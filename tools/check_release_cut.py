@@ -790,6 +790,9 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
     ((".aiqt/core/hooks/scripts/aiqt_hooks.py", "__import__:errno"),
      (1, "a stdlib late import by literal name inside the worktree-entry classifier; no in-tree path "
       "or computed name reaches __import__")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py", "__import__:fcntl"),
+     (1, "a stdlib late import by literal name for the advisory file lock the register "
+      "append takes; no in-tree path or computed name reaches __import__")),
     ((".aiqt/core/hooks/scripts/aiqt_hooks.py", "__import__:hashlib"),
      (11, "stdlib late imports by literal name (the hook helpers hash register lines and briefs lazily "
       "to keep hook startup light); no in-tree path or computed name reaches __import__")),
@@ -802,7 +805,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     ((".aiqt/core/hooks/scripts/aiqt_hooks.py", "subprocess.run:<no-py-literal>"),
-     (12, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (13, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -1018,7 +1021,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("opf/tools/check_opf_record.py", "subprocess.run:<no-py-literal>"),
-     (4, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (5, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -1044,6 +1047,9 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
     (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "__import__:errno"),
      (1, "a stdlib late import by literal name inside the worktree-entry classifier; no in-tree path "
       "or computed name reaches __import__")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "__import__:fcntl"),
+     (1, "a stdlib late import by literal name for the advisory file lock the register "
+      "append takes; no in-tree path or computed name reaches __import__")),
     (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "__import__:hashlib"),
      (11, "stdlib late imports by literal name (the hook helpers hash register lines and briefs lazily "
       "to keep hook startup light); no in-tree path or computed name reaches __import__")),
@@ -1056,7 +1062,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "subprocess.run:<no-py-literal>"),
-     (12, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (13, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -1113,11 +1119,6 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "_run_runner_copy runs bash over a scratch copy of the local runner whose tool commands "
       "are stubs, and the required-status vector runs bash -c over the pinned aggregate body "
       "and over its two-line options control")),
-    (("tools/check_clauses.py", "subprocess.run:<no-py-literal>"),
-     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
-      "launcher call, the pristine import name included, so a new launch site drifts this count and "
-      "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
-      "named LIMITS residue")),
     (("tools/check_derived_command_parameters.py", "subprocess.run:<no-py-literal>"),
      (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
@@ -1151,14 +1152,19 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
     (("tools/check_instruction_budget.py", "spec_from_file_location:"),
      (1, "loads a mutant copy this self-test wrote under its scratch")),
     (("tools/check_internal_names.py", "subprocess.run:<no-py-literal>"),
-     (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (11, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/check_internal_names.py", "subprocess.run:check_internal_names.py"),
-     (2, "relaunches a tempfile-scratch sibling copy of itself and, since round 7 (codex 4), a second "
-      "mutated copy whose independent extra child failure the exact-failure-set comparison must "
-      "reject; the original is this enumerated module")),
+     (3, "relaunches tempfile-scratch copies of itself as top-level --self-test children: the "
+      "hostile-sibling copy, the mutated inherited-sentinel copy and the platform-lane copy; "
+      "the original is this enumerated module")),
+    (("tools/check_license_qualification.py", "subprocess.run:<no-py-literal>"),
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+      "launcher call, the pristine import name included, so a new launch site drifts this count and "
+      "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
+      "named LIMITS residue")),
     (("tools/check_manifest.py", "__import__:subprocess"),
      (1, "imports the stdlib subprocess by literal name for the git-availability probe (git "
       "--version); git executes no Python here")),
@@ -1168,7 +1174,7 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/check_mistakes_register.py", "subprocess.run:<no-py-literal>"),
-     (9, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (21, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -1194,8 +1200,13 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
+    (("tools/check_portability.py", "subprocess.Popen:<no-py-literal>"),
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+      "launcher call, the pristine import name included, so a new launch site drifts this count and "
+      "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
+      "named LIMITS residue")),
     (("tools/check_portability.py", "subprocess.run:<no-py-literal>"),
-     (3, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -1212,6 +1223,9 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
     (("tools/check_python_floor.py", "subprocess.run:check_python_floor.py"),
      (1, "relaunches tools/check_python_floor.py from the tree under test, this enumerated module "
       "itself")),
+    (("tools/check_python_host_pin.py", "spec_from_file_location:.py"),
+     (1, "loads module copies and mutant copies of this gate that its self-test writes under "
+      "its own scratch (the path is built from the written name)")),
     (("tools/check_python_launcher_isolation.py", "subprocess.run:<no-py-literal>"),
      (6, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
@@ -1287,6 +1301,11 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
+    (("tools/check_version_monotonicity.py", "subprocess.Popen:<no-py-literal>"),
+     (1, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+      "launcher call, the pristine import name included, so a new launch site drifts this count and "
+      "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
+      "named LIMITS residue")),
     (("tools/check_version_monotonicity.py", "subprocess.run:<no-py-literal>"),
      (12, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
@@ -1333,8 +1352,27 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
+    (("tools/measure_hook_latency.py", "subprocess.Popen:<no-py-literal>"),
+     (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+      "launcher call, the pristine import name included, so a new launch site drifts this count and "
+      "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
+      "named LIMITS residue")),
+    (("tools/measure_hook_latency.py", "subprocess.run:<no-py-literal>"),
+     (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+      "launcher call, the pristine import name included, so a new launch site drifts this count and "
+      "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
+      "named LIMITS residue")),
+    (("tools/orch_register.py", "subprocess.run:<no-py-literal>"),
+     (11, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+      "launcher call, the pristine import name included, so a new launch site drifts this count and "
+      "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
+      "named LIMITS residue")),
+    (("tools/orch_register.py", "subprocess.run:orch_register.py"),
+     (6, "relaunches tempfile-scratch copies of itself (the appender's installed-location, "
+      "unconfirmed-root and search-ceiling subprocess vectors); the original is this "
+      "enumerated module")),
     (("tools/selftest_aiqt_hooks.py", "subprocess.run:<no-py-literal>"),
-     (39, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (42, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -1382,8 +1420,17 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
      (1, "a stdlib late import by literal name for a StringIO capture; no in-tree module is imported")),
     (("tools/selftest_orch_hooks.py", "import_module:orch_doctor"),
      (1, "edge: tools/orch_doctor.py")),
+    (("tools/selftest_orch_hooks.py", "__import__:errno"),
+     (8, "stdlib late imports by literal name inside the suite's hook-fixture payloads; no "
+      "in-tree path or computed name reaches __import__")),
+    (("tools/selftest_orch_hooks.py", "__import__:fcntl"),
+     (6, "stdlib late imports by literal name inside the suite's hook-fixture payloads; no "
+      "in-tree path or computed name reaches __import__")),
+    (("tools/selftest_orch_hooks.py", "__import__:time"),
+     (1, "a stdlib late import by literal name inside a hook-fixture payload; no in-tree "
+      "path or computed name reaches __import__")),
     (("tools/selftest_orch_hooks.py", "subprocess.run:<no-py-literal>"),
-     (28, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (29, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
@@ -3116,7 +3163,7 @@ RAW_READ_ALLOWLIST = dict((
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_pending_artefact_findings::open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_pending_haystack::open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_read_jsonl::open", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::open", 2),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_registry::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_registry::os.read", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_registry_walk::os.open", 2),
@@ -3127,7 +3174,6 @@ RAW_READ_ALLOWLIST = dict((
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_write_json_at::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_write_json_atomic::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_blob_id::os.read", 1),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_brief::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_fd::os.read", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_small::os.open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_record_read::os.open", 1),
@@ -3524,10 +3570,10 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/opf.py::_self_test_entry_gaps::open", 1),
     ("opf/tools/opf.py::_st_census_reuse_detected::os.open", 2),
     ("opf/tools/opf.py::_upgrade_replace::os.open", 1),
-    ("opf/tools/opf.py::_watchdog_completion_case::os.open", 3),
+    ("opf/tools/opf.py::_watchdog_completion_case::os.open", 4),
     ("opf/tools/opf.py::_watchdog_completion_case::os.read", 1),
     ("opf/tools/opf.py::_watchdog_completion_case::read_bytes", 1),
-    ("opf/tools/opf.py::_watchdog_completion_case::read_text", 10),
+    ("opf/tools/opf.py::_watchdog_completion_case::read_text", 16),
     ("opf/tools/opf.py::_watchdog_deadline_case::os.read", 1),
     ("opf/tools/opf.py::_watchdog_overlap_case::os.read", 1),
     ("opf/tools/opf.py::_watchdog_safety_case::os.open", 1),
@@ -3568,7 +3614,7 @@ RAW_READ_ALLOWLIST = dict((
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_pending_artefact_findings::open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_pending_haystack::open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_read_jsonl::open", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::open", 2),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_registry::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_registry::os.read", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_registry_walk::os.open", 2),
@@ -3579,7 +3625,6 @@ RAW_READ_ALLOWLIST = dict((
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_write_json_at::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_write_json_atomic::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_blob_id::os.read", 1),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_read_brief::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_read_fd::os.read", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_read_small::os.open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_record_read::os.open", 1),
@@ -3657,7 +3702,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_opf_enforce_platforms.py::_swap_codex_gemini_rows::read_text", 1),
     ("tools/check_opf_standalone_closure.py::self_test_main::read_text", 1),
     ("tools/check_overclaim.py::_asset_closure_self_test::attr.open", 1),
-    ("tools/check_overclaim.py::_collector_self_test::attr.open", 1),
+    ("tools/check_overclaim.py::_collector_self_test::attr.open", 2),
     ("tools/check_overclaim.py::_open_regular_nofollow::os.open", 1),
     ("tools/check_overclaim.py::_page_bound_source_self_test::read_text", 1),
     ("tools/check_overclaim.py::_read_regular_bounded::os.read", 1),
@@ -3665,8 +3710,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_portability.py::load_identity::open", 1),
     ("tools/check_portability.py::scan_file::read_text", 1),
     ("tools/check_python_floor.py::_read_text::read_bytes", 1),
-    ("tools/check_python_launcher_isolation.py::_read_required_text::read_text", 1),
-    ("tools/check_python_launcher_isolation.py::_scan_workflows::read_text", 1),
     ("tools/check_python_launcher_isolation.py::self_test_main::read_text", 2),
     ("tools/check_record_sections.py::_self_test_isolated::read_text", 1),
     ("tools/check_record_sections.py::load_config::read_bytes", 1),
@@ -3713,8 +3756,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_sized_instructions.py::run::read_text", 2),
     ("tools/check_sized_instructions.py::skill_version::read_text", 1),
     ("tools/check_versions.py::main::read_bytes", 1),
-    ("tools/conformance.py::_adapter_drift::read_text", 1),
-    ("tools/conformance.py::_agents_drift::read_text", 1),
     ("tools/conformance.py::_build_conformant::read_text", 1),
     ("tools/conformance.py::_build_mapped_tree::read_text", 1),
     ("tools/conformance.py::_claude_drift::read_text", 2),
@@ -3722,13 +3763,11 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/conformance.py::_skill_drift::read_bytes", 1),
     ("tools/conformance.py::_skill_drift::read_text", 2),
     ("tools/conformance.py::check_c5::read_text", 1),
-    ("tools/conformance.py::self_test_main::read_bytes", 1),
+    ("tools/conformance.py::self_test_main::read_bytes", 7),
     ("tools/conformance.py::self_test_main::read_text", 4),
     ("tools/doctor.py::assert_open_journal::os.open", 1),
     ("tools/doctor.py::call::os.open", 1),
     ("tools/doctor.py::self_test::os.open", 2),
-    ("tools/gen_adapters.py::main::read_text", 1),
-    ("tools/gen_agents.py::main::read_text", 1),
     ("tools/gen_char_policy.py::_self_test::read_bytes", 1),
     ("tools/gen_char_policy.py::run::read_bytes", 2),
     ("tools/gen_claude.py::main::read_text", 1),
@@ -3763,7 +3802,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/gen_first_pin_demo.py::demo_of::read_text", 1),
     ("tools/gen_first_pin_demo.py::hand_edited::read_text", 1),
     ("tools/gen_first_pin_demo.py::read_agents::read_bytes", 1),
-    ("tools/gen_first_pin_demo.py::self_test_main::read_bytes", 5),
+    ("tools/gen_first_pin_demo.py::self_test_main::read_bytes", 6),
     ("tools/gen_first_pin_demo.py::self_test_main::read_text", 1),
     ("tools/gen_gensrc.py::_read_declaration::read_text", 1),
     ("tools/gen_gensrc.py::self_test_main::read_text", 1),
@@ -3836,7 +3875,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_aiqt_hooks.py::_stop_field_claim_failures::read_text", 1),
     ("tools/selftest_aiqt_hooks.py::_test_note_shape_pins::read_text", 1),
     ("tools/selftest_ci_status.py::_run_checks::read_text", 2),
-    ("tools/selftest_ci_status.py::invoke::read_text", 4),
+    ("tools/selftest_ci_status.py::invoke::read_text", 6),
     ("tools/selftest_git_fixture_env.py::_auto_maintenance_children::read_text", 1),
     ("tools/selftest_git_fixture_env.py::_await_holder_ready::os.read", 1),
     ("tools/selftest_git_fixture_env.py::_close_lock_sites::open", 1),
@@ -3862,7 +3901,7 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_orch_hooks.py::_event_rows::read_text", 1),
     ("tools/selftest_orch_hooks.py::_main_isolated::os.open", 6),
     ("tools/selftest_orch_hooks.py::_main_isolated::read_bytes", 8),
-    ("tools/selftest_orch_hooks.py::_main_isolated::read_text", 39),
+    ("tools/selftest_orch_hooks.py::_main_isolated::read_text", 40),
     ("tools/selftest_orch_hooks.py::_ordinary::read_bytes", 1),
     ("tools/selftest_orch_hooks.py::_r12_audit::open", 1),
     ("tools/selftest_orch_hooks.py::_r14_left::read_text", 1),
@@ -3876,6 +3915,125 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_orch_hooks.py::_spoof_detail::read_text", 1),
     ("tools/selftest_orch_hooks.py::open::open", 1),
     ("tools/selftest_orch_hooks.py::turn_state::read_text", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_append_checked::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_load::os.read", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.read", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory_save::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_open::os.open", 4),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_prove::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_verify::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_write_field::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.read", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_text::os.open", 1),
+    ("opf/tools/_opf_check.py::tree::read_bytes", 1),
+    ("opf/tools/_opf_observe.py::held_case::read_text", 1),
+    ("opf/tools/_opf_observe.py::self_test_isolated::read_text", 1),
+    ("opf/tools/_opf_record.py::_kind_reservation_high::os.open", 1),
+    ("opf/tools/check_opf_record.py::_oop_reap::os.read", 1),
+    ("opf/tools/check_opf_record.py::t22_homes2_claim_reserves::read_bytes", 2),
+    ("opf/tools/check_opf_record.py::t79_kill_after_reserve::read_bytes", 4),
+    ("opf/tools/check_opf_record.py::t80_two_runs_never_same_id::read_bytes", 3),
+    ("opf/tools/check_opf_record.py::t81_cross_kind_reservations::read_bytes", 3),
+    ("opf/tools/opf.py::eio_ack::os.open", 1),
+    ("opf/tools/opf.py::refusing_capture::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_append_checked::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_load::os.read", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.read", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory_save::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_open::os.open", 4),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_prove::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_verify::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_write_field::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.read", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_read_text::os.open", 1),
+    ("tools/_adapter_compose.py::_open_dir_component::os.open", 1),
+    ("tools/_adapter_compose.py::_read_target::os.open", 1),
+    ("tools/_adapter_compose.py::_target_dir_fd::os.open", 1),
+    ("tools/_adapter_compose.py::_write_target::os.open", 2),
+    ("tools/_adapter_compose.py::load_registry::read_bytes", 2),
+    ("tools/check_leaks.py::_read_bytes::os.open", 1),
+    ("tools/check_leaks.py::read_archive::attr.open", 1),
+    ("tools/check_license_qualification.py::_read_file_text::read_text", 1),
+    ("tools/check_mistakes_register.py::_read_regular::os.open", 1),
+    ("tools/check_mistakes_register.py::_read_regular::os.read", 1),
+    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.open", 1),
+    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.read", 1),
+    ("tools/check_mistakes_register.py::self_test::read_bytes", 1),
+    ("tools/check_mistakes_register.py::self_test::read_text", 16),
+    ("tools/check_mistakes_register.py::update_anchor::os.open", 1),
+    ("tools/check_portability.py::_drain_pipes_unreaped::os.read", 1),
+    ("tools/check_portability.py::_not_run_vectors::open", 1),
+    ("tools/check_portability.py::_ready_line_complete::open", 1),
+    ("tools/check_python_host_pin.py::_read_text::read_bytes", 1),
+    ("tools/check_python_host_pin.py::_self_test_cases::read_bytes", 1),
+    ("tools/check_python_launcher_isolation.py::_read_file_text::read_text", 1),
+    ("tools/check_reference_facts.py::_path_is_code::open", 1),
+    ("tools/check_reference_facts.py::_path_is_code::read_text", 1),
+    ("tools/check_version_monotonicity.py::_drain_pipes_unreaped::os.read", 1),
+    ("tools/check_version_monotonicity.py::_not_run_vectors::open", 1),
+    ("tools/check_version_monotonicity.py::_ready_line_complete::open", 1),
+    ("tools/conformance.py::_adapter_drift::read_bytes", 1),
+    ("tools/conformance.py::_agents_drift::read_bytes", 1),
+    ("tools/gen_agents.py::open_fds::os.open", 1),
+    ("tools/gen_agents.py::read::read_bytes", 1),
+    ("tools/gen_agents.py::self_test_main::os.open", 1),
+    ("tools/gen_agents.py::self_test_main::read_bytes", 7),
+    ("tools/gen_agents.py::to_held_fifo::os.open", 1),
+    ("tools/gen_hooks.py::deadline_case::read_text", 1),
+    ("tools/measure_hook_latency.py::_interrupt_vectors::read_text", 1),
+    ("tools/measure_hook_latency.py::_real_hooks_vectors::read_text", 1),
+    ("tools/measure_hook_latency.py::_stub_cli_rows::read_text", 1),
+    ("tools/measure_hook_latency.py::command_budget::open", 1),
+    ("tools/measure_hook_latency.py::load_hooks::open", 1),
+    ("tools/measure_hook_latency.py::self_test::read_bytes", 2),
+    ("tools/measure_hook_latency.py::self_test::read_text", 1),
+    ("tools/orch_register.py::_declared_family::read_text", 1),
+    ("tools/orch_register.py::_dir_synced::os.open", 1),
+    ("tools/orch_register.py::_dirs_created::os.open", 2),
+    ("tools/orch_register.py::_fd_bytes::os.pread", 1),
+    ("tools/orch_register.py::_made_dirs_swept::os.open", 3),
+    ("tools/orch_register.py::cmd_append::os.open", 3),
+    ("tools/orch_register.py::cmd_append::os.read", 1),
+    ("tools/orch_register.py::dir_state::read_bytes", 1),
+    ("tools/orch_register.py::probing::os.open", 1),
+    ("tools/orch_register.py::rewrite_in_place::open", 1),
+    ("tools/orch_register.py::self_test::os.open", 1),
+    ("tools/orch_register.py::self_test::os.pread", 1),
+    ("tools/orch_register.py::self_test::read_bytes", 12),
+    ("tools/orch_register.py::self_test::read_text", 7),
+    ("tools/orch_register.py::state::read_bytes", 1),
+    ("tools/selftest_aiqt_hooks.py::_test_note_literal_sites::read_text", 1),
+    ("tools/selftest_aiqt_hooks.py::_test_stop_dispatch_note_sites::read_text", 1),
+    ("tools/selftest_orch_hooks.py::_leasehb_cases::os.open", 1),
+    ("tools/selftest_orch_hooks.py::_leasehb_cases::read_bytes", 6),
+    ("tools/selftest_orch_hooks.py::_leasehb_cases::read_text", 21),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::os.open", 20),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::os.read", 2),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::read_bytes", 34),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::read_text", 16),
+    ("tools/selftest_orch_hooks.py::_leasehb_status_and_parse_cases::read_bytes", 12),
+    ("tools/selftest_orch_hooks.py::_leasehb_write_integrity_cases::read_bytes", 6),
+    ("tools/selftest_orch_hooks.py::_rdp_draft_cases::read_text", 1),
+    ("tools/selftest_orch_hooks.py::build::read_text", 1),
+    ("tools/selftest_orch_hooks.py::declare::read_text", 1),
+    ("tools/selftest_orch_hooks.py::declare_raw::read_text", 1),
+    ("tools/selftest_orch_hooks.py::declared_rows::read_text", 1),
+    ("tools/selftest_orch_hooks.py::fixture::read_text", 2),
+    ("tools/selftest_orch_hooks.py::json_case::read_bytes", 2),
+    ("tools/selftest_orch_hooks.py::meta::read_bytes", 1),
+    ("tools/selftest_orch_hooks.py::r12c_state::read_bytes", 1),
+    ("tools/selftest_orch_hooks.py::r7q_ids::os.open", 1),
+    ("tools/selftest_orch_hooks.py::r8c_tfstat::os.open", 1),
+    ("tools/selftest_orch_hooks.py::r9d_probe::os.open", 1),
+    ("tools/selftest_orch_hooks.py::release_state::open", 1),
+    ("tools/selftest_orch_hooks.py::rows::read_text", 3),
+    ("tools/selftest_orch_hooks.py::set_horizon::read_text", 1),
+    ("tools/selftest_orch_hooks.py::snap::read_bytes", 4),
+    ("tools/selftest_orch_hooks.py::swap_holder::open", 1),
 ))
 
 RAW_READ_REASONS = dict((
@@ -5585,6 +5743,224 @@ RAW_READ_SITE_REASONS = dict((
      "reads; every caller points it at fixture state the test created under its own scratch, never "
      "the repository tree"),
     ("tools/selftest_orch_hooks.py::turn_state::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_append_checked::os.open",
+     "(c) already a non-blocking, fstat-checked reader: the open carries O_NONBLOCK and the opened "
+     "descriptor is refused unless S_ISREG before any read, so a special file cannot block it; "
+     "every os.open site is pinned with its reason since round 6"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_load::os.read", _RAW_READ_PENDING),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.open",
+     "(c) already a non-blocking, fstat-checked reader: the open carries O_NONBLOCK and the opened "
+     "descriptor is refused unless S_ISREG before any read, so a special file cannot block it; "
+     "every os.open site is pinned with its reason since round 6"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.read",
+     "(c) a bounded descriptor read inside the same function that opened the descriptor with "
+     "O_NONBLOCK and refused it unless fstat-checked S_ISREG, so it cannot name a blocking FIFO"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory_save::os.open",
+     "(c) an exclusive O_CREAT plus O_EXCL plus O_NOFOLLOW create of a brand-new file: the opened "
+     "entry can never be an existing special file, so the open cannot block"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_open::os.open", _RAW_READ_PENDING),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_prove::os.open", _RAW_READ_PENDING),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_verify::os.open", _RAW_READ_PENDING),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_write_field::os.open",
+     "(c) an exclusive O_CREAT plus O_EXCL plus O_NOFOLLOW create of a brand-new file: the opened "
+     "entry can never be an existing special file, so the open cannot block"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.open",
+     "(c) already a non-blocking, fstat-checked reader: the open carries O_NONBLOCK and the opened "
+     "descriptor is refused unless S_ISREG before any read, so a special file cannot block it; "
+     "every os.open site is pinned with its reason since round 6"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.read",
+     "(c) a bounded descriptor read inside the same function that opened the descriptor with "
+     "O_NONBLOCK and refused it unless fstat-checked S_ISREG, so it cannot name a blocking FIFO"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_rdp_read_text::os.open", _RAW_READ_PENDING),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_append_checked::os.open",
+     "(c) already a non-blocking, fstat-checked reader: the open carries O_NONBLOCK and the opened "
+     "descriptor is refused unless S_ISREG before any read, so a special file cannot block it; "
+     "every os.open site is pinned with its reason since round 6"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_load::os.read", _RAW_READ_PENDING),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.open",
+     "(c) already a non-blocking, fstat-checked reader: the open carries O_NONBLOCK and the opened "
+     "descriptor is refused unless S_ISREG before any read, so a special file cannot block it; "
+     "every os.open site is pinned with its reason since round 6"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory::os.read",
+     "(c) a bounded descriptor read inside the same function that opened the descriptor with "
+     "O_NONBLOCK and refused it unless fstat-checked S_ISREG, so it cannot name a blocking FIFO"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_memory_save::os.open",
+     "(c) an exclusive O_CREAT plus O_EXCL plus O_NOFOLLOW create of a brand-new file: the opened "
+     "entry can never be an existing special file, so the open cannot block"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_open::os.open", _RAW_READ_PENDING),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_prove::os.open", _RAW_READ_PENDING),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_verify::os.open", _RAW_READ_PENDING),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_lease_hb_write_field::os.open",
+     "(c) an exclusive O_CREAT plus O_EXCL plus O_NOFOLLOW create of a brand-new file: the opened "
+     "entry can never be an existing special file, so the open cannot block"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.open",
+     "(c) already a non-blocking, fstat-checked reader: the open carries O_NONBLOCK and the opened "
+     "descriptor is refused unless S_ISREG before any read, so a special file cannot block it; "
+     "every os.open site is pinned with its reason since round 6"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::os.read",
+     "(c) a bounded descriptor read inside the same function that opened the descriptor with "
+     "O_NONBLOCK and refused it unless fstat-checked S_ISREG, so it cannot name a blocking FIFO"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_rdp_read_text::os.open", _RAW_READ_PENDING),
+    ("tools/_adapter_compose.py::_open_dir_component::os.open", _RAW_READ_PENDING),
+    ("tools/_adapter_compose.py::_read_target::os.open",
+     "(c) already a non-blocking, fstat-checked reader: the open carries O_NONBLOCK and the opened "
+     "descriptor is refused unless S_ISREG before any read, so a special file cannot block it; "
+     "every os.open site is pinned with its reason since round 6"),
+    ("tools/_adapter_compose.py::_target_dir_fd::os.open", _RAW_READ_PENDING),
+    ("tools/_adapter_compose.py::_write_target::os.open",
+     "(c) an exclusive O_CREAT plus O_EXCL plus O_NOFOLLOW create of a brand-new file: the opened "
+     "entry can never be an existing special file, so the open cannot block"),
+    ("tools/_adapter_compose.py::load_registry::read_bytes", _RAW_READ_PENDING),
+    ("tools/check_license_qualification.py::_read_file_text::read_text", _RAW_READ_PENDING),
+    ("tools/check_mistakes_register.py::_read_regular::os.open", _RAW_READ_PENDING),
+    ("tools/check_mistakes_register.py::_read_regular::os.read", _RAW_READ_PENDING),
+    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.open",
+     "(c) already a non-blocking, fstat-checked reader: the open carries O_NONBLOCK and the opened "
+     "descriptor is refused unless S_ISREG before any read, so a special file cannot block it; "
+     "every os.open site is pinned with its reason since round 6"),
+    ("tools/check_mistakes_register.py::_read_text_nonblocking::os.read",
+     "(c) a bounded descriptor read inside the same function that opened the descriptor with "
+     "O_NONBLOCK and refused it unless fstat-checked S_ISREG, so it cannot name a blocking FIFO"),
+    ("tools/check_mistakes_register.py::self_test::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/check_mistakes_register.py::self_test::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/check_mistakes_register.py::update_anchor::os.open",
+     "(c) an exclusive O_CREAT plus O_EXCL plus O_NOFOLLOW create of a brand-new file: the opened "
+     "entry can never be an existing special file, so the open cannot block"),
+    ("tools/check_python_host_pin.py::_read_text::read_bytes", _RAW_READ_PENDING),
+    ("tools/check_python_host_pin.py::_self_test_cases::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/check_version_monotonicity.py::_drain_pipes_unreaped::os.read", _RAW_READ_PENDING),
+    ("tools/check_version_monotonicity.py::_not_run_vectors::open",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/check_version_monotonicity.py::_ready_line_complete::open",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/measure_hook_latency.py::_interrupt_vectors::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/measure_hook_latency.py::_real_hooks_vectors::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/measure_hook_latency.py::_stub_cli_rows::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/measure_hook_latency.py::command_budget::open", _RAW_READ_PENDING),
+    ("tools/measure_hook_latency.py::load_hooks::open", _RAW_READ_PENDING),
+    ("tools/measure_hook_latency.py::self_test::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/measure_hook_latency.py::self_test::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/orch_register.py::_declared_family::read_text", _RAW_READ_PENDING),
+    ("tools/orch_register.py::_dir_synced::os.open", _RAW_READ_PENDING),
+    ("tools/orch_register.py::_dirs_created::os.open", _RAW_READ_PENDING),
+    ("tools/orch_register.py::_fd_bytes::os.pread", _RAW_READ_PENDING),
+    ("tools/orch_register.py::_made_dirs_swept::os.open", _RAW_READ_PENDING),
+    ("tools/orch_register.py::cmd_append::os.open",
+     "(c) an exclusive O_CREAT plus O_EXCL plus O_NOFOLLOW create of a brand-new file: the opened "
+     "entry can never be an existing special file, so the open cannot block"),
+    ("tools/orch_register.py::cmd_append::os.read", _RAW_READ_PENDING),
+    ("tools/orch_register.py::dir_state::read_bytes", _RAW_READ_PENDING),
+    ("tools/orch_register.py::probing::os.open", _RAW_READ_PENDING),
+    ("tools/orch_register.py::rewrite_in_place::open", _RAW_READ_PENDING),
+    ("tools/orch_register.py::self_test::os.open",
+     "(a) reads and probes fixture state the same test created under its own tempfile scratch, "
+     "opened only as probe descriptors"),
+    ("tools/orch_register.py::self_test::os.pread",
+     "(a) reads and probes fixture state the same test created under its own tempfile scratch, "
+     "opened only as probe descriptors"),
+    ("tools/orch_register.py::self_test::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/orch_register.py::self_test::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/orch_register.py::state::read_bytes", _RAW_READ_PENDING),
+    ("tools/selftest_orch_hooks.py::_leasehb_cases::os.open",
+     "(a) reads and probes fixture state the same test created under its own tempfile scratch, "
+     "opened only as probe descriptors"),
+    ("tools/selftest_orch_hooks.py::_leasehb_cases::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::_leasehb_cases::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::os.open",
+     "(a) reads and probes fixture state the same test created under its own tempfile scratch, "
+     "opened only as probe descriptors"),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::os.read",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::_leasehb_fix2_cases::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::_leasehb_status_and_parse_cases::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::_leasehb_write_integrity_cases::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::_rdp_draft_cases::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::build::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::declare::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::declare_raw::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::declared_rows::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::fixture::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::json_case::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::meta::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::r12c_state::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::r7q_ids::os.open",
+     "(a) reads and probes fixture state the same test created under its own tempfile scratch, "
+     "opened only as probe descriptors"),
+    ("tools/selftest_orch_hooks.py::r8c_tfstat::os.open",
+     "(a) reads and probes fixture state the same test created under its own tempfile scratch, "
+     "opened only as probe descriptors"),
+    ("tools/selftest_orch_hooks.py::r9d_probe::os.open",
+     "(a) reads and probes fixture state the same test created under its own tempfile scratch, "
+     "opened only as probe descriptors"),
+    ("tools/selftest_orch_hooks.py::release_state::open",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::rows::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::set_horizon::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::snap::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
+     "the repository tree"),
+    ("tools/selftest_orch_hooks.py::swap_holder::open",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never "
      "the repository tree"),
 ))
@@ -7367,7 +7743,7 @@ RAW_READ_UNSUPPORTED_USES = dict((
       "wrap line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
     (("opf/tools/check_opf_record.py",
       "real = os.open"),
-     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+     (2, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
       "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
       "uses through it are invisible by design")),
     (("opf/tools/check_opf_record.py",
@@ -8312,10 +8688,6 @@ RAW_READ_UNSUPPORTED_USES = dict((
      (1, "getattr reads a builtin exception class by the name an except clause spells, so the "
       "tomllib leg can classify the handler; the value is only tested with isinstance and "
       "issubclass, never called, so nothing is executed or opened through it")),
-    (("tools/check_python_launcher_isolation.py",
-      "return shlex.split(_space_shell_operators(s), comments=False, posix=True)"),
-     (1, "the keyword posix=True selects the POSIX quoting mode of shlex; the argument is a "
-      "bool and the parameter name belongs to shlex, not to the module")),
     (("tools/check_record_drift.py",
       "if hasattr(os, \"mkfifo\"):"),
      (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
@@ -9179,6 +9551,1564 @@ RAW_READ_UNSUPPORTED_USES = dict((
     (("tools/selftest_orch_hooks.py",
       "| getattr(os, \"O_NONBLOCK\", 0) | getattr(os, \"O_NOCTTY\", 0) | getattr(os, \"O_CLOEXEC\", 0))"),
      (3, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "cloexec = getattr(os, \"O_CLOEXEC\", 0)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, \"O_NONBLOCK\", 0)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, \"O_NONBLOCK\", 0)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "leaf = os.open(leaf_name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, \"O_NONBLOCK\", 0)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "os.fchown(tmp_fd, -1, st.st_gid)"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_CLOEXEC\", 0), 0o600, dir_fd=parent)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_CLOEXEC\", 0), 0o600, dir_fd=state_fd)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_CLOEXEC\", 0), 0o666, dir_fd=holder[\"state_fd\"])"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_NOCTTY\", 0) | cloexec, dir_fd=parent)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_NOCTTY\", 0) | getattr(os, \"O_CLOEXEC\", 0))"),
+     (4, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_NOCTTY\", 0) | getattr(os, \"O_CLOEXEC\", 0), dir_fd=dirfd)"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_NONBLOCK\", 0) | getattr(os, \"O_NOCTTY\", 0)"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    ((".aiqt/core/hooks/scripts/aiqt_hooks.py",
+      "| os.O_NOFOLLOW | getattr(os, \"O_CLOEXEC\", 0))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("opf/tools/_opf_store.py",
+      "_TYPE_NAME = type.__dict__[\"__name__\"]   # the getter of type itself, so a metaclass _"
+      "_name__ never runs"),
+     (1, "a reflective namespace fetch, fail-closed on any base (round 6); carried from the round-8 "
+      "namespace-handle shape pins, with the fetch line as the reviewed site")),
+    (("opf/tools/check_opf_record.py",
+      "patch.object(os, \"supports_dir_fd\", set(os.supports_dir_fd) | {opening}):"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("opf/tools/check_opf_record.py",
+      "patch.object(os, \"supports_fd\", set(os.supports_fd) | {listdir}):"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("opf/tools/check_opf_record.py",
+      "rebuilt.__dict__.update(exc.__dict__)"),
+     (2, "a reflective namespace fetch, fail-closed on any base (round 6); carried from the round-8 "
+      "namespace-handle shape pins, with the fetch line as the reviewed site")),
+    (("opf/tools/check_opf_record.py",
+      "with patch.object(os, \"listdir\", listdir), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("opf/tools/check_opf_record.py",
+      "with patch.object(os, \"open\", opening), \\"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("opf/tools/opf.py",
+      "def launch_held(arm=True, ack_bound=30, capture_open=os.open,"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "cloexec = getattr(os, \"O_CLOEXEC\", 0)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, \"O_NONBLOCK\", 0)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, \"O_NONBLOCK\", 0)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "leaf = os.open(leaf_name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, \"O_NONBLOCK\", 0)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "os.fchown(tmp_fd, -1, st.st_gid)"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_CLOEXEC\", 0), 0o600, dir_fd=parent)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_CLOEXEC\", 0), 0o600, dir_fd=state_fd)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_CLOEXEC\", 0), 0o666, dir_fd=holder[\"state_fd\"])"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_NOCTTY\", 0) | cloexec, dir_fd=parent)"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_NOCTTY\", 0) | getattr(os, \"O_CLOEXEC\", 0))"),
+     (4, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_NOCTTY\", 0) | getattr(os, \"O_CLOEXEC\", 0), dir_fd=dirfd)"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "| getattr(os, \"O_NONBLOCK\", 0) | getattr(os, \"O_NOCTTY\", 0)"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+      "| os.O_NOFOLLOW | getattr(os, \"O_CLOEXEC\", 0))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/_adapter_compose.py",
+      "_DIR_FD_REQUIRES = (os.open, os.stat, os.mkdir, os.rename)"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/_adapter_compose.py",
+      "if (any(fn not in os.supports_dir_fd for fn in _DIR_FD_REQUIRES)"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/_adapter_compose.py",
+      "or not hasattr(os, \"O_DIRECTORY\") or not hasattr(os, \"O_NOFOLLOW\")):"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/_adapter_compose.py",
+      "with os.fdopen(fd, \"rb\", closefd=False) as fh:"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/_adapter_compose.py",
+      "with os.fdopen(tfd, \"wb\", closefd=False) as fh:"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/check_leaks.py",
+      "with os.fdopen(fd, \"rb\") as handle:"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/check_mistakes_register.py",
+      "os.close = anchor_close_error"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.close = real_os_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat = check_ref_eio"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat = eio_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat = marker_eio_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat = masking_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat = real_cr_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat = real_os_lstat"),
+     (3, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat = real_reg_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat = reg_eio_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat, os.stat = real_os_lstat, real_os_stat"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.lstat, os.stat = regular_view(real_os_lstat), regular_view(real_os_stat)"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.open = eacces_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.open = real_os_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.replace = cleanup_replace_error"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.replace = failing_replace"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.replace = real_os_replace"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.unlink = cleanup_unlink_error"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.unlink = real_os_unlink"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.write = anchor_short_write"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.write = anchor_write_error"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "os.write = real_os_write"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "real_os_open = os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/check_mistakes_register.py",
+      "real_sp_run = subprocess.run"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_mistakes_register.py",
+      "real_subprocess_run = subprocess.run"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_mistakes_register.py",
+      "subprocess.run = _raising_for(target, raised)"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "subprocess.run = _show_raising(raised)"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "subprocess.run = failing_catfile"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "subprocess.run = real_sp_run"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_mistakes_register.py",
+      "subprocess.run = real_subprocess_run"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.killpg = _anchor_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.killpg = _dropping_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.killpg = _recording_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.killpg = _replaced_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.killpg = _signal_failing_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.killpg = _window_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.killpg = real_cl_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.read = _read_child_pipe"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.read = real_cl_read"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.waitid = _anchor_failing_waitid"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.waitid = _anchor_waitid"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.waitid = _replaced_waitid"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.waitid = _window_waitid"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.waitid = real_cl_waitid"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.waitid, time.sleep = real_a_waitid, real_a_sleep"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.waitid, time.sleep = real_rg_waitid, real_rg_sleep"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "os.waitid, time.sleep = real_w_waitid, real_w_sleep"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "real_a_popen, real_a_killpg = subprocess.Popen, os.killpg"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_portability.py",
+      "real_cl_popen = subprocess.Popen"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_portability.py",
+      "real_cl_read = os.read"),
+     (1, "a saved os.read reference for a monkeypatch seam; the acquisition line is the pinned site "
+      "(round 11, decided 2: the descriptor reader is counted or pinned, never consumed silently)")),
+    (("tools/check_portability.py",
+      "real_rg_popen, real_rg_killpg = subprocess.Popen, os.killpg"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_portability.py",
+      "real_sc_popen = subprocess.Popen"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_portability.py",
+      "real_spied_run, real_spied_popen = subprocess.run, subprocess.Popen"),
+     (2, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_portability.py",
+      "real_w_popen, real_w_killpg = subprocess.Popen, os.killpg"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_portability.py",
+      "return _ModelSiginfo(os.CLD_KILLED, signal.SIGKILL)"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/check_portability.py",
+      "subprocess.Popen = _AnchorProc"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "subprocess.Popen = _RecordingPopen"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "subprocess.Popen = _ReplacedGroupProc"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "subprocess.Popen = _WindowProc"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "subprocess.Popen = _sigchld_spy_popen"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "subprocess.Popen = real_cl_popen"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "subprocess.Popen = real_sc_popen"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "subprocess.Popen, os.killpg = real_a_popen, real_a_killpg"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "subprocess.Popen, os.killpg = real_rg_popen, real_rg_killpg"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "subprocess.Popen, os.killpg = real_w_popen, real_w_killpg"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "subprocess.run, subprocess.Popen = _spy_launch, _spy_launch"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_portability.py",
+      "subprocess.run, subprocess.Popen = real_spied_run, real_spied_popen"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_python_host_pin.py",
+      "module = importlib.util.module_from_spec(spec)"),
+     (1, "module_from_spec materializes a module object from a spec constructed beside it by a "
+      "reviewed loader call; the construction line is the pinned site (round 10, decided 1: a "
+      "loader-yielding importlib member is never consumed)")),
+    (("tools/check_python_launcher_isolation.py",
+      "if shlex.split(raw, comments=False, posix=True) != [dec]:"),
+     (1, "the keyword posix=True selects the POSIX quoting mode of shlex; the argument is a bool and "
+      "the parameter name belongs to shlex, not to the module")),
+    (("tools/check_python_launcher_isolation.py",
+      "return shlex.split(spaced, comments=False, posix=True)"),
+     (1, "the keyword posix=True selects the POSIX quoting mode of shlex; the argument is a bool and "
+      "the parameter name belongs to shlex, not to the module")),
+    (("tools/check_version_monotonicity.py",
+      "os.killpg = _anchor_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.killpg = _dropping_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.killpg = _recording_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.killpg = _replaced_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.killpg = _signal_failing_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.killpg = _window_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.killpg = real_cl_killpg"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.read = _read_child_pipe"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.read = real_cl_read"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.waitid = _anchor_failing_waitid"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.waitid = _anchor_waitid"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.waitid = _replaced_waitid"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.waitid = _window_waitid"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.waitid = real_cl_waitid"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.waitid, time.sleep = real_a_waitid, real_a_sleep"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.waitid, time.sleep = real_rg_waitid, real_rg_sleep"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "os.waitid, time.sleep = real_w_waitid, real_w_sleep"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "real_a_popen, real_a_killpg = subprocess.Popen, os.killpg"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_version_monotonicity.py",
+      "real_cl_popen = subprocess.Popen"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_version_monotonicity.py",
+      "real_cl_read = os.read"),
+     (1, "a saved os.read reference for a monkeypatch seam; the acquisition line is the pinned site "
+      "(round 11, decided 2: the descriptor reader is counted or pinned, never consumed silently)")),
+    (("tools/check_version_monotonicity.py",
+      "real_probe_run = subprocess.run"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_version_monotonicity.py",
+      "real_rg_popen, real_rg_killpg = subprocess.Popen, os.killpg"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_version_monotonicity.py",
+      "real_run = subprocess.run"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_version_monotonicity.py",
+      "real_sc_popen = subprocess.Popen"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_version_monotonicity.py",
+      "real_spied_run, real_spied_popen = subprocess.run, subprocess.Popen"),
+     (2, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_version_monotonicity.py",
+      "real_w_popen, real_w_killpg = subprocess.Popen, os.killpg"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/check_version_monotonicity.py",
+      "return _ModelSiginfo(os.CLD_KILLED, signal.SIGKILL)"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.Popen = _AnchorProc"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.Popen = _RecordingPopen"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.Popen = _ReplacedGroupProc"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.Popen = _WindowProc"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.Popen = _sigchld_spy_popen"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.Popen = real_cl_popen"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.Popen = real_sc_popen"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.Popen, os.killpg = real_a_popen, real_a_killpg"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.Popen, os.killpg = real_rg_popen, real_rg_killpg"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.Popen, os.killpg = real_w_popen, real_w_killpg"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.run = _gitless_run"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.run = _recording_run"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.run = real_probe_run"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.run = real_run"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.run, subprocess.Popen = _spy_launch, _spy_launch"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/check_version_monotonicity.py",
+      "subprocess.run, subprocess.Popen = real_spied_run, real_spied_popen"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.fchmod = real_fchmod"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.fchmod = special_bit_keeping_fchmod"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.mkdir = racing_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.mkdir = real_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.open = deny_probe_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.open = probe_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.open = read_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.open = real_open"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.open = real_t28_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.replace = failing_replace"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.replace = foreign_then_fail"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.replace = interrupt_rename"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.replace = real_replace"),
+     (3, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.supports_dir_fd = frozenset()"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "ac.os.supports_dir_fd = real_supports"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.chmod = real_chmod"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.chmod = sticky_refusing_chmod"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.chmod = sticky_stripping_chmod"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.close = closefail_failing_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.close = real_close"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.close = real_os_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.close = sentinel_close_failing_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.close = writer_leaking_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.listdir = boundary_unlistable_listdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.listdir = first_enumeration_crashing_listdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.listdir = real_listdir"),
+     (4, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.listdir = sentinel_omitting_listdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.listdir = unavailable_listdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.lstat = real_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.lstat = uninspectable_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.open = close_fail_recording_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.open = closefail_recording_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.open = devnull_refusing_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.open = nth_root_denying_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.open = real_os_open"),
+     (7, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.open = recovery_denying_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.open = root_denying_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.open = sentinel_recording_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.stat, os.lstat = real_stat, real_lstat"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "os.stat, os.lstat = uninspectable(real_stat), uninspectable(real_lstat)"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/gen_agents.py",
+      "real_open = ac.os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/gen_agents.py",
+      "real_os_open = os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/gen_agents.py",
+      "real_supports = ac.os.supports_dir_fd"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/gen_agents.py",
+      "real_t28_open = ac.os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/measure_hook_latency.py",
+      "\"cpu_count\": os.cpu_count(), \"platform\": platform.platform(),"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/measure_hook_latency.py",
+      "and conditions.get(\"cpu_count\") == os.cpu_count() and len(rows) == 9, sorted(condition"
+      "s))"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/measure_hook_latency.py",
+      "if not isinstance(getattr(signal.getsignal(signal.SIGTERM), \"__self__\", None), _Interr"
+      "upts):"),
+     (1, "the SIGINT fixture profile callback identifies the gather-lock acquire method through a "
+      "getattr under the literal __self__ on objects the profiler reports; identification only, "
+      "nothing is called through it")),
+    (("tools/measure_hook_latency.py",
+      "real_open = builtins.open"),
+     (1, "a builtins member fetched as a value (builtins consumes nothing, round 9); the fetch line is "
+      "the reviewed site")),
+    (("tools/measure_hook_latency.py",
+      "return [round(value, 2) for value in os.getloadavg()]"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/measure_hook_latency.py",
+      "with _patched(builtins, \"open\", unwritable_json):"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "(\"fsync\", [(os, \"fsync\", step_fsync)], \"could not be synced to disk\", None),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "(\"permission-bits\", [(os, \"fchmod\", step_fchmod)],"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "(\"recheck-bytes\", [(os, \"fsync\", fsync_after(rewrite_in_place))],"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "(\"recheck-hard-link\", [(os, \"fsync\", fsync_after(link_register))],"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "(\"recheck-identity\", [(os, \"fsync\", fsync_after(replace_with_seed_copy))],"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "(\"recheck-size\", [(os, \"fsync\", fsync_after(append_in_place))],"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "(\"rename\", [(os, \"replace\", step_replace)],"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "(\"short-write\", [(os, \"write\", step_short_write)],"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "(\"temp-create\", [(os, \"open\", step_open)],"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "(\"write\", [(os, \"write\", step_write)],"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "os.close = cbf_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = ccf_failing_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = counting_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = counting_close2"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = failing_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = final_failing_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = fsl_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = hr_reusing_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = ncr_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = pk_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = real_os_close"),
+     (13, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = sd2_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = sr_reusing_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.close = sweep_failing_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.fstat = cbf_fstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.fstat = fsl_fstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.fstat = nonos_fstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.fstat = real_os_fstat"),
+     (4, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.fstat = y3_swapping_fstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.fsync = failing_dir_fsync"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.fsync = fsync_after("),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.fsync = real_c_fsync"),
+     (3, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.fsync = step_fsync"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.ftruncate = real_c_ftruncate"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.ftruncate = refusing_truncate"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.lstat = eio_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.lstat = not_regular_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.lstat = pre_eio_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.lstat = real_c_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.lstat = real_os_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.lstat = real_reg_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.lstat = real_walk_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.lstat = registry_eio_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.mkdir = ancestor_swapping_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.mkdir = failing_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.mkdir = name_swapping_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.mkdir = never_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.mkdir = partial_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.mkdir = per_component_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.mkdir = racing_middle_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.mkdir = racing_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.mkdir = real_os_mkdir"),
+     (10, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.mkdir = rn2_racing_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.mkdir = x2_swapping_mkdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.open = cbf_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.open = counting_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.open = counting_open2"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.open = fsl_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.open = ncr_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.open = pk_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.open = real_os_open"),
+     (8, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.open = refusing_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.open = sd2_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.read = failing_read"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.read = real_os_read"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.rmdir = cbi_moving_rmdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.rmdir = real_os_rmdir"),
+     (4, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.rmdir = sweep_swapping_rmdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.rmdir = window2_swapping_rmdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.rmdir = window_swapping_rmdir"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.stat = hiding_stat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.stat = real_os_stat"),
+     (3, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.stat = x1_swapping_stat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.stat = x4_swapping_stat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.unlink = real_c_unlink"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.unlink = refusing_tmp_unlink"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.write = failing_write3"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "os.write = real_os_write"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "real_c_open = os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/orch_register.py",
+      "real_c_run = subprocess.run"),
+     (1, "a saved launcher reference; round 9 does not follow the name it feeds, so the acquisition "
+      "line is the reviewed site and launches through it are invisible by design")),
+    (("tools/orch_register.py",
+      "real_os_open = os.open"),
+     (2, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/orch_register.py",
+      "real_os_read = os.read"),
+     (1, "a saved os.read reference for a monkeypatch seam; the acquisition line is the pinned site "
+      "(round 11, decided 2: the descriptor reader is counted or pinned, never consumed silently)")),
+    (("tools/orch_register.py",
+      "return [(os, \"fsync\", recording_fsync), (os, \"fstat\", failing_fstat)]"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "return [(os, \"lstat\", failing_lstat)]"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/orch_register.py",
+      "subprocess.run = failing_catfile"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/orch_register.py",
+      "subprocess.run = real_c_run"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_aiqt_hooks.py",
+      "children = os.times()"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/selftest_aiqt_hooks.py",
+      "holding = (window.armed and getattr(handler, \"__self__\", None) is window"),
+     (1, "the SIGINT fixture profile callback identifies the gather-lock acquire method through a "
+      "getattr under the literal __self__ on objects the profiler reports; identification only, "
+      "nothing is called through it")),
+    (("tools/selftest_aiqt_hooks.py",
+      "if (getattr(signal.getsignal(signal.SIGALRM), \"__self__\", None) is not outer"),
+     (1, "the SIGINT fixture profile callback identifies the gather-lock acquire method through a "
+      "getattr under the literal __self__ on objects the profiler reports; identification only, "
+      "nothing is called through it")),
+    (("tools/selftest_aiqt_hooks.py",
+      "if getattr(signal.getsignal(signal.SIGALRM), \"__self__\", None) is not outer:"),
+     (1, "the SIGINT fixture profile callback identifies the gather-lock acquire method through a "
+      "getattr under the literal __self__ on objects the profiler reports; identification only, "
+      "nothing is called through it")),
+    (("tools/selftest_aiqt_hooks.py",
+      "if nested and not fired and not (getattr(after_inner[0], \"__self__\", None) is outer"),
+     (1, "the SIGINT fixture profile callback identifies the gather-lock acquire method through a "
+      "getattr under the literal __self__ on objects the profiler reports; identification only, "
+      "nothing is called through it")),
+    (("tools/selftest_aiqt_hooks.py",
+      "if not (raised and getattr(handler, \"__self__\", None) is outer and timer[1] == 0.0"),
+     (1, "the SIGINT fixture profile callback identifies the gather-lock acquire method through a "
+      "getattr under the literal __self__ on objects the profiler reports; identification only, "
+      "nothing is called through it")),
+    (("tools/selftest_aiqt_hooks.py",
+      "return getattr(handler, \"__self__\", None) is outer and timer[1] == 0.0 and 29.0 < time"
+      "r[0] <= 30.0"),
+     (1, "the SIGINT fixture profile callback identifies the gather-lock acquire method through a "
+      "getattr under the literal __self__ on objects the profiler reports; identification only, "
+      "nothing is called through it")),
+    (("tools/selftest_aiqt_hooks.py",
+      "return getattr(handler, \"__self__\", None) is outer and timer[1] == 0.0 and 599.0 < tim"
+      "er[0] <= 600.0"),
+     (1, "the SIGINT fixture profile callback identifies the gather-lock acquire method through a "
+      "getattr under the literal __self__ on objects the profiler reports; identification only, "
+      "nothing is called through it")),
+    (("tools/selftest_aiqt_hooks.py",
+      "return getattr(handler, \"__self__\", None) is outer if nested else handler is counting"),
+     (1, "the SIGINT fixture profile callback identifies the gather-lock acquire method through a "
+      "getattr under the literal __self__ on objects the profiler reports; identification only, "
+      "nothing is called through it")),
+    (("tools/selftest_aiqt_hooks.py",
+      "return getattr(signal.getsignal(signal.SIGALRM), \"__self__\", None) is window"),
+     (2, "the SIGINT fixture profile callback identifies the gather-lock acquire method through a "
+      "getattr under the literal __self__ on objects the profiler reports; identification only, "
+      "nothing is called through it")),
+    (("tools/selftest_orch_hooks.py",
+      "(aiqt_hooks, \"_orch_lease_hb_load\", gp_load), (os, \"fchown\", gp_fchown),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "(os, \"fchmod\", gm_fchmod)], lambda: stop(gm))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "(os, \"fchmod\", gp_fchmod), (os, \"write\", gp_write)], lambda: stop(gp))"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "(os, \"fchown\", gf_fchown)], lambda: stop(gf))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "(os, \"fsync\", sw_fsync),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "(os, \"unlink\", r12b_unlink)])"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "(os, \"unlink\", unlink13)])"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "[(os, \"fchmod\", r12a_fchmod), (os, \"unlink\", r12a_unlink)])"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "[(os, \"fsync\", r11l_fsync), (os, \"unlink\", r11l_unlink)])"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "[(os, \"fsync\", r12b_fsync), (os, \"close\", r12b_close),"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "field_run(f14, tmp14, [(os, \"fsync\", fsync14), (os, \"stat\", stat14),"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "for other in sorted(set(os.getgroups()) | {os.getegid()}):"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/selftest_orch_hooks.py",
+      "known_gids = set(os.getgroups()) | {os.getgid(), os.getegid(), default_gid, lease_gid,"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = c_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = counting_close"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = lcf_counting_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = r10a_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = r11a_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = r11b_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = r8h2_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = real_close10"),
+     (3, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = real_close11"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = real_close11b"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = real_close3"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = real_close6"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = real_close7"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = real_os_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.close = t_close"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.fstat = faulting_fstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.fstat = real_fstat10"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.lstat = alias_lstat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.lstat = faulty_lstat"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.lstat = real_lstat"),
+     (3, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.makedirs = fault_makedirs"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.makedirs = real_makedirs"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = c_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = counting_open"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = r10a_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = r7q_counting_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = r8j_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = real_open10"),
+     (2, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = real_open11"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = real_open3"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = real_open7"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = real_open9"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = real_os_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.open = t_open"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.path.relpath = fault_relpath"),
+     (1, "a monkeypatch store of a posixpath member inside a self-test seam, restored in the same "
+      "vector; the store line is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.path.relpath = real_relpath"),
+     (1, "a monkeypatch store of a posixpath member inside a self-test seam, restored in the same "
+      "vector; the store line is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.stat = faulty_stat"),
+     (3, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.stat = r10n_stat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.stat = r11i_stat"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.stat = real_stat"),
+     (3, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.stat = real_stat10"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "os.stat = real_stat11"),
+     (1, "a store over a watched module attribute: a self-test fixture or harness seam rebinds the "
+      "member in a controlled scope, and the store line itself is the pinned, reviewable site")),
+    (("tools/selftest_orch_hooks.py",
+      "r11k_stop = field_run(r11k, \".forced.r11k.hb.tmp\", [(os, \"fchmod\", r11k_fchmod)])"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "real_fchown = os.fchown"),
+     (1, "os.fdopen wraps a descriptor already opened at a judged site into a file object; the wrap "
+      "line is the pinned site (round 10, decided 1: fdopen is never consumed silently)")),
+    (("tools/selftest_orch_hooks.py",
+      "real_open10 = os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/selftest_orch_hooks.py",
+      "real_open11 = os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/selftest_orch_hooks.py",
+      "real_open3 = os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/selftest_orch_hooks.py",
+      "real_open7 = os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/selftest_orch_hooks.py",
+      "real_open9 = os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/selftest_orch_hooks.py",
+      "real_os_open = os.open"),
+     (1, "a saved or passed opener reference carried from the round-8 os.open-ref pin set; round 9 "
+      "does not follow the name it feeds, so this acquisition line is the reviewed site and later "
+      "uses through it are invisible by design")),
+    (("tools/selftest_orch_hooks.py",
+      "result = field_run(r11n, \".forced.r11n.hb.tmp\", [(os, \"fsync\", r11n_fsync)])"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "result = patched([(os, \"fsync\", dc_fsync),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "result = patched([(os, \"fsync\", df_fsync)], lambda: stop(df))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "result = patched([(os, \"fsync\", dir_fault(pd))], lambda: post(pd))"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "result = patched([(os, \"fsync\", dir_fault(pr)),"),
+     (1, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
+      "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
+      "this line is the reviewed site")),
+    (("tools/selftest_orch_hooks.py",
+      "result13 = field_run(f13, tmp13, [(os, \"fsync\", fsync13), (os, \"stat\", stat13),"),
+     (2, "the module object stands as a value (a hasattr or setattr probe, a helper or fixture "
       "argument, a container member): round 9 refuses helper passing instead of modelling it, and "
       "this line is the reviewed site")),
 ))
@@ -10476,9 +12406,33 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/gen_skill.py", "_open_dir_fd", "TRY", "prev", "fd", 1,
      _CS_P1.format("prev, fd = fd, nxt runs before os.close(prev), so the handler closes nxt (or nothing, once "
                    "an absent component left fd None), never prev")),
+    ("tools/orch_register.py", "_dirs_created", "TRY", "prev", "dir_fd", 1,
+     _CS_P1.format("prev, dir_fd = dir_fd, nxt runs before os.close(prev), so the handler closes nxt, never "
+                   "prev")),
+    ("tools/orch_register.py", "_dirs_created", "AFTER", "dir_fd", "dir_fd", 1,
+     "false positive: the unwind handler's wrapped close (its OSError suppressed so the in-flight refusal "
+     "wins) sits in a handler whose own block ends in a raise, so the wrapped close after the try never "
+     "runs after it"),
+    ("tools/orch_register.py", "_made_dirs_swept", "REBIND", "prev", "", 2,
+     _CS_P1.format("the sweep's every close is _swept_closed(prev, ...), and prev joins cur_fd and nxt_fd; "
+                   "each of these two body closes (the descent handoff and the stopped-descent release) "
+                   "runs only after the statement that took its number OUT of the slots (cur_fd, cur_on, "
+                   "nxt_fd, nxt_on = nxt_fd, nxt_on, None, None, or prev, nxt_fd = nxt_fd, None), so no "
+                   "slot holds the closed number even when the close raises any exception class, and each "
+                   "later re-binding of prev takes a different, still-open number out of a slot")),
+    ("tools/orch_register.py", "_made_dirs_swept", "TRY", "prev", "prev", 4,
+     _CS_P1.format("the three body closes (descent handoff, stopped-descent release, climb handoff) each "
+                   "close a number already re-bound out of both slots, and the finally closes only what a "
+                   "slot still holds, clearing that slot first (prev, nxt_fd = nxt_fd, None in the nested "
+                   "try, prev, cur_fd = cur_fd, None in its finally), so the finally never reaches a number "
+                   "a body close closed, and its nxt_fd close (the fourth line) and cur_fd close are two "
+                   "slots, the second attempted even when the first raises")),
     ("tools/check_release_cut.py", "working_blob", "TRY", "parent", "directory", 1,
      _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally closes "
                    "child, never parent")),
+    ("tools/_adapter_compose.py", "_target_dir_fd", "TRY", "parent", "directory", 1,
+     _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally (guarded "
+                   "by handed, which a successful hand-over sets) closes child, never parent")),
     ("tools/pin.py", "do_recover", "TRY", "fd", "root_fd", 4,
      _CS_P1.format("each fd, root_fd = root_fd, None runs before os.close(fd), so the handler's `if root_fd is "
                    "not None` guard never reaches the closed number")),

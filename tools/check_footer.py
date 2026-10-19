@@ -19,7 +19,7 @@ coverage input: if a root is absent, unreadable, or carries no .html pages, the 
 file, opened O_NOFOLLOW and confirmed regular via fstat on the opened fd, so a symlink/FIFO/socket/device
 .html (or site/ itself as a symlink) is fail-closed and never read or followed, and the check-then-read
 TOCTOU on the final path component is closed (the fd type-checked is the fd read). THREAT-MODEL BOUNDARY
-(disclosed, Architect-ruled 2026-08-28): site/ is a TRUSTED, git-tracked, CI-checked-out tree, not an
+(disclosed, maintainer-ruled 2026-08-28): site/ is a TRUSTED, git-tracked, CI-checked-out tree, not an
 adversarial input. This gate does NOT defend against a concurrent-write attacker or a parent-directory-
 component symlink race (full component-wise containment is the OS/CI-isolation layer's job per
 SYSTEM-HARDENING.md), nor cross-check the page set against an expected/tracked index (page presence and
