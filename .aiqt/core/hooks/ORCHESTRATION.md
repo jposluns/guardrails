@@ -1032,14 +1032,19 @@ fields:
 - `workdir`: the held worktree's absolute top level.
 - `head`: the full lowercase object id the worktree was at when the review was dispatched.
 - `dispatch_id`: a non-empty identifier for the review.
-- `created_utc` and `expires_utc`: ISO-8601 UTC timestamps. `expires_utc` is required and bounded:
-  an expired marker is ignored with a note, so a crashed dispatcher cannot pin a worktree forever.
+- `created_utc` and `expires_utc`: ISO-8601 UTC timestamps. `expires_utc` is required: an expired
+  marker is ignored with a note, so a crashed dispatcher cannot pin a worktree forever. No maximum
+  lifetime is enforced, so a marker with a far-future expiry pins its worktree until the dispatcher
+  removes it; keep the horizon short and refresh it for a long review.
 
 The adopter's steps:
 
-1. The dispatch tool writes the marker atomically (write a temporary file in the same directory,
-   then rename it into place) before the reviewer starts, and removes it when the review returns or
-   is abandoned.
+1. The dispatch tool writes the marker atomically (write a temporary file elsewhere in
+   `GIT_COMMON_DIR/aiqt/`, then rename it into `review-holds/`) before the reviewer starts, and
+   removes it when the review returns or is abandoned. Never write the temporary file inside
+   `review-holds/` itself: every entry there is read as a marker, so a partial or oddly named file
+   reads as malformed state and withholds mutating git commands repository-wide until it is renamed
+   into place or removed.
 2. The resync or fast-forward tool runs the preflight before it moves any worktree: pipe the
    PreToolUse payload (`tool_name` `Bash`, `cwd`, and `tool_input.command`) to
    `aiqt_hooks.py review_workdir_hold`, and withhold the move on exit 2 or a printed `deny`
@@ -1052,14 +1057,25 @@ resolves to that worktree. The target is read from an explicit `-C`, a preceding
 `pushd`, or the session working directory, through the shared lexer and wrapper peel, and worktree
 identity is compared by git's absolute git directory, never by path string, so a symlinked alias of
 the held worktree is the same worktree and a sibling path that merely shares a prefix is not.
-`git worktree remove` and `git worktree move` of the held worktree, and `git update-ref` of the
-branch the held worktree has checked out, are denied from any worktree of the repository. A
-mutating git command whose target cannot be resolved (an expansion in `-C`, a
-`--git-dir`/`--work-tree` override, an unknown shell working directory after `popd` or an opaque
-`cd`, or a command the lexer cannot parse that names git beside a mutating verb) is denied with the
-reason prefixed `UNVERIFIABLE:`, only while the session repository has a live hold. An unreadable
-or malformed marker directory denies mutating git commands only (fail closed); read-only git and
-non-git commands always pass. When a live marker's recorded `head` differs from the held worktree's
+`git worktree remove` and `git worktree move` of the held worktree (named by path or by git's
+shorthand of the unique last components of its path), and `git update-ref` or `git symbolic-ref`
+writes of the branch the held worktree has checked out or of its HEAD through git's cross-worktree
+ref paths (`worktrees/<id>/HEAD`, `main-worktree/HEAD`), are denied from any worktree of the
+repository; a `worktree remove`/`move` operand that resolves to no worktree is denied as
+`UNVERIFIABLE:` while a hold is live. A mutating git command whose target cannot be resolved (an
+expansion, glob or brace pattern in `-C`, a `--git-dir`/`--work-tree` override, a
+`-c`/`--config-env` configuration override, a `GIT_DIR`-class environment assignment on the command
+or inherited by the session, an `env` or `sudo` wrapper carrying options or assignments before git,
+an unknown shell working directory after `popd`, an opaque `cd`, a `cd` run in a pipeline,
+background or subshell position, a target that resolves to no worktree identity, or a command the
+lexer cannot parse that names git beside a mutating verb) is denied with the reason prefixed
+`UNVERIFIABLE:`, only while the session repository has a live hold; a `cd` to a destination that
+does not exist or cannot be entered fails in place, so it reads as the directory the shell was
+already in. An unreadable or malformed marker directory, including a `review-holds` path that
+exists but is not a directory, denies mutating git commands only (fail closed); recognized
+read-only git commands (`git worktree list` included) and non-git commands pass, though a dry-run
+spelling of a mutating verb (`git clean -n`, `git commit --dry-run`) is read as mutating, a safe
+over-deny. When a live marker's recorded `head` differs from the held worktree's
 current HEAD, the hook surfaces a drift note (the in-flight review is invalidated; re-dispatch per
 rvwpin.4) on each check without denying, which catches a move made outside the session after the
 fact.
@@ -1083,8 +1099,12 @@ Limits:
 - A held branch tip moved by `git branch -f`, a push into the held worktree's checked-out branch,
   and a mutating verb outside the recognized set (`checkout-index`, `read-tree`, `filter-branch`)
   are not matched; safe over-denies (a repository-level write such as `push` or `tag` targeted into
-  the held worktree, a path that literally contains `$` or a leading `~`, a pipeline-subshell `cd`
-  read as preceding) are taken instead of under-blocking.
+  the held worktree, a path that literally contains `$`, a backquote, a glob or brace character or
+  a leading `~`, a `cd` in a pipeline or subshell read as making the working directory unknown, a
+  `cd` destination that cannot be entered read as the directory it started from, and a worktree
+  name or override the hook cannot resolve while a hold is live) are taken instead of
+  under-blocking. The `review-holds` directory itself is resolved through the filesystem, so a
+  symlinked directory is followed; only its entries are opened without following links.
 
 ## Platforms without hooks
 

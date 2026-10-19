@@ -1380,6 +1380,100 @@ def _rwh_cases(tmp):
     size_got.append(kind(main, ut))
     (holds / "pad.json").unlink()
     check("rwh/marker-size-boundary", size_got, [True, "unverifiable", "deny"])
+    # a GIT_DIR/GIT_WORK_TREE assignment (inline, behind env, via -c, or inherited from the session
+    # environment) moves the repository away from the lexical target, so the mutation is
+    # unresolvable while a hold is live, never silently bound to the session directory
+    held_gd = main / ".git" / "worktrees" / "held"
+    ev = ["GIT_DIR=" + str(held_gd) + " GIT_WORK_TREE=" + str(held) + " git reset --hard " + seed,
+          "env GIT_DIR=" + str(held_gd) + " git reset --hard " + seed,
+          "git -c core.worktree=" + str(held) + " reset --hard " + seed]
+    ev_got = [kind(main, c) for c in ev]
+    os.environ["GIT_DIR"] = str(held_gd)
+    try:
+        ev_got.append(kind(main, "git reset --hard " + seed))
+    finally:
+        del os.environ["GIT_DIR"]
+    ev_got.append(_rwh_without_hold(lambda: kind(main, ev[0])))
+    check("rwh/env-override-unverifiable-red-on-revert", ev_got, ["unverifiable"] * 4 + ["allow"])
+    # a glob the shell may expand to the held worktree, and a target that resolves to no worktree,
+    # are unresolvable: fail closed while a hold is live, never a silent allow
+    gl = "git -C " + str(base / "hel*") + " checkout " + seed
+    nx = "git -C " + str(base / "missing") + " checkout " + seed
+    check("rwh/glob-or-unresolved-target-unverifiable-red-on-revert",
+          [kind(main, gl), kind(main, nx),
+           _rwh_without_hold(lambda: kind(main, gl)), _rwh_without_hold(lambda: kind(main, nx))],
+          ["unverifiable", "unverifiable", "allow", "allow"])
+    # a piped or subshell cd does not move the shell that runs the later mutation, and a cd to a
+    # missing directory fails in place, so none of the three leaves the held worktree; a plain cd
+    # to an existing other worktree still resolves there (the allow control)
+    pc = "cd " + str(main) + " | true; git reset --hard " + seed
+    sc = "(cd " + str(main) + "); git reset --hard " + seed
+    fc = "cd " + str(base / "missing") + "; git reset --hard " + seed
+    check("rwh/pipeline-or-failed-cd-refused-red-on-revert",
+          [kind(held, pc), kind(held, sc), kind(held, fc),
+           kind(held, "cd " + str(base / "other") + " && git checkout " + seed),
+           _rwh_without_hold(lambda: kind(held, pc))],
+          ["unverifiable", "unverifiable", "deny", "allow", "allow"])
+    # git also accepts a worktree named by the unique last components of its path; an unknown name
+    # is unresolvable (fail closed), and an absolute path to an unheld worktree still passes
+    ws = ["git worktree remove held", "git worktree move held " + str(base / "elsewhere2")]
+    check("rwh/worktree-shorthand-denies-red-on-revert",
+          [kind(main, c) for c in ws] +
+          [kind(main, "git worktree remove nosuchname"),
+           kind(main, "git worktree remove " + str(base / "other")),
+           _rwh_without_hold(lambda: kind(main, ws[0]))],
+          ["deny", "deny", "unverifiable", "allow", "allow"])
+    # the cross-worktree ref path worktrees/<id>/HEAD moves a held worktree's HEAD without entering
+    # it; the same path of an unheld worktree still passes
+    cr = "git update-ref worktrees/held/HEAD " + seed
+    check("rwh/cross-worktree-head-ref-denies-red-on-revert",
+          [kind(main, cr), kind(main, "git update-ref worktrees/other/HEAD " + seed),
+           _rwh_without_hold(lambda: kind(main, cr))],
+          ["deny", "allow", "allow"])
+    # a symbolic-ref write can move the held HEAD (in place or through the cross-worktree path) or
+    # re-point its checked-out branch; the read form and a write of an unheld HEAD still pass
+    sr = ["git -C " + str(held) + " symbolic-ref HEAD refs/heads/main",
+          "git symbolic-ref worktrees/held/HEAD refs/heads/main",
+          "git symbolic-ref refs/heads/review refs/heads/main"]
+    check("rwh/symbolic-ref-held-head-denies-red-on-revert",
+          [kind(main, c) for c in sr] +
+          [kind(held, "git symbolic-ref -q HEAD"),
+           kind(main, "git symbolic-ref HEAD refs/heads/main"),
+           _rwh_without_hold(lambda: kind(main, sr[0]))],
+          ["deny", "deny", "deny", "allow", "allow", "allow"])
+    # a marker-directory path that exists but is not a directory is invalid state, not absence:
+    # mutating git is withheld (at review-holds itself and at its aiqt parent), reads still pass
+    shutil.rmtree(holds)
+    holds.write_text("x", encoding="utf-8")
+    nd_got = [kind(base, co), kind(held, "git status")]
+    holds.unlink()
+    aiqt_dir = main / ".git" / "aiqt"
+    aiqt_dir.rmdir()
+    aiqt_dir.write_text("x", encoding="utf-8")
+    nd_got.append(kind(base, co))
+    nd_got.append(kind(held, "git log --oneline"))
+    nd_got.append(_rwh_without_hold(lambda: kind(base, co)))
+    aiqt_dir.unlink()
+    holds.mkdir(parents=True)
+    marker("rev-1")
+    check("rwh/marker-dir-not-a-directory-denies-red-on-revert", nd_got,
+          ["deny", "allow", "deny", "allow", "allow"])
+    # a marker version of another type that compares equal to 1 (True, 1.0) is malformed state, not
+    # a live version-1 hold: a valid marker pins only its worktree (see rwh/other-worktree-allows),
+    # malformed state withholds every mutating git command and still passes reads
+    marker("rev-1", version=True)
+    vt_got = [kind(base, "git -C " + str(base / "other") + " checkout " + seed)]
+    marker("rev-1", version=1.0)
+    vt_got.append(kind(base, "git -C " + str(base / "other") + " checkout " + seed))
+    vt_got.append(kind(held, "git status"))
+    marker("rev-1")
+    check("rwh/marker-version-type-strict", vt_got, ["deny", "deny", "allow"])
+    # malformed marker state withholds mutating git only: worktree list is a read and passes while
+    # worktree remove stays withheld
+    (holds / "bad.json").write_text("{not json", encoding="utf-8")
+    wl_got = [kind(held, "git worktree list"), kind(main, "git worktree remove " + str(held))]
+    (holds / "bad.json").unlink()
+    check("rwh/worktree-list-under-bad-state-allows", wl_got, ["allow", "deny"])
 
     # ---------- allow cases, each naming the over-broad implementation it catches ----------
     # catches: matching on "git in the held path" instead of on the mutating forms
