@@ -5757,6 +5757,7 @@ def _self_test_checks():
     failure_details = {}
     checked = [0]
     skipped = []    # (check, why): a check this platform cannot evaluate, named, never silently dropped
+    bound_expired = []  # each child bound that expired, named: its checks did not run (exit 2, never a pass)
     # The descriptor census the inode-reuse, handoff and NFS vectors use is /proc/self/fd; a platform
     # without it (macOS) skips exactly those vectors, each named with this note, never a partial run.
     census = Path("/proc/self/fd").is_dir()
@@ -8392,16 +8393,14 @@ def _self_test_checks():
         # in _close_class_sweep_checks) runs in a fresh interpreter (--selftest-class-sweep-child, python -I
         # -B), so every descriptor its runs leave open (the disclosed windows) dies with that child, and this
         # process (and every module a self-test run loads after this one) is untouched by construction: the
-        # sweep closes nothing it did not open itself. Fail closed: a nonzero exit, a timeout, or a result
-        # that is missing, incomplete or does not name exactly those checks in order fails every one of them,
-        # named with the reason. This process's descriptor set is the same after the child as before it.
+        # sweep closes nothing it did not open itself. Fail closed: a nonzero exit or a result that is
+        # missing, incomplete or does not name exactly those checks in order fails every one of them, named
+        # with the reason. The child reaching its bound fails none of them: it is recorded in bound_expired
+        # and reported as the bound expiring (exit 2), since those checks did not run (_class_sweep_record).
+        # This process's descriptor set is the same after the child as before it.
         sweep_before = _fds_open()
-        sweep_rows, sweep_why = _run_class_sweep_child()
-        for sweep_index, sweep_name in enumerate(_CLASS_SWEEP_CHECKS):
-            if sweep_rows is None:
-                check(sweep_name, False, observed="class sweep child: " + sweep_why)
-            else:
-                check(sweep_name, sweep_rows[sweep_index][1], observed=sweep_rows[sweep_index][2])
+        _class_sweep_record(check, bound_expired)
+        _class_sweep_bound_self_test(check)
         sweep_after = _fds_open()
         check("class-sweep-child-leaves-this-process-descriptors-unchanged", sweep_after == sweep_before,
               observed="opened={!r} closed={!r}".format(sorted(sweep_after - sweep_before),
@@ -12823,16 +12822,7 @@ def _self_test_checks():
         skipped.append(("self-test-leaves-no-descriptor-open", no_census))
     for name, why in skipped:
         print("  SKIPPED: {} ({})".format(name, why))
-    if failures:
-        print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
-        for f in failures:
-            print("  FAILED: {}".format(f))
-            if f in failure_details:
-                print("    observed: {}".format(failure_details[f]))
-        return 1
-    print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; ten executable ops: the file ops, "
-          "init-store, the registration ops, enable-hook and the finish ops)".format(checked[0]))
-    return 0
+    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)
 
 
 def _st_fixture_plan(run_id_):
@@ -12990,38 +12980,194 @@ _CLASS_SWEEP_CHECKS = ("class-run-leaves-a-foreign-thread-descriptor-open",
 _CLASS_SWEEP_FORMAT = "opf.adopt-apply.class-sweep/v1"
 
 
-def _run_class_sweep_child(timeout=1800):
+# The class sweep child's bound, the timeout default below, sized as follows. It stays an int literal: the
+# standalone closure gate reads literal timeout defaults to size its legs, and the self-test check
+# class-sweep-bound-declared-literal refuses any other form or figure.
+#   MEASURED (2026-10-19, 24 CPUs, three serial child runs, each passing all 13 checks): 115.68 s,
+#   117.38 s and 120.28 s wall; 112.54 s, 113.41 s and 115.41 s child CPU (user plus system); load5
+#   from 24.06 to 29.87 over the three runs.
+#   REPORTED, not reproduced here: one child run of 3,866 s at load5 about 45 to 55 (2026-10-13), before
+#   the sweep's descriptor census was bounded; that change measured 644.5 s before and 357.4 s after on
+#   one host in the same window, load not stated.
+#   ESTIMATED: 3,866 * 357.4 / 644.5 = 2,144 s for the current sweep at load5 45 to 55, assuming the
+#   census change saves the same share under load.
+# 3000 s is 1.40 times that estimate and 24.9 times the slowest measured run. It cannot rise above 3,120 s
+# while the closure gate's other legs keep their bounds: the gate bounds two legs at this wait plus 60 s,
+# and at 3,121 s its leg bounds and setup would exceed the 21,600 s job limit. When the bound expires the
+# self-test reports the bound, not the sweep's checks (_class_sweep_record).
+def _run_class_sweep_child(timeout=3000):
     """Run the close-fault class sweep in a fresh interpreter of this module (python -I -B,
     --selftest-class-sweep-child), with a bounded wait: (the rows (check, passed, observed) in
-    _CLASS_SWEEP_CHECKS order, None) on exit 0 with a complete result, else (None, why). A crash, a
-    nonzero exit, a timeout (the child is killed), or a result that is missing, malformed or names other
-    checks is the (None, why) failure."""
+    _CLASS_SWEEP_CHECKS order, None, False) on exit 0 with a complete result; (None, why, False) on a
+    crash, a nonzero exit, or a result that is missing, malformed or names other checks; and (None, why,
+    True) when the child is still running at the bound and is killed, which is the bound expiring, not a
+    result of the sweep (_class_sweep_record)."""
     import tempfile
+    import time
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-sweep-") as temp:
         result_path = Path(temp) / "class-sweep-result.json"
+        started = time.monotonic()
         try:
             proc = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__),
                                    "--selftest-class-sweep-child", str(result_path)],
                                   stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
-            return None, "no result within " + str(timeout) + "s (killed)"
+            return None, "killed at its {}s bound after {:.1f}s; not a result of the sweep".format(
+                timeout, time.monotonic() - started), True
         except OSError as exc:
-            return None, "could not start: " + repr(exc)
+            return None, "could not start: " + repr(exc), False
         said = proc.stderr.decode("utf-8", "replace").strip()[-800:]
         if proc.returncode != 0:
-            return None, "exit " + str(proc.returncode) + " (" + said + ")"
+            return None, "exit " + str(proc.returncode) + " (" + said + ")", False
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            return None, "no readable result: " + repr(exc)
+            return None, "no readable result: " + repr(exc), False
     rows = result.get("checks") if isinstance(result, dict) else None
     if not (isinstance(rows, list) and result.get("format") == _CLASS_SWEEP_FORMAT
             and result.get("complete") is True
             and all(isinstance(row, list) and len(row) == 3 and type(row[1]) is bool
                     and (row[2] is None or isinstance(row[2], str)) for row in rows)
             and [row[0] for row in rows] == list(_CLASS_SWEEP_CHECKS)):
-        return None, ("incomplete or malformed result: " + repr(result))[:800]
-    return [tuple(row) for row in rows], None
+        return None, ("incomplete or malformed result: " + repr(result))[:800], False
+    return [tuple(row) for row in rows], None, False
+
+
+def _class_sweep_record(check, bound_expired, run=None):
+    """Run the class sweep child (run, by default _run_class_sweep_child) and record its outcome. A result
+    records each of _CLASS_SWEEP_CHECKS through check as the child judged it; a failure to produce one (a
+    crash, a nonzero exit, a missing or malformed result) fails every one of them, named with the reason
+    (fail-closed). The child reaching its bound records none of them: it appends one entry naming the bound
+    to bound_expired, so the run reports the bound expiring (exit 2, _self_test_outcome), never those
+    checks failing."""
+    rows, why, expired = (_run_class_sweep_child if run is None else run)()
+    if expired:
+        bound_expired.append("class sweep child {} ({} checks not evaluated)".format(
+            why, len(_CLASS_SWEEP_CHECKS)))
+        return
+    for index, name in enumerate(_CLASS_SWEEP_CHECKS):
+        if rows is None:
+            check(name, False, observed="class sweep child: " + why)
+        else:
+            check(name, rows[index][1], observed=rows[index][2])
+
+
+def _self_test_outcome(failures, failure_details, checked, bound_expired):
+    """Print the run's verdict and return its exit code: 1 when a check failed (each bound that expired is
+    named beside the failures), 2 when the only problem is a bound that expired (cannot evaluate: the
+    checks behind it did not run, which is not a failure of the code under test), else 0."""
+    if failures:
+        print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
+        for f in failures:
+            print("  FAILED: {}".format(f))
+            if f in failure_details:
+                print("    observed: {}".format(failure_details[f]))
+        for entry in bound_expired:
+            print("  BOUND EXPIRED: {}".format(entry))
+        return 1
+    if bound_expired:
+        for entry in bound_expired:
+            print("  BOUND EXPIRED: {}".format(entry))
+        print("OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE ({} bound(s) expired, not a failure of the code "
+              "under test; the other {} checks passed)".format(len(bound_expired), checked))
+        return 2
+    print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; ten executable ops: the file ops, "
+          "init-store, the registration ops, enable-hook and the finish ops)".format(checked))
+    return 0
+
+
+def _declared_sweep_bound(tree):
+    """The default of the timeout parameter of _run_class_sweep_child in the module tree, when it is an int
+    literal (the form the standalone closure gate's declared-wait scan reads, so the gate's leg bound covers
+    this wait); None when the function or that default is missing or is any other form (a name, a call,
+    arithmetic, a float or a bool), which that scan would not count."""
+    import ast
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_class_sweep_child":
+            spec = node.args
+            positional = spec.posonlyargs + spec.args
+            pairs = list(zip(positional[len(positional) - len(spec.defaults):], spec.defaults))
+            for arg, default in pairs:
+                if arg.arg == "timeout" and isinstance(default, ast.Constant) and type(default.value) is int:
+                    return default.value
+    return None
+
+
+def _class_sweep_bound_self_test(check):
+    """The class sweep child's bound: its expiry is reported as the bound, never as the sweep's checks
+    failing, and its size stays the int literal recorded above _run_class_sweep_child."""
+    import ast
+    import io
+    import time
+    rows = [(name, True, None) for name in _CLASS_SWEEP_CHECKS]
+    # The real child, given a 1 s bound it cannot finish in, is killed and reports the bound expiring.
+    started = time.monotonic()
+    got = _run_class_sweep_child(timeout=1)
+    took = time.monotonic() - started
+    check("class-sweep-bound-expiry-attributed-to-the-bound",
+          len(got) == 3 and got[0] is None and got[2] is True
+          and str(got[1]).startswith("killed at its 1s bound after ")
+          and str(got[1]).endswith("; not a result of the sweep") and took < 60,
+          observed="returned {!r} in {:.1f}s".format(got, took))
+    # How each child outcome is recorded: an expiry records no check and one bound entry; a crash, a
+    # nonzero exit or a malformed result fails all of them, naming why; a result records each row.
+    recorded = {}
+    for label, outcome in (("expired", (None, "killed at its 3000s bound after 3000.2s; not a result of the "
+                                        "sweep", True)),
+                           ("crashed", (None, "exit 2 (class sweep child: harness error)", False)),
+                           ("malformed", (None, "incomplete or malformed result: {}", False)),
+                           ("result", (rows[:6] + [(rows[6][0], False, "seen")] + rows[7:], None, False))):
+        calls, expired = [], []
+        _class_sweep_record(lambda name, cond, observed=None: calls.append((name, bool(cond), observed)),
+                            expired, run=lambda: outcome)
+        recorded[label] = (calls, expired)
+    names = list(_CLASS_SWEEP_CHECKS)
+    calls, expired = recorded["expired"]
+    check("class-sweep-bound-expiry-not-a-check-failure",
+          calls == [] and expired == ["class sweep child killed at its 3000s bound after 3000.2s; not a result "
+                                      "of the sweep ({} checks not evaluated)".format(len(names))],
+          observed=repr(recorded["expired"]))
+    check("class-sweep-child-failure-still-fails-every-check",
+          all(recorded[label][1] == [] and [c[0] for c in recorded[label][0]] == names
+              and all(c[1] is False and c[2] == "class sweep child: " + outcome_why for c in recorded[label][0])
+              for label, outcome_why in (("crashed", "exit 2 (class sweep child: harness error)"),
+                                         ("malformed", "incomplete or malformed result: {}")))
+          and recorded["result"] == ([(name, index != 6, "seen" if index == 6 else None)
+                                      for index, name in enumerate(names)], []),
+          observed=repr({label: recorded[label] for label in ("crashed", "malformed", "result")}))
+    # The exit mapping: 2 for a bound alone, 1 for a failure (the bound named beside it), 0 when clean.
+    said = {}
+    for label, args in (("bound", ([], {}, 40, ["class sweep child killed at its 3000s bound"])),
+                        ("both", (["x"], {"x": "y"}, 41, ["class sweep child killed at its 3000s bound"])),
+                        ("fail", (["x"], {}, 41, [])),
+                        ("clean", ([], {}, 41, []))):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = _self_test_outcome(*args)
+        said[label] = (code, out.getvalue())
+    bound_line = "  BOUND EXPIRED: class sweep child killed at its 3000s bound\n"
+    check("self-test-exit-bound-expiry-cannot-evaluate",
+          said["bound"][0] == 2 and bound_line in said["bound"][1] and "CANNOT EVALUATE" in said["bound"][1]
+          and "FAIL" not in said["bound"][1] and "PASS" not in said["bound"][1]
+          and said["both"][0] == 1 and bound_line in said["both"][1] and "FAILED: x" in said["both"][1]
+          and said["fail"][0] == 1 and "BOUND EXPIRED" not in said["fail"][1]
+          and said["clean"][0] == 0 and "SELF-TEST: PASS (41 " in said["clean"][1]
+          and "BOUND EXPIRED" not in said["clean"][1],
+          observed=repr(said))
+    # The bound is an int literal default equal to the sized figure (3000 s, recorded above
+    # _run_class_sweep_child): a name, a call, a float, a bool or another figure is refused, so the closure
+    # gate's scan of literal waits keeps covering it and a resize goes through the sizing record.
+    live = _declared_sweep_bound(ast.parse(Path(os.path.abspath(__file__)).read_text(encoding="utf-8")))
+    probes = {}
+    for default in ("2999", "3000", "3001", "_BOUND", "3000.0", "True", "1500 * 2"):
+        probes[default] = _declared_sweep_bound(ast.parse(
+            "def _run_class_sweep_child(timeout={}):\n    pass\n".format(default)))
+    check("class-sweep-bound-declared-literal",
+          live == 3000 and probes == {"2999": 2999, "3000": 3000, "3001": 3001, "_BOUND": None,
+                                      "3000.0": None, "True": None, "1500 * 2": None}
+          and [d for d, v in probes.items() if v == 3000] == ["3000"]
+          and _declared_sweep_bound(ast.parse("def other(timeout=3000):\n    pass\n")) is None,
+          observed="live={!r} probes={!r}".format(live, probes))
 
 
 def _class_sweep_child_main(args):
