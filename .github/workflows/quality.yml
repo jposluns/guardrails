@@ -53,7 +53,9 @@ jobs:
         with:
           python-version: '3.14'
       # D-400-SPECIAL-FILE-PRECHECK runs FIRST after checkout and the Python setup action, in EVERY
-      # job of EVERY workflow (check_ci_parity holds every job to that order): one walk refuses a
+      # job of EVERY workflow except this file's two host-patch jobs, which
+      # tools/check_python_host_pin.py holds whole, refusing any inserted step (check_ci_parity
+      # holds every other job to that order and discloses that residual): one walk refuses a
       # special file (a FIFO
       # above all, whose plain read with no writer blocks forever), a symlink to one, an unresolvable
       # symlink that git does not ignore, a symlink to a directory outside the root, git-ignored or
@@ -891,11 +893,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14.4'
-      - name: Special-file precheck
-        shell: bash
-        run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
-          python3 -I -B tools/_gen_common.py --precheck
 
       - name: Python host pin
         shell: bash
@@ -921,11 +918,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14.4'
-      - name: Special-file precheck
-        shell: bash
-        run: |
-          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
-          python3 -I -B tools/_gen_common.py --precheck
 
       - name: Python host pin
         shell: bash

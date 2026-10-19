@@ -1132,10 +1132,12 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("tools/check_gensrc_failclose.py", "subprocess.run:<no-py-literal>"),
-     (4, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
+     (5, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
-      "named LIMITS residue")),
+      "named LIMITS residue (the fifth site is the fixture repo_root() probe, a -c one-liner that "
+      "imports the fixture's own sandbox copy of _gen_common, itself a copy of an enumerated "
+      "module)")),
     (("tools/check_gensrc_failclose.py", "subprocess.run:gen_{}.py"),
      (1, "launches sandbox copies of the registered tools/gen_<stem>.py generators, each enumerated "
       "live")),

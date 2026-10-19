@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "6dd49d02a9ee879681c4d0e4df3b208dcdeda3bbcd8cd9e354908cb045275f6a"
+tree-sha256 = "a80ce6a77f118353b68738d3a9b4bfb2b5b73bb2346a5a35e80d16a5d9f87ca6"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2372,7 +2372,7 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 [[sources]]
 path = "README.md"
 bytes = 5065
-sha256 = "696054a84813b5ac285d5086cfdc132d3d1bd5c6754e951609064b75171b59a0"
+sha256 = "069288d1c2c9fe5e1ae434973717be3fd97203defb629c7567157b293e0dde62"
 
 [[sources]]
 path = "RELEASING.md"
@@ -3326,8 +3326,8 @@ sha256 = "41360f1cc7595248ad23d30104cd93dd8a20a99920fdb11e0335ede7d1b9db50"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 428289
-sha256 = "bc07a9afb3c6fb827ad5aaee3a3ac8423e3931b8f092688bf647f9d71edcbdc9"
+bytes = 433858
+sha256 = "1e99dbc1aa31f85f6eaf1a5667de44fdb588c199fb31200fc741698d7efcc8c2"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
@@ -3361,8 +3361,8 @@ sha256 = "45657d4fc0bea6d79dce0c7814230bbae50a59093d2f4c1976cdf13debc69157"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
-bytes = 134512
-sha256 = "d1dc1896b7eefbb80f56c601bdf8da333fe8dd1cfdfd7044c8c33d008dcab4ad"
+bytes = 135671
+sha256 = "9f76ad5bf0c4ea65713fc9d18c6563e44f3dd76fe6d43cf2f7c39031ccecf1f8"
 
 [[sources]]
 path = "tools/check_git_option_table.py"
@@ -3491,8 +3491,8 @@ sha256 = "7243ff533bed682037100c39ad41dfe3da39bbe1b4b0a81452417d07a25ddd95"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 1081473
-sha256 = "1a6983a854c9d257bd77ebd6b15150b3e7da7238722c7bcaf773df25514c3a15"
+bytes = 1081655
+sha256 = "849587e91dd3b199b29fa6a9dc99b73bd6a1a8ddcfa1d17d506e989c67b007e4"
 
 [[sources]]
 path = "tools/check_release_delta.py"
