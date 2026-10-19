@@ -3224,12 +3224,50 @@ _GAP_DENY_ROWS = (
     "py'thon3' -c 'import os; os.system(\"git commit --no-verify -m y\")'",
     "p\"y\"thon3 -c 'import os; os.system(\"git commit --no-verify -m y\")'",
     "python3 -c \"import os; os.system('g\"\"it commit --no-verify -m y')\"",
+    # Quoting split across a word in text the shell decode does not reach is restored by the quote-stripped
+    # reading: the raw probes read each text and its quote-stripped variant, so a g'it' or -'n'm on the
+    # parse-error fallback path (a here-string does not lex), inside a here-document body, or inside a script
+    # piped to a stdin-reading shell no longer hides the bypass.
+    "g'it' commit -nm x <<<y",
+    "git commit -'n'm x <<<y",
+    "bash <<'E'\ng'it' commit --no-verify -m x\nE",
+    "bash <<'E'\ngit commit -'n'm x\nE",
+    "printf \"g'it' commit --no-verify -m x\\n\" | bash /dev/stdin",
     # A short cluster carrying n beside later letters or an attached value (-nm, -nq, -nqm) is the -n
     # (--no-verify) bypass on git commit and git am; the raw short-n probe reads the n anywhere in the cluster.
     "python3 -c \"import os; os.system('git commit -nm y')\"",
     "bash <<'A'\ngit am -nm patch\nA",
     "bash <<'A'\ngit commit -nqm msg\nA",
     "perl -e 'system(\"git\", \"commit\", \"-nq\")'",
+    # The same clusters on the parse-error fallback path (a here-string does not lex): the raw short-n probe
+    # must keep reading the n anywhere in the cluster THERE too. These denied before as well; they pin the
+    # fallback itself, since a fallback-only return to a trailing word boundary on the cluster probe would
+    # flip each of them to allow while every parsed-path row still passes.
+    "git commit -nm x <<<y",
+    "git am -nq p.mbox <<<y",
+    "git commit -nqm msg <<<y",
+    # In raw text the reading cannot resolve (interpreter code, a here-document or here-string body, a
+    # stdin-fed script, an expansion, assignment or export value), argument order proves nothing: a -n bound
+    # to a name BEFORE the git word, or held in an assignment or export value, is still the bypass, so there
+    # the verb and the -n pair unordered over the whole text.
+    "python3 -c \"import subprocess; opts=['-n']; subprocess.run(['git', 'commit', *opts, '-m', 'x'])\"",
+    "python3 -c \"import subprocess as s; a='-n'; s.run(['git','commit',a,'-m','x'])\"",
+    "python3 -c \"import subprocess as s; a=['-n']; s.run(['git','commit','-m','x']+a)\"",
+    "perl -e '$f=\"-n\"; system(\"git\",\"commit\",$f,\"-m\",\"x\")'",
+    "python3 <<'A'\nimport subprocess\na=['-n']\nsubprocess.run(['git','commit','-m','x']+a)\nA",
+    "bash <<'A'\nf=-n\ngit commit $f -m x\nA",
+    "printf 'f=-n; git commit $f -m x\\n' | bash",
+    "export F=-n; bash <<'A'\ngit commit $F -m x\nA",
+    "F=-n; python3 -c \"import os,sys; os.system('git commit '+sys.argv[1]+' -m x')\" \"$F\"",
+    "export F=-n; python3 -c \"import os; os.system('git commit $F -m x')\"",
+    # The unordered pairing over opaque text is a DISCLOSED over-denial, the chosen cost of not trusting any
+    # order there: a -n in a later unrelated command beside a here-document or here-string, or a git/am in
+    # here-document prose beside a sort -n, denies (the first two denied before as well; the prose row
+    # returns to denying, since a here-document body is opaque text). The minimal pairs that keep the
+    # construct and drop the -n or the verb are in _GAP_ALLOW_ROWS.
+    "bash <<'E'\ngit commit -m x\ngrep -n y\nE",
+    "git commit -m x <<<y; grep -n z",
+    "cat <<'EOF'\ngit notes: I am updating the docs\nEOF\nsort -n data.txt",
     # A shell whose script operand NAMES standard input reads its script from the pipe or here-document, so a
     # piped or here-documented bypass of any no-verify verb denies, as it does for 'bash -' (stdin-uncertain).
     "printf 'git commit --no-verify -m y\\n' | bash /dev/stdin",
@@ -3237,6 +3275,9 @@ _GAP_DENY_ROWS = (
     "printf 'git rebase --no-verify main\\n' | sh /proc/self/fd/0",
     "printf 'git merge --no-verify topic\\n' | zsh //dev/stdin",
     "printf 'git commit --no-verify -m y\\n' | bash -- /dev/stdin",
+    # A RELATIVE script operand whose trailing components spell the stdin can resolve to the device from a
+    # deep enough working directory, so it is read as the stdin conservatively.
+    "printf 'git commit --no-verify -m y\\n' | bash ../../../../../../../dev/stdin",
     # Redirection-branch coverage: NO interpreter word and NO '<<', so only the unresolved-redirect trigger
     # fires (opaque input duplication, a 0>& onto standard input with an opaque target, a device input, and a
     # read-write input to a device). Each branch is shown to discriminate by removing it in a mutant, paired
@@ -3265,20 +3306,28 @@ _GAP_ALLOW_ROWS = (
     # A wrapped trap with a harmless action, and a wrapped lookup that sets no handler.
     "command trap 'echo done' EXIT",
     "command trap -p",
-    # Finding-1 controls: the same quoted-interpreter construct with no bypass spelling allows.
+    # The same quoted-interpreter constructs with no bypass spelling allow, raw and quote-stripped alike.
     "py'thon3' -c 'import os; os.system(\"git status\")'",
     "python3 -c \"import os; os.system('g\"\"it status')\"",
-    # Finding-2 controls: a non-skip short cluster (-q, no n) under a here-document trigger allows.
+    "g'it' status <<<y",
+    # A non-skip short cluster (-q, no n) under a here-document trigger allows.
     "bash <<'A'\ngit commit -q -m msg\nA",
     "bash <<'A'\ngit am -q patch\nA",
-    # Finding-3 control: an ordinary script-file operand is data, not stdin, so the piped bypass is not read.
+    # Harmless standard-input scripts: a piped script with no bypass spelling allows, through an absolute or a
+    # relative stdin-naming operand alike (the stdin reading adds denials only where a spelling is present).
     "printf 'git status\\n' | bash /dev/stdin",
-    # Finding-4: a -n in a LATER unrelated command, a git log -n, or a git/am mentioned in here-document prose
-    # beside a sort -n no longer pairs with an earlier git commit or am (the short -n is bounded to one command).
+    "printf 'git status\\n' | bash ../../../../../../../dev/stdin",
+    # Where the lexer reads every word of every segment with certainty, the short -n stays bounded to one
+    # segment, ordered: a -n in a LATER unrelated command or a git log -n does not pair with an earlier git
+    # commit, even with an interpreter-family word in a message string.
     "git commit -m 'fix python parser'; grep -n TODO notes.txt",
     "git commit -m 'update python docs'; git log --oneline -n 5",
-    "cat <<'EOF'\ngit notes: I am updating the docs\nEOF\nsort -n data.txt",
-    # Finding-5 controls: a numeric duplication, a close, a static-file input and an ordinary output redirect
+    # Minimal pairs for the unordered opaque-text pairing: the same constructs with the -n and no bypass verb,
+    # or the verb and no -n, allow (the here-string rows run the parse-error fallback).
+    "git commit -m x <<<y",
+    "F=-n; bash <<'A'\ngit status\nA",
+    "export F=-n; python3 -c \"import os; os.system('git status')\"",
+    # A numeric duplication, a close, a static-file input and an ordinary output redirect
     # leave the redirect bounded, so the bypass spelling beside them is not read (no unbounded-input trigger).
     "echo 'git commit --no-verify -m y' <&3",
     "echo 'git commit --no-verify -m y' <&-",
@@ -3747,20 +3796,23 @@ _RAW_SEQUENCE_REFERENCES = (
     (("_RAW_COMMIT_RE",), r"(?is)\bgit\b.*?\bcommit\b"),
     (("_RAW_NOVERIFY_VERB_RE",), r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b"),
     (("_RAW_SHORT_NOVERIFY_VERB_RE",), r"(?is)\bgit\b.*?\b(?:commit|am)\b"),
+    (("_RAW_SHORT_SEQ_RE",),
+     r"(?is)\bgit\b.*?\b(?:commit|am)\b.*?(?:^|[\s\"';,=([{])-[A-Za-z]*n"),
     (("_RAW_COMMIT_MSG_GIT_RE",), r"(?is)\bgit\b.*?\bcommit\b"),
 )
 # Words and joiners the differential corpus is drawn from: each verb, its case and word-boundary
-# neighbours, the breadth and prune selectors and their near misses, quotes, and the two non-ASCII letters
-# the case-folded patterns also match (a long s for s, a Kelvin sign for k).
+# neighbours, the breadth and prune selectors and their near misses, the short -n cluster spellings and
+# their near misses, quotes, and the two non-ASCII letters the case-folded patterns also match (a long s
+# for s, a Kelvin sign for k).
 _RAW_SEQUENCE_WORDS = (
     "git", "GIT", "Git", "xgit", "gitx", "git-x", "x-git", "push", "PUSH", "pushx", "commit", "Commit", "am",
     "merge", "pull", "rebase", "add", "fetch", "diff", "show", "ſhow", "log", "range-diff", "worKtree",
     "-A", "-a", "-xA", "-xa", "a-a", "--all", "--allx", "--prune", "--prune-tags", "--prunex", "-p", "-xp", "-P",
-    "p-p", ".", "..", ":/", ":/x", "./", "x", "-", "'", '"', "$(", ")")
+    "p-p", "-n", "-nm", "-xn", "--n", "n", ".", "..", ":/", ":/x", "./", "x", "-", "'", '"', "$(", ")")
 _RAW_SEQUENCE_JOINERS = (" ", "  ", "\n", "\t", ";", "", "/", "=", "-")
 # Half the corpus is drawn from the words the three-step probes need, so their orderings are well covered.
-_RAW_SEQUENCE_FOCUS = ("git", "Git", "xgit", "fetch", "add", "commit", "push", "-p", "-xp", "-A", "-a", "-xa",
-                       "--all", "--prune", "--prune-tags", ".", ":/", "x", "'")
+_RAW_SEQUENCE_FOCUS = ("git", "Git", "xgit", "fetch", "add", "commit", "am", "push", "-p", "-xp", "-A", "-a",
+                       "-xa", "-n", "-nm", "--n", "--all", "--prune", "--prune-tags", ".", ":/", "x", "'")
 
 
 def _raw_sequence_failures(count=20000, seed=20261015):
@@ -15328,8 +15380,12 @@ def _main_isolated(monitor):
              'pytest | grep -m 1 x //dev/null', 'allow'),
             ('(gw-r9-c3.9) /dev/../etc/hosts is an ordinary file, allows',
              'pytest | grep -m 1 x /dev/../etc/hosts', 'allow'),
-            ('(gw-r9-c3.10) a relative dev/stdin stays a disclosed residual, allows',
-             'pytest | grep -m 1 x dev/stdin', 'allow'),
+            ('(gw-r9-c3.10) a relative dev/stdin can resolve to the device, so it reads the stdin, notes',
+             'pytest | grep -m 1 x dev/stdin', 'allow-note'),
+            ('(gw-r9-c3.11) a ..-led relative spelling of the stdin reads the stdin, notes',
+             'pytest | grep -m 1 x ../../dev/stdin', 'allow-note'),
+            ('(gw-r9-c3.12) a relative path to an ordinary name, allows',
+             'pytest | grep -m 1 x ../notes/stdin.txt', 'allow'),
             ("(gw-r9-d.1) cd DIR && the run, denies",
              'cd /x && pytest -q 2>&1 | tail -20', 'deny'),
             ("(gw-r9-d.2) 'true &&' before the run, denies",
