@@ -11061,13 +11061,17 @@ _MERGE_VALUE_LONGS = frozenset((
     "--jq", "--template", "--preview", "--hostname", "--cache"))
 _MERGE_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")  # a timeout(1) duration operand
 # The raw merge-spelling backstop, applied ONLY to shell-body wrappers (sh/bash/zsh/dash/ksh -c, eval,
-# xargs) and to commands whose lex is refused or uncertain, never to an ordinary certain-lex segment, so
+# xargs), to commands whose lex is refused or uncertain, and (when the lex is uncertain) to the lexed
+# parts of a command no recognized candidate accounts for, never to an ordinary certain-lex segment, so
 # prose that mentions a merge (a commit message) does not deny. The scan is an ordered word walk per
-# command chunk (the text between ; | & and newline separators): each word is searched once from the end
+# command chunk (the text between ; | and & separators): each word is searched once from the end
 # of the previous match, so the whole reading is linear and carries NO gap bound (any amount of
 # whitespace or filler between the words still matches; an earlier bounded-gap regex silently stopped
-# matching past its bound).
-_RAW_CHUNK_SPLIT_RE = re.compile(r"[;|&\n]")
+# matching past its bound). A NEWLINE does not split a chunk: a quoted wrapper-body string can carry a
+# real newline inside ONE inner command (a multi-line graphql query), so splitting there hid the merge;
+# where a newline really separates two inner commands, the merged chunk can only ADD a match, the
+# disclosed over-deny direction for text this guard already cannot parse.
+_RAW_CHUNK_SPLIT_RE = re.compile(r"[;|&]")
 _RAW_GH_RE = re.compile(r"(?i)\bgh\b")
 _RAW_PR_RE = re.compile(r"(?i)\bpr\b")
 _RAW_MERGE_RE = re.compile(r"(?i)\bmerge\b")
@@ -11096,7 +11100,8 @@ def _load_operations(root):
     shapes reach; merge.mcp_tools (optional, default merge_pull_request) names the MCP tool short names
     that count as a merge, each of which must contain 'merge' (the installed matcher invokes the guard
     only for mcp__*merge* names, so any other name could never be checked and is BAD, never silently
-    accepted). prepush.command is the declared required pre-push command and
+    accepted) and none of which may contain '__' (the handler matches the short name after the LAST
+    '__' of mcp__<server>__<name>, so a '__'-bearing declared name could never match: BAD too). prepush.command is the declared required pre-push command and
     prepush.hook_line (optional, default command) the exact line the installed hook must carry. The
     lstat-to-open swap race and hard-link/case/Unicode aliasing stay the gensrc-disclosed residuals."""
     path = os.path.join(root, _OPERATIONS_REL)
@@ -11164,6 +11169,13 @@ def _load_operations(root):
                 return ("bad", "merge.mcp_tools names a tool without 'merge' in its name; the merge "
                                "guard is invoked only for MCP tool names containing 'merge', so that "
                                "tool could never be checked")
+            if any("__" in t for t in merge["mcp_tools"]):
+                # The handler matches an MCP call by the short name after the LAST '__' of
+                # mcp__<server>__<name>, so a declared name carrying '__' could never equal that short
+                # name: it would read as armed while the tool stays unguarded, so it is BAD.
+                return ("bad", "merge.mcp_tools names a tool containing '__'; the merge guard matches "
+                               "an MCP call by the short name after the last '__', so that declared "
+                               "name could never match and the tool would stay unchecked")
             tools = tuple(merge["mcp_tools"])
         merge_cfg = {"argv": list(argv), "repos": repos, "mcp_tools": frozenset(tools)}
     prepush_cfg = None
@@ -11242,7 +11254,8 @@ _MERGE_NICE_ADJ_RE = re.compile(r"^(?:-n|--adjustment=)-?\d+$")  # nice's attach
 def _merge_peel(seg):
     """(tokens, opaque, gh_repo) from the real command word onward for a lexed segment: leading env
     assignments, leading shell reserved words (_MERGE_SHELL_KEYWORDS: the command sits inside a loop or
-    conditional body) and a run of bare command-word wrappers (_WRAPPER_WORDS) are peeled, with
+    conditional body), env assignments at the fresh command position each reserved word opens
+    ('then GH_REPO=o/r gh ...') and a run of bare command-word wrappers (_WRAPPER_WORDS) are peeled, with
     timeout's duration operand, nice's '-n N' / '-nN' / '--adjustment=N' and env's inline assignments
     skipped, mirroring the git-explicit-binding peel; any other wrapper option or assignment stops the
     peel in place (the same disclosed residual, its option grammar never guessed). sh/bash/xargs are NOT
@@ -11265,7 +11278,10 @@ def _merge_peel(seg):
     while i < n:
         word = tokens[i].rsplit("/", 1)[-1]
         if word in _MERGE_SHELL_KEYWORDS:
-            i += 1
+            # a reserved word opens a fresh command position, so assignments after it ('then
+            # GH_REPO=o/r gh pr merge 3') are consumed exactly like leading ones (last-wins GH_REPO
+            # kept); without this the assignment reads as the command word and the merge is never seen
+            i = take_assignments(i + 1)
             continue
         if word not in _WRAPPER_WORDS or word in ("sh", "bash", "xargs"):
             break
@@ -11302,16 +11318,21 @@ def _merge_explicit_repo(value, opq):
     return ("slug", _merge_slug(value))
 
 
-def _merge_gh_shape(tokens, opaque, seg_env, ambient_env):
+def _merge_gh_shape(tokens, opaque, seg_env, env_state):
     """Classify one peeled gh segment: None for no merge shape (including the exempt read-only forms: a
     lone --help/-h, --disable-auto with no merge method, and the GET is-it-merged api read with no body
     field), a ("deny", repo, what) tuple for a matched merge shape (repo is "implicit", "unprovable", or
-    ("slug", owner/name)), or ("note", what) for a graphql body this guard cannot read. The option walk
+    ("slug", owner/name)), or ("note", what) for a graphql body this guard cannot read. env_state is the
+    GH_REPO value the invoked process receives when the segment itself binds none (_merge_env_effective:
+    None for no value, ("val", value, opaque) for one, "unprovable" for a rebinding the command-level
+    tracker cannot model). The option walk
     is best-effort: known value-taking options (long and short, separated, '=' and attached-cluster
     spellings) have their values consumed, and an UNRECOGNIZED value-taking option's separated value
-    still reads as an operand. That stray operand can never exempt the call: only the FIRST operand
-    after 'pr merge' may name the target by PR URL, a later or expansion-opaque operand makes the
-    target unprovable (governed), and on the api path an extra operand can only add an endpoint
+    still reads as an operand. That stray operand can never exempt the call: only a LITERAL,
+    expansion-free, placeholder-free FIRST operand
+    after 'pr merge' may name the target by PR URL (an expansion inside a URL could name the governed
+    repository once the shell expands it), a later, expansion-opaque or expansion-bearing operand makes
+    the target unprovable (governed), and on the api path an extra operand can only add an endpoint
     match."""
     if not tokens or tokens[0].rsplit("/", 1)[-1] != "gh":
         return None
@@ -11409,9 +11430,10 @@ def _merge_gh_shape(tokens, opaque, seg_env, ambient_env):
         target_unprovable = False
         for pos, (p, q) in enumerate(positionals[2:]):
             m = _MERGE_PR_URL_RE.match(p)
-            if m is not None and pos == 0:
-                # Only the FIRST operand is gh's PR spec; a URL anywhere later (a stray value of an
-                # option this read does not know) must never move the target out of scope.
+            if m is not None and pos == 0 and not q and "{" not in p:
+                # Only a LITERAL FIRST operand is gh's PR spec; a URL anywhere later (a stray value of
+                # an option this read does not know), an expansion-bearing URL (owner/$REPO can expand
+                # to the governed slug) or a {placeholder} must never move the target out of scope.
                 url_slug = (m.group(1) + "/" + m.group(2)).lower()
             elif m is not None or q:
                 target_unprovable = True
@@ -11423,8 +11445,10 @@ def _merge_gh_shape(tokens, opaque, seg_env, ambient_env):
             repo = _merge_explicit_repo(repo_opt[0], repo_opt[1])
         elif seg_env is not None:
             repo = _merge_explicit_repo(seg_env[0], seg_env[1])
-        elif isinstance(ambient_env, str) and ambient_env:
-            repo = _merge_explicit_repo(ambient_env, False)
+        elif env_state == "unprovable":
+            repo = "unprovable"
+        elif env_state is not None:
+            repo = _merge_explicit_repo(env_state[1], env_state[2])
         else:
             repo = "implicit"
         return ("deny", repo, "a 'gh pr merge'")
@@ -11441,10 +11465,17 @@ def _merge_gh_shape(tokens, opaque, seg_env, ambient_env):
             if m is not None:
                 return ("deny", _merge_api_repo(m),
                         "a 'gh api' branch-merge endpoint (repos/.../merges)")
-        if any(p == "graphql" for p, _q in positionals[1:]):
+        # The GraphQL endpoint in ANY pathname spelling ('/graphql', 'graphql/', a query string, the
+        # full URL) is reduced exactly like the REST endpoints; an expansion-opaque endpoint operand
+        # can expand to it, so a merge-mutation body beside one is governed (unprovable) rather than
+        # judged by the endpoint spelling this guard cannot read.
+        graphql_endpoint = any(_merge_api_graphql(p) for p, _q in positionals[1:])
+        endpoint_opaque = any(q for _p, q in positionals[1:])
+        if graphql_endpoint or endpoint_opaque:
             hay = " ".join(field_values).lower()
             if any(name in hay for name in _MERGE_GRAPHQL_MUTATIONS):
-                return ("deny", "implicit", "a 'gh api graphql' merge mutation")
+                return ("deny", "implicit" if graphql_endpoint else "unprovable",
+                        "a 'gh api graphql' merge mutation")
             # A field token is key=value; the FILE/stdin marker sits on the value ('query=@body.gql'),
             # so the key is split off before the '@'/'-' read, or the token is read whole when it
             # carries no '='.
@@ -11453,6 +11484,17 @@ def _merge_gh_shape(tokens, opaque, seg_env, ambient_env):
                 return ("note", "a 'gh api graphql' call whose body this guard cannot read "
                                 "(an @file, --input or expansion body)")
     return None
+
+
+def _merge_api_graphql(operand):
+    """True when a literal gh api endpoint operand names the GraphQL endpoint in any spelling the
+    shared pathname reduction reads ('graphql', '/graphql', 'graphql/', 'graphql?x=1', or the full
+    https URL), case-folded, so a mutation body is judged by what it does rather than by one exact
+    endpoint spelling."""
+    path = _merge_api_path(operand)
+    if path.startswith("/"):
+        path = path[1:]
+    return path.lower() == "graphql"
 
 
 def _merge_api_path(operand):
@@ -11487,9 +11529,123 @@ def _merge_governed(repo, cfg):
     return cfg["repos"] is None or repo[1] in cfg["repos"]
 
 
+def _merge_declared_prefix(argv, opaque, declared_argv):
+    """True only when a matched merge candidate is PROVABLY the declared command run as declared: the
+    declared words lead, every token is literal (an expansion anywhere can become an extra flag or a
+    different target once the shell expands it), and no token past the declared words carries a merge
+    method or behaviour flag in ANY spelling: the exact word (--admin), the =value form (--admin=true,
+    --squash=false; the value is not parsed, because any spelling of the flag is a different merge than
+    the one declared), or a short cluster carrying m/s/r (-ds). The walk fails CLOSED: an unknown short
+    option is not provably flag-free and keeps the command governed, while a long option outside the
+    method set, a known plain boolean short (-d, -i), a value-taking short with its value, and plain
+    operands stay sanctioned, so the declared command plus a PR number or --delete-branch still
+    allows."""
+    if argv is None or opaque is None or len(argv) < len(declared_argv):
+        return False
+    if list(argv[:len(declared_argv)]) != list(declared_argv):
+        return False
+    if any(opaque):
+        return False
+    for tok in argv[len(declared_argv):]:
+        if tok in _MERGE_METHOD_FLAGS:
+            return False
+        if tok.startswith("--"):
+            if tok.partition("=")[0] in _MERGE_METHOD_FLAGS:
+                return False
+        elif tok.startswith("-") and len(tok) > 1:
+            j = 1
+            while j < len(tok):
+                c = tok[j]
+                if c in _MERGE_METHOD_BOOL_SHORTS:
+                    return False
+                if c in _MERGE_PLAIN_BOOL_SHORTS:
+                    j += 1
+                    continue
+                if c in _MERGE_VALUE_SHORTS:
+                    break  # the rest of this token is that option's value
+                return False  # an unknown short: not provably free of behaviour flags
+    return True
+
+
+def _merge_env_track(seg, state, ambient_set):
+    """The command-level GH_REPO binding after one lexed segment, threaded across a command's segments
+    so a later merge is judged by what the invoked gh receives, not by the hook's own environment: a
+    pure-assignment segment ('GH_REPO=o/r;') persists in the shell (bash keeps the export attribute, so
+    with GH_REPO already exported the new value reaches the next command, while an unexported one stays
+    shell-only and gh still receives nothing), 'export GH_REPO=o/r' and an 'export GH_REPO' after a
+    shell-only assignment expose a value, and 'unset GH_REPO' removes one. state is None (untouched:
+    the ambient value stands), ("lit", value, opaque) (gh receives value), ("shell", value, opaque)
+    (shell-only: gh receives nothing unless later exported), "implicit" (gh receives nothing), or
+    "unprovable" (an unmodelled rebinding: the effective target can no longer be proven, the governed
+    direction). Reserved words are peeled first so 'then export GH_REPO=..' is read; a per-command
+    prefix assignment ('GH_REPO=x gh ..') does not persist and leaves state unchanged; any other
+    command whose words past the command word touch GH_REPO (declare, typeset, readonly, an append) is
+    unmodelled and fails closed to "unprovable". A rebinding inside a wrapper body or a command
+    substitution is a single opaque token here and stays a disclosed residual."""
+    tokens, opq = seg.argv, seg.argv_opaque
+    i = 0
+    n = len(tokens)
+    while i < n and tokens[i].rsplit("/", 1)[-1] in _MERGE_SHELL_KEYWORDS:
+        i += 1
+    rest, ropq = tokens[i:], opq[i:]
+
+    def touches(t):
+        return t == "GH_REPO" or t.startswith(("GH_REPO=", "GH_REPO+="))
+
+    if not any(touches(t) for t in rest):
+        return state
+    idx = _command_word_index(rest)
+    if idx >= len(rest):
+        new = state
+        for k, t in enumerate(rest):
+            if t.startswith("GH_REPO+="):
+                new = "unprovable"
+            elif t.startswith("GH_REPO=") and new != "unprovable":
+                exported = (new is None and ambient_set) or (
+                    isinstance(new, tuple) and new[0] == "lit")
+                new = (("lit" if exported else "shell"),
+                       t[len("GH_REPO="):], bool(ropq[k]))
+        return new
+    word = rest[idx].rsplit("/", 1)[-1]
+    if idx == 0 and word == "export":
+        new = state
+        for k, t in enumerate(rest[1:], 1):
+            if t.startswith("GH_REPO+="):
+                new = "unprovable"
+            elif t.startswith("GH_REPO="):
+                new = ("lit", t[len("GH_REPO="):], bool(ropq[k]))
+            elif t == "GH_REPO":
+                if isinstance(new, tuple) and new[0] == "shell":
+                    new = ("lit", new[1], new[2])
+                elif new is not None and not (isinstance(new, tuple) and new[0] == "lit"):
+                    new = "unprovable"  # re-exporting an unset or unmodelled state is unmodelled
+        return new
+    if idx == 0 and word == "unset" and any(t == "GH_REPO" for t in rest[1:]):
+        return "implicit"
+    if any(touches(t) for t in rest[idx:]):
+        return "unprovable"  # an unmodelled command touches GH_REPO past its command word
+    return state  # only a per-command prefix assignment: it does not persist
+
+
+def _merge_env_effective(state, ambient):
+    """The GH_REPO value the NEXT command in this command line receives, folded for _merge_gh_shape:
+    None for no value (the target stays implicit), ("val", value, opaque) for one, or "unprovable"
+    when the command-level tracker lost the thread (governed)."""
+    if state is None:
+        return ("val", ambient, False) if isinstance(ambient, str) and ambient else None
+    if state == "implicit":
+        return None
+    if state == "unprovable":
+        return "unprovable"
+    if state[0] == "shell":
+        return None  # a shell-only value: the invoked gh receives nothing
+    return ("val", state[1], state[2])
+
+
 def _merge_raw_hit(text):
     """True when the raw merge backstop sees a gh pr-merge or gh api merge spelling in text: within one
-    chunk (no ; | & or newline between them), 'gh' then 'pr' then 'merge' as words in order, or 'gh'
+    chunk (no ; | or & between them; a newline does not split, see _RAW_CHUNK_SPLIT_RE), 'gh' then 'pr'
+    then 'merge' as words in order, or 'gh'
     then 'api' then a merge endpoint or mutation name, with no bound on the gaps. Backslash-newline
     pairs are dropped first, so a line continuation inside a wrapper body cannot split a pair of words
     the inner shell would join. Taking the EARLIEST match of each word is sound: an ordered occurrence
@@ -11525,6 +11681,15 @@ _MERGE_DISCOVERY_FAULT_REASON = (
 _MERGE_DISCOVERY_FAULT_BANNER = (
     "AIQT guardrail: denied a merge-shaped {} call because the git work-tree discovery failed (rule "
     "artbr1, fail-closed on a discovery fault); retry once git can resolve the work tree.")
+_MERGE_NO_CWD_REASON = (
+    "AIQT rule artbr1 (branch-and-merge-on-green): a merge-shaped call was seen, but the hook payload "
+    "carried no usable session cwd, so whether this checkout declares a required merge path in "
+    ".aiqt/operations.json cannot be established (a missing cwd is a cannot-evaluate, not a "
+    "git-confirmed non-repository). It fails closed and denies; retry from a session that reports its "
+    "working directory.")
+_MERGE_NO_CWD_BANNER = (
+    "AIQT guardrail: denied a merge-shaped {} call because the session reported no working directory "
+    "(rule artbr1, fail-closed on cannot-evaluate).")
 
 
 def merge_path_guard(data):
@@ -11539,18 +11704,30 @@ def merge_path_guard(data):
     in), and the declaration is read only AFTER a merge shape has matched, so ordinary commands never pay
     the read. A PRESENT-but-unreadable/malformed declaration DENIES the matched shapes with a named
     diagnostic (the gensrc fail-closed precedent): a corrupted declaration must never silently disarm the
-    merge gate. SCOPE: an explicit target (a PR URL as the FIRST operand, then -R/--repo last-wins,
-    then the last peeled GH_REPO= assignment on the segment including env wrappers, then the hook's
-    ambient GH_REPO) with a slug OUTSIDE merge.repos allows; an implicit target, a declared slug, a
+    merge gate. SCOPE: an explicit target (a literal expansion-free PR URL as the FIRST operand, then
+    -R/--repo last-wins, then the GH_REPO binding the invoked process receives: the last GH_REPO=
+    assignment peeled on the segment including env wrappers, then the binding threaded across the
+    command's earlier segments (a plain assignment, an export, an unset; an unmodelled rebinding reads
+    unprovable), then the hook's ambient GH_REPO) with a slug OUTSIDE merge.repos allows; an implicit
+    target, a declared slug, a
     target this guard cannot read (an expansion, a {placeholder}) and a stray or opaque extra operand
-    are governed. The exact declared command allows by argv prefix, PROVIDED no extra merge
-    method/behaviour flag rides past the declared words (an added --admin or a changed method is not
-    the declared path). The raw backstop covers shell bodies (sh/bash/zsh/dash/ksh -c, eval, xargs) and
-    refused or uncertain lexes only. A literal absolute 'cd' target's toplevel declaration is consulted
+    are governed. The exact declared command allows only when it is PROVABLY the declared command
+    (_merge_declared_prefix: the declared words lead, every token literal, and no extra merge
+    method/behaviour flag past the declared words in ANY spelling: the exact word, an =value form, or
+    a short cluster; an added --admin or a changed method is not the declared path). The raw backstop
+    covers shell bodies (sh/bash/zsh/dash/ksh -c, eval, xargs), refused or uncertain lexes, and, when
+    the lex is uncertain, every lexed segment no recognized candidate accounts for, so one recognized
+    merge (even an out-of-scope one) cannot suppress the backstop for another the lexer could not
+    classify. A literal absolute 'cd' target's toplevel declaration is consulted
     beside the session's. NO-ASK: a merge shape in a session git CONFIRMS is in no work tree allows
     with a note (nothing has opted in), while a work-tree DISCOVERY FAULT (a git timeout, a repository
-    git refuses to read) denies fail-closed: a fault is not evidence that nothing opted in; a mis-wired
-    event hard-blocks; a missing tool_name or unreadable Bash command denies fail-closed."""
+    git refuses to read) and a payload with NO USABLE CWD (not a confirmed non-repository) deny
+    fail-closed: neither is evidence that nothing opted in; a mis-wired
+    event hard-blocks; a missing tool_name or unreadable Bash command denies fail-closed. RESIDUAL
+    this construction still cannot see: a merge whose spelling never survives into the command text or
+    its de-quoted reading (assembled at run time from fragments, read from a file, a gh alias), a
+    rebinding of GH_REPO inside a wrapper body or command substitution, and a 'gh api' call whose
+    endpoint is one opaque expansion beside a body this guard reads as benign or absent."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: merge_path_guard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -11561,8 +11738,10 @@ def merge_path_guard(data):
         return _allow()  # defensive: the matcher governs Bash and the MCP merge tools
     cwd = data.get("cwd")
     if tool_name.startswith("mcp__"):
-        state, root = (_operations_toplevel(cwd) if isinstance(cwd, str) and cwd
-                       else ("none", None))
+        if not (isinstance(cwd, str) and cwd):
+            # a missing cwd is a cannot-evaluate, never a git-confirmed non-repository
+            return _deny(_MERGE_NO_CWD_REASON, _MERGE_NO_CWD_BANNER.format(tool_name))
+        state, root = _operations_toplevel(cwd)
         if state == "fault":
             return _deny(_MERGE_DISCOVERY_FAULT_REASON.format(root),
                          _MERGE_DISCOVERY_FAULT_BANNER.format(tool_name))
@@ -11609,6 +11788,7 @@ def merge_path_guard(data):
     gh_env = os.environ.get("GH_REPO")
     candidates = []
     cd_targets = []
+    unaccounted = []  # raw text of lexed segments no candidate, wrapper scan or cd probe accounts for
     try:
         segments = _lex_command(command)
     except ValueError:
@@ -11616,8 +11796,9 @@ def merge_path_guard(data):
     if segments is None:
         if _merge_raw_hit(command) or _merge_raw_hit(_dequoted_text(command)):
             candidates.append(("deny", "unprovable",
-                               "an apparent PR merge in a command this guard cannot parse", None))
+                               "an apparent PR merge in a command this guard cannot parse", None, None))
     else:
+        env_state = None  # the command-level GH_REPO binding, threaded across segments in order
         for seg in segments:
             tokens = seg.argv
             idx = _command_word_index(tokens)
@@ -11625,26 +11806,39 @@ def merge_path_guard(data):
             if (word == "cd" and len(tokens) == idx + 2 and not seg.argv_opaque[idx + 1]
                     and _is_absolute(tokens[idx + 1])):
                 cd_targets.append(tokens[idx + 1])
-                continue
-            eff, opq, seg_gh_repo = _merge_peel(seg)
-            head = eff[0].rsplit("/", 1)[-1] if eff else ""
-            if head in ("sh", "bash", "zsh", "dash", "ksh", "xargs", "eval"):
-                if _merge_raw_hit(seg.raw) or _merge_raw_hit(_dequoted_text(seg.raw)):
-                    candidates.append(("deny", "unprovable",
-                                       "an apparent PR merge inside a shell-body wrapper", None))
-                continue
-            shape = _merge_gh_shape(eff, opq, seg_gh_repo, gh_env)
-            if shape is None:
-                continue
-            if shape[0] == "deny":
-                candidates.append(("deny", shape[1], shape[2], tuple(eff)))
             else:
-                candidates.append(("note", None, shape[1], None))
+                eff, opq, seg_gh_repo = _merge_peel(seg)
+                head = eff[0].rsplit("/", 1)[-1] if eff else ""
+                if head in ("sh", "bash", "zsh", "dash", "ksh", "xargs", "eval"):
+                    if _merge_raw_hit(seg.raw) or _merge_raw_hit(_dequoted_text(seg.raw)):
+                        candidates.append(("deny", "unprovable",
+                                           "an apparent PR merge inside a shell-body wrapper",
+                                           None, None))
+                else:
+                    shape = _merge_gh_shape(eff, opq, seg_gh_repo,
+                                            _merge_env_effective(env_state, gh_env))
+                    if shape is None:
+                        unaccounted.append(seg.raw)
+                    elif shape[0] == "deny":
+                        candidates.append(("deny", shape[1], shape[2], tuple(eff), tuple(opq)))
+                    else:
+                        candidates.append(("note", None, shape[1], None, None))
+            env_state = _merge_env_track(seg, env_state, gh_env is not None)
         if not candidates and _lex_uncertain(command):
             if _merge_raw_hit(command) or _merge_raw_hit(_dequoted_text(command)):
                 candidates.append(("deny", "unprovable",
                                    "an apparent PR merge in a command whose shell reading is uncertain",
-                                   None))
+                                   None, None))
+        elif candidates and unaccounted and _lex_uncertain(command):
+            # one recognized candidate (even an out-of-scope or note one) must not suppress the
+            # uncertain-lex backstop for the parts of the command no candidate accounts for: an
+            # unrecognized brace-group merge beside an outside merge stays governed
+            for raw in unaccounted:
+                if _merge_raw_hit(raw) or _merge_raw_hit(_dequoted_text(raw)):
+                    candidates.append(("deny", "unprovable",
+                                       "an apparent PR merge in a part of the command whose shell "
+                                       "reading is uncertain", None, None))
+                    break
     if not candidates:
         return _allow()
     roots = []
@@ -11652,6 +11846,9 @@ def merge_path_guard(data):
     if isinstance(cwd, str) and cwd:
         probes.append(cwd)
     probes.extend(cd_targets)
+    if not probes:
+        # no session cwd and no literal cd target: a cannot-evaluate, never a confirmed non-repository
+        return _deny(_MERGE_NO_CWD_REASON, _MERGE_NO_CWD_BANNER.format("Bash"))
     for probe in probes:
         state, answer = _operations_toplevel(probe)
         if state == "fault":
@@ -11673,18 +11870,17 @@ def merge_path_guard(data):
     if not configs:
         return _allow()  # the inert boundary: no merge member declares a required path
     note_what = None
-    for kind, repo, what, argv in candidates:
+    for kind, repo, what, argv, argv_opaque in candidates:
         if kind == "note":
             note_what = what
             continue
         for cfg in configs:
             declared_argv = cfg["argv"]
-            if (argv is not None and len(argv) >= len(declared_argv)
-                    and list(argv[:len(declared_argv)]) == declared_argv
-                    and not any(t in _MERGE_METHOD_FLAGS for t in argv[len(declared_argv):])):
-                # The declared command is sanctioned by argv prefix, but an extra merge method or
-                # behaviour flag (--admin, a changed method) past the declared words is a different
-                # merge than the one declared, so it stays governed.
+            if _merge_declared_prefix(argv, argv_opaque, declared_argv):
+                # PROVABLY the declared command: the declared words lead, every token is literal, and
+                # no extra merge method or behaviour flag rides past the declared words in any
+                # spelling (an added --admin, --admin=true, a changed method, an -ds cluster, or an
+                # expansion that could become one is a different merge and stays governed).
                 continue
             if _merge_governed(repo, cfg):
                 declared = " ".join(declared_argv)
@@ -11758,12 +11954,19 @@ def prepush_declared_hook(data):
     chain is named before a plain 'git push' silently skips it. INERT boundaries, silent by design: a
     session whose cwd git CONFIRMS is in no work tree (nothing can have opted in), an absent
     declaration, and a declaration with no prepush member. A work-tree DISCOVERY FAULT (a git timeout,
-    a repository git refuses to read) is not absence and WARNS as cannot-evaluate, as does a PRESENT
+    a repository git refuses to read) and a session start with NO USABLE CWD are not absence and WARN
+    as cannot-evaluate, as does a PRESENT
     declaration that cannot be read and any probe or hook read this check cannot complete: never a
     silent pass. It never blocks and never suggests core.hooksPath (a tracked hooks directory would
     let any branch add a hook, per the installer precedent)."""
     cwd = data.get("cwd")
-    state, root = (_operations_toplevel(cwd) if isinstance(cwd, str) and cwd else ("none", None))
+    if not (isinstance(cwd, str) and cwd):
+        # a missing cwd is a cannot-evaluate, never a git-confirmed non-repository: warn, never silent
+        return _stop_warn(
+            "AIQT guardrail (rules reqstp, gatdis): the session start carried no usable cwd, so "
+            "whether this checkout declares a required pre-push step in .aiqt/operations.json cannot "
+            "be evaluated; surfacing this warning rather than passing silently.")
+    state, root = _operations_toplevel(cwd)
     if state == "fault":
         return _stop_warn(
             "AIQT guardrail (rules reqstp, gatdis): {}, so whether this checkout declares a required "
