@@ -4457,7 +4457,7 @@ _SCAN_ALLOWED_UNPINNED = (
      " merge-base reads for the post-release revision binding, QA round-2); read-only by"
      " design, and production launches stay unchanged"),
     ("tools/check_release_delta.py", "_stage1_git", ("git",),
-     "stage-1 re-execution read funnel (QA round 5, D-397-REEXEC-FROM-COMMITTED): rev-parse and"
+     "stage-1 re-execution read funnel (a design decision): rev-parse and"
      " cat-file --batch reads only, with --no-replace-objects and -c core.commitGraph=false -c"
      " core.fsmonitor=false in option position plus an INLINE GIT_* scrub (GIT_NO_REPLACE_OBJECTS=1,"
      " GIT_GRAFT_FILE pinned to os.devnull); the env is built inline rather than through"

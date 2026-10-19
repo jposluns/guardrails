@@ -40,7 +40,7 @@
 #                        that an operation is a preview (secprv.5 to secprv.10) and its carve-out was reworded
 #                        (secprv.11): rule files 115525 -> 116234 (+709 units); managed block 360 and file
 #                        headers 16136 unchanged.
-#                        Raised 132730 -> 132775 for content, within maintainer decision D-505-R8-BUDGET of
+#                        Raised 132730 -> 132775 for content, within the maintainer's decision of
 #                        2026-10-11 (a raise of at most 45 units): preview-has-no-side-effects names the user
 #                        as the recipient of the fallback's uncertainty disclosure (secprv.8, secprv.9) and
 #                        admits only reference docs produced and published independently of the assistant's
@@ -58,14 +58,27 @@
 #                        items from such a record, its reason was narrowed to say an id or count check can pass,
 #                        and the rule's scope paragraph excluded such a record change from the bounded-claim
 #                        exemption (setcmp.9, setcmp.10): rule files 117124 -> 117367 (+243 units); managed
-#                        block 360 and file headers 16136 unchanged. This raise and the one above await the
-#                        maintainer's recorded approval.
+#                        block 360 and file headers 16136 unchanged. Recorded approval for this raise and
+#                        the one above: the maintainer, 2026-10-18.
+#                        Raised 133863 -> 134241 on 2026-10-18 when citation-from-opened-file gained its
+#                        sentence on re-opening each cited range before delivery to confirm that its stated
+#                        lines carry the cited content (citint.4) and read-before-characterizing gained its
+#                        sentence that a restatement keeps its source's force and scope (rdbchr.2): rule
+#                        files 117367 -> 117745 (+378 units); managed block 360 and file headers 16136
+#                        unchanged. Recorded approval: the maintainer, 2026-10-18.
+#                        Raised 134241 -> 134499 on 2026-10-18 when security-seci-dependency-provenance
+#                        gained its sentence that a tag or branch name is a movable label, not pinned
+#                        provenance, so a fetched source is pinned to the commit or digest the label
+#                        resolved to, and, where the fetched content declares its own version, a mismatch
+#                        with the version the label names is a changed entry (secsup.7): rule files
+#                        117745 -> 118003 (+258 units); managed block 360 and file headers 16136
+#                        unchanged. Recorded approval: the maintainer, 2026-10-18.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 133863
+ratchet = 134499
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
