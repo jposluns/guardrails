@@ -11383,28 +11383,38 @@ def _merge_slug(value):
 def _merge_gh_walk(tokens, opaque):
     """Best-effort option walk over one gh argv (the tokens after the command word): (positionals,
     repo_opt, has_input, field_opaque, field_values). positionals are (token, opaque) pairs in order;
-    repo_opt is the LAST -R/--repo value as (token, opaque), in the separated, '=' or attached-cluster
-    spelling; field_values are the -f/-F/--field/--raw-field values with field_opaque True when any was
-    expansion-opaque; has_input marks an --input body. Known value-taking options have their values
-    consumed so they never land in positionals; an UNRECOGNIZED value-taking option's separated value
-    still reads as a positional, which can only REFUSE an exemption downstream, never widen one."""
+    repo_opt is the LAST -R/--repo value as (token, opaque, plain): plain is True only when EVERY
+    -R/--repo occurrence in the argv used the separated two-token '-R VALUE' / '--repo VALUE' form or
+    the '--repo=VALUE' form, the only spellings whose value this walk reads the way gh's parser does.
+    An '-R=VALUE' (gh's short-option parser consumes the '=', so the value is VALUE, not '=VALUE'),
+    an attached '-RVALUE' or a clustered short option sets plain False, so no exemption may rest on
+    the value; field_values are the -f/-F/--field/--raw-field values with field_opaque True when any
+    was expansion-opaque; has_input marks an --input body. Known value-taking options have their
+    values consumed so they never land in positionals; an UNRECOGNIZED value-taking option's separated
+    value still reads as a positional, which can only REFUSE an exemption downstream, never widen
+    one."""
     positionals = []
     repo_opt = None
+    repo_plain = True  # False once ANY repo option uses a spelling this walk does not read as gh does
     field_values = []
     field_opaque = False
     has_input = False
     expect = None
+    expect_separated = False
     for k, tok in enumerate(tokens):
         opq = bool(opaque[k]) if k < len(opaque) else True
         if expect is not None:
             if expect == "repo":
                 repo_opt = (tok, opq)
+                if not expect_separated:
+                    repo_plain = False
             elif expect == "field":
                 field_values.append(tok)
                 field_opaque = field_opaque or opq
             expect = None
         elif tok in ("-R", "--repo"):
             expect = "repo"
+            expect_separated = True
         elif tok.startswith("--repo="):
             repo_opt = (tok[len("--repo="):], opq)
         elif tok in ("-X", "--method"):
@@ -11436,23 +11446,32 @@ def _merge_gh_walk(tokens, opaque):
                 attached = tok[j + 1:]
                 if not attached:
                     expect = kind
+                    expect_separated = False  # a clustered short is not the separated spelling
                 elif kind == "repo":
                     repo_opt = (attached, opq)
+                    repo_plain = False  # '-RVALUE' / '-R=VALUE': not a spelling this walk reads
                 elif kind == "field":
                     field_values.append(attached)
                     field_opaque = field_opaque or opq
                 break
         else:
             positionals.append((tok, opq))
+    if repo_opt is not None:
+        repo_opt = (repo_opt[0], repo_opt[1], repo_plain)
     return positionals, repo_opt, has_input, field_opaque, field_values
 
 
 def _merge_scope_slug(tokens, opaque):
     """The explicit out-of-scope candidate of one lexed, reserved-word-peeled segment, or None: the
     segment is a recognized 'gh pr merge' whose EVERY token is literal, whose target is named by an
-    explicit -R/--repo value (last-wins, any spelling) carrying an owner/name slug (no expansion, no
-    {placeholder}), and whose extra operands are plain words carrying no '/' and no '{' (a PR number or
-    branch name, never a URL, path or placeholder that could itself name the target). Returns the
+    explicit -R/--repo value (last-wins) in one of the THREE spellings this read follows the way gh's
+    parser does: the separated '-R VALUE', the separated '--repo VALUE', or '--repo=VALUE'. Any other
+    spelling ('-R=VALUE', whose '=' gh's short-option parser consumes so the value is VALUE and can
+    name the governed repository; an attached '-RVALUE'; a clustered short option) earns NO exemption,
+    whatever it names: re-deriving every parser spelling is exactly the modelling this guard refuses,
+    so an unread spelling denies. The value must carry an owner/name slug (no expansion, no
+    {placeholder}), and the extra operands must be plain words carrying no '/' and no '{' (a PR number
+    or branch name, never a URL, path or placeholder that could itself name the target). Returns the
     lowercased owner/name slug for the caller to test against the declared repos scope. Everything else
     returns None and stays governed: scope is decided from this literal argv read ONLY, never from
     GH_REPO or any other environment or directory state, so no rebinding in either direction can move a
@@ -11469,8 +11488,8 @@ def _merge_scope_slug(tokens, opaque):
     for p, _q in positionals[2:]:
         if "/" in p or "{" in p:
             return None  # a stray operand that could itself name the target refuses the exemption
-    if repo_opt is None:
-        return None
+    if repo_opt is None or not repo_opt[2]:
+        return None  # absent, or a spelling this read does not follow: no exemption
     value = repo_opt[0]
     if "{" in value or "/" not in value:
         return None
@@ -11549,6 +11568,44 @@ def _merge_declared_exact(argv, opaque, declared_argv):
     if argv is None or opaque is None:
         return False
     return list(argv) == list(declared_argv) and not any(opaque)
+
+
+# An empty '()' pair is how every bash function definition spells its parentheses ('gh() {...}',
+# 'gh () {...}'); the 'function NAME {...}' form is caught by the rebind-word scan instead. A '$()',
+# '<()' or '>()' also matches, but each of those is already refused by the substitution scan first.
+_MERGE_FUNCDEF_RE = re.compile(r"\([ \t]*\)")
+# Words that can rebind or re-run text this guard cannot follow when they appear ANYWHERE in a
+# command's decoded argv: a function or alias definition can retarget the very command an exempt
+# argv names, and eval/source/. execute text read from elsewhere.
+_MERGE_REBIND_WORDS = frozenset(("alias", "eval", "source", ".", "function"))
+
+
+def _merge_unexempt_reason(command, segments):
+    """Why NEITHER merge exemption (the exact declared argv, the literal out-of-scope -R/--repo
+    target) may be granted anywhere in this command, or None. Judged over the WHOLE raw command,
+    never only the exempt segment, and such text is never blanked from any rescan: the exemption is
+    simply withheld, the deny-when-uncertain direction. The reasons: a backtick or a command or
+    process substitution opener anywhere in the raw text (bash executes that text before or beside
+    the exempt argv; a quoted spelling is treated the same, a deliberate over-deny); an empty '()'
+    pair (a function definition can rebind the exempt command word); a redirect whose target is not
+    a plain literal word (bash expands or executes the target before opening the redirect); or an
+    alias, eval, source, '.' or function word anywhere in the lexed argv (each can rebind what the
+    command runs or execute text this guard cannot read)."""
+    if "`" in command or "$(" in command or "<(" in command or ">(" in command:
+        return "a backtick or a command or process substitution"
+    if _MERGE_FUNCDEF_RE.search(command):
+        return "a function definition's '()'"
+    for seg in segments:
+        for red in seg.redirects:
+            if red.target_class == "opaque":
+                return "a redirect whose target is not a plain literal word"
+        for tok in seg.argv:
+            if tok in _MERGE_REBIND_WORDS:
+                return ("a word that can rebind or re-run what the command executes "
+                        "({!r})".format(tok))
+    return None
+
+
 def _merge_raw_hit(text):
     """True when the raw merge backstop sees a gh pr-merge or gh api merge spelling in text: within one
     chunk (no ; | or & between them; a newline does not split, see _RAW_CHUNK_SPLIT_RE), 'gh' then 'pr'
@@ -11613,8 +11670,17 @@ def merge_path_guard(data):
     one chunk, or gh..api.. followed by a merge REST endpoint or merge-mutation name) is a lexed
     segment whose argv, after the exact reserved-word peel, is EXACTLY the declared merge argv (every
     token literal, no extra token: _merge_declared_exact), or a recognized 'gh pr merge' whose FULLY
-    LITERAL argv names an explicit -R/--repo target outside the declared repos scope with no stray
-    operand that could itself name the target (_merge_scope_slug). EVERY OTHER merge spelling DENIES:
+    LITERAL argv names an explicit -R/--repo target outside the declared repos scope, spelled ONLY as
+    the separated '-R VALUE' / '--repo VALUE' or as '--repo=VALUE', with no stray operand that could
+    itself name the target (_merge_scope_slug; '-R=VALUE', whose '=' gh's short-option parser
+    consumes so the value can name the governed repository, an attached '-RVALUE' and a clustered
+    short option are spellings this guard does not re-derive and earn NO exemption). NEITHER
+    exemption is granted while the command ALSO carries text bash executes that this guard cannot
+    read (_merge_unexempt_reason): a backtick or a command or process substitution anywhere in the
+    raw text, a redirect whose target is not a plain literal word, an empty '()' function-definition
+    pair, or an alias/eval/source/./function word anywhere in the lexed argv; such a command's merge
+    spellings deny outright, and the unexempt text is never blanked from any rescan. EVERY OTHER
+    merge spelling DENIES:
     in an argument, a quoted string, a here-document body, a substitution, a wrapper or shell body, a
     command whose lex is refused or uncertain with no spelled segment, and any text the exempt
     segments do not cover (after the per-segment judgment, the command with every exempt segment's raw
@@ -11632,11 +11698,17 @@ def merge_path_guard(data):
     merge words, and the declared argv run with ANY extra word (a trailing PR number or flag); the
     sanctioned outs are the declared command run exactly as declared, a spelling-free wrapper script,
     or an explicit literal out-of-scope -R/--repo target. DISCOVERY: declarations are read from the
-    git toplevels of the session cwd and of every literal cd/pushd destination, an absolute one as
-    given and a relative one resolved against the session cwd AND every earlier literal destination
-    (a growing SET, never a threaded current directory, so a skipped, failed, popd- or 'cd -'-reverted
-    change still leaves every literally reachable directory probed), bounded at _MERGE_PROBE_CAP
-    probes: past the cap a merge-spelling command denies fail-closed rather than probing unboundedly.
+    git toplevels of the session cwd and of every HANDLED cd/pushd destination. The handled shape is
+    exactly 'cd DEST' or 'pushd DEST' with ONE literal non-dash destination: an absolute one is
+    probed as given and a relative one resolved against the session cwd AND every earlier literal
+    destination (a growing SET, never a threaded current directory, so a skipped, failed, popd- or
+    'cd -'-reverted change still leaves every literally reachable directory probed), bounded at
+    _MERGE_PROBE_CAP probes: past the cap a merge-spelling command denies fail-closed rather than
+    probing unboundedly. A merge spelling AFTER any OTHER directory-change form (a bare or optioned
+    cd/pushd such as 'cd --' or 'cd -P', 'cd -', a non-literal destination, a builtin- or
+    command-wrapped cd, or a cd/pushd word in any argv position, read conservatively) DENIES with
+    the unhandled change named, like the cap: the unprobed destination may hold the governing
+    declaration, so an incomplete probe set is never read as a repository that opted out.
     NO-ASK: a merge shape in a session git CONFIRMS is in no work tree allows with a note (nothing has
     opted in), while a work-tree DISCOVERY FAULT (a git timeout, a repository git refuses to read) and
     a payload with NO USABLE CWD and no literal absolute cd target (not a confirmed non-repository)
@@ -11647,9 +11719,12 @@ def merge_path_guard(data):
     survives into the command text or its de-quoted reading (assembled at run time from fragments or
     from a brace or glob expansion inside one token such as m{e..e}rge, read from a file, a gh alias
     or extension, a renamed binary, a command literally named like a shell reserved word, another
-    forge, a raw curl, or a tool outside the Bash and MCP matchers); a
-    non-literal, computed or CDPATH-resolved cd/pushd destination (only the session cwd and the
-    literal destinations are probed); an opaque 'gh api' endpoint beside a body this guard reads as
+    forge, a raw curl, or a tool outside the Bash and MCP matchers; an alias, function or sourced
+    rebinding established OUTSIDE this command, one defined or run inside the same command now
+    denies); a CDPATH resolution that takes a handled literal relative cd/pushd destination
+    somewhere other than the probed bases (an unhandled or non-literal directory change ahead of a
+    merge spelling now denies; one with no merge spelling after it still changes no discovery); an
+    opaque 'gh api' endpoint beside a body this guard reads as
     benign or absent; and a declaration edited or deleted in the worktree before the merge."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: merge_path_guard wired to unexpected event {!r}; failing closed"
@@ -11711,6 +11786,9 @@ def merge_path_guard(data):
     candidates = []  # (what, argv, opaque, slug, span) per merge spelling this command carries
     note_what = None
     overflow = False
+    unexempt = None   # why NO exemption may be granted, judged over the whole command, or None
+    dirchange = None  # the first directory-change form this guard cannot probe, or None
+    dirchange_hit = None  # that form, once a merge spelling has been seen AFTER it
     uncertain = True  # a refused lex is the most uncertain reading of all
     probes = [cwd] if isinstance(cwd, str) and cwd else []
     try:
@@ -11723,6 +11801,7 @@ def merge_path_guard(data):
                                None, None, None, None))
     else:
         uncertain = _lex_uncertain(command)
+        unexempt = _merge_unexempt_reason(command, segments)
         search_from = 0
         for seg in segments:
             span = None
@@ -11757,10 +11836,21 @@ def merge_path_guard(data):
                         overflow = True
                         break
                     probes.append(dest)
+            elif dirchange is None and (word in ("cd", "pushd")
+                                        or "cd" in tokens or "pushd" in tokens):
+                # any OTHER spelling of a directory change (a bare or optioned cd/pushd, a '-' or
+                # non-literal destination, a builtin/command-wrapped cd, or a cd/pushd word in any
+                # argv position, read conservatively) names a destination this guard cannot probe:
+                # record the form, and deny any merge spelling that FOLLOWS it rather than let the
+                # unprobed destination's declaration go undiscovered
+                _dc = " ".join(tokens)
+                dirchange = _dc if len(_dc) <= 80 else _dc[:80] + "[cut]"
             if _merge_raw_hit(seg.raw) or _merge_raw_hit(_dequoted_text(seg.raw)):
                 candidates.append((
                     "an apparent PR merge spelled outside the exact declared merge command",
                     tuple(tokens), tuple(opq), _merge_scope_slug(tokens, opq), span))
+                if dirchange is not None and dirchange_hit is None:
+                    dirchange_hit = dirchange
             elif note_what is None:
                 note_what = _merge_api_note(tokens, opq)
         if not candidates and uncertain and (
@@ -11769,6 +11859,14 @@ def merge_path_guard(data):
                                None, None, None, None))
     if not candidates and note_what is None:
         return _allow()
+    if dirchange_hit is not None:
+        # like the probe-cap overflow below, this denies BEFORE discovery: the unprobed
+        # destination may hold the very declaration that governs the merge, so an incomplete
+        # probe set is never read as a repository that opted out
+        return _deny(_MERGE_DISCOVERY_FAULT_REASON.format(
+            "the command changes directory in a form this guard does not probe ('{}') before "
+            "the merge spelling".format(dirchange_hit)),
+            _MERGE_DISCOVERY_FAULT_BANNER.format("Bash"))
     if overflow and candidates:
         return _deny(_MERGE_DISCOVERY_FAULT_REASON.format(
             "the command names more literal directory-change destinations than this guard probes "
@@ -11799,10 +11897,17 @@ def merge_path_guard(data):
         return _allow()  # the inert boundary: no merge member declares a required path
     for what, argv, argv_opaque, slug, _span in candidates:
         for cfg in configs:
-            if _merge_declared_exact(argv, argv_opaque, cfg["argv"]):
+            # BOTH exemptions are withheld while _merge_unexempt_reason names text bash executes
+            # that this guard does not read (a substitution, a non-literal redirect target, a
+            # rebinding construct): deny when uncertain, never model what that text does
+            if unexempt is None and _merge_declared_exact(argv, argv_opaque, cfg["argv"]):
                 continue  # PROVABLY the declared command, run exactly as declared
-            if slug is not None and cfg["repos"] is not None and slug not in cfg["repos"]:
+            if unexempt is None and slug is not None and cfg["repos"] is not None \
+                    and slug not in cfg["repos"]:
                 continue  # an explicit, fully literal -R/--repo target outside this declared scope
+            if unexempt is not None:
+                what = ("{}, in a command that also carries {} (no exemption applies beside text "
+                        "bash executes that this guard cannot read)".format(what, unexempt))
             declared = " ".join(cfg["argv"])
             return _deny(
                 "AIQT rule artbr1 (branch-and-merge-on-green): this repository declares its merge "
