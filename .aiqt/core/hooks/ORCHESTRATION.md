@@ -1014,6 +1014,78 @@ Limits:
   A draft with CRLF line ends, or one holding a hunk of a CRLF file, is withheld as `UNVERIFIABLE:`
   rather than censused.
 
+## Review holds
+
+The optional review-hold markers turn on the review workdir hold hook (`review-workdir-hold`, rule
+rvwpin): once a review is dispatched against a worktree, that worktree is not modified until the
+review returns or is abandoned. The markers are adopter-provided: the pack ships the hook, the
+dispatcher writes the holds. Without a marker directory the hook is inert (a silent allow), so
+adopters who write no markers see nothing.
+
+One marker file per live review lives in `GIT_COMMON_DIR/aiqt/review-holds/<dispatch-id>.json`,
+beside the hook-owned `review-dispatch-binding/` records. Every linked worktree of a repository
+shares that directory, so the hook finds a hold from the command's target alone and needs no
+orchestration registry. The marker is a JSON object owned by the hook's user with exactly these
+fields:
+
+- `version`: 1.
+- `workdir`: the held worktree's absolute top level.
+- `head`: the full lowercase object id the worktree was at when the review was dispatched.
+- `dispatch_id`: a non-empty identifier for the review.
+- `created_utc` and `expires_utc`: ISO-8601 UTC timestamps. `expires_utc` is required and bounded:
+  an expired marker is ignored with a note, so a crashed dispatcher cannot pin a worktree forever.
+
+The adopter's steps:
+
+1. The dispatch tool writes the marker atomically (write a temporary file in the same directory,
+   then rename it into place) before the reviewer starts, and removes it when the review returns or
+   is abandoned.
+2. The resync or fast-forward tool runs the preflight before it moves any worktree: pipe the
+   PreToolUse payload (`tool_name` `Bash`, `cwd`, and `tool_input.command`) to
+   `aiqt_hooks.py review_workdir_hold`, and withhold the move on exit 2 or a printed `deny`
+   decision; or read the markers itself.
+3. Dispatch each review on a dedicated worktree per review, as the review dispatch binding's limits
+   above already advise.
+
+While a live marker pins a worktree, the hook denies a recognized mutating git command whose target
+resolves to that worktree. The target is read from an explicit `-C`, a preceding literal `cd` or
+`pushd`, or the session working directory, through the shared lexer and wrapper peel, and worktree
+identity is compared by git's absolute git directory, never by path string, so a symlinked alias of
+the held worktree is the same worktree and a sibling path that merely shares a prefix is not.
+`git worktree remove` and `git worktree move` of the held worktree, and `git update-ref` of the
+branch the held worktree has checked out, are denied from any worktree of the repository. A
+mutating git command whose target cannot be resolved (an expansion in `-C`, a
+`--git-dir`/`--work-tree` override, an unknown shell working directory after `popd` or an opaque
+`cd`, or a command the lexer cannot parse that names git beside a mutating verb) is denied with the
+reason prefixed `UNVERIFIABLE:`, only while the session repository has a live hold. An unreadable
+or malformed marker directory denies mutating git commands only (fail closed); read-only git and
+non-git commands always pass. When a live marker's recorded `head` differs from the held worktree's
+current HEAD, the hook surfaces a drift note (the in-flight review is invalidated; re-dispatch per
+rvwpin.4) on each check without denying, which catches a move made outside the session after the
+fact.
+
+Limits:
+
+- Movers the hook cannot see: a resync from cron, a terminal, another session without the plugin, a
+  Codex or Gemini worker, or a non-Bash tool. These are caught only after the fact by the drift
+  note, and only on the next hooked Bash call in a session; they are prevented only where the
+  adopter's tool runs the preflight above.
+- Indirect git is not seen: an alias, a shell function, a script, or git configured to run programs
+  (a `post-checkout` hook, `core.fsmonitor`).
+- File edits inside a held worktree (the Write and Edit tools, `sed -i`, `cp`) are covered by the
+  rule but not by this hook; extending the write-scope hook is a separate follow-on.
+- Marker accuracy is the adopter's: a missing marker, an early removal, a wrong `workdir`, or a
+  review that outlasts `expires_utc` are adopter errors the hook cannot judge.
+- A race between the check and the command running remains.
+- The marker directory can be written by the assistant, so a determined actor can remove a hold;
+  the same suite-level limit the honest-limits section below discloses for the pack's other
+  machine-local state.
+- A held branch tip moved by `git branch -f`, a push into the held worktree's checked-out branch,
+  and a mutating verb outside the recognized set (`checkout-index`, `read-tree`, `filter-branch`)
+  are not matched; safe over-denies (a repository-level write such as `push` or `tag` targeted into
+  the held worktree, a path that literally contains `$` or a leading `~`, a pipeline-subshell `cd`
+  read as preceding) are taken instead of under-blocking.
+
 ## Platforms without hooks
 
 The decision algorithm binds as an operating procedure: before any stop, idle wake, or drained

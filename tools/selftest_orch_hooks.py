@@ -1242,6 +1242,186 @@ def _rdp_cases(tmp):
     _rdp_scope_cases(base, bare)
 
 
+def _rwh_iso(hours=0):
+    """An ISO-8601 UTC timestamp `hours` from now (negative for the past), for review-hold markers."""
+    return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=hours)).isoformat()
+
+
+def _rwh_without_hold(fn):
+    """fn() with the hold reader patched inert, so every marker reads as absent: the revert leg of each
+    refuse case. The refuse case's deny leg goes red when the hook's check is reverted, and this leg
+    shows the deny comes from the marker check alone (the command is allowed today without it)."""
+    saved = aiqt_hooks._rwh_holds
+    aiqt_hooks._rwh_holds = lambda common, cache, notes: ("absent", [])
+    try:
+        return fn()
+    finally:
+        aiqt_hooks._rwh_holds = saved
+
+
+def _rwh_cases(tmp):
+    """The review-workdir-hold vectors (rwh/*), enforcing rvwpin: a live adopter-written marker in
+    GIT_COMMON_DIR/aiqt/review-holds/ pins its worktree against mutating git commands. Every refuse case
+    of the placement study is asserted as a deny AND shown allowed with the hold reader reverted
+    (red on revert); every allow case names the over-broad implementation it catches."""
+    base = tmp / "rwh"
+    main = base / "main"
+    main.mkdir(parents=True)
+    _rdp_git(base, "init", "-q", "-b", "main", str(main))
+    (main / "f").write_text("x\n", encoding="utf-8")
+    (main / "sub").mkdir()
+    (main / "sub" / "g").write_text("y\n", encoding="utf-8")
+    _rdp_git(main, "add", "-A")
+    _rdp_git(main, "commit", "-q", "-m", "seed")
+    seed = _rdp_git(main, "rev-parse", "HEAD")
+    (main / "f").write_text("x2\n", encoding="utf-8")
+    _rdp_git(main, "add", "f")
+    _rdp_git(main, "commit", "-q", "-m", "change")
+    tip = _rdp_git(main, "rev-parse", "HEAD")
+    held = base / "held"
+    _rdp_git(main, "worktree", "add", "-q", "-b", "review", str(held), "main")
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(base / "held2"), tip)
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(base / "other"), tip)
+    (base / "alias").symlink_to(held)
+    holds = main / ".git" / "aiqt" / "review-holds"
+    holds.mkdir(parents=True)
+
+    def marker(name, **over):
+        doc = dict(version=1, workdir=str(held), head=tip, dispatch_id=name,
+                   created_utc=_rwh_iso(), expires_utc=_rwh_iso(4))
+        doc.update(over)
+        (holds / (name + ".json")).write_text(json.dumps(doc), encoding="utf-8")
+
+    def run(cwd, command):
+        return aiqt_hooks.review_workdir_hold(dict(
+            hook_event_name="PreToolUse", cwd=str(cwd), session_id="s1", tool_name="Bash",
+            tool_input=dict(command=command)))
+
+    def kind(cwd, command):
+        return _rdp_kind(run(cwd, command))
+
+    marker("rev-1")
+    # ---------- refuse cases (study section 3), each red on revert ----------
+    co = "git -C " + str(held) + " checkout " + seed
+    check("rwh/held-checkout-denies-red-on-revert",
+          [kind(base, co), _rwh_without_hold(lambda: kind(base, co))], ["deny", "allow"])
+    sw = "git -C " + str(held) + " switch main"
+    check("rwh/held-switch-denies-red-on-revert",
+          [kind(base, sw), _rwh_without_hold(lambda: kind(base, sw))], ["deny", "allow"])
+    rh = "git -C " + str(held) + " reset --hard " + seed
+    check("rwh/held-reset-denies-red-on-revert",
+          [kind(base, rh), kind(base, "git -C " + str(held) + " reset --soft " + seed),
+           _rwh_without_hold(lambda: kind(base, rh))], ["deny", "deny", "allow"])
+    mg = "git -C " + str(held) + " merge --ff-only main"
+    check("rwh/held-merge-denies-red-on-revert",
+          [kind(base, mg), _rwh_without_hold(lambda: kind(base, mg))], ["deny", "allow"])
+    pl = "git -C " + str(held) + " pull"
+    check("rwh/held-pull-denies-red-on-revert",
+          [kind(base, pl), _rwh_without_hold(lambda: kind(base, pl))], ["deny", "allow"])
+    rb = "git -C " + str(held) + " rebase main"
+    check("rwh/held-rebase-denies-red-on-revert",
+          [kind(base, rb), _rwh_without_hold(lambda: kind(base, rb))], ["deny", "allow"])
+    cf = ["git -C " + str(held) + " " + c for c in
+          ("commit -m x", "cherry-pick " + seed, "revert " + seed, "am")]
+    check("rwh/held-commit-family-denies-red-on-revert",
+          [kind(base, c) for c in cf] + [_rwh_without_hold(lambda: kind(base, cf[0]))],
+          ["deny"] * 4 + ["allow"])
+    # tree mutations that keep HEAD still mutate the held artefact (rvwpin: "not modified")
+    tm = ["git -C " + str(held) + " " + c for c in
+          ("restore f", "checkout -- f", "stash pop", "clean -f")]
+    check("rwh/held-tree-mutation-denies-red-on-revert",
+          [kind(base, c) for c in tm] + [_rwh_without_hold(lambda: kind(base, tm[0]))],
+          ["deny"] * 4 + ["allow"])
+    cd = "cd " + str(held) + " && git checkout " + seed
+    check("rwh/cd-into-held-denies-red-on-revert",
+          [kind(base, cd), _rwh_without_hold(lambda: kind(base, cd))], ["deny", "allow"])
+    check("rwh/cwd-inside-held-denies-red-on-revert",
+          [kind(held / "sub", "git switch main"),
+           _rwh_without_hold(lambda: kind(held / "sub", "git switch main"))], ["deny", "allow"])
+    al = "git -C " + str(base / "alias") + " checkout " + seed
+    check("rwh/symlink-alias-denies-red-on-revert",
+          [kind(base, al), _rwh_without_hold(lambda: kind(base, al))], ["deny", "allow"])
+    wr = ["command " + co, "env " + co]
+    check("rwh/wrapper-peel-denies-red-on-revert",
+          [kind(base, c) for c in wr] + [_rwh_without_hold(lambda: kind(base, wr[0]))],
+          ["deny", "deny", "allow"])
+    ur = "git -C " + str(main) + " update-ref refs/heads/review " + seed
+    check("rwh/update-ref-held-branch-denies-red-on-revert",
+          [kind(base, ur), _rwh_without_hold(lambda: kind(base, ur))], ["deny", "allow"])
+    wt = ["git -C " + str(main) + " worktree remove " + str(held),
+          "git -C " + str(main) + " worktree move " + str(held) + " " + str(base / "elsewhere")]
+    check("rwh/worktree-remove-or-move-denies-red-on-revert",
+          [kind(base, c) for c in wt] + [_rwh_without_hold(lambda: kind(base, wt[0]))],
+          ["deny", "deny", "allow"])
+    ut = 'git -C "$X" checkout y'
+    check("rwh/unresolvable-target-unverifiable-red-on-revert",
+          [kind(main, ut), _rwh_without_hold(lambda: kind(main, ut))], ["unverifiable", "allow"])
+    (holds / "bad.json").write_text("{not json", encoding="utf-8")
+    bad_got = [kind(base, co), kind(held, "git status")]
+    (holds / "bad.json").unlink()
+    (holds / "link.json").symlink_to(holds / "rev-1.json")
+    bad_got.append(kind(base, co))
+    bad_got.append(_rwh_without_hold(lambda: kind(base, co)))
+    (holds / "link.json").unlink()
+    # an unreadable or malformed marker state withholds mutating git commands only (fail closed);
+    # read-only commands pass, and the revert leg shows the deny comes from the marker state alone
+    check("rwh/malformed-marker-state-denies-red-on-revert", bad_got,
+          ["deny", "allow", "deny", "allow"])
+    # both ends of the marker size bound: a marker of exactly _RWH_MARKER_MAX bytes is still a live
+    # hold (the opaque-target probe reads it as live: unverifiable), and one byte over is malformed
+    # (the same probe denies fail-closed), so the bound is tested at and just outside its edge
+    pad = dict(version=1, workdir=str(held), head=tip, dispatch_id="rev-pad",
+               created_utc=_rwh_iso(), expires_utc=_rwh_iso(4))
+    pad["dispatch_id"] = "rev-pad" + "x" * (aiqt_hooks._RWH_MARKER_MAX - len(json.dumps(pad)))
+    (holds / "pad.json").write_text(json.dumps(pad), encoding="utf-8")
+    size_got = [len(json.dumps(pad)) == aiqt_hooks._RWH_MARKER_MAX, kind(main, ut)]
+    pad["dispatch_id"] += "x"
+    (holds / "pad.json").write_text(json.dumps(pad), encoding="utf-8")
+    size_got.append(kind(main, ut))
+    (holds / "pad.json").unlink()
+    check("rwh/marker-size-boundary", size_got, [True, "unverifiable", "deny"])
+
+    # ---------- allow cases, each naming the over-broad implementation it catches ----------
+    # catches: matching on "git in the held path" instead of on the mutating forms
+    check("rwh/held-read-only-allows", [kind(held, c) for c in (
+        "git status", "git log --oneline", "git diff", "git show", "git rev-parse HEAD",
+        "git fetch")], ["allow"] * 6)
+    # catches: holding per repository instead of per worktree (same common dir, different git dir)
+    check("rwh/other-worktree-allows",
+          kind(base, "git -C " + str(base / "other") + " checkout " + seed), "allow")
+    # catches: a path-prefix match without a boundary check (held2 shares held's prefix)
+    check("rwh/prefix-sibling-allows",
+          kind(base, "git -C " + str(base / "held2") + " checkout " + seed), "allow")
+    # catches: judging by the session cwd over an explicit -C target
+    check("rwh/explicit-target-over-cwd-allows",
+          kind(held / "sub", "git -C " + str(base / "other") + " switch --detach " + seed), "allow")
+    # catches: a raw substring scan that fires on the held path as data
+    check("rwh/path-as-data-allows", kind(base, "grep checkout " + str(held) + "/f"), "allow")
+    # catches: an armed hook in non-adopting repositories (no marker directory: silent allow)
+    norepo = base / "plain"
+    norepo.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(norepo))
+    check("rwh/no-marker-directory-inert", kind(norepo, "git checkout -b x"), "allow")
+    # catches: a hold that never ends (marker removed -> allow; expired -> allow with a note)
+    (holds / "rev-1.json").unlink()
+    ended = [kind(base, co)]
+    marker("rev-2", expires_utc=_rwh_iso(-1))
+    expired = run(base, co)
+    ended.append(_rdp_kind(expired))
+    ended.append("expired review-hold marker" in (expired[1] or {}).get("systemMessage", ""))
+    (holds / "rev-2.json").unlink()
+    check("rwh/removed-or-expired-marker-allows", ended, ["allow", "warn", True])
+    # catches: a missing drift check (the held HEAD moved outside the hook: the next Bash call notes
+    # the invalidated review without denying, and the hold still denies a mutation)
+    marker("rev-3")
+    _rdp_git(held, "checkout", "-q", "--detach", seed)
+    drift = run(main, "git -C " + str(main) + " status")
+    check("rwh/drift-notes-without-denying",
+          [_rdp_kind(drift), "re-dispatch" in (drift[1] or {}).get("systemMessage", ""),
+           _rdp_kind(run(main, "ls")), kind(base, "git -C " + str(held) + " checkout main")],
+          ["warn", True, "warn", "deny"])
+
+
 def _rdp_draft_diff(root, base, head):
     """A worker draft as git writes it: the diff from base to head with git's default a/ and b/ prefixes
     and rename detection, whatever the ambient configuration says."""
@@ -13399,6 +13579,7 @@ def _main_isolated(report_path=None):
         _leasehb_write_integrity_cases(tmp)
         _leasehb_status_and_parse_cases(tmp)
         _rdp_cases(tmp)
+        _rwh_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)

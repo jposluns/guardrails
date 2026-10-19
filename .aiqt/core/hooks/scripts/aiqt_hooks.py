@@ -17087,6 +17087,443 @@ def review_dispatch_pin(data):
     return _allow()
 
 
+# --- rvwpin: review-workdir-hold (a review in flight pins its artefact) -------------------------------
+# ADOPTER-PROVIDED HOLD MARKERS: one JSON file per live review in GIT_COMMON_DIR/aiqt/review-holds/,
+# beside the hook-owned review-dispatch-binding records. The DISPATCHER writes a marker atomically
+# before the reviewer starts and removes it when the review returns or is abandoned; this hook never
+# writes one. Every linked worktree of a repository shares its common git directory, so the hook finds
+# a hold from the command's target alone, needs no orchestration registry, and is INERT (silent allow)
+# wherever no marker directory exists. A hookless dispatcher or an adopter's resync tool runs the same
+# check as a preflight: pipe the PreToolUse payload to `aiqt_hooks.py review_workdir_hold`.
+_RWH_MARKER_MAX = 4096
+_RWH_MARKER_VERSION = 1
+_RWH_MARKER_KEYS = frozenset(("version", "workdir", "head", "dispatch_id", "created_utc", "expires_utc"))
+_RWH_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")  # a full sha1 or sha256 object id
+_RWH_CD_FLAGS_RE = re.compile(r"-[LPe@n]+")  # the closed cd/pushd option flags, which take no value
+
+
+def _rwh_view(directory, views):
+    """The git identity of the worktree holding directory, cached per check: (absolute_git_dir,
+    common_dir), each fully resolved, or None when directory is not inside a git repository or git
+    cannot say (also on a git too old to answer --git-common-dir, where this hook stays inert, a
+    disclosed residual). Worktree identity is compared by git's absolute git directory, never by path
+    string, so a symlinked alias of a held worktree resolves to the same identity and a sibling path
+    that merely shares a prefix does not."""
+    key = os.path.normpath(directory)
+    if key in views:
+        return views[key]
+    view = None
+    p = _review_git(directory, "rev-parse", "--absolute-git-dir", "--git-common-dir")
+    if p is not None and p.returncode == 0:
+        lines = p.stdout.decode("utf-8", "surrogateescape").split("\n")
+        if len(lines) >= 3 and lines[0] and lines[1] and \
+                not lines[0].startswith("-") and not lines[1].startswith("-"):
+            try:
+                view = (os.path.realpath(os.path.join(directory, lines[0])),
+                        os.path.realpath(os.path.join(directory, lines[1])))
+            except (OSError, ValueError):
+                view = None
+    views[key] = view
+    return view
+
+
+def _rwh_head(workdir):
+    """The full object id of the worktree's current HEAD, or None when it cannot be read."""
+    p = _review_git(workdir, "rev-parse", "--verify", "HEAD")
+    if p is None or p.returncode != 0:
+        return None
+    value = p.stdout.decode("utf-8", "surrogateescape").strip()
+    return value if _RWH_OBJECT_ID_RE.fullmatch(value) else None
+
+
+def _rwh_head_branch(workdir):
+    """The full ref name the worktree has checked out (refs/heads/...), or None when its HEAD is
+    detached or cannot be read."""
+    p = _review_git(workdir, "symbolic-ref", "-q", "HEAD")
+    if p is None or p.returncode != 0:
+        return None
+    value = p.stdout.decode("utf-8", "surrogateescape").strip()
+    return value or None
+
+
+def _rwh_read_marker(path):
+    """(marker, None) for a well-formed version-1 review-hold marker owned by this user, read without
+    following a symbolic link and without blocking, at most _RWH_MARKER_MAX bytes; (None, why)
+    otherwise. The fields, exactly: version, workdir (the held worktree's absolute top level), head
+    (the full object id at dispatch), dispatch_id, created_utc and expires_utc (ISO-8601 UTC; the
+    required bounded horizon that keeps a crashed dispatcher from pinning a worktree forever)."""
+    try:
+        fd = os.open(path, _RDP_OPEN_FLAGS | os.O_NOFOLLOW)
+    except (OSError, ValueError) as exc:
+        return (None, "cannot be opened ({})".format(exc))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return (None, "is not a regular file")
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is not None and st.st_uid != geteuid():
+            return (None, "is not owned by this user")
+        blob = _rdp_read_fd(fd, _RWH_MARKER_MAX + 1)
+    except OSError as exc:
+        return (None, "cannot be read ({})".format(exc))
+    finally:
+        os.close(fd)
+    if len(blob) > _RWH_MARKER_MAX:
+        return (None, "is over {} bytes".format(_RWH_MARKER_MAX))
+    try:
+        doc = json.loads(blob.decode("utf-8"))
+    except ValueError as exc:
+        return (None, "is not JSON ({})".format(exc))
+    if not isinstance(doc, dict) or set(doc) != _RWH_MARKER_KEYS or doc["version"] != _RWH_MARKER_VERSION:
+        return (None, "is not a version-{} review-hold marker (fields, exactly: {})".format(
+            _RWH_MARKER_VERSION, ", ".join(sorted(_RWH_MARKER_KEYS))))
+    workdir = doc["workdir"]
+    if not isinstance(workdir, str) or not os.path.isabs(workdir) or "\x00" in workdir:
+        return (None, "has no absolute workdir path")
+    if not isinstance(doc["head"], str) or not _RWH_OBJECT_ID_RE.fullmatch(doc["head"]):
+        return (None, "has no full lowercase object id as its head")
+    if not isinstance(doc["dispatch_id"], str) or not doc["dispatch_id"].strip():
+        return (None, "has no dispatch_id")
+    if _orch_parse_utc(doc["created_utc"]) is None or _orch_parse_utc(doc["expires_utc"]) is None:
+        return (None, "has an unreadable created_utc or expires_utc timestamp")
+    return (doc, None)
+
+
+def _rwh_holds(common, cache, notes):
+    """The review holds of the repository whose common git directory is common, read once per check:
+    ("absent", []) with no marker directory (the inert path for adopters who write no markers),
+    ("ok", live) with the well-formed unexpired markers as (marker, path) pairs, or ("bad", detail)
+    when the directory or an entry in it cannot be read as a marker, which withholds mutating git
+    commands only. An expired marker is ignored with a note; a live marker whose recorded head differs
+    from the held worktree's current HEAD adds the drift note (the in-flight review is invalidated;
+    re-dispatch per rvwpin.4) without denying, which also catches a move made outside the session,
+    after the fact."""
+    if common in cache:
+        return cache[common]
+    holds_dir = os.path.join(common, "aiqt", "review-holds")
+    result = None
+    try:
+        entries = sorted(os.listdir(holds_dir))
+    except (FileNotFoundError, NotADirectoryError):
+        result = ("absent", [])
+    except OSError as exc:
+        result = ("bad", "the marker directory {} cannot be listed ({})".format(holds_dir, exc))
+    if result is None:
+        now = _orch_now()
+        live = []
+        for name in entries:
+            path = os.path.join(holds_dir, name)
+            marker, why = _rwh_read_marker(path)
+            if marker is None:
+                result = ("bad", "the review-hold marker {} {}".format(path, why))
+                break
+            if _orch_parse_utc(marker["expires_utc"]) <= now:
+                notes.append(
+                    "AIQT guardrail (rule rvwpin): ignored the expired review-hold marker {} (dispatch "
+                    "{}, expired {}), so a crashed dispatcher cannot pin {} forever; remove the stale "
+                    "marker.".format(path, marker["dispatch_id"], marker["expires_utc"],
+                                     marker["workdir"]))
+                continue
+            current = _rwh_head(marker["workdir"])
+            if current != marker["head"]:
+                notes.append(
+                    "AIQT guardrail (rule rvwpin): the review hold {} pins {} at {}, but that "
+                    "worktree's HEAD {} now: the in-flight review is invalidated; re-dispatch it "
+                    "against the new state once it has settled (rvwpin.4). This note does not "
+                    "block.".format(marker["dispatch_id"], marker["workdir"], marker["head"][:12],
+                                    "is " + current[:12] if current is not None else "cannot be read"))
+            live.append((marker, path))
+        if result is None:
+            result = ("ok", live)
+    cache[common] = result
+    return result
+
+
+def _rwh_opaque_path(value):
+    """True when a decoded path word cannot be resolved lexically: an expansion or substitution the
+    shell builds at run time, or a leading tilde. The shared lexer decodes quotes, so a quoted literal
+    '~' or '$' in a directory name is over-read as opaque, a safe over-hold while a hold is live."""
+    return "$" in value or "`" in value or value.startswith("~")
+
+
+def _rwh_next_cwd(word, eff, eff_cwd):
+    """The shell working directory after a cd/pushd/popd segment: the resolved destination, or None
+    when it cannot be known (popd, a bare cd to $HOME, the OLDPWD '-' shortcut, a stack rotation, an
+    expansion or tilde, or a relative destination from an already-unknown cwd). Conservative: an
+    unknown cwd makes a later ambient-target git mutation UNVERIFIABLE while a hold is live, never a
+    silent allow; a cd that bash runs in a pipeline subshell is read as preceding too, the same safe
+    over-hold the explicit-binding hook takes."""
+    if word == "popd":
+        return None
+    i = _command_word_index(eff) + 1
+    n = len(eff)
+    dest = None
+    while i < n:
+        token = eff[i]
+        if token == "--":
+            dest = eff[i + 1] if i + 1 < n else None
+            break
+        if token.startswith("-") or token.startswith("+"):
+            if _RWH_CD_FLAGS_RE.fullmatch(token):
+                i += 1
+                continue
+            return None
+        dest = token
+        break
+    if dest is None or dest == "" or dest == "-" or _rwh_opaque_path(dest):
+        return None
+    if os.path.isabs(dest):
+        return dest
+    return os.path.join(eff_cwd, dest) if eff_cwd is not None else None
+
+
+def _rwh_segment_target(eff, eff_cwd):
+    """The directory a git segment binds to: ("dir", absolute_directory), or ("opaque", None) when it
+    cannot be resolved lexically (a -C value an expansion builds, a --git-dir/--work-tree override,
+    whose combinations this hook does not model, or a relative resolution from an unknown shell cwd).
+    Successive -C values accumulate the way git applies them, and an empty -C value is git's no-op."""
+    i = _command_word_index(eff) + 1
+    n = len(eff)
+    cur = eff_cwd
+    while i < n:
+        token = eff[i]
+        if not token.startswith("-"):
+            break
+        if token in ("--git-dir", "--work-tree") or \
+                token.startswith("--git-dir=") or token.startswith("--work-tree="):
+            return ("opaque", None)
+        if token == "-C":
+            value = eff[i + 1] if i + 1 < n else None
+            if value is None:
+                return ("opaque", None)
+            if value != "":
+                if _rwh_opaque_path(value):
+                    return ("opaque", None)
+                cur = value if os.path.isabs(value) else (
+                    os.path.join(cur, value) if cur is not None else None)
+                if cur is None:
+                    return ("opaque", None)
+            i += 2
+            continue
+        if "=" not in token and token in _GIT_ARG_OPTS:
+            i += 2
+        else:
+            i += 1
+    if cur is None:
+        return ("opaque", None)
+    return ("dir", cur)
+
+
+def _rwh_worktree_path(args):
+    """(op, path): a git worktree subcommand and its first path operand, each None when absent."""
+    operands = [a for a in args if not a.startswith("-")]
+    return (operands[0] if operands else None,
+            operands[1] if len(operands) > 1 else None)
+
+
+def _rwh_update_ref_name(args):
+    """The ref a git update-ref invocation writes, or None when it cannot be read from the argv
+    (a --stdin batch, a -m whose message swallows the operand position, or no operand at all)."""
+    i, n = 0, len(args)
+    while i < n:
+        token = args[i]
+        if token == "-m":
+            i += 2
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        return token
+    return None
+
+
+def _rwh_bad_text(detail):
+    return ("AIQT rule rvwpin (fail-closed): the review-hold state cannot be read: {}; which worktrees "
+            "a live review pins is unknown, so this mutating git command is withheld until an operator "
+            "repairs or removes the marker directory. Read-only commands are unaffected.".format(detail))
+
+
+def _rwh_deny_text(marker, path):
+    return ("AIQT rule rvwpin (review-in-flight-pins-its-artefact): this command mutates the worktree "
+            "{} that a live review hold pins (dispatch {}, held at {}, marker {}). A review's findings "
+            "are meaningful only against the state it observed, so the held worktree is not modified "
+            "until the review returns or is abandoned. Make the change on a separate worktree or "
+            "revision and re-dispatch the review against the new state once it has settled (rvwpin.4); "
+            "the dispatcher removes the marker when the review ends.".format(
+                marker["workdir"], marker["dispatch_id"], marker["head"][:12], path))
+
+
+def _rwh_raw_mutating(command):
+    """Whether the raw text of an unparseable command names git beside a recognized mutating verb (the
+    shared expbnd raw sequences, which include update-ref and worktree)."""
+    return bool(_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))
+
+
+def _rwh_worktree_hit(args, base, live, views):
+    """A deny for a `git worktree remove` or `git worktree move` whose path operand resolves to a held
+    worktree, reachable from any worktree of the repository; ("unverifiable", ...) when that operand
+    cannot be resolved while a hold is live; None otherwise."""
+    op, wt_path = _rwh_worktree_path(args)
+    if op not in ("remove", "move") or not live:
+        return None
+    if wt_path is None or _rwh_opaque_path(wt_path):
+        return ("unverifiable", "AIQT rule rvwpin: the worktree this git 'worktree {}' names cannot be "
+                "resolved while a review hold is live; name it with a literal absolute path, or end the "
+                "hold first.".format(op))
+    resolved = wt_path if os.path.isabs(wt_path) else os.path.join(base, wt_path)
+    wt_view = _rwh_view(resolved, views)
+    if wt_view is None:
+        return None
+    for marker, path in live:
+        held_view = _rwh_view(marker["workdir"], views)
+        if held_view is not None and held_view[0] == wt_view[0]:
+            return ("deny", _rwh_deny_text(marker, path))
+    return None
+
+
+def _rwh_update_ref_hit(args, live):
+    """A deny for a `git update-ref` naming the branch a held worktree has checked out, which moves
+    that worktree's HEAD without entering it; ("unverifiable", ...) for a batch or an argv with no
+    readable ref while a hold is live; None otherwise."""
+    if not live:
+        return None
+    name = _rwh_update_ref_name(args)
+    if name is None:
+        return ("unverifiable", "AIQT rule rvwpin: the refs this git 'update-ref' writes cannot be "
+                "read from its argv while a review hold is live; name one ref per plain call, or end "
+                "the hold first.")
+    for marker, path in live:
+        branch = _rwh_head_branch(marker["workdir"])
+        if branch is not None and name in (branch, branch.removeprefix("refs/heads/")):
+            return ("deny", _rwh_deny_text(marker, path))
+    return None
+
+
+def _rwh_decide(data):
+    """The review-workdir-hold decision for one Bash payload: ("allow"|"note"|"deny"|"unverifiable",
+    message). INERT where no review-hold marker directory exists: the only state read is the session
+    repository's markers and the markers of each repository a git segment targets, so adopters who
+    write no markers see nothing. A recognized mutating git segment whose target worktree a live
+    marker pins denies; `git worktree remove/move` of a held worktree and `git update-ref` of the
+    branch a held worktree has checked out deny from any worktree of that repository; a mutating git
+    segment whose target cannot be resolved (an expansion in -C, a --git-dir/--work-tree override, an
+    unknown shell cwd after cd/popd) is denied as UNVERIFIABLE only while the session repository has a
+    live hold; an unreadable or malformed marker state denies mutating git segments only; an expired
+    marker is ignored with a note; and a live marker whose recorded head differs from its worktree's
+    HEAD notes the drift without denying."""
+    cwd = data.get("cwd")
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    views, holds, notes = {}, {}, []
+    cwd_ok = isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd
+    sview = _rwh_view(cwd, views) if cwd_ok else None
+    s_state, s_payload = _rwh_holds(sview[1], holds, notes) if sview is not None else ("absent", [])
+    s_live = s_payload if s_state == "ok" else []
+    if not isinstance(command, str) or not command:
+        if s_state == "bad":
+            return ("deny", _rwh_bad_text(s_payload))
+        if s_live:
+            return ("unverifiable", "AIQT rule rvwpin: the Bash command is absent or unreadable while "
+                    "a review hold is live, so a mutation of the held worktree cannot be ruled out.")
+        return ("allow", None)
+    try:
+        segments = _segments(command, skip_empty=True)
+    except ValueError:
+        if _rwh_raw_mutating(command):
+            if s_state == "bad":
+                return ("deny", _rwh_bad_text(s_payload))
+            if s_live:
+                return ("unverifiable", "AIQT rule rvwpin: this command cannot be parsed, so the "
+                        "worktree its git mutation binds to cannot be resolved while a review hold is "
+                        "live; run it as plain calls with an explicit absolute '-C' target, or end the "
+                        "hold first.")
+        return ("note", " ".join(notes)) if notes else ("allow", None)
+    eff_cwd = cwd if cwd_ok else None
+    for tokens, _sep in segments:
+        eff = _expbnd_effective_tokens(tokens)
+        word = _command_word(eff)
+        if word in _CD_BUILTINS or word == "popd":
+            eff_cwd = _rwh_next_cwd(word, eff, eff_cwd)
+            continue
+        if word != "git":
+            continue
+        sub, args = _git_subcommand_rest(eff)
+        if sub is None:
+            continue
+        special = sub in ("update-ref", "worktree")
+        if not special and not _git_is_mutating(sub, args):
+            continue
+        if s_state == "bad":
+            return ("deny", _rwh_bad_text(s_payload))
+        kind, target = _rwh_segment_target(eff, eff_cwd)
+        if kind == "opaque":
+            if s_live:
+                return ("unverifiable", "AIQT rule rvwpin: the worktree this git '{}' binds to cannot "
+                        "be resolved (an expansion, a --git-dir/--work-tree override, or an unknown "
+                        "shell working directory) while a review hold is live; use an explicit "
+                        "absolute '-C /path' target, or end the hold first.".format(sub))
+            continue
+        tview = _rwh_view(target, views)
+        if tview is None:
+            continue
+        t_gitdir, t_common = tview
+        t_state, t_payload = _rwh_holds(t_common, holds, notes)
+        if t_state == "bad":
+            return ("deny", _rwh_bad_text(t_payload))
+        t_live = t_payload if t_state == "ok" else []
+        if sub == "worktree":
+            hit = _rwh_worktree_hit(args, target, t_live, views)
+            if hit is not None:
+                return hit
+        if sub == "update-ref":
+            hit = _rwh_update_ref_hit(args, t_live)
+            if hit is not None:
+                return hit
+        if not _git_is_mutating(sub, args):
+            continue
+        for marker, path in t_live:
+            held_view = _rwh_view(marker["workdir"], views)
+            if held_view is not None and held_view[0] == t_gitdir:
+                return ("deny", _rwh_deny_text(marker, path))
+    return ("note", " ".join(notes)) if notes else ("allow", None)
+
+
+def review_workdir_hold(data):
+    """rvwpin, PreToolUse Bash: once a review is dispatched against a worktree, that worktree is not
+    modified until the review returns or is abandoned. The hold is an adopter-written marker file in
+    GIT_COMMON_DIR/aiqt/review-holds/ naming the held worktree, its head at dispatch, a dispatch id
+    and a required expiry; the dispatcher writes it before the reviewer starts and removes it when the
+    review ends. INERT (silent allow) where no marker directory exists. While a live marker pins a
+    worktree: a recognized mutating git command whose target resolves to that worktree (by git's
+    absolute git directory, never by path string) DENIES-and-educates (make the change on a separate
+    revision, rvwpin.4); a `git worktree remove/move` of the held worktree or a `git update-ref` of
+    its checked-out branch denies from any worktree of the repository; a mutating git command whose
+    target cannot be resolved denies with an UNVERIFIABLE: prefix, only while the session repository
+    has a live hold; an unreadable or malformed marker state denies mutating git commands only; an
+    expired marker is ignored with a note; and a drifted head (the held worktree moved outside the
+    session) is surfaced with a note, never a deny. NO-ASK posture: block or note only; read-only git
+    and non-git commands always pass. A crash reaches main's PreToolUse fail-closed exit 2.
+    Hookless dispatchers and resync tools run it as a preflight: `aiqt_hooks.py review_workdir_hold`
+    with the payload on stdin."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: review_workdir_hold wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if tool is None:
+        return _deny_missing_tool_name("rvwpin")
+    if tool != "Bash":
+        return _allow()
+    kind, message = _rwh_decide(data)
+    if kind in ("deny", "unverifiable"):
+        prefix = "UNVERIFIABLE: " if kind == "unverifiable" else ""
+        return _deny("{}{}".format(prefix, message),
+                     "AIQT guardrail: {}a live review hold pins its worktree (rule rvwpin); make the "
+                     "change on a separate revision, or end the hold when the review returns.".format(prefix))
+    if kind == "note":
+        return _allow_note(message)
+    return _allow()
+
+
 def orch_prompt_stamp(data):
     """tstamp/estsep, UserPromptSubmit (recorder, never blocks): stamp genuine human input from the
     clock, classify a prompt matching a registered wake as timer-originated, and inject the measured
@@ -21857,6 +22294,7 @@ HANDLERS = {
     "orch_untracked_wait_loop": orch_untracked_wait_loop,
     "orch_dispatch_ledger": orch_dispatch_ledger,
     "review_dispatch_pin": review_dispatch_pin,
+    "review_workdir_hold": review_workdir_hold,
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
@@ -21896,6 +22334,7 @@ HANDLER_EVENT = {
     "orch_untracked_wait_loop": PRETOOL,
     "orch_dispatch_ledger": "PostToolUse",
     "review_dispatch_pin": PRETOOL,
+    "review_workdir_hold": PRETOOL,
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,
