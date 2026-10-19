@@ -3039,8 +3039,9 @@ def _test_shell_string_floor(failures, hooks, cwd):
     return labels
 
 
-# No new false denies. A shell with a script-file operand reads its script from that file, so data piped into
-# it is data; a wrapper's operands are read only where the wrapper launches a shell; a cd in a child shell's
+# No new false denies. A shell with a script-file operand that is an ordinary file reads its script from that
+# file, so data piped into it is data (a stdin-aliasing operand such as /dev/stdin is NOT such a file and is
+# covered by the raw-rule deny rows); a wrapper's operands are read only where the wrapper launches a shell; a cd in a child shell's
 # string moves no later command; for the guards that keep the structured interpreter reading
 # (commit_msg_subst, commit_identity, git_explicit_binding), a spelling in a comment, printed or quoted text,
 # an unbound run or call, a non-pipe open, an argv form running another program, or split across two forms is
@@ -3217,6 +3218,33 @@ _GAP_DENY_ROWS = (
     # A spelling in a perl comment after a division slash, or any inline-code text, is read raw.
     "perl -e '$r = 6 / 3; # git commit --no-verify -m y'",
     "ruby -e 'r = 7 % 3 # git commit --no-verify -m y'",
+    # Quoting that splits the interpreter word or the git word across a shell word no longer hides either half:
+    # the trigger and the bypass predicate read the shell-decoded words too (py'thon3' and p"y"thon3 decode to
+    # python3, and the adjacent double-quoted fragments of g""it concatenate back to git).
+    "py'thon3' -c 'import os; os.system(\"git commit --no-verify -m y\")'",
+    "p\"y\"thon3 -c 'import os; os.system(\"git commit --no-verify -m y\")'",
+    "python3 -c \"import os; os.system('g\"\"it commit --no-verify -m y')\"",
+    # A short cluster carrying n beside later letters or an attached value (-nm, -nq, -nqm) is the -n
+    # (--no-verify) bypass on git commit and git am; the raw short-n probe reads the n anywhere in the cluster.
+    "python3 -c \"import os; os.system('git commit -nm y')\"",
+    "bash <<'A'\ngit am -nm patch\nA",
+    "bash <<'A'\ngit commit -nqm msg\nA",
+    "perl -e 'system(\"git\", \"commit\", \"-nq\")'",
+    # A shell whose script operand NAMES standard input reads its script from the pipe or here-document, so a
+    # piped or here-documented bypass of any no-verify verb denies, as it does for 'bash -' (stdin-uncertain).
+    "printf 'git commit --no-verify -m y\\n' | bash /dev/stdin",
+    "printf 'git am -n p.mbox\\n' | bash /dev/fd/0",
+    "printf 'git rebase --no-verify main\\n' | sh /proc/self/fd/0",
+    "printf 'git merge --no-verify topic\\n' | zsh //dev/stdin",
+    "printf 'git commit --no-verify -m y\\n' | bash -- /dev/stdin",
+    # Redirection-branch coverage: NO interpreter word and NO '<<', so only the unresolved-redirect trigger
+    # fires (opaque input duplication, a 0>& onto standard input with an opaque target, a device input, and a
+    # read-write input to a device). Each branch is shown to discriminate by removing it in a mutant, paired
+    # with the numeric-duplication, close, static-file and ordinary-output controls in _GAP_ALLOW_ROWS.
+    "echo 'git commit --no-verify -m y' <&$FD",
+    "echo 'git commit --no-verify -m y' 0>&$FD",
+    "echo 'git commit --no-verify -m y' </dev/stdin",
+    "echo 'git commit --no-verify -m y' <>/dev/stdin",
 )
 _GAP_ALLOW_ROWS = (
     # Minimal-pair controls: the same constructs as the deny rows (a here-document, inline interpreter code, a
@@ -3237,6 +3265,26 @@ _GAP_ALLOW_ROWS = (
     # A wrapped trap with a harmless action, and a wrapped lookup that sets no handler.
     "command trap 'echo done' EXIT",
     "command trap -p",
+    # Finding-1 controls: the same quoted-interpreter construct with no bypass spelling allows.
+    "py'thon3' -c 'import os; os.system(\"git status\")'",
+    "python3 -c \"import os; os.system('g\"\"it status')\"",
+    # Finding-2 controls: a non-skip short cluster (-q, no n) under a here-document trigger allows.
+    "bash <<'A'\ngit commit -q -m msg\nA",
+    "bash <<'A'\ngit am -q patch\nA",
+    # Finding-3 control: an ordinary script-file operand is data, not stdin, so the piped bypass is not read.
+    "printf 'git status\\n' | bash /dev/stdin",
+    # Finding-4: a -n in a LATER unrelated command, a git log -n, or a git/am mentioned in here-document prose
+    # beside a sort -n no longer pairs with an earlier git commit or am (the short -n is bounded to one command).
+    "git commit -m 'fix python parser'; grep -n TODO notes.txt",
+    "git commit -m 'update python docs'; git log --oneline -n 5",
+    "cat <<'EOF'\ngit notes: I am updating the docs\nEOF\nsort -n data.txt",
+    # Finding-5 controls: a numeric duplication, a close, a static-file input and an ordinary output redirect
+    # leave the redirect bounded, so the bypass spelling beside them is not read (no unbounded-input trigger).
+    "echo 'git commit --no-verify -m y' <&3",
+    "echo 'git commit --no-verify -m y' <&-",
+    "echo 'git commit --no-verify -m y' <in.txt",
+    "echo 'git commit --no-verify -m y' >out.txt",
+    "echo 'git commit --no-verify -m y' 0>&3",
 )
 
 

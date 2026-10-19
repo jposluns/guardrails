@@ -1953,9 +1953,12 @@ def _shell_reading(seg):
     -c string and an EXIT trap action, which run apart from the commands after it (_trap_string), False for eval
     and a trap action on a signal or on DEBUG, ERR or RETURN, which the current shell runs. unread is True when a
     string is there that the reading does not have (an opaque word, _shell_option_walk, _eval_string,
-    _trap_string); stdin is True when a shell word in it reads its SCRIPT from standard input: no -c option, and -s
-    given or no operand after its options (a shell with a script FILE operand, bash script.sh, reads its script
-    from that file, so a pipe or a here-document feeding it is data). The command word is found after leading
+    _trap_string); stdin is True when a shell word in it reads its SCRIPT from standard input: no -c option, and
+    -s given, no operand after its options, or a script operand that NAMES standard input (/dev/stdin, /dev/fd/0,
+    /proc/self/fd/0 and their slash-collapsed spellings, _gate_stdin_name). A shell with a script FILE operand
+    that is an ordinary file (bash script.sh) reads its script from that file, so a pipe or a here-document
+    feeding it is data; but a stdin-aliasing operand IS the input the shell reads as its script, so a pipe or
+    here-document there is the script, not data. The command word is found after leading
     reserved words and VAR=value words (_command_start), and the programs it runs are resolved through the
     wrappers that launch them (_launched_programs): a shell -c string is read only where that program is a shell
     (_SHELL_C_SHELLS), and eval and trap only where each is reached directly or through command, builtin or
@@ -2023,6 +2026,11 @@ def _shell_reading(seg):
                 else:
                     found.append((j, argv[j], True))
         elif stdin_ok and (has_s or kind == "end"):
+            stdin = True
+        elif stdin_ok and kind == "operand" and not opaque[j] and _gate_stdin_name(argv[j]):
+            # the script operand names standard input (/dev/stdin, /dev/fd/0, /proc/self/fd/0 and the
+            # slash-collapsed spellings): the shell reads its script FROM the input, so a pipe or a
+            # here-document feeding it is the script, not data (stdin-uncertain, like a shell with no operand)
             stdin = True
     for k in evals:
         text, eval_unread = _eval_string(argv, opaque, k)
@@ -2180,9 +2188,10 @@ def _scope_moved(moved, scope):
 # --- interpreters given inline code ---------------------------------------------------------------------
 # A command an interpreter runs from inline code (python -c, perl -e/-E, ruby -e, node -e/-p/--eval/--print) is
 # NOT shell, so the shared segment reading cannot read it as a command line. gate_weakening does not read the
-# structure of that code at all: it reads the WHOLE raw command text whenever an interpreter-family word (or
-# another construct the reading cannot bound) is present, and denies a bypass spelling anywhere in it
-# (_raw_unbounded_input, the fail-closed direction). Three guards read the structure of
+# structure of that code at all: it reads the raw command text AND the shell-decoded words of the expanded
+# reading whenever an interpreter-family word (or another construct the reading cannot bound) is present in
+# either, and denies a bypass spelling there (_raw_unbounded_input and the raw-text rule, the fail-closed
+# direction). Three guards read the structure of
 # that code instead: commit_msg_subst, commit_identity and git_explicit_binding. Each reads ONLY
 # the execution forms in the code (_interp_exec_forms: os.system, subprocess calls, the os.exec and spawn
 # families, perl and ruby system/exec/backquotes/qx/%x and a pipe open, node child_process calls), judges each
@@ -2891,14 +2900,37 @@ def _raw_unbounded_input(command, records):
     return False
 
 
+def _raw_names_gate_bypass_long(text):
+    """True when raw text `text` names the LONG --no-verify bypass: a git no-verify verb plus a --no-ver
+    spelling, both anywhere in `text`. Split from the short -n branch so the raw-text rule can read the long
+    branch over the whole command while bounding the short branch to a single command sequence. "" is False."""
+    return bool(text and _RAW_NOVERIFY_VERB_RE.search(text) and _RAW_NOVERIFY_RE.search(text))
+
+
+def _raw_names_short_bypass(text):
+    """True when raw text `text` (ONE command sequence's text) names the SHORT -n bypass: git, then commit or
+    am, then a short -n cluster, IN THAT ORDER (_RAW_SHORT_SEQ_RE). Ordered within one sequence so a -n in a
+    later, unrelated command or beside a mention of git am in prose does not match. "" is False."""
+    return bool(text and _RAW_SHORT_SEQ_RE.search(text))
+
+
 def _raw_names_gate_bypass(text):
-    """True when raw text `text` (an interpreter's execution-form text, or an uncertain segment's text) names a git
-    verification-hook bypass gate_weakening denies: git with a no-verify verb plus a --no-verify spelling, or git
-    commit/am with a short -n cluster, exactly the two deny shapes of _gate_weakening_fallback. A plain predicate
-    over the raw text; it builds no decision, and a checker piped to a sink (only a note) is deliberately NOT
-    read here, left to the broad note tier. "" is False."""
-    return bool(text and ((_RAW_NOVERIFY_VERB_RE.search(text) and _RAW_NOVERIFY_RE.search(text))
-                          or (_RAW_SHORT_NOVERIFY_VERB_RE.search(text) and _RAW_SHORT_N_RE.search(text))))
+    """True when raw text `text` (an interpreter's execution-form text, or an uncertain segment's text, each one
+    command sequence) names a git verification-hook bypass gate_weakening denies: git with a no-verify verb plus
+    a --no-verify spelling, or git commit/am with a short -n cluster after that verb, the two deny shapes of
+    _gate_weakening_fallback. A plain predicate over the raw text; it builds no decision, and a checker piped to
+    a sink (only a note) is deliberately NOT read here, left to the broad note tier. "" is False."""
+    return _raw_names_gate_bypass_long(text) or _raw_names_short_bypass(text)
+
+
+def _raw_segment_bypass_texts(seg):
+    """The raw texts of ONE command sequence the raw-text rule reads for a bypass: the segment's raw slice and
+    the decoded join of its words, each followed by every here-document body the segment opened (stdin_script).
+    The decoded join restores a verb or flag that shell quoting split across a word (g""it, -'n'm); the body
+    carries a spelling written in a quoted here-document. Bounding the short -n branch to these per-segment
+    texts keeps a -n in a LATER, unrelated command from pairing with an earlier git commit or am."""
+    body = ("\n" + seg.stdin_script) if seg.stdin_script else ""
+    return (seg.raw + body, " ".join(seg.argv) + body)
 
 
 def _raw_names_gate_note(text):
@@ -11119,17 +11151,29 @@ _GATE_ALTS = (
     "the artefact it guards. A genuinely broken hook or check is repaired or retired at its source "
     "through a reviewed change, never bypassed for one run.")
 
-# Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
-# mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
-# deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
-# probe requires a single-dash token preceded by whitespace OR by list punctuation (a quote, comma,
-# semicolon, equals sign or an opening bracket), so a '-n' spelled as an interpreter argv word
-# ("git","commit","-n" or ['git', 'commit', '-n']) is read too, while a long option ('--amend') and a
-# hyphenated word ('well-known', whose '-' follows a letter) never match.
+# Raw-string probes over text the shared reading cannot bind to real command structure: the fallback when the
+# tokenizer cannot parse the command (an unbalanced quote or an unsupported construct), AND the raw-text rule
+# of gate_weakening, which reads interpreter inline code, here-document bodies and the text of a command
+# carrying an unresolved redirect. Conservative and over-matching, never a silent allow. '--no-ver'
+# deliberately also hits '--no-verbose', so a '--no-verbose' beside a git no-verify verb in such text
+# over-denies; this over-deny is NOT limited to the unparseable path, since the raw-text rule calls these
+# probes on parsed commands too.
 _RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
 _RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
-_RAW_SHORT_N_RE = re.compile(r"(?:^|[\s\"';,=([{])-[A-Za-z]*n\b")
+# A short-option token carrying 'n' ANYWHERE in its letter run, preceded by whitespace OR by list punctuation
+# (a quote, comma, semicolon, equals sign or an opening bracket), so a '-n' spelled as an interpreter argv word
+# ("git","commit","-n" or ['git', 'commit', '-n']) is read too. The 'n' need not end the cluster, so a cluster
+# that carries it beside other letters or an attached value ('-nm', '-qn', '-nqm', '-nmMSG'), which on git
+# commit and git am IS the -n (--no-verify) bypass, matches; a long option ('--amend', '--no-verbose') and a
+# hyphenated word ('well-known', whose '-' follows a letter) never match.
+_RAW_SHORT_N_PATTERN = r"(?:^|[\s\"';,=([{])-[A-Za-z]*n"
+_RAW_SHORT_N_RE = re.compile(_RAW_SHORT_N_PATTERN)
+# The short -n bypass as ONE ordered sequence: git, then commit or am, then a short -n cluster AFTER that verb.
+# The raw-text rule reads it over a SINGLE command sequence so a -n in a LATER, unrelated command
+# ('git commit -m x; grep -n y', 'git commit ...; git log -n 5') or beside a mention of git am in prose does
+# not read as the bypass; the whole-text scan paired the verb and the -n unordered and over-denied those.
+_RAW_SHORT_SEQ_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b", _RAW_SHORT_N_PATTERN)
 _RAW_CHECKER_RE = re.compile(
     r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
     r"vitest|mocha|rspec|rubocop|phpunit|phpstan|golangci-lint|staticcheck|shellcheck|hadolint|"
@@ -11779,11 +11823,12 @@ def _gate_flow_note(records, command):
 def _gate_weakening_fallback(command):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
-    a short -n cluster ASKS (the raw string cannot bind the cluster to its subcommand, so it cannot
-    prove the -n is the bypass rather than an unrelated flag); a checker keyword next to a raw swallow
-    or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
-    design, the documented posture of the sibling fallbacks (_diff_source_fallback,
-    _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable."""
+    a short -n cluster DENIES fail-safe (the raw string cannot bind the cluster to its subcommand, so it
+    reads the cluster conservatively as the bypass); a checker keyword next to a raw swallow or
+    truncating-pipe spelling ALLOWS-WITH-NOTE (the broad heuristic is too broad to deny); anything else
+    ALLOWS (the true boundary). Over-matching by design, the documented posture of the sibling fallbacks
+    (_diff_source_fallback, _commit_identity_fallback, _protected_line_fallback): re-issue the command
+    parseable."""
     if _RAW_NOVERIFY_VERB_RE.search(command) and _RAW_NOVERIFY_RE.search(command):
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
@@ -11846,16 +11891,20 @@ def gate_weakening(data):
     otherwise the raw fallback stands. A command inside a shell -c or eval string, a trap action, or a find
     -exec/-execdir/-ok/-okdir or xargs shell -c string is read as if written in
     place (_lex_command), so a --no-verify there denies. A segment whose string that reading cannot read, and a
-    shell that reads its script from a pipe or a here-document, are uncertain alone: the raw fallback reads each
-    of that segment's texts alone (_shell_uncertain_texts), and every other segment is judged as before. RAW-TEXT
-    RULE (fail-closed): a command that carries inline interpreter code (an interpreter-family word anywhere in
-    its raw text), a here-document or here-string, or a redirection or descriptor duplication the reading cannot
-    resolve with certainty (_raw_unbounded_input) is ALSO read as ONE raw text: a verification-hook bypass
-    spelling anywhere in it (_raw_names_gate_bypass), inside quotes, comments and here-document bodies included,
-    DENIES. No per-language reading of interpreter code is attempted for this guard: proving such a spelling
-    quoted, printed or commented out cannot be made sound across fragments, quote-like operators and descriptor
-    aliases, and that proof could only allow. DISCLOSED over-denial: a command that merely prints or mentions a
-    bypass spelling beside such a construct is denied; spell it differently or run it without the construct.
+    shell that reads its script from a pipe or a here-document (a script operand that names standard input,
+    /dev/stdin and its aliases, counts), are uncertain alone: the raw fallback reads each of that segment's texts
+    alone (_shell_uncertain_texts), and every other segment is judged as before. RAW-TEXT RULE (fail-closed): a
+    command that carries inline interpreter code (an interpreter-family word anywhere in its raw text OR in its
+    shell-decoded words), a here-document or here-string, or a redirection or descriptor duplication the reading
+    cannot resolve with certainty (_raw_unbounded_input) is ALSO read as raw text: a verification-hook bypass
+    spelling (_raw_names_gate_bypass_long over the whole text, or the short -n after git commit or am in one
+    command sequence, _raw_names_short_bypass), read over the raw command text AND its shell-decoded words so
+    quoting the interpreter word or the git word cannot hide either half, inside quotes, comments and
+    here-document bodies included, DENIES. No per-language reading of interpreter code is attempted for this
+    guard: proving such a spelling quoted, printed or commented out cannot be made sound across fragments,
+    quote-like operators and descriptor aliases, and that proof could only allow. DISCLOSED over-denial: a
+    command that merely prints or mentions a --no-verify spelling, or git commit/am followed by a short -n in the
+    same command, beside such a construct is denied; spell it differently or run it without the construct.
     Disclosed residuals: R1 a check inside a shell string piped into a sink notes rather than denies
     (the shell command before it is an earlier command the deny tier does not count as benign), and a check
     inside an xargs or find body that runs no shell, or a string built at run time, is not read; R2 an alias or shell
@@ -11947,23 +11996,34 @@ def gate_weakening(data):
         return _deny(reason, banner)
     # The raw-text rule: a command carrying a construct the reading cannot bound with certainty (inline
     # interpreter code, a here-document or here-string, or a redirection or descriptor duplication whose
-    # effect on the command's input is unresolved) is read as ONE raw text, and a verification-hook bypass
-    # spelling anywhere in it (inside quotes, comments and here-document bodies included) DENIES. No attempt
-    # is made to prove the spelling quoted, printed or commented out: that proof cannot be made sound across
-    # fragments, quote-like operators and descriptor aliases, and it could only allow. A DISCLOSED
-    # over-denial, the fail-closed direction; the same constructs with no bypass spelling keep their posture.
-    if _raw_unbounded_input(command, records) and _raw_names_gate_bypass(command):
-        return _deny(
-            "AIQT rule gatdis (gate-discipline): this command carries a construct whose input or code the "
-            "hook cannot bound with certainty (inline interpreter code, a here-document or here-string, or a "
-            "redirection or descriptor duplication it cannot resolve), and its raw text names a git "
-            "verification-hook bypass (a --no-verify spelling, or a short -n beside git commit or am). The "
-            "raw text is read whole, quotes, comments and here-document bodies included, so a bypass spelling "
-            "that is only mentioned or printed is denied too, the fail-closed direction. Never weaken a gate "
-            "to obtain a pass; fix the artefact instead, or re-issue the command without that construct or "
-            "without the bypass spelling. {}".format(_GATE_ALTS),
-            "AIQT guardrail: denied a command pairing an unresolvable input or inline-code construct with a "
-            "git verification-hook bypass spelling in its raw text (rule gatdis, fail-closed).")
+    # effect on the command's input is unresolved) is read as raw text, and a verification-hook bypass
+    # spelling there DENIES. The TRIGGER and the SPELLING are both read over the raw command text AND over the
+    # shell-decoded words of the expanded reading (records), so shell quoting of the interpreter word or the
+    # git word cannot hide either half (py'thon3', g""it decode back to python3 and git). The long --no-verify
+    # branch reads the whole text; the short -n branch is bounded to a single command sequence (a segment and
+    # the here-document bodies it opened), so a -n in a later unrelated command or beside a mention of git am in
+    # prose does not deny. No attempt is made to prove the spelling quoted, printed or commented out: that proof
+    # cannot be made sound across fragments, quote-like operators and descriptor aliases, and it could only
+    # allow. A DISCLOSED over-denial, the fail-closed direction; the same constructs with no bypass spelling
+    # keep their posture.
+    decoded = "\n".join(" ".join(seg.argv) for seg in records)
+    if _raw_unbounded_input(command, records) or _RAW_INTERP_WORD_RE.search(decoded):
+        if (_raw_names_gate_bypass_long(command) or _raw_names_gate_bypass_long(decoded)
+                or any(_raw_names_short_bypass(text) for seg in records
+                       for text in _raw_segment_bypass_texts(seg))):
+            return _deny(
+                "AIQT rule gatdis (gate-discipline): this command carries a construct whose input or code the "
+                "hook cannot bound with certainty (inline interpreter code, a here-document or here-string, or "
+                "a redirection or descriptor duplication it cannot resolve), and its raw text or its "
+                "shell-decoded words name a git verification-hook bypass (a --no-verify spelling anywhere, or a "
+                "short -n after git commit or am in the same command). The text is read whole, quotes, comments "
+                "and here-document bodies included, and shell quoting of the interpreter word or the git word "
+                "does not hide it, so a bypass spelling that is only mentioned or printed is denied too, the "
+                "fail-closed direction. Never weaken a gate to obtain a pass; fix the artefact instead, or "
+                "re-issue the command without that construct or without the bypass spelling. {}"
+                .format(_GATE_ALTS),
+                "AIQT guardrail: denied a command pairing an unresolvable input or inline-code construct with a "
+                "git verification-hook bypass spelling in its raw text (rule gatdis, fail-closed).")
     # An uncertain segment (a shell string the reading cannot read, or a shell reading its script from a pipe or a
     # here-document) is read under this guard's posture: the raw fallback over each of its texts alone. Its deny
     # (a --no-verify spelling, or a short -n on git commit or am, there) is checked here, ahead of the notes
