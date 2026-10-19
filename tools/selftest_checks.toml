@@ -1409,6 +1409,7 @@ expected-check-ids = [
   "config/member-timeout-main-verdict",
   "config/member-timeout-main-verdict-mixed",
   "config/member-timeout-record-before-cleanup",
+  "config/member-timeout-vectors",
   "config/pid-state-fail-closed",
   "config/timeout-attribution",
   "config/timeout-offenders-split",
@@ -1622,6 +1623,7 @@ runner = "tools/selftest_git_fixture_env_config_system.py"
 expected-check-ids = [
   "config/registered-system",
   "config/system-control",
+  "env/lifecycle-probe-timeout-vectors",
   "env/opf-tooling-home-lifecycle",
   "env/opf-upgrade-home-lifecycle",
   "env/registered-opf-lifecycles",
