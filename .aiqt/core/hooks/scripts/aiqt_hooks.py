@@ -108,7 +108,7 @@ lexical scan never sees. An UNPARSEABLE command
 takes the recover-then-allow/deny resolution above (never a silent pass). WITHIN scope (a recognized lossy
 verb: checkout/switch/restore/reset/clean/stash/
 rm/branch) that resolution applies unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND
-the tree is provably clean (or the leading opt-out is set, or the form is genuinely non-destructive), in
+the tree is provably clean (or the form is genuinely non-destructive), in
 which case it ALLOWS. PRISTINE
 SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
 assignments the command is exactly 'git <args>' as ONE simple command, and the RAW string carries NO shell
@@ -120,8 +120,9 @@ word, or second command makes the command not-pristine - a PURELY LEXICAL determ
 WITHOUT ever consulting the probe (a safe over-ask). An option the form-classifier cannot resolve is a
 SEPARATE mechanism and does NOT bear on pristineness: a pristine command carrying an unresolved option still
 reaches the probe, where its role routes to a scoped ASK, so it is not silently allowed either. A wrapper is
-caught only while the raw scan still sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT
-categorical (a wrapper that ALSO fragments the verb is a disclosed residual, below). Only a
+caught while the raw scan, the continuation-joined text or the de-quoted copy (quotes, a '$' before a quote,
+and backslashes removed) sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical (a
+verb no such reading assembles is a disclosed residual, below). Only a
 metacharacter-free 'git <verb> <plain args>'
 reaches the probe, where PROVABLY CLEAN means the read-only, config-forced porcelain probe (git -c
 status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a repo-local
@@ -130,15 +131,16 @@ entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree c
 checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
 No recognized lossy verb that would discard WORKING-TREE CONTENT is silently ALLOWED except a pristine bare
 'git <verb>' whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even
-on a dirty tree), or on a provably-clean tree, or a pristine bare form carrying the leading
-GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS, at the cost of more asks. This guarantee is bounded to
+on a dirty tree), or on a provably-clean tree - worst case it ASKS, at the cost of more asks. No in-band
+override exists (the operator channel is hook configuration). This guarantee is bounded to
 working-tree content: ref-level moves (reset --soft moving HEAD, a merged-branch delete) are reflog-
 recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
-function renaming git; deliberate token fragmentation or obfuscation of the COMMAND WORD 'git' ITSELF or of
-the verb (a wrapper whose git command word or verb is SPLIT so neither the token scan nor the raw scan sees
-a contiguous git+verb keyword, e.g. env git re'set' --hard, eval git re'set', or command g'it' reset --hard
-/ env /usr/bin/g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset', reads as 'no
-recognized lossy verb' and is silently ALLOWED - a best-effort residual, not chased); a real discard whose
+function renaming git; deliberate obfuscation of the COMMAND WORD 'git' ITSELF or of the verb that no raw,
+continuation-joined or de-quoted reading assembles (an escape decoded inside $'...', or a word built by a
+parameter expansion or a command substitution at run time, reads as 'no recognized lossy verb' and is
+silently ALLOWED - a best-effort residual; a quote- or backslash-fragmented spelling under a wrapper, such
+as env git re'set' --hard, eval git re'set', command g'it' reset --hard or env /usr/bin/g'it' reset --hard,
+is in scope through the de-quoted copy); a real discard whose
 VERB is outside the recognized set AND the raw scan does NOT flag at all (a 'git worktree remove -f' of a
 dirty linked worktree discards that worktree's uncommitted work, yet 'worktree' matches no lossy keyword, so
 it is allowed at the true boundary - disclosed, not closed this round). A command the raw scan DOES flag as
@@ -150,7 +152,7 @@ persistent shell/config state; the deferred recovery/snapshot layer is the backs
 read-only and offline; it never mutates the repo.
 
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
-flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
+flagged for maintainer review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
 it does NOT hard-block. The wall has already rendered by Stop time, so blocking cannot unsend it; and
 because this layer keeps no loop bound of its own and does not read the stop_hook_active field of the
 Stop input, a hard exit-2 Stop block could re-fire on the forced continuation and wedge the session. The
@@ -166,6 +168,9 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
+A handler result whose exit code is not 0 or 2, or whose stderr text is neither a str nor None, is a
+handler crash with that same posture, and an exception's text in a diagnostic is built so that its own
+str() raising cannot end main() early.
 
 These exits, and the floor guard's on an older interpreter that can start this file, hold even when a
 standard stream cannot be written or flushed (a closed descriptor, a full
@@ -181,6 +186,39 @@ decision whose stdout write failed exited 0, which allows. The floor guard above
 write-flush-os._exit shape inline, since it runs before any helper exists.
 The PYTHON-FLOOR comment below gives the floor guard's exits and the exit of an interpreter that cannot
 start this file, which fails first with Python's own exit.
+
+DEADLINE (PreToolUse): every PreToolUse mode that is not fail-open reads its payload and runs its check
+inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS (8 seconds: HOOK_TIMEOUT_SECONDS, the 10-second
+hooks.json timeout tools/gen_hooks.py renders, less 2), armed before the payload read. A check that has
+not decided by then is interrupted by _HookDeadline, a BaseException that no handler's except Exception
+branch catches, and the call fails CLOSED with exit 2 and a stderr line naming the handler, the budget and
+the input size and asking for smaller calls or long content moved into a file; the timer is cancelled
+before the decision is written to stdout. Any other exception out of the window (an error entering or
+leaving it, or an in-process caller's own alarm handler raising when its expiry is delivered) fails
+closed with exit 2 as well, and a fail-open mode warns on exit 0 instead, except for a stop (an exit
+or an interrupt) raised in a fail-open mode, which ends the hook as it would with no window, save that
+an exit whose status would be 2 ends it with status 1. The raw 'git ... <verb>'
+fallback scans are _RawSequence probes of linear cost: the single regexes they replaced grew with the
+square or the cube of the command length, and five guards ran past the hook timeout on some shape at or
+below 64 KB. Measured in-process on a 24-core host with Python 3.14.4 over runs on 2026-10-15 and
+2026-10-16, the slowest PreToolUse handler call on the worst shapes tools/selftest_aiqt_hooks.py times
+took at most 0.10 s of wall-clock time at 64 KB, 0.49 s at 256 KB and 2.07 s at 1 MB (nest_parens under
+git_stash_ref). With the raw-text push backstop and the joined and de-quoted readings of the command,
+runs on 2026-10-17 on a 24-core host with Python 3.14.4 that was running other work measured at most
+0.13 s at 64 KB (protected_line, whose backstop reads the whole command before its 65,536-character
+commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard). Interpreter
+start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
+module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
+uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
+check for signals), which holds the deadline back until it returns, as does review_dispatch_pin's wait for
+its worker thread when the kernel delivers the alarm to that thread (the wait ends within that guard's
+own 8-second budget plus a quarter second); cleanup that runs while the deadline
+unwinds (a finally block, killing and reaping a child process), which still counts against the platform's
+timeout; and a platform without SIGALRM and setitimer (Windows), a caller that blocks SIGALRM, or a call
+off the main thread, which run with no deadline. Whether the platform blocks or allows a PreToolUse call
+whose hook it stops at its own timeout has not been verified; the deadline makes the decision the
+dispatcher's own exit 2 instead. An interrupted git_discard recovery snapshot can leave a temporary index
+or unreferenced objects behind.
 """
 import sys
 
@@ -208,7 +246,8 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
+FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_lease_heartbeat_post",
+                         "orch_lease_heartbeat_stop", "orch_prompt_stamp", "orch_resume_audit",
                          "orch_stop_guard", "orch_teammate_idle")
 
 if tuple(sys.version_info[:2]) < (3, 14):
@@ -234,8 +273,10 @@ if tuple(sys.version_info[:2]) < (3, 14):
         os._exit(0)
     os._exit(2)
 
+import _signal
 import collections
 import datetime
+import errno
 import fnmatch
 import json
 import math
@@ -250,6 +291,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 
 PRETOOL = "PreToolUse"
@@ -259,6 +301,14 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 # cannot block at all; an errored UserPromptSubmit stamp must never block a human prompt; a
 # PostToolUse recorder error must surface as a warning, not a tool failure. Doc-confirmed 2026-08-29.
 FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse")
+# The platform stops a hook command at the timeout tools/gen_hooks.py writes into hooks.json (its
+# TIMEOUT); HOOK_TIMEOUT_SECONDS mirrors that value, and gen_hooks refuses to render (exit 2) when the two
+# differ, so both numbers come from that one source. main() gives every PreToolUse mode that is not
+# fail-open PRETOOL_BUDGET_SECONDS, counted from before the payload read, and fails closed with exit 2
+# when its check has not decided by then, so the refusal is written before the platform's own timeout.
+# gen_hooks also refuses a budget that is not at least one second below the timeout or not positive.
+HOOK_TIMEOUT_SECONDS = 10
+PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0
 
 
 # --- decision constructors ---------------------------------------------------------------------------
@@ -290,13 +340,13 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 NOTE_CONSTRUCTORS = (
     "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
-    "_gate_weakening_fallback", "_gensrc_fail_ask", "_git_discard_fallback", "_stash_drop_clear_outcome",
+    "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
     "_orch_stop_family")
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
-    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_protected_line_fallback",
-    "_wrtscp_deny")
+    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_git_discard_fallback",
+    "_protected_line_fallback", "_raw_push_guard", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -409,7 +459,112 @@ _Segment = collections.namedtuple(
                  "argv_leading_tilde"))
 
 
-def _read_word(command, i, n):
+def _skip_quoting(command, i, n):
+    """Skip the quote or substitution opened at command[i]: a single or double quote, a backquote, or a
+    $( command substitution or ${ parameter expansion. Return the index just past the whole construct.
+    A substitution nested in a double-quoted string opens a FRESH quoting context whose own quotes nest, so
+    an inner quote never closes an outer string and a << quoted at any depth stays data, never a heredoc
+    opener. Iterative (an explicit context stack), linear, stdlib-only. Raises ValueError on an unterminated
+    context so the caller fails closed rather than mis-pairing a later quote."""
+    c = command[i]
+    if c == "'":
+        stack = ["sq"]
+        i += 1
+    elif c == '"':
+        stack = ["dq"]
+        i += 1
+    elif c == "`":
+        stack = ["bq"]
+        i += 1
+    elif c == "$" and i + 1 < n and command[i + 1] == "(":
+        stack = ["paren"]
+        i += 2
+    elif c == "$" and i + 1 < n and command[i + 1] == "{":
+        stack = ["brace"]
+        i += 2
+    else:
+        raise ValueError("not a quoting opener")
+    while stack:
+        if i >= n:
+            raise ValueError("unterminated quote or substitution")
+        top = stack[-1]
+        c = command[i]
+        if top == "sq":
+            j = command.find("'", i)
+            if j < 0:
+                raise ValueError("unterminated single quote")
+            i = j + 1
+            stack.pop()
+            continue
+        if top == "bq":
+            if c == chr(92) and i + 1 < n:
+                i += 2
+            elif c == "`":
+                i += 1
+                stack.pop()
+            else:
+                i += 1
+            continue
+        if c == chr(92):
+            if i + 1 >= n:
+                raise ValueError("unterminated escape")
+            i += 2
+            continue
+        if top == "dq":
+            if c == '"':
+                i += 1
+                stack.pop()
+                continue
+            if c == "`":
+                stack.append("bq")
+                i += 1
+                continue
+            if c == "$" and i + 1 < n and command[i + 1] == "(":
+                stack.append("paren")
+                i += 2
+                continue
+            if c == "$" and i + 1 < n and command[i + 1] == "{":
+                stack.append("brace")
+                i += 2
+                continue
+            i += 1
+            continue
+        if c == "'":
+            stack.append("sq")
+            i += 1
+            continue
+        if c == '"':
+            stack.append("dq")
+            i += 1
+            continue
+        if c == "`":
+            stack.append("bq")
+            i += 1
+            continue
+        if c == "$" and i + 1 < n and command[i + 1] == "(":
+            stack.append("paren")
+            i += 2
+            continue
+        if c == "$" and i + 1 < n and command[i + 1] == "{":
+            stack.append("brace")
+            i += 2
+            continue
+        if top == "paren":
+            if c == "(":
+                stack.append("paren")
+            elif c == ")":
+                stack.pop()
+            i += 1
+            continue
+        if c == "{":
+            stack.append("brace")
+        elif c == "}":
+            stack.pop()
+        i += 1
+    return i
+
+
+def _read_word(command, i, n, locale=False):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
     newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
     the quote/escape decoded word, opaque is True if it carried an unquoted
@@ -422,7 +577,10 @@ def _read_word(command, i, n):
     after the tilde stay relative), while a quote or expansion AFTER the prefix-closing '/' (e.g. ~/$VAR) does
     not block it. Stops at an
     unquoted space, tab, newline, or metacharacter. Raises ValueError on an unbalanced quote or an
-    unterminated escape."""
+    unterminated escape. With locale True, an unquoted bash locale quote $"..." is read as the double-quoted
+    string bash reads when no message catalogue translates it (the '$' dropped, so Cl$""aude is Claude);
+    otherwise its '$' stays an ordinary opaque character, as every other caller reads it and as the
+    commit-identity check reads it too, alongside the locale reading."""
     chars = []
     opaque = False
     started = False
@@ -455,6 +613,14 @@ def _read_word(command, i, n):
             break
         was_started = started  # whether the word had begun BEFORE this char (a leading tilde needs it False)
         started = True
+        if locale and c == "$" and i + 1 < n and command[i + 1] == '"':
+            # bash locale quoting $"...": the text is looked up in the current locale's message catalogue
+            # and, when no translation applies, the '$' is dropped and the rest is a double-quoted string, read
+            # by the branch below. The word stays opaque, as its '$' made it before, since a catalogue can
+            # replace the text at run time.
+            opaque = True
+            i += 1
+            c = '"'
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
             if tilde_prefix_open:  # a quote inside the tilde-prefix disables bash expansion: stays relative
                 leading_tilde = False
@@ -491,6 +657,12 @@ def _read_word(command, i, n):
                         continue
                     chars.append("\\")  # a backslash before any other char is literal inside "..."
                     i += 1
+                    continue
+                if d == "`" or (d == "$" and i + 1 < n and command[i + 1] in "({"):
+                    _sub_start = i
+                    i = _skip_quoting(command, i, n)
+                    opaque = True
+                    chars.append(command[_sub_start:i])
                     continue
                 if d in "$`":
                     opaque = True
@@ -787,53 +959,329 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
     return i
 
 
-def _strip_quoted_heredoc_bodies(command):
-    """ROUND-2 FINDING 17. Return `command` with the BODIES of QUOTED heredocs (<<'EOF'/<<"EOF"/<<\\EOF)
-    removed, so a RAW (regex) scan that runs unconditionally - e.g. git_discard's _raw_has_lossy_git - does
-    not match shell syntax quoted inside heredoc prose. Everything OUTSIDE the quoted-heredoc bodies is
-    preserved verbatim (a real 'git reset --hard <<'EOF'...' still scans as lossy). UNQUOTED heredoc bodies
-    interpolate and stay in scope. Best-effort and conservative: on any ambiguity the text is left in place
-    (the raw scan then over-matches, the safe direction), and multiple heredocs stacked on one line beyond
-    the first are a disclosed over-match residual, never an under-match."""
+# The characters after which bash starts a new word: blanks, newline and the shell metacharacters.
+# An unquoted '#' that follows one of these (or starts the text) opens a comment.
+_SHELL_WORD_BREAK = " \t\n;&|()<>"
+
+
+def _join_continuations(command):
+    """Remove every backslash-newline line continuation the way bash does BEFORE any raw
+    scanner reads the command, and return (joined, raw_index). raw_index[k] is the index in `command`
+    of joined[k], plus one final entry len(command), so a scanner can map a slice of the joined text
+    back to the raw slice it came from (for diagnostics and the segment strings it returns).
+
+    The join matches bash outside single quotes and ANSI-C quotes and at comment ends: a
+    backslash-newline is removed at top level, inside double quotes, inside a backtick, '$(...)',
+    '<(...)' or '>(...)' substitution and inside a '${...}' expansion, and kept inside single quotes,
+    inside $'...' and at the end of a comment (a comment ends at its newline; a trailing backslash does
+    not continue it). A '#' opens a comment only where bash starts a word: at the start of the text, of
+    a substitution or of a '(' group, or just past an UNESCAPED blank, newline or shell metacharacter;
+    never past an escaped character, a closing quote or the ')' that closes a substitution, and never
+    inside a backtick substitution or a '${...}' expansion ('a\\<newline>#b' and '$(x)#y' are each one
+    word, as in bash). A substitution nested in a double-quoted string opens a fresh context whose own
+    quotes nest, as in _skip_quoting. DISCLOSED divergences: inside a QUOTED heredoc body bash keeps the
+    pair and this join removes it (heredocs are not modelled; any '<<' marks the lex uncertain anyway),
+    and a 'case' pattern ')' inside a substitution is read as closing it (any '$(' or backtick marks the
+    lex uncertain anyway). Linear, never raises.
+
+    A command that holds no backslash immediately followed by a newline returns (command, the identity
+    index) at once, without the context walk (_join_continuations_walk). The result is identical: the
+    walk removes characters only at a backslash whose next character is a newline, and every other step
+    copies the characters it passes in order, so with no such pair nothing is removed in any context and
+    the walk returns the command unchanged with raw_index[k] == k. The pair test is a plain substring
+    test, so a pair the walk keeps (inside single quotes or a comment) still takes the walk."""
+    if chr(92) + "\n" not in command:
+        return command, list(range(len(command) + 1))
+    return _join_continuations_walk(command)
+
+
+def _join_continuations_walk(command):
+    """The context walk behind _join_continuations, with no fast path: the same (joined, raw_index)
+    for every command. The self-test compares the two on commands with and without a continuation."""
     n = len(command)
     out = []
+    raw_index = []
+    # The context stack, innermost last: 'top', 'subst' (a '$(', '<(' or '>(' substitution) and
+    # 'group' (a '(' group) are command contexts, where comments and word starts apply; 'dq' is a
+    # double-quoted string, 'bq' a backtick substitution and 'brace' a '${...}' expansion.
+    stack = ["top"]
+    word_break = True  # in a command context: the next unquoted character starts a word
+    prev = ""  # the previous character when the command-context branch at the end took it, else ""
+
+    def take(k, count):
+        for m in range(k, min(k + count, n)):
+            out.append(command[m])
+            raw_index.append(m)
+
     i = 0
     while i < n:
-        lt = command.find("<<", i)
-        if lt < 0:
-            out.append(command[i:])
-            break
-        parsed = _parse_heredoc_delim(command, lt + 2, n)
-        if parsed is None or not parsed[0]:
-            out.append(command[i:lt + 2])   # not a quoted heredoc: keep the '<<' and continue past it
-            i = lt + 2
+        c = command[i]
+        context = stack[-1]
+        last, prev = prev, ""
+        if c == chr(92):
+            if i + 1 < n and command[i + 1] == "\n":
+                i += 2  # a line continuation: removed outside single quotes and comments, as bash does
+                continue
+            take(i, 2)  # an escaped character is literal and never starts a comment
+            i += 2
+            word_break = False
             continue
-        _q, delim, strip_tabs, next_i = parsed
-        nl = command.find("\n", next_i)
-        if nl < 0:
-            out.append(command[i:next_i])    # the opening line has no body yet (no newline): keep, done
-            i = next_i
+        if context == "bq":
+            if c == "`":
+                stack.pop()
+                word_break = False
+            take(i, 1)
+            i += 1
             continue
-        out.append(command[i:nl + 1])        # keep through the opening line's newline
-        i = _skip_heredoc_bodies(command, nl + 1, n, [(delim, strip_tabs)])  # drop the body region
-    return "".join(out)
+        if c == "$" and i + 1 < n and command[i + 1] in "({":
+            stack.append("subst" if command[i + 1] == "(" else "brace")
+            take(i, 2)
+            i += 2
+            word_break = True  # a substitution starts a command ('${' reads no comment either way)
+            continue
+        if c == "`":
+            stack.append("bq")
+            take(i, 1)
+            i += 1
+            continue
+        if context == "dq":
+            if c == '"':
+                stack.pop()
+                word_break = False
+            take(i, 1)
+            i += 1
+            continue
+        if c == "'" or (c == "$" and i + 1 < n and command[i + 1] == "'"):
+            ansi = c == "$"
+            k = i + (2 if ansi else 1)
+            while k < n and command[k] != "'":
+                k += 2 if (ansi and command[k] == chr(92)) else 1
+            end = min(k + 1, n)
+            take(i, end - i)  # single-quoted text is copied unchanged: no continuation inside
+            i = end
+            word_break = False
+            continue
+        if c == '"':
+            stack.append("dq")
+            take(i, 1)
+            i += 1
+            word_break = False
+            continue
+        if context == "brace":
+            if c == "{":
+                stack.append("brace")
+            elif c == "}":
+                stack.pop()
+            take(i, 1)
+            i += 1
+            word_break = False
+            continue
+        if c == "#" and word_break:
+            nl = command.find("\n", i)
+            end = n if nl == -1 else nl
+            take(i, end - i)  # a comment is copied unchanged up to its newline
+            i = end
+            continue
+        closes_subst = c == ")" and context == "subst"
+        if c == "(":
+            stack.append("subst" if last in ("<", ">") else "group")
+        elif c == ")" and context in ("subst", "group"):
+            stack.pop()
+        take(i, 1)
+        word_break = c in _SHELL_WORD_BREAK and not closes_subst
+        prev = c
+        i += 1
+    raw_index.append(n)
+    return "".join(out), raw_index
 
 
-def _lex_command(command, partial=False):
+def _dequoted_text(command):
+    """The command with its line continuations joined (_join_continuations) and then every
+    quote character and backslash removed, so a quote-fragmented spelling ('pu""sh', "ma''in",
+    'pu\\sh') reads as the word bash assembles from it. A '$' directly before a quote is
+    removed first, so a $'...' or $"..." fragment ('re$''set', 'check$""out') reads as the word bash
+    assembles too; escape decoding inside $'...' is not modelled (the disclosed boundary). A raw-text
+    reading only, always read BESIDE the raw text so it can only add a match or widen scope (for
+    example the push backstop's segments, the uncertain-lex push fallback and its git gate, the discard
+    scope scan on every reading, and the unparseable-command discard fallback's scope scan), never to
+    prove a command safe."""
+    joined, _raw_index = _join_continuations(command)
+    joined = re.sub(r"\$(?=['\"])", "", joined)
+    return joined.replace("'", "").replace('"', "").replace(chr(92), "")
+
+
+# The uncertainty causes _lex_uncertain_causes reports, worded for the deny messages.
+_LEX_UNCERTAIN_CAUSE_TEXT = {
+    "comment": "an unquoted '#', which can open a comment the lexer does not model",
+    "heredoc": "a '<<' heredoc",
+    "grouping": "an unquoted '(' or ')' grouping or a lone '{' or '}' brace-group word",
+    "substitution": "a backtick or '$(' command substitution",
+    "quote": "an unbalanced quote or a trailing backslash",
+    "continuation": "a line continuation the lexer reads differently once joined",
+    "lexer": "a construct the shell lexer refuses",
+}
+
+
+def _lex_argvs(command):
+    """The argv list of every segment the full lexer reads from `command`, or None when it refuses."""
+    try:
+        return [seg.argv for seg in _lex_command(command)]
+    except ValueError:
+        return None
+
+
+def _lex_uncertain_causes(command):
+    """The reasons the restored lexer's reading of `command` is UNCERTAIN, as an ordered
+    tuple of keys of _LEX_UNCERTAIN_CAUSE_TEXT (empty when the reading is certain). Line
+    continuations are joined first (_join_continuations), then the joined text is scanned with a
+    deliberately blunt quoting model (single quotes, $'...' with its escapes, double quotes, backslash
+    escapes) and these shapes are reported wherever they occur, with no comment-boundary predicate:
+      - 'comment': ANY unquoted '#', whether or not bash would start a comment there;
+      - 'heredoc': ANY unquoted '<<' (a heredoc, a '<<<' here-string, or a commented opener);
+      - 'grouping': ANY unquoted '(' or ')' (a subshell, a function, a case pattern, arithmetic),
+        and ANY unquoted lone '{' or '}' word (a brace group, reserved at command
+        position; the lexer reads it as a plain word, so a git command inside one is hidden from the
+        parsed scan; a literal '}' argument is flagged too, the safe direction);
+      - 'substitution': ANY backtick or '$(' outside single quotes, double-quoted or not;
+      - 'quote': an unpaired single quote, an unmatched double quote, an unclosed $'...', or a
+        trailing backslash;
+      - 'continuation': the full lexer reads the joined text differently from the raw text (bash
+        reads the joined text, so the raw lex is not what bash runs, e.g. '&\\<newline>>' is the
+        '&>' redirect);
+      - 'lexer': anything else the full lexer refuses (a {fd} redirect, a malformed redirect, NUL),
+        reported only when no shape above already explains the refusal.
+    A '#' at a word start skips its comment text, so a quote inside a comment opens nothing. Quoted
+    literals ("a # b", '(x)', "<<EOF") report nothing. Never raises."""
+    causes = []
+
+    def add(key):
+        if key not in causes:
+            causes.append(key)
+
+    joined, _raw_index = _join_continuations(command)
+    n = len(joined)
+    i = 0
+    in_dq = False
+    word_break = True
+    open_subst = 0  # unquoted '$(' openers, so their closing ')' is not also reported as grouping
+    while i < n:
+        c = joined[i]
+        if c == chr(92):
+            if i + 1 >= n:
+                add("quote")  # a trailing backslash escape: the full lexer raises
+            i += 2
+            word_break = False
+            continue
+        if c == "`":
+            add("substitution")
+            i += 1
+            word_break = False
+            continue
+        if c == "$" and i + 1 < n and joined[i + 1] == "(":
+            add("substitution")
+            if not in_dq:
+                open_subst += 1
+            i += 2
+            word_break = True
+            continue
+        if c == '"':
+            in_dq = not in_dq
+            i += 1
+            word_break = False
+            continue
+        if in_dq:
+            i += 1
+            continue
+        if c == "'" or (c == "$" and i + 1 < n and joined[i + 1] == "'"):
+            ansi = c == "$"
+            k = i + (2 if ansi else 1)
+            while k < n and joined[k] != "'":
+                k += 2 if (ansi and joined[k] == chr(92)) else 1
+            if k >= n:
+                add("quote")  # an unpaired single quote or an unclosed $'...'
+                break
+            i = k + 1
+            word_break = False
+            continue
+        if c == "#":
+            add("comment")
+            if word_break:
+                nl = joined.find("\n", i)
+                i = n if nl == -1 else nl  # comment text opens no quote and reports nothing
+                continue
+        elif c == "<" and i + 1 < n and joined[i + 1] == "<":
+            add("heredoc")
+        elif c == ")" and open_subst:
+            open_subst -= 1
+        elif c in "()":
+            add("grouping")
+        elif c in "{}" and word_break and (i + 1 >= n or joined[i + 1] in _SHELL_WORD_BREAK):
+            add("grouping")  # a lone '{' or '}' word: a brace group the lexer reads as a plain word
+        word_break = c in _SHELL_WORD_BREAK
+        i += 1
+    if in_dq:
+        add("quote")  # an unmatched double quote
+    raw_argvs = _lex_argvs(command)
+    if joined != command and raw_argvs != _lex_argvs(joined):
+        add("continuation")
+    if raw_argvs is None and not causes:
+        add("lexer")
+    return tuple(causes)
+
+
+def _lex_uncertain(command):
+    """True when the restored nested-quote quoting model's reading of `command` is UNCERTAIN,
+    so no consumer may treat a clean lex as proof of what bash will run and a raw reading decides
+    instead. It is True exactly when _lex_uncertain_causes reports a cause: the joined text holds ANY
+    unquoted '#', '<<', '(' or ')', a lone '{' or '}' word, any backtick or '$(', an unclosed quote or
+    trailing backslash, a continuation the lexer reads differently once joined, or anything else the
+    full lexer refuses.
+    No comment-boundary predicate decides it, so a comment after '(' or any other shell form cannot
+    slip between the scanners' word boundaries.
+    Consumers: protected_line lets _protected_line_fallback decide on an uncertain lex even when a
+    benign git segment was lexed, and the fallback reads the de-quoted text (_dequoted_text);
+    git_discard re-reads the raw lines of an uncertain in-scope command to NAME the work-losing verb
+    (_uncertain_line_lossy), while its scope scan reads the raw, joined and de-quoted text of every
+    command unstripped. DISCLOSED
+    over-denial (the safe direction): an uncertain command whose text pairs git..push with a
+    force/delete/mirror spelling denies via the fallback even when the push names only a FEATURE ref
+    or the pairing is prose or spans two commands (pl-uncertain-cost, pl-overrefusal-cost-*), and a '#' in
+    a word ('ticket#1'), a subshell, a brace group, a function or a substitution makes the lex
+    uncertain too; the same shapes carrying no push or work-losing spelling still allow (the
+    pl-mispair-*-ctl controls)."""
+    return bool(_lex_uncertain_causes(command))
+
+
+def _lex_command(command, partial=False, locale=False, skip_empty=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
     a partially-cleaned command. A QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) is NOT unsupported: its literal
     body is EXCLUDED from analysis (round-2 finding 17) so a guard never fires on shell syntax quoted inside
-    heredoc prose. Linear, non-recursive, stdlib-only.
+    heredoc prose. This quoting model is a best-effort reading of bash, not a guarantee (a
+    comment, heredoc body or nested substitution can read differently under bash), so the push
+    guard never depends on it: _raw_push_guard rescans the raw text on every protected_line
+    call. Linear, non-recursive, stdlib-only.
 
     When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
-    the lexer returns (segments, complete), where segments are the COMPLETE segments recovered before the
-    first unparseable construct and complete is False when such a construct truncated the scan (True when
-    the whole command parsed). This lets the Bash abspth floor still inspect a resolvable PREFIX (an
-    earlier relative cd/redirect) even when a LATER segment is unparseable, rather than discarding every
-    parsed segment on the first heredoc/here-string/process-substitution. The default partial=False keeps
-    the list-returning, raise-on-error contract every other caller relies on."""
+    the lexer returns (segments, complete, in_progress), where segments are the segments recovered before the
+    first unparseable construct, complete is False when such a construct truncated the scan (True when the
+    whole command parsed), and in_progress is True only when the LAST of those segments is the one the lexer
+    was still inside when it stopped (its words and redirects parsed before the construct are kept, but its
+    unseen tokens could change it). A construct that begins a new segment (a lone quote after ';') leaves
+    in_progress False: every recovered segment is then complete. This lets the Bash abspth floor still
+    inspect a resolvable PREFIX (an earlier relative cd/redirect) even when a LATER segment is unparseable,
+    rather than discarding every parsed segment on the first heredoc/here-string/process-substitution. The
+    default partial=False keeps the list-returning, raise-on-error contract every other caller relies on.
+
+    locale is passed to _read_word for every word: True reads a bash locale quote $"..." as a double-quoted
+    string, and the default False keeps the reading every other caller relies on.
+
+    skip_empty True leaves out every segment with no word and no redirect, whose record would be
+    _Segment([], sep, [], raw, False, [], []), so a long run of separators ('((((', ';;;;') builds no record,
+    list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only a
+    caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
+    list) passes it; the default False keeps every record."""
     n = len(command)
     segments = []
     argv = []
@@ -845,14 +1293,17 @@ def _lex_command(command, partial=False):
     pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
 
     def end_segment(sep, op_start, next_start):
-        segments.append(_Segment(list(argv), sep, list(redirects),
-                                  command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
-                                  list(argv_leading_tilde)))
-        del argv[:]
-        del argv_opaque[:]
-        del argv_leading_tilde[:]
-        del redirects[:]
-        opaque[0] = False
+        # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde and opaque
+        # change only together with argv, so a skipped segment leaves them empty and False as well.
+        if argv or redirects or not skip_empty:
+            segments.append(_Segment(list(argv), sep, list(redirects),
+                                      command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
+                                      list(argv_leading_tilde)))
+            del argv[:]
+            del argv_opaque[:]
+            del argv_leading_tilde[:]
+            del redirects[:]
+            opaque[0] = False
         seg_start[0] = next_start
 
     def consume_redirect(op, oplen, at, src_fd):
@@ -863,7 +1314,7 @@ def _lex_command(command, partial=False):
         # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
         if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
             raise ValueError("malformed redirect: no target")
-        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n)
+        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, locale)
         if not started:
             raise ValueError("malformed redirect target")
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
@@ -917,7 +1368,7 @@ def _lex_command(command, partial=False):
                     raise ValueError("unsupported shell construct: {}".format(op))
                 i = consume_redirect(op, oplen, i, None)
                 continue
-            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n)
+            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, locale)
             # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect
             # operator is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' ->
             # fd 2; but '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep it.
@@ -944,28 +1395,34 @@ def _lex_command(command, partial=False):
         # positions of the IN-PROGRESS segment that were fully parsed BEFORE it (an earlier relative
         # cd/redirect in the SAME, still-open segment - e.g. the 'out.txt' of 'cat > out.txt <<EOF' - is
         # thereby still inspected by the Bash abspth floor); a position WITHIN or AFTER the unparseable
-        # construct stays uninspected, a disclosed residual. The default contract re-raises for every
-        # other caller.
+        # construct stays uninspected, a disclosed residual. The in_progress flag tells a caller that the
+        # last recovered segment is that still-open one, so a caller that must judge only complete segments
+        # drops exactly it and never a segment the scan had already closed. The default contract re-raises
+        # for every other caller.
         if partial:
-            if argv or redirects:
+            in_progress = bool(argv or redirects)
+            if in_progress:
                 segments.append(_Segment(list(argv), "", list(redirects),
                                          command[seg_start[0]:], opaque[0], list(argv_opaque),
                                          list(argv_leading_tilde)))
-            return segments, False
+            return segments, False, in_progress
         raise
     if partial:
-        return segments, True
+        return segments, True, False
     return segments
 
 
-def _segments(command):
+def _segments(command, locale=False, skip_empty=False):
     """Compatibility projection over _lex_command: a list of (argv, sep_after) tuples, argv being the
     quote-decoded words with shell REDIRECTION removed (so a leading/interspersed/trailing redirect no
     longer pollutes the token stream) and sep_after the ending operator or "". Raises ValueError on a
     parse error or unsupported construct so callers fall back conservatively. Existing consumers
     (protected_line, gate_weakening, git_explicit_binding, git_discard, find_ai_authorship) read
-    redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly."""
-    return [(seg.argv, seg.sep_after) for seg in _lex_command(command)]
+    redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly.
+    locale is passed to _lex_command; only the commit-identity reader (_cmtidn_line_ai) sets it, and it reads
+    each line with it set and unset. skip_empty is passed to _lex_command, for a caller that reads nothing
+    from a segment with no word and no redirect."""
+    return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale, skip_empty=skip_empty)]
 
 
 # A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
@@ -975,11 +1432,12 @@ def _segments(command):
 # APPEND '+=' form (OLDPWD+=..) is a real bash assignment prefix too, so it is recognized here; missing it
 # left the append-assignment mistaken for the command word, so the following cd was never examined. The
 # any-segment identity-assignment scan still inspects these same tokens for an AI name
-# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: the 'env VAR=x git ...' command form
-# and the 'command git ...' builtin remain out of scope. This matches the DECODED token, so an
-# assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. -> decoded OLDPWD=..) also matches;
-# bash would treat that as a command, not an assignment, so recognizing it is a deliberate conservative
-# over-fire (disclosed in the manifest residue), never an under-block.
+# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: for the checks that resolve the
+# command word here, the 'env VAR=x git ...' command form and the 'command git ...' builtin remain out of
+# scope; the commit-identity check reads both through its own finder (_cmtidn_git_commands). This matches
+# the DECODED token, so an assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. -> decoded
+# OLDPWD=..) also matches; bash would treat that as a command, not an assignment, so recognizing it is a
+# deliberate conservative over-fire (disclosed in the manifest residue), never an under-block.
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 
 
@@ -1297,10 +1755,39 @@ _DEV_PROC_TARGET_RE = re.compile(r"^/+(?:dev|proc)(?:/|$)")
 # It therefore cannot be proven a plain file lexically, so it is routed OPAQUE (ASK), never a proven
 # real-file ALLOW - matching how a '..' escape (equally cwd-dependent) is handled.
 _REL_DEV_PROC_TARGET_RE = re.compile(r"^(?:dev|proc)(?:/|$)")
+
+
+class _RawSequence:
+    """A raw-text probe whose steps must match IN ORDER: each step is searched once, from the end of the
+    previous step's leftmost match, and search() returns the last step's match or None. It decides the
+    same set as the single regex that joins the steps with a lazy '.*?' under re.DOTALL ('\\bgit\\b.*?\\bpush\\b'
+    and its siblings), at linear cost: that single regex retries the lazy gap from every match of the
+    first step, so on a command with many git words and no verb after them its cost grew with the square
+    of the command length, and with the cube for a three-step pattern (seconds at a few KB, past the hook
+    timeout well under 64 KB). Taking each step's leftmost match loses no solution because every step but
+    the last matches one fixed-length word, so the leftmost match also ends first, and a search started at
+    a position still reads the characters before it, so a word boundary or lookbehind at that position
+    sees the same neighbour it sees in the single regex. tools/selftest_aiqt_hooks.py holds every probe
+    built from this class equal to the single regex it replaced over a generated corpus."""
+    __slots__ = ("steps",)
+
+    def __init__(self, *patterns):
+        self.steps = tuple(re.compile(pattern) for pattern in patterns)
+
+    def search(self, text):
+        found, pos = None, 0
+        for step in self.steps:
+            found = step.search(text, pos)
+            if found is None:
+                return None
+            pos = found.end()
+        return found
+
+
 # Fallback-only broad producer probe over the RAW command, used only when _lex_command cannot parse the
 # command: an apparent 'git ... <producer>' ASKS (never a silent allow, never a regex-earned allow).
-_RAW_DIFF_PRODUCER_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
+_RAW_DIFF_PRODUCER_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
 
 
 def _has_patch_flag(tokens):
@@ -1741,7 +2228,7 @@ def _diff_proof_summary(command):
 
 
 def _diff_proof_log_listing(command):
-    """Proof E (Architect-directed refinement): a benign 'git log' COMMIT LISTING that provably emits no diff
+    """Proof E (maintainer-directed refinement): a benign 'git log' COMMIT LISTING that provably emits no diff
     to the console. Requires a metacharacter-free single simple command (the conservative charset, no shell
     reserved word, so no redirect and no pipe), the first resolved words literally 'git' and 'log', and every
     option-like word before a '--'/'--end-of-options' boundary drawn from the exact _BENIGN_LOG_OPTS
@@ -1907,8 +2394,17 @@ def diff_source_pretool(data):
 
 # --- cmtidn: AI identity in a git authoring command --------------------------------------------------
 # Quote-aware and token-based. The commit-MESSAGE contexts (a Co-Authored-By trailer, an --author value)
-# are judged only on a segment whose command word is git and whose subcommand is a commit-creating verb,
-# so a read-side use of the same tokens (git log --author=Claude) never trips. Separately, an identity
+# are judged only on a segment that runs a git command whose subcommand is a commit-creating verb (the git
+# command is found behind leading reserved words, a function or coprocess name, VAR=value words and wrapper
+# words, _cmtidn_git_commands), so a read-side use of the same tokens (git log --author=Claude) does not trip,
+# bare or wrapped, and a git word after the subcommand of a read-side git command taken to be the one the
+# segment runs (a held candidate whose subcommand is a git command name) is that command's operand (env git
+# log --grep git commit --author=Claude). A command that git itself runs from its operands (git submodule
+# foreach CMD, git submodule--helper foreach CMD, git bisect run CMD, git rebase --exec CMD) is read as a
+# command line of its own (_cmtidn_run_lines). The read-side forms that still trip are the disclosed over-denies at
+# _CMTIDN_GIT_WRAPPERS: a wrapped git word right after a wrapper option, which the finder cannot tell from that
+# option's value (sudo -E git log --grep git commit --author=Claude), and a wrapped git command whose
+# subcommand is not a git command name (an alias). Separately, an identity
 # ASSIGNMENT (a git-identity env var, or a user.name/user.email config value) is a violation on ANY
 # segment, to harden the common 'set the identity then commit' form. Because the tokens are quote-aware,
 # a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
@@ -1918,42 +2414,222 @@ AI_IDENTITY_RE = re.compile(
     r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
     r"|@anthropic\.com|@openai\.com")
 COMMIT_VERBS = ("commit", "merge", "cherry-pick", "am", "rebase", "revert", "commit-tree")
-# A Co-Authored-By trailer inside a single token; its value runs to the token end (the token IS the
-# quoted message, so no shell quote can appear within it).
-CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n]{1,160})")
+# A Co-Authored-By trailer inside a single token; its value is up to 160 characters, to the end of its line (the
+# token IS the quoted message, so no shell quote can appear within it). The regex matches the trailer name alone
+# and reads the value in a lookahead, so a scan of its matches (_co_author_ai) resumes right after each name and
+# reaches every trailer name in the token, one inside an earlier trailer's value included: a second trailer on the
+# same line, which a regex that consumed the value passed over when its search resumed after that value (a first
+# value of 140 characters ends inside a later 'Co-authored-by: Claude' and names no AI). The only 'c' in a trailer
+# name is its first letter, so two names cannot overlap, and each place a trailer can start is read with the value
+# that the regex consuming the value found there. Each whitespace run is taken whole (\s*+), as in the fallback's
+# co-author context (_RAW_IDENTITY_CONTEXTS): giving a run back one character at a time cost time quadratic in its
+# length when the token ends after it (a message of a trailer name and a long run of newlines). Taking a run whole
+# changes a match only where nothing but whitespace and at most one ':' follows the trailer name to the end of the
+# token: the value found there names no AI identity and no later match can start, so the reader finds the same AI
+# identities. The whitespace runs after a name end before the next name starts, so a token costs time linear in
+# its length.
+CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n]{1,160}))")
 # Identity-assignment tokens (any segment): a git-identity env var, or a user.name/user.email config
 # value in the '-c user.name=VALUE' inline shape.
 GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
 USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
-# Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command (see
-# _commit_identity_fallback). A value runs to whitespace or a shell separator/quote.
+# Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command, when a command
+# line that git runs from its operands is left unread, because the tokenizer cannot parse it or it is past the
+# run-line bounds, and when the command is too long to read and holds no word that can record an identity (see
+# _commit_identity_fallback). A value runs to whitespace or a shell separator/quote. The --author context
+# matches every prefix that git reads as --author (--au, --aut, --auth, --autho, --author; no other git commit
+# option starts with 'au'), with '=' or whitespace before the value, so the fallback is no weaker on that option
+# than the token reader. Like CO_AUTHOR_RE, the co-author context matches the trailer name alone and reads its
+# value, up to 160 characters, in a lookahead, so the scan reaches every trailer name, one inside an earlier
+# trailer's value included, each with the value that the context consuming the value found there. It takes each
+# whitespace run whole (\s*+), since it also judges a command too long to read, of any length: giving a run back
+# one character at a time cost time quadratic in its length when a quote or the end of the command follows it (a
+# run of newlines, which no value can start with). Taking a run whole changes a match only there, and the value
+# that giving part of the run back would find holds only whitespace or a ':', which names no AI identity, and
+# covers no place the context can start, so the context finds the same AI identities. The user.name context takes
+# each whitespace run whole too, since it judges a command the tokenizer cannot parse at any length up to the read
+# limit: splitting a run between two whitespace quantifiers at each space in it cost time quadratic in the run's
+# length when no value can start after it (a run of spaces before a quote that does not close). Its name is
+# followed by a whitespace run, '=' and a whitespace run, or else by a whitespace run that holds a space (the
+# lookahead). No value starts with whitespace, so either way a value starts after the whole run, where it started
+# when the run was split, and when no value starts after the '=', the '=' itself is the value, as it was when a
+# space before it was taken for the separator: the context finds the same values. The identity variable and
+# user.name contexts judge a command too long to read only when it holds none of their names
+# (_cmtidn_identity_word), so there they find no place to start.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
-    (re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n\"']{1,160})"), "co-author trailer"),
-    (re.compile(r"(?i)--author[= ]\s*" + _VALUE), "--author value"),
+    (re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n\"']{1,160}))"), "co-author trailer"),
+    (re.compile(r"(?i)--au(?:t(?:h(?:o(?:r)?)?)?)?[=\s]\s*" + _VALUE), "--author value"),
     (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*=\s*" + _VALUE), "git identity variable"),
-    (re.compile(r"(?i)\buser\.(?:name|email)\s*[= ]\s*" + _VALUE), "user.name/user.email value"),
+    (re.compile(r"(?i)\buser\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
+     "user.name/user.email value"),
 )
 
 
-def _commit_message_and_author_ai(tokens):
+# The options of git commit as git 2.55 lists them (git commit -h, git commit --git-completion-helper-all), so
+# the commit-message reader reads a value-taking option's value word as that value and never as an --author
+# option ('git commit -m --author=X' records the message '--author=X' and no author). Each short letter and
+# long name maps to the kind of value the option takes: 'author' is judged; 'message' (-m) and 'trailer' are
+# message text, which a co-author trailer can live in, so it is scanned for one; 'file' (-F) is the name of the
+# file git reads the message from; 'value' (a commit, a template, a date, a mode or a number) is passed over;
+# None takes no value from the next word (a flag, or -S, -u, --gpg-sign and --untracked-files, whose optional
+# value can only share their own word). A next-word value of any value-taking option that has the form
+# --author=VALUE is still judged as an --author value, and so is the word after a next-word value that is
+# --author or a prefix git reads as --author, a safe-direction over-deny that the maintainer chose to keep,
+# since git takes that word as the option's value and records no author from it
+# (_commit_message_and_author_ai). 'verify' and 'post-rewrite' are the positive spellings git also accepts for
+# --no-verify and --no-post-rewrite. Every long name is listed, since git reads a prefix that only one long name
+# starts with as that option (_cmtidn_option).
+_CMTIDN_COMMIT_SHORT = {"m": "message", "F": "file", "C": "value", "c": "value", "t": "value", "U": "value",
+                        "S": None, "u": None}
+_CMTIDN_COMMIT_LONG = {
+    "author": "author", "message": "message", "trailer": "trailer", "file": "file", "reedit-message": "value",
+    "reuse-message": "value", "fixup": "value", "squash": "value", "date": "value", "cleanup": "value",
+    "template": "value", "pathspec-from-file": "value", "unified": "value", "inter-hunk-context": "value",
+    "quiet": None, "verbose": None, "reset-author": None, "signoff": None, "edit": None, "status": None,
+    "gpg-sign": None, "all": None, "include": None, "interactive": None, "patch": None, "only": None,
+    "verify": None, "dry-run": None, "short": None, "branch": None, "ahead-behind": None, "porcelain": None,
+    "long": None, "null": None, "amend": None, "post-rewrite": None, "untracked-files": None,
+    "pathspec-file-nul": None, "allow-empty": None, "allow-empty-message": None}
+
+
+def _cmtidn_option(tok, short, long):
+    """(kind, value) for the word tok read as an option of a git verb, as git's option parser reads it, where
+    short and long map each short letter and each long name of the verb to the kind of value it takes (None:
+    no value from the next word). A short option cluster ('-am') is read letter by letter up to its first
+    letter in short, whose value is the rest of the word, or the next word when nothing follows that letter
+    ('-am MSG' and '-amMSG' both give -m the value MSG). A long option ('--auth', '--auth=X') is the option of
+    that exact name, else the one option whose name starts with it, as git reads an abbreviation (a prefix two
+    names share is ambiguous, and git refuses it); a '--no-' option takes no value. kind is None when the word
+    takes no value from the next word, and value is None when the value is the next word."""
+    if tok.startswith("--"):
+        name, eq, value = tok[2:].partition("=")
+        if name.startswith("no-"):
+            return None, None
+        if name in long:
+            kind = long[name]
+        else:
+            kinds = [k for opt, k in long.items() if opt.startswith(name)]
+            kind = kinds[0] if len(kinds) == 1 else None
+        return kind, (value if eq else None)
+    if tok.startswith("-"):
+        for k in range(1, len(tok)):
+            if tok[k] in short:
+                return short[tok[k]], (tok[k + 1:] or None)
+    return None, None
+
+
+# The longest name that AI_IDENTITY_RE matches between word boundaries ('anthropic'): a match that a co-author
+# value holds and the shorter value of an earlier trailer that it overlaps does not starts at most this many
+# characters less one before the shorter value's end (_ai_value_match). Each name ends with a word character, so
+# a name match that ends at or before that end lies in the shorter value, whose end is a word boundary after the
+# name's last character, and the match that the shorter value lacks ends past it. The gpt alternative has no
+# length bound, but each of its fixed parts (gpt, an optional '-' and a digit or 'o', at most 5 characters) ends
+# with a word character too, so a gpt match whose fixed part ends at or before that end gives the shorter value a
+# match of its own, which stops at the first character of the tail that is not a word character, or at the
+# shorter value's end after a word character, each a word boundary. Each address alternative holds a name
+# alternative between two characters that are not word characters (@anthropic.com holds anthropic), so it
+# matches only where that name matches too. The self-test (ci-wr-ai-margin) computes the names, every fixed part
+# and the addresses from AI_IDENTITY_RE's own parse, and fails when a name or a fixed part is longer than this
+# constant or can begin or end with a character that is not a word character, when an earlier value that ends
+# exactly at the end of one names no AI identity, or when a scan with this constant one smaller finds the same
+# values on strings whose AI name the end of an earlier value cuts.
+_AI_NAME_LONGEST = 9
+_WORD_CHAR_RE = re.compile(r"\w")
+
+
+def _ai_value_match(regex, text):
+    """The first match of regex in text whose value (group 1) names an AI identity, as AI_IDENTITY_RE.search
+    finds one in the value read alone, else None: the match that the plain scan, which searches each value
+    whole, finds, with each character of text searched a bounded number of times. regex is CO_AUTHOR_RE or a
+    context of _RAW_IDENTITY_CONTEXTS, whose values start in order and end in order. The other contexts consume
+    their values, so no two overlap and each is searched whole. The co-author regexes read each value, of up to
+    160 characters, in a lookahead, so in a word of repeated trailer names each character lies in up to 14
+    values. Once a value is found to name no AI identity, a later value that it overlaps and that ends where it
+    ends can hold a match only at its first character, and one that ends past it only there or in a match that
+    ends past that end, which starts at most _AI_NAME_LONGEST - 1 characters before it; so such a value is
+    searched only from there, with the text before that place read for its word boundary. The value read alone
+    starts a word at its first character where the text has a word character before it (a trailer name with no
+    ':' or space after it), so there that character is matched on the value itself. Each character is so
+    searched at most twice (where a later value ends past an earlier one that it overlaps, the earlier one ends
+    160 characters after its start, and the starts are at least 12 characters apart), and the match at a
+    value's first character reads at most 14 characters, except that a gpt name there reads its tail of letters,
+    digits, hyphens and dots to the end of the run or of the value, as the plain scan does."""
+    reached = 0  # the end of the last value searched
+    for m in regex.finditer(text):
+        start, end = m.span(1)
+        if start >= reached:  # no value searched before overlaps this one, which is searched whole
+            if AI_IDENTITY_RE.search(m.group(1)):
+                return m
+            reached = end
+            continue
+        first = start
+        if _WORD_CHAR_RE.match(text, start - 1):
+            if AI_IDENTITY_RE.match(m.group(1)):
+                return m
+            first = start + 1
+        if end > reached:
+            if AI_IDENTITY_RE.search(text, max(first, reached - _AI_NAME_LONGEST + 1), end):
+                return m
+            reached = end
+    return None
+
+
+def _co_author_ai(tok, judged):
+    """A hit label for the first Co-Authored-By trailer in the word tok whose value names an AI identity, else
+    None. Every trailer name in the word is read, one inside an earlier trailer's value included
+    (CO_AUTHOR_RE), so a word costs time linear in its length, though a word of repeated trailer names reads up
+    to about 13 times as many characters as it holds for the values (each name is at least 12 characters long
+    and has its own value of up to 160); the AI identity search of those values reads each character a bounded
+    number of times (_ai_value_match). judged maps each word already judged for the command to its result, so a
+    word that a run line repeats from the line it is built from, or that both readings of a line hold, is
+    scanned once."""
+    if tok in judged:
+        return judged[tok]
+    m = _ai_value_match(CO_AUTHOR_RE, tok)
+    hit = None if m is None else "co-author trailer {!r}".format(m.group(1).strip()[:80])
+    judged[tok] = hit
+    return hit
+
+
+def _commit_message_and_author_ai(tokens, judged):
     """A hit label if this git commit segment names an AI identity in an --author value or in a
-    Co-Authored-By trailer (scanned as a substring of any token, so the trailer that lives inside the
-    single quoted -m message token is caught), else None. The bare message body is deliberately NOT
-    matched against the identity set: a legitimate message that merely mentions an AI product name
-    (e.g. -m 'fix claude adapter') is not a recorded AI identity, and denying it would be a false
-    positive; only a trailer or an --author value records identity."""
+    Co-Authored-By trailer (scanned as a substring of a token, so the trailer that lives inside the
+    single quoted -m message token is caught), else None. Each word is read as a git commit option
+    (_cmtidn_option), so a value-taking option's value is read as that value before anything else, whether it
+    shares the option's word (--author=X, -mMSG) or is the next word (--author X, -am MSG): an --author value is
+    judged, a message value is scanned for a trailer, and a next-word value is never read as an option. One
+    exception keeps an earlier deny: a next-word value of ANY value-taking option (any spelling _cmtidn_option
+    reads as one) that has the form --author=VALUE is judged as an --author value, and so is the word after a
+    next-word value that is --author or a prefix git reads as --author, though git takes the value word as that
+    option's value and records no author from it (git commit -m --author=X, git commit -C --author=X, git commit
+    -m --author X), a safe-direction over-deny that the maintainer chose to keep. The bare message body is
+    deliberately NOT matched against the identity set: a legitimate message that merely mentions an AI product
+    name (e.g. -m 'fix claude adapter') is not a recorded AI identity, and denying it would be a false positive;
+    only a trailer or an --author value records identity. judged holds the trailer results of the words already
+    judged for the command (_co_author_ai)."""
     n = len(tokens)
-    for i, tok in enumerate(tokens):
-        m = CO_AUTHOR_RE.search(tok)
-        if m and AI_IDENTITY_RE.search(m.group(1)):
-            return "co-author trailer {!r}".format(m.group(1).strip()[:80])
-        if tok.startswith("--author="):
-            value = tok[len("--author="):]
-            if AI_IDENTITY_RE.search(value):
-                return "--author value {!r}".format(value.strip()[:80])
-        elif tok == "--author" and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
-            return "--author value {!r}".format(tokens[i + 1].strip()[:80])
+    i = 0
+    while i < n:
+        tok = tokens[i]
+        hit = _co_author_ai(tok, judged)
+        if hit is not None:
+            return hit
+        kind, value = _cmtidn_option(tok, _CMTIDN_COMMIT_SHORT, _CMTIDN_COMMIT_LONG)
+        if kind is not None and value is None and i + 1 < n:
+            i += 1
+            value = tokens[i]  # the option's value word, never read as an option
+            hit = _co_author_ai(value, judged) if kind in ("message", "trailer") else None
+            if hit is not None:
+                return hit
+            if value.startswith("--author="):
+                kind, value = "author", value[len("--author="):]  # the over-deny kept above
+            elif (i + 1 < n and _cmtidn_option(value, {}, _CMTIDN_COMMIT_LONG) == ("author", None)
+                  and AI_IDENTITY_RE.search(tokens[i + 1])):
+                return "--author value {!r}".format(tokens[i + 1].strip()[:80])  # the over-deny kept above
+        if kind == "author" and value is not None and AI_IDENTITY_RE.search(value):
+            return "--author value {!r}".format(value.strip()[:80])
+        i += 1
     return None
 
 
@@ -1975,37 +2651,467 @@ def _identity_assignment_ai(tokens):
     return None
 
 
+# The wrapper words that run the command after them (their own options and operands first) for the
+# commit-identity check: when one is a segment's command word, a later word that is git starts a candidate
+# git command the check reads (_cmtidn_git_commands). One bounded rule rather than an option grammar per
+# wrapper, so a wrapper option or operand that is not git is passed over whatever its arity (sudo -u ci,
+# timeout -s KILL 60, nice -n 10, xargs -I{}), and a wrapper option value spelled git (sudo -u git git commit)
+# starts a candidate that does not hide the git command after it. A candidate whose git word does not stand
+# right after a word that may be an option taking it as a value (a word that starts with '-' other than '-',
+# '--' or an option carrying '=') is held: it may be the git command the segment runs, or a git-named operand
+# of a program off this list that the wrapper runs (sudo flock /var/lock/git env git commit, sudo chroot
+# /srv/git /usr/bin/env git commit). Once a held candidate has a subcommand that is a git command name
+# (_CMTIDN_GIT_SUBCOMMANDS), it is taken to be the git command the segment runs, and a later git word is
+# that command's operand and starts no candidate (env git log --grep git commit); a held candidate whose
+# subcommand is not a git command name (env, /usr/bin/env, an alias) leaves later git words read. The cost
+# is a safe-direction over-deny when a wrapped command that is not git carries git, a commit verb and an AI
+# --author or trailer as its own operands ('xargs echo git commit --author=...'), when a read-side git word
+# stands right after a wrapper option, so the finder cannot tell it from that option's value and keeps
+# reading later git words ('sudo -E git log --grep git commit --author=...'), and when a wrapped read-side
+# git command's subcommand is an alias ('env git lg --grep git commit --author=...'); the remaining gap is a
+# git-named operand of a program off the list followed by a word spelled as a git command name. 'command -v
+# NAME' and 'command -V NAME' only look a name up, so a command word 'command' whose options carry v or V runs
+# no git command. A wrapper off this list (builtin, doas, ionice, ...) is not read. The list and the reserved
+# words below are this check's own (the _CMTIDN_ prefix), so one shared wrapper-aware finder can later replace
+# them.
+_CMTIDN_GIT_WRAPPERS = frozenset((
+    "env", "timeout", "command", "exec", "nohup", "xargs", "sudo", "nice", "setsid", "stdbuf", "time"))
+# The shell reserved words that can stand before a segment's command word ('! git ...', 'if git ...',
+# 'then git ...', '{ git ...; }'); the same words the gate-discipline check passes over (_GATE_RESERVED).
+_CMTIDN_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "fi", "for", "while", "until",
+                              "do", "done", "case", "esac", "select", "function", "in", "[[", "]]", "coproc"))
+# The reserved words that open a compound command. 'function NAME' and 'coproc NAME' followed by one of them
+# define a function or start a named coprocess whose body is that compound command, so NAME is a name and the
+# body's command word comes after it (function f { git commit ...; }, coproc C while git commit ...; do :;
+# done). 'coproc NAME' followed by any other word is a simple command whose command word is NAME (coproc C
+# env git ... runs C). A '(' or '((' body ends the segment in the lexer, so that body is judged as a segment
+# of its own.
+_CMTIDN_COMPOUND_OPENERS = frozenset(("{", "if", "while", "until", "for", "case", "select", "[["))
+# The git command names, so a held candidate whose subcommand is one is taken to be the git command the segment
+# runs (_CMTIDN_GIT_WRAPPERS): the git 2.55 built-ins (git --list-cmds=builtins) and the commands of its command
+# list (git --list-cmds=list-mainporcelain and the other command categories, the guides left out), less the
+# internal helpers whose name carries '--' and the separate programs gitk, gitweb and scalar. A git command
+# missing from it only leaves later git words read, a safe-direction over-deny.
+_CMTIDN_GIT_SUBCOMMANDS = frozenset((
+    "add", "am", "annotate", "apply", "archimport", "archive", "backfill", "bisect", "blame", "branch",
+    "bugreport", "bundle", "cat-file", "check-attr", "check-ignore", "check-mailmap", "check-ref-format",
+    "checkout", "checkout-index", "cherry", "cherry-pick", "citool", "clean", "clone", "column", "commit",
+    "commit-graph", "commit-tree", "config", "count-objects", "credential", "credential-cache", "credential-store",
+    "cvsexportcommit", "cvsimport", "cvsserver", "daemon", "describe", "diagnose", "diff", "diff-files",
+    "diff-index", "diff-pairs", "diff-tree", "difftool", "fast-export", "fast-import", "fetch", "fetch-pack",
+    "filter-branch", "fmt-merge-msg", "for-each-ref", "for-each-repo", "format-patch", "format-rev", "fsck",
+    "fsck-objects", "gc", "get-tar-commit-id", "grep", "gui", "hash-object", "help", "history", "hook",
+    "http-backend", "http-fetch", "http-push", "imap-send", "index-pack", "init", "init-db", "instaweb",
+    "interpret-trailers", "last-modified", "log", "ls-files", "ls-remote", "ls-tree", "mailinfo", "mailsplit",
+    "maintenance", "merge", "merge-base", "merge-file", "merge-index", "merge-one-file", "merge-ours",
+    "merge-recursive", "merge-recursive-ours", "merge-recursive-theirs", "merge-subtree", "merge-tree",
+    "mergetool", "mktag", "mktree", "multi-pack-index", "mv", "name-rev", "notes", "p4", "pack-objects",
+    "pack-redundant", "pack-refs", "patch-id", "pickaxe", "prune", "prune-packed", "pull", "push", "quiltimport",
+    "range-diff", "read-tree", "rebase", "receive-pack", "reflog", "refs", "remote", "remote-ext", "remote-fd",
+    "repack", "replace", "replay", "repo", "request-pull", "rerere", "reset", "restore", "rev-list", "rev-parse",
+    "revert", "rm", "send-email", "send-pack", "sh-i18n", "sh-setup", "shell", "shortlog", "show", "show-branch",
+    "show-index", "show-ref", "sparse-checkout", "stage", "stash", "status", "stripspace", "submodule", "svn",
+    "switch", "symbolic-ref", "tag", "unpack-file", "unpack-objects", "update-index", "update-ref",
+    "update-server-info", "upload-archive", "upload-pack", "url-parse", "var", "verify-commit", "verify-pack",
+    "verify-tag", "version", "whatchanged", "worktree", "write-tree"))
+
+
+def _cmtidn_git_commands(tokens):
+    """Yield the index of each word that one segment's git commands may read as their subcommand, in ONE pass
+    over the tokens: no suffix is sliced or re-scanned per git word, so a long wrapped segment costs time
+    linear in its length. Leading reserved words (_CMTIDN_RESERVED) and VAR=value words are passed over to the
+    command word, and so is the NAME after 'function' or 'coproc' when a compound opener follows it
+    (_CMTIDN_COMPOUND_OPENERS). When the command word is git (a path to git included), that one git command
+    is read and the index of its subcommand is yielded. When it is a wrapper (_CMTIDN_GIT_WRAPPERS), the finder
+    yields CANDIDATES: a later word that is git and not a VAR=value word starts a candidate git command, a
+    git-named option value or operand included, until a held candidate (its git word does not stand right
+    after a word that may be an option taking it as a value) has a subcommand that is a git command name
+    (_CMTIDN_GIT_SUBCOMMANDS), so it is taken to be the command the segment runs; a later git word is that
+    command's operand. A held candidate whose subcommand is not a git command name may be a git-named operand
+    of a program off the wrapper list (sudo flock /var/lock/git env git commit), so later git words are still
+    read (the subcommand word itself, when it is git, starts one: sudo flock git git commit runs git commit).
+    The command that a git command runs from its operands is read by find_ai_authorship (_cmtidn_run_lines),
+    not here. A 'command' whose options carry v or V (command -v git, command -V git) is a lookup and runs
+    none; otherwise the segment runs no git command. A git command's subcommand is its first word that is not
+    a git global option, an arg-consuming global option (_GIT_ARG_OPTS: -C DIR, -c NAME=VALUE) passing over
+    its value too, as _git_subcommand_rest reads it. Every
+    candidate still reading its global options sees the same next word, so the pass keeps three flags (the
+    candidates expect an option or their subcommand here, they expect an option value here, one of them is
+    held), and a word that is the subcommand of two candidates is yielded once. Purely lexical: a git word the
+    shell builds at run time is not seen (the residue lists them)."""
+    n = len(tokens)
+    i = 0
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        named = tokens[i] in ("function", "coproc")
+        i += 1
+        if named and i + 1 < n and tokens[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1  # the NAME of a function definition or a named coprocess, before its compound body
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= n:
+        return
+    word = tokens[i].rsplit("/", 1)[-1]
+    wrapped = word in _CMTIDN_GIT_WRAPPERS
+    if word != "git" and not wrapped:
+        return
+    i += 1
+    if word == "command":
+        while i < n and tokens[i].startswith("-") and tokens[i] != "--":
+            if "v" in tokens[i] or "V" in tokens[i]:
+                return  # command -v / -V NAME looks NAME up and runs nothing
+            i += 1
+    reading = not wrapped  # the candidates expect a global option or their subcommand at this word
+    value = False          # the candidates expect the value of an arg-consuming global option at this word
+    held = not wrapped     # one of the candidates is held (its git word follows no option that may take it)
+    ended = False          # a held candidate has a git command name as its subcommand, the command run
+    last = tokens[i - 1]
+    while i < n:
+        tok = tokens[i]
+        starts = (wrapped and not ended and tok.rsplit("/", 1)[-1] == "git"
+                  and not _ENV_ASSIGN_RE.match(tok))
+        next_reading = value  # an option value is passed over and its candidates read on
+        next_held = held and value
+        next_value = False
+        if reading:
+            if not tok.startswith("-"):
+                yield i
+                ended = ended or (held and (not wrapped or tok in _CMTIDN_GIT_SUBCOMMANDS))
+            elif tok in _GIT_ARG_OPTS:
+                next_value, next_held = True, held
+            else:
+                next_reading, next_held = True, held
+        if starts:
+            next_reading = True
+            if not last.startswith("-") or last in ("-", "--") or "=" in last:
+                next_held = True  # no option before this git word can take it as its value
+        reading, value, held = next_reading, next_value, next_held
+        if ended and not (reading or value):
+            return  # the git command the segment runs has its subcommand
+        last = tok
+        i += 1
+
+
+# The options of git rebase as git 2.55 lists them (git rebase -h, git rebase --git-completion-helper-all), read
+# like _CMTIDN_COMMIT_SHORT and _CMTIDN_COMMIT_LONG so that the value of --exec or -x, in any spelling git
+# accepts (-x CMD, -xCMD, -ix CMD, --exec=CMD, --ex CMD), is found and the value of another option is not
+# read as one. 'verify', 'stat' and 'ff' are the positive spellings of --no-verify, --no-stat and --no-ff.
+_CMTIDN_REBASE_SHORT = {"x": "exec", "C": "value", "s": "value", "X": "value", "S": None, "r": None}
+_CMTIDN_REBASE_LONG = {
+    "exec": "exec", "onto": "value", "trailer": "value", "whitespace": "value", "empty": "value",
+    "strategy": "value", "strategy-option": "value", "keep-base": None, "verify": None, "quiet": None,
+    "verbose": None, "stat": None, "signoff": None, "committer-date-is-author-date": None,
+    "reset-author-date": None, "ignore-date": None, "ignore-whitespace": None, "force-rebase": None, "ff": None,
+    "continue": None, "skip": None, "abort": None, "quit": None, "edit-todo": None, "show-current-patch": None,
+    "apply": None, "merge": None, "interactive": None, "preserve-merges": None, "rerere-autoupdate": None,
+    "keep-empty": None, "autosquash": None, "update-refs": None, "gpg-sign": None, "autostash": None,
+    "allow-empty-message": None, "rebase-merges": None, "fork-point": None, "root": None,
+    "reschedule-failed-exec": None, "reapply-cherry-picks": None}
+# How deep the command lines that git runs from its operands may nest (a foreach that runs a foreach) and how
+# many characters of such lines one command may make the check read, as a multiple of its own length plus a
+# floor, kept for each reading of the lines and for the lines that only a mix of the readings builds
+# (_cmtidn_line_ai), so a command built to nest or repeat them costs time linear in its length. A line past
+# either bound is left unread, and so is a line, at any depth, that the shared tokenizer cannot parse (an
+# unbalanced quote in a foreach operand or an exec value): every other segment of the command and every other
+# run line within the bounds is still judged, so such a line cannot hide an AI identity that the reader can
+# read. Only when none of them sets one does find_ai_authorship raise ValueError with _CMTIDN_RUN_BOUNDS, so
+# the handler judges the command with its conservative fallback, which then denies an AI identity anywhere in
+# the command once its quotes and backslashes are removed (_commit_identity_fallback).
+_CMTIDN_RUN_DEPTH = 8
+_CMTIDN_RUN_SCALE = 8
+_CMTIDN_RUN_FLOOR = 4096
+_CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or command lines nested or repeated past "
+                      "the commit-identity bounds")
+# The longest command, in characters, that find_ai_authorship reads. A hook that runs past its timeout (10
+# seconds, tools/gen_hooks.py TIMEOUT) is stopped before it can deny, and the platform contract this file
+# records (the module docstring) does not say that a stopped hook refuses the call, so the reading of a long
+# command has to end well inside the timeout. The costliest commands measured, repeated wrapped git bisect run
+# words nested up to three deep and ending in a locale quote, which spend all three run-line bounds, took up to
+# about 7.3 microseconds of CPU time per character to read (1.9 s at 256 KiB, 7.1 s at 1 MiB), so a command of
+# this length costs up to about 1 s, a tenth of the timeout; that margin is for a host several times slower than
+# the one measured and for the other PreToolUse hooks the platform runs on the same command at the same time.
+# That bound holds only while each regex the reader runs on a word, and each one the fallback runs on a command of
+# this length that the tokenizer cannot parse, costs time linear in the length it scans: CO_AUTHOR_RE and the
+# user.name context of _RAW_IDENTITY_CONTEXTS take each whitespace run whole, since giving a run back one character
+# at a time cost time quadratic in its length (about 53 s and 130 s of CPU time at this length, for a commit message
+# of a trailer name and a run of newlines and for user.name and a run of spaces before a quote that does not close,
+# against about 0.01 s with each run taken whole). CO_AUTHOR_RE also gives each trailer name in a word its own
+# value of up to 160 characters, so a word of repeated trailer names costs several times one pass over it, though
+# the AI identity search reads only the part of each value past the end of the one before it, less
+# _AI_NAME_LONGEST - 1 characters (_ai_value_match), and each distinct word is scanned once for the command
+# (_co_author_ai): a commit message of repeated trailer names in git rebase -x lines nested seven deep, the
+# innermost ending in a locale quote, took up to about 0.15 s at this length, against 0.41 s with each value
+# searched whole (the highest of three single runs on one host). A longer command raises ValueError with
+# _CMTIDN_TOO_LONG before any reading starts, and the handler's fallback denies it when it names an AI anywhere
+# and holds a word that can record an identity, or when a raw-string context finds an AI identity in it, in time
+# that grows with its length: on the measuring host a command of about 40 to 48 MiB or longer can outlast the
+# timeout, and on a slower host a shorter one can (_commit_identity_fallback).
+_CMTIDN_READ_LIMIT = 128 << 10
+_CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads within the hook timeout"
+# An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
+# command too long to read is found by the fallback as well. Each word the reader judges, a word of a run line
+# included, holds the command's characters in order less only quotes, backslashes, the newline of a
+# backslash-newline and the '$' before a quote (a run line adds quotes and backslashes that its own reading drops
+# again), so once every quote, backslash, '$' and newline is dropped from the command (_CMTIDN_UNREAD_CHARS_RE),
+# the letters of any name the reader matches stand together, though the characters around them may no longer
+# leave a word boundary.
+_AI_NAME_ANYWHERE_RE = re.compile(AI_IDENTITY_RE.pattern.replace(r"\b", ""))
+_CMTIDN_UNREAD_CHARS_RE = re.compile(r"[\\\"'$\n]")
+# The words that can record an identity, which a command too long to read must also hold before its AI name
+# denies it (_cmtidn_identity_word): the reader judges an --author value or a trailer only on a segment whose
+# git command it finds by a word that is git or a path ending in /git, and a run line only under such a git
+# command, and it judges an identity assignment only in a word that starts with a GIT_AUTHOR_ or GIT_COMMITTER_
+# variable name, or with user.name or user.email. Each such word holds its letters in the command with only the
+# characters of _CMTIDN_UNREAD_CHARS_RE between them, so the variable and config names are sought in the command
+# once those characters are dropped, as the AI name is. git is sought as a whole word: its letters with only
+# those characters between them (g$'i't), and no letter, digit or underscore directly before or after it in the
+# command as written, so a dropped character counts as a word boundary too. A word of the command starts after
+# a space, a tab, a newline or an operator, and git in a path follows a '/', so a git at the start of a line,
+# whose newline the dropping removes (EOF, a newline, then git commit ...), is still found. A command that runs
+# git under another name (a variable, a function, an alias) is outside the reader too.
+_CMTIDN_GIT_WORD_RE = re.compile(r"(?<!\w)g[\\\"'$\n]*i[\\\"'$\n]*t(?!\w)")
+_CMTIDN_IDENTITY_NAME_RE = re.compile(r"(?i)GIT_(?:AUTHOR|COMMITTER)_|user\.(?:name|email)")
+
+
+def _cmtidn_run_lines(tokens, k, stop):
+    """Yield each command line that the git command whose subcommand is the word at index k runs from its own
+    operands, spelled as the shell reads it, so find_ai_authorship reads it as a command of its own. git
+    submodule foreach CMD runs its first operand as shell text followed by the other operands as its arguments
+    (foreach 'git commit ...' and foreach git commit ... both run git commit); the options of submodule
+    (--quiet, --cached) and of foreach (--quiet, --recursive) take no value, so the first word after them that
+    does not start with '-' is that first operand. git submodule foreach hands its operands to git
+    submodule--helper foreach after a '--', and git runs the helper's operands the same way, after an optional
+    '--', so the helper's foreach is read the same way. git bisect run CMD runs its operands as the words of one
+    command. git rebase runs the value of each --exec or -x as a shell command line (_cmtidn_option reads the
+    rebase options up to '--'). stop is the index of the next rebase subcommand that the segment's git commands
+    read (len(tokens) when there is none), where this rebase's read of its options stops: that subcommand word
+    takes no value, so from the word after it both reads see the same option boundaries and find the same
+    lines, which the next rebase yields. Each word of a segment is so read for one rebase only, and a segment
+    of many wrapped rebase commands costs time linear in its length. Only these forms are read: the residue
+    lists the commands git runs from elsewhere (an interactive rebase's edited todo list, an alias, a configured
+    editor)."""
+    n = len(tokens)
+    verb = tokens[k]
+    j = k + 1
+    if verb in ("submodule", "submodule--helper"):
+        while j < n and tokens[j].startswith("-"):
+            j += 1
+        if j < n and tokens[j] == "foreach":
+            j += 1
+            while j < n and tokens[j].startswith("-"):
+                j += 1
+            if j < n:
+                yield tokens[j] + "".join(" " + shlex.quote(word) for word in tokens[j + 1:])
+    elif verb == "bisect":
+        if j + 1 < n and tokens[j] == "run":
+            yield " ".join(shlex.quote(word) for word in tokens[j + 1:])
+    elif verb == "rebase":
+        while j < stop and tokens[j] != "--":
+            kind, value = _cmtidn_option(tokens[j], _CMTIDN_REBASE_SHORT, _CMTIDN_REBASE_LONG)
+            if kind is not None and value is None and j + 1 < n:
+                j += 1
+                value = tokens[j]  # the option's value word, never read as an option
+            if kind == "exec" and value is not None:
+                yield value
+            j += 1
+
+
 def find_ai_authorship(command):
     """Return '<context> <value>' when a segment sets an AI identity for a recorded change, else None:
     an identity-assignment (env var / git config) on ANY segment, or a commit-message context (co-author
-    trailer, --author value) on a git commit segment. Raises ValueError on a shell parse error (via
-    _segments), which the handler turns into the conservative fallback."""
-    for tokens, _sep in _segments(command):
-        hit = _identity_assignment_ai(tokens)
-        if hit is not None:
-            return hit
-        if _command_word(tokens) == "git" and _git_subcommand(tokens) in COMMIT_VERBS:
-            hit = _commit_message_and_author_ai(tokens)
+    trailer, --author value) on a segment that runs a git commit-family command, found by
+    _cmtidn_git_commands behind leading reserved words, a function or coprocess name, VAR=value words and
+    wrapper words (env, sudo, ...), and the same on each command line that a git command runs from its
+    operands (_cmtidn_run_lines). The command and each run line are judged under two readings, and an AI
+    identity that either finds is returned: bash locale quoting read as double-quoted text (_segments with
+    locale True), so a name that $"" splits inside a word (Cl$""aude) is read joined, as bash joins it, and the
+    literal '$' reading every other guard uses (locale False), so a name followed directly by a locale quote
+    (Claude$"bot", which the first reading joins into Claudebot) still denies as it did before locale quoting
+    was read: a change toward allow is held until the maintainer decides it. The run lines that each reading
+    alone builds are read within a length bound of that reading's own, and those that only a mix of the two
+    builds within a third, so the lines one reading builds cannot spend the bound of the other: every line that
+    one reading alone reads is still read, and no command that one reading alone denies is allowed. Raises
+    ValueError on a shell parse error in the command itself (via _segments; under one reading only, after the
+    other reading has found nothing and left no run line unread), ValueError(_CMTIDN_RUN_BOUNDS) when a run
+    line was left unread, because it could not be parsed or was past the bounds (_CMTIDN_RUN_DEPTH), and
+    nothing read sets an AI identity, and ValueError(_CMTIDN_TOO_LONG) at once, before any reading, when the
+    command is longer than _CMTIDN_READ_LIMIT characters; the handler turns each into the conservative
+    fallback."""
+    if len(command) > _CMTIDN_READ_LIMIT:
+        raise ValueError(_CMTIDN_TOO_LONG)
+    bound = _CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR
+    unread = [False]
+    try:
+        hit = _cmtidn_line_ai(command, 0, {True: [bound], False: [bound], None: [bound]}, unread, [True, False],
+                              {})
+    except ValueError:
+        if not unread[0]:
+            raise
+        hit = None  # one reading cannot parse the command, and the other left a run line unread
+    if hit is None and unread[0]:
+        raise ValueError(_CMTIDN_RUN_BOUNDS)
+    return hit
+
+
+def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
+    """find_ai_authorship over one command line at a run-line nesting depth. The line is judged under both
+    readings, the locale reading and the literal '$' reading (the locale flag of _segments True and False),
+    once when they agree, which they do on a line holding no $". paths lists the readings whose own reading of
+    the command and of every run line down to this one builds this line, and is empty when only a mix of the
+    two does. budgets maps each reading, and None for such a mix, to a one-item list of the characters of run
+    lines still to be read within that bound, shared by every nested line of the command: each run line that a
+    reading of this line builds is charged to the bound of each reading in paths that reads this line so, or to
+    the None bound when there is none, and is read while one of those bounds is not spent, so every line that
+    one reading alone reads is read, within that reading's bound, as that reading alone reads it. unread is a
+    one-item list set to True when a run line is left unread: one past a bound, or one (depth above 0) that the
+    shared tokenizer cannot parse under a reading. Such a line is not read, but the other segments of the
+    command and of every line being read still are, and so are the other run lines within the bounds; once the
+    bounds that a reading charges are spent it builds no further run line, and each rebase reads its options
+    only up to the next rebase subcommand (_cmtidn_run_lines), so the cost stays linear. judged maps each word
+    already scanned for a co-author trailer, on this line or another line of the command, to its result
+    (_co_author_ai). A parse error in the command itself (depth 0) raises: at once when neither reading parses
+    it, and otherwise after the other reading has found nothing."""
+    readings = []  # (the readings that read the line so, its segments)
+    error = None
+    for locale in (True, False):
+        if not locale and '$"' not in command:
+            for same, _read in readings:
+                same.append(locale)  # the readings differ only at a $" (_read_word): one serves for both
+            break
+        try:
+            segments = _segments(command, locale=locale)
+        except ValueError as exc:
+            error = error or exc
+            continue
+        for same, read in readings:
+            if read == segments:
+                same.append(locale)
+                break
+        else:
+            readings.append(([locale], segments))
+    if error is not None and depth > 0:
+        unread[0] = True  # a run line that a reading cannot parse is left unread, like one past the bounds
+    elif error is not None and not readings:
+        raise error
+    for same, segments in readings:
+        keys = [reading for reading in paths if reading in same] or [None]
+        for tokens, _sep in segments:
+            hit = _identity_assignment_ai(tokens)
             if hit is not None:
                 return hit
+            subs = list(_cmtidn_git_commands(tokens))
+            if any(tokens[k] in COMMIT_VERBS for k in subs):
+                hit = _commit_message_and_author_ai(tokens, judged)
+                if hit is not None:
+                    return hit
+            rebases = [k for k in subs if tokens[k] == "rebase"]
+            stops = dict(zip(rebases, rebases[1:]))
+            for k in subs:
+                if all(budgets[key][0] < 0 for key in keys):
+                    break  # the length bound is spent: no further run line is built
+                for line in _cmtidn_run_lines(tokens, k, stops.get(k, len(tokens))):
+                    for key in keys:
+                        budgets[key][0] -= len(line)
+                    spent = [budgets[key][0] < 0 for key in keys]
+                    if depth >= _CMTIDN_RUN_DEPTH or any(spent):
+                        unread[0] = True  # left to the conservative fallback unless something read sets an identity
+                        if depth >= _CMTIDN_RUN_DEPTH or all(spent):
+                            break
+                    hit = _cmtidn_line_ai(line, depth + 1, budgets, unread, [key for key in keys if key is not None],
+                                          judged)
+                    if hit is not None:
+                        return hit
+    if error is not None and depth == 0:
+        raise error
     return None
 
 
-def _commit_identity_fallback(command):
-    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): scan the RAW
-    string for an AI identity in a Co-Authored-By trailer, an --author value, a git-identity env var, or
-    a user.name/user.email value; deny on a hit. Never silent-allow a plausibly-violating command on a
-    parse failure."""
+def _cmtidn_identity_word(command):
+    """A word of command that can record an identity, as a match object: its first git word
+    (_CMTIDN_GIT_WORD_RE), else its first GIT_AUTHOR_, GIT_COMMITTER_, user.name or user.email name once the
+    characters of _CMTIDN_UNREAD_CHARS_RE are dropped (_CMTIDN_IDENTITY_NAME_RE); None when it holds neither."""
+    return (_CMTIDN_GIT_WORD_RE.search(command)
+            or _CMTIDN_IDENTITY_NAME_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command)))
+
+
+def _commit_identity_fallback(command, error):
+    """FAIL-SAFE conservative scan when find_ai_authorship could not read the command in full, error being the
+    text of the ValueError it raised: the shared tokenizer cannot parse the command (an unbalanced quote or an
+    unsupported construct), a command line that git runs from its operands was left unread, because the
+    tokenizer cannot parse it or it is past the run-line bounds, and nothing read set an AI identity
+    (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
+    (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command for an
+    AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
+    git-identity env var, or a user.name/user.email value (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
+    A command too long to read is first denied when an AI name appears ANYWHERE in it once every quote,
+    backslash, '$' and newline is removed, with no word boundary needed around the name (_AI_NAME_ANYWHERE_RE),
+    and it also holds a word that can record an identity (_cmtidn_identity_word), so a command that the reader
+    would deny is denied; the cost is a disclosed over-deny of such a command whose text merely names an AI
+    product or holds a name inside a longer word (Claudette) and that holds git as a word or an identity
+    variable or config name, a heredoc body included. One that names no AI anywhere is allowed at once, since no
+    raw-string context can find an AI identity in it either. One that names an AI but holds none of those words
+    is judged by the raw-string contexts, as a command the tokenizer cannot parse is, so an AI --author value or
+    co-author trailer in it denies when git runs under another name (gi?, "$G"); a heredoc that writes a file
+    naming an AI product, with no trailer, --author value or identity assignment in it, is allowed. This
+    judgement has no length bound, so its cost grows with the command's length. The costliest shapes measured
+    are commands made of repeated co-author trailer names, since the co-author context reads each name with its
+    own value of up to 160 characters, though the AI identity search reads only the part of each value past the
+    end of the one before it, less _AI_NAME_LONGEST - 1 characters (_ai_value_match): the highest of three
+    single runs on one host took about 0.26 s of CPU time at 1,048,576 characters, 4.0 s at 16,777,216 and 6.3 s
+    at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and 14.0 s on the same host), and 7.3 s at
+    33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so on the measuring host a command of about 40 to
+    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. The platform
+    contract this file records (the module docstring) does not say that a hook stopped at its timeout refuses the
+    call, so such a command may run with no deny from this check.
+    With a run line left unread it first denies when an AI identity appears ANYWHERE in the
+    command once every backslash-newline, backslash and quote is removed, since quoting or escaping in the
+    unread line can split or build an option name or value that no raw-string context sees (--"auth"=...,
+    --author=C"laude ...", a backslash-newline before the value), or once the '$' before each double quote is
+    removed as well, since bash drops the '$' of a locale quote $"..." (--author=Cl$""aude ...); the cost is a
+    disclosed over-deny of such a command whose text merely names an AI product, and the second form also joins
+    the text around a '$' that bash keeps (one inside double quotes, or one escaped), the same safe direction.
+    Never silent-allow a plausibly-violating command the check could not read in full."""
+    if error == _CMTIDN_TOO_LONG:
+        match = _AI_NAME_ANYWHERE_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command))
+        if match is None:
+            return _allow()  # no AI name, so no raw-string context below can find one either
+        word = _cmtidn_identity_word(command)
+        if word is not None:
+            reason = ("AIQT rule cmtidn (commit-identity): the command is {} characters long, more than the {} "
+                      "that the check reads within the hook timeout, and it names an AI identity ({!r}) once its "
+                      "quotes, backslashes, '$' signs and newlines are removed, and holds a word that can record one "
+                      "({!r}); failing closed, since the unread command can set an AI --author, trailer or "
+                      "identity. Remove it and commit as the maintainer; a long command that only mentions an AI "
+                      "product can be split into shorter commands."
+                      .format(len(command), _CMTIDN_READ_LIMIT, match.group(0), word.group(0)))
+            return _deny(reason,
+                         "AIQT guardrail: denied a command too long for the commit-identity check to read that "
+                         "names an AI identity (rule cmtidn, fail-safe).")
+        # no word that can record an identity: the raw-string contexts below judge the command
+    if error == _CMTIDN_RUN_BOUNDS:
+        text = command.replace("\\\n", "").replace("\\", "")
+        match = (AI_IDENTITY_RE.search(text.replace('"', "").replace("'", ""))
+                 or AI_IDENTITY_RE.search(text.replace('$"', "").replace('"', "").replace("'", "")))
+        if match:
+            reason = ("AIQT rule cmtidn (commit-identity): git runs a command line that could not be parsed, or "
+                      "command lines nested or repeated past the check's bounds, so a line was left unread, and "
+                      "the command names an AI identity ({!r}) once its quotes and backslashes are removed; "
+                      "failing closed, since quoting or escaping in the unread line can build an AI --author or "
+                      "trailer. Remove it and commit as the maintainer.".format(match.group(0)))
+            return _deny(reason,
+                         "AIQT guardrail: denied a git command with a run line left unread (unparseable or past "
+                         "the commit-identity bounds) that names an AI identity (rule cmtidn, fail-safe).")
     for regex, label in _RAW_IDENTITY_CONTEXTS:
-        for match in regex.finditer(command):
-            if AI_IDENTITY_RE.search(match.group(1)):
-                hit = "{} {!r}".format(label, match.group(1).strip()[:80])
-                reason = ("AIQT rule cmtidn (commit-identity): the command could not be parsed by the "
-                          "shell lexer (likely unbalanced quotes) and it appears to set an AI identity "
-                          "({}); failing closed. Remove it and commit as the maintainer.".format(hit))
-                return _deny(reason,
-                             "AIQT guardrail: denied an unparseable git command that appears to record "
-                             "an AI commit identity (rule cmtidn, fail-safe).")
+        match = _ai_value_match(regex, command)
+        if match is not None:
+            hit = "{} {!r}".format(label, match.group(1).strip()[:80])
+            reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
+                      "parse error such as unbalanced quotes, a command line that git runs that could not be "
+                      "parsed or was nested or repeated past the check's bounds, or a command longer than the "
+                      "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
+                      "closed. Remove it and commit as the maintainer.".format(hit))
+            return _deny(reason,
+                         "AIQT guardrail: denied a git command the check could not read in full that "
+                         "appears to record an AI commit identity (rule cmtidn, fail-safe).")
     return _allow()
 
 
@@ -2028,8 +3134,8 @@ def commit_identity(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
     try:
         hit = find_ai_authorship(command)
-    except ValueError:
-        return _commit_identity_fallback(command)
+    except ValueError as exc:
+        return _commit_identity_fallback(command, str(exc))
     if hit is None:
         return _allow()
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
@@ -2268,7 +3374,8 @@ def bash_absolute_paths(data):
     # cd/redirect in the parseable PREFIX still ASKS. Only a cd/redirect position WITHIN or AFTER the
     # unparseable construct is left to the human's own permission flow (a disclosed residual), rather than
     # over-asking on every such command. This is the conservative-floor boundary, not a proof of safety.
-    segments = _lex_command(command, partial=True)[0]
+    # The loop reads only each segment's words and redirects, so a segment with neither is skipped unbuilt.
+    segments = _lex_command(command, partial=True, skip_empty=True)[0]
     reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
     deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
     for seg in segments:
@@ -2330,15 +3437,14 @@ def bash_absolute_paths(data):
 # recoverable, else deny-and-educate". For a command that names any recognized lossy git verb (checkout incl
 # -B force-create, switch incl -C/--force-create, restore/reset/clean/stash drop-clear/rm/branch force
 # delete/move/copy/reset) the outcome is ASK(->recover-then-allow/deny) unless the command is a PRISTINE
-# SINGLE BARE 'git <verb>' invocation on a PROVABLY CLEAN tree (or, for that same pristine form, the LEADING
-# opt-out is set). Three outcomes:
+# SINGLE BARE 'git <verb>' invocation on a PROVABLY CLEAN tree. Three outcomes:
 #   ALLOW  exit 0 silent  - the true boundary (a non-git command, no recognized lossy verb, an
 #                           unparseable command with no lossy verb keyword); OR a PRISTINE SINGLE BARE
 #                           'git <verb>' whose FORM is genuinely non-destructive (a bare no-op, reset
 #                           --soft, an unforced branch-create, clean -n, stash push, branch -d); OR a
 #                           PRISTINE SINGLE BARE lossy 'git <verb>' on a PROVABLY CLEAN tree (the config-
 #                           forced porcelain probe reports no tracked change AND no untracked entry), so
-#                           there is nothing to discard; OR the LEADING opt-out on that same pristine form.
+#                           there is nothing to discard.
 #   DENY   permissionDecision deny - a PRISTINE SINGLE BARE WHOLE-TREE-clobbering verb (reset --hard,
 #                           checkout -f with no pathspec, switch --force/--discard-changes) on a tree the
 #                           probe confirms is dirty: the loss is certain.
@@ -2358,10 +3464,12 @@ def bash_absolute_paths(data):
 # coarse cut (a shell 'if'/'for', a backtick or '$()' substitution, a '|&' or leading/interspersed redirect,
 # and ANY wrapper in front of git - sudo/stdbuf/doas/setsid/eval/sh -c/...: the raw 'git'+work-losing-verb
 # scan is trusted UNCONDITIONALLY, not an enumerated wrapper list, so an un-listed wrapper is caught): ASK.
-# That "cannot slip" is NOT categorical: a wrapper that ALSO fragments the command word 'git' or the verb so
-# neither the token scan nor the raw scan sees a contiguous git+verb keyword reads as "no recognized lossy
-# verb" and is silently ALLOWED (a DISCLOSED best-effort residual, see the module docstring; GD-34
-# do-not-chase). The raw scan also OVER-ASKS in the SAFE direction: a command that merely CONTAINS a git
+# That "cannot slip" is NOT categorical: the raw scan also reads the continuation-joined text and a de-quoted
+# copy, so a command word 'git' or a verb fragmented by quotes or a backslash is caught too,
+# but one built so that no such reading holds a contiguous git+verb keyword (an escape decoded inside $'...',
+# a parameter expansion or command substitution at run time) reads as "no recognized lossy verb" and is
+# silently ALLOWED (a DISCLOSED best-effort residual, see the module docstring; GD-34 do-not-chase). The raw
+# scan also OVER-ASKS in the SAFE direction: a command that merely CONTAINS a git
 # token and a lossy verb as TEXT while running no discard ('echo git branch', 'git log | grep branch') still
 # ASKS; narrowing that is the whack-a-mole GD-34 rejected, so the over-ask is disclosed, not chased.
 # The status probe (git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) is
@@ -2374,23 +3482,42 @@ def bash_absolute_paths(data):
 # Bash tool, or persistent shell/config state set in a prior turn; the recovery/snapshot layer backstops a
 # discard it CAN see, but cannot snapshot content the probe itself cannot see (assume-unchanged/skip-worktree
 # marks or submodule.<name>.ignore hide work from the probe) nor ignored files (git add --all excludes them).
-# An explicit GUARDRAIL_ALLOW_DISCARD truthy assignment LEADING a pristine bare git command opts out to ALLOW.
-# The value capture is `(.*)` (matches an EMPTY value, `GUARDRAIL_ALLOW_DISCARD=`), consulted with fullmatch, so
-# an exact leading assignment with an empty value updates the last-wins value to '' (bash: effective empty =
-# falsy), and `GUARDRAIL_ALLOW_DISCARD=1 GUARDRAIL_ALLOW_DISCARD= git ...` does NOT opt out (the empty final
-# assignment wins). A `(.+)` capture would ignore the empty final assignment and wrongly honour the earlier 1.
-_DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.*)$")
-_DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insensitive) that is NOT truthy
-# Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct). We cannot
-# segment safely, so scan the RAW string for git AND a recognized work-losing verb: any of the
-# always-lossy verbs, or 'branch' in ANY form. On the raw path we do NOT parse branch flags: an unparseable
-# 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' cannot be told from a create or a list, so ANY
-# raw 'git' + 'branch' is treated as lossy and ASKS regardless of a delete flag. This over-asks a benign
-# unparseable 'git branch --list' (rare, safe) and ends the raw-branch silent-allow gap.
-# A hit -> ASK (cannot prove safe); no hit -> ALLOW (the true boundary). Mirrors how diff_source/
-# commit_identity fall back to a conservative raw scan on a parse failure. The opt-out is NOT consulted on
-# this path: the guard cannot parse the command, so it cannot trust an opt-out-looking prefix inside it; an
-# unparseable in-scope command ALWAYS ASKS. The opt-out is honoured ONLY on a PARSEABLE pristine bare command.
+# REMOVED OVERRIDE: a leading GUARDRAIL_ALLOW_DISCARD assignment once short-circuited a pristine bare git
+# command to an unsnapshotted ALLOW. The guarded actor could type it into the very command under guard, so it
+# could not carry the operator-only authority it claimed; it is removed, no in-band override exists, and the
+# operator channel is hook configuration. The assignment is now an ordinary leading env assignment, and no
+# code reads its value to permit anything: only _segment_dir_simple (benign, it redirects nothing) and
+# _removed_prefix_note (reason text only) read the name. When the command without it already names a
+# recognized work-losing git verb and the prefixed command is pristine (it parses and _SHELL_META_RE finds
+# nothing in the raw string), the pristine path decides from the token list plus the raw-scan flag raw_lossy,
+# which the bare command already set (it names a work-losing verb), so the prefixed command gets the
+# decision of the command without it. Outside that bound the value is raw text the raw scans read: a
+# metacharacter, even quoted, makes the command non-pristine; an unbalanced quote makes it unparseable
+# (the fallback then denies every raw-flagged command); and _raw_has_lossy_git matches a lossy keyword
+# inside it, so the decision can differ from the bare one. Neither the non-pristine path nor the fallback
+# reads the name, so there it gets what FOO=<the same value> gets. The pattern accepts
+# both '=' and '+=' and a value spanning newlines (re.DOTALL, used with fullmatch), the token shapes
+# _ENV_ASSIGN_RE treats as a leading assignment; the value capture lets the migration note below see an
+# empty final assignment (bash last-wins) and fold a '+=' append.
+_REMOVED_DISCARD_PREFIX_RE = re.compile(r"GUARDRAIL_ALLOW_DISCARD(\+?)=(.*)", re.DOTALL)
+# MIGRATION (this release only; the next release deletes this sentence, _removed_prefix_note and its
+# self-test vectors rmo-4 and rmo-7; the git_discard residue records the same sunset): every reason the pristine path emits for a command whose leading
+# GUARDRAIL_ALLOW_DISCARD is truthy gains this sentence, so a stale runbook learns the route.
+_REMOVED_DISCARD_PREFIX_NOTE = (
+    " NOTE: the GUARDRAIL_ALLOW_DISCARD prefix no longer overrides this guard (it was removed because the "
+    "guarded assistant could set it itself); for an intentional discard, run 'git stash' (add -u for "
+    "untracked files) and then the discard.")
+# Raw-string probes used when the shared tokenizer cannot parse the command (an unbalanced quote or an
+# unsupported construct) and by the in-scope gate. We cannot segment safely, so scan the RAW string for
+# git AND a recognized work-losing verb: any of the always-lossy verbs, or 'branch' in ANY form. On the
+# raw path we do NOT parse branch flags: an unparseable 'git branch -d -f topic <heredoc>' / '-df' /
+# '--del --for' cannot be told from a create or a list, so ANY raw 'git' + 'branch' is treated as lossy
+# regardless of a delete flag. A hit on an unparseable command -> DENY (the unparseable-command fallback: the guard cannot
+# prove it safe and cannot establish a snapshot basis); no hit -> ALLOW (the true boundary). This
+# over-denies a benign unparseable 'git branch --list' (rare, safe), a disclosed fallback cost. No
+# override exists on this path (or any other): an unparseable in-scope command DENIES whatever prefix it
+# carries, and the removed-prefix migration note is not emitted here (the guard cannot parse the
+# command's leading assignments).
 _RAW_GIT_RE = re.compile(r"(?i)\bgit\b")
 _RAW_LOSSY_VERB_RE = re.compile(r"(?i)\b(?:checkout|switch|restore|reset|clean|rm|stash)\b")
 _RAW_BRANCH_RE = re.compile(r"(?i)\bbranch\b")
@@ -2413,50 +3540,27 @@ _SHELL_RESERVED_WORDS = frozenset((
     "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done",
     "case", "esac", "function", "select", "in", "[[", "]]", "{", "}"))
 # The safe alternatives named in every DENY/ASK reason, so the actor is never left without a next step.
-# The opt-out guidance is PATH-AWARE and appended by the caller. The opt-out is honoured on the command AS
-# ISSUED whenever a leading GUARDRAIL_ALLOW_DISCARD=1 prefix short-circuits to ALLOW: on a pristine bare
-# command the leading prefix opts THIS command out (_OPTOUT_PRISTINE), and because that short-circuit fires
-# BEFORE the repository-view-redirect gate, a pristine repository-view-redirected form (a 'git -C <dir>
-# <verb>' or an ambient-GIT_* form that ASKS at that gate) is ALSO opted out by prefixing the command as
-# issued, keeping its -C (_OPTOUT_PRISTINE too). Only on a raw/unparseable or non-pristine command, where no
-# pristine bare form is present to carry the prefix, is the opt-out NOT honoured on the command as issued, so
-# the actor is told to RE-ISSUE the discard as a parseable pristine bare form carrying the prefix
-# (_OPTOUT_REISSUE).
 _DISCARD_ALTS = (
     "Safe alternatives: commit or 'git stash' your work first; scope the revert with an explicit "
     "'-- <paths>'; unstage without touching the worktree via 'git restore --staged' or 'git rm "
     "--cached'; change branch with 'git switch' (it carries non-conflicting changes and aborts rather than "
     "overwrite them).")
-# Opt-out guidance for a PRISTINE bare form, where the leading prefix opts THIS command out.
-_OPTOUT_PRISTINE = (
-    " Or, for a known-safe discard, prefix this command with GUARDRAIL_ALLOW_DISCARD=1 to override this "
-    "guard.")
-# Opt-out guidance for a raw/unparseable or non-pristine form, where the opt-out is NOT honoured on the
-# command as issued: re-issue it as a parseable pristine bare 'git <verb>' with the leading prefix. A
-# repository-view-redirected form does NOT use this: it is pristine-lexically, so its leading prefix opts it
-# out on the command as issued (_OPTOUT_PRISTINE, keeping its -C), short-circuiting before the redirect gate.
-_OPTOUT_REISSUE = (
-    " For a known-safe discard, re-issue it as a parseable pristine bare 'git <verb>' command carrying a "
-    "leading GUARDRAIL_ALLOW_DISCARD=1 prefix; the opt-out is honoured only on that pristine bare form, not "
-    "on the command as issued here.")
 
 
-def _segment_has_optout(tokens):
-    """True when THIS segment carries a truthy GUARDRAIL_ALLOW_DISCARD as a LEADING env-assignment (the
-    documented 'GUARDRAIL_ALLOW_DISCARD=1 git ...' prefix on the git command itself). Only the leading
-    assignment region (the tokens before this segment's command word) is inspected, so the same string
-    buried in an argument does NOT count. The caller consults this ONLY on a segment whose command word is
-    git (GD-41 blocker 4), so an opt-out leading a NON-git command ('GUARDRAIL_ALLOW_DISCARD=1 true; git
-    reset --hard') never disables the guard on the later git command. A value in {'', '0', 'false', 'no',
-    'off'} (case-insensitive) is NOT truthy. When the leading region repeats the assignment, bash last-wins
-    applies: only the LAST GUARDRAIL_ALLOW_DISCARD assignment's value is evaluated (=1 then =0 does NOT opt
-    out)."""
+def _removed_prefix_note(tokens):
+    """MIGRATION (this release only): _REMOVED_DISCARD_PREFIX_NOTE when THIS pristine git segment's leading
+    assignment region carries a truthy final GUARDRAIL_ALLOW_DISCARD value (bash last-wins; an empty value or
+    0, false, no or off, case-insensitive, is not truthy; a '+=' appends to the value an earlier assignment
+    in the same region set), else the empty string. It adds reason text only and changes no decision."""
     last = None
     for tok in tokens[:_command_word_index(tokens)]:
-        m = _DISCARD_OPTOUT_RE.fullmatch(tok)
+        m = _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok)
         if m:
-            last = m.group(1)  # bash last-wins: keep the LAST leading assignment's value, evaluate only it
-    return last is not None and last.lower() not in _DISCARD_FALSY
+            # bash last-wins: keep the LAST leading assignment's value; '+=' appends to it
+            last = ((last or "") + m.group(2)) if m.group(1) else m.group(2)
+    if last is None or last.lower() in ("", "0", "false", "no", "off"):
+        return ""
+    return _REMOVED_DISCARD_PREFIX_NOTE
 
 
 def _raw_has_lossy_git(command):
@@ -2597,15 +3701,19 @@ _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "-e", "--edit"))
 _EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
 _RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
-_RAW_EXPBND_MUTATE_RE = re.compile(
-    r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
+_RAW_EXPBND_MUTATE_RE = _RawSequence(
+    r"(?i)\bgit\b",
+    r"(?i)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
     r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
-_RAW_EXPBND_PRUNING_FETCH_RE = re.compile(
-    r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)")
-_RAW_EXPBND_BREADTH_RE = re.compile(
-    r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
-    r"\bcommit\b.*?(?:--all\b|(?<!\S)-[^\s]*a))")
-_RAW_EXPBND_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+_RAW_EXPBND_PRUNING_FETCH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\bfetch\b", r"(?i)--prune(?:-tags)?\b|(?<!\S)-[^\s]*p")
+# The whole-tree breadth probe is two sequences, git then add then an add breadth selector, or git then
+# commit then a commit breadth selector; a command shows breadth when either matches.
+_RAW_EXPBND_ADD_BREADTH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\badd\b", r"(?i)--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S)")
+_RAW_EXPBND_COMMIT_BREADTH_RE = _RawSequence(
+    r"(?i)\bgit\b", r"(?i)\bcommit\b", r"(?i)--all\b|(?<!\S)-[^\s]*a")
+_RAW_EXPBND_PUSH_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bpush\b")
 
 
 def _is_abs_binding(value):
@@ -2860,7 +3968,8 @@ def _expbnd_fallback(command):
     if (_RAW_EXPBND_CD_RE.search(command) and
             (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
         return _expbnd_target_ask("mutation")
-    if _RAW_EXPBND_BREADTH_RE.search(command) and _RAW_EXPBND_PUSH_RE.search(command):
+    if ((_RAW_EXPBND_ADD_BREADTH_RE.search(command) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(command))
+            and _RAW_EXPBND_PUSH_RE.search(command)):
         return _expbnd_breadth_publish_deny("breadth operation")  # finding 11: breadth + publish -> deny
     return _allow()
 
@@ -3000,7 +4109,9 @@ def git_stash_ref(data):
             "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
-        segments = _segments(command)
+        # The loop below passes over a segment with no word (it has no command word), so one with no word
+        # and no redirect is not built at all.
+        segments = _segments(command, skip_empty=True)
     except ValueError:
         return _allow()
 
@@ -3229,7 +4340,9 @@ def _checkout_role(args):
     merge option stays allow. The new-branch NAME of '-b'/'-B' is consumed as that option's ARGUMENT (attached '-bfoo' or
     separated '-b foo') and is NOT char-scanned as force flags, so '-bfoo'/'-bBranch' ALLOW and are never
     mis-read as carrying -f/-B (F-85; see _checkout_switch_parse_options). '-p'/'--patch' (prefix-matched)
-    interactively discards worktree hunks -> scoped. A forced
+    interactively discards worktree hunks -> scoped (R11 DECIDED item 4: git_discard DENIES every
+    -p/--patch spelling through _discard_patch_token before this role is consulted; the scoped
+    role remains the in-scope marker for the clean-parse lossy scan). A forced
     checkout that carries a BARE OPERAND ('checkout -f <operand>') is lexically ambiguous - the operand may
     be a branch (a whole-tree switch) OR a pathspec (a scoped path-restore), and it is no longer
     disambiguated by a rev-parse probe - so it is treated as -> scoped (which ASKS on a not-provably-clean
@@ -3516,29 +4629,12 @@ def _discard_role(sub, args):
 
 # --- outcome text ------------------------------------------------------------------------------------
 
-def _discard_ask_reason(kind, detail, optout=None):
-    """The (reason, banner) pair for an ASK. Stored by the handler and carried into the no-ask decision
-    the role dispatch determines (deny, allow-with-note, or snapshot-then-allow), so a confirmed loss
-    still wins over a recoverable discard; the "ASK" here is historical shorthand per the module's
-    READING KEY FOR "ASK"/"ASKS", not a live outcome. `optout` selects the PATH-AWARE
-    opt-out guidance folded into the reason and the banner: _OPTOUT_PRISTINE (the default) on a pristine
-    bare command, INCLUDING a pristine repository-view-redirected form (its leading GUARDRAIL_ALLOW_DISCARD=1
-    prefix opts THIS command out, short-circuiting even the redirect gate), or _OPTOUT_REISSUE on a
-    raw/unparseable or non-pristine command where no pristine bare form is present, so the opt-out is honoured
-    only on a re-issued pristine bare form, never on the command as issued."""
-    if optout is None:
-        optout = _OPTOUT_PRISTINE
-    reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} {}. Confirm before proceeding, or commit "
-              "or stash your work first. {}{}".format(kind, detail, _DISCARD_ALTS, optout))
-    if optout is _OPTOUT_REISSUE:
-        banner = ("AIQT guardrail: {} - confirm this discard, or re-issue it as a parseable pristine bare "
-                  "'git <verb>' command carrying a leading GUARDRAIL_ALLOW_DISCARD=1 prefix to skip this "
-                  "prompt (the opt-out is not honoured on the command as issued) (rule prsunc)."
-                  .format(kind))
-    else:
-        banner = ("AIQT guardrail: {} - confirm this discard, or prefix GUARDRAIL_ALLOW_DISCARD=1 to skip "
-                  "this prompt (rule prsunc).".format(kind))
-    return (reason, banner)
+def _discard_ask_reason(kind, detail):
+    """The reason for an ASK, carried into the no-ask decision the role dispatch determines (here the deny
+    of _discard_recovery_result when no recovery snapshot could be made); the "ASK" here is historical
+    shorthand per the module's READING KEY FOR "ASK"/"ASKS", not a live outcome."""
+    return ("AIQT rule prsunc (preserve-uncommitted-work): {} {}. Confirm before proceeding, or commit "
+            "or stash your work first. {}".format(kind, detail, _DISCARD_ALTS))
 
 
 def _discard_deny(kind, recovery=""):
@@ -3548,10 +4644,10 @@ def _discard_deny(kind, recovery=""):
     appended to the reason as given (see _deny_with_recovery), so no caller edits a built deny result."""
     reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} would overwrite the working tree, which "
               "currently holds uncommitted or untracked changes the command could destroy, discarding any "
-              "fix you have applied but not yet committed. {}{}"
-              .format(kind, _DISCARD_ALTS, _OPTOUT_PRISTINE)) + recovery
-    banner = ("AIQT guardrail: blocked a git command that would discard uncommitted work (rule prsunc). "
-              "Prefix GUARDRAIL_ALLOW_DISCARD=1 to override.")
+              "fix you have applied but not yet committed. {}"
+              .format(kind, _DISCARD_ALTS)) + recovery
+    banner = ("AIQT guardrail: blocked a git command that would discard uncommitted work (rule prsunc); "
+              "commit or stash first, then retry.")
     return _deny(reason, banner)
 
 
@@ -3619,7 +4715,8 @@ def _ambient_repo_view_override():
 
 def _segment_dir_simple(tokens):
     """True when a git segment names its worktree simply enough that the session dir IS the worktree the
-    command acts on: no leading env-assignment other than the opt-out (a GIT_DIR/GIT_WORK_TREE could
+    command acts on: no leading env-assignment other than the removed GUARDRAIL_ALLOW_DISCARD prefix ('=' or
+    '+=', any value), which redirects nothing (any other, such as a GIT_DIR/GIT_WORK_TREE, could
     redirect it), and no global option before the subcommand (a -C/--git-dir/--work-tree/-c, possibly
     abbreviated or attached, could redirect the worktree or change config). Anything else -> not simple ->
     the handler ASKS rather than trust a clean probe in the session dir. This is the coarse replacement
@@ -3627,8 +4724,8 @@ def _segment_dir_simple(tokens):
     repeatedly fooled into probing a clean dir and silently allowing - F-62/F-64/F-66)."""
     cw_idx = _command_word_index(tokens)
     for tok in tokens[:cw_idx]:
-        if _DISCARD_OPTOUT_RE.match(tok):
-            continue  # the opt-out assignment is benign and is handled separately
+        if _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok):
+            continue  # the removed override's assignment is benign: it redirects nothing
         return False  # some other leading env-assignment: it may redirect the worktree or config
     i = cw_idx + 1  # the token after the 'git' command word
     if i < len(tokens) and tokens[i].startswith("-"):
@@ -3719,8 +4816,8 @@ def _segment_repo_dir(tokens, cwd):
                     redirect is present with NO -C, the session cwd (git discovers the repo from cwd; the
                     --work-tree only moves the worktree). Callers snapshot/probe THIS dir, never --work-tree.
       - None      : no dir-relocating redirect this helper resolves: a bare command, or one carrying only
-                    --git-dir/GIT_DIR (which names the repo directly, not a discoverable dir), -c, or a
-                    non-opt-out env assignment. The caller keeps its own conservative cannot-pin handling.
+                    --git-dir/GIT_DIR (which names the repo directly, not a discoverable dir), -c, or
+                    another leading env assignment. The caller keeps its own conservative cannot-pin handling.
       - "opaque"  : a -C redirect is present but unresolvable (value-less, or relative with no cwd to anchor).
     A --git-dir/GIT_DIR redirect returns None (the repo is named directly, left to the caller's cannot-pin
     path); a combined --git-dir + -C still returns None here, so the caller's --git-dir handling governs."""
@@ -3838,90 +4935,37 @@ def _worktree_within_repo(wt_dir, repo_probe):
     return w == t or w.startswith(t + os.sep)
 
 
-# ROUND-6 FINDING 4. Raw indicators, on the UNPARSEABLE fallback path only, that a lossy git command's
-# target is NOT the session cwd but a redirected worktree/repository the guard cannot resolve (it could not
-# even parse the command): a `git -C <dir>`, a --git-dir/--work-tree redirect, a leading/ambient
-# GIT_DIR=/GIT_WORK_TREE= assignment, or a cd/pushd in the chain. When any is present the session-cwd
-# cleanliness/snapshot basis is UNSOUND (a clean session cwd does not prove the redirected target clean, and
-# a session snapshot would not capture it), so the fallback DENIES-and-educates rather than allow on that
-# basis. Conservative and over-matching (a keyword in prose over-denies, the safe direction), mirroring the
-# other raw fallbacks; it is consulted only after _raw_has_lossy_git has already flagged the command in scope.
-_RAW_DISCARD_REDIRECT_RE = re.compile(
-    r"(?i)(?:^|[\s'\";&|()])(?:cd|pushd)(?=$|[\s'\";&|()])"
-    r"|(?:^|[\s'\";&|()])-C(?=[\s'\"=]|$)"
-    r"|--git-dir\b|--work-tree\b"
-    r"|(?:^|[\s'\";&|()])GIT_DIR="
-    r"|(?:^|[\s'\";&|()])GIT_WORK_TREE=")
-
-
-def _git_discard_fallback(command, cwd=None):
-    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): we cannot
-    segment safely, so scan the RAW string. The opt-out is NOT consulted here: the guard cannot parse the
-    command, so it cannot soundly trust an opt-out-looking prefix inside it (a quoted-falsy `="0"`, an
-    interspersed `OTHER=x`, an opt-out on a DIFFERENT command `...=1 true; git`, a captured-truthy `0;` all
-    read as opt-outs to a raw scan), so an unparseable in-scope command ALWAYS ASKS regardless of any leading
-    opt-out-looking prefix. The opt-out is honoured ONLY on a PARSEABLE pristine bare command (see
-    _segment_has_optout). If git is present AND a recognized work-losing verb keyword is present (an
-    always-lossy verb, or 'branch' in any form) -> ASK (cannot prove safe); otherwise ALLOW (the true
-    boundary). Documented best-effort: a genuinely clean but unparseable command that merely mentions a lossy
-    verb keyword may ASK.
-
-    Class C: an unparseable command reaching an ASK is a NON-PRISTINE discard, so it gets the SAME
-    best-effort SESSION-CWD snapshot the non-pristine path takes (base resolvable + tree not provably
-    clean) BEFORE returning the ASK, so a discard that is asked-then-approved is still recoverable. Without
-    it, `git reset --hard <<'EOF'\\n'\\nEOF` (Bash-valid, a tokenizer ValueError) reached ASK with NO recovery
-    ref. The snapshot is decision-INDEPENDENT and best-effort against the session repo only (the verb is
-    unparseable, so the ledger label is a generic 'discard'); on snapshot fail the decision stays ASK with
-    the failure surfaced."""
-    if not _raw_has_lossy_git(command):
-        return _allow()  # no git, or no recognized work-losing verb: the true boundary
-    if _RAW_DISCARD_REDIRECT_RE.search(command):
-        # ROUND-6 FINDING 4: the unparseable command carries a target redirect (a -C/--git-dir/--work-tree,
-        # a leading/ambient GIT_DIR=/GIT_WORK_TREE=, or a cd/pushd), so its discard target is NOT provably the
-        # session cwd. A clean session cwd cannot prove the redirected target clean and a session snapshot
-        # would not capture it, so it must NOT allow on that basis: DENY-and-educate. Re-issue it as a plain,
-        # parseable 'git <verb>' command run FROM the target repository, or commit or stash first.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
-            "lexer and it names a git work-losing verb together with a target redirect (a -C/--git-dir/"
-            "--work-tree, a GIT_DIR=/GIT_WORK_TREE= assignment, or a cd/pushd), so its discard targets a "
-            "worktree or repository this guard cannot resolve; a clean session directory does not prove that "
-            "target clean and a session snapshot would not capture it, so this discard could be "
-            "unrecoverable and is denied rather than run. Re-issue it as a plain, parseable 'git <verb>' "
-            "command from the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
-            "AIQT guardrail: denied an unparseable git discard carrying a target redirect this guard cannot "
-            "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
-    base = cwd if isinstance(cwd, str) and cwd else None
-    snap = None
-    if base is not None and _tree_is_clean(base) is not True:  # dirty or probe-uncertain: snapshot first
-        snap = _record_recovery(base, "discard")
-    # SNAPSHOT-THEN-ALLOW: a recoverable discard proceeds once its recovery point exists (hooks never ask).
-    if snap is not None and snap[0] == "ok":
-        return _allow_note(
-            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): the command could not be parsed by the "
-            "shell lexer and it names a git work-losing verb this guard cannot prove safe. A pre-command "
-            "recovery snapshot was saved, so it is allowed. {}".format(_recovery_pointer(snap[1])))
-    if snap is not None and snap[0] == "fail":
-        # A warranted recovery point could NOT be created: an unrecoverable discard denies-and-educates.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
-            "lexer and it names a git work-losing verb on a tree that is not provably clean, and no "
-            "pre-command recovery snapshot could be created ({}), so this discard would be unrecoverable; "
-            "denied. Commit or stash your work first, then retry. {}".format(snap[1], _DISCARD_ALTS),
-            "AIQT guardrail: denied an unparseable, unrecoverable git discard (rule prsunc); commit or stash "
-            "first, then retry.")
-    if base is None:
-        # No session cwd, so no recovery snapshot could even be attempted for this unparseable lossy command.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
-            "lexer and it names a git work-losing verb, but no session working directory is available to "
-            "take a recovery snapshot, so this discard would be unrecoverable; denied. Re-issue it as a "
-            "parseable bare 'git <verb>' command from the target repository (a leading "
-            "GUARDRAIL_ALLOW_DISCARD=1 prefix then opts out), or commit or stash your work first. {}"
-            .format(_DISCARD_ALTS),
-            "AIQT guardrail: denied an unparseable git discard with no recoverable snapshot (rule prsunc).")
-    # base is set and the tree is provably clean: nothing to discard.
-    return _allow()
+def _git_discard_fallback(command):
+    """The fail-closed unparseable-command fallback when the shared tokenizer cannot parse the command (an unbalanced
+    quote or an unsupported construct): the closed allowlist grammar cannot be applied to a command that
+    cannot be segmented, so the ONLY allow is the true boundary - the raw scan, run on the FULL raw
+    command (ROUND 8: heredoc bodies are no longer stripped on this path; stripping removed text, so
+    it could only hide a real discard and widen acceptance, and the round-7 stripper did exactly that
+    on nested heredoc data), finds no git plus work-losing verb keyword. EVERYTHING that raw scan
+    flags is DENIED-and-educated, read-only commands included (the raw scan cannot tell a real discard
+    from prose or a read-only form), and NO session snapshot or stash preservation is attempted first:
+    a sound snapshot basis cannot be established for a command whose verb and target are unreadable, and
+    the removed best-effort session snapshot-then-allow let an unparseable discard run against a
+    redirected target the session snapshot does not contain. This fallback cost - every unparseable
+    command the raw scan flags is denied, read-only ones included - is disclosed in the manifest
+    residue. No override exists on this path (or any other): an unparseable in-scope command DENIES
+    whatever leading prefix it carries. The scope scan also reads the de-quoted copy
+    (_dequoted_text: continuations joined, a '$' before a quote, quote characters and backslashes
+    removed), so a fragmented 're""set' in an unparseable command is flagged and denied like its
+    plain spelling. Every flagged unparseable command denies here, so a redirect a continuation or a
+    quote splits ('-\\<newline>C', '-"C"') can never reach a session-directory snapshot."""
+    if not (_raw_has_lossy_git(command) or _raw_has_lossy_git(_dequoted_text(command))):
+        return _allow()  # no git + work-losing verb in the raw text or its de-quoted copy: the true boundary
+    return _deny(
+        "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell lexer "
+        "(an unbalanced quote or an unsupported construct) and its raw text names git together with a "
+        "work-losing verb keyword, so this guard cannot establish what it would run or where; under the "
+        "closed allowlist grammar every such unparseable flagged command is denied, read-only ones "
+        "included (the raw scan cannot tell them apart), and no recovery snapshot is attempted (no sound "
+        "snapshot basis exists for an unreadable command). Re-issue it as a plain, parseable 'git <verb>' "
+        "command from the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
+        "AIQT guardrail: denied an unparseable command naming a git work-losing verb (rule prsunc); "
+        "re-issue it as a plain, parseable git command, or commit or stash first.")
 
 
 def _pristine_single_bare_git(command, segments):
@@ -3934,7 +4978,7 @@ def _pristine_single_bare_git(command, segments):
         redirect), and every command/process substitution ($( ), backtick, <( ), >( ));
       * no shell RESERVED-WORD token (if/then/for/while/case/[[/{/... a compound-command keyword);
       * exactly ONE operator-free command segment (guaranteed once no metacharacter is present, asserted);
-      * after optional leading KEY=value env/opt-out assignments, the sole command word is LITERALLY 'git'
+      * after optional leading KEY=value env assignments, the sole command word is LITERALLY 'git'
         (not a path like /usr/bin/git, and not a wrapper such as sudo/env/sh -c/... whose word is not 'git').
     Anything else - a compound, a wrapper/redirect/reserved-word, or a command word that is not literally
     'git' - returns None so the guard ASKS rather than trust the clean probe on a command it cannot read
@@ -3948,7 +4992,7 @@ def _pristine_single_bare_git(command, segments):
     tokens = populated[0][0]
     if any(t in _SHELL_RESERVED_WORDS for t in tokens):
         return None  # a shell reserved word: not a bare git invocation -> ASK
-    idx = _command_word_index(tokens)  # skip leading KEY=value assignments (incl. the opt-out)
+    idx = _command_word_index(tokens)  # skip leading KEY=value assignments
     if idx >= len(tokens) or tokens[idx] != "git":
         return None  # a wrapper, a pathed git, or no command word: not a bare 'git' -> ASK
     return tokens
@@ -4392,7 +5436,9 @@ def _record_stash_recovery(repo):
     """ROUND-2 FINDING 6. Preserve every stash entry under DURABLE refs/aiqt-recovery/ refs before a
     'git stash drop' / 'git stash clear', which is NOT reflog-recoverable after the fact (drop/clear delete
     the stash reflog entry, leaving the stash commit unreachable and GC-eligible). Returns:
-      - ('none', None)  : the repo has NO stash entries, so a drop/clear loses nothing (allow).
+      - ('none', None)  : CONFIRMED absence (the presence probe exited 1 with no output and no error
+                          text), so a drop/clear loses nothing (allow); a failed or malformed probe is
+                          NEVER read as 'none' - it returns ('fail') instead (round-4 codex finding 3).
       - ('ok', info)    : every stash entry was preserved under a durable ref; info = {refs, count}.
       - ('fail', reason): the repo/entries could not be enumerated, or a durable ref could not be written.
     Reads the stash reflog and writes only private refs (no working state) through the scrubbed _recovery_git
@@ -4403,18 +5449,33 @@ def _record_stash_recovery(repo):
         top = _recovery_toplevel(repo)
         if not top:
             return ("fail", "the repository toplevel could not be resolved (a bare or broken git dir)")
-        # `stash list` over the reflog: one line per entry. An absent refs/stash yields an empty list (no
-        # stashes), a genuine 'none'. A non-zero return is a fault -> fail (never a false 'none').
+        # The presence probe: `rev-parse --verify -q refs/stash`. CONFIRMED ABSENCE is exactly rc 1 with
+        # EMPTY stdout and EMPTY stderr (the -q contract for a missing ref): only that silent miss is a
+        # genuine 'none'. EVERY other outcome - rc 128, an I/O or ownership diagnostic, or rc 0 with no
+        # object id - is a FAILED or MALFORMED observation, not evidence of absence, so it is a
+        # preservation FAILURE (the caller denies) rather than a false 'none' that would let a drop/clear
+        # destroy a real stash unpreserved (PR #423 round-4, codex finding 3).
         verify = _recovery_git(repo, ["rev-parse", "--verify", "-q", "refs/stash"], timeout=5)
-        if verify.returncode != 0 or not verify.stdout.strip():
-            return ("none", None)                     # no stash ref at all: nothing to preserve
+        # codex round-5 MEDIUM: compare the ORIGINAL streams, TYPED, with the empty string.
+        _vout = verify.stdout
+        _verr = verify.stderr
+        if verify.returncode == 1 and _vout == "" and _verr == "":
+            return ("none", None)
+        if verify.returncode != 0 or not isinstance(_vout, str) or not _vout.strip():
+            return ("fail", "the stash presence probe failed (rc={}{}), so the stash entries could not be "
+                            "confirmed absent or preserved".format(
+                                verify.returncode,
+                                ": " + _verr.strip() if isinstance(_verr, str) and _verr.strip() else ""))
         listing = _recovery_git(repo, ["reflog", "show", "--no-abbrev", "--format=%H", "refs/stash"],
                                 timeout=10)
         if listing.returncode != 0:
             return ("fail", "the stash reflog could not be enumerated (rc={})".format(listing.returncode))
         shas = [ln.strip() for ln in listing.stdout.splitlines() if ln.strip()]
         if not shas:
-            return ("none", None)
+            # refs/stash was just verified to EXIST, so an empty reflog listing is a malformed observation
+            # (at least the top entry exists and would be lost): a preservation failure, never 'none'.
+            return ("fail", "refs/stash exists but its reflog listed no entries, so the stash entries "
+                            "could not be enumerated for preservation")
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         refs = []
         for idx, sha in enumerate(shas):
@@ -4430,39 +5491,43 @@ def _record_stash_recovery(repo):
     return ("ok", {"refs": refs, "count": len(refs)})
 
 
-def _discard_recovery_result(kind, detail, snap, optout=None):
+def _discard_recovery_result(kind, detail, snap, note=""):
     """The SNAPSHOT-THEN-ALLOW outcome for a recoverable-destructive discard (hooks never ask). snap is
     ('ok', info) (a recovery snapshot was saved), ('fail', reason) (a warranted snapshot could NOT be made),
     or None (no snapshot warranted: a ref-level move or a stash/branch asset a working-tree snapshot cannot
-    hold, which is typically reflog-recoverable). On 'ok' or None the discard is ALLOWED with an
+    hold; a ref/branch move is typically reflog-recoverable, while a resolved stash drop/clear is preserved
+    under durable refs by the caller first, or denied). On 'ok' or None the discard is ALLOWED with an
     informational note; on 'fail' the discard would be unrecoverable, so it is DENIED-and-educated (commit or
-    stash first). `optout` selects the path-aware opt-out guidance folded into the deny wording only (an
-    allow needs none)."""
+    stash first). `note` (the removed-prefix migration sentence, or empty) ends the reason or note."""
     if snap is not None and snap[0] == "fail":
-        reason, _banner = _discard_ask_reason(kind, detail, optout)
         return _deny(
-            reason + " NOTE: no pre-command recovery snapshot could be created ({}), so this discard would "
-                     "be unrecoverable; it is denied rather than run. Commit or stash your work first, then "
-                     "retry.".format(snap[1]),
+            _discard_ask_reason(kind, detail)
+            + " NOTE: no pre-command recovery snapshot could be created ({}), so this discard would "
+              "be unrecoverable; it is denied rather than run. Commit or stash your work first, then "
+              "retry.".format(snap[1]) + note,
             "AIQT guardrail: denied an unrecoverable git discard - no recovery snapshot could be created "
             "(rule prsunc); commit or stash first, then retry.")
     if snap is not None and snap[0] == "ok":
         return _allow_note(
             "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. A pre-command recovery snapshot "
-            "was saved, so it is allowed. {}".format(kind, detail, _recovery_pointer(snap[1])))
+            "was saved, so it is allowed. {}".format(kind, detail, _recovery_pointer(snap[1])) + note)
     return _allow_note(
         "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. This guard could not auto-snapshot "
-        "it (a ref-level or stash/branch asset a working-tree snapshot cannot capture, typically "
-        "reflog-recoverable), so it is allowed; ensure any work you need is saved.".format(kind, detail))
+        "it (a ref-level or branch asset a working-tree snapshot cannot capture, which is typically "
+        "reflog-recoverable; a resolved stash drop/clear is NOT reflog-recoverable afterwards and instead "
+        "has its entries preserved under durable refs first, stated in this note when it applies), so it "
+        "is allowed; ensure any work you need is saved.".format(kind, detail)
+        + note)
 
 
-def _stash_drop_clear_outcome(repo, stash_op):
+def _stash_drop_clear_outcome(repo, stash_op, note=""):
     """Preserve every stash entry of `repo` under durable refs/aiqt-recovery/ refs, then return the no-ask
     decision for a 'git stash drop'/'clear' (ROUND-2 FINDING 6, generalized in round-3 finding 2 to the
     -C/compound/redirected forms): 'none' -> ALLOW (no entries to lose), 'ok' -> ALLOW-WITH-NOTE (entries
     preserved under durable refs), 'fail' -> DENY (the entries could not be preserved, so the discard would
     be unrecoverable). The caller has already established `repo` is the repository the command will actually
-    clear (drop/clear is NOT reflog-recoverable afterwards, so a worktree snapshot cannot protect it)."""
+    clear (drop/clear is NOT reflog-recoverable afterwards, so a worktree snapshot cannot protect it).
+    `note` (the removed-prefix migration sentence, or empty) ends the reason or note."""
     st = _record_stash_recovery(repo)
     if st[0] == "none":
         return _allow()  # no stash entries: drop/clear loses nothing
@@ -4471,7 +5536,7 @@ def _stash_drop_clear_outcome(repo, stash_op):
             "AIQT rule prsunc (preserve-uncommitted-work): git stash {} discards saved stash entries and is "
             "NOT reflog-recoverable afterwards, and this guard could not preserve the stash entries under a "
             "recovery ref first ({}), so the discard would be unrecoverable; denied rather than run. Commit "
-            "or apply your stash first, then retry. {}".format(stash_op, st[1], _DISCARD_ALTS),
+            "or apply your stash first, then retry. {}".format(stash_op, st[1], _DISCARD_ALTS) + note,
             "AIQT guardrail: denied an unrecoverable git stash drop/clear - the stash entries could not be "
             "preserved (rule prsunc); apply or commit the stash first, then retry.")
     # ROUND-7 (codex finding 4): bind the advertised stash-recovery command to the TARGET repo with
@@ -4483,41 +5548,20 @@ def _stash_drop_clear_outcome(repo, stash_op):
         "(not reflog-recoverable afterwards). {} stash entr{} were first preserved under durable refs so they "
         "remain recoverable ({}); recover one with 'git -C {} stash apply <ref>'. It is allowed.".format(
             stash_op, st[1]["count"], "y" if st[1]["count"] == 1 else "ies", ", ".join(st[1]["refs"]),
-            shlex.quote(repo)))
+            shlex.quote(repo)) + note)
 
 
-def _deny_with_recovery(kind, snap):
+def _deny_with_recovery(kind, snap, note=""):
     """A DENY (a confirmed whole-tree clobber on a dirty tree) whose reason folds in the recovery outcome,
-    mirroring _discard_recovery_result. The recovery text goes in through _discard_deny's parameter: a
-    deny constructor's result is only ever returned, never unpacked and edited."""
+    mirroring _discard_recovery_result. The recovery text (then `note`, the removed-prefix migration
+    sentence or empty) goes in through _discard_deny's parameter: a deny constructor's result is only ever
+    returned, never unpacked and edited."""
     recovery = ""
     if snap is not None and snap[0] == "ok":
         recovery = " " + _recovery_pointer(snap[1])
     elif snap is not None and snap[0] == "fail":
         recovery = " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1])
-    return _discard_deny(kind, recovery)
-
-
-def _cd_target_dir(tokens, cw, base):
-    """Resolve the destination directory of a top-level `cd`/`pushd` segment (`cw` is the command word),
-    against the current effective directory `base`. Returns an absolute-normalized directory path when it
-    can be resolved simply, or None when it cannot (a `popd`, a bare `cd`/`pushd` with no operand, a `cd -`,
-    a relative operand with no `base` to anchor it, or an operand this guard cannot treat as a literal path).
-    Only a single simple literal operand is honoured; anything else is unresolvable so the caller treats the
-    subsequent discard target as unresolved (round-3 finding 1: a discard after a cd it cannot resolve must
-    not be snapshotted against the wrong directory)."""
-    if cw == "popd":
-        return None                                   # returns to an unknowable dir off the pushd stack
-    cwidx = _command_word_index(tokens)
-    operands = [t for t in tokens[cwidx + 1:] if not t.startswith("-")]
-    if len(operands) != 1 or not operands[0] or operands[0] == "-":
-        return None                                   # no operand (HOME/rotate), 'cd -', or ambiguous
-    d = operands[0]
-    if os.path.isabs(d):
-        return os.path.normpath(d)
-    if base is None:
-        return None                                   # a relative cd with no cwd to anchor it
-    return os.path.normpath(os.path.join(base, d))
+    return _discard_deny(kind, recovery + note)
 
 
 def _segment_has_gitdir_redirect(tokens):
@@ -4609,198 +5653,1071 @@ def _gitdir_is_session_repo(tokens, cwd):
     return gd_c == sess_c
 
 
-def _wrapped_git_index(tokens):
-    """ROUND-6 FINDING 3. The index of the first STANDALONE 'git' command token (its basename is 'git') in a
-    segment whose own command word is NOT git, i.e. a WRAPPED git invocation (env/sudo/xargs/timeout/... git
-    <verb>), or None. Matches a real token equal to 'git' (or '/usr/bin/git'), so a 'git <verb>' buried inside
-    a single QUOTED argument ('sh -c "git reset --hard"', 'eval "git reset"') has no standalone git token and
-    is NOT matched here (that fragmented/quoted form stays the disclosed best-effort residual). Purely lexical."""
-    for i, tok in enumerate(tokens):
-        if tok.rsplit("/", 1)[-1] == "git":
-            return i
+# PR #423: the POSITIVE LITERAL closed allowlist grammar for a NON-PRISTINE
+# in-scope command. The round-7 walk MODELLED shell behaviour (heredoc stripping, builtin
+# directory-neutrality, environment tracking) and each round left a sibling of a closed class accepted
+# (R7C blockers 1-4, majors 5-6). ROUND 8 stops modelling: the grammar RECOGNIZES a closed positive
+# language, judged directly on the RAW command string, and denies on the first byte, token, word or
+# shape outside it, so every shell construct the grammar does not spell out is unreachable by
+# construction. The language, exactly:
+#   characters: a token is a BARE word over the class [A-Za-z0-9_./@:=+,%-] or ONE single-quoted
+#     literal (no quote inside, no concatenation with anything adjacent); any other byte anywhere
+#     outside single quotes (a dollar sign, a backquote, a double quote, a backslash, a glob or brace
+#     character, a tilde, <, (, ), |, #, !, a stray ampersand, a carriage return or other control
+#     byte) denies, which by construction rules out every expansion, substitution, heredoc,
+#     here-string, process substitution, pipe, subshell, brace group, comment, background job and
+#     input redirect;
+#   command words, spelled bare and unquoted: git; cd (option flags -P and -L only, exactly ONE
+#     operand, an absolute literal path with no '..' component whose realpath equals its normpath);
+#     and true or : with no arguments. EVERY other command word (echo, printf, test, [, pwd, pushd,
+#     popd, export, eval, source, ., set, unset, alias, a wrapper, an interpreter, a pathed or quoted
+#     or concatenated spelling) and any assignment word (NAME=value) before or in the command-word
+#     position denies, so nothing accepted can change the shell environment, and the directory can
+#     change only through the one modelled cd;
+#   git shape: the only global option is -C <absolute literal path> (same path rules as cd; it may
+#     repeat, each absolute); any other global option (-c, --git-dir, --work-tree, --namespace,
+#     --no-pager, ...) denies, and a GIT_*= token ANYWHERE in the command denies; the bare literal
+#     subcommand is either on the explicit read-only allowlist below - carrying ONLY that
+#     subcommand's vetted option spellings (R9 DECIDED item 1 narrowed by R10,
+#     _DISCARD_READONLY_OPTS: exact value-less flags plus joined-only --opt=value forms, no
+#     abbreviations and no separated value words, each value shape-validated; an unvetted option
+#     denies naming itself, because a read-only subcommand's
+#     own options can run a program or write a file) - or a modelled lossy verb, which
+#     is then preserve-then-allowed exactly as before (stash preservation or a resolved-target
+#     snapshot first, plus the session catch-all snapshot); anything else denies;
+#   joins: the and-and operator, the semicolon and the newline only, each between two populated
+#     simple commands; a TRAILING semicolon and leading or trailing newlines are accepted (bash
+#     runs the same commands), while a trailing and-and and any doubled or misplaced operator
+#     denies; a cd is honoured for a later segment only across and-and joins (across a
+#     semicolon or a newline the cd may have failed with the next command still running, so the
+#     effective directory becomes unprovable and a later discard-capable git segment denies);
+#   redirects: stdout-to-/dev/null, stderr-to-/dev/null and stderr-to-stdout only (none writes a
+#     file); an accepted redirect may directly FOLLOW a completed bare or quoted word (the word
+#     ends at the operator, exactly as bash reads it), an ALL-DIGIT word standing immediately
+#     before '>' is an IO number of which only 2 is accepted (in the 2> forms), repeated accepted
+#     redirects are accepted, and every other redirect, input, read-write, append and clobber
+#     forms included, denies.
+# Accepting a vetted wrapper/interpreter/xargs form stays DEFERRED later work (manifest residue).
+_SAFE_STASH_OPS = frozenset(("list", "show", "apply", "pop", "push", "save", "branch", "create", "store"))
+# The EXPLICIT READ-ONLY git subcommand allowlist with each subcommand's VETTED option grammar
+# (R9 DECIDED item 1, narrowed by R10 DECIDED item 1): a read-only SUBCOMMAND is not a read-only
+# COMMAND LINE, because its own options can run a program (git grep --open-files-in-pager/-O runs
+# one per matching file; git ls-remote --upload-pack/-u runs an arbitrary command string, so
+# ls-remote is DELISTED outright - it also opens network access) or write a file (git log
+# --output=<path> truncates that file). R10 DELISTS the subcommands whose ACCEPTED command line can
+# run a configured program through git itself: help (it launches a man viewer or browser, and a
+# configured man.<tool>.cmd is shell-evaluated) and diff, show and blame (their patch output runs
+# configured textconv and external-diff drivers); -p/--patch is outside every closed option allowlist
+# for the same reason - removed from every option list here (cat-file -p, an object pretty-printer, goes under
+# the same literal rule: an over-deny - use -t/-s/-e or the positional object form) AND denied on
+# the modelled lossy verbs by _discard_patch_token (R11 DECIDED item 4: interactive patch mode
+# renders its hunks through the configured interactive.diffFilter program) - and for-each-ref's
+# --format AND --sort are delisted (R10 item 1 and R11 DECIDED item 2: the %(...) placeholders
+# and the sort atoms include signature fields that run the configured signature program). Each entry
+# maps the subcommand to (value-less flags, value-taking options with a value validator); only
+# these EXACT spellings are accepted - no abbreviation, although git itself accepts an unambiguous
+# long-option prefix - and a value-taking option is accepted ONLY as the joined --opt=value
+# spelling that git itself reads joined, NEVER with a separated value word: for git's optional-
+# value options a separated word is NOT the value but a token git reads in its own right (the R9
+# hole read 'log --pretty --output=<path>' as a vetted value while git read --output as an option
+# and truncated the path), and the short valued spellings (-n, -e, -A, -B, -C, -U, -L) are gone
+# with the separated form (the -<n> shorthand of log/rev-list/shortlog stays). '--' ends the
+# option region (everything after is a positional operand), and a non-option token is a positional
+# operand (a rev, path, pattern or object name): DATA passed to the subcommand, never 'inert' -
+# repository, global or system configuration can make even an accepted read-only command run a
+# configured program (core.fsmonitor on status, textconv drivers, pagers, signature programs; see
+# the residue), so this grammar bounds the COMMAND LINE, never configuration. 'reflog' and
+# 'config' are deliberately absent (reflog expire/delete and config set mutate); 'branch' and
+# 'stash' route through _discard_role/_stash_op_role instead, and an explicit 'stash list'
+# carries NO argument while an explicit 'stash show' carries at most ONE positional stash
+# reference and nothing else, '--' included (_discard_stash_ro_bad, R11 DECIDED items 3-4,
+# enforced on the grammar path AND the pristine single-command path: stash forwards list
+# arguments to git log and show arguments to git diff, where the class R10 delists would ride
+# through, and a retained '--' makes git stash show itself select patch output).
+_RO_INT = re.compile(r"[0-9]+")
+_RO_TEXT = re.compile(r"[^\x00-\x1f\x7f]*")  # free literal data (a pattern, author, date or sort
+# key) carried JOINED to the one vetted option that takes it; EVERY control byte (TAB and LF
+# included) and DEL is refused. The data is passed to the subcommand, never "inert" (see the
+# table comment below).
+# R10 (DECIDED item 1), narrowed by R11 (DECIDED item 1): a log --pretty/--format value is EXACTLY
+# one of the seven NAMED formats, or a format:/tformat:-PREFIXED string over literal text plus an
+# EXPLICIT placeholder allowlist (hash, tree, parent, author and committer fields, decoration,
+# subject, body, encoding, merge mark, %% and %n). EVERY OTHER value DENIES - an abbreviation, a
+# further built-in name (email, mboxrd) and any arbitrary name included - because git resolves an
+# unprefixed value as a format NAME: a built-in or a pretty.<name> CONFIGURATION alias, and a
+# configured alias can itself carry %G. EVERY %G signature placeholder is OUTSIDE the list (a %G
+# value makes the ACCEPTED command run the configured signature program), as are %(...)
+# extensions, %C colour, %x hex bytes and every other spelling.
+_RO_PRETTY = re.compile(
+    r"(?:oneline|short|medium|full|fuller|reference|raw|"
+    r"t?format:(?:[^%\x00-\x1f\x7f]|%(?:%|n|[HhTtPp]|[ac][neldrtiI]|[dDsfbBem]))*)")
+_DISCARD_READONLY_OPTS = {
+    "status": (frozenset(("-s", "--short", "-b", "--branch", "--porcelain", "--ignored")),
+               {"--porcelain": re.compile(r"v1|v2|1|2")}),  # R11: the four documented spellings
+    "log": (frozenset(("--oneline", "--graph", "--decorate", "--no-decorate", "--all", "--stat",
+                       "--numstat", "--shortstat", "--name-only", "--name-status", "--follow",
+                       "--reverse", "--first-parent", "--merges", "--no-merges", "--abbrev-commit",
+                       "--topo-order", "--date-order", "--no-patch", "--not")),
+            {"--max-count": _RO_INT, "--skip": _RO_INT, "--since": _RO_TEXT,
+             "--until": _RO_TEXT, "--author": _RO_TEXT, "--committer": _RO_TEXT,
+             "--grep": _RO_TEXT, "--pretty": _RO_PRETTY, "--format": _RO_PRETTY,
+             "--date": _RO_TEXT}),
+    "rev-parse": (frozenset(("--verify", "-q", "--quiet", "--short", "--abbrev-ref",
+                             "--symbolic-full-name", "--git-dir", "--absolute-git-dir",
+                             "--show-toplevel", "--show-prefix", "--is-inside-work-tree",
+                             "--is-bare-repository", "--is-shallow-repository")),
+                  {"--short": _RO_INT}),
+    "rev-list": (frozenset(("--count", "--all", "--objects", "--not", "--reverse",
+                            "--first-parent", "--topo-order", "--date-order")),
+                 {"--max-count": _RO_INT, "--skip": _RO_INT}),
+    "ls-files": (frozenset(("-s", "--stage", "-z", "-o", "--others", "-c", "--cached", "-d",
+                            "--deleted", "-m", "--modified", "--exclude-standard", "--full-name")),
+                 {}),
+    "ls-tree": (frozenset(("-r", "-t", "-z", "-l", "--long", "--name-only", "--full-tree",
+                           "--full-name")), {}),
+    "cat-file": (frozenset(("-t", "-s", "-e")), {}),
+    "grep": (frozenset(("-i", "-n", "-l", "-L", "-c", "-w", "-F", "-E", "-G", "-P", "-v", "-h",
+                        "-H", "--cached", "--untracked", "--no-index", "--line-number",
+                        "--name-only", "--files-with-matches", "--files-without-match", "--count",
+                        "--fixed-strings", "--extended-regexp", "--basic-regexp", "--perl-regexp",
+                        "--ignore-case", "--word-regexp", "--invert-match")),
+             {"--max-depth": _RO_INT, "--after-context": _RO_INT, "--before-context": _RO_INT,
+              "--context": _RO_INT}),
+    "describe": (frozenset(("--tags", "--all", "--always", "--long", "--dirty", "--exact-match",
+                            "--first-parent")),
+                 {"--abbrev": _RO_INT, "--candidates": _RO_INT, "--match": _RO_TEXT,
+                  "--exclude": _RO_TEXT}),
+    "shortlog": (frozenset(("-s", "--summary", "-n", "--numbered", "-e", "--email", "--all",
+                            "--no-merges", "--merges", "--first-parent")),
+                 {"--since": _RO_TEXT, "--until": _RO_TEXT}),
+    "name-rev": (frozenset(("--name-only", "--tags", "--all", "--always", "--no-undefined")),
+                 {"--refs": _RO_TEXT}),
+    "merge-base": (frozenset(("--all", "--is-ancestor", "--octopus", "--independent",
+                              "--fork-point")), {}),
+    "check-ignore": (frozenset(("-v", "--verbose", "-q", "--quiet", "-z", "--non-matching",
+                                "--no-index")), {}),
+    "check-attr": (frozenset(("-a", "--all", "-z")), {"--source": _RO_TEXT}),
+    "count-objects": (frozenset(("-v", "--verbose", "-H", "--human-readable")), {}),
+    "show-ref": (frozenset(("--head", "--heads", "--tags", "-d", "--dereference", "--verify",
+                            "-q", "--quiet", "--hash", "-s")),
+                 {"--hash": _RO_INT, "--abbrev": _RO_INT}),
+    "for-each-ref": (frozenset(),
+                     {"--count": _RO_INT,
+                      "--contains": _RO_TEXT, "--no-contains": _RO_TEXT, "--merged": _RO_TEXT,
+                      "--no-merged": _RO_TEXT, "--points-at": _RO_TEXT}),
+    "var": (frozenset(("-l",)), {}),
+    "version": (frozenset(("--build-options",)), {}),
+}
+# Derived from the table so the two can never disagree (an entry exists exactly per listed sub).
+_DISCARD_READONLY_SUBS = frozenset(_DISCARD_READONLY_OPTS)
+# log/rev-list/shortlog accept the -<n> max-count shorthand (an exact all-digit spelling).
+_RO_NUM_SHORTHAND_SUBS = frozenset(("log", "rev-list", "shortlog"))
+_RO_NUM_SHORTHAND_RE = re.compile(r"-[0-9]+")
+
+
+def _discard_readonly_args(sub, args):
+    """R9 DECIDED item 1, narrowed by R10 DECIDED item 1: vet every option-shaped argument of an
+    accepted read-only subcommand against that subcommand's exact allowlisted spellings
+    (_DISCARD_READONLY_OPTS, see its block comment). A value-taking option is accepted ONLY in its
+    joined --opt=value spelling: there is NO separated-value consumption, because consuming a
+    following word as a value is how R9 read 'log --pretty --output=<path>' as vetted while git
+    read --output as an option of its own and truncated the path. Returns None when every option
+    is vetted, else the offending spelling, which the caller denies naming it."""
+    flags, valued = _DISCARD_READONLY_OPTS[sub]
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--":
+            return None  # end of options: every later token is a positional operand
+        if not a.startswith("-") or a == "-":
+            i += 1  # a positional operand: data passed to the subcommand (see the table comment)
+            continue
+        if a in flags:
+            i += 1
+            continue
+        if a.startswith("--") and "=" in a:
+            name, val = a.split("=", 1)
+            v = valued.get(name)
+            if v is not None and v.fullmatch(val) is not None:
+                i += 1
+                continue
+        if sub in _RO_NUM_SHORTHAND_SUBS and _RO_NUM_SHORTHAND_RE.fullmatch(a) is not None:
+            i += 1
+            continue
+        return a
     return None
 
 
-def _segment_carries_target_redirect(tokens):
-    """ROUND-6 FINDING 3. True when a segment carries a git TARGET-redirect token: a '-C', a
-    --git-dir/--work-tree (bare or '='-attached), or a leading/inline GIT_DIR=/GIT_WORK_TREE= assignment. Used
-    only for a WRAPPED git discard the walk cannot resolve as a depth-0 literal-git segment: such a redirect
-    moves the discard OFF the session cwd, so the session-cwd best-effort snapshot cannot capture it and the
-    discard fails closed (DENY). A wrapped discard with NO redirect acts on the effective cwd, which that
-    best-effort snapshot covers, so it is not flagged here. Conservative token scan (over-detection only
-    over-denies)."""
-    for tok in tokens:
-        if tok == "-C" or tok.startswith("--git-dir") or tok.startswith("--work-tree"):
-            return True
-        if tok.startswith("GIT_DIR=") or tok.startswith("GIT_WORK_TREE="):
-            return True
-    return False
+# The closed positive character class of a BARE literal word (R8 DECIDED item 1) and the closed list
+# of accepted command words (item 2). The token-end set is what may follow a completed token: any
+# other adjacency (a quote starting mid-word, a denied byte) denies.
+_DISCARD_WORD_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./@:=+,%-")
+_DISCARD_TOKEN_END = frozenset((" ", "\t", "\n", ";", "&", ">", ""))
+_DISCARD_COMMAND_WORDS = frozenset(("git", "cd", "true", ":"))
+# R8 DECIDED item 3: a GIT_* assignment-shaped token ANYWHERE in the command denies (the accepted
+# words cannot export it, but the closed grammar refuses the spelling outright rather than reason
+# about where it is harmless).
+_DISCARD_GIT_ENV_RE = re.compile(r"GIT_[A-Za-z0-9_]*\+?=")
 
 
-def _nonpristine_discard_actions(segments, cwd):
-    """ROUND-3 FINDINGS 1 and 2. Walk a NON-PRISTINE in-scope command's segments and resolve, for each
-    VISIBLE git discard segment, the effective worktree/repository the discard ACTUALLY acts on, so the
-    recovery snapshot (a worktree discard) or the stash preservation (a `git stash drop`/`clear`) lands on
-    that target rather than blindly on the session cwd. The shell cwd is tracked across TOP-LEVEL `cd`/`pushd`
-    (a `&&`-gated cd applies to the next command with certainty; a `;`/`||`-sequenced one does NOT gate
-    success so the cwd becomes uncertain; a backgrounded `cd &` and a cd inside a subshell `( )` do NOT change
-    the foreground cwd), and each git segment's own -C/--work-tree/GIT_WORK_TREE= redirect is resolved against
-    that cwd. Returns a dict:
-      { 'snapshot_bases': [dir, ...]  # distinct worktree dirs a snappable destructive discard acts on
-        'stash_ops':      [(dir, op)] # each stash drop/clear paired with the repo dir it acts on
-        'unresolved':     bool        # a visible depth-0 discard whose target could NOT be resolved
-        'hidden':         bool        # ROUND-6 FINDING 3: a lossy discard the walk cannot resolve to a
-                                      #   snapshottable target - a git inside a subshell whose cwd a prior
-                                      #   internal cd moved, or a WRAPPED git (env/sudo/... git) carrying a
-                                      #   -C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE= redirect - so its
-                                      #   target cannot be snapshotted with certainty
-        'saw_actionable': bool }      # any visible worktree-destructive or stash drop/clear discard
-    A caller with unresolved=True OR hidden=True DENIES (fail closed: it cannot snapshot/preserve the exact
-    target). Where a
-    destructive segment acts on the plain session cwd (no cd, no redirect) that cwd is added to
-    snapshot_bases so it is snapshotted through the same path; where no actionable discard is visible
-    (obfuscated verbs, soft/ref-level forms, or an unknown cwd) saw_actionable is False and the caller keeps
-    its existing best-effort session-cwd snapshot."""
-    depth = 0
-    session_cwd = cwd if isinstance(cwd, str) and cwd else None
-    eff = session_cwd
-    eff_certain = True
-    cd_happened = False
-    snapshot_bases = []
-    stash_ops = []
-    unresolved = False
-    saw_actionable = False
-    targets_session = False
-    hidden = False   # ROUND-6 FINDING 3: a lossy discard the walk cannot resolve as a depth-0 literal-git
-    # segment (a subshell-internal cd moved its target, or a WRAPPED git carries a target redirect) -> DENY.
-    subshell_cd_seen = False  # a cd/pushd occurred at depth>0 in the current subshell nesting: a git discard
-    # then running inside that subshell acts on a moved, un-modelled cwd. Reset when depth returns to 0.
+def _stash_op_role(op):
+    if op is None:
+        return "safe"
+    if op in ("drop", "clear"):
+        return "preserve"
+    if op == "export":
+        return "export"
+    if op in _SAFE_STASH_OPS:
+        return "safe"
+    return "deny"
 
-    def _add(seq, item):
-        if item not in seq:
-            seq.append(item)
 
-    for tokens, sep in segments:
-        cw = _command_word(tokens)
-        if cw == "git":
-            sub, args = _git_sub_and_args(tokens)
-            if sub is not None:
-                role, _kind = _discard_role(sub, args)
-                if role != "allow":
-                    if depth != 0 and subshell_cd_seen:
-                        # ROUND-6 FINDING 3: a lossy git discard inside a subshell '( ... )' where a cd/pushd
-                        # earlier in that subshell moved the cwd the walk does not model (e.g.
-                        # '(cd T && git restore -- f)'), so its target cannot be resolved and the session
-                        # snapshot would not capture it -> fail closed (the caller denies). A subshell/command
-                        # substitution with NO internal cd runs at the foreground cwd, so it falls through to
-                        # the normal resolution below and is snapshot-backed there (the C6 design).
-                        hidden = True
-                        saw_actionable = True
-                    elif sub in _SNAPSHOTTABLE_VERBS:
-                        saw_actionable = True
-                        if not eff_certain:
-                            unresolved = True
-                        elif _segment_has_worktree_redirect(tokens):
-                            # ROUND-7 (codex finding 1): --work-tree relocates ONLY the worktree, not the repo.
-                            # An INDEX/REF-only discard (restore --staged, mixed reset, rm --cached) acts on the
-                            # ambient (or -C) repo, so snapshot THAT via _segment_repo_dir (--work-tree ignored).
-                            # A WORKTREE-CONTENT discard destroys content in the --work-tree dir while the index/
-                            # refs stay in the ambient repo: the split cannot be captured by one snapshot, so it
-                            # is unresolved (the caller DENIES) rather than snapshotting the wrong --work-tree.
-                            if _discard_index_only(sub, args):
-                                rd = _segment_repo_dir(tokens, eff)
-                                if rd == "opaque":
-                                    unresolved = True
-                                elif isinstance(rd, str):
-                                    _add(snapshot_bases, rd)
-                                elif eff is None:
-                                    if cd_happened:
-                                        unresolved = True
-                                else:
-                                    _add(snapshot_bases, eff)
-                            else:
-                                unresolved = True
-                        else:
-                            wt = _segment_redirect_worktree(tokens, eff)
-                            if wt == "opaque":
-                                unresolved = True
-                            elif wt is not None:
-                                _add(snapshot_bases, wt)
-                            elif eff is None:
-                                if cd_happened:
-                                    unresolved = True     # a cd to an unresolvable dir preceded the discard
-                                # else: cwd unknown -> keep the best-effort session path (not unresolved)
-                            elif cd_happened:
-                                _add(snapshot_bases, eff)  # a cd'd-into concrete dir
-                            else:
-                                targets_session = True     # plain session cwd
-                    elif sub == "stash":
-                        stash_op = next((a for a in args if not a.startswith("-")), None)
-                        if stash_op in ("drop", "clear"):
-                            saw_actionable = True
-                            if not eff_certain or _segment_has_gitdir_redirect(tokens):
-                                unresolved = True
-                            else:
-                                # ROUND-7 (codex finding 1): stash is a REPO/ref op; its target repo is the
-                                # ambient (or -C) repo, NOT the --work-tree value, so resolve via
-                                # _segment_repo_dir (--work-tree ignored) and preserve THAT repo's stash.
-                                rd = _segment_repo_dir(tokens, eff)
-                                if rd == "opaque":
-                                    unresolved = True
-                                elif isinstance(rd, str):
-                                    _add(stash_ops, (rd, stash_op))
-                                elif eff is None:
-                                    if cd_happened:
-                                        unresolved = True
-                                    # else: cwd unknown -> best-effort session path
-                                else:
-                                    _add(stash_ops, (eff, stash_op))
-                    # a force branch delete/move/copy/reset or stash export is ref-level/reflog-recoverable:
-                    # a worktree snapshot cannot capture it, so no target is resolved here (the existing
-                    # allow-note covers it).
-        elif depth == 0 and cw in ("cd", "pushd", "popd"):
-            if sep == "&":
-                pass                                   # backgrounded: no foreground cwd change
-            elif sep in ("&&", ""):
-                nd = _cd_target_dir(tokens, cw, eff)
-                eff = nd                               # a resolvable dir, or None (subsequent target opaque)
-                cd_happened = True
-            else:                                      # ';' or '||': cd success does not gate the next
-                eff_certain = False
-        elif cw in ("cd", "pushd", "popd"):
-            # a cd/pushd at depth>0 (a subshell-internal cd, e.g. '(cd T && ...)'): the walk does not model
-            # the subshell's cwd, so note it, and a later same-subshell git discard fails closed (finding 3).
-            subshell_cd_seen = True
+def _discard_stash_op(args):
+    # R8 (codex 8) reworked by R9 (codex 2): git resolves the stash operation ONLY from the FIRST
+    # argument. A bare first word is the EXPLICIT operation (git errors on an unknown one, which
+    # _stash_op_role denies). Anything else - no argument, a leading '--', or a leading option of
+    # any spelling (-q, -m <msg>, an attached -m<msg>, --message=<msg>) - is a bare or IMPLICIT
+    # PUSH, in which NO later token is ever an operation: git reads it as a push option, as a
+    # pathspec after '--', or refuses the whole command ("subcommand wasn't specified; 'push'
+    # can't be assumed due to unexpected token ..."), so a stray token or pathspec named drop or
+    # clear can never steer this guard into a wrong op (the R8 skip-the-message walk read 'git
+    # stash -m msg drop' as a drop git never runs, and denied the stray pathspec of 'git stash -m
+    # msg file.txt' that git itself refuses). Returns the explicit op word, or None for a bare or
+    # implicit push (safe).
+    if not args or args[0] == "--" or args[0].startswith("-"):
+        return None
+    return args[0]
+
+
+def _discard_stash_ro_bad(args):
+    """R10 DECIDED item 1, widened by R11 (DECIDED items 3-4): the read-only stash LISTING forms
+    carry almost nothing, because git forwards their arguments to the delisted diff/log class. An
+    explicit 'stash list' carries NO further token (its arguments ride to git log around the
+    vetted log grammar), and an explicit 'stash show' carries AT MOST ONE positional stash
+    reference and nothing else: an option-shaped token rides to git diff (-p selects the patch
+    output whose textconv/external-diff drivers R10 delisted), and a retained '--' makes git stash
+    show itself select patch output, so '--', anything after it, an empty token and a second
+    positional all deny. Returns the offending-token description, or None. Applied by the grammar
+    path AND the pristine single-command path, so the bare single-command spelling cannot ride
+    around the compound rule."""
+    op = _discard_stash_op(args)
+    if op == "list" and len(args) > 1:
+        return "stash list {}".format(args[1])
+    if op == "show":
+        seen_ref = False
+        for tok in args[1:]:
+            if not tok or tok.startswith("-"):  # '-', '--', '-p', --opt=..., an empty quoted token
+                return "stash show {}".format(tok) if tok else "stash show (an empty token)"
+            if seen_ref:
+                return "stash show {}".format(tok)
+            seen_ref = True
+    return None
+
+
+# R11 DECIDED item 4, reworked by R12 DECIDED item 2 and R13 DECIDED item 1: the verbs on
+# which the -p/--patch spelling is DENIED outright (interactive patch mode is outside what this
+# guard can prove safe, because the hunks it renders pass through the operator-configurable
+# interactive.diffFilter setting, the same configuration class whose subcommands R10 delisted).
+# R13 DECIDED item 1: the scan NO LONGER keeps a private copy of the value-taking options (the
+# R12 copy omitted --pathspec-from-file and the --orphan/--conflict values, so the two tables
+# could disagree: a separated filename value spelled -p was read as a real patch flag, a false
+# deny, and a REAL -p standing behind a consumed separated value was never seen); it DERIVES
+# the arity from the SAME closed allowlists the option validator uses (_DISCARD_VERB_OPTS, and
+# _DISCARD_STASH_OP_OPTS for the resolved stash op) through _discard_valued_arity, so the two
+# can never disagree (ONE arity specification). In a short cluster git reads everything after a
+# value-taking letter as that option's attached VALUE ('checkout -bp' names the branch 'p'), so
+# the scan stops there and never reads a value's bytes as flags (the F-85 lesson), and a
+# SEPARATED value word is consumed by that arity BEFORE the scan looks for -p/--patch or a
+# terminator ('stash push -m -- -p' makes '--' the message and the later -p a REAL patch flag,
+# while 'stash push -m -p' makes -p the message itself: git's parser consumes the next word
+# unconditionally). Every OTHER cluster character is read as a FLAG, non-letters included: the
+# digit flags of checkout/restore mean git reads '-2p'/'-3p' as --ours/--theirs plus --patch and
+# enters patch mode, so the scan no longer stops at a non-letter (the old break silently allowed
+# those clusters).
+_DISCARD_PATCH_VERBS = frozenset(("checkout", "restore", "reset", "stash"))
+
+
+def _discard_valued_arity(valued):
+    """The (short option LETTERS, long option NAMES) arity view of the value-taking spellings
+    of one closed allowlist (R13 DECIDED item 1: _DISCARD_VERB_OPTS and _DISCARD_STASH_OP_OPTS
+    are the ONE arity specification; the -p/--patch scan derives its value consumption from
+    them, so the option validator and that scan can never disagree on which option takes a
+    value)."""
+    return ("".join(sorted(v[1] for v in valued if not v.startswith("--"))),
+            tuple(sorted(v[2:] for v in valued if v.startswith("--"))))
+
+
+def _discard_patch_token(sub, args):
+    """The -p/--patch spelling (a conservative '--patch' prefix abbreviation and a 'p' anywhere in
+    a flag cluster included) carried in `sub`'s option region, returned as the SPELLING TYPED,
+    op word included ('git stash push -p', 'git checkout -2p'), or None (R12 DECIDED item 4: the
+    deny names what was typed). For stash, only the push forms take -p (an explicit push or save,
+    or the bare/implicit push); list and show have their own rule (_discard_stash_ro_bad), and git
+    rejects -p on the remaining ops, which keep their existing outcome. A declared value-taking
+    option consumes its value FIRST - the rest of its cluster token when attached, the NEXT token
+    when separated ('--' and '-p' shapes included, exactly as git itself consumes them) - so a
+    value is never read as a flag or a terminator AND a real flag standing after a consumed '--'
+    is still seen; the declared value-taking options are DERIVED from the closed allowlist of the
+    verb (or of the resolved stash op), the same table the option validator reads (R13 DECIDED
+    item 1), never a second copy. Over-recognition is safe here - it denies, never silently
+    allows - mirroring _has_long_prefix, so an ambiguous '--p'/'--pa'/'--pat' prefix denies too,
+    and an unambiguous abbreviation of a declared long value option ('--mess') consumes like its
+    full spelling."""
+    if sub not in _DISCARD_PATCH_VERBS:
+        return None
+    op = None
+    if sub == "stash":
+        op = _discard_stash_op(args)
+        if op not in (None, "push", "save"):
+            return None
+        valued_set = _DISCARD_STASH_OP_OPTS["push" if op is None else op][1]
+        scan = args[1:] if op is not None else args
+    else:
+        valued_set = _DISCARD_VERB_OPTS[sub][1]
+        scan = args
+    valued, long_valued = _discard_valued_arity(valued_set)
+    label = "git {} {}".format(sub, op) if op is not None else "git {}".format(sub)
+    skip_value = False
+    for t in scan:
+        if skip_value:
+            skip_value = False
+            continue  # a prior option's SEPARATED value ('-m -p' is a message), never a flag
+        if t in _EOO_TOKENS:
+            break  # a genuine option terminator (one consumed as a value never reaches here)
+        if t.startswith("--"):
+            name = t.split("=", 1)[0][2:]
+            if name and "patch".startswith(name):
+                return "{} {}".format(label, t)
+            if name and "=" not in t and any(full.startswith(name) for full in long_valued):
+                skip_value = True  # a value-taking long option: the next token is its value
+            continue
+        if t.startswith("-") and t != "-":
+            for i, ch in enumerate(t[1:]):
+                if ch == "p":
+                    return "{} {}".format(label, t)
+                if ch in valued:
+                    if i == len(t) - 2:
+                        skip_value = True  # a bare '-m'/'-b': the value is the NEXT token
+                    break  # the rest of this token is the attached value, never flags
+    return None
+
+
+# R12 DECIDED item 1: the CLOSED per-verb option allowlists of the compound-grammar path. On that
+# path a recognized lossy verb's options were vetted only by the -p/--patch and stash rules, so an
+# accepted compound could carry an option that runs a configured program: git branch --sort and
+# --format take the same signature-bearing sort atoms and %(...) placeholders whose for-each-ref
+# spellings R11 delisted (--sort=signature:grade runs the configured signature program), and
+# --edit-description launches the configured editor. Enumerating bad options is the many-round
+# whack-a-mole; these tables instead enumerate what is ACCEPTED: each verb maps to (value-less
+# flags, value-taking options), EXACT spellings only - no git-accepted abbreviation and no flag
+# cluster ('-fd' is outside the table even where '-f' and '-d' are in it) - and a value-taking
+# option consumes its value by arity: attached ('-bfoo', '--opt=val') or separated ('-b foo',
+# '--opt val'), so a value is never read as an option and a real option is never swallowed as
+# data. ANY option outside the verb's table denies (kind "verbopt"); a non-option token is a
+# positional operand (a ref or pathspec), and '--' ends the option region. git branch deliberately
+# lists NO --sort, --format, --edit-description, --list, --show-current, --contains, --merged or
+# --points-at spelling: the listing/formatting family carries the signature atoms and free
+# placeholders, and the write forms below cover every modelled branch mutation. stash is vetted
+# PER OP by _discard_stash_opt_bad. The role helpers (_discard_role) still classify an accepted
+# option set; these tables only bound which spellings may appear. The pristine single-command
+# path keeps its role-based handling (R12 scope: the compound grammar).
+_DISCARD_VERB_OPTS = {
+    "checkout": (frozenset(("-q", "--quiet", "-f", "--force", "-m", "--merge", "--detach",
+                            "--ours", "--theirs", "-2", "-3", "--ignore-skip-worktree-bits")),
+                 frozenset(("-b", "-B", "--orphan", "--conflict", "--pathspec-from-file"))),
+    "switch": (frozenset(("-q", "--quiet", "-f", "--force", "--discard-changes", "-d", "--detach",
+                          "-m", "--merge", "--guess", "--no-guess", "--no-track")),
+               frozenset(("-c", "-C", "--orphan", "--conflict"))),
+    "restore": (frozenset(("-q", "--quiet", "-W", "--worktree", "-S", "--staged", "--ours",
+                           "--theirs", "--ignore-unmerged", "--ignore-skip-worktree-bits",
+                           "--overlay", "--no-overlay")),
+                frozenset(("-s", "--source", "--conflict", "--pathspec-from-file"))),
+    "reset": (frozenset(("-q", "--quiet", "--hard", "--soft", "--mixed", "--merge", "--keep",
+                         "-N", "--intent-to-add", "--no-refresh", "--refresh")),
+              frozenset(("--pathspec-from-file",))),
+    "rm": (frozenset(("-f", "--force", "-r", "-n", "--dry-run", "--cached", "-q", "--quiet",
+                      "--ignore-unmatch", "--sparse")),
+           frozenset(("--pathspec-from-file",))),
+    "clean": (frozenset(("-n", "--dry-run", "--no-dry-run", "-f", "--force", "-d", "-x", "-X",
+                         "-q", "--quiet")),
+              frozenset(("-e", "--exclude"))),
+    "branch": (frozenset(("-d", "-D", "--delete", "-f", "--force", "-m", "-M", "--move", "-c",
+                          "-C", "--copy", "-r", "--remotes", "-a", "--all", "-q", "--quiet",
+                          "-v", "-vv", "--verbose", "--unset-upstream")),
+               frozenset(("-u", "--set-upstream-to"))),
+}
+# The stash leg of the same R12 DECIDED item 1 rule, keyed by the RESOLVED op word (None, the
+# bare/implicit push, uses the push entry): only these exact spellings may appear after the op.
+# R14 DECIDED item 1: each entry is audited against the option listing of git itself for that
+# sub-command (the 'git stash <op> -h' output of the installed git 2.55.0; create prints none),
+# so a value-taking option is never listed as a flag: the save listing carries
+# "-m, --[no-]message <message>" and "-S, --[no-]staged" exactly as push does, so save carries
+# -m/--message in its VALUE set (the R13 entry listed an empty value set on the false premise
+# that save takes no -m) and the -p scan consumes a message value before it looks for a patch
+# flag. R15 DECIDED item 3: save also lists --no-include-untracked, as push does (both
+# listings carry "-u, --[no-]include-untracked"; the R14 save entry omitted it, an over-deny).
+# The other negated spellings the entries omit (--no-quiet, --no-staged, --no-all and
+# --no-message, for example), --[no-]auto-advance, push's --[no-]pathspec-file-nul and apply's
+# --[no-]label-* values stay unlisted, so the compound path denies them, an over-deny in the
+# safe direction. The numeric-valued -U/--unified and --inter-hunk-context spellings stay
+# unlisted: git refuses a non-numeric value, so a terminator consumed as such a value never
+# reaches patch mode, and the compound path denies the unlisted spelling outright (the safe
+# direction). list lists nothing here because it accepts NO further token, and show accepts
+# at most ONE positional stash reference (both vetted by _discard_stash_ro_bad); export keeps
+# its two documented spellings (the pristine path still treats every export form as not
+# provably safe).
+_DISCARD_STASH_OP_OPTS = {
+    "push": (frozenset(("-q", "--quiet", "-k", "--keep-index", "--no-keep-index", "-u",
+                        "--include-untracked", "--no-include-untracked", "-a", "--all",
+                        "-S", "--staged")),
+             frozenset(("-m", "--message", "--pathspec-from-file"))),
+    "save": (frozenset(("-q", "--quiet", "-k", "--keep-index", "--no-keep-index", "-u",
+                        "--include-untracked", "--no-include-untracked", "-a", "--all",
+                        "-S", "--staged")),
+             frozenset(("-m", "--message"))),
+    "apply": (frozenset(("-q", "--quiet", "--index")), frozenset()),
+    "pop": (frozenset(("-q", "--quiet", "--index")), frozenset()),
+    "drop": (frozenset(("-q", "--quiet")), frozenset()),
+    "clear": (frozenset(), frozenset()),
+    "branch": (frozenset(), frozenset()),
+    "create": (frozenset(), frozenset()),
+    "store": (frozenset(("-q", "--quiet")), frozenset(("-m", "--message"))),
+    "list": (frozenset(), frozenset()),
+    "show": (frozenset(), frozenset()),
+    "export": (frozenset(("--print",)), frozenset(("--to-ref",))),
+}
+
+
+def _discard_opt_scan(flags, valued, scan):
+    """The first option-shaped token in scan outside the closed (flags, valued) allowlist, or None
+    when every option is listed. EXACT spellings only; a listed value-taking option consumes its
+    value by arity (the joined '--opt=val', the attached '-bfoo', or the SEPARATED next token,
+    '--' and option shapes included, exactly as git consumes them); a '--' or --end-of-options
+    not consumed as a value ends the option region; a non-option token is a positional operand."""
+    skip_value = False
+    for a in scan:
+        if skip_value:
+            skip_value = False
+            continue  # a prior value-taking option's SEPARATED value, consumed by arity
+        if a in _EOO_TOKENS:
+            return None  # end of options: every later token is a positional operand
+        if not a.startswith("-") or a == "-":
+            continue  # a positional operand (a ref or pathspec): data, never an option
+        if a in flags:
+            continue
+        if a in valued:
+            skip_value = True  # its value is the next token, whatever its shape
+            continue
+        if a.startswith("--") and "=" in a and a.split("=", 1)[0] in valued:
+            continue  # the joined --opt=value spelling of a listed value option
+        if not a.startswith("--") and len(a) > 2 and a[:2] in valued:
+            continue  # the attached -b<value> spelling of a listed short value option
+        return a
+    return None
+
+
+def _discard_verb_opt_bad(sub, args):
+    """R12 DECIDED item 1: vet every option-shaped token of a recognized non-stash lossy verb on
+    the compound-grammar path against that verb's CLOSED allowlist (_DISCARD_VERB_OPTS, see its
+    block comment). Returns None when every option is listed, else the offending spelling, which
+    the caller denies naming it."""
+    flags, valued = _DISCARD_VERB_OPTS[sub]
+    return _discard_opt_scan(flags, valued, args)
+
+
+def _discard_stash_opt_bad(op, args):
+    """The stash leg of R12 DECIDED item 1: vet the tokens after a resolved stash op against that
+    op's closed allowlist (_DISCARD_STASH_OP_OPTS; a None op is the bare/implicit push and scans
+    every token). Returns None or the offending spelling."""
+    flags, valued = _DISCARD_STASH_OP_OPTS["push" if op is None else op]
+    return _discard_opt_scan(flags, valued, args if op is None else args[1:])
+
+
+def _discard_literal_abs_path(p):
+    """`p` normalized when it is an ABSOLUTE literal path with no '..' component whose realpath equals
+    its normpath (R8 DECIDED items 2-3: no symlink component, so the directory the kernel resolves IS
+    the directory this guard snapshots), else None."""
+    if not p or not os.path.isabs(p) or ".." in p.split("/"):
+        return None
+    norm = os.path.normpath(p)
+    try:
+        real = os.path.realpath(norm)
+    except (OSError, ValueError):
+        return None
+    if real != norm:
+        return None
+    return norm
+
+
+def _discard_lex_redirect(command, i, fd):
+    """Validate ONE redirect whose '>' sits at command[i-1]; `fd` is "2" for the 2> spelling, else
+    "1". The closed grammar accepts exactly >/dev/null, 2>/dev/null and 2>&1 (whitespace before the
+    /dev/null target allowed, and a further accepted redirect may follow directly), none of which
+    writes a file. Returns (next index, None) when accepted,
+    else (i, (kind, what))."""
+    n = len(command)
+    if command[i:i + 1] == ">":
+        return i, ("redir", ("2" if fd == "2" else "") + ">>")
+    if command[i:i + 1] == "&":
+        if fd == "2" and command[i + 1:i + 2] == "1" and command[i + 2:i + 3] in _DISCARD_TOKEN_END:
+            return i + 2, None
+        return i, ("redir", ("2" if fd == "2" else "") + ">&" + command[i + 1:i + 2])
+    j = i
+    while j < n and command[j] in " \t":
+        j += 1
+    k = j
+    while k < n and command[k] in _DISCARD_WORD_CHARS:
+        k += 1
+    target = command[j:k]
+    if target != "/dev/null" or command[k:k + 1] not in _DISCARD_TOKEN_END:
+        return i, ("redir", target or command[j:j + 1] or "(missing target)")
+    return k, None  # a further accepted redirect may follow directly; it is judged on its own
+
+
+def _discard_grammar_lex(command):
+    """Lex the RAW command string under the positive literal grammar. Returns (items, deny): items is
+    the ordered list of ("word", text, quoted) and ("sep", op) entries with op in ("&&", ";", "nl");
+    an ACCEPTED harmless redirect emits nothing (it writes no file), may directly follow a completed
+    bare or quoted word (the word ends at the operator, exactly as bash reads it; an ALL-DIGIT word
+    there is bash's IO number, of which only 2 is accepted), and may be repeated. deny is the first (kind, what)
+    outside the grammar, else None. Judging bytes on the raw string is what makes the grammar closed
+    BY CONSTRUCTION: no quote removal, expansion, heredoc or operator this lexer does not spell out
+    can reach an accepted command, so none needs to be modelled on this path."""
+    items = []
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if ch in " \t":
+            i += 1
+            continue
+        if ch == "\n":
+            items.append(("sep", "nl"))
+            i += 1
+            continue
+        if ch == ";":
+            items.append(("sep", ";"))
+            i += 1
+            continue
+        if ch == "&":
+            if command[i + 1:i + 2] == "&":
+                items.append(("sep", "&&"))
+                i += 2
+                continue
+            return items, ("sep", "&")
+        if ch == ">":
+            i, bad = _discard_lex_redirect(command, i + 1, "1")
+            if bad is not None:
+                return items, bad
+            continue
+        if ch == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return items, ("quote", "an unterminated single quote")
+            if command[j + 1:j + 2] not in _DISCARD_TOKEN_END:
+                return items, ("quote", "a single-quoted literal concatenated with adjacent text")
+            items.append(("word", command[i + 1:j], True))
+            i = j + 1
+            continue
+        if ch in _DISCARD_WORD_CHARS:
+            j = i
+            while j < n and command[j] in _DISCARD_WORD_CHARS:
+                j += 1
+            nxt = command[j:j + 1]
+            if nxt == ">":
+                word = command[i:j]
+                if word.isdigit():
+                    # R9 (codex 3): an ALL-DIGIT word standing immediately before '>' is bash's IO
+                    # number, not a word; only 2 is accepted (the 2> forms) and every other number
+                    # keeps its named rejection.
+                    if word == "2":
+                        i, bad = _discard_lex_redirect(command, j + 1, "2")
+                        if bad is not None:
+                            return items, bad
+                        continue
+                    return items, ("redir", word + ">")
+                # A non-digit word ends at the redirect operator, exactly as bash reads it; the '>'
+                # is then judged as its own stdout redirect on the next loop pass.
+                items.append(("word", word, False))
+                i = j
+                continue
+            if nxt == "'":
+                return items, ("quote", "a quote starting inside a word")
+            if nxt not in _DISCARD_TOKEN_END:
+                return items, ("char", nxt)
+            items.append(("word", command[i:j], False))
+            i = j
+            continue
+        return items, ("char", ch)
+    return items, None
+
+
+def _discard_grammar_segments(items):
+    """Fold the lexed item stream into (words, join_after) segments. Between two populated simple
+    commands exactly ONE join is accepted: one '&&' or one ';', either followed by newline
+    continuations, or bare newlines; anything else (a leading or doubled ';' or '&&', a ';' or '&&'
+    after a newline, a trailing '&&') is a bash syntax error or an empty command and denies (fail
+    closed, nothing guessed about what bash would then run). A TRAILING ';' (with trailing newlines)
+    and leading or trailing bare newlines ARE accepted: bash runs the same commands (R9: the stated
+    grammar now says so explicitly). join_after is "&&" or ";" (a bare
+    newline joins like ';': the previous command's success is not established), or None at the end.
+    Returns (segments, deny)."""
+    segments = []
+    cur = []
+    run = []
+
+    def _run_bad():
+        return ("sep", " ".join("<newline>" if s == "nl" else s for s in run))
+
+    for it in items:
+        if it[0] == "word":
+            if run:
+                if any(s != "nl" for s in run[1:]):
+                    return segments, _run_bad()
+                segments.append((cur, "&&" if run[0] == "&&" else ";"))
+                cur = []
+                run = []
+            cur.append((it[1], it[2]))
+        elif run:
+            run.append(it[1])
+        elif cur:
+            run = [it[1]]
+        elif it[1] != "nl":
+            return segments, ("sep", it[1])
+    if run and (run[0] == "&&" or any(s != "nl" for s in run[1:])):
+        return segments, _run_bad()  # a trailing '&&' (or a malformed trailing run) leaves bash waiting
+    if cur:
+        segments.append((cur, None))
+    return segments, None
+
+
+def _discard_cd_target(operands):
+    """The absolute destination of an accepted cd segment, or None when the segment is outside the
+    closed shape (R8 DECIDED item 2): bare option flags -P and -L only, exactly ONE operand, which
+    must be an absolute literal path with no '..' component whose realpath equals its normpath, so
+    the honoured directory IS the directory the shell would enter (no OLDPWD '-', no HOME default, no
+    CDPATH, no directory-stack selector, no symlink divergence). `operands` is the (text, quoted)
+    token list after the bare command word 'cd'."""
+    path = None
+    count = 0
+    for text, quoted in operands:
+        if not quoted and text in ("-P", "-L"):
+            continue
+        if not quoted and text.startswith("-"):
+            return None
+        count += 1
+        path = text
+    if count != 1:
+        return None
+    return _discard_literal_abs_path(path)
+
+
+def _discard_git_segment_grammar(words, eff):
+    """Validate ONE segment whose bare command word is 'git' against the positive grammar. `words` is
+    the full (text, quoted) token list (words[0] is 'git'); `eff` is the tracked effective directory,
+    or None when it is unprovable (a cd not followed through '&&' joins). Returns one of:
+      ("deny", kind, what)         - the segment is outside the grammar (kind names the violation
+                                     class: global/cdir/sub/roopt/stashop/stashro/patch/verbopt/
+                                     dir; what the offending token)
+      ("ok", action, base, label)  - accepted; action is None (a read-only subcommand or a read-only
+                                     stash list/show form, R13 DECIDED item 3: not a lossy
+                                     verb), "lossy" (a recognized lossy verb in a form with
+                                     nothing to preserve: an allow-role form, a safe or export
+                                     stash form, or a force-branch ref move a worktree snapshot
+                                     cannot capture anyway), "consume" (a stash pop or stash
+                                     branch, which APPLIES and then DROPS a stash entry: accepted
+                                     alone, denied by the caller in a compound with another lossy
+                                     verb, R12 DECIDED item 3), "snapshot" (a worktree discard:
+                                     snapshot `base` first) or "stash" (a stash removal: preserve
+                                     the stash of `base` first); label is the subcommand (or the
+                                     stash op word for "stash"/"consume")."""
+    seg_dir = eff
+    i = 1
+    n = len(words)
+    while i < n:
+        text, quoted = words[i]
+        if quoted or not text.startswith("-"):
+            break
+        if text == "-C":
+            val = words[i + 1][0] if i + 1 < n else None
+            nd = _discard_literal_abs_path(val) if val is not None else None
+            if nd is None:
+                return ("deny", "cdir", val if val is not None else "(missing value)")
+            seg_dir = nd
+            i += 2
+            continue
+        return ("deny", "global", text)
+    if i >= n:
+        return ("deny", "sub", "(none)")
+    sub, sub_quoted = words[i]
+    if sub_quoted:
+        return ("deny", "sub", sub)
+    args = [t for t, _q in words[i + 1:]]
+    if sub in _DISCARD_READONLY_SUBS:
+        ro_bad = _discard_readonly_args(sub, args)
+        if ro_bad is not None:
+            return ("deny", "roopt", ro_bad)
+        return ("ok", None, None, sub)
+    if sub not in _RECOGNIZED_VERBS:
+        return ("deny", "sub", sub)
+    if sub in _DISCARD_PATCH_VERBS:
+        p_bad = _discard_patch_token(sub, args)
+        if p_bad is not None:
+            # R11 DECIDED item 4: -p/--patch on a lossy verb selects interactive patch mode,
+            # whose rendered hunks pass through the operator-configurable interactive.diffFilter
+            # setting; deny, never snapshot-then-allow (see _discard_patch_token, which returns
+            # the spelling typed, op word included).
+            return ("deny", "patch", p_bad)
+    if sub == "stash":
+        op = _discard_stash_op(args)
+        srole = _stash_op_role(op)
+        if srole == "deny":
+            return ("deny", "stashop", op)
+        st_bad = _discard_stash_ro_bad(args)
+        if st_bad is not None:
+            # R10 DECIDED item 1, widened by R11 (DECIDED items 3-4): an explicit 'stash list'
+            # carries NO argument and an explicit 'stash show' at most ONE positional stash
+            # reference and nothing else ('--' included); see _discard_stash_ro_bad.
+            return ("deny", "stashro", st_bad)
+        so_bad = _discard_stash_opt_bad(op, args)
+        if so_bad is not None:
+            # R12 DECIDED item 1 (stash leg): only the resolved op's exact option spellings are
+            # accepted; see _DISCARD_STASH_OP_OPTS.
+            return ("deny", "verbopt", so_bad)
+        if op in ("list", "show"):
+            # R13 DECIDED item 3: the read-only stash LISTING forms (arguments already bounded
+            # by _discard_stash_ro_bad above) are NOT a lossy verb: they destroy nothing, so
+            # the stash-consume rule must not count them, and its deny text truthfully names
+            # only lossy verbs. R14 MINOR: this exemption covers list and show ONLY; every
+            # other non-consuming stash form (create, store, export --print; R15: store is not
+            # read-only, it adds an entry to refs/stash) still counts as a lossy segment and
+            # can over-deny a compound with pop or branch, the safe direction.
+            return ("ok", None, None, sub)
+        if srole == "preserve":
+            if seg_dir is None:
+                return ("deny", "dir", "git stash {}".format(op))
+            return ("ok", "stash", seg_dir, op)
+        if op in ("pop", "branch"):
+            # R12 DECIDED item 3: pop (and branch, which drops its source entry on success)
+            # CONSUMES a stash entry; the caller denies it in a compound with another lossy verb,
+            # because the following verb can destroy the just-applied content while the dropped
+            # entry is gone and the pre-command snapshot cannot contain it.
+            return ("ok", "consume", None, op)
+        return ("ok", "lossy", None, sub)  # a safe or export stash form discards no stash entry
+    vo_bad = _discard_verb_opt_bad(sub, args)
+    if vo_bad is not None:
+        # R12 DECIDED item 1: every recognized lossy verb's options are checked against a CLOSED
+        # per-verb allowlist of exact spellings with their arity; any option outside it denies
+        # (git branch --sort/--format carry the signature atoms R11 delisted on for-each-ref).
+        return ("deny", "verbopt", vo_bad)
+    role, _kind = _discard_role(sub, args)
+    if role == "allow":
+        return ("ok", "lossy", None, sub)  # a genuinely non-destructive form of a recognized verb
+    if sub in _SNAPSHOTTABLE_VERBS:
+        if seg_dir is None:
+            return ("deny", "dir", "git {}".format(sub))
+        return ("ok", "snapshot", seg_dir, sub)
+    return ("ok", "lossy", None, sub)  # a force-branch form: a reflog-recoverable ref asset, no snapshot
+
+
+def _discard_positive_grammar(command, cwd):
+    """Judge a NON-PRISTINE in-scope command against the positive literal grammar (the closed
+    allowlist grammar; see the block comment above _SAFE_STASH_OPS), directly on the RAW command string. `cwd`
+    is the session working directory (the caller already denied when none exists). The effective
+    directory for a git segment starts at `cwd` and changes ONLY through an accepted absolute-literal
+    cd, and only while every join from that cd to the git segment is '&&' (across ';' or a newline
+    the cd may have failed with the next command still running, so the directory becomes UNPROVABLE
+    and a later discard-capable git segment denies; a later accepted cd re-establishes it). R12
+    DECIDED item 3: a compound in which an accepted segment CONSUMES a stash entry (git stash pop,
+    git stash branch) together with ANOTHER segment resolving to a recognized lossy verb (any
+    form) denies outright, because a successful pop applies then drops the entry, so the other
+    verb can destroy the just-applied content while the dropped entry is gone and the pre-command
+    snapshot cannot contain it; a consuming segment alone (or joined only with read-only git
+    segments, stash list and show included (R13 DECIDED item 3),
+    cd, true or ':') keeps its existing handling. Returns a dict:
+      deny            - None, or (kind, what) naming the first grammar violation
+      snapshot_bases  - the resolved repo dir of every accepted worktree-discard segment
+      stash_ops       - (repo dir, op word) of every accepted stash drop/clear segment
+      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)"""
+    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set()}
+    items, bad = _discard_grammar_lex(command)
+    if bad is None:
+        segments, bad = _discard_grammar_segments(items)
+    if bad is not None:
+        out["deny"] = bad
+        return out
+    eff = cwd
+    cd_seen = False
+    lossy_segs = 0    # git segments resolving to a recognized lossy verb, whatever their form
+    consume_ops = []  # the op word of every stash-entry-consuming segment (pop, branch)
+    for words, join_after in segments:
+        for text, _quoted in words:
+            if _DISCARD_GIT_ENV_RE.match(text):
+                out["deny"] = ("assign", text.split("=", 1)[0])
+                return out
+        head, head_quoted = words[0]
+        if head_quoted or head not in _DISCARD_COMMAND_WORDS:
+            if not head_quoted and _ENV_ASSIGN_RE.match(head):
+                out["deny"] = ("assign", head.split("=", 1)[0])
+            else:
+                out["deny"] = ("word", head)
+            return out
+        is_cd = False
+        if head in ("true", ":"):
+            if len(words) > 1:
+                out["deny"] = ("word", "{} with arguments".format(head))
+                return out
+        elif head == "cd":
+            nd = _discard_cd_target(words[1:])
+            if nd is None:
+                out["deny"] = ("cdir", " ".join(t for t, _q in words[1:]) or "(no operand)")
+                return out
+            is_cd = True
         else:
-            # ROUND-6 FINDING 3: a segment whose command word is neither git nor a cd-family builtin. A
-            # STANDALONE 'git' token here is a WRAPPED git discard (env/sudo/xargs/timeout/... git <verb>).
-            # When it carries a target redirect (-C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE=), or runs
-            # inside a subshell whose cwd a prior internal cd moved, its target is off the session cwd (or
-            # unmodellable) and the session snapshot would not capture it, so it cannot be resolved+snapshotted
-            # -> fail closed. A wrapped discard with NO redirect and no moved-subshell-cwd acts on the effective
-            # cwd, which the best-effort session snapshot covers, so it is NOT flagged (e.g. 'env git reset
-            # --hard', or '$(echo git checkout -f)' which runs at the foreground cwd). A git verb
-            # fragmented/quoted into a single token (no standalone 'git') stays the disclosed best-effort residual.
-            gi = _wrapped_git_index(tokens)
-            if gi is not None:
-                wsub, wargs = _git_sub_and_args(tokens[gi:])
-                if wsub is not None:
-                    wrole, _wk = _discard_role(wsub, wargs)
-                    if wrole != "allow" and (_segment_carries_target_redirect(tokens)
-                                             or (depth != 0 and subshell_cd_seen)):
-                        hidden = True
-                        saw_actionable = True
-        if sep == "(":
-            depth += 1
-        elif sep == ")":
-            depth = max(0, depth - 1)
-            if depth == 0:
-                subshell_cd_seen = False   # left the subshell nesting: its internal cd no longer applies
+            res = _discard_git_segment_grammar(words, eff)
+            if res[0] == "deny":
+                out["deny"] = (res[1], res[2])
+                return out
+            _act, _base, _label = res[1], res[2], res[3]
+            if _act is not None:
+                lossy_segs += 1  # every action but None marks a recognized-lossy-verb segment
+            if _act == "snapshot":
+                if _base not in out["snapshot_bases"]:
+                    out["snapshot_bases"].append(_base)
+                out["subs"].add(_label)
+            elif _act == "stash":
+                if (_base, _label) not in out["stash_ops"]:
+                    out["stash_ops"].append((_base, _label))
+            elif _act == "consume":
+                consume_ops.append(_label)
+        if is_cd:
+            cd_seen = True
+            eff = nd if join_after == "&&" else None
+        elif join_after not in ("&&", None) and cd_seen:
+            eff = None
+    if consume_ops and lossy_segs > 1:
+        # R12 DECIDED item 3: a stash-entry-consuming segment (pop, branch) in a compound with
+        # another lossy verb denies BEFORE any preservation or snapshot (the walk is pure; the
+        # caller acts only on an accepted walk), naming the consuming op. A consuming segment
+        # alone keeps its existing handling.
+        out["deny"] = ("stashconsume", "git stash {}".format(consume_ops[0]))
+        return out
+    return out
 
-    if targets_session and session_cwd is not None:
-        _add(snapshot_bases, session_cwd)              # a plain session-cwd discard: snapshot the cwd too
-    return {"snapshot_bases": snapshot_bases, "stash_ops": stash_ops, "hidden": hidden,
-            "unresolved": unresolved, "saw_actionable": saw_actionable}
+
+# The deny texts for each positive-grammar violation class. {0} is the
+# offending byte, token or form, {1} the safe-alternatives text. Every reason names the closed
+# allowlist grammar, so a denial is attributable to the grammar (not to a snapshot failure), and each
+# names the plain spelling that would be accepted. None steers toward a destructive spelling.
+_DISCARD_GRAMMAR_DENY_TEXTS = {
+    "char": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries the character "
+        "{0!r}, which is outside the closed allowlist grammar's positive literal character class "
+        "(letters, digits and _ . / @ : = + , % - in bare words, single-quoted literals, the joins "
+        "'&&', ';' and newline, and the redirections >/dev/null, 2>/dev/null and 2>&1). Such a "
+        "character can introduce an expansion, substitution, heredoc, pipe, subshell, brace group, "
+        "comment or redirect this guard does not model, so what the command would run or where cannot "
+        "be proven; denied rather than run on a possibly unrecoverable discard. Re-issue it as a "
+        "plain 'git <verb>' command with literal tokens only, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command carrying a character outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); use plain literal tokens, or commit or stash first."),
+    "quote": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries {0}, which is "
+        "outside the closed allowlist grammar (accepted: a bare literal word, or ONE "
+        "single-quoted literal standing alone as a whole token; no double quotes, no concatenation, "
+        "no quote inside a quote). An unmodelled quoting form can change what the shell runs, so the "
+        "command cannot be proven; denied rather than run. Re-issue it with bare or simply "
+        "single-quoted literal tokens, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command carrying a quoting form outside the discard "
+        "guard's closed allowlist grammar (rule prsunc); use plain literal tokens, or commit or stash "
+        "first."),
+    "sep": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command joins its parts with "
+        "{0!r}, which is outside the closed allowlist grammar (accepted joins: '&&', ';' and a "
+        "newline, each between two complete simple commands). An unmodelled join can background, "
+        "pipe or misparse the command, so what would run cannot be proven; denied rather than run. "
+        "Re-issue it as plain commands joined by '&&' alone, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command joined outside the discard guard's closed "
+        "allowlist grammar (rule prsunc); join plain commands with '&&', or commit or stash first."),
+    "word": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a segment of this in-scope command runs {0!r}, "
+        "which is outside the closed allowlist grammar's command words (accepted, spelled bare and "
+        "unquoted: 'git', a 'cd' to one absolute literal path with options -P/-L only, and 'true' or "
+        "':' with no arguments). Any other command word - a wrapper, an interpreter, eval, xargs, a "
+        "builtin that can change the environment or directory, a quoted or concatenated or pathed "
+        "spelling - could hide or redirect the discard, so the command cannot be proven; denied "
+        "rather than run. Re-issue the inner git command as a plain, unwrapped 'git <verb>' from the "
+        "target repository, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied an in-scope command whose command word is outside the discard "
+        "guard's closed allowlist grammar (rule prsunc); re-issue the inner git command plainly, or "
+        "commit or stash first."),
+    "assign": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries an assignment "
+        "word (NAME=value, or a GIT_* assignment-shaped token), which is outside the closed allowlist "
+        "grammar: no assignment is accepted anywhere on this path (the name is not echoed here), "
+        "because an assignment can redirect the repository view or what the shell resolves, so the "
+        "discard's target cannot be proven; denied rather than run. Re-issue it as a plain "
+        "'git <verb>' command without the assignment, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git command carrying an assignment outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); drop the assignment, or commit or stash first."),
+    "global": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a git segment of this in-scope command carries "
+        "the git global option {0!r}, which is outside the closed allowlist grammar (the only "
+        "accepted global option is -C with an absolute literal path): any other global can redirect "
+        "the repository, worktree, index or config view, so the discard's target cannot be proven; "
+        "denied rather than run. Re-issue it without that option, or commit or stash your work "
+        "first. {1}",
+        "AIQT guardrail: denied a git command carrying a global option outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); drop the option, or commit or stash first."),
+    "cdir": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command changes or names a "
+        "directory through {0!r}, which is outside the closed allowlist grammar (accepted for cd and "
+        "git -C alike: exactly one ABSOLUTE literal path, no '..' component, whose realpath equals "
+        "its normpath, so no symlink component; cd additionally accepts only the flags -P and -L), "
+        "so the repository the command acts on cannot be resolved; denied rather than run. Re-issue "
+        "it with a literal absolute path, or run it from the target repository, or commit or stash "
+        "your work first. {1}",
+        "AIQT guardrail: denied a git discard whose directory operand is outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); use a literal absolute path, or commit or stash "
+        "first."),
+    "sub": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a git segment of this in-scope command "
+        "resolves to the git subcommand {0!r}, which is outside the closed allowlist grammar "
+        "(neither on the explicit read-only allowlist nor a lossy verb this guard models: checkout/"
+        "switch/restore/reset/rm/clean/stash/branch, each spelled bare), so it cannot be proven "
+        "non-destructive and cannot be snapshotted; denied rather than run. Re-issue it as a "
+        "recognized, provable form, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git command whose subcommand is outside the discard guard's closed "
+        "allowlist grammar (rule prsunc); re-issue a recognized form, or commit or stash first."),
+    "roopt": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a read-only git segment of this in-scope "
+        "command carries the option {0!r}, which is outside the closed allowlist grammar's vetted "
+        "option list for that subcommand (exact value-less flags plus joined-only --opt=value "
+        "spellings, each value shape-validated; a git-accepted abbreviation and every separated "
+        "value word are not vetted). An unvetted option can make a read-only "
+        "subcommand run a program (git grep --open-files-in-pager/-O runs one per matching file; "
+        "the delisted git ls-remote --upload-pack/-u runs an arbitrary command string) or write a "
+        "file (the --output forms truncate their target), so the segment cannot be proven "
+        "read-only; denied rather than run. Re-issue it without that option or with a vetted exact "
+        "spelling, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git command whose read-only segment carries an option outside "
+        "the discard guard's vetted allowlist (rule prsunc); drop the option, or commit or stash "
+        "first."),
+    "stashop": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command names the git stash "
+        "operation {0!r}, which this guard cannot resolve to a modelled literal op word under the "
+        "closed allowlist grammar, so it cannot establish or preserve the stash entries the command "
+        "could affect; denied rather than run. Re-issue it as a plain, modelled git stash operation "
+        "spelled as its own bare word, or apply or commit the stash first. {1}",
+        "AIQT guardrail: denied a git stash command whose operation is outside the discard guard's "
+        "closed allowlist grammar (rule prsunc); re-issue it plainly, or apply or commit the stash "
+        "first."),
+    "stashro": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries {0!r}, which "
+        "is outside the closed allowlist grammar's stash rule: an explicit 'git stash list' "
+        "carries NO further token, and an explicit 'git stash show' carries at most ONE positional "
+        "stash reference and nothing else (no option-shaped token and no '--'). git forwards stash "
+        "list arguments to git log and stash show arguments to git diff, so an extra token rides "
+        "around the vetted read-only grammar and the delisted diff class (an --output value "
+        "truncates its target file; patch output runs configured textconv and external-diff "
+        "drivers, and a retained '--' makes stash show itself select patch output); denied rather "
+        "than run. Re-issue it as a bare 'git stash list' or a 'git stash show' with at most one "
+        "stash reference, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git stash list/show argument outside the discard guard's closed "
+        "allowlist grammar (rule prsunc); use a bare 'stash list' or 'stash show <stash>', or "
+        "commit or stash first."),
+    "verbopt": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a lossy-verb git segment of this in-scope "
+        "command carries the option {0!r}, which is outside the closed allowlist grammar's "
+        "per-verb option list for that verb (exact spellings only, each value-taking option's "
+        "value consumed by its arity; no git-accepted abbreviation and no flag cluster is "
+        "listed). An unlisted option can make even a modelled lossy verb run a configured "
+        "program (git branch --sort and --format carry signature atoms and placeholders that "
+        "run the configured signature program, and --edit-description launches the editor), so "
+        "the segment cannot be proven to stay within what a recovery snapshot preserves; denied "
+        "rather than run. Re-issue it with listed exact option spellings, or commit or stash "
+        "your work first. {1}",
+        "AIQT guardrail: denied a git command whose lossy-verb segment carries an option outside "
+        "the discard guard's closed per-verb allowlist (rule prsunc); drop the option, or commit "
+        "or stash first."),
+    "stashconsume": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command runs {0} together "
+        "with another lossy git verb, which is outside the closed allowlist grammar: a successful "
+        "stash pop (or stash branch) APPLIES and then DROPS the stash entry, so the other lossy "
+        "verb can destroy the just-applied content while the dropped entry is no longer in the "
+        "stash, and a pre-command worktree snapshot cannot contain it; denied rather than run. "
+        "Run the stash-consuming command alone first (or use git stash apply, which keeps the "
+        "entry), then re-issue the second command. {1}",
+        "AIQT guardrail: denied a compound that consumes a stash entry together with another "
+        "lossy git verb (rule prsunc); run git stash pop or branch alone (or use stash apply), "
+        "then retry."),
+    "patch": (
+        "AIQT rule prsunc (preserve-uncommitted-work): this in-scope command carries {0!r}, and "
+        "-p/--patch (abbreviations, clustered spellings such as -2p, and a separated option "
+        "value hiding the flag included) is outside the closed allowlist grammar's per-verb "
+        "option allowlists on every modelled lossy verb: interactive patch mode renders its "
+        "hunks through the operator-configurable interactive.diffFilter setting, so even a "
+        "modelled lossy verb would run a configured program before any recovery snapshot could "
+        "matter; denied rather than run. Re-issue the command without -p/--patch (a "
+        "pathspec-scoped spelling), or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git -p/--patch form whose interactive patch mode runs the "
+        "configured interactive.diffFilter program (rule prsunc); re-issue it without -p/--patch, "
+        "or commit or stash first."),
+    "redir": (
+        "AIQT rule prsunc (preserve-uncommitted-work): a segment of this in-scope command carries "
+        "the redirection {0!r}, which is outside the closed allowlist grammar (accepted: >/dev/null, "
+        "2>/dev/null and 2>&1 only, none of which writes a file), so the redirect could read, "
+        "truncate or overwrite a file this guard cannot snapshot; denied rather than run. Re-issue "
+        "it without the redirection, or commit or stash your work first. {1}",
+        "AIQT guardrail: denied a git discard carrying a redirection the discard guard cannot "
+        "preserve (rule prsunc); drop the redirection, or commit or stash first."),
+    "dir": (
+        "AIQT rule prsunc (preserve-uncommitted-work): {0} runs after a directory change the closed "
+        "allowlist grammar cannot follow through (a cd is honoured only while every join from it to "
+        "the discard is '&&'; across ';' or a newline the cd may have failed with the next command "
+        "still running), so its effective target directory is unprovable and can be neither proven "
+        "clean nor snapshotted; denied rather than run. Re-issue it as a plain 'git <verb>' command "
+        "run from the target repository, or join the chain with '&&' alone, or commit or stash your "
+        "work first. {1}",
+        "AIQT guardrail: denied a git discard whose directory the discard guard's closed allowlist "
+        "grammar cannot establish (rule prsunc); run it from the target repo, or commit or stash "
+        "first."),
+}
+
+
+
+def _uncertain_line_lossy(command):
+    """When _lex_uncertain flags an IN-SCOPE command, the whole-command lex
+    may have swallowed the very line that carries the work-losing verb into an opaque word
+    (gd-uncertain-reset-reason: a commented paren inside a substitution), leaving the reason with only
+    the GENERIC 'a git work-losing verb' wording. bash ends a comment at its newline, so a PHYSICAL LINE
+    is still meaningful there: re-read each raw line on its own and collect the lossy roles of the
+    lines that independently lex as git commands, so the reason names the SPECIFIC verb ('git reset',
+    'git reset --hard'; gd-uncertain-reset-name pins it in the no-session-directory deny). NAMING ONLY: the
+    caller is already in scope via the raw scan and already on the non-pristine path (the closed
+    allowlist grammar or the no-session-directory deny); this re-read changes no decision.
+    A prose line (gd-nested-prose: 'mention git reset --hard ...' inside a heredoc nested in a
+    substitution) does not lex to a 'git' command word, so the generic wording stays there.
+    The lines are read after joining continuations (_join_continuations), so a verb a
+    continuation splits is named too."""
+    found = []
+    for line in _join_continuations(command)[0].split("\n"):
+        try:
+            line_segments = _segments(line, skip_empty=True)  # a segment with no word names no verb
+        except ValueError:
+            continue  # a line the lexer cannot read alone contributes no name
+        for tokens, _sep in line_segments:
+            if _command_word(tokens) != "git":
+                continue
+            sub, args = _git_sub_and_args(tokens)
+            if sub is None:
+                continue
+            role, kind = _discard_role(sub, args)
+            if role != "allow":
+                found.append((role, kind, tokens))
+    return found
 
 
 def git_discard(data):
@@ -4817,24 +6734,57 @@ def git_discard(data):
     is a PRISTINE SINGLE BARE 'git <verb>' invocation (see _pristine_single_bare_git: no shell metacharacter
     anywhere even quoted, no reserved word, no wrapper/redirect/compound, and the sole command word literally
     'git') AND either its FORM is genuinely non-destructive, or the working tree is PROVABLY CLEAN (the
-    config-forced porcelain probe reports no tracked change AND no untracked entry), or the LEADING opt-out is
-    set - in which cases ALLOW. A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no
-    pathspec, switch --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope ASKS:
-    any shell structure at all (a metacharacter, wrapper, redirect, reserved word, or second segment), an
-    option the form-classifier cannot resolve, a worktree it cannot resolve to the session cwd, an incomplete
-    probe, or a softer/index-only discard. No recognized lossy command that would discard WORKING-TREE CONTENT
-    is silently ALLOWED unless it is a pristine
+    config-forced porcelain probe reports no tracked change AND no untracked entry) - in which cases ALLOW.
+    A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no pathspec, switch
+    --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope is judged by the
+    POSITIVE LITERAL closed allowlist grammar (_discard_positive_grammar,
+    judged on the RAW command string): a non-pristine in-scope command is accepted ONLY when every
+    token is a bare literal word over the closed character class (letters, digits and
+    _ . / @ : = + , % -) or ONE standalone single-quoted literal; every command word, spelled bare,
+    is git, a cd to exactly one absolute literal '..'-free realpath-equals-normpath path (flags -P/-L
+    only), or true/':' with no arguments; no assignment word stands in or before a command-word
+    position and no GIT_* assignment-shaped token appears ANYWHERE; a git segment carries no global
+    option but -C <absolute literal path> and its bare subcommand is read-only-listed (carrying
+    ONLY that subcommand's vetted option spellings - R10/R11: value options joined-only; help,
+    diff, show, blame and for-each-ref --format/--sort delisted; -p/--patch outside every closed
+    option allowlist, the modelled lossy verbs included - because an unvetted read-only option
+    can run a program or write a file) or a modelled
+    lossy verb carrying ONLY that verb's closed option allowlist of exact spellings, each
+    value-taking option's value consumed by its arity, with a stash-entry-consuming op (pop,
+    branch) denied in a compound with another lossy verb (then preserve-then-allowed exactly as
+    before: stash preservation or a resolved-target
+    snapshot first, plus the session catch-all snapshot); joins are '&&', ';' and newline only (a
+    trailing ';' or newline is accepted), and
+    redirections >/dev/null, 2>/dev/null and 2>&1 only (each may directly follow a word, which ends
+    at the operator). ANY other byte, quoting form, word, join,
+    redirect or shape DENIES with the grammar reason - every wrapper, interpreter, eval, xargs,
+    find -exec, subshell, brace group, pipe, expansion, substitution, heredoc, builtin, assignment
+    word, unlisted global option or subcommand, unresolvable -C or cd or post-cd join, and every
+    unparseable flagged command (the fallback). No recognized lossy command that would discard
+    WORKING-TREE CONTENT is silently ALLOWED unless it is a pristine
     bare git whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even on
-    a dirty tree), or on a provably-clean tree, or a pristine bare form carrying the leading
-    GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS; the guarantee is bounded to working-tree content
-    (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are reflog-recoverable) and is
-    best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is reserved for the TRUE boundary
-    (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
-    or no recognized lossy verb). A wrapper is in scope only while the raw scan still
-    sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical: a wrapper that ALSO
-    fragments the COMMAND WORD 'git' itself or the verb (env git re'set' --hard / eval git re'set' / command
-    g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset') reads as 'no recognized lossy
-    verb' and is silently ALLOWED - a DISCLOSED best-effort residual, not chased. A real discard whose VERB is
+    a dirty tree), or on a provably-clean tree; no in-band override exists (a leading
+    GUARDRAIL_ALLOW_DISCARD assignment, the removed override, is an ordinary assignment whose value no code
+    reads to permit anything: when the command without it names a recognized work-losing verb and the
+    prefixed command is pristine, it gets the decision of the command without it; otherwise its value is raw
+    text the raw scans read like any other: a metacharacter value takes the non-pristine grammar path and
+    an unbalanced quote takes the deny-on-flag fallback, each exactly as FOO=<the same value> would, while
+    a lossy keyword in the value brings a command into scope exactly as FOO=<the same value> does; the
+    non-pristine path and the unparseable fallback never read the name, so there the prefixed command gets
+    exactly what FOO=<the same value> gets); the guarantee is bounded to
+    working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
+    reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
+    reserved for the TRUE boundary (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
+    or no recognized lossy verb). A wrapper is in scope while the raw scan, the continuation-joined text or
+    the DE-QUOTED copy (_dequoted_text: continuations joined, a '$' before a quote, quote characters and
+    backslashes removed) sees a contiguous git verb keyword. The de-quoted copy is read on a
+    certain lex too, so a wrapper that ALSO fragments the COMMAND WORD 'git' itself or the verb with quotes or
+    a backslash (env git re'set' --hard / eval git re'set' / command g'it' reset --hard / git status; env git
+    re""set --hard) is in scope, where the closed allowlist grammar denies it, no longer a silent allow.
+    'any wrapper DENIES' is still NOT
+    categorical: a command word or verb no raw, joined or de-quoted reading assembles (an escape decoded
+    inside $'...', a word built by a parameter expansion or a command substitution at run time) reads as 'no
+    recognized lossy verb' and is silently ALLOWED - a DISCLOSED best-effort residual. A real discard whose VERB is
     outside the recognized set AND unflagged by the raw scan ('git worktree remove -f' of a dirty linked
     worktree, where 'worktree' matches no lossy keyword) is allowed at the true boundary - disclosed, not
     closed this round. BUT a command the raw scan DOES flag whose resolved subcommand is outside the
@@ -4852,11 +6802,20 @@ def git_discard(data):
     skipped when no per-user location resolves, the path would land inside the repo, or the write fails), on
     the ALLOW and ASK paths alike (the hook fires once, with no post-approval callback). It NEVER mutates the real index, worktree, HEAD, or any
     branch. If a warranted snapshot cannot be made, a would-be ALLOW is downgraded to ASK ('no recovery point
-    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. F-D EXPANSION: a
-    NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is ALSO snapshot-backed
-    BEST-EFFORT against the SESSION CWD repo (the redirected dir of a non-pristine command is not parsed, so a
-    command that changes into a DIFFERENT repo may be snapshotted at the session repo rather than the target;
-    a same-repo cd is still captured by the whole-tree add --all). See the recovery block comment above
+    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. Under the
+    closed allowlist grammar, an ACCEPTED non-pristine in-scope command is snapshot-backed against EACH worktree the grammar
+    resolves (a plain git segment's own literal -C chain over the '&&'-followed literal cd chain) PLUS
+    the session cwd as a best-effort catch-all for EVERY in-scope command (a verb that actually acts on
+    the session repository stays recoverable even when no segment resolved it); a resolved plain stash
+    drop/clear first preserves its target repo's stash under durable refs or DENIES; a discard-capable
+    segment whose directory the grammar cannot establish DENIES; and with NO session cwd EVERY
+    non-pristine in-scope command DENIES (fail closed:
+    no catch-all snapshot is possible). That no-cwd deny is DELIBERATELY CONSERVATIVE and catches legitimate
+    workflows: with no session cwd, a compound or assignment-prefixed command whose visible form is
+    non-destructive or non-snapshottable ('git checkout -b nb && echo ok', 'git log | grep branch',
+    "FOO=';' git clean -n", "FOO=';' git reset --soft") is DENIED although its
+    bare single-command form allows - an accepted cost, because a raw-flagged verb the walk cannot see could
+    still act on the unknown cwd. See the recovery block comment above
     _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
     marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
     content is not recoverable here."""
@@ -4872,11 +6831,15 @@ def git_discard(data):
     if not isinstance(command, str):
         return _allow()  # boundary: unreadable/malformed command container
     try:
-        segments = _segments(command)
+        # Segments with no word and no redirect are skipped unbuilt: the lossy scan below passes over a
+        # segment with no command word, and _pristine_single_bare_git returns before reading the segments
+        # when the command holds any shell metacharacter (every separator and the newline among them), so
+        # it reads only the single segment that ends the command, and drops that one too when it has no word.
+        segments = _segments(command, skip_empty=True)
     except ValueError:
-        # Conservative raw scan, not a silent allow. Pass cwd so an unparseable in-scope discard still gets
-        # a best-effort recovery snapshot before the ASK (Class C), mirroring the non-pristine path.
-        return _git_discard_fallback(command, data.get("cwd"))
+        # Conservative raw scan, not a silent allow (the unparseable-command fallback): an unparseable command the raw scan
+        # flags is denied outright; only a command the scan clears is allowed at the true boundary.
+        return _git_discard_fallback(command)
 
     # Precisely-identified lossy git segments (the clean-parse signal). A git command-word segment whose
     # verb-form is not "allow" is a real in-scope lossy form. Used for the in-scope decision on a
@@ -4898,87 +6861,82 @@ def git_discard(data):
     # setsid/eval defeated the list), so any raw 'git' + work-losing verb is in scope even when the precise
     # `lossy` list is empty (a wrapped or quoted git verb). A non-lossy git command still routes through the
     # pristine path below and allows. Residual: git renamed out of the string (alias/function) -> recovery layer.
-    # ROUND-2 FINDING 17: the unconditional raw scan runs on a copy with QUOTED-heredoc bodies stripped, so a
-    # lossy-verb keyword quoted inside heredoc prose (a 'git reset --hard' example in a here-doc) does not
-    # falsely route the harmless outer command (e.g. 'cat <<'EOF'...') into the discard machinery. A real
-    # lossy verb OUTSIDE the heredoc body is preserved and still caught.
-    raw_lossy = _raw_has_lossy_git(_strip_quoted_heredoc_bodies(command))
+    # ROUND 8 (the R7C BLOCKER-1 class): the unconditional raw scan reads the FULL raw command.
+    # Heredoc bodies are no longer stripped on this path: stripping removes text, so it can only hide
+    # a real discard and widen acceptance (the round-7 stripper erased a real 'git -C stash clear'
+    # behind nested heredoc data). The cost is disclosed: a lossy keyword quoted inside heredoc prose
+    # now brings the harmless outer command in scope, where the positive grammar denies the heredoc
+    # operator itself - an over-deny, the safe direction under the closed allowlist grammar.
+    # Beside the raw text the scope scan reads the JOINED text (_join_continuations,
+    # continuations removed as bash removes them) and the DE-QUOTED copy (_dequoted_text: continuations
+    # joined, a '$' before a quote, quote characters and backslashes removed), unstripped like the raw text
+    # and on a certain and an uncertain lex alike, so a verb or command word that a continuation, a quote
+    # or a backslash fragments under a wrapper ('env git re\<newline>set --hard', 'git status; env git
+    # re""set --hard', "env git re'set' --hard", 'command g""it reset --hard') is in scope, where the
+    # closed allowlist grammar denies it, instead of a silent allow. A work-losing verb behind a commented
+    # heredoc opener is in scope the same way. raw_lossy also feeds the unrecognized-subcommand deny
+    # below, so a pristine 'git "check"out-index -a -f' denies like 'git checkout-index -a -f'.
+    # DISCLOSED over-refusal (the safe direction): the de-quoted copy reads quoted prose too, so
+    # a command that only prints fragmented work-losing prose ("echo 'git re""set --hard'", a quoted printf
+    # argument) is in scope, where the grammar denies it (echo and printf are not accepted command words);
+    # and a read-only subcommand whose quoted argument de-quotes to a work-losing keyword
+    # ('git log --grep="re""set"') denies through that deny like its plain spelling
+    # (gd-dequote-prose-* vectors). The read is kept: quoted text is code under eval, 'bash -c' or
+    # 'sh -c', and this read is what brings a fragmented verb there into scope.
+    raw_lossy = (_raw_has_lossy_git(command)
+                 or _raw_has_lossy_git(_join_continuations(command)[0])
+                 or _raw_has_lossy_git(_dequoted_text(command)))
     if not lossy and not raw_lossy:
         return _allow()  # boundary: no git + work-losing verb anywhere
 
     # In scope. Apply the ULTRA-CONSERVATIVE pristine gate: anything that is not a pristine single bare
-    # 'git <verb>' invocation ASKS, without ever consulting the probe (a safe over-ask).
+    # 'git <verb>' invocation is judged by the closed allowlist grammar below, without ever consulting
+    # the probe.
     pristine = _pristine_single_bare_git(command, segments)
     if pristine is None:
+        # On an UNCERTAIN lex the parsed scan may have swallowed the
+        # work-losing line into an opaque word, leaving only the GENERIC wording; re-read the raw
+        # lines to NAME the specific verb (naming only, see _uncertain_line_lossy).
+        if not lossy and _lex_uncertain(command):
+            lossy = _uncertain_line_lossy(command)
         kind = lossy[0][1] if lossy else "a git work-losing verb"
-        # F-D EXPAND (GD-41, Architect-approved): a non-pristine in-scope command still ASKS, but now gets a
-        # BEST-EFFORT recovery point first, so an asked-then-approved compound/wrapped discard is recoverable
-        # (the hook fires once, with no post-approval callback). This is BEST-EFFORT against the SESSION CWD
-        # repo only: we do NOT parse a non-pristine command's redirected dir, so a command that changes into a
-        # DIFFERENT repo may be snapshotted at the session repo rather than the target (a same-repo cd is
-        # still captured by the whole-tree add --all). The snapshot is decision-INDEPENDENT (same
-        # _record_recovery path); on snapshot fail the decision stays ASK with the failure surfaced (never
-        # allow).
-        np_subs = set()
-        for _role, _kind, _toks in lossy:
-            _s, _ = _git_sub_and_args(_toks)
-            if _s is not None:
-                np_subs.add(_s)
-        # This command is ALREADY IN SCOPE (a visible lossy token routed it here), so the snapshot is no
-        # longer gated on lexical snappable-detection: shell quoting/eval can hide WHICH snappable verb an
-        # in-scope command carries (a `re'set'` fragment assembles `reset` at runtime, so np_subs may miss
-        # it), so whenever the base resolves and the tree is NOT provably clean we take the inert best-effort
-        # snapshot regardless of which verb is (or is not) visible. A verb obfuscated so thoroughly that it
-        # evades even the raw scan (a standalone `eval git re'set'`, whose raw string has no contiguous
-        # `reset` for _raw_has_lossy_git to catch) never reaches here at all: it is ALLOWED at the in-scope
-        # boundary above, a DISCLOSED best-effort residual (the classifier's documented obfuscation residual),
-        # not something this snapshot closes. Over-snapshotting a pure stash/branch non-pristine command is an
-        # accepted inert cost (a worktree snapshot cannot capture their asset, but it is never an
-        # under-protection). The np_verb label is best-effort from any visible snappable sub.
+        # A non-pristine in-scope command is accepted ONLY when its RAW text
+        # fits the positive literal grammar (_discard_positive_grammar); anything outside it DENIES with the
+        # grammar reason. An accepted command keeps the preserve-then-allow posture of the pin: every
+        # resolved stash drop/clear preserves its target repository's stash under durable refs first (or
+        # denies), every resolved worktree discard is snapshotted at its resolved target (or denies),
+        # and the SESSION CWD is always snapshotted as the best-effort catch-all for every in-scope
+        # command, so an in-scope verb that actually acts on the session repository stays recoverable
+        # even when no segment resolved it. With NO session cwd every non-pristine in-scope command
+        # DENIES (fail closed: the catch-all snapshot base cannot be resolved; ROUND-8).
+        # A quote-fragmented `eval git re'set'` reaches here through the de-quoted scope
+        # scan, and the grammar denies it (eval and a concatenated quote are outside it). A verb
+        # obfuscated so thoroughly that it evades even that scan (built by an escape decoded inside
+        # $'...' or by a parameter expansion at run time, so no raw, joined or de-quoted reading holds a
+        # contiguous `reset` for _raw_has_lossy_git to catch) never reaches here at all: it is ALLOWED at
+        # the in-scope boundary above, a DISCLOSED best-effort residual, not something this path closes.
         np_cwd = data.get("cwd")
         np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
-        np_verb = next(iter(sorted(np_subs & _SNAPSHOTTABLE_VERBS)), "discard")
-        # ROUND-3 FINDINGS 1 and 2: resolve the effective worktree/repository EACH visible discard acts on
-        # (tracking top-level cd/pushd and each git segment's own -C/--work-tree/GIT_WORK_TREE= redirect), so
-        # the snapshot/stash-preservation lands on the repo the command will actually mutate, not blindly on
-        # the session cwd. A `git -C T restore ...; :` or `cd T && git restore ...` now snapshots T, and a
-        # `git -C T stash clear` or `git stash clear; :` now preserves the stash of the repo it clears. Where
-        # the effective target cannot be resolved with certainty (an unresolvable redirect/cd, a ;/||-gated
-        # cd whose success is not guaranteed, or a --git-dir/GIT_DIR-redirected stash), the discard DENIES
-        # (fail closed) rather than note a recovery that would not contain the discarded state.
-        actions = _nonpristine_discard_actions(segments, np_base)
-        if actions["unresolved"]:
+        if np_base is None:
             return _deny(
-                "AIQT rule prsunc (preserve-uncommitted-work): {} runs in a compound/redirected command "
-                "whose effective target worktree or repository this guard cannot resolve with certainty (an "
-                "unresolvable -C/--work-tree/GIT_WORK_TREE= or --git-dir/GIT_DIR redirect, or a cd/pushd "
-                "whose success does not gate the discard), so it cannot snapshot or preserve the exact target "
-                "the command will discard from; denied rather than run on a possibly unrecoverable discard. "
-                "Re-issue it as a plain 'git <verb>' command from the target repository, or commit or stash "
-                "your work first. {}".format(kind, _DISCARD_ALTS),
-                "AIQT guardrail: denied a compound/redirected git discard whose target this guard cannot "
-                "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
-        if actions["hidden"]:
-            # ROUND-6 FINDING 3: a lossy discard the walk could not resolve as a depth-0 literal-git segment
-            # (inside a subshell '( ... )', or a WRAPPED 'git' carrying a -C/--git-dir/--work-tree/GIT_DIR=/
-            # GIT_WORK_TREE= redirect off the session cwd). Its target cannot be snapshotted with certainty and
-            # the best-effort session-cwd snapshot would not capture it, so it fails closed: DENY-and-educate
-            # (re-issue it as a plain, unwrapped 'git <verb>' command from the target repository).
-            return _deny(
-                "AIQT rule prsunc (preserve-uncommitted-work): {} runs inside a subshell, or as a wrapped "
-                "'git' invocation (env/sudo/... git) carrying a -C/--git-dir/--work-tree/GIT_DIR=/"
-                "GIT_WORK_TREE= redirect, so its effective target worktree or repository is off the session "
-                "directory and this guard cannot resolve or snapshot it with certainty; denied rather than "
-                "run on a possibly unrecoverable discard. Re-issue it as a plain, unwrapped 'git <verb>' "
-                "command from the target repository, or commit or stash your work first. {}"
-                .format(kind, _DISCARD_ALTS),
-                "AIQT guardrail: denied a subshell/wrapped-and-redirected git discard whose target this guard "
-                "cannot resolve to snapshot (rule prsunc); run it unwrapped from the target repo, or commit or "
-                "stash first.")
-        # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo whose
-        # stash cannot be preserved), so a `git -C T stash clear` / `git stash clear; :` no longer notes a
-        # recovery that omits the cleared stash (round-3 finding 2).
-        for _b, _op in actions["stash_ops"]:
+                "AIQT rule prsunc (preserve-uncommitted-work): {} runs in a compound/wrapped/redirected "
+                "command and no session working directory is available, so this guard can neither prove any "
+                "target tree clean nor take the session-directory recovery snapshot; denied rather than run "
+                "on a possibly unrecoverable discard. Re-issue it as a plain 'git <verb>' command from the "
+                "target repository, or commit or stash your work first. {}".format(kind, _DISCARD_ALTS),
+                "AIQT guardrail: denied a compound/wrapped/redirected git discard with no session directory "
+                "to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
+        walk = _discard_positive_grammar(command, np_base)
+        if walk["deny"] is not None:
+            g_kind, g_what = walk["deny"]
+            g_reason, g_banner = _DISCARD_GRAMMAR_DENY_TEXTS[g_kind]
+            return _deny(g_reason.format(g_what, _DISCARD_ALTS), g_banner)
+        np_verb = next(iter(sorted(walk["subs"])), "discard")
+        # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo
+        # whose stash cannot be preserved), so a resolved stash removal never notes a recovery that omits
+        # the cleared stash.
+        _stash_preserved = []
+        for _b, _op in walk["stash_ops"]:
             _st = _record_stash_recovery(_b)
             if _st[0] == "fail":
                 return _deny(
@@ -4989,12 +6947,14 @@ def git_discard(data):
                     .format(_op, _b, _st[1], _DISCARD_ALTS),
                     "AIQT guardrail: denied an unrecoverable compound/redirected git stash drop/clear (rule "
                     "prsunc); apply or commit the stash first, then retry.")
-        # Snapshot every worktree the command discards from: each RESOLVED redirect/cd target (round-3 finding
-        # 1) PLUS the session cwd itself, which stays a best-effort catch-all because a snappable verb hidden
-        # by shell quoting/eval/substitution may still discard the cwd (the rec-c6 residual). Any warranted
-        # snapshot that FAILS denies (fail closed), never a note over a target with no recovery point.
-        _bases = list(actions["snapshot_bases"])
-        if np_base is not None and np_base not in _bases:
+            if _st[0] == "ok":
+                _stash_preserved.append("{} stash entr{} of {} under {}".format(
+                    _st[1]["count"], "y" if _st[1]["count"] == 1 else "ies", _b, ", ".join(_st[1]["refs"])))
+        # Snapshot every worktree the command discards from: each RESOLVED target the grammar accepted,
+        # PLUS the session cwd itself, which stays a best-effort catch-all. Any warranted snapshot that
+        # FAILS denies (fail closed), never a note over a target with no recovery point.
+        _bases = list(walk["snapshot_bases"])
+        if np_base not in _bases:
             _bases.append(np_base)
         np_snap = None
         for _b in _bases:
@@ -5011,20 +6971,46 @@ def git_discard(data):
                 if np_snap is None and _s[0] == "ok":
                     np_snap = _s
         return _discard_recovery_result(
-            kind, "is not a pristine single bare 'git <verb>' invocation (it carries a shell "
-                  "metacharacter, wrapper, redirect, reserved word, a second command, or a command word "
-                  "that is not literally 'git'); a recovery snapshot targets the effective worktree(s) it "
-                  "resolved plus the session directory before allowing", np_snap, _OPTOUT_REISSUE)
+            kind, "matches the closed allowlist grammar for a non-pristine command (bare literal "
+                  "tokens; command words git, cd to an absolute literal path, true and ':' only; "
+                  "joins '&&', ';' and newline; redirections to /dev/null and 2>&1 only); a "
+                  "recovery snapshot targets the worktree(s) it resolved plus the session directory "
+                  "before allowing"
+                  + ("; the stash entries it would discard were first preserved under durable refs "
+                     "(not reflog-recoverable otherwise): {}; recover an entry with git stash apply using "
+                     "one of the refs named above, run from its repository".format("; ".join(_stash_preserved))
+                     if _stash_preserved else ""), np_snap)
 
-    # A pristine single bare git command. Honour a truthy LEADING opt-out on it (an explicit override).
-    # This short-circuits BEFORE the recovery layer, so an opt-out discard is NOT snapshot-backed: the
-    # operator has explicitly taken responsibility for having saved the work.
-    if _segment_has_optout(pristine):
-        return _allow()
+    # A pristine single bare git command. No in-band override exists: below, only _segment_dir_simple (benign)
+    # and _removed_prefix_note (text) read a leading GUARDRAIL_ALLOW_DISCARD by name; the raw command string
+    # is read below only through raw_lossy, the scope flag a prefix value can only switch ON (routing to the
+    # F-97 denies), so the prefix's value can make the decision below stricter, never more permissive.
+    # MIGRATION (this release only): every
+    # reason this path emits ends with `note`, the removed-prefix sentence when that prefix is truthy (empty
+    # otherwise), through `alts` (the safe alternatives plus the note) or a helper's `note` parameter.
+    note = _removed_prefix_note(pristine)
+    alts = _DISCARD_ALTS + note
 
     # Re-derive the verb form from the sole pristine git command.
     sub, args = _git_sub_and_args(pristine)
     role, kind = _discard_role(sub, args) if sub is not None else ("allow", None)
+
+    # R11 (DECIDED items 3-4): the -p/--patch rule and the stash list/show argument rule hold on
+    # the PRISTINE single-command path exactly as on the grammar path, decided BEFORE the
+    # view-override and role logic below: a bare in-scope 'git stash list --output=<path>' or
+    # 'git checkout -p' must never ride the pristine allow (or snapshot-then-allow) around the
+    # compound rule. Both checks are purely lexical; the denied command runs nothing, so no
+    # snapshot is warranted.
+    if sub in _DISCARD_PATCH_VERBS:
+        p_bad = _discard_patch_token(sub, args)
+        if p_bad is not None:
+            p_reason, p_banner = _DISCARD_GRAMMAR_DENY_TEXTS["patch"]
+            return _deny(p_reason.format(p_bad, alts), p_banner)
+    if sub == "stash":
+        st_bad = _discard_stash_ro_bad(args)
+        if st_bad is not None:
+            st_reason, st_banner = _DISCARD_GRAMMAR_DENY_TEXTS["stashro"]
+            return _deny(st_reason.format(st_bad, alts), st_banner)
 
     # FAIL-SAFE (EN-6, structural completion): the command's repository view cannot be proven to be the
     # session cwd when EITHER cause is present. (1) A NON-COSMETIC ambient GIT_* var: the probe scrubs it,
@@ -5034,10 +7020,11 @@ def git_discard(data):
     # at a different worktree or config. In EITHER case ANY in-scope pristine form ASKS here - a destructive
     # form OR a genuinely non-destructive allow form (reset --soft, plain switch, clean -n, checkout -b) -
     # BEFORE the role/allow logic below that would otherwise let an allow form through and bypass the fail-
-    # safe. Only the explicit leading opt-out (short-circuited above) bypasses it. A best-effort snapshot of
+    # safe. Nothing bypasses it (no in-band override exists). A best-effort snapshot of
     # the SESSION CWD is still taken on a not-provably-clean snappable tree (the cwd is known even when the
     # target is not): it is inert and provides recovery IF the command acts on the cwd (the common benign
-    # non-redirecting case), but may NOT capture a redirected tree.
+    # non-redirecting case), but may NOT capture a redirected tree. With NO session cwd and no resolved -C
+    # target a DESTRUCTIVE form DENIES below (fail closed, ROUND-8): no base can be probed or snapshotted.
     ambient_override = _ambient_repo_view_override()
     if ambient_override or not _segment_dir_simple(pristine):
         ao_cwd = data.get("cwd")
@@ -5075,7 +7062,7 @@ def git_discard(data):
                 "-c or inline GIT_DIR=/GIT_WORK_TREE= assignment, e.g. an inline '-c alias.<name>=' or a "
                 "redirected 'checkout-index'/'read-tree'); this guard cannot prove it non-destructive and "
                 "cannot snapshot it, so it is denied rather than run on a possible discard. Re-issue as a "
-                "recognized, provable form, or commit or stash your work first. {}".format(sub, _DISCARD_ALTS),
+                "recognized, provable form, or commit or stash your work first. {}".format(sub, alts),
                 "AIQT guardrail: denied a redirected git command whose subcommand this guard cannot prove "
                 "non-destructive (rule prsunc); commit or stash first, or re-issue in a recognized form.")
         # ROUND-6 FINDING 5: a destructive discard carrying a --git-dir/GIT_DIR redirect (which does NOT move
@@ -5095,7 +7082,7 @@ def git_discard(data):
                     "session snapshot cannot capture that redirected index, so this discard could be "
                     "unrecoverable and is denied rather than run. Re-issue it as a plain 'git -C <repo> "
                     "<verb>' command run from the target repository, or commit or stash your work first. {}"
-                    .format(kind or "a git work-losing verb", _DISCARD_ALTS),
+                    .format(kind or "a git work-losing verb", alts),
                     "AIQT guardrail: denied a --git-dir/GIT_DIR-redirected git discard whose repository this "
                     "guard cannot resolve to snapshot (rule prsunc); run it from the target repo, or commit "
                     "or stash first.")
@@ -5120,7 +7107,7 @@ def git_discard(data):
                     "the exact content the command would discard and denies rather than run on a possibly "
                     "unrecoverable discard. Re-issue it as a plain 'git <verb>' command run FROM the target "
                     "working tree (without --work-tree), or commit or stash your work first. {}"
-                    .format(kind or "a git work-losing verb", _DISCARD_ALTS),
+                    .format(kind or "a git work-losing verb", alts),
                     "AIQT guardrail: denied a --work-tree-redirected worktree-content git discard whose split "
                     "index/worktree state this guard cannot snapshot (rule prsunc); run it from the target "
                     "worktree, or commit or stash first.")
@@ -5141,7 +7128,7 @@ def git_discard(data):
                         "cannot resolve, so it cannot preserve the stash the command will actually clear; "
                         "denied rather than run on an unrecoverable discard. Re-issue it as a plain git "
                         "command from the target repository, or apply or commit the stash first. {}"
-                        .format(stash_op, _DISCARD_ALTS),
+                        .format(stash_op, alts),
                         "AIQT guardrail: denied a redirected git stash drop/clear whose repository this guard "
                         "cannot resolve to preserve (rule prsunc); run it from the target repo, or apply or "
                         "commit the stash first.")
@@ -5154,10 +7141,10 @@ def git_discard(data):
                         "entries and is NOT reflog-recoverable afterwards, and no target repository could be "
                         "resolved to preserve them first; denied rather than run on an unrecoverable discard. "
                         "Re-issue it from the target repository, or leave the stash in place. {}"
-                        .format(stash_op, _DISCARD_ALTS),
+                        .format(stash_op, alts),
                         "AIQT guardrail: denied a git stash drop/clear with no resolvable repository to "
                         "preserve the stash first (rule prsunc).")
-                return _stash_drop_clear_outcome(stash_repo, stash_op)
+                return _stash_drop_clear_outcome(stash_repo, stash_op, note)
         if repo_dir == "opaque":
             if destructive:
                 return _deny(
@@ -5166,18 +7153,34 @@ def git_discard(data):
                     "cannot snapshot the repository the command will actually discard from; denied rather "
                     "than run on a possibly unrecoverable discard. Re-issue it as a plain git command from "
                     "the target repository, or commit or stash your work first. {}".format(
-                        kind or "a git work-losing verb", _DISCARD_ALTS),
+                        kind or "a git work-losing verb", alts),
                     "AIQT guardrail: denied a repository-redirected git discard whose target this guard cannot "
                     "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
             return _allow_note(
                 "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} carries a command-local "
                 "repository redirect this guard cannot resolve, but it is a non-destructive form, so it is "
-                "allowed.".format(kind or "a git command"))
+                "allowed.".format(kind or "a git command") + note)
         # ROUND-7 (codex findings 1/2): snapshot the REPO git acts on (repo_dir: a -C target, or the session
         # cwd when only --work-tree/--git-dir/-c is present), never the --work-tree value.
         target_base = repo_dir if isinstance(repo_dir, str) else cwd_base
         target_desc = ("the -C target ({})".format(repo_dir)
                        if isinstance(repo_dir, str) and repo_dir != cwd_base else "the session directory")
+        # ROUND-8 (class-width of the orchestrator-confirmed fail-open): a DESTRUCTIVE verb deciding on this
+        # view-override branch with NO resolvable base (no session cwd and no resolved -C target: a benign
+        # leading assignment such as FOO=1, a -c or other global option, or an ambient GIT_* override, each
+        # with no cwd) used to allow-note with NO snapshot, making the command MORE permissive than its bare
+        # form, which denies on an unresolvable worktree. It now DENIES (fail closed); a non-destructive
+        # form below keeps its ref-level allow-note, matching the bare command.
+        if destructive and target_base is None:
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} runs under a repository-view override or a "
+                "command-local redirect and no session working directory is available, so this guard can "
+                "neither prove the target tree clean nor take a recovery snapshot; denied rather than run on "
+                "a possibly unrecoverable discard. Re-issue it as a plain git command from the target "
+                "repository, or commit or stash your work first. {}"
+                .format(kind or "a git work-losing verb", alts),
+                "AIQT guardrail: denied a view-overridden git discard with no session directory to snapshot "
+                "(rule prsunc); run it from the target repo, or commit or stash first.")
         ao_snap = None
         if target_base is not None and destructive and _tree_is_clean(target_base) is not True:
             ao_snap = _record_recovery(target_base, sub)
@@ -5187,7 +7190,7 @@ def git_discard(data):
                     "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
                     "than run. Re-issue it as a plain git command from the target repository, or commit or "
                     "stash your work first. {}".format(kind or "a git work-losing verb", target_desc,
-                                                       ao_snap[1], _DISCARD_ALTS),
+                                                       ao_snap[1], alts),
                     "AIQT guardrail: denied an unrecoverable worktree-redirected git discard (rule prsunc); "
                     "run it from the target repo, or commit or stash first.")
         return _discard_recovery_result(
@@ -5195,7 +7198,7 @@ def git_discard(data):
             "runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
             "(-C/--git-dir/--work-tree or an inline GIT_DIR=/GIT_WORK_TREE= assignment); the recovery "
             "snapshot targets {} (a --git-dir/GIT_DIR alone leaves the worktree at the session directory)"
-            .format(target_desc), ao_snap, _OPTOUT_PRISTINE)
+            .format(target_desc), ao_snap, note)
 
     if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
         return _deny(
@@ -5203,7 +7206,7 @@ def git_discard(data):
             "('-c alias.<name>=...') that may expand to a work-losing verb this guard cannot resolve or "
             "snapshot; denied rather than run on an unknown discard. Re-issue the command the alias expands "
             "to explicitly (without '-c alias.<name>='), so this guard can classify it, or commit or stash "
-            "your work first. {}".format(_DISCARD_ALTS),
+            "your work first. {}".format(alts),
             "AIQT guardrail: denied an unresolvable git inline alias that may discard work (rule prsunc); "
             "run the aliased command explicitly, or commit or stash first.")
 
@@ -5244,7 +7247,7 @@ def git_discard(data):
             "(checkout/switch/restore/reset/rm/clean/stash/branch); this guard cannot prove it "
             "non-destructive and cannot snapshot it, so it is denied rather than run on a possible discard. "
             "Re-issue as a recognized, provable form, or commit or stash your work first. {}"
-            .format(sub, _DISCARD_ALTS),
+            .format(sub, alts),
             "AIQT guardrail: denied a git command whose subcommand this guard cannot prove non-destructive "
             "(rule prsunc); commit or stash first, or re-issue in a recognized form.")
 
@@ -5258,7 +7261,7 @@ def git_discard(data):
                 "AIQT rule prsunc (preserve-uncommitted-work): {} would run on a working tree that is not "
                 "provably clean and no recovery point could be created ({}), so this discard would be "
                 "unrecoverable; denied rather than run. Commit or stash your work first, then retry. {}"
-                .format(kind or "a git work-losing verb", snap[1], _DISCARD_ALTS),
+                .format(kind or "a git work-losing verb", snap[1], alts),
                 "AIQT guardrail: denied an unrecoverable git discard - no recovery snapshot could be created "
                 "(rule prsunc); commit or stash first, then retry.")
         return _allow()
@@ -5279,12 +7282,12 @@ def git_discard(data):
                     "cannot resolve to the session directory with certainty, so it can neither prove the "
                     "tree clean nor take a recovery snapshot; denied rather than run on a possible "
                     "unrecoverable discard of untracked content. Re-issue it as a plain git command from the "
-                    "target repository, or commit or stash your work first. {}".format(kind, _DISCARD_ALTS),
+                    "target repository, or commit or stash your work first. {}".format(kind, alts),
                     "AIQT guardrail: denied a git clean whose working tree this guard cannot resolve to "
                     "snapshot (rule prsunc); re-issue from the target repo, or commit or stash first.")
             # resolvable + not provably clean: a snapshot was taken above; fold its outcome in (ok ->
             # allow-note, fail -> deny), so a clean with no recovery point never silently allows.
-            return _discard_recovery_result(kind, "removes untracked files, which cannot be recovered", snap)
+            return _discard_recovery_result(kind, "removes untracked files, which cannot be recovered", snap, note)
         if sub == "stash":
             # ROUND-2 FINDING 6: 'git stash drop'/'clear' is NOT reflog-recoverable after the fact (it deletes
             # the stash reflog entry, orphaning the stash commit), so a worktree snapshot cannot protect it.
@@ -5299,15 +7302,15 @@ def git_discard(data):
                         "entries and is NOT reflog-recoverable afterwards, and no session working directory "
                         "is available to preserve the stash entries first; denied rather than run on an "
                         "unrecoverable discard. Re-issue it from the target repository, or leave the stash "
-                        "in place. {}".format(stash_op, _DISCARD_ALTS),
+                        "in place. {}".format(stash_op, alts),
                         "AIQT guardrail: denied an unrecoverable git stash drop/clear with no session "
                         "directory to preserve the stash first (rule prsunc).")
-                return _stash_drop_clear_outcome(base, stash_op)
+                return _stash_drop_clear_outcome(base, stash_op, note)
             # stash export / other ask-classified stash forms discard no stash entry: keep the allow-note.
-            return _discard_recovery_result(kind, "cannot be proven safe offline", snap)
+            return _discard_recovery_result(kind, "cannot be proven safe offline", snap, note)
         # A force branch delete/move/copy/reset: a branch ref is a separate, reflog-recoverable asset a
         # worktree snapshot cannot capture, so it keeps the allow-note.
-        return _discard_recovery_result(kind, "cannot be proven safe offline", snap)
+        return _discard_recovery_result(kind, "cannot be proven safe offline", snap, note)
 
     # A scoped or clobber form (all snapshottable): gate on the clean probe, which must resolve to the
     # session worktree.
@@ -5317,7 +7320,7 @@ def git_discard(data):
             "resolve to the session directory with certainty, so it can neither prove the tree clean nor "
             "take a recovery snapshot; denied rather than run on a possible unrecoverable discard. Re-issue "
             "it as a plain git command from the target repository, or commit or stash your work first. {}"
-            .format(kind, _DISCARD_ALTS),
+            .format(kind, alts),
             "AIQT guardrail: denied a git discard whose working tree this guard cannot resolve to snapshot "
             "(rule prsunc); re-issue from the target repo, or commit or stash first.")
     if clean is True:
@@ -5326,11 +7329,11 @@ def git_discard(data):
         # probe-uncertain: a snapshot was attempted above (snap set); fold its outcome into the ASK reason.
         return _discard_recovery_result(
             kind, "targets a repository whose status probe did not complete, so this guard cannot prove "
-                  "the working tree clean", snap)
+                  "the working tree clean", snap, note)
     # clean is False: the tree holds uncommitted tracked changes or untracked files this verb could reach.
     if role == "clobber":
-        return _deny_with_recovery(kind, snap)  # a confirmed whole-tree loss, still recoverable if approved
-    return _discard_recovery_result(kind, "may discard uncommitted changes in the working tree", snap)
+        return _deny_with_recovery(kind, snap, note)  # a confirmed whole-tree loss, still recoverable if approved
+    return _discard_recovery_result(kind, "may discard uncommitted changes in the working tree", snap, note)
 
 
 _PROTECTED = frozenset(("main", "master"))  # the protected line(s); default {main, master}, source-level config
@@ -5367,8 +7370,8 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture: conservative, over-matching, never
-# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with the verb in one pattern ((?is): case-fold,
-# '.' spans newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
+# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with a LATER verb (a _RawSequence, case-folded,
+# the gap spanning newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
 # --for/--force/--force-with-lease/--force-if-includes; the short cluster scan now admits a digit
 # ('-[A-Za-z0-9]*f'), so an ipv4/ipv6 '-4f'/'-6f' clustered with force is caught (F-117), and its
 # disclosed false-hit on an attached -o value ending in f ('-of') now also covers '-o4f'; the short
@@ -5393,10 +7396,60 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 # (env git push -'f' origin main, \-f, escaped +main) is not matched, because bash quote/escape removal
 # cannot be replicated by a raw-string regex; this is the same inherent lexical boundary as a
 # shell-expanded $VAR, disclosed and not chased (F-117/F-119).
-_RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
-_RAW_PUSH_FORCE_RE = re.compile(r"(?i)--for[a-z-]*|--mirror\b|--all\b|--branches\b|(?:^|[\s'\"])-[A-Za-z0-9]*f|(?:^|[\s'\"])\+\S")
+# Every remote-overwriting long option is matched at EVERY abbreviation git accepts, derived from
+# git push's own long-option set rather than by hand. That set (git 2.55, the option table behind
+# 'git push -h'): verbose, quiet, repo, all, branches, mirror, delete, tags, dry-run, porcelain,
+# force, force-with-lease, force-if-includes, recurse-submodules, thin, receive-pack, exec,
+# set-upstream, progress, prune, no-verify (with its negation verify), follow-tags, signed, atomic,
+# push-option, ipv4, ipv6. git takes a prefix that names exactly ONE option (an exact name wins, and
+# --branches is an alias of --all, so those two never clash). The options that can overwrite, delete
+# or bulk-update remote refs, each with its shortest accepted prefix:
+#   --force              --force    (each shorter prefix also names the two options below)
+#   --force-with-lease   --force-w
+#   --force-if-includes  --force-i
+#   --mirror             --m
+#   --all                --al       (--a also names --atomic)
+#   --branches           --b
+#   --delete             --de       (--d also names --dry-run)
+#   --prune              --pru      (--p and --pr also name --porcelain, --progress or --push-option)
+# --tags and --follow-tags are left out: they add refs under refs/tags only and never update or
+# delete a branch (a force spelling beside them is matched as force); no other option forces,
+# deletes or sweeps. _push_abbrev_alternative turns each row into one alternative that matches every
+# prefix from the shortest to the full name as a whole option word (the full '--all' and '--branches'
+# spellings it replaces also matched a longer hyphenated word such as '--all-targets', which no git
+# push option is); the broader '--for[a-z-]*', '--de[a-z-]*' and
+# '--pru[a-z-]*' spellings beside them also match prefixes git rejects as ambiguous ('--for',
+# '--forc'), an over-match in the safe direction. The parsed classifier (_push_parse) matches every
+# prefix of each name through _has_long_prefix. tools/selftest_aiqt_hooks.py recomputes the shortest
+# prefixes from a recorded copy of the option set above and fails when these rows disagree with it.
+# The three predicate regexes are applied per raw SEGMENT by _raw_push_match (split at newlines and
+# unquoted ;/&/| separators, see _raw_push_segments), so '^' anchors a segment start.
+_PUSH_FORCE_ABBREVS = (
+    ("force", "force"), ("force-with-lease", "force-w"), ("force-if-includes", "force-i"),
+    ("mirror", "m"), ("all", "al"), ("branches", "b"))
+_PUSH_DELETE_ABBREVS = (("delete", "de"), ("prune", "pru"))
+
+
+def _push_abbrev_alternative(name, shortest):
+    """One regex alternative matching '--<prefix>' for every prefix of `name` at least as long as
+    `shortest`, ending where the option word ends (no letter, digit, '_' or '-' follows, so
+    '--force-with' followed by '-x' does not match): ('mirror', 'm') gives
+    '--m(?:i(?:r(?:r(?:o(?:r)?)?)?)?)?(?![\\w-])'."""
+    tail = ""
+    for ch in reversed(name[len(shortest):]):
+        tail = "(?:" + re.escape(ch) + tail + ")?"
+    return "--" + re.escape(shortest) + tail + r"(?![\w-])"
+
+
+_RAW_PUSH_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bpush\b")
+_RAW_PUSH_FORCE_RE = re.compile(
+    r"(?i)--for[a-z-]*|"
+    + "|".join(_push_abbrev_alternative(name, shortest) for name, shortest in _PUSH_FORCE_ABBREVS)
+    + r"|(?:^|[\s'\"])-[A-Za-z0-9]*f|(?:^|[\s'\"])\+\S")
 _RAW_PUSH_DELETE_RE = re.compile(
-    r"(?i)--de[a-z-]*|--pru[a-z-]*|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
+    r"(?i)--de[a-z-]*|--pru[a-z-]*|"
+    + "|".join(_push_abbrev_alternative(name, shortest) for name, shortest in _PUSH_DELETE_ABBREVS)
+    + r"|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
     + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
 # GD-146: the raw-fallback parity for a command-local mirror configuration the parsed path cannot reach
@@ -5407,17 +7460,23 @@ _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")
 # unquoted form, while a push-option value ('-o remote.origin.mirror=true') and prose do not. It matches
 # only the COMMON quoted-argument forms above: a quote or backslash that FRAGMENTS the option token, the
 # key, or the value (-'c', \-c, remote.origin.'mirror'=true which git 2.53 still reconstructs to
-# mirror=true, or a split value) is NOT matched. Arbitrary shell fragmentation of an unparseable or
-# wrapper-prefixed command cannot be robustly matched by a regex (only a shell parser could, which the
-# pack deliberately avoids), so this is an inherent lexical-scan boundary, the same class as the disclosed
-# wrapper/alias/fragmented-command-word residuals; it is DISCLOSED, not chased with more regex variants.
+# mirror=true, or a split value) is NOT matched by this regex on the raw text;
+# _protected_line_fallback also applies it to the DE-QUOTED copy (_dequoted_text), and the
+# raw-text backstop applies it to each segment's de-quoted copy, so a fragment made only of quote
+# characters, backslashes and a '$' before a quote is matched there (the key-fragmented wrapped
+# mirror-config vector, re-expected), while a fragment made another way (an escape decoded inside
+# $'...', an expansion) is not. Arbitrary shell
+# fragmentation of an unparseable or wrapper-prefixed command cannot be robustly matched by a regex (only
+# a shell parser could, which the pack deliberately avoids), so this is an inherent lexical-scan boundary,
+# the same class as the disclosed wrapper/alias/fragmented-command-word residuals; it is DISCLOSED, not
+# chased with more regex variants.
 # The PARSED path is complete for parseable commands (the tokenizer normalizes quotes) and network-side
 # branch protection remains the backstop. It parses NO value: a falsy value over-asks on this path
 # (accepted, documented), mirroring the raw scan's over-matching posture.
 _RAW_PUSH_MIRRORCFG_RE = re.compile(
     r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
     r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
-_RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 
 # Commit proof contract. Recognizers establish syntax, never authorization.
 # The ordered evaluator supplies the evidence consumed by _commit_on_protected.
@@ -5640,7 +7699,7 @@ def _commit_command_syntax(command):
         records = tuple(_lex_command(command))
     except ValueError:
         # Partial records improve detection only. They can NEVER establish a proof.
-        partial, _complete = _lex_command(command, partial=True)
+        partial, _complete, _in_progress = _lex_command(command, partial=True)
         apparent = bool(_RAW_COMMIT_RE.search(command))
         apparent = apparent or not _commit_quote_bytes_known(command)
         apparent = apparent or any(_commit_apparent_segment(seg) for seg in partial)
@@ -6416,30 +8475,248 @@ def _commit_denial(detail):
         "AIQT guardrail: denied a protected or unproved direct commit (rule artbr1).")
 
 
-def _protected_line_fallback(command):
+def _raw_push_segments(command):
+    """Split the raw command at newlines and at the shell separators ; & | (covering
+    ;, ;;, &&, ||, |, |& and a background &) that sit OUTSIDE any quoting _skip_quoting can prove,
+    so the backstop judges ONE command segment at a time and an ordinary neighbouring segment (a
+    'rm -rf build', a 'git rebase origin/main', a '--format' or '--depth' value, a 'tail -f' in
+    another pipe stage) no longer supplies the force spelling or the protected name for an unrelated
+    push. An unquoted '#' that STARTS A WORD is a comment;
+    the splitter skips to the end of that line WITHOUT reading any quote or separator in it (bash
+    does not), so a quote or an '&'/';'/'|' sitting in comment text neither opens a quoting context
+    nor splits a segment. The comment TEXT stays in the surrounding segment, still available to the
+    raw matching policy (a commented protected name is still matched, the disclosed over-denial),
+    but a comment quote can no longer mis-pair a later string and sever a wrapped push from its
+    force spelling or protected name (the pl-comment-quote vectors; the old scan let the quote in a
+    '# "' line pair with a later '"' and read 'env git push --force "origin' and 'other" main' as
+    different segments, a silent allow). An '&' or '|' that is part of a REDIRECTION
+    OPERATOR is NOT a separator and never splits - an '&' that follows an UNESCAPED '<' or '>' or is
+    followed by '>' (2>&1, >&2, 1>&2, <&0, 2>&-, &>, &>>) and a '|' that follows an UNESCAPED '>'
+    (the '>|' clobber form) - because bash reads a redirection as part of ONE simple command.
+    Operator membership is read in ESCAPE and LINE-CONTINUATION context: a
+    backslash-newline between the '<'/'>' and the '&' is a line continuation and transparent, so
+    '2>\\<newline>&1' stays one segment, while an ESCAPED '\\>' is a literal character and NOT a
+    redirection operator, so a real '&' or '|' after it splits; an IO number ('12>&1') and an
+    fd-var ('{fd}>&1') redirect stay unsplit, and a plain '&', '|' or '|&' splits. The split is
+    conservative where quoting is readable: a quote, backquote or substitution is consumed as ONE
+    opaque unit, so its content (separators included) stays inside the surrounding segment; a line
+    continuation does not split. On an unterminated or unreadable construct the REST of the command
+    joins the current segment unsplit, degrading toward a whole-text read (over-denial).
+    The splits themselves carry NO one-sided guarantee: a separator inside text bash reads
+    differently (an unquoted-heredoc body line, a construct the quoting model mis-pairs) can still
+    divide a pairing bash would run together, so this segment read stays one layer beside the parsed
+    classifier and the uncertain-lex fallback, never a proof of safety. Heredoc bodies
+    are NOT modelled and split at their newlines like any other text.
+
+    The split runs on the JOINED text (_join_continuations removes every backslash-newline
+    continuation first, as bash does), so a continuation on EITHER side of an operator is transparent:
+    '2>\\<newline>&1' and '&\\<newline>>' (bash's '&>' redirect) both stay in one segment. A comment
+    starts at a word start in the joined text, after a blank, a newline or any shell metacharacter
+    (;&|()<>), so a '(# "' line is comment text too. Each returned segment is the RAW slice of
+    `command` that its joined text came from (continuations included), for diagnostics.
+
+    A word start is tracked as bash tracks it: only an UNESCAPED blank, newline or
+    metacharacter ends a word, so a '#' just past an escaped blank ('x\\ #"'), a closing quote or the
+    ')' that closes a '$(', '<(' or '>(' substitution continues the word and opens no comment, and a
+    '<(' or '>(' process substitution is consumed as one opaque unit like '$('."""
+    joined, raw_index = _join_continuations(command)
+    segments = []
+    start = 0  # the RAW index where the current segment starts (just past the last separator)
+    i = 0
+    n = len(joined)
+    # prev_redir: the previous significant character was an UNESCAPED '<' or '>', so a following
+    # '&'/'|' is part of a redirection operator, not a separator.
+    prev_redir = False
+    # word_start: the next character starts a word (the text start, or just past an UNESCAPED blank,
+    # newline or shell metacharacter), the only place bash opens a comment.
+    word_start = True
+    while i < n:
+        c = joined[i]
+        if c == "#" and word_start:
+            # an unquoted word-start '#' is a comment: skip to end of line without reading quotes or
+            # separators in it, as bash does; the comment text stays in the current segment.
+            nl = joined.find("\n", i)
+            i = n if nl == -1 else nl
+            prev_redir = False
+            continue
+        if c in "\n;&|":
+            nxt = joined[i + 1] if i + 1 < n else ""
+            word_start = True
+            if c == "&" and (prev_redir or nxt == ">"):
+                i += 1  # part of a redirection operator (2>&1, >&2, <&0, 2>&-, &>, &>>): not a separator
+                prev_redir = False
+                continue
+            if c == "|" and prev_redir:
+                i += 1  # the '>|' clobber redirect: not a separator
+                prev_redir = False
+                continue
+            segments.append(command[start:raw_index[i]])
+            start = raw_index[i] + 1
+            i += 1
+            prev_redir = False
+            continue
+        if c == chr(92):
+            if i + 1 < n and joined[i + 1] == "\n":
+                i += 2  # a continuation the join kept (inside quoting it read differently): transparent
+                continue
+            i += 2  # an escaped character is literal: NOT a redirection metacharacter, NOT a word break
+            prev_redir = False
+            word_start = False
+            continue
+        if c == "(" and prev_redir:
+            # a '<(' or '>(' process substitution: skip it as the '$(' it parses like, one opaque unit
+            try:
+                i += _skip_quoting("$" + joined[i:], 0, n - i + 1) - 1
+            except ValueError:
+                break
+            prev_redir = False
+            word_start = False
+            continue
+        if c in ("'", '"', "`") or (c == "$" and i + 1 < n and joined[i + 1] in "({"):
+            try:
+                i = _skip_quoting(joined, i, n)
+            except ValueError:
+                break
+            prev_redir = False
+            word_start = False
+            continue
+        prev_redir = c in ("<", ">")
+        word_start = c in _SHELL_WORD_BREAK
+        i += 1
+    segments.append(command[start:])
+    return segments
+
+
+def _raw_push_match(command):
+    """True when ONE raw command segment pairs a git push with a force, delete or mirror spelling
+    AND a protected branch name: the raw-text backstop predicate, read with no lexing and no
+    stripping, and judging one _raw_push_segments segment at a time so a
+    neighbouring ordinary segment cannot supply the pairing. protected_line tests it on EVERY call
+    and returns _raw_push_guard on a match. Every regex runs on each segment's JOINED
+    text too (_join_continuations of the slice alone, which is sound because each slice starts just
+    past an unquoted separator), so a continuation inside a word ('pu\\<newline>sh',
+    'ma\\<newline>in', '--fo\\<newline>rce') no longer hides the push, the force spelling or the
+    protected name on a certain lex. The raw slice stays the diagnostic, and its own reading is kept
+    beside the joined one (it can only add a match, the safe direction). Every regex also
+    runs on each segment's DE-QUOTED copy (_dequoted_text of the slice: continuations joined, a '$'
+    before a quote, quote characters and backslashes removed), so a quote- or backslash-fragmented
+    word under a command-word wrapper ('pu""sh', "-'f'", "'ma'in", 'ma\\in') beside an ordinary git
+    segment no longer hides a force-push to a protected branch on a certain lex, where the broad
+    fallback does not run. Like the joined reading it can only add a match: a FEATURE-branch force-push
+    spelled in fragments still allows here (the disclosed pl-segment-res1 residual)."""
+    for segment in _raw_push_segments(command):
+        for text in (segment, _join_continuations(segment)[0], _dequoted_text(segment)):
+            if (_RAW_PUSH_RE.search(text)
+                    and (_RAW_PUSH_FORCE_RE.search(text) or _RAW_PUSH_DELETE_RE.search(text)
+                         or _RAW_PUSH_MIRRORCFG_RE.search(text))
+                    and _RAW_PROTECTED_RE.search(text)):
+                return True
+    return False
+
+def _raw_push_guard(command):
+    """The raw-text push backstop, the unconditional deny for a _raw_push_match
+    hit (ONE raw command segment pairing a git push with a force, delete or mirror spelling AND
+    a protected branch name, read with no lexing and no stripping; the read covers one
+    _raw_push_segments segment at a time rather than the whole text, and reads each
+    segment with its continuations joined and de-quoted too, beside the raw slice). protected_line
+    tests the predicate on EVERY call, before the commit-grammar reading and the lexer, so no parse
+    outcome and no harmless git segment elsewhere in the command can stand it down: a
+    shell-quoting model inside a hook cannot track comments, heredoc bodies and nested
+    substitutions the way bash does, so this layer does not depend on
+    one (for the shapes the backstop cannot spell - a hidden push naming no protected branch
+    - the restored nested-quote lexer is the parsed first line ONLY while its reading is certain;
+    on an UNCERTAIN lex (_lex_uncertain: any unquoted '#', '<<', '(' or ')', a lone
+    '{' or '}' word, any backtick or '$(', a continuation the lexer reads differently once joined, or a
+    refused form) protected_line routes to the broader _protected_line_fallback raw scan, which needs
+    no protected name, rather than let a benign lexed git segment vouch for the command).
+    DISCLOSED COST (the safe direction): push-shaped prose naming a
+    protected branch inside a heredoc body line, quoted string, comment or commit message
+    DENIES whenever it shares a segment with a push and force spelling (witnessed by the
+    quoted-heredoc prose vector and the pl-mispair vectors); the per-segment read removes only the
+    CROSS-segment pairings (a rebase
+    origin/main beside a feature force-push, an rm -rf beside a plain push, a --format or
+    --depth value: pl-segflow vectors). A force or delete spelling that names no protected
+    branch is NOT matched here: it is judged by the parsed classifier (force to a feature ref
+    stays allowed) and, for wrapped or unparseable commands, by the broader
+    _protected_line_fallback raw scan."""
+    return _deny(
+            "AIQT rule prtbrn (protected-branch-integrity): the raw command text pairs a git push "
+            "with a force, delete or mirror spelling and a protected branch name within one "
+            "command segment. This backstop reads the submitted text on every call, one "
+            "segment at a time (line continuations joined first, then split at newlines and at ;/&/| "
+            "separators outside any readable quoting and not part of a redirection operator; each "
+            "segment is read as written, with its continuations joined, and with quotes and "
+            "backslashes removed), "
+            "including the quoted strings, comments "
+            "and heredoc body lines inside that segment, because a quoting model inside a hook "
+            "cannot track those the way bash does; push-shaped prose naming a protected branch "
+            "beside a push in one segment is denied too (a disclosed over-denial, the safe "
+            "direction). The protected line changes only through a reviewed, verified merge. "
+            "Re-issue the work without force-push-to-protected text in the command segment. "
+            + _PROTECTED_ALTS,
+            "AIQT guardrail: denied a command whose raw text shows a force, delete or mirror push "
+            "naming a protected branch (rule prtbrn, raw-text backstop); push to a feature branch "
+            "and merge on green.")
+
+
+def _fallback_push_hit(text):
+    """True when `text` holds a git..push spelling together with a force, delete or mirror spelling
+    (the broad fallback predicate: no protected name is required)."""
+    return bool(_RAW_PUSH_RE.search(text) and (_RAW_PUSH_FORCE_RE.search(text)
+                                               or _RAW_PUSH_DELETE_RE.search(text)
+                                               or _RAW_PUSH_MIRRORCFG_RE.search(text)))
+
+
+def _protected_line_fallback(command, wrapped=False):
     """Commit-free push fallback; commit syntax is checked before this path.
 
-    Retain conservative raw push coverage and quoted-heredoc stripping. Hidden
-    commits are checked independently of other Git segments by the commit recognizer.
+    R10 (DECIDED item 3): the raw push scan reads the WHOLE command text, with no
+    heredoc stripping at all. Stripping removes text, so any stripping defect can
+    only HIDE a live push from this fail-safe scan (the stacked-heredoc and the
+    nested-quote command-substitution shapes each erased a real force-push from
+    the stripped scan). The disclosed cost is an over-deny: force-push-shaped
+    prose inside a QUOTED heredoc body now denies on this fallback path.
+    Retain conservative raw push coverage over the RAW, unstripped text. The
+    former quoted-heredoc stripping could remove a real line that a mis-paired reading took
+    for body text, so no stripping removes any line from this scan; quoted prose can
+    over-match here (the safe direction). DISCLOSED over-denial, witnessed by
+    pl-fallback-prose: push-shaped prose naming only a FEATURE ref inside a quoted heredoc
+    body therefore denies here when the command is unparseable or wrapper-hidden (the
+    removed quoted-heredoc strip would have removed it; this scan stays unstripped by decision).
+    The scan also reads the DE-QUOTED copy of the whole command (_dequoted_text:
+    continuations joined, a '$' before a quote, quote characters and backslashes removed), so a
+    fragmented spelling ('pu""sh', 'ma""in') that bash assembles into a push is caught; the deny message names the
+    actual reasons the reading is uncertain (_lex_uncertain_causes), plus 'wrapped' when the
+    caller lexed no segment whose command word is git. The pairing is read across the WHOLE
+    text, so a force spelling in one command and a push word in another pair here (a disclosed
+    over-denial, reached only on an uncertain, unparseable or wrapper-hidden command).
+    Hidden commits are checked independently of other Git segments by the commit recognizer.
     """
     syntax = _commit_command_syntax(command)
     if syntax.status != "outside":
         if syntax.status == "help":
             return _allow()
         return _commit_denial("apparent commit lacks complete proof: " + syntax.detail)
-    scan = _strip_quoted_heredoc_bodies(command)
-    if _RAW_PUSH_RE.search(scan) and (_RAW_PUSH_FORCE_RE.search(scan)
-                                      or _RAW_PUSH_DELETE_RE.search(scan)
-                                      or _RAW_PUSH_MIRRORCFG_RE.search(scan)):
-        named = " a protected branch" if _RAW_PROTECTED_RE.search(scan) else " a target this guard cannot read"
+    plain = _dequoted_text(command)
+    # R10: raw and unstripped; stripping could remove a real, mis-paired line. The de-quoted copy
+    # is read beside it, never instead of it.
+    if _fallback_push_hit(command) or _fallback_push_hit(plain):
+        named = (" a protected branch" if (_RAW_PROTECTED_RE.search(command) or _RAW_PROTECTED_RE.search(plain))
+                 else " a target this guard cannot read")
+        causes = [_LEX_UNCERTAIN_CAUSE_TEXT[key] for key in _lex_uncertain_causes(command)]
+        if wrapped:
+            causes.append("no segment whose command word is git, so git sits under a command-word "
+                          "wrapper or inside another command's text")
+        why = "; ".join(causes) if causes else "a form this guard cannot read with certainty"
         return _deny(
-            "AIQT rule prtbrn (protected-branch-integrity): this command could not be fully parsed by the "
-            "shell lexer (unbalanced quotes) or hides git under a command-word wrapper, and it appears to "
-            "force-push or delete{}; it is denied fail-safe because this guard cannot prove it will not "
-            "rewrite the protected line. The protected line changes only through a reviewed, verified merge. "
-            "Re-issue it as a plain, parseable, non-force git command. {}".format(named, _PROTECTED_ALTS),
-            "AIQT guardrail: denied an apparent force-push or branch deletion this guard cannot fully parse "
-            "(rule prtbrn, fail-safe); push to a feature branch and merge on green.")
+            "AIQT rule prtbrn (protected-branch-integrity): this guard cannot read this command's shell "
+            "structure with certainty ({}), and its text, read as written and with quotes and backslashes "
+            "removed, appears to force-push or delete{}; it is denied fail-safe because this guard cannot "
+            "prove it will not rewrite the protected line. The protected line changes only through a "
+            "reviewed, verified merge. Re-issue it as a plain, parseable, non-force git command. {}"
+            .format(why, named, _PROTECTED_ALTS),
+            "AIQT guardrail: denied an apparent force-push or branch deletion this guard cannot read with "
+            "certainty ({}) (rule prtbrn, fail-safe); push to a feature branch and merge on green.".format(why))
     return _allow()
 
 def protected_line(data):
@@ -6451,6 +8728,22 @@ def protected_line(data):
     opaque script or unparseable fragmentation; other commit-producing verbs and
     other tools remain outside this boundary. Server protection does not validate
     this pre-execution proof. Push coverage retains its existing separate limits.
+
+    A raw-text backstop (_raw_push_guard) scans the unmodified command on every
+    call, before any parsing, and denies a force/delete/mirror push spelling paired with a
+    protected branch name inside one command segment (it splits the raw text at
+    newlines and unquoted ;/&/| separators and judges one segment at a time). The shell lexer
+    below carries the restored nested-quoting model (_skip_quoting), so a push hidden
+    behind a nested-substitution heredoc opener is a visible segment again; the lexer remains a
+    best-effort reading of bash, not a guarantee, and the backstop is the second layer.
+    Where that reading is UNCERTAIN (_lex_uncertain, read after joining line
+    continuations: ANY unquoted '#', '<<', '(' or ')', a lone '{' or '}' word, any backtick or '$(',
+    a continuation the lexer reads differently once joined, or anything the full lexer refuses) a
+    benign lexed git segment no longer suppresses the broad raw fallback; the fallback decides from the raw and
+    de-quoted text (a disclosed over-denial, the safe direction). That uncertainty check is a LATER fallback condition,
+    reached only for commit-free commands after the input validation, the raw backstop, the
+    'help' early return and the commit-grammar reading above it; it is not the unconditional
+    backstop.
     """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
@@ -6466,6 +8759,15 @@ def protected_line(data):
             "AIQT rule prtbrn (protected-branch-integrity): the Bash payload carried no readable command "
             "string, so the protected-line check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule prtbrn, fail-closed).")
+    # After the input validation above (the PreToolUse
+    # event, the Bash tool, and a readable command string), the raw-text backstop runs
+    # unconditionally on every call, ahead of the commit-grammar reading and the lexer, so no
+    # parse outcome suppresses it; it judges one raw segment at a time. The uncertainty
+    # check (_lex_uncertain) is NOT here: it is a LATER fallback condition below, reached only
+    # for commit-free commands and only after the 'help' early return (a lone
+    # 'git commit --help' / -h allows before it). _raw_push_guard states the disclosed over-denial.
+    if _raw_push_match(command):
+        return _raw_push_guard(command)
     deadline = time.monotonic() + _COMMIT_SECONDS
     syntax = _commit_command_syntax(command)
     if syntax.status == "help":
@@ -6522,8 +8824,25 @@ def protected_line(data):
                 "(rule prtbrn); push to a feature branch and merge on green.")
     if pending_deny is not None:
         return _deny(*pending_deny)
-    if not saw_git and _RAW_GIT_RE.search(command):
-        return _protected_line_fallback(command)
+    # The BROAD raw fallback (force/delete spellings with NO protected-name requirement) runs
+    # when no git segment was lexed OR the lex is UNCERTAIN: run on
+    # every call it would deny every force-push to a FEATURE branch (pl-b). On an UNCERTAIN lex
+    # (_lex_uncertain: ANY unquoted '#', '<<', '(' or ')', a lone '{' or '}' word, any backtick or
+    # '$(', a continuation the lexer reads differently once joined, or anything the full lexer refuses)
+    # the lexed reading may have swallowed a
+    # real push line into one opaque word, so a benign parsed git segment (a 'git status') must
+    # not vouch for the command: the fallback decides from the raw text (the pl-uncertain
+    # vectors; DISCLOSED over-denial witnessed by pl-uncertain-cost). The protected-name class
+    # does not depend on this gate: _raw_push_guard already scanned the raw text on every call
+    # first, so a harmless earlier or later git segment can no longer suppress that scan
+    # (the old pl-r1/pl-r1b residual, closed for pushes naming a protected branch in the wrapped
+    # segment). The NARROWED residual stays disclosed and witnessed (pl-segment-res1/res1b): a
+    # wrapped force push naming NO protected branch, beside a benign parsed git segment, still
+    # allows on a CERTAIN lex. The git gate reads the de-quoted text too, so a
+    # quote-fragmented 'g""it' under a wrapper still reaches the fallback.
+    if ((not saw_git or _lex_uncertain(command))
+            and (_RAW_GIT_RE.search(command) or _RAW_GIT_RE.search(_dequoted_text(command)))):
+        return _protected_line_fallback(command, wrapped=not saw_git)
     return _allow()
 
 
@@ -6983,14 +9302,17 @@ def branch_root(data):
             "command string, so branch creation could not be checked; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
     try:
-        segments = _segments(command)
+        # The loop below passes over a segment with no word (it has no command word), so one with no word
+        # and no redirect is not built at all, here or in the partial reread.
+        segments = _segments(command, skip_empty=True)
     except ValueError:
         # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
         # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
         # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
         try:
-            segments = [(seg.argv, seg.sep_after) for seg in _lex_command(command, partial=True)[0]]
+            segments = [(seg.argv, seg.sep_after)
+                        for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
         except ValueError:
             return _allow()  # even partial recovery failed: open grammar, best-effort
 
@@ -7177,9 +9499,9 @@ _GATE_ALTS = (
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
 # deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
 # probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
-_RAW_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b")
+_RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
-_RAW_SHORT_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|am)\b")
+_RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
 _RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
 _RAW_CHECKER_RE = re.compile(
     r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
@@ -7192,7 +9514,7 @@ _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
 # checker's output may reach the sink through it, so the fallback notes it as it notes a raw '| head'.
 _RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
 _RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
-_RAW_COMMIT_MSG_GIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_MSG_GIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
 
@@ -7917,10 +10239,11 @@ def gate_weakening(data):
     except ValueError:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
         # the unparseable construct are judged first for a verification run piped into a truncating sink;
-        # otherwise the raw fallback stands. The in-progress segment the lexer was inside is dropped, since
-        # its unseen tokens could change it.
-        recovered, complete = _lex_command(command, partial=True)
-        if not complete:
+        # otherwise the raw fallback stands. Only the in-progress segment the lexer was inside is dropped,
+        # since its unseen tokens could change it; a construct that begins a new segment (a lone quote after
+        # 'pytest | head;') leaves every recovered segment complete, so none is dropped.
+        recovered, _complete, in_progress = _lex_command(command, partial=True)
+        if in_progress:
             recovered = recovered[:-1]
         hit = _verification_sink(recovered)
         if hit is not None:
@@ -8381,6 +10704,17 @@ _GENSRC_TOOLS = ("Write", "Edit", "MultiEdit")   # MultiEdit carries ONE top-lev
 _GENSRC_REGISTRY_REL = os.path.join(".aiqt", "gensrc.json")
 _GENSRC_VERSION = 1
 _GENSRC_MAX_BYTES = 1_000_000  # the real registry is ~5 KB; a larger one is malformed (SECA bound)
+# The optional entry scope. Absent: the entry governs every tree holding the registry. "authoring": tools/
+# gen_gensrc.py marks the tools/gen_hooks.py AUTHORING_ONLY_REL targets (the repository-local
+# .claude/settings.json), which exist only in the pack authoring tree, so the entry is honoured only where the
+# authoring marker below sits at the repo root (_gensrc_authoring_marker); an adopter tree holding the shipped
+# registry keeps its own .claude/settings.json. Any other value is a malformed entry.
+_GENSRC_SCOPES = ("authoring",)
+# The authoring marker tools/gen_hooks.py reads (AUTHORING_MARKER_REL, AUTHORING_MARKER), spelled here because
+# the dispatcher imports nothing from tools/; tools/selftest_aiqt_hooks.py pins both, and _GENSRC_MAX_BYTES as the
+# marker size bound (AUTHORING_MARKER_MAX_BYTES), against gen_hooks.
+_GENSRC_MARKER_REL = os.path.join(".aiqt", "authoring.toml")
+_GENSRC_MARKER = {"format-version": 1, "role": "pack-authoring-repository"}
 
 
 def _gensrc_fail_ask(detail):
@@ -8402,9 +10736,11 @@ def _gensrc_fail_ask(detail):
 
 def _load_gensrc_registry(root):
     """Read <root>/.aiqt/gensrc.json AT DECISION TIME and return one of ("absent", None),
-    ("ok", entries), or ("bad", detail). `entries` is the list of (kind, target, sources, regenerate)
+    ("ok", entries), or ("bad", detail). `entries` is the list of (kind, target, sources, regenerate, scope)
     tuples in registry order with kind=block entries dropped (a path guard cannot see which lines an
-    edit touches; the block drift gates backstop those).
+    edit touches; the block drift gates backstop those). scope is None for an entry with no "scope" key and
+    "authoring" for an authoring-only entry (_GENSRC_SCOPES); any other present value, a JSON null
+    included, is a malformed entry.
 
     ABSENT (FileNotFoundError from the lstat probe: ENOENT on the file or a missing .aiqt/ component) is
     the inert boundary: a repo with no registry gets no coverage (adopters author their own). Every OTHER
@@ -8420,8 +10756,10 @@ def _load_gensrc_registry(root):
     validation only guarantees THIS repo's registry; an adopter-authored or hand-tampered registry the
     guard cannot fully read is BAD (it cannot prove no-match). Unknown extra keys within version 1 are
     tolerated: the version field pins the schema, and strictness on additions would break a
-    forward-compatibly authored registry. This loader is BEST-EFFORT against the ACCIDENTAL case, not a
-    hardened TOCTOU check: it rejects a STATIONARY non-regular registry and fails a delete race safe to
+    forward-compatibly authored registry. "scope" is the one optional key this guard reads; a guard older
+    than it tolerated the key as unknown, so it honours an authoring-only entry in every tree. This loader
+    is BEST-EFFORT against the ACCIDENTAL case, not a hardened TOCTOU check: it rejects a STATIONARY
+    non-regular registry and fails a delete race safe to
     BAD, but a registry concurrently SWAPPED to a different file type in the lstat-to-open window is a
     disclosed residual (see the comment below and the control residue), a sibling of the hard-link,
     case-insensitive-filesystem, and NFC/NFD aliases."""
@@ -8518,10 +10856,59 @@ def _load_gensrc_registry(root):
             return ("bad", "a registry entry has malformed sources")
         if not isinstance(regenerate, str) or not regenerate:
             return ("bad", "a registry entry has a malformed regenerate command")
+        # Validated BEFORE the block skip, like the control-character rule: a scope this guard cannot read
+        # must never silently widen or narrow coverage, so an unknown value (null included) is BAD.
+        scope = item.get("scope")
+        if "scope" in item and scope not in _GENSRC_SCOPES:
+            return ("bad", "a registry entry has an unknown scope")
         if kind == "block":
             continue  # blocks are excluded from matching by design; the block drift gates backstop them
-        entries.append((kind, target, sources, regenerate))
+        entries.append((kind, target, sources, regenerate, scope))
     return ("ok", entries)
+
+
+def _gensrc_authoring_marker(root):
+    """Read <root>/.aiqt/authoring.toml, the pack authoring-tree marker, and return ("absent", None),
+    ("authoring", None) or ("bad", detail). Called only when an authoring-scoped registry entry matches the
+    target, so a damaged marker never touches any other edit. It mirrors tools/gen_hooks.py authoring_tree,
+    which exits 2 on a present marker that is not exact: ABSENT (FileNotFoundError from the lstat probe) is
+    an adopter tree; a REGULAR file whose UTF-8 TOML is exactly _GENSRC_MARKER (format-version the integer 1,
+    never the bool true, which == 1 in Python) is the authoring tree; everything else is BAD and the caller
+    denies fail-closed: any other lstat fault, a symlink, FIFO, directory or other non-regular file (lstat
+    is probed BEFORE the open, so a STATIONARY FIFO never blocks), a marker gone at the open (a delete race
+    in the lstat->open window, never read as absent), an unreadable, oversized (over _GENSRC_MAX_BYTES, the
+    same bound gen_hooks applies), non-UTF-8, unparseable or too deeply nested file, or any other content. A
+    marker SWAPPED to another type in the lstat->open window is the same disclosed residual as the registry
+    read."""
+    path = os.path.join(root, _GENSRC_MARKER_REL)
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return ("absent", None)
+    except OSError as exc:
+        return ("bad", "the authoring marker could not be stat'd ({})".format(exc))
+    if not stat.S_ISREG(st.st_mode):
+        return ("bad", "the authoring marker is not a regular file (a symlink, FIFO, directory, ...)")
+    try:
+        with open(path, "rb") as handle:
+            raw_bytes = handle.read(_GENSRC_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return ("bad", "the authoring marker disappeared during the read (a concurrent change); failing safe")
+    except OSError as exc:
+        return ("bad", "the authoring marker could not be read ({})".format(exc))
+    if len(raw_bytes) > _GENSRC_MAX_BYTES:
+        return ("bad", "the authoring marker exceeds the {}-byte bound".format(_GENSRC_MAX_BYTES))
+    try:
+        import tomllib  # read here only: the one handler branch that parses TOML
+        data = tomllib.loads(raw_bytes.decode("utf-8"))
+    except (ImportError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError covers UnicodeDecodeError, TOMLDecodeError and the bare ValueError tomllib raises on an
+        # oversized integer; RecursionError or MemoryError a too deeply nested table.
+        return ("bad", "the authoring marker is not readable UTF-8 TOML ({})".format(exc))
+    if data != _GENSRC_MARKER or type(data.get("format-version")) is not int:
+        return ("bad", "the authoring marker does not hold exactly format-version = 1 and "
+                       "role = \"pack-authoring-repository\"")
+    return ("authoring", None)
 
 
 _GENSRC_MATCH_FAULT = object()  # sentinel: a resolution/containment fault so no-match cannot be PROVEN
@@ -8547,29 +10934,41 @@ def _gensrc_within(candidate, parent):
 
 def _gensrc_match(entries, target, root_c):
     """The first registry entry that `target` (an already-realpath'd absolute path) matches, as
-    (entry_target, sources, regenerate); None on a PROVEN no-match; or the _GENSRC_MATCH_FAULT sentinel
-    when a resolution or containment fault means no-match cannot be proven (the handler turns the
+    (entry_target, sources, regenerate, marker); None on a PROVEN no-match; or the _GENSRC_MATCH_FAULT
+    sentinel when a resolution or containment fault means no-match cannot be proven (the handler turns the
     sentinel into an allow with a warning systemMessage via _gensrc_fail_ask, never a match and never a
     silent allow; there is no ask posture). A FILE entry matches on
     realpath EQUALITY; a TREE entry matches when `target` is the tree root or lies under it, by
     component-boundary containment (_gensrc_within), never a raw string prefix, so gen-extra/ never
     matches gen/ and GEN.md.bak never matches GEN.md. Each entry target is repo-root-relative, so it is
     joined onto root_c and canonicalized under try/except: an unresolvable entry is a fault, not a
-    no-match. Block entries were dropped at load."""
-    for kind, entry_target, sources, regenerate in entries:
+    no-match. Block entries were dropped at load. A matching AUTHORING-scoped entry consults the marker
+    (_gensrc_authoring_marker, read at most once per call): an ABSENT marker (an adopter tree) skips the
+    entry SILENTLY and matching goes on with the next entry, so an adopter keeps its own
+    .claude/settings.json; a present marker returns the match with marker ("authoring", None) or
+    ("bad", detail), and the handler denies either way. An unscoped match returns marker None."""
+    marker = None
+    for kind, entry_target, sources, regenerate, scope in entries:
         try:
             entry_c = os.path.realpath(os.path.join(root_c, entry_target))
         except (OSError, ValueError):
             return _GENSRC_MATCH_FAULT
         if kind == "file":
-            if entry_c == target:
-                return (entry_target, sources, regenerate)
+            if entry_c != target:
+                continue
         else:  # tree
             verdict = _gensrc_within(target, entry_c)
             if verdict == "err":
                 return _GENSRC_MATCH_FAULT
-            if verdict == "in":
-                return (entry_target, sources, regenerate)
+            if verdict != "in":
+                continue
+        if scope is None:
+            return (entry_target, sources, regenerate, None)
+        if marker is None:
+            marker = _gensrc_authoring_marker(root_c)
+        if marker[0] == "absent":
+            continue  # an adopter tree: the authoring-only entry is not this tree's to enforce
+        return (entry_target, sources, regenerate, marker)
     return None
 
 
@@ -8580,7 +10979,11 @@ def gensrc_guard(data):
     fires only when the file_path resolves onto a kind=file or kind=tree registry entry. Coverage is
     exactly the registry, so an ABSENT registry is the inert ALLOW by design; kind=block entries are
     EXCLUDED (a path guard cannot see which lines an edit touches); Bash is EXCLUDED by design
-    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. NO-ASK posture:
+    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. A Write, Edit or
+    MultiEdit to a sibling settings file such as .claude/settings.local.json is not judged either (no generator
+    writes it, so no registry entry names it; that it holds only personal settings is a convention, not
+    enforced), yet it can change hook behaviour for later sessions; the settings precedence Claude Code gives
+    it is not verified by this pack. NO-ASK posture:
     a CONFIRMED registry match DENIES and names the source to edit and the regenerate command (a reachable
     correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES, fail-closed (round-2 finding
     8): a corrupted registry must not silently disable the generated-artefact protection, so a cannot-read of
@@ -8591,10 +10994,15 @@ def gensrc_guard(data):
     target outside the repo or a containment fault, a registry entry that cannot be resolved for containment)
     are NOT confirmed generated-artefact edits, have no "edit the source" action to name, and are outside any
     expected coverage, so they ALLOW with an informational note rather than block a legitimate edit; a
-    genuinely-ABSENT registry is likewise the inert ALLOW (adopters author their own). The CI
+    genuinely-ABSENT registry is likewise the inert ALLOW (adopters author their own). An entry scoped
+    "authoring" (gen_gensrc marks the tools/gen_hooks.py AUTHORING_ONLY_REL targets) is honoured only in the
+    pack authoring tree: on its match the guard reads .aiqt/authoring.toml at the repo root, an ABSENT marker
+    skips the entry silently (an adopter's own .claude/settings.json is theirs), the exact marker honours it,
+    and a PRESENT-but-malformed marker denies fail-closed (_gensrc_authoring_marker). The CI
     generated-artefact drift gate remains the authoritative backstop. Besides a confirmed registry match, the
-    guard denies fail-closed in exactly three cases: a missing tool_name (the shared fail-closed contract), a
-    PRESENT-but-unreadable/malformed registry, and a mis-wired event (a hard block, exit 2). The repo root is
+    guard denies fail-closed in exactly four cases: a missing tool_name (the shared fail-closed contract), a
+    PRESENT-but-unreadable/malformed registry, a PRESENT-but-malformed authoring marker on a matching
+    authoring-scoped entry, and a mis-wired event (a hard block, exit 2). The repo root is
     the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
     _gen_common.repo_root, which falls back to cwd and would fabricate a root)."""
     if data.get("hook_event_name") != PRETOOL:
@@ -8602,13 +11010,15 @@ def gensrc_guard(data):
                            .format(data.get("hook_event_name")))
     tool_name = data.get("tool_name")
     if tool_name is None:
-        # A missing field cannot be matched. This is one of three fail-closed denies, with a present but
-        # unreadable/malformed registry and a mis-wired event (the hard block above).
+        # A missing field cannot be matched. This is one of four fail-closed denies, with a present but
+        # unreadable/malformed registry, a present but malformed authoring marker on an authoring-scoped
+        # match, and a mis-wired event (the hard block above).
         return _deny_missing_tool_name("gensrc")
     if not isinstance(tool_name, str) or not tool_name:
         # A present-but-unreadable tool_name (an empty string, a list, a bool) cannot be matched against
         # the scope set; allow with a warning systemMessage rather than silently allow. The fail-closed
-        # denies are a MISSING tool_name, a present but unreadable/malformed registry, and a mis-wired event.
+        # denies are a MISSING tool_name, a present but unreadable/malformed registry, a present but
+        # malformed authoring marker on an authoring-scoped match, and a mis-wired event.
         return _gensrc_fail_ask("the tool_name was unreadable")
     if tool_name not in _GENSRC_TOOLS:
         return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit)
@@ -8676,8 +11086,24 @@ def gensrc_guard(data):
         return _gensrc_fail_ask("a registry entry could not be resolved for containment, so a no-match "
                                 "cannot be proven")
     if match is None:
-        return _allow()  # not a registered generated artefact
-    entry_target, sources, regenerate = match
+        return _allow()  # not a registered generated artefact (or an authoring-only one in an adopter tree)
+    entry_target, sources, regenerate, marker = match
+    if marker is not None and marker[0] == "bad":
+        # An authoring-only entry matched and the authoring marker is PRESENT but not exact: the guard cannot
+        # tell the authoring tree from an adopter tree, so it fails CLOSED, as tools/gen_hooks.py exits 2 on
+        # the same marker. The message names the marker repair, never the regenerate command, which a
+        # damaged marker would not reconcile.
+        return _deny(
+            "AIQT rule gensrc (generated-artefact-source-only): {} is an authoring-only generated artefact "
+            "({} in .aiqt/gensrc.json, scope authoring), and the authoring marker .aiqt/authoring.toml is "
+            "PRESENT but malformed ({}), so this guard cannot tell the pack authoring tree from an adopter "
+            "tree. It fails closed and denies the edit. Repair .aiqt/authoring.toml (exactly format-version = "
+            "1 and role = \"pack-authoring-repository\"), or remove it if this is not the pack authoring "
+            "repository, through Bash, which this guard does not judge, then retry."
+            .format(file_path, entry_target, marker[1]),
+            "AIQT guardrail: denied a {} to the authoring-only artefact {} because .aiqt/authoring.toml is "
+            "present but malformed, a fail-closed cannot-evaluate (rule gensrc); repair or remove the marker, "
+            "then retry.".format(tool_name, entry_target))
     reason = ("AIQT rule gensrc (generated-artefact-source-only): {} is a generated artefact ({} in "
               ".aiqt/gensrc.json); it is changed only through its source, so a hand-edit is denied. Edit {} "
               "and regenerate with '{}' instead; source and derivative land in the same change."
@@ -9258,7 +11684,9 @@ def _orch_write_json(path, obj):
 
 def _orch_write_json_atomic(path, obj):
     """Crash-safe JSON overwrite, the one writer of turn-state.json, backlog-checkpoint.json,
-    checkpoint-init.marker, attestations-validated.json and forced-exit-surfaced.json. Returns None on success,
+    checkpoint-init.marker, attestations-validated.json and forced-exit-surfaced.json (the
+    lease-heartbeat past-holder memory has its OWN descriptor-bound writer,
+    _orch_lease_hb_memory_save, and is no longer written here). Returns None on success,
     else a short failure detail the caller names in its output (the caller decides what a failure means).
     It serializes obj first (a value json cannot encode fails before any file is created), creates the
     parent directory and opens it ONCE (os.open _ORCH_O_WALK|O_DIRECTORY|O_CLOEXEC: where O_PATH exists the
@@ -9581,14 +12009,54 @@ def _orch_mode_classify_text(text):
     return _ORCH_MODE_ARMED
 
 
+def _orch_lease_age_class(age, max_age):
+    """ONE age classifier for every lease freshness reader (_orch_scope_live, the resume-audit
+    lease probes, and the lease-heartbeat core), so no two of them can disagree on a boundary:
+    'cannot' when a horizon is DECLARED but not usable (a boolean, zero, negative, NaN, infinite,
+    or any non-number), judged FIRST, before any age comparison, so a future-dated mtime can never
+    hide an unusable horizon behind 'future' (an invalid horizon never reads as fresh and never as
+    a mere clock anomaly: it is a cannot-evaluate whatever the mtime, chkfcl); 'future' when age
+    (seconds) is more than _ORCH_CLOCK_SKEW ahead of the clock (clock skew or tamper; never fresh
+    forever, and the future value is kept as evidence, never rewritten), judged only under a None
+    or a valid positive horizon, which classify exactly as before; 'stale' when the valid declared
+    horizon (hours) is exceeded; else 'fresh' (an age exactly at the horizon or exactly at the
+    skew boundary is still fresh, matching the comparisons this classifier replaced; a None
+    max_age declares NO horizon, so no staleness check applies)."""
+    if max_age is not None and (
+            isinstance(max_age, bool) or not isinstance(max_age, (int, float))
+            or (isinstance(max_age, float) and not math.isfinite(max_age)) or max_age <= 0):
+        return "cannot"
+    if age < -_ORCH_CLOCK_SKEW:
+        return "future"
+    if max_age is None:
+        return "fresh"
+    if age > max_age * 3600:
+        return "stale"
+    return "fresh"
+
+
+_ORCH_SCOPE_CANNOT_DETAIL = ("the declared lease max_age_hours horizon is not usable, so lease "
+                             "scope cannot be evaluated; correct it in the registry (the "
+                             "confinement's trust root)")
+
+
 def _orch_scope_live(reg, root, session_id=None):
     """The D11 scope check: True when a declared orchestrator lease file is live (present, non-empty,
-    within max_age_hours when declared) OR a declared mode record carries a mode line. When the lease
-    declares holder_is_session_id AND the caller's session_id is known, a LIVE lease must additionally
-    NAME that session_id, so a co-located NON-holder session (a bounded worker) does not inherit the
-    global backlog (CX-M3). Where the lease records no comparable session identity, scope is repo-coarse
-    (a co-located session may inherit the backlog): a disclosed residual, not a strict boundary."""
+    within max_age_hours when declared) OR a declared mode record carries a mode line; False when scope
+    is provably not live; the string 'cannot' when a DECLARED max_age_hours horizon is not usable (a
+    boolean, zero, negative, NaN, infinite or non-number) on a lease that would otherwise read live
+    and no mode record reads live, so liveness cannot be evaluated. 'cannot' is TRUTHY on purpose: a
+    caller that only truth-tests this answer stays armed (the fail-closed direction), and every caller
+    handles it explicitly (the stop family and the yield guard route it into their existing
+    cannot-evaluate deny path; the dispatch ledger and the prompt stamp stay armed and surface it;
+    none turns a lease-scoped guard off over it). When the lease declares holder_is_session_id AND the
+    caller's session_id is known, a LIVE lease must additionally NAME that session_id, so a co-located
+    NON-holder session (a bounded worker) does not inherit the global backlog (CX-M3); a session the
+    lease does not name is a NON-holder (False) even under an unusable horizon. Where the lease
+    records no comparable session identity, scope is repo-coarse (a co-located session may inherit the
+    backlog): a disclosed residual, not a strict boundary."""
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
+    cannot = False
     if lease:
         path = _orch_path(root, lease.get("path"))
         if path:
@@ -9596,12 +12064,19 @@ def _orch_scope_live(reg, root, session_id=None):
                 st = os.stat(path)
                 fresh = True
                 max_age = lease.get("max_age_hours")
-                if isinstance(max_age, (int, float)) and max_age > 0:
+                if max_age is not None:
                     age = _orch_now().timestamp() - st.st_mtime
                     # a future mtime (age below -skew) is anomalous (clock skew or tamper) and never reads
-                    # as fresh forever; a small future skew is tolerated (CX future-mtime finding).
-                    fresh = -_ORCH_CLOCK_SKEW <= age <= max_age * 3600
-                if st.st_size > 0 and fresh:
+                    # as fresh forever; a small future skew is tolerated (CX future-mtime finding). A
+                    # DECLARED horizon that is not usable (a boolean, zero, negative, NaN, infinite or
+                    # non-number) classifies 'cannot' WHATEVER the mtime (the classifier judges the
+                    # horizon first, so a future-dated mtime cannot hide it): an invalid horizon is
+                    # a cannot-evaluate, never unlimited freshness and never a silent guards-off
+                    # (every caller stays armed).
+                    cls = _orch_lease_age_class(age, max_age)
+                    fresh = cls == "fresh"
+                    cannot = cls == "cannot" and st.st_size > 0
+                if st.st_size > 0 and (fresh or cannot):
                     if lease.get("holder_is_session_id"):
                         # STRICT opt-in holder scoping: the caller must carry a session id AND the lease
                         # must be readable AND name that id as a whole token; anything else is a NON-holder
@@ -9613,13 +12088,19 @@ def _orch_scope_live(reg, root, session_id=None):
                                 held = fh.read()
                         except OSError:
                             return False
-                        return _orch_token_present(session_id, held)
-                    return True
+                        if not _orch_token_present(session_id, held):
+                            return False
+                        if not cannot:
+                            return True
+                    elif not cannot:
+                        return True
             except OSError:
                 if lease.get("holder_is_session_id"):
                     return False  # holder mode: an unreadable lease -> caller cannot be confirmed holder
                 # otherwise an absent/unreadable lease is not live; fall through to the mode check
-    return _orch_mode(reg, root) is not None
+    if _orch_mode(reg, root) is not None:
+        return True  # a live mode record is an independent scope source; it outranks a lease 'cannot'
+    return "cannot" if cannot else False
 
 
 def _orch_escape_stat(path):
@@ -10025,10 +12506,18 @@ def decide_yield(ctx):
             return ("ALLOW_WITH_FINDINGS",
                     "{} schedule denials on an unchanged basis; yielding with findings"
                     .format(ctx["schedule_denials"]), disposition)
+        sched_cannot = ctx.get("cannot_evaluate", [])
+        # the unevaluable items are NAMED here exactly as on the stop path below, so a
+        # scope-level cannot-evaluate such as lease:max_age_hours tells the operator WHAT to
+        # correct, not only that one exists
+        named_sched = ", ".join(i for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
+        if len(sched_cannot) > _ORCH_MAX_NAMED:
+            named_sched += "; and {} more".format(len(sched_cannot) - _ORCH_MAX_NAMED)
         return ("DENY",
-                "a proof source for {} open item(s) is unreadable (cannot-evaluate); missing evidence "
-                "never licenses a new idle or wake. Fix the source, or release through the "
-                "operator-owned escape sentinel.".format(len(ctx.get("cannot_evaluate", []))), disposition)
+                "a proof source for {} open item(s) is unreadable (cannot-evaluate): {}. Missing "
+                "evidence never licenses a new idle or wake. Fix the source, or release through "
+                "the operator-owned escape sentinel.".format(len(sched_cannot), named_sched),
+                disposition)
     if not ctx["actionable"]:
         rechecked = ctx["waiting"] + ctx["blocked"]
         if kind == "schedule_idle" and rechecked and ctx["wake_named"] is False:
@@ -10043,11 +12532,17 @@ def decide_yield(ctx):
                     "pending: {}".format(
                         ", ".join(i for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
         if ctx.get("cannot_evaluate", []):
+            cannot_items = ctx.get("cannot_evaluate", [])
+            # the unevaluable items are NAMED (bounded), so a scope-level cannot-evaluate such as
+            # lease:max_age_hours tells the operator WHAT to correct, not only that one exists
+            named_cannot = ", ".join(i for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
+            if len(cannot_items) > _ORCH_MAX_NAMED:
+                named_cannot += "; and {} more".format(len(cannot_items) - _ORCH_MAX_NAMED)
             return ("DENY",
-                    "cntdef: {} open item(s) have an unreadable proof source (cannot-evaluate); an "
-                    "unconfirmable blocker cannot license a stop (ignorance refuses the wind-down). "
-                    "Fix the source; the operator-owned escape sentinel is the release for a genuine "
-                    "block.".format(len(ctx.get("cannot_evaluate", []))), disposition)
+                    "cntdef: {} open item(s) have an unreadable proof source (cannot-evaluate): "
+                    "{}. An unconfirmable blocker cannot license a stop (ignorance refuses the "
+                    "wind-down). Fix the source; the operator-owned escape sentinel is the release "
+                    "for a genuine block.".format(len(cannot_items), named_cannot), disposition)
         return ("ALLOW", "no actionable item remains; the disposition table is the enumeration",
                 disposition)
     if kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
@@ -10417,9 +12912,16 @@ def _orch_stop_family(data, event_name, kind):
                           "({}); the {} fails open on its own read error and, because the registry is "
                           "unreadable, writes NO guard-event (no record).".format(reg,
                                                                                   event_name))
-    if not _orch_scope_live(reg, root, data.get("session_id")):
+    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    if not scope:
         return _allow()
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)
+    if scope == "cannot":
+        # D11 scope CANNOT be evaluated (a declared but unusable max_age_hours): routed into this
+        # guard's existing cannot-evaluate deny path (FIX 1: ignorance refuses the wind-down; the
+        # loop bound and the operator escape still release), never a silent guards-off _allow().
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
@@ -10517,7 +13019,8 @@ def orch_yield_tool(data):
             "work rather than parking or stopping the run.".format(reg),
             "AIQT guardrail: denied a scheduling call under an unreadable orchestration registry "
             "(ignorance refuses the wind-down); fix the registry or keep working.")
-    if not _orch_scope_live(reg, root, data.get("session_id")):
+    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    if not scope:
         return _allow()
     tool = data.get("tool_name")
     declared = reg.get("yield_tools")
@@ -10527,6 +13030,11 @@ def orch_yield_tool(data):
     kind = "stop" if tool_input.get("stop") is True else "schedule_idle"
     wake_text = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data, wake_text=wake_text)
+    if scope == "cannot":
+        # D11 scope cannot be evaluated: routed into this guard's existing cannot-evaluate deny
+        # path (the schedule cap and the operator escape still release), never a silent _allow().
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     # Measured quiet beats a claimed quiet duration (estsep: the two grades never blend silently).
@@ -11862,7 +14370,8 @@ def orch_dispatch_ledger(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    if not _orch_scope_live(reg, root, data.get("session_id")):
+    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    if not scope:
         return _allow()  # only the holder session writes the shared dispatch ledger (CX-M4b)
     tool = data.get("tool_name")
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
@@ -11908,6 +14417,11 @@ def orch_dispatch_ledger(data):
     if not _orch_append_jsonl(path, row):
         return _allow_note("AIQT guardrail: the dispatch-ledger write failed; "
                            "the launched work may be invisible to the stop guard.")
+    if scope == "cannot":
+        # armed and surfaced, never a silent skip: the row above was recorded anyway, so launched
+        # work stays visible to the stop guard while the operator corrects the horizon
+        return _allow_note("AIQT guardrail: {}; this dispatch row was recorded anyway (the "
+                           "ledger stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
     return _allow()
 
 
@@ -11918,7 +14432,9 @@ def orch_dispatch_ledger(data):
 # reads the brief file passed as that command's one brief argument and reconciles the brief's column-0 labels against the repository BEFORE the
 # command runs: an explicit review target; for a revision review, a full-length pin that resolves to exactly
 # that commit and equals the authoritative task revision the adopter's authority command prints; the
-# declared review paths equal to the pin's changed set (base derived from the commit's raw parent headers);
+# declared review paths equal to the pin's changed set (base derived from the commit's raw parent headers),
+# where a brief that names the worker draft the commit applies has every path the draft's diff headers name
+# declared too, less the paths it records as skipped (_rdp_draft_census);
 # and no uncommitted state over any declared path, except edits inside a checked-out submodule whose HEAD is
 # at the pinned gitlink, which are not read. A refusal is a deny naming its reason; a cannot-evaluate
 # is a deny prefixed UNVERIFIABLE: so it stays distinct. Every git probe runs through _review_git, which
@@ -11926,6 +14442,9 @@ def orch_dispatch_ledger(data):
 _RDP_KEYS = frozenset(("commands", "brief_option", "labels", "authority", "max_brief_bytes"))
 _RDP_REQUIRED_KEYS = frozenset(("commands", "brief_option", "labels", "authority"))
 _RDP_LABEL_KEYS = frozenset(("target", "revision", "path", "repo", "branch"))
+# The optional labels a binding declares together or not at all: the brief line naming the worker draft a
+# revision applies, and the lines recording the drafted paths deliberately left out of it.
+_RDP_DRAFT_LABEL_KEYS = frozenset(("draft", "skip"))
 _RDP_AUTHORITY_KEYS = frozenset(("argv", "timeout"))
 _RDP_TARGETS = frozenset(("revision", "working-tree", "not-a-review"))
 # Line boundaries to Unicode that are not physical newlines (VT, FF, FS, GS, RS, NEL, LINE and PARAGRAPH
@@ -12026,8 +14545,10 @@ def _rdp_binding(reg):
             or any(ch.isspace() or ch == "=" for ch in option):
         return ("bad", "review_dispatch.brief_option is not a single option word")
     labels = raw["labels"]
-    if not isinstance(labels, dict) or set(labels) != _RDP_LABEL_KEYS:
-        return ("bad", "review_dispatch.labels must declare exactly {}".format(sorted(_RDP_LABEL_KEYS)))
+    if not isinstance(labels, dict) or set(labels) not in (
+            _RDP_LABEL_KEYS, _RDP_LABEL_KEYS | _RDP_DRAFT_LABEL_KEYS):
+        return ("bad", "review_dispatch.labels must declare exactly {}, or those and both of {}".format(
+            sorted(_RDP_LABEL_KEYS), sorted(_RDP_DRAFT_LABEL_KEYS)))
     values = list(labels.values())
     if not all(isinstance(v, str) and v and v.strip() == v and "\n" not in v and "\r" not in v
                for v in values):
@@ -12088,38 +14609,45 @@ def _rdp_read_fd(fd, limit):
     return b"".join(chunks)
 
 
-def _rdp_read_brief(path, max_bytes):
-    """(text, None) for a readable brief, or (None, reason) for a cannot-evaluate: missing, a symlink, not a
-    regular file, an I/O or permission error, over max_bytes, invalid UTF-8, a NUL, or a non-physical line
-    boundary. One leading byte-order mark is dropped, so a brief saved with one still shows its first
-    label at column 0. The brief is opened ONCE, non-blocking and without following a final symlink, and the type
-    is checked on that open descriptor, so no swap can land between a check and the open, and a FIFO or
-    device never blocks the hook."""
+def _rdp_read_text(path, max_bytes, what):
+    """(text, None) for a readable file, or (None, reason) for a cannot-evaluate: missing, a symlink, not a
+    regular file, an I/O or permission error, over max_bytes, invalid UTF-8, or a NUL; what names the file
+    in the reason (the brief, the draft). One leading byte-order mark is dropped. The file is opened ONCE,
+    non-blocking and without following a final symlink, and the type is checked on that open descriptor, so
+    no swap can land between a check and the open, and a FIFO or device never blocks the hook."""
     try:
         fd = os.open(path, _RDP_OPEN_FLAGS | os.O_NOFOLLOW)
     except (OSError, ValueError) as exc:
-        return (None, "the brief {} cannot be opened ({})".format(path, exc))
+        return (None, "the {} {} cannot be opened ({})".format(what, path, exc))
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return (None, "the brief {} is not a regular file".format(path))
+            return (None, "the {} {} is not a regular file".format(what, path))
         blob = _rdp_read_fd(fd, max_bytes + 1)
     except OSError as exc:
-        return (None, "the brief {} cannot be read ({})".format(path, exc))
+        return (None, "the {} {} cannot be read ({})".format(what, path, exc))
     finally:
         os.close(fd)
     if len(blob) > max_bytes:
-        return (None, "the brief {} is larger than max_brief_bytes ({})".format(path, max_bytes))
+        return (None, "the {} {} is larger than max_brief_bytes ({})".format(what, path, max_bytes))
     try:
         text = blob.decode("utf-8")
     except UnicodeDecodeError as exc:
-        return (None, "the brief {} is not valid UTF-8 ({})".format(path, exc))
+        return (None, "the {} {} is not valid UTF-8 ({})".format(what, path, exc))
     if text.startswith("\ufeff"):
         text = text[1:]
     if "\x00" in text:
-        return (None, "the brief {} contains a NUL".format(path))
-    if any(ch in text for ch in _RDP_NONPHYSICAL):
-        return (None, "the brief {} contains a line boundary that is not a physical newline".format(path))
+        return (None, "the {} {} contains a NUL".format(what, path))
     return (text, None)
+
+
+def _rdp_read_brief(path, max_bytes):
+    """(text, None) for a readable brief, or (None, reason) for a cannot-evaluate: a file _rdp_read_text
+    cannot read, or one holding a non-physical line boundary. The dropped byte-order mark lets a brief
+    saved with one still show its first label at column 0."""
+    text, why = _rdp_read_text(path, max_bytes, "brief")
+    if text is not None and any(ch in text for ch in _RDP_NONPHYSICAL):
+        return (None, "the brief {} contains a line boundary that is not a physical newline".format(path))
+    return (text, why)
 
 
 def _rdp_labels(text, labels):
@@ -12241,6 +14769,468 @@ def _rdp_gitlink_entry(repo, relpath, want):
     return ("160000", lines[1]) if lines[1] == want[1] else ("other", "")
 
 
+# The draft path census. A worker draft is a git diff; the census reads the paths its headers name, never
+# its prose, and reads the draft conservatively, as the diff output git writes by default, so some forms
+# git apply accepts but git does not write are refused, not read: a localized marker, a context marker
+# that only added lines follow, an added-line marker that more added lines follow, and a backslash line
+# other than the exact marker right after a hunk's counted lines or their marker. Others are read (an
+# added-line marker that a removed line follows, an empty line as context). After a hunk's counted lines,
+# git's exact no-newline marker is read as the marker; any other line beginning with a backslash there is
+# refused; a hunk header, a `diff --git` line or a `--- ` line naming a path goes on to the next hunk or
+# section; a `diff --cc` or `diff --combined` line is refused as a combined diff; a line that begins as
+# another diff header is refused as outside a file section; a `Content-Transfer-Encoding:` line naming an
+# encoding other than 7bit or 8bit is refused as a transfer-encoded mailbox part; a `Submodule` line that
+# shows a submodule's own changes inline (--submodule=log or --submodule=diff) is refused as a submodule
+# shown inline; and any other line is read as prose. Whatever line follows it, each hunk is consumed by
+# its header's counts, so no path is hidden. A file section opens at a `diff --git` line, or at a `--- `
+# line naming a path, which a `+++ ` line and a hunk header must follow; its extended headers are the git
+# header lines below; each hunk is consumed by the line counts of its own header, so an added line that reads `++ b/x`
+# (shown as `+++ b/x`) is content, never a header, and by git's exact `\ No newline at end of file` marker
+# where git writes one: after the last line of each side of the file it marks (a marker after a removed
+# line marks the old side, after an added line the new side, after a context line both), so only where
+# its hunk header's count for each of those sides is met, and with no hunk after it in its section. Any
+# other line beginning with a backslash, in a hunk or right after its counted lines, is refused. A
+# section completes with a hunk, a binary marker, or a creation, deletion, mode change, rename or copy
+# header; one that does not (a draft cut short inside it) cannot be read. A section names at most one old
+# path (its `---`, `rename from` and `copy from` headers) and one new path (its `+++`, `rename to` and
+# `copy to` headers), and its `diff --git` line names exactly those, as git writes them from one pair, so
+# a section whose headers disagree (a mangled or hand-edited one) cannot be read. A rename names both
+# paths, a copy only its destination (the source is unchanged), a deletion and a creation the one path
+# that is not /dev/null, and a section with no path header (a mode change, an empty file, a binary change)
+# the one name its `diff --git` line repeats. A line outside a section is prose (the mailbox headers and
+# message, the `---` separator, the diffstat, the `-- ` signature and the version after it, a binary
+# patch's encoded lines, blank and indented lines) unless it begins as a diff header or a no-newline
+# marker does, which is never prose: a truncated or mangled section would otherwise drop out of the census
+# unseen. A header or hunk line that ends in a carriage return before its LF (a CRLF draft, or a hunk of a
+# CRLF file) cannot be read either, since a header's names would carry the return, and neither can a
+# transfer-encoded mailbox part or a submodule shown inline. A `diff --git` line naming its paths under
+# b/ and then a/, as git diff -R writes it, in a section with no `--- ` line (a mode change, a binary
+# change, an empty file, a pure rename, a pure copy) is refused with a reason naming that swap; a section
+# with one is refused first by its `--- ` or `+++ ` line's prefix.
+_RDP_DIFF_EXTENDED = ("old mode ", "new mode ", "deleted file mode ", "new file mode ", "similarity index ",
+                      "dissimilarity index ", "index ", "rename from ", "rename to ", "copy from ", "copy to ")
+# The extended headers that complete a section with no hunk, and the pairs git writes together.
+_RDP_DIFF_METADATA = frozenset(("new file mode ", "deleted file mode ", "old mode ", "rename from ", "copy from "))
+_RDP_DIFF_PAIRS = (("old mode ", "new mode "), ("rename from ", "rename to "), ("copy from ", "copy to "))
+# The extended headers that name a path, and the side of the file each names (`---` names the old side
+# and `+++` the new).
+_RDP_DIFF_SIDES = {"rename from ": "old", "rename to ": "new", "copy from ": "old", "copy to ": "new"}
+# The lines that begin as a diff header does and so never stand outside a section in a draft git wrote:
+# every header git apply reads in a section ("rename old " and "rename new " are older spellings it still
+# reads as a rename), a hunk header, git's binary markers, and any other diff command line ("diff -",
+# which covers diff -ruN output; diff --git opens a section, and diff --cc and diff --combined, which git
+# writes for a merge, are refused on their own as a combined diff).
+_RDP_DIFF_STRAY = _RDP_DIFF_EXTENDED + ("rename old ", "rename new ", "diff -", "+++ ", "@@ ", "Binary files ",
+                                        "GIT binary patch")
+_RDP_DIFF_HUNK = re.compile(r"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
+# The one marker git writes after a hunk line whose file ends without a newline. Among a hunk's counted
+# lines, git apply reads a line beginning with a backslash and a space as one when it is at least eleven
+# bytes long (counted in bytes before the line feed, so a short line of non-ASCII text can reach it) and
+# rejects a shorter one as a corrupt patch; right after a hunk's counted lines it accepts any such line,
+# reading one of eleven bytes or more as a marker and passing over a shorter one. The census refuses every
+# such line other than this exact marker in both places, and a line beginning so is never prose.
+_RDP_DIFF_NO_NEWLINE = "\\ No newline at end of file"
+# The sides of the file a marker after each kind of hunk line marks.
+_RDP_DIFF_MARKS = {" ": ("old", "new"), "": ("old", "new"), "-": ("old",), "+": ("new",)}
+# A mailbox part whose body is transfer-encoded (base64, quoted-printable) hides its headers from a line
+# reader, while git am decodes it and applies what it holds; git format-patch writes 7bit or 8bit.
+_RDP_MAIL_ENCODING = "content-transfer-encoding:"
+_RDP_MAIL_PLAIN = frozenset(("7bit", "8bit"))
+# The header git diff --submodule=log or --submodule=diff writes for a submodule whose own changes follow
+# inline (a log, or sections named under the submodule's path) instead of one gitlink section.
+_RDP_DIFF_SUBMODULE = re.compile(r"Submodule .+ (?:[0-9a-f]+\.\.\.?[0-9a-f]+[ :]|contains (?:untracked|modified) "
+                                 r"content$)")
+_RDP_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _rdp_diff_quoted(text, i):
+    """The name git C-quoted at text[i] (a double quote): (name, the index after the closing quote), the
+    escapes and octal bytes decoded and the bytes read as UTF-8; None when it is not a complete quoted
+    name."""
+    out = bytearray()
+    j = i + 1
+    while j < len(text):
+        ch = text[j]
+        if ch == '"':
+            try:
+                return (bytes(out).decode("utf-8"), j + 1)
+            except UnicodeDecodeError:
+                return None
+        if ch != "\\":
+            out.extend(ch.encode("utf-8"))
+            j += 1
+            continue
+        if text[j + 1:j + 2] in _RDP_C_ESCAPES:
+            out.append(_RDP_C_ESCAPES[text[j + 1]])
+            j += 2
+            continue
+        digits = text[j + 1:j + 4]
+        if len(digits) != 3 or digits[0] not in "0123" or any(c not in "01234567" for c in digits):
+            return None
+        out.append(int(digits, 8))
+        j += 4
+    return None
+
+
+def _rdp_diff_name(value, prefix):
+    """The path a header value names (prefix "a/", "b/" or "" for a rename or copy line): the name with
+    that prefix removed, read up to a tab (where git and diff -u put a timestamp or the tab git adds to a
+    name holding a space), or C-quoted; "" for /dev/null under a prefix; None when it carries no such
+    prefix or cannot be read."""
+    if value.startswith('"'):
+        got = _rdp_diff_quoted(value, 0)
+        if got is None or value[got[1]:got[1] + 1] not in ("", "\t"):
+            return None
+        name = got[0]
+    else:
+        name = value.split("\t", 1)[0]
+        if prefix and name == "/dev/null":
+            return ""
+    if not name.startswith(prefix) or not name[len(prefix):]:
+        return None
+    return name[len(prefix):]
+
+
+def _rdp_diff_git_line(rest, prefixes=("a/", "b/")):
+    """The one path a `diff --git` line names twice, rest being the text after `diff --git `: the name
+    under the first of prefixes (git's a/) and the name under the second (b/), both C-quoted or both bare
+    (as git writes one path twice), must be the same path; None otherwise (two names, which git writes only
+    with rename or copy headers, or a line that cannot be read)."""
+    first_prefix, second_prefix = prefixes
+    if rest.startswith('"'):
+        got = _rdp_diff_quoted(rest, 0)
+        if got is None or rest[got[1]:got[1] + 2] != ' "':
+            return None
+        first = got[0]
+        got = _rdp_diff_quoted(rest, got[1] + 1)
+        if got is None or got[1] != len(rest):
+            return None
+        second = got[0]
+    elif len(rest) % 2 == 1:
+        half = (len(rest) - 1) // 2
+        first, gap, second = rest[:half], rest[half], rest[half + 1:]
+        if gap != " ":
+            return None
+    else:
+        return None
+    if not first.startswith(first_prefix) or not second.startswith(second_prefix) \
+            or first[len(first_prefix):] != second[len(second_prefix):] or not first[len(first_prefix):]:
+        return None
+    return first[len(first_prefix):]
+
+
+def _rdp_diff_git_names(rest, old, new, prefixes=("a/", "b/")):
+    """Whether a `diff --git` line, rest being the text after `diff --git `, names old and then new under
+    prefixes (git's a/ and b/), each C-quoted or bare, as git writes the line for that pair; with both names
+    known, a name holding a space or ` b/` reads one way only."""
+    for name, gap in ((prefixes[0] + old, " "), (prefixes[1] + new, "")):
+        if rest.startswith('"'):
+            got = _rdp_diff_quoted(rest, 0)
+            if got is None or got[0] != name:
+                return False
+            rest = rest[got[1]:]
+        elif rest.startswith(name):
+            rest = rest[len(name):]
+        else:
+            return False
+        if not rest.startswith(gap):
+            return False
+        rest = rest[len(gap):]
+    return rest == ""
+
+
+def _rdp_diff_swapped(line, old, new):
+    """The reason a `diff --git` line cannot be read where it names its paths under b/ and then a/, git's
+    default prefixes swapped, as git diff -R writes them: the one path it names twice when old and new (the
+    paths the section's other headers name) are both None, otherwise old and then new; None when the line
+    does not read so."""
+    rest = line[len("diff --git "):]
+    if old is None and new is None:
+        swapped = _rdp_diff_git_line(rest, ("b/", "a/")) is not None
+    else:
+        swapped = _rdp_diff_git_names(rest, old or new, new or old, ("b/", "a/"))
+    if not swapped:
+        return None
+    return ("the header {!r} names its paths under b/ and then a/, git's default prefixes swapped, as git "
+            "diff -R writes them".format(line[:80]))
+
+
+def _rdp_diff_crlf(line):
+    """The reason a draft header or hunk line that ends in a carriage return before its LF (a CRLF line end)
+    cannot be read, or None for any other line."""
+    if not line.endswith("\r"):
+        return None
+    return ("the line {!r} ends in a carriage return before its LF (CRLF), which the census does not read: a "
+            "draft saved with CRLF line ends, or a hunk of a file whose lines end in CRLF".format(line[:80]))
+
+
+def _rdp_diff_marker(line, after, left, inside):
+    """None when line, which begins with a backslash and stands among a hunk's counted lines (inside) or
+    right after them, is git's no-newline marker in its place: after a context, removed or added line
+    (after, the first character of the line before it, None after a hunk header), and after the last line
+    the hunk header counts for each side of the file it marks (left, the lines still to come for each
+    side), as git writes one only after a side's last line; otherwise the reason it cannot be read."""
+    why = _rdp_diff_crlf(line)
+    if why is not None:
+        return why
+    if line != _RDP_DIFF_NO_NEWLINE and inside:
+        return ("the hunk line {!r} is no context, removed or added line, and not git's no-newline marker "
+                "{!r}".format(line[:80], _RDP_DIFF_NO_NEWLINE))
+    if line != _RDP_DIFF_NO_NEWLINE:
+        return ("the line {!r} right after a hunk's counted lines begins with a backslash and is not git's "
+                "no-newline marker {!r}, the only such line git writes there".format(
+                    line[:80], _RDP_DIFF_NO_NEWLINE))
+    if after not in _RDP_DIFF_MARKS:
+        return "a no-newline marker follows no context, removed or added line"
+    early = [side for side in _RDP_DIFF_MARKS[after] if left[side] > 0]
+    if early:
+        return ("a no-newline marker stands before the last line its hunk header counts for the {} {} of the "
+                "file, and git writes one only after the last line of each side it marks".format(
+                    " and ".join(early), "sides" if len(early) > 1 else "side"))
+    return None
+
+
+def _rdp_diff_hunks(lines, i):
+    """The index after the hunks that start at lines[i], each consumed by its header's old and new line
+    counts (a context line counts in both, an empty line as context, as git apply reads one, and a
+    no-newline marker in neither) and by the marker that may follow its last counted line; (None, reason)
+    for a malformed or truncated hunk, a line that begins with a backslash and is not git's exact marker
+    after a context, removed or added line, a marker before the last line its hunk header counts for a
+    side of the file it marks, a hunk after a marker in its section (git writes one only in a section's
+    last hunk), or a line that ends in a carriage return."""
+    marked = False
+    while i < len(lines) and lines[i].startswith("@@ "):
+        why = _rdp_diff_crlf(lines[i])
+        if why is not None:
+            return (None, why)
+        if marked:
+            return (None, "the hunk header {!r} follows a no-newline marker in its section, and git writes one "
+                    "only after the last line of each side it marks, in a section's last hunk".format(
+                        lines[i][:80]))
+        match = _RDP_DIFF_HUNK.match(lines[i])
+        if match is None:
+            return (None, "the hunk header {!r} cannot be read".format(lines[i][:80]))
+        old = 1 if match.group(1) is None else int(match.group(1))
+        new = 1 if match.group(2) is None else int(match.group(2))
+        after = None
+        i += 1
+        while old > 0 or new > 0:
+            if i >= len(lines):
+                return (None, "a hunk ends before its header's line counts")
+            why = _rdp_diff_crlf(lines[i])
+            if why is not None:
+                return (None, why)
+            mark = lines[i][:1]
+            if mark in (" ", ""):
+                old, new = old - 1, new - 1
+            elif mark == "-":
+                old -= 1
+            elif mark == "+":
+                new -= 1
+            elif mark == "\\":
+                why = _rdp_diff_marker(lines[i], after, dict(old=old, new=new), True)
+                if why is not None:
+                    return (None, why)
+                marked = True
+            else:
+                return (None, "the hunk line {!r} is no context, removed or added line".format(lines[i][:80]))
+            if old < 0 or new < 0:
+                return (None, "a hunk holds more lines than its header counts")
+            after = mark
+            i += 1
+        while i < len(lines) and lines[i].startswith("\\"):
+            why = _rdp_diff_marker(lines[i], after, dict(old=old, new=new), False)
+            if why is not None:
+                return (None, why)
+            marked = True
+            after = "\\"
+            i += 1
+    return (i, None)
+
+
+def _rdp_diff_section(lines, i):
+    """The file section that opens at lines[i], a `diff --git` line or a `--- ` line naming a path: (the
+    index after it, the set of paths it names, None), or (None, None, reason) when it cannot be read: a
+    header without git's a/ or b/ prefix, a `--- ` line with no `+++ ` line, a `+++ ` line with no hunk,
+    a section that ends with no hunk, binary marker, or creation, deletion, mode, rename or copy header, a
+    rename, copy or mode header without its pair, a `diff --git` line naming two paths with no rename or
+    copy header, path headers naming two old or two new paths, a `diff --git` line that does not name the
+    old and new paths the other headers name (one naming them under b/ and then a/, as git diff -R writes
+    it, with a reason that says so), a malformed or truncated hunk, or a header or hunk line ending in a
+    carriage return."""
+    line = lines[i]
+    git = line.startswith("diff --git ")
+    heads, sides, complete = set(), dict(old=set(), new=set()), False
+    if git:
+        why = _rdp_diff_crlf(line)
+        if why is not None:
+            return (None, None, why)
+        i += 1
+        while i < len(lines) and lines[i].startswith(_RDP_DIFF_EXTENDED):
+            why = _rdp_diff_crlf(lines[i])
+            if why is not None:
+                return (None, None, why)
+            head = next(h for h in _RDP_DIFF_EXTENDED if lines[i].startswith(h))
+            heads.add(head)
+            if head in _RDP_DIFF_SIDES:
+                name = _rdp_diff_name(lines[i][len(head):], "")
+                if name is None:
+                    return (None, None, "the header {!r} cannot be read".format(lines[i][:80]))
+                sides[_RDP_DIFF_SIDES[head]].add(name)
+            i += 1
+    if i < len(lines) and lines[i].startswith("--- "):
+        if i + 1 >= len(lines) or not lines[i + 1].startswith("+++ "):
+            return (None, None, _rdp_diff_crlf(lines[i]) or "the header {!r} has no +++ line after it".format(
+                lines[i][:80]))
+        for k, prefix, side in ((i, "a/", "old"), (i + 1, "b/", "new")):
+            why = _rdp_diff_crlf(lines[k])
+            if why is not None:
+                return (None, None, why)
+            name = _rdp_diff_name(lines[k][4:], prefix)
+            if name is None:
+                return (None, None, "the header {!r} does not name a path under git's {} prefix or "
+                        "/dev/null".format(lines[k][:80], prefix))
+            if name:
+                sides[side].add(name)
+        if i + 2 >= len(lines) or not lines[i + 2].startswith("@@ "):
+            return (None, None, "the header {!r} has no hunk after it".format(lines[i + 1][:80]))
+        i, why = _rdp_diff_hunks(lines, i + 2)
+        if why is not None:
+            return (None, None, why)
+        complete = True
+    elif git and i < len(lines) and lines[i].startswith(("GIT binary patch", "Binary files ")):
+        why = _rdp_diff_crlf(lines[i])
+        if why is not None:
+            return (None, None, why)
+        if lines[i] != "GIT binary patch" and not lines[i].endswith(" differ"):
+            return (None, None, "the binary marker {!r} cannot be read".format(lines[i][:80]))
+        i += 1
+        complete = True
+    for pair in _RDP_DIFF_PAIRS:
+        if (pair[0] in heads) != (pair[1] in heads):
+            return (None, None, "the section {!r} has one of the headers {!r} and {!r} without the other".format(
+                line[:80], pair[0].strip(), pair[1].strip()))
+    if not complete and not heads & _RDP_DIFF_METADATA:
+        return (None, None, "the section {!r} ends with no hunk, binary marker, or creation, deletion, mode, "
+                "rename or copy header, as a draft cut short inside it does".format(line[:80]))
+    if len(sides["old"]) > 1 or len(sides["new"]) > 1:
+        return (None, None, "the section {!r} names {} in its ---, +++, rename and copy headers, which disagree "
+                "with each other, as git never writes them".format(
+                    line[:80], _rdp_listing(sorted(sides["old"] | sides["new"]))))
+    old, new = min(sides["old"], default=None), min(sides["new"], default=None)
+    if old is None and new is None:
+        name = _rdp_diff_git_line(line[len("diff --git "):]) if git else None
+        if name is None:
+            why = _rdp_diff_swapped(line, None, None) if git else None
+            return (None, None, why or "the header {!r} cannot be read as one path".format(line[:80]))
+        return (i, {name}, None)
+    if git and not _rdp_diff_git_names(line[len("diff --git "):], old or new, new or old):
+        return (None, None, _rdp_diff_swapped(line, old, new) or "the section {!r} names {} in its ---, +++, "
+                "rename or copy headers, which disagree with its diff --git line, as git never writes them".format(
+                    line[:80], _rdp_listing(sorted({old, new} - {None}))))
+    if "copy to " in heads and "rename to " not in heads:
+        return (i, {new}, None)
+    return (i, {old, new} - {None}, None)
+
+
+def _rdp_diff_prose(line):
+    """None when line, outside every file section, is prose as git's readers take it; otherwise the reason
+    the draft cannot be read: a combined diff, a line that begins as a diff header or a no-newline marker
+    does (a truncated or mangled section), a mailbox part transfer-encoded other than 7bit or 8bit, or a
+    submodule's own changes shown inline."""
+    if line.startswith(("diff --cc ", "diff --combined ")):
+        return "it holds a combined diff ({!r}), whose paths the census does not read".format(line[:80])
+    if line.startswith(_RDP_DIFF_STRAY):
+        return _rdp_diff_crlf(line) or ("the header {!r} stands outside a file section, as in a draft cut "
+                                        "short or mangled, and is not read as prose".format(line[:80]))
+    if line.startswith("\\ "):
+        return _rdp_diff_crlf(line) or ("the line {!r} begins as a no-newline marker does but follows no hunk "
+                                        "line, as in a draft cut short or mangled, and is not read as "
+                                        "prose".format(line[:80]))
+    if line[:len(_RDP_MAIL_ENCODING)].lower() == _RDP_MAIL_ENCODING \
+            and line[len(_RDP_MAIL_ENCODING):].strip().lower() not in _RDP_MAIL_PLAIN:
+        return ("a mailbox part is transfer-encoded ({!r}), so the file headers it holds cannot be read; "
+                "git am decodes it and applies them".format(line[:80]))
+    if _RDP_DIFF_SUBMODULE.match(line):
+        return ("the line {!r} shows a submodule's own changes inline (git diff --submodule=log or "
+                "--submodule=diff), which the census does not read; write the draft with --submodule=short, "
+                "which shows the submodule as its one gitlink section".format(line[:80]))
+    return None
+
+
+def _rdp_draft_paths(text):
+    """(paths, None), the set of repository paths the git diff text's file headers name, or (None,
+    reason) when the draft cannot be read: a section _rdp_diff_section cannot read (one cut short among
+    them), or a line outside every section that _rdp_diff_prose refuses. Lines are split on LF only, as
+    git apply reads them."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    paths = set()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("diff --git ") or (line.startswith("--- ") and line[4:].strip()):
+            i, named, why = _rdp_diff_section(lines, i)
+            if why is not None:
+                return (None, why)
+            paths.update(named)
+            continue
+        why = _rdp_diff_prose(line)
+        if why is not None:
+            return (None, why)
+        i += 1
+    return (paths, None)
+
+
+def _rdp_draft_census(cfg, found, changed, pin):
+    """The census of the worker draft a revision brief names: (paths, None), paths being the drafted paths
+    less those the brief records as skipped (a set, empty when the binding declares no draft label or the
+    brief names no draft), or (None, (kind, message)) for the first failure. The draft is named once, by an
+    absolute path, and read once as the brief is (under the same max_brief_bytes cap), by this hook alone,
+    so no other process's view of the path takes part. Each skip names a drafted path the commit does not
+    change, and skip lines without a draft are refused, since no census is made against them."""
+    labels = cfg["labels"]
+    if "draft" not in labels:
+        return (set(), None)
+    drafts, skips = found["draft"], found["skip"]
+    if not drafts:
+        if skips:
+            return (None, ("deny", "the brief has {!r} lines but no {!r} line; a skip is recorded against the "
+                           "draft it leaves out, so name that draft or drop the skips".format(
+                               labels["skip"], labels["draft"])))
+        return (set(), None)
+    if len(drafts) > 1:
+        return (None, ("unverifiable", "the brief has {} {!r} lines; at most one is allowed".format(
+            len(drafts), labels["draft"])))
+    draft = drafts[0].strip()
+    if not os.path.isabs(draft):
+        return (None, ("unverifiable", "the {!r} value {!r} is not an absolute path".format(
+            labels["draft"], draft)))
+    text, why = _rdp_read_text(draft, cfg["max_brief_bytes"], "draft")
+    if text is None:
+        return (None, ("unverifiable", why))
+    drafted, why = _rdp_draft_paths(text)
+    if drafted is None:
+        return (None, ("unverifiable", "the draft {} cannot be read as a git diff: {}".format(draft, why)))
+    if not drafted:
+        return (None, ("unverifiable", "the draft {} names no file in a diff header, so the paths it drafts "
+                       "cannot be counted; a draft that names its files only in prose is not "
+                       "censused".format(draft)))
+    if not all(skips):
+        return (None, ("unverifiable", "the brief has an empty {!r} value".format(labels["skip"])))
+    skipped = set(skips)
+    stray = sorted(skipped - drafted)
+    if stray:
+        return (None, ("deny", "the brief records {} as skipped, but the draft {} names no such path; a skip "
+                       "names a path the draft drafts".format(_rdp_listing(stray), draft)))
+    applied = sorted(skipped & set(c.decode("utf-8", "surrogateescape") for c in changed))
+    if applied:
+        return (None, ("deny", "the brief records {} as skipped, but {} changes it; a path the commit applies "
+                       "is not skipped".format(_rdp_listing(applied), pin)))
+    return (drafted - skipped, None)
+
+
 def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
     """Reconcile a revision-target brief against the repository: ("allow"|"note"|"deny"|"unverifiable",
     message). repo_default is the top level of the repository the dispatch runs in, used when the brief
@@ -12325,22 +15315,33 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
                                "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", base, pin)
     if changed is None:
         return ("unverifiable", "the changed set of {} cannot be read".format(pin))
+    # A brief naming the worker draft the commit applies declares every path the draft's headers name, less
+    # its recorded skips, so a drafted file the apply left out is in neither the commit nor a hand list.
+    drafted, failed = _rdp_draft_census(cfg, found, set(changed), pin)
+    if failed is not None:
+        return failed
     declared = found["path"]
-    if not declared:
+    if not declared and not drafted:
         return ("deny", "the brief declares no {!r} line; list every path the review covers".format(
             labels["path"]))
     if not all(declared):
         return ("unverifiable", "the brief has an empty {!r} value".format(labels["path"]))
+    declared = declared + sorted(drafted - set(declared))
     declared_b = set(d.encode("utf-8") for d in declared)
     changed_b = set(changed)
     if declared_b != changed_b:
         parts = []
         missing = sorted(c.decode("utf-8", "replace") for c in changed_b - declared_b)
         extra = sorted(d.decode("utf-8", "replace") for d in declared_b - changed_b)
+        unapplied = [d for d in extra if d in drafted]
+        extra = [d for d in extra if d not in drafted]
         if missing:
             parts.append("changed by {} but not declared: {}".format(pin, _rdp_listing(missing)))
         if extra:
             parts.append("declared but not changed by {}: {}".format(pin, _rdp_listing(extra)))
+        if unapplied:
+            parts.append("drafted in {} but neither changed by {} nor recorded as skipped on a {!r} line: "
+                         "{}".format(found["draft"][0].strip(), pin, labels["skip"], _rdp_listing(unapplied)))
         return ("deny", "the declared review paths do not match the commit's changed set ({})".format(
             "; ".join(parts)))
     paths = sorted(declared)
@@ -14155,10 +17156,13 @@ def review_dispatch_pin(data):
     """vfxcmt, PreToolUse Bash: a review dispatch made through a registry-declared command pins an
     immutable, authoritative revision whose changed set is the declared review set and whose declared
     paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
-    dispatch runs. Inert without a review_dispatch binding; in a session a binding scopes, a Bash call that
-    is not one provably plain command (its command word on the allowlist, or a declared dispatch command)
-    is withheld, a plain one naming the registry is refused unless it only reads, a plain git command that
-    sets configuration (every git config write, every -c or --config-env global) or may move the
+    dispatch runs; where the binding declares the draft labels, a brief naming the worker draft the commit
+    applies declares every path the draft's diff headers name less the paths it records as skipped, so a
+    drafted path neither committed nor skipped is refused. Inert without a review_dispatch binding; in a
+    session a binding scopes, a Bash call that is not one provably plain command (its command word on the
+    allowlist, or a declared dispatch command) is withheld, a plain one naming the registry is refused
+    unless it only reads, a plain git command that sets configuration (every git config write, every -c or
+    --config-env global) or may move the
     repository is refused, as is a plain command that may write into a git directory or a git
     configuration file (a read-only git subcommand's words taken as data, unless it carries an option that
     runs a program), and a malformed registry or binding, or a linked worktree whose main worktree cannot be located,
@@ -14196,7 +17200,8 @@ def orch_prompt_stamp(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    if not _orch_scope_live(reg, root, data.get("session_id")):
+    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    if not scope:
         return _allow()  # only the holder session stamps/resets the shared turn-state (CX-M4b)
     prompt = data.get("prompt")
     ts = _orch_turn_state(root) or {}
@@ -14213,6 +17218,10 @@ def orch_prompt_stamp(data):
         ts.pop("schedule_basis", None)
         unsaved = _orch_save_turn_state(root, ts)
         if unsaved is None:
+            if scope == "cannot":
+                # armed and surfaced, never a silent skip: the stamp above was written anyway
+                return _allow_note("AIQT guardrail: {}; this prompt was stamped anyway (the "
+                                   "stamp stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
             return _allow()
         # the stamp is this recorder's record; the prompt proceeds and the unwritten stamp is noted
         return _allow_note("AIQT guardrail: this prompt was read as genuine human input, but turn-state.json "
@@ -14238,6 +17247,10 @@ def orch_prompt_stamp(data):
                 "or as genuine human input; record it manually (nocncl).".format(unsaved))
         return _context_note("UserPromptSubmit", context + " Additionally, " + warn,
                              "AIQT guardrail: this prompt was read as timer-originated, but " + warn)
+    if scope == "cannot":
+        return _context_note("UserPromptSubmit", context,
+                             "AIQT guardrail: {}; this wake was classified anyway (the stamp "
+                             "stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
     return (0, {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
         "additionalContext": context}}, None)
@@ -14366,9 +17379,15 @@ def _orch_resume_probes(reg, root):
             try:
                 st = os.stat(path)
                 age = _orch_now().timestamp() - st.st_mtime
-                if isinstance(max_age, (int, float)) and max_age > 0 and age > max_age * 3600:
+                age_class = _orch_lease_age_class(age, max_age)
+                if age_class == "cannot":
+                    # an invalid declared horizon (a boolean, zero, negative, NaN, infinite or
+                    # non-number) is a cannot-evaluate finding, never unlimited freshness
+                    findings.append("the lease max_age_hours declaration is not a usable horizon "
+                                    "({!r}): cannot-evaluate".format(max_age))
+                if age_class == "stale":
                     findings.append("the orchestrator lease is stale (older than {}h)".format(max_age))
-                if age < -_ORCH_CLOCK_SKEW:
+                if age_class == "future":
                     # CONV4-G2 + CONV6-F: a FUTURE lease mtime (clock skew or tamper) is checked whenever
                     # the lease is stattable, NOT only when a max_age horizon happens to be configured.
                     findings.append("the orchestrator lease mtime is in the future (clock skew or tamper)")
@@ -14376,6 +17395,7 @@ def _orch_resume_probes(reg, root):
                 pass  # no lease yet is a legitimate resume state
             except OSError as exc:
                 findings.append("declared lease unreadable ({}): cannot-evaluate".format(exc))
+    findings.extend(_orch_lease_hb_resume_findings(reg, root, lease))
     findings.extend(_orch_merge_pending_findings(reg, root))
     findings.extend(_orch_validate_attestations(reg, root))
     findings.extend(_orch_pending_artefact_findings(root))
@@ -14484,12 +17504,19 @@ def _orch_register_authority(root, path):
     except (OSError, ValueError):
         rel = None
     if rel and not rel.startswith(os.pardir + os.sep) and rel != os.pardir:
+        # The tracked/untracked DECISION is an authority read (the same rule as the gate's
+        # verify_append_only): git confirms "not tracked" only with exit 1; any other exit (a
+        # corrupt index: 128, a non-repository root), launch error or timeout leaves the
+        # question open and is a HOLD, never a fall-through into the anchor leg.
         try:
-            tracked = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", rel],
-                                     capture_output=True, timeout=10, env=env).returncode == 0
+            probe = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", rel],
+                                   capture_output=True, timeout=10, env=env)
         except (OSError, subprocess.SubprocessError) as exc:
             return ("hold", "cannot determine register tracking ({})".format(exc), None)
-        if tracked:
+        if probe.returncode not in (0, 1):
+            return ("hold", "cannot determine register tracking (git ls-files exited "
+                    "{})".format(probe.returncode), None)
+        if probe.returncode == 0:
             try:
                 base = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "origin/HEAD"],
                                       capture_output=True, text=True, timeout=10, env=env)
@@ -14508,15 +17535,48 @@ def _orch_register_authority(root, path):
                         "register is not an append-only extension of its merge-base state", None)
             return _orch_register_tip(lines)
     anchor = path + ".anchor"
+    # The gate's anchor rule: the anchor is opened ONCE, non-blocking and without following a
+    # final symlink, its type is checked on the OPENED descriptor, and its bytes are read from
+    # that same descriptor, so a symlink (live or dangling), a directory, a FIFO or any other
+    # non-regular entry is a HOLD, never a file the link names and never a blocked hook.
     try:
-        with open(anchor, "r", encoding="utf-8") as fh:
-            a = json.load(fh)
-        n, digest = int(a["seq"]), str(a["digest"])
-    except (OSError, ValueError, KeyError, TypeError):
+        fd = os.open(anchor, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+                     | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return ("hold", "the register anchor is a symlink, which is never followed", None)
         return ("hold", "declared register has no readable anchor authority", None)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ("hold", "the register anchor is not a regular file", None)
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return ("hold", "declared register has no readable anchor authority", None)
+    finally:
+        os.close(fd)
+    try:
+        a = json.loads(b"".join(chunks).decode("utf-8"))
+    except ValueError:
+        return ("hold", "declared register has no readable anchor authority", None)
+    # The same strict anchor shape as the gate: an object whose seq is an int (bools excluded)
+    # of at least 1 and whose digest is 64 lowercase hex. A zero, negative or false seq, a
+    # wrong-length or non-hex digest, and a non-object anchor are each a HOLD, never a
+    # bypassed digest comparison.
+    n = a.get("seq") if isinstance(a, dict) else None
+    digest = a.get("digest") if isinstance(a, dict) else None
+    if (not isinstance(n, int) or isinstance(n, bool) or n < 1
+            or not isinstance(digest, str) or len(digest) != 64
+            or set(digest) - set("0123456789abcdef")):
+        return ("hold", "the register anchor is malformed (an anchor is an object with an "
+                "integer seq >= 1 and a 64-hex digest)", None)
     if len(lines) < n:
         return ("hold", "register is shorter than its verified anchor (rows removed)", None)
-    if n > 0 and _orch_sha256_hex(lines[n - 1]) != digest:
+    if _orch_sha256_hex(lines[n - 1]) != digest:
         return ("hold", "the anchored row was rewritten (tamper or reorder)", None)
     return _orch_register_tip(lines)
 
@@ -15132,6 +18192,2998 @@ def orch_resume_barrier(data):
         "audit found divergence ({}) and this mutation is outside the record surfaces. Correct the "
         "record first, then clear the barrier with 'python3 tools/orch_doctor.py --resume-audit'."
         .format("; ".join(barrier.get("findings") or [])[:500]))
+
+
+# --- lease heartbeat (cnclse/recncl) ------------------------------------------------------------------
+# Two warn-only bindings (orch_lease_heartbeat_post on PostToolUse, orch_lease_heartbeat_stop on Stop)
+# over ONE core, because the generator requires a distinct handler per control. The core keeps the
+# holding session's concurrency-lease liveness record fresh, or warns when it cannot: the incident
+# class is a LIVE session whose lease heartbeat goes stale because refresh is manual, after which
+# _orch_scope_live reads scope as dead and every lease-scoped guard silently goes out of scope. Inert
+# unless the registry's lease declares holder_is_session_id and a valid heartbeat block (the registry
+# is the confinement's trust root, so the opt-in, and the wider refresh mode, is an operator act
+# there). A write happens ONLY in the declared refresh mode, ONLY when one parsed holder field is
+# EXACTLY the payload session_id (never a whole-token presence test: a decoy line such as
+# `previous_holder: <sid>` passes _orch_token_present and must never authorize a write), and ONLY on
+# a lease proven to be a single-link regular file owned by this effective uid, reached by a
+# component-wise no-follow descriptor walk. Every fault direction is no-write: a lease that is
+# absent, unreadable, symlinked anywhere on its path, not a regular file, multi-link, foreign-owned,
+# oversized, not strict UTF-8, unparsable, duplicate-keyed, missing a declared field,
+# state-inactive, future-dated, stale, or too close to staleness is NEVER created, seized, revived,
+# renewed or rewritten; it is surfaced as a named warning on Stop (exit 0, never a block) and an
+# attempted (best-effort) guard-events row. No bookkeeping write may land in the lease either: the
+# past-holder memory and
+# the guard-events destinations are proven DISTINCT from the declared lease (by resolved path, by
+# inode and by parent identity) and carried, with that proof, as ONE per-event holder EVERY
+# bookkeeping writer consumes (the row append, the event append, the memory save, the tracking
+# backoff save and the crash recorder: none re-reads anything, and none writes without it). The
+# proof is BOUND to the lease access in hand: opening the lease, taking the declared lock and
+# re-opening under it each INVALIDATE it, and only a re-proof on the descriptor then in hand
+# (_orch_lease_hb_sep_fd) restores it, so a branch holding no freshly proven descriptor (a failed
+# first open, a failed under-lock re-open, a busy or faulted lock) writes and records NOTHING; the
+# busy- and faulted-lock DEFERRALS surface on Stop only (one made on a PostToolUse event is
+# dropped with that event's holder, a disclosed narrowing), while every other no-holder refusal
+# rides the hook result of the event it happened on (on PostToolUse the result's error text, the
+# dispatcher's stderr); an unknown or unusable lease path leaves the holder unproven too. The
+# declared lease path and lock_path values are validated BEFORE any path resolution (an embedded
+# NUL, or an empty component from a doubled, leading or trailing separator, is the named refusal
+# on Stop, never a resolution fault or a silent allow). The timestamp written is a clock read at
+# the event (_orch_now, tstamp), never a recalled value, and a refresh inside
+# refresh_after_minutes is a no-op (idempotent).
+# DISCLOSED residual, the SAME-USER CONCURRENCY CLASS, stated here ONCE and completely (every
+# narrower residual sentence of earlier rounds is subsumed by this one): a concurrently running
+# process of the SAME user can rename, re-point, link or replace ANY entry between ANY check and
+# its use (the state directory, the lease's parent directory, the lease, a bookkeeping
+# destination, a temporary file), so a row can land at a declared path (the suite keeps a
+# disclosed-residual WITNESS vector that re-points the lease's parent directory at the state
+# directory between the destination open and the identity read and shows the row landing at the
+# declared lease path) or a bookkeeping write can be lost. The same holds for the failure
+# cleanup of a temporary file: its unlink is by NAME after one identity stat, and POSIX offers no
+# unlink-if-inode, so an entry swapped onto the temporary name between that stat and the unlink
+# is removed in its place (the suite witnesses this window through _orch_lease_hb_cleanup_unlink),
+# and the temporary itself then stays where that process moved it, undisclosed. The checks
+# therefore cover
+# ACCIDENTAL mis-targeting and a stale or replaced lease, and they do not guarantee a boundary
+# against a same-user concurrent actor: on POSIX every path-based step can be raced by a process
+# of the same user, so closing that class needs OS isolation (distinct users, or a state
+# directory and lease directory private to this keeper), not more checks here.
+_ORCH_LEASE_HB_KIND = "lease-heartbeat"       # the guard-events kind of every row this core appends
+_ORCH_LEASE_HB_MAX_BYTES = 64 * 1024          # a larger lease is a cannot-evaluate, never read further
+_ORCH_LEASE_HB_MODES = frozenset(("warn", "refresh"))
+_ORCH_LEASE_HB_FORMATS = frozenset(("lines", "json"))
+_ORCH_LEASE_HB_KEYS = frozenset(("mode", "format", "holder_field", "field", "state_field",
+                                 "active_values", "refresh_after_minutes", "warn_after_minutes",
+                                 "lock_path"))
+_ORCH_LEASE_HB_REQUIRED = frozenset(("mode", "format", "holder_field", "refresh_after_minutes",
+                                     "warn_after_minutes"))
+_ORCH_LEASE_HB_RECORD = "lease-heartbeat.json"  # the past-holder memory in the state directory
+_ORCH_LEASE_HB_EVENTS = "guard-events.jsonl"    # the OTHER bookkeeping destination this keeper
+                                                # appends to (_orch_guard_event), named here only so
+                                                # the lease/bookkeeping separation can prove the
+                                                # declared lease is neither destination
+_ORCH_LEASE_HB_WRITER_NAMES = ("turn-state.json", "backlog-checkpoint.json",
+                                "checkpoint-init.marker", "attestations-validated.json",
+                                "forced-exit-surfaced.json")
+                                              # every OTHER whole-file replacement target of this
+                                              # plugin in the state directory (the
+                                              # _orch_write_json_atomic inventory; the memory and
+                                              # events names above are the keeper's own), named so
+                                              # the lock separation can refuse a declared lock
+                                              # aliasing one under ANY spelling (kept aligned with
+                                              # _orch_write_json_atomic's docstring, chkfcl)
+_ORCH_LEASE_HB_RETRY_SECONDS = 600            # while a refusal persists on an unchanged lease
+                                              # identity, the git tracking probe is re-run at
+                                              # most this often (the backoff)
+_ORCH_LEASE_HB_TRACKED_DETAIL = ("the lease is tracked by git, or the tracking probe failed; "
+                                 "a tracked lease is never rewritten by a hook")
+
+
+def _orch_lease_hb_dests(root, reg):
+    """The keeper's two bookkeeping destinations, (past-holder memory path, guard-events log
+    path), resolved ONCE per event from the registry dict the caller ALREADY read and validated
+    (PURE delegation to _state_dir_from_registry: no registry read of its own) and passed to the
+    separation check and to EVERY writer, so the separation decision and every subsequent save or
+    append use the SAME resolved paths: a registry re-read that fails (or is changed) between the
+    separation decision and a write can no longer redirect a writer onto a destination the
+    decision never examined."""
+    sd = _state_dir_from_registry(root, reg)
+    return (os.path.join(sd, _ORCH_LEASE_HB_RECORD), os.path.join(sd, _ORCH_LEASE_HB_EVENTS))
+
+
+def _orch_lease_hb_holder():
+    """A fresh, EMPTY separation holder: the one per-event record EVERY bookkeeping writer
+    consumes (_orch_lease_hb_event, _orch_lease_hb_row_once, _orch_lease_hb_memory_save, the
+    tracking backoff save inside _orch_lease_hb_tracked_refused, and the crash recorder). dests
+    is filled from the event's single registry read; lease_fd carries the HELD lease descriptor
+    whose separation _orch_lease_hb_sep_fd proved (the descriptor itself, never a boolean: the
+    proof IS the open lease access), lease_parent_fd the held directory descriptor the lease
+    was opened under (every write-time lstat of the lease name runs relative to it), lease_name
+    the lease's leaf name under that descriptor, lease_path the declared spelling, and state_fd
+    the state directory opened ONCE, O_DIRECTORY|O_NOFOLLOW, when the proof passed: every
+    bookkeeping open, lstat, exclusive temporary create and replace then runs RELATIVE to these
+    held descriptors (dir_fd), binding every such step to the HELD directory identities rather
+    than to path spellings; what a concurrently running process of the same user can still do
+    is the SAME-USER CONCURRENCY CLASS, stated once and completely in the section comment above
+    _ORCH_LEASE_HB_KIND and witnessed in the suite (the saves check their temporary descriptor
+    before its first byte, then re-check the temporary name immediately before the replace).
+    Opening (or re-opening) the lease and taking the declared lock clear the lease descriptors;
+    only _orch_lease_hb_prove passing on the descriptors then in hand fills the holder, and it
+    is emptied again BEFORE any held descriptor or the lock is released, so a write attempted
+    after cleanup finds no held descriptor and withholds. The holder OWNS state_fd (the event's
+    cleanup closes it); the lease descriptors stay owned by their opener."""
+    return {"dests": None, "lease_fd": None, "lease_parent_fd": None, "lease_name": None,
+            "state_fd": None, "lease_path": None, "withheld": []}
+
+
+def _orch_lease_hb_holder_ok(holder):
+    """True only when holder carries the HELD, separation-proven lease descriptor, the lease
+    parent-directory and state-directory descriptors the proof was built on, the lease leaf
+    name and the destinations the proof examined: the structural gate of every bookkeeping
+    writer, so a branch holding no proven descriptor (the entry path before the first open, an
+    invalid declaration, a failed first open, a failed under-lock re-open, a busy or faulted
+    lock, a crash before the proof or after cleanup, an unknown or unusable lease path) writes
+    and records nothing anywhere."""
+    if not isinstance(holder, dict):
+        return False
+    for key in ("lease_fd", "lease_parent_fd", "state_fd"):
+        fd = holder.get(key)
+        if not isinstance(fd, int) or isinstance(fd, bool) or fd < 0:
+            return False
+    return (isinstance(holder.get("lease_name"), str) and bool(holder["lease_name"])
+            and isinstance(holder.get("lease_path"), str) and bool(holder["lease_path"])
+            and isinstance(holder.get("dests"), tuple) and len(holder["dests"]) == 2)
+
+
+def _orch_lease_hb_withheld(holder, detail):
+    """Record a withheld bookkeeping write on the event's holder and return False: the binding
+    reports every withheld write through the HOOK RESULT (the Stop banner, or the result's error
+    text, which the dispatcher writes to stderr), NEVER into a file, so a destination refused at
+    write time stays visible without landing a byte anywhere."""
+    try:
+        if isinstance(holder, dict):
+            holder.setdefault("withheld", []).append(str(detail))
+    except Exception:
+        pass
+    return False
+
+
+def _orch_lease_hb_withheld_text(holder, event="Stop"):
+    """The one-line report of this event's withheld bookkeeping writes, or None when nothing was
+    withheld: the bindings surface it through the hook result (appended to the Stop banner, or
+    carried as the result's error text, which the dispatcher writes to stderr), never into a
+    file. A BUSY- or FAULTED-LOCK deferral (_orch_lease_hb_no_holder), and a core-fault record
+    made with no held descriptor on those branches (_orch_lease_hb_crash_row), are included on
+    Stop only, at most once each per turn end: the declared lock being busy is expected
+    coordination, and neither is worth one report per tool call (the faulted-lock deferral and
+    the crash record each NAME their fault). A due refresh's Stop banner names the flock fault
+    itself and DROPS the faulted-lock deferral (_orch_lease_hb_judge), so the fault is rendered
+    exactly once per turn end; and each event builds a FRESH holder, so a deferral made on a
+    PostToolUse event (a lock deferral or a core fault deferred on those branches) is dropped
+    with that event's holder and surfaces only where the Stop event reproduces it, a disclosed
+    narrowing."""
+    withheld = list(holder.get("withheld") or []) if isinstance(holder, dict) else []
+    if isinstance(holder, dict) and event == "Stop":
+        withheld.extend(d for d in (holder.get("deferred") or []) if d not in withheld)
+    if not withheld:
+        return None
+    return ("AIQT guardrail (lease heartbeat): bookkeeping withheld ({}).".format(
+        "; ".join(withheld)))
+
+
+def _orch_lease_hb_lock_fault_deferral(lock_fault):
+    """The ONE faulted-lock deferral line, built here so the judge's Stop banner, which names
+    the same flock fault and carries the bookkeeping consequence, can DROP the deferral and
+    render the fault exactly once per turn end."""
+    return ("the declared lock faulted ({}), so this event's bookkeeping is "
+            "withheld".format(lock_fault))
+
+
+def _orch_lease_hb_no_holder(holder):
+    """The structural-gate refusal of a bookkeeping writer reached with NO held,
+    separation-proven lease descriptor, always returning False. On the BUSY-lock branch (the one
+    no-holder branch that still runs the decision table, so writers are reached on EVERY
+    PostToolUse call while another holder legitimately has the declared lock) the refusal is
+    recorded once as a DEFERRAL surfaced on Stop only (_orch_lease_hb_withheld_text), never a
+    per-tool-call report; the FAULTED-lock branch (the other such branch) defers the same way,
+    NAMING the lock fault rather than the generic no-descriptor refusal; every other no-holder
+    write is withheld and reported as the named refusal, exactly as before."""
+    if isinstance(holder, dict) and holder.get("lock_busy"):
+        try:
+            deferred = holder.setdefault("deferred", [])
+            detail = ("the declared lock is busy, so this event's bookkeeping is deferred to "
+                      "a later event")
+            if detail not in deferred:
+                deferred.append(detail)
+        except Exception:
+            pass
+        return False
+    if isinstance(holder, dict) and holder.get("lock_fault") is not None:
+        try:
+            deferred = holder.setdefault("deferred", [])
+            detail = _orch_lease_hb_lock_fault_deferral(holder["lock_fault"])
+            if detail not in deferred:
+                deferred.append(detail)
+        except Exception:
+            pass
+        return False
+    return _orch_lease_hb_withheld(holder, "no held, separation-proven lease descriptor")
+
+
+def _orch_lease_hb_lease_ids(holder):
+    """The lease identities every bookkeeping write must differ from, read at WRITE time (and
+    AFTER the write's own destination stat, so a destination renamed onto the lease name before
+    this read is seen at the name and refused): the fstat of the held, separation-proven lease
+    descriptor, plus an lstat of the lease leaf NAME taken relative to the held lease
+    parent-directory descriptor (a cooperating writer can have re-pointed that name at a
+    bookkeeping destination since the proof, so the name's CURRENT identity refuses the write
+    too; the dir_fd binding keeps this read on the HELD parent directory whatever its ancestors
+    are renamed to, while what a same-user concurrent actor can still do is the SAME-USER
+    CONCURRENCY CLASS in the section comment above _ORCH_LEASE_HB_KIND).
+    (ids, None) on success, else (None, detail); an absent lease name contributes no identity
+    (nothing is there to alias), while any other stat fault withholds (chkfcl)."""
+    try:
+        lst = os.fstat(holder["lease_fd"])
+    except OSError as exc:
+        return (None, "the held lease descriptor cannot be stat'ed ({})".format(exc))
+    ids = {(lst.st_dev, lst.st_ino)}
+    try:
+        nst = os.stat(holder["lease_name"], dir_fd=holder["lease_parent_fd"],
+                      follow_symlinks=False)
+        ids.add((nst.st_dev, nst.st_ino))
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as exc:
+        return (None, "the declared lease name cannot be stat'ed ({})".format(exc))
+    return (ids, None)
+
+
+def _orch_lease_hb_append_fstat(fd):
+    """The append destination's identity stat, bound to the very descriptor the row would be
+    written through (never a pathname). A seam, as _orch_lease_hb_restat is, so the self-test
+    can plant a swap between the destination open and this stat deterministically."""
+    return os.fstat(fd)
+
+
+def _orch_lease_hb_row_write(fd, view):
+    """ONE write syscall of a guard-events row through the append descriptor, returning the
+    byte count written (a short write leaves the rest to the caller's loop, which calls this
+    again). A seam, as _orch_lease_hb_append_fstat is, so the self-test can observe EVERY write
+    of the final row, the repeat after a forced short write included, inside the critical
+    section."""
+    return os.write(fd, view)
+
+
+def _orch_lease_hb_append_checked(holder, path, obj):
+    """The ONE lease-heartbeat row appender, bound to held descriptors at BOTH ends: the
+    destination is opened by its leaf NAME relative to the holder's held state-directory
+    descriptor (dir_fd, so a swap of the state directory's own name after the proof cannot
+    redirect the open) with O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY|O_CLOEXEC
+    (a symlink planted at the name is refused, never followed; an absent log is created, as the
+    state directory's first append always did; a FIFO, with or without a reader, returns
+    PROMPTLY and never blocks the hook: opened non-blocking with no reader the open fails
+    outright, and with one the fstat below refuses it before any write), THAT descriptor is
+    fstat'ed, and the row is written through it only when it is a regular file with exactly one
+    hard link whose (st_dev, st_ino) differs from the held lease descriptor's AND from an lstat
+    of the lease name taken relative to the held lease parent-directory descriptor AFTER the
+    destination fstat (read after, so a destination renamed onto the lease name between the
+    open and that read is seen at the lease name and refused); otherwise NOTHING is written and
+    the refusal is reported through the hook result (the Stop banner or the result's error
+    text, the dispatcher's stderr), never into a file, though the O_CREAT of the open can
+    already have CREATED an empty destination file before the checks ran, a DISCLOSED side
+    effect of a refused append (no row byte lands anywhere). DISCLOSED residual: the same-user
+    concurrency class, stated once and completely in the section comment above
+    _ORCH_LEASE_HB_KIND; the checks here cover accidental mis-targeting and a stale or replaced
+    lease, never a concurrently running process of the same user. Returns whether the row was
+    appended."""
+    if not _orch_lease_hb_holder_ok(holder):
+        return _orch_lease_hb_no_holder(holder)
+    fd = None
+    try:
+        fd = os.open(os.path.basename(path),
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+                     | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0), 0o666, dir_fd=holder["state_fd"])
+        st = _orch_lease_hb_append_fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return _orch_lease_hb_withheld(
+                holder, "the bookkeeping destination is not a regular file")
+        if st.st_nlink != 1:
+            return _orch_lease_hb_withheld(
+                holder, "the bookkeeping destination does not have exactly one hard link")
+        ids, fault = _orch_lease_hb_lease_ids(holder)
+        if ids is None:
+            return _orch_lease_hb_withheld(holder, fault)
+        if (st.st_dev, st.st_ino) in ids:
+            return _orch_lease_hb_withheld(
+                holder, "the bookkeeping destination aliases the declared lease")
+        blob = (json.dumps(obj, sort_keys=True) + "\n").encode("utf-8")
+        view = memoryview(blob)
+        while view:
+            view = view[_orch_lease_hb_row_write(fd, view):]
+        return True
+    except (OSError, ValueError) as exc:
+        return _orch_lease_hb_withheld(
+            holder, "the bookkeeping append failed ({})".format(exc))
+    finally:
+        _orch_lease_hb_close(fd)
+
+
+def _orch_lease_hb_event(holder, decision, detail):
+    """Best-effort append of one lease-heartbeat guard-events row, through the event's separation
+    HOLDER only: it writes NOTHING unless the holder carries the held, separation-proven lease
+    descriptor (_orch_lease_hb_holder_ok), and the append itself re-opens the SAME events
+    destination the proof examined no-follow, by name RELATIVE to the held state-directory
+    descriptor, and fstats the descriptor it writes through (_orch_lease_hb_append_checked),
+    against that held lease descriptor AND an lstat of the lease name taken relative to the
+    held lease parent-directory descriptor AFTER the destination fstat, so a destination
+    aliased onto the lease AFTER the proof is refused at write time, not only at proof time (and never a fresh _orch_guard_event resolution, whose
+    independent registry re-read could land the row somewhere the proof never examined).
+    Returns whether the append succeeded; a guard never changes its decision over a failed or
+    withheld one."""
+    if not _orch_lease_hb_holder_ok(holder):
+        return _orch_lease_hb_no_holder(holder)
+    return _orch_lease_hb_append_checked(holder, holder["dests"][1],
+                                         {"ts": _orch_now().isoformat(),
+                                          "kind": _ORCH_LEASE_HB_KIND,
+                                          "decision": decision, "detail": detail})
+
+
+def _orch_lease_hb_path_bad(value):
+    """The refusal detail when a declared path value cannot name a file (an embedded NUL, which
+    path resolvers raise ValueError on, or an empty component from a doubled, leading or
+    trailing separator, which collapses silently to a DIFFERENT path than the declared
+    spelling), else None. Judged on the string alone, BEFORE any filesystem resolution
+    (_orch_lease_hb_paths_bad runs it ahead of realpath, stat and the entry separation proof),
+    so an unusable declared value is the NAMED refusal, never a late resolution fault or a
+    silent allow (guardrail-config-integrity). Exactly ONE leading separator is the absolute
+    anchor: stripping every leading separator would hide the empty leading component of a
+    doubled root ('//tmp/lease', '///tmp/lease')."""
+    if "\0" in value:
+        return "contains an embedded NUL"
+    rest = value[len(os.sep):] if os.path.isabs(value) else value
+    if any(part == "" for part in rest.split(os.sep)):
+        return "contains an empty path component (a doubled, leading or trailing separator)"
+    return None
+
+
+def _orch_lease_hb_paths_bad(lease):
+    """The named refusal when the declared lease path or lock_path VALUE cannot name a file,
+    judged on the strings alone BEFORE any filesystem resolution (realpath, stat, the entry
+    separation proof): an embedded NUL raises ValueError inside a resolver, and an empty
+    component silently collapses to a DIFFERENT path than the declared spelling, so either must
+    be the named refusal on Stop, never a resolution fault or a silent allow. None when both
+    values are usable; _orch_lease_hb_config repeats these checks inside the whole-declaration
+    validation (kept aligned, chkfcl)."""
+    path = lease.get("path")
+    if not (isinstance(path, str) and path):
+        return "a heartbeat block requires a declared lease path"
+    detail = _orch_lease_hb_path_bad(path)
+    if detail:
+        return "the declared lease path {}".format(detail)
+    block = lease.get("heartbeat")
+    if isinstance(block, dict) and "lock_path" in block:
+        lock_path = block.get("lock_path")
+        if not (isinstance(lock_path, str) and lock_path):
+            return "lock_path must be a non-empty string"
+        detail = _orch_lease_hb_path_bad(lock_path)
+        if detail:
+            return "lock_path {}".format(detail)
+    return None
+
+
+def _orch_lease_hb_config(reg, root=None):
+    """The adopter declaration, validated whole: ('absent', None) when the registry's lease declares
+    no heartbeat block (byte-for-byte today's behaviour), ('ok', block) on a valid declaration, and
+    ('bad', detail) otherwise. A bad block never writes and never falls back to another mode; it is
+    surfaced (a Stop warning and a resume-audit finding; never a guard-events row or a memory
+    save, because no descriptor proof exists before the first open and a writer with no held
+    descriptor withholds), so a typo can never silently select a posture
+    (guardrail-config-integrity). With root (every runtime caller passes it: the event entry and
+    the resume audit) a declared lock_path also runs the ONE shared read-only lock validation
+    (_orch_lease_hb_lock_sep) against the lease and against every file this plugin's whole-file
+    writers replace, on paths and destinations resolved from the authoritative root, so an
+    alternate spelling, a relative lock_path that resolves to a refused target, an inode alias, a
+    lock inside the state directory and a stat fault are each the NAMED invalid-declaration
+    refusal at declaration validation too, read-only and BEFORE any state-directory creation
+    (without root, direct unit callers, only the string-level checks run)."""
+    lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
+    if not lease or "heartbeat" not in lease:
+        return ("absent", None)
+    block = lease.get("heartbeat")
+    if not isinstance(block, dict):
+        return ("bad", "heartbeat is not an object")
+    extra = set(block) - _ORCH_LEASE_HB_KEYS
+    if extra:
+        return ("bad", "unknown heartbeat key(s): {}".format(", ".join(sorted(extra))))
+    missing = _ORCH_LEASE_HB_REQUIRED - set(block)
+    if missing:
+        return ("bad", "missing heartbeat key(s): {}".format(", ".join(sorted(missing))))
+    if lease.get("holder_is_session_id") is not True:
+        return ("bad", "a heartbeat block requires lease.holder_is_session_id true (the holder proof)")
+    if not (isinstance(lease.get("path"), str) and lease.get("path")):
+        return ("bad", "a heartbeat block requires a declared lease path")
+    lease_path_bad = _orch_lease_hb_path_bad(lease.get("path"))
+    if lease_path_bad:
+        return ("bad", "the declared lease path {}".format(lease_path_bad))
+    max_age = lease.get("max_age_hours")
+    if not isinstance(max_age, (int, float)) or isinstance(max_age, bool) \
+            or (isinstance(max_age, float) and not math.isfinite(max_age)) or max_age <= 0:
+        return ("bad", "a heartbeat block requires a finite max_age_hours greater than 0")
+    # isinstance BEFORE membership: an unhashable declared value (a list, an object) must be the
+    # NAMED invalid-declaration refusal, never a TypeError the binding records as a core fault
+    # that silently allows (guardrail-config-integrity)
+    mode = block.get("mode")
+    if not isinstance(mode, str) or mode not in _ORCH_LEASE_HB_MODES:
+        return ("bad", "mode must be 'warn' or 'refresh'")
+    fmt = block.get("format")
+    if not isinstance(fmt, str) or fmt not in _ORCH_LEASE_HB_FORMATS:
+        return ("bad", "format must be 'lines' or 'json'")
+    refresh_after = block.get("refresh_after_minutes")
+    warn_after = block.get("warn_after_minutes")
+    for value, name in ((refresh_after, "refresh_after_minutes"), (warn_after, "warn_after_minutes")):
+        if type(value) is not int or value < 1:
+            return ("bad", "{} must be an integer of at least 1".format(name))
+    if not refresh_after < warn_after:
+        return ("bad", "refresh_after_minutes must be below warn_after_minutes")
+    if warn_after * 60 > max_age * 3600 - 2 * _ORCH_CLOCK_SKEW:
+        return ("bad", "warn_after_minutes must stay at least two clock skews under max_age_hours")
+    fields = [block.get("holder_field")]
+    for key in ("field", "state_field"):
+        if key in block:
+            fields.append(block.get(key))
+    for value in fields:
+        if not isinstance(value, str) or not value or value == "Operating-mode":
+            return ("bad", "field names must be non-empty strings other than Operating-mode")
+    if len(set(fields)) != len(fields):
+        return ("bad", "field names must be distinct")
+    if ("state_field" in block) != ("active_values" in block):
+        return ("bad", "state_field and active_values are declared together or not at all")
+    if "active_values" in block:
+        active = block.get("active_values")
+        if not isinstance(active, list) or not active \
+                or not all(isinstance(v, str) and v for v in active):
+            return ("bad", "active_values must be a non-empty list of non-empty strings")
+    if "lock_path" in block:
+        lock_path = block.get("lock_path")
+        if not (isinstance(lock_path, str) and lock_path):
+            return ("bad", "lock_path must be a non-empty string")
+        lock_path_bad = _orch_lease_hb_path_bad(lock_path)
+        if lock_path_bad:
+            return ("bad", "lock_path {}".format(lock_path_bad))
+        if os.path.normpath(lock_path) == os.path.normpath(lease.get("path")):
+            # the lock must be a STABLE, SEPARATE coordination file this keeper never
+            # replaces: a lock that IS the lease would be replaced by the keeper's own
+            # refresh (flock attaches to the open file description, so the next cooperating
+            # keeper locks the replacement while this one still holds the orphaned inode)
+            return ("bad", "lock_path names the declared lease path (the lock must be a "
+                    "stable coordination file separate from the lease)")
+        if root is not None:
+            # the SHARED read-only lock validation (the same check the event entry runs),
+            # resolving the state directory and both bookkeeping destinations from the
+            # authoritative root: it creates NOTHING (the separation check's state-directory
+            # creation runs later, and only on a valid declaration), and the resume audit
+            # reports this refusal through the invalid-declaration finding
+            lock_sep = _orch_lease_hb_lock_sep(_orch_path(root, lease.get("path")),
+                                               _orch_path(root, lock_path),
+                                               _orch_lease_hb_dests(root, reg))
+            if lock_sep is not None:
+                return ("bad", lock_sep)
+    return ("ok", block)
+
+
+def _orch_lease_hb_close(*fds):
+    """Close walk descriptors exactly once each, ATTEMPTING EVERY ONE even when an earlier close
+    raises: an OSError is swallowed because every outcome the descriptor could affect is settled
+    before this runs, and any OTHER exception class (an interrupt, an injected core fault) is
+    held until every remaining descriptor has had its one close attempt, and then the FIRST such
+    fault propagates. A descriptor whose close raised is never retried, whichever side of the
+    close syscall the fault arrived on (the number may already be closed and reused by another
+    acquisition), so the fail direction of that one ambiguous close is a leaked descriptor,
+    never a close of a descriptor this caller no longer owns. Every terminal cleanup of the
+    lease heartbeat releases its descriptors through ONE call of this helper (the event
+    finalizer, _orch_lease_hb_event_cleanup, and the judge's re-opened descriptors with the
+    lock last), so a fault at one close can never skip the next."""
+    fault = None
+    for fd in fds:
+        if fd is None:
+            continue
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        except BaseException as exc:  # the remaining closes still run; then it propagates
+            if fault is None:
+                fault = exc
+    if fault is not None:
+        raise fault
+
+
+def _orch_lease_hb_close_mark(fd, done):
+    """Close one held descriptor, recording fd in done IMMEDIATELY BEFORE the close syscall
+    (OSError swallowed, as in _orch_lease_hb_close). The record leads the syscall so a fault
+    that interrupts this helper between the two reads as CLOSED and is never retried: after a
+    fault the number may already be closed and reused by another acquisition, so the fail
+    direction of that one ambiguous step is a leaked descriptor, never a close of a descriptor
+    this caller no longer owns. A seam, so the self-test can inject a fault on EITHER side of
+    the close and prove both ownership outcomes."""
+    done.append(fd)
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _orch_lease_hb_close_held(held, fd):
+    """Close one descriptor of a held-descriptor ledger at a transfer seam: fd leaves held
+    exactly when the close primitive RECORDED it (closed, or interrupted at the one ambiguous
+    step, which resolves to closed-and-never-retried), and stays in held when the fault arrived
+    BEFORE the record, so the enclosing cleanup still owns it and closes it exactly once. The
+    two-sided ledger distinguishes a close that faults before closing from one after it,
+    without ever retrying an ambiguously closed descriptor."""
+    done = []
+    try:
+        _orch_lease_hb_close_mark(fd, done)
+    finally:
+        if fd in done and fd in held:
+            held.remove(fd)
+
+
+def _orch_lease_hb_open(root, path):
+    """Open the declared lease by a component-wise no-follow walk (openat semantics, the
+    symlink-resolution discipline): (parent_fd, leaf_fd, leaf_name, None) on success, with the
+    final parent held O_RDONLY|O_DIRECTORY (reopened as '.' under the walked descriptor, so a field
+    write can fsync it; the final parent therefore needs read permission, a disclosed platform
+    cost) and the lease held O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY; (None, None, None,
+    ('absent'|'cannot', detail)) on any other outcome (an unusable path value, for example an
+    embedded NUL raising ValueError, is a named cannot refusal). The anchor is '/' for an
+    absolute path and the repo root for a relative one; a '..' component is refused outright; no
+    component is ever re-resolved by name after its open, and no symlink is followed at ANY
+    component (an ancestor alias such as a symlinked /var/run refuses, the fail-closed
+    direction). Descriptor ownership is a LEDGER kept exact from the moment of each
+    acquisition: every descriptor enters held when opened and leaves it exactly once, at its
+    transfer close (_orch_lease_hb_close_held, which distinguishes a close fault BEFORE its
+    close syscall, where the enclosing cleanup still owns and closes the descriptor, from one
+    AT or AFTER it, where it is never retried) or at the hand-off of the final (parent, leaf)
+    pair; on any fault the terminal cleanup closes every descriptor still in the ledger exactly
+    once, running the REMAINING closes even when one of them faults, then propagating the
+    FIRST such fault (as _orch_lease_hb_close does; _orch_lease_hb_lock keeps its cleanup
+    fault the same way). The caller closes both returned descriptors exactly once (via
+    _orch_lease_hb_close)."""
+    if not isinstance(path, str) or not path:
+        return (None, None, None, ("cannot", "no usable lease path"))
+    if os.pardir in path.split(os.sep):
+        return (None, None, None, ("cannot", "the lease path contains '..' (refused)"))
+    if os.path.isabs(path):
+        anchor, rest = os.sep, path.lstrip(os.sep)
+    else:
+        anchor, rest = root, path
+    parts = [p for p in rest.split(os.sep) if p and p != os.curdir]
+    if not parts:
+        return (None, None, None, ("cannot", "the lease path names no file"))
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    held = []
+    handed = False
+    stage = "walk"
+    try:
+        fd = os.open(anchor, _ORCH_O_WALK | os.O_DIRECTORY | cloexec)
+        held.append(fd)
+        for comp in parts[:-1]:
+            nxt = os.open(comp, _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec,
+                          dir_fd=fd)
+            # the next component enters the ledger BEFORE the finished one's transfer close: a
+            # close fault on either side of that close still owns every acquisition exactly once
+            held.append(nxt)
+            _orch_lease_hb_close_held(held, fd)
+            fd = nxt
+        parent = os.open(os.curdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec,
+                         dir_fd=fd)
+        held.append(parent)
+        _orch_lease_hb_close_held(held, fd)
+        leaf_name = parts[-1]
+        stage = "leaf"
+        leaf = os.open(leaf_name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+                       | getattr(os, "O_NOCTTY", 0) | cloexec, dir_fd=parent)
+        held.append(leaf)
+        handed = True
+        return (parent, leaf, leaf_name, None)
+    except FileNotFoundError:
+        return (None, None, None, ("absent", "the declared lease is absent"))
+    except OSError as exc:
+        if stage == "leaf":
+            return (None, None, None, ("cannot", "the lease cannot be opened ({})".format(exc)))
+        return (None, None, None, ("cannot", "the lease path walk was refused ({})".format(exc)))
+    except ValueError as exc:
+        # an unusable component (an embedded NUL) raises ValueError, not OSError: a NAMED
+        # cannot refusal, with every held walk descriptor closed exactly once by the cleanup
+        return (None, None, None, ("cannot", "the path is unusable ({})".format(exc)))
+    finally:
+        if not handed:
+            fault = None
+            for leftover in reversed(list(held)):
+                try:
+                    _orch_lease_hb_close_held(held, leftover)
+                except BaseException as exc:  # the remaining closes still run; then it propagates
+                    if fault is None:  # the FIRST fault, as _orch_lease_hb_close keeps it
+                        fault = exc
+            if fault is not None:
+                raise fault
+
+
+def _orch_lease_hb_fstat(fd):
+    """The lease identity stat, bound to the open descriptor (never a pathname). A one-line seam,
+    as _orch_escape_stat is, so the self-test can exercise the foreign-owner leg hermetically on a
+    single-uid host."""
+    return os.fstat(fd)
+
+
+def _orch_lease_hb_restat(dirfd, name):
+    """Re-stat the lease NAME without following links, bound to the held parent directory
+    descriptor: the identity re-check before any write, so a swap between the proof and the write
+    refuses the write. A seam so the self-test can inject that swap deterministically."""
+    return os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+
+
+def _orch_lease_hb_replace(tmp, name, dirfd):
+    """The one rename of a heartbeat field write, bound to the held parent directory descriptor on
+    both sides. A seam so the self-test can inject a rename failure."""
+    os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+
+
+def _orch_lease_hb_load(fd):
+    """('ok', (st, text)) from an already-opened lease descriptor, else ('cannot', detail). Every
+    check runs on the OPEN descriptor, so a name swapped after the open cannot redirect it: a
+    regular file (a FIFO opened non-blocking is refused here and never blocks the hook), exactly
+    one hard link (a hard-linked alias is ambiguous), owned by this effective uid (a foreign-owned
+    lease is never this session's to touch), at most _ORCH_LEASE_HB_MAX_BYTES, and strict UTF-8."""
+    try:
+        st = _orch_lease_hb_fstat(fd)
+    except OSError as exc:
+        return ("cannot", "the lease cannot be stat'ed ({})".format(exc))
+    if not stat.S_ISREG(st.st_mode):
+        return ("cannot", "the lease is not a regular file")
+    if st.st_nlink == 0:
+        # an orphaned descriptor, not a multi-link file: the name was re-pointed after the open
+        return ("cannot", "the lease was replaced or unlinked since it was opened")
+    if st.st_nlink != 1:
+        return ("cannot", "the lease has more than one hard link")
+    if st.st_uid != os.geteuid():
+        return ("cannot", "the lease is not owned by this effective uid")
+    if st.st_size > _ORCH_LEASE_HB_MAX_BYTES:
+        return ("cannot", "the lease is larger than {} bytes".format(_ORCH_LEASE_HB_MAX_BYTES))
+    chunks, total = [], 0
+    try:
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _ORCH_LEASE_HB_MAX_BYTES:
+                return ("cannot",
+                        "the lease grew past {} bytes mid-read".format(_ORCH_LEASE_HB_MAX_BYTES))
+            chunks.append(chunk)
+    except OSError as exc:
+        return ("cannot", "the lease cannot be read ({})".format(exc))
+    try:
+        text = b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError:
+        return ("cannot", "the lease is not strict UTF-8")
+    return ("ok", (st, text))
+
+
+def _orch_lease_hb_split(text):
+    """The PHYSICAL lines of a lines-format lease, each with its own ending kept: a line ends ONLY
+    at a line feed, so a Unicode separator str.splitlines would also break on (U+2028, U+2029,
+    U+0085, a form feed, a vertical tab, a lone carriage return) stays inside its line and can
+    never start a phantom line (a holder line hidden in another field's value). The reader and
+    the renderer share this one split, so a line index means the same line in both."""
+    pieces = text.split("\n")
+    lines = [piece + "\n" for piece in pieces[:-1]]
+    if pieces[-1]:
+        lines.append(pieces[-1])
+    return lines
+
+
+def _orch_lease_hb_lines(text, key):
+    """Every PHYSICAL line of a lines-format lease that declares key, as (index, prefix, value,
+    trail, ending): the reader splits on line feeds FIRST (_orch_lease_hb_split), so a value can
+    never cross a line boundary, and the pieces are byte-exact (prefix is the leading run through
+    the colon and its horizontal whitespace, trail the trailing horizontal whitespace, ending the
+    line's own terminator: a line feed, with a carriage return directly before it kept as part of
+    the ending, or nothing on a last line without one), so a rewrite of the one value changes no
+    other byte."""
+    out = []
+    head = re.compile(r"^([ \t]*" + re.escape(key) + r"[ \t]*:[ \t]*)(.*)")
+    for index, line in enumerate(_orch_lease_hb_split(text)):
+        body, ending = line, ""
+        for candidate in ("\r\n", "\n"):
+            if body.endswith(candidate):
+                body, ending = body[:-len(candidate)], candidate
+                break
+        matched = head.match(body)
+        if matched:
+            rest = matched.group(2)
+            value = rest.rstrip(" \t")
+            out.append((index, matched.group(1), value, rest[len(value):], ending))
+    return out
+
+
+def _orch_lease_hb_parse(text, cfg, keys=None):
+    """('ok', info) or ('cannot', detail): the declared fields of the lease content (or only the
+    keys selection: the holder proof is parsed FIRST and alone, so a foreign lease that lacks the
+    holding session's other declared fields stays a silent foreign lease, never a warning aimed at
+    a session that does not hold it), parsed by ONE sound reader per declared format. info carries
+    holder, and where declared state and hb (the raw heartbeat value; for the lines format also
+    hb_line, the byte-exact pieces of its one line, so a refresh changes only the value). A
+    declared field that is absent or appears more than once is a cannot-evaluate (ambiguity never
+    authorizes a write), and so is a lines-format declared value carrying a carriage return (a
+    lease whose lines end with a lone carriage return is one physical line, _orch_lease_hb_split,
+    so its declared value runs on into the rest of the lease), and in json the top level must be
+    an object with no duplicate key (the
+    strict duplicate-rejecting hook) and string declared fields. Prose and other lines are allowed
+    around a lines-format lease, so it may share a file with the operating-mode record; the
+    declaration validation already refuses Operating-mode as a field."""
+    if keys is None:
+        keys = (("holder_field", "holder"), ("state_field", "state"), ("field", "hb"))
+    info = {}
+    if cfg["format"] == "lines":
+        for cfg_key, name in keys:
+            if cfg_key != "holder_field" and cfg_key not in cfg:
+                continue
+            found = _orch_lease_hb_lines(text, cfg[cfg_key])
+            if len(found) != 1:
+                return ("cannot", "the declared {} field appears {} times (exactly once required)"
+                        .format(name, len(found)))
+            if "\r" in found[0][2]:
+                # a carriage return ends no line unless a line feed follows it, so a lease whose
+                # lines end with a lone carriage return is ONE physical line and a declared value
+                # runs on into the rest of it: a cannot-evaluate, never a holder that silently
+                # reads as foreign
+                return ("cannot", "the declared {} field's value carries a carriage return (a "
+                        "lone carriage return does not end a line)".format(name))
+            info[name] = found[0][2]
+            if name == "hb":
+                info["hb_line"] = found[0]
+        return ("ok", info)
+    try:
+        obj = json.loads(text, object_pairs_hook=_orch_reject_duplicate_keys)
+    except (ValueError, RecursionError) as exc:
+        return ("cannot", "the lease does not parse as json ({})".format(type(exc).__name__))
+    if not isinstance(obj, dict):
+        return ("cannot", "the lease json top level is not an object")
+    for cfg_key, name in keys:
+        if cfg_key != "holder_field" and cfg_key not in cfg:
+            continue
+        key = cfg[cfg_key]
+        if key not in obj:
+            return ("cannot", "the declared {} field is missing".format(name))
+        if not isinstance(obj[key], str):
+            return ("cannot", "the declared {} field is not a string".format(name))
+        info[name] = obj[key]
+    info["json"] = obj
+    return ("ok", info)
+
+
+def _orch_lease_hb_ts(value):
+    """(parsed_utc, suffix) for a heartbeat field value, or (None, detail): an ISO-8601 UTC time
+    whose zone is spelled 'Z' or '+00:00' (the suffix a refresh keeps, at seconds precision). An
+    epoch number, a naive or differently-zoned time, or any other form is (None, detail): an
+    unreadable liveness value never reads as fresh or stale, it is a cannot-evaluate (chkfcl)."""
+    if not isinstance(value, str):
+        return (None, "not a string")
+    if value.endswith("Z"):
+        suffix = "Z"
+    elif value.endswith("+00:00"):
+        suffix = "+00:00"
+    else:
+        return (None, "timestamp form not supported (a UTC time ending 'Z' or '+00:00' is required)")
+    parsed = _orch_parse_utc(value)
+    if parsed is None:
+        return (None, "unparseable timestamp")
+    return (parsed, suffix)
+
+
+def _orch_lease_hb_memory(dests):
+    """The past-holder memory ({} when absent, unreadable, not a regular file, or oversized), read
+    from the SAME resolved destination (dests[0]) the event's separation check examined: the
+    BEST-EFFORT record of the last session this core proved to hold the lease, plus the last
+    guard-events row state (the once-per-state log discipline of _orch_lease_hb_row_once). It
+    never authorizes anything, and an unreadable memory only widens silence or repeats one row,
+    never a write to the lease. The open is non-blocking and no-follow and the file type is
+    checked on the DESCRIPTOR before any read, so a FIFO planted at the record's name can never
+    block the hook (opened non-blocking it returns at once and S_ISREG refuses it) and a symlink
+    is never followed; the read is bounded at _ORCH_LEASE_HB_MAX_BYTES before any parse, so an
+    oversized file is the empty-memory case, never an unbounded read."""
+    path = dests[0]
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+                     | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _ORCH_LEASE_HB_MAX_BYTES:
+            return {}
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _ORCH_LEASE_HB_MAX_BYTES:
+                return {}
+            chunks.append(chunk)
+        data = json.loads(b"".join(chunks).decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, RecursionError):
+        return {}
+    finally:
+        _orch_lease_hb_close(fd)
+
+
+def _orch_lease_hb_save_replace(tmp, name, dirfd):
+    """The one rename of a bookkeeping save, bound to the held state-directory descriptor on
+    BOTH sides (src_dir_fd and dst_dir_fd), so a swap of the state directory's own name after
+    the proof cannot redirect it. A seam, as _orch_lease_hb_replace is, so the self-test can
+    plant a swap between the identity checks and this replace deterministically."""
+    os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+
+
+def _orch_lease_hb_save_tmp_fstat(fd):
+    """The save's temporary-descriptor identity stat, bound to the very descriptor the memory
+    (or backoff) save would write through, taken BEFORE its first byte. A seam, as
+    _orch_lease_hb_append_fstat is, so the self-test can plant a rename, a hard link or an
+    unlink of the temporary between the exclusive create and this stat deterministically."""
+    return os.fstat(fd)
+
+
+def _orch_lease_hb_cleanup_unlink(tmp, dirfd):
+    """The ONE unlink of the failure cleanup (_orch_lease_hb_save_cleanup), by NAME relative to
+    the held directory descriptor. POSIX offers no unlink-if-inode, so an entry another process
+    of the same user swaps onto the name between the cleanup's identity stat and this call is
+    removed in its place (a window of the same-user concurrency class, the section comment above
+    _ORCH_LEASE_HB_KIND). A seam so the self-test can plant that swap deterministically and
+    witness the documented outcome."""
+    os.unlink(tmp, dir_fd=dirfd)
+
+
+def _orch_lease_hb_save_cleanup(tmp, tmp_id, state_fd):
+    """The failure cleanup of one bookkeeping save (and of the heartbeat field write,
+    _orch_lease_hb_write_field, which passes the held lease parent-directory descriptor as
+    state_fd), returning the leftover DISCLOSURE detail
+    (joined into the withheld report) or None: the temporary NAME is unlinked only when ONE
+    bounded no-follow stat, taken just before the unlink, finds it still carrying the inode this
+    save created (a name re-pointed at a DIFFERENT learned inode BEFORE that stat is left alone
+    silently, as the entry there is not this save's). The unlink itself is by name
+    (_orch_lease_hb_cleanup_unlink): POSIX offers no unlink-if-inode, so an entry another
+    process of the same user swaps onto the name between that stat and the unlink is removed in
+    its place, and this save's own temporary then stays wherever that process moved it,
+    undisclosed (a window of the same-user concurrency class, stated in the section comment
+    above _ORCH_LEASE_HB_KIND); a temporary whose identity
+    was never learned, because the pre-write stat itself faulted, is NEVER unlinked and the
+    leftover is disclosed by name; a cleanup stat fault other than CONFIRMED absence
+    (FileNotFoundError) also never unlinks and discloses the name AND the fault, because an
+    unreadable result cannot establish absence (chkfcl); and a failed unlink discloses the
+    leftover too. A fault of any OTHER class raised in here (an interrupt at the stat or the
+    unlink) returns no detail at all, so BOTH callers catch it around this call, disclose the
+    temporary through the event holder (the fixed disclosure first, formatted before the
+    temporary was created, _orch_lease_hb_cleanup_fault_fixed, recorded by
+    _orch_lease_hb_cleanup_record, then the rendered one,
+    _orch_lease_hb_cleanup_fault_rendered) and then let the FIRST fault propagate, save for the
+    residuals _orch_lease_hb_cleanup_record states (a stop raised while that record itself is
+    appended propagates without it)."""
+    try:
+        cst = os.stat(tmp, dir_fd=state_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None  # confirmed absence: nothing remains to disclose or unlink
+    except (OSError, ValueError) as exc:
+        return ("its temporary file cannot be re-checked for cleanup ({}) and may remain "
+                "({})".format(exc, tmp))
+    if tmp_id is not None and (cst.st_dev, cst.st_ino) == tmp_id:
+        try:
+            _orch_lease_hb_cleanup_unlink(tmp, state_fd)
+        except OSError as exc:
+            return ("its temporary file cannot be removed ({}) and may remain "
+                    "({})".format(exc, tmp))
+        return None
+    if tmp_id is None:
+        return "its temporary file may remain ({})".format(tmp)
+    return None
+
+
+def _orch_lease_hb_cleanup_fault_fixed(tmp):
+    """The FIXED leftover disclosure when _orch_lease_hb_save_cleanup itself raised a fault of a
+    class other than OSError, built from the temporary's name alone and nothing of the fault, so
+    it can never fail on the fault's own text. BOTH callers format it BEFORE they create the
+    temporary, so their failure cleanup formats nothing to name an interrupted cleanup's
+    temporary, and they record it through the event holder (_orch_lease_hb_cleanup_record)
+    BEFORE the fault is rendered (_orch_lease_hb_cleanup_fault_rendered)."""
+    return "its temporary file cleanup was interrupted and the file may remain ({})".format(tmp)
+
+
+def _orch_lease_hb_cleanup_fallback(what, tmp):
+    """The PREFORMATTED fallback record of BOTH callers of _orch_lease_hb_save_cleanup, formatted
+    with the fixed disclosure BEFORE they create the temporary: what failed and the temporary
+    that may remain. It is recorded in place of the full record only when building that record
+    faults (_orch_lease_hb_cleanup_record), so the temporary is still named once its own append
+    completes; it cannot stand in for a record whose append itself stops (the residual
+    _orch_lease_hb_cleanup_record states)."""
+    return "{} failed and its temporary file may remain ({})".format(what, tmp)
+
+
+def _orch_lease_hb_withheld_entry(holder, entry):
+    """Record ONE withheld entry on the event's holder, as _orch_lease_hb_withheld does, but
+    append the very str given (nothing is formatted or copied here) and return the MARK that
+    binds that record: (the holder's withheld list, the record's index, the entry itself). None
+    when nothing was recorded or the mark could not be built: an ordinary fault (an Exception,
+    a MemoryError) is absorbed here, and then the record may or may not have been appended (an
+    append that takes effect and then raises leaves it in place without a mark). A STOP (not an
+    Exception: an interrupt or an exit) is never absorbed here: one raised before the append has
+    taken effect (by the append itself, or delivered as a signal before it) propagates with
+    NOTHING recorded, and no fallback can record the entry once the append itself has stopped;
+    _orch_lease_hb_cleanup_record orders that stop and states the loss as a residual. Only
+    through this mark does
+    _orch_lease_hb_cleanup_fault_rendered replace a record, so it replaces exactly the record
+    made here and no other."""
+    try:
+        if isinstance(holder, dict):
+            withheld = holder.setdefault("withheld", [])
+            if isinstance(withheld, list):
+                withheld.append(entry)
+                return (withheld, len(withheld) - 1, entry)
+    except Exception:
+        pass
+    return None
+
+
+def _orch_lease_hb_cleanup_record(holder, head, failure, disclosure, fallback, fault):
+    """The ONE withheld record BOTH callers of _orch_lease_hb_save_cleanup make through the event
+    holder when their temporary may remain while a fault is propagating or after the cleanup
+    itself faulted (fault, else None): head, then the named failure when there is one, then the
+    disclosure, as one entry bound by a mark (_orch_lease_hb_withheld_entry). Returns (mark,
+    lead, fault). Nothing on that path is formatted outside this guard: when building the
+    record raises an ordinary fault (an Exception: a MemoryError), the record is the caller's
+    PREFORMATTED fallback (_orch_lease_hb_cleanup_fallback), which names the temporary too, and
+    mark and lead are None, so no rendered detail ever replaces it. A STOP raised while
+    building or recording it (not an Exception: an interrupt or an exit, a signal delivered
+    there) is never absorbed and never raised from here: it is returned in place of no fault or
+    of an ordinary fault, and an earlier stop is kept, so the caller orders it as it orders a
+    stop raised in the cleanup (ahead of an Exception already propagating, never displacing a
+    stop already propagating). An ordinary fault while appending is absorbed
+    (_orch_lease_hb_withheld_entry), and then the mark is unavailable and the record may or may
+    not have been appended (an append that takes effect and then raises leaves the record in
+    place, unbound, so no rendered detail replaces it). DISCLOSED residuals: a STOP
+    raised while the record itself is appended (before that append has taken effect) is ordered
+    exactly as above but propagates WITHOUT the disclosure: nothing is recorded, and no
+    preformatted fallback can be, since recording one would need the very append that stopped
+    (a stop raised while the record is BUILT leaves the fallback to be appended instead). The
+    order holds for faults raised INSIDE these guards. Memory exhaustion so severe that a
+    fixed-size step fails (a call, the append that records the entry) can lose the record and
+    can leave the caller's cleanup at that step, and a stop delivered as a signal at an instant
+    OUTSIDE the guards (between two statements of the caller's cleanup) leaves the cleanup at
+    that point, unordered, in place of the fault already propagating."""
+    entry = fallback
+    lead = None
+    stop = None
+    try:
+        lead = head if failure is None else "{}{}; ".format(head, failure)
+        entry = lead + disclosure
+    except Exception:
+        lead = None  # building the record faulted: the preformatted fallback names the temporary
+    except BaseException as exc:
+        lead = None
+        stop = exc
+    mark = None
+    try:
+        mark = _orch_lease_hb_withheld_entry(holder, entry)
+    except Exception:
+        pass  # a fault at the call itself: nothing is bound, the record is not replaced
+    except BaseException as exc:
+        stop = exc if stop is None else stop
+    if stop is not None and (fault is None or isinstance(fault, Exception)):
+        fault = stop
+    return (mark if lead is not None else None), lead, fault
+
+
+def _orch_lease_hb_cleanup_fault_detail(exc, tmp, fixed):
+    """The leftover DISCLOSURE detail when _orch_lease_hb_save_cleanup itself raised a fault of
+    a class other than OSError: whether its unlink ran is unknown, so the temporary is named as
+    one that may remain, together with the fault. The temporary is named FIRST, in the fixed
+    string built from its name alone and nothing of the fault (fixed,
+    _orch_lease_hb_cleanup_fault_fixed, formatted before the temporary was created), which BOTH
+    callers have already recorded through the event holder before this runs; the class and
+    text of the fault are added only after that. An ordinary fault raised while rendering them
+    (an Exception: an exception whose str() raises, a MemoryError) returns that fixed string
+    itself, so a fault that cannot be rendered never loses the disclosure and that rendering
+    fault never displaces the first fault. A STOP raised while rendering them (not an
+    Exception: an interrupt or an exit, raised from a str() or delivered as a signal) is never
+    absorbed: it propagates out of here with the fixed disclosure already recorded, and each
+    caller then orders it as it orders a stop raised in the cleanup itself
+    (_orch_lease_hb_cleanup_fault_rendered)."""
+    detail = fixed
+    try:
+        detail = ("its temporary file cleanup was interrupted ({}: {}) and the file may "
+                  "remain ({})".format(type(exc).__name__, exc, tmp))
+    except Exception:
+        pass  # an ordinary rendering fault: the fixed detail still names the temporary
+    return detail
+
+
+def _orch_lease_hb_cleanup_fault_rendered(mark, lead, fixed, exc, tmp):
+    """The step BOTH callers take after _orch_lease_hb_save_cleanup itself raised exc, once they
+    have recorded lead + fixed (the fixed disclosure naming the temporary,
+    _orch_lease_hb_cleanup_fault_fixed) through the event holder and kept the MARK of that one
+    record (_orch_lease_hb_cleanup_record): only then is the fault rendered
+    (_orch_lease_hb_cleanup_fault_detail), and a rendered detail replaces THAT record IN PLACE,
+    by one item store made only while the holder's withheld list still has exactly the length
+    it had right after the record and that slot still holds the very entry recorded (identity,
+    never equality). A record appended or swapped in meanwhile (by a str() with side effects)
+    is therefore never overwritten, the rendering never adds a second record, and otherwise
+    every record is left as it is; an interrupt around the store leaves one of the two
+    recorded, never neither. Returns the cleanup fault the caller's ordering applies to: exc
+    itself, or a STOP raised while rendering or at the store (not an Exception: an interrupt or
+    an exit) in place of an ordinary exc, so that stop follows the rule a stop raised in the
+    cleanup already follows (it propagates ahead of an Exception already propagating and never
+    displaces a stop already propagating); when exc is itself a stop, that earlier stop is kept.
+    Nothing here removes the record: the fixed disclosure stays recorded unless a rendered
+    detail naming the same temporary replaced it. DISCLOSED residual: as for
+    _orch_lease_hb_cleanup_record, this order holds for faults raised inside these guards, never
+    for a stop delivered as a signal at an instant outside them."""
+    try:
+        detail = _orch_lease_hb_cleanup_fault_detail(exc, tmp, fixed)
+    except Exception:
+        return exc  # an ordinary fault here too: the recorded fixed disclosure stands
+    except BaseException as stop:
+        # a STOP raised while rendering (the helper keeps the fixed detail for every
+        # Exception): never absorbed, it takes the place of an ordinary cleanup fault
+        return stop if isinstance(exc, Exception) else exc
+    try:
+        if mark is not None and detail is not fixed:
+            withheld, index, entry = mark
+            if len(withheld) == index + 1 and withheld[index] is entry:
+                withheld[index] = lead + detail
+    except Exception:
+        pass  # the recorded fixed disclosure stands
+    except BaseException as stop:
+        # a STOP at the store (a signal delivered there): ordered as a rendering stop is
+        return stop if isinstance(exc, Exception) else exc
+    return exc
+
+
+def _orch_lease_hb_memory_save(holder, memory):
+    """Best-effort save of the past-holder memory the caller already read this event, bound to
+    held descriptors at BOTH ends: it writes NOTHING unless the holder carries the held,
+    separation-proven lease descriptor, the lease parent-directory descriptor and the
+    state-directory descriptor (_orch_lease_hb_holder_ok). The temporary file is created
+    EXCLUSIVELY (O_EXCL|O_NOFOLLOW, a random name) relative to the held state-directory
+    descriptor, and the temporary DESCRIPTOR is checked BEFORE its first byte
+    (_orch_lease_hb_save_tmp_fstat): the save writes only through a regular file with exactly
+    one hard link whose (st_dev, st_ino) differs from the held lease descriptor's and from a
+    fresh lstat of the lease name taken relative to the held lease parent-directory descriptor,
+    so a temporary renamed onto the lease name, hard-linked, or unlinked between the create and
+    the first write is refused with NOTHING written through the descriptor. The replace runs
+    relative to that same held state-directory descriptor on BOTH sides
+    (_orch_lease_hb_save_replace), after the replace TARGET is re-checked relative to it at
+    write time (an lstat of the memory name must find nothing there, or a regular file with
+    exactly one hard link whose (st_dev, st_ino) differs from the held lease descriptor's and
+    from an lstat of the lease name taken relative to the held lease parent-directory
+    descriptor AFTER the target stat) and after the replace SOURCE is re-checked immediately
+    before the replace: the temporary name must still carry the very single-link regular inode
+    this save created, checked and wrote, so a temporary name re-pointed after the write
+    publishes nothing. The failure cleanup and the leftover disclosure
+    (_orch_lease_hb_save_cleanup) run from a FINALLY, for ANY exception class (a core fault
+    mid-save included, which still propagates to the crash path afterwards): the temporary
+    name is unlinked only when one bounded no-follow stat just before the unlink finds it still
+    carrying the inode this save created (the unlink is by name and POSIX offers no
+    unlink-if-inode, so an entry swapped onto the name between that stat and the unlink is
+    removed in its place: the same-user concurrency window _orch_lease_hb_save_cleanup
+    states), a temporary whose
+    identity was never learned, because the pre-write stat itself faulted, is never unlinked
+    and the leftover is DISCLOSED in the report instead (save for the residuals stated below),
+    and a cleanup stat fault other than confirmed absence also never unlinks and discloses the
+    name AND the fault (an unreadable result cannot establish absence, chkfcl); a fault of any
+    other class raised INSIDE that cleanup (an interrupt at its stat or unlink) discloses the
+    temporary by name on the holder BEFORE it propagates (with the same residuals), and the
+    FIRST fault wins (an exception already propagating keeps
+    propagating, else the cleanup's own fault does, unchanged), except that a cleanup fault
+    that is a STOP (not an Exception: an interrupt or an exit) propagates ahead of an Exception
+    already propagating, so the crash handling (which catches Exception) never swallows it; the
+    disclosure is recorded first either way, after the named failure when there is one, and it
+    names the temporary even when the fault cannot be rendered: the fixed disclosure is
+    formatted before the temporary is created and recorded BEFORE the fault is rendered, so a
+    stop raised while rendering it propagates by the same rule with the disclosure already
+    recorded, and the rendered detail replaces only that very record
+    (_orch_lease_hb_cleanup_fault_rendered); a fault raised while that record is built or
+    recorded is ordered by the same rule, a preformatted fallback naming the temporary taking
+    the record's place when it cannot be built (_orch_lease_hb_cleanup_record, which makes every
+    record of a temporary that may remain and states the residuals: a stop raised while such a
+    record is itself appended, before that append has taken effect, propagates by the same rule
+    WITHOUT the disclosure, as no fallback can be recorded once that append has stopped; memory
+    exhaustion at a fixed-size step; and a stop delivered as a signal outside its guards). A
+    failed or refused save is
+    recorded on the holder and
+    reported through the hook result (the Stop banner or the result's error text, the
+    dispatcher's stderr); it only widens silence or repeats one guard-events row later, never a
+    write to the lease. DISCLOSED residual: the same-user concurrency class, stated once and
+    completely in the section comment above _ORCH_LEASE_HB_KIND; these checks cover accidental
+    mis-targeting and a stale or replaced lease, never a concurrently running process of the
+    same user."""
+    if not _orch_lease_hb_holder_ok(holder):
+        _orch_lease_hb_no_holder(holder)
+        return
+    name = os.path.basename(holder["dests"][0])
+    state_fd = holder["state_fd"]
+    tmp = _orch_lease_hb_tmp_name(name)
+    # the fixed disclosure and the fallback record are formatted HERE, before the temporary
+    # exists, so the failure cleanup below formats nothing outside a guard before it records a
+    # temporary that may remain (_orch_lease_hb_cleanup_record)
+    fixed = _orch_lease_hb_cleanup_fault_fixed(tmp)
+    fallback = _orch_lease_hb_cleanup_fallback("the memory save", tmp)
+    try:
+        tmp_fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                         | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=state_fd)
+    except (OSError, ValueError) as exc:
+        _orch_lease_hb_withheld(
+            holder, "the memory temporary file cannot be created ({})".format(exc))
+        return
+    failure = None
+    tmp_id = None
+    checked = False
+    published = False
+    interrupted = False
+    first_stop = False
+    try:
+        try:
+            # the temporary DESCRIPTOR is checked BEFORE its first byte: a temporary renamed
+            # onto the lease name, hard-linked or unlinked between the exclusive create and
+            # this write is refused here, with nothing written through the descriptor
+            tst = _orch_lease_hb_save_tmp_fstat(tmp_fd)
+            tmp_id = (tst.st_dev, tst.st_ino)
+            if not stat.S_ISREG(tst.st_mode) or tst.st_nlink != 1:
+                failure = ("the memory temporary file is not a single-link regular file "
+                           "(linked or unlinked before its first write)")
+            if failure is None:
+                ids, fault = _orch_lease_hb_lease_ids(holder)
+                if ids is None:
+                    failure = fault
+                elif tmp_id in ids:
+                    failure = "the memory temporary file aliases the declared lease"
+            if failure is None:
+                checked = True
+                blob = json.dumps(memory, sort_keys=True).encode("utf-8")
+                view = memoryview(blob)
+                while view:
+                    view = view[os.write(tmp_fd, view):]
+                os.fsync(tmp_fd)
+        except (OSError, ValueError) as exc:
+            failure = "the memory temporary file cannot be {} ({})".format(
+                "written" if checked else "checked", exc)
+        finally:
+            try:
+                os.close(tmp_fd)  # once: after a failed close the number may already be reused
+            except OSError as exc:
+                failure = failure or \
+                    "the memory temporary file cannot be closed ({})".format(exc)
+        if failure is None:
+            dst = None
+            try:
+                dst = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError) as exc:
+                failure = "the memory destination cannot be stat'ed ({})".format(exc)
+        if failure is None:
+            # the lease identities are read AFTER the target stat, so a destination renamed
+            # onto the lease name before this read is seen at the name and refused
+            ids, fault = _orch_lease_hb_lease_ids(holder)
+            if ids is None:
+                failure = fault
+            elif dst is not None and (not stat.S_ISREG(dst.st_mode) or dst.st_nlink != 1
+                                      or (dst.st_dev, dst.st_ino) in ids):
+                failure = ("the memory destination is not a single-link regular file distinct "
+                           "from the declared lease")
+        if failure is None:
+            try:
+                # the replace SOURCE is re-checked immediately before the replace: the
+                # temporary name must still carry the single-link regular file this save
+                # created, checked and wrote, so a temporary name re-pointed after the write
+                # publishes nothing
+                rst = os.stat(tmp, dir_fd=state_fd, follow_symlinks=False)
+                if (rst.st_dev, rst.st_ino) != tmp_id or not stat.S_ISREG(rst.st_mode) \
+                        or rst.st_nlink != 1:
+                    failure = ("the memory temporary name no longer carries the file this "
+                               "save created")
+            except (OSError, ValueError) as exc:
+                failure = "the memory temporary file cannot be re-checked ({})".format(exc)
+        if failure is None:
+            try:
+                _orch_lease_hb_save_replace(tmp, name, state_fd)
+                published = True
+            except (OSError, ValueError) as exc:
+                failure = "the memory save replace failed ({})".format(exc)
+    except BaseException as exc:
+        # an exception of ANY class propagates past here to the judge's crash handler:
+        # recorded, with whether it is a STOP (not an Exception: an interrupt or an exit), so
+        # a fault raised inside the cleanup's guards below never displaces it, unless that
+        # fault is a stop and this one is not (the residual: _orch_lease_hb_cleanup_record)
+        interrupted = True
+        first_stop = not isinstance(exc, Exception)
+        raise
+    finally:
+        if not published:
+            # the failure cleanup and the leftover DISCLOSURE run from this finally for ANY
+            # exception class (a core fault mid-save included, which still propagates past
+            # here to the judge's crash handler), never only for the named refusals above. A
+            # fault of any other class INSIDE the cleanup returns no detail, so the temporary
+            # is disclosed on the holder BEFORE any fault propagates (save for the residual
+            # below), and the FIRST fault wins: an exception already propagating keeps
+            # propagating, else this one does; except that a STOP raised in the cleanup (not
+            # an Exception: an interrupt, an exit) propagates ahead of an Exception already
+            # propagating, whose crash handling catches Exception and would otherwise swallow
+            # the stop. The FIXED disclosure, formatted before the temporary existed, is
+            # recorded BEFORE that fault is rendered, so a stop raised while rendering it
+            # leaves the disclosure recorded and takes the same order; a fault raised while the
+            # record is built or recorded takes that order too, but a stop raised while the
+            # record itself is appended, before that append has taken effect, leaves NOTHING
+            # recorded (the residual _orch_lease_hb_cleanup_record states); the rendered detail
+            # replaces only the record its mark binds
+            cleanup_fault = None
+            try:
+                disclosure = _orch_lease_hb_save_cleanup(tmp, tmp_id, state_fd)
+            except BaseException as exc:
+                cleanup_fault = exc
+                disclosure = fixed
+            mark = lead = None
+            if disclosure is not None:
+                mark, lead, cleanup_fault = _orch_lease_hb_cleanup_record(
+                    holder, "" if failure is not None else "the memory save was interrupted; ",
+                    failure, disclosure, fallback, cleanup_fault)
+            elif failure is not None:
+                _orch_lease_hb_withheld(holder, failure)
+            if mark is not None and cleanup_fault is not None:
+                cleanup_fault = _orch_lease_hb_cleanup_fault_rendered(
+                    mark, lead, fixed, cleanup_fault, tmp)
+            if cleanup_fault is not None and (not interrupted or (
+                    not first_stop and not isinstance(cleanup_fault, Exception))):
+                raise cleanup_fault
+    if not published:
+        return
+    try:
+        os.fsync(state_fd)
+    except OSError:
+        pass  # the replace is already published; a directory fsync fault only weakens durability
+
+
+def _orch_lease_hb_row_once(holder, memory, now, kind, code, detail, lease_key=None):
+    """Append a guard-events row ONCE per refusal state, never per tool call: the state is (kind,
+    code, lease identity), remembered in the past-holder memory, so a refusal that persists
+    unchanged across events keeps ONE row until the state that caused it changes (a different
+    refusal, a changed lease identity, or a cleared memory re-arms it). The event log is the
+    over-fire metric; one row per state keeps it bounded while the keeper runs on every tool call,
+    and the remembered timestamp also drives the git-probe backoff
+    (_orch_lease_hb_tracked_refused). It consumes the event's separation holder: without a proof
+    made on the lease access currently in hand it writes NOTHING and leaves the memory unchanged
+    (_orch_lease_hb_holder_ok). Returns whether a row was appended (the state changed); the
+    append and the memory save stay best-effort (a lost row or memory only widens silence)."""
+    if not _orch_lease_hb_holder_ok(holder):
+        # no held descriptor: nothing is recorded and the memory state is kept
+        return _orch_lease_hb_no_holder(holder)
+    last = memory.get("last_row") if isinstance(memory.get("last_row"), dict) else {}
+    if (last.get("kind"), last.get("code"), last.get("lease")) == (kind, code, lease_key):
+        return False
+    _orch_lease_hb_event(holder, kind, detail)
+    memory["last_row"] = {"kind": kind, "code": code, "lease": lease_key,
+                          "ts": now.isoformat()}
+    _orch_lease_hb_memory_save(holder, memory)
+    return True
+
+
+def _orch_lease_hb_tracked_refused(root, path, st, now, memory, holder):
+    """True when the tracking gate refuses a field write (the probe must PROVE the lease
+    untracked, and a cannot-evaluate refuses). While that refusal persists on an UNCHANGED lease
+    identity the probe is not re-run until _ORCH_LEASE_HB_RETRY_SECONDS elapses (elapsed inside
+    [0, backoff) skips; at the bound, past it, or under an unreadable or future remembered time it
+    re-probes, so a tampered memory can only cost probes, never a write), and a re-probe that
+    refuses again rewrites only the remembered timestamp, never a second row. A changed lease
+    identity re-probes at once, so a persisting refusal costs no git subprocess per tool call."""
+    lease_key = [st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size]
+    last = memory.get("last_row") if isinstance(memory.get("last_row"), dict) else {}
+    if (last.get("kind"), last.get("code"), last.get("lease")) == \
+            ("no-write", _ORCH_LEASE_HB_TRACKED_DETAIL, lease_key):
+        parsed = _orch_parse_utc(last.get("ts"))
+        if parsed is not None and 0 <= (now - parsed).total_seconds() \
+                < _ORCH_LEASE_HB_RETRY_SECONDS:
+            return True  # the same refusal state persists; the probe is backed off
+        if _orch_lease_hb_git_tracked(root, path) is not False:
+            last["ts"] = now.isoformat()
+            memory["last_row"] = last
+            _orch_lease_hb_memory_save(holder, memory)
+            return True
+        return False
+    return _orch_lease_hb_git_tracked(root, path) is not False
+
+
+def _orch_lease_hb_statedir_stat(state_dir):
+    """The state-directory existence stat of the separation check, a seam so the self-test can
+    report the directory ABSENT while a concurrent keeper creates it just before the makedirs
+    that follows: a sequential repeat finds the directory by this stat and never reaches the
+    creation, so only this injection can prove the creation stays idempotent (exist_ok) under
+    the concurrent-creation race it exists for."""
+    return os.stat(state_dir)
+
+
+def _orch_lease_hb_bookkeeping_sep(path, dests):
+    """None when the declared lease is DISTINCT from both of this keeper's bookkeeping destinations
+    (the past-holder memory <state_dir>/lease-heartbeat.json and the guard-events log
+    <state_dir>/guard-events.jsonl, resolved ONCE per event by _orch_lease_hb_dests from the SAME
+    registry read and passed to every writer), else (side, detail): side names the access that
+    failed, carried to the Stop remediation from the FAULT itself, never recovered from a
+    substring of the detail ('lease': the declared lease path faulted; 'state': the keeper's own
+    state records faulted; 'collision': the two provably meet, so a distinct lease path is the
+    remedy). This is the event's PRELIMINARY path-based refusal: a pass here licenses NO
+    bookkeeping write (only _orch_lease_hb_sep_fd on an opened descriptor hands the holder the
+    descriptor every writer then writes through). Separation is judged by resolved
+    path (os.path.realpath on both sides, so a symlink alias, or an ABSENT destination whose first
+    append would create it at the lease's name, cannot collide under a different spelling), by
+    inode identity where both sides exist (a hard-link alias resolves to different paths yet is
+    the same file), and by PARENT identity: a lease whose parent directory IS the state directory
+    (same st_dev, st_ino) is refused outright, so an alias spelling that realpath cannot fold (a
+    case-folding filesystem, a bind mount) can never let a first bookkeeping append create the
+    lease's own file. BEFORE the state directory is created, a lease path that IS the state
+    directory or an ANCESTOR of it (resolved paths, common-path containment) is refused with
+    nothing created: creating the directory there would plant this keeper's records at or under
+    the declared lease name itself. A stat fault other than absence refuses too: separation that
+    cannot be evaluated is treated as a collision (chkfcl). While a refusal persists the keeper
+    writes NOTHING anywhere: no lease write, no memory save and no guard-events row (a refusal
+    never records into the refused lease, and without the memory a row could not keep its
+    once-per-state bound); the Stop output is the only surfacing (the warning, joined there by
+    any deferral or withheld report), so it stays bounded at one
+    message per turn end."""
+    if not isinstance(path, str) or not path:
+        # an UNKNOWN lease path can never be proven distinct from anything: the refusal leaves
+        # the event's holder empty and every bookkeeping writer withholds (never a silent
+        # None, which would have read as "nothing to land in" and licensed the writers)
+        return ("lease",
+                "the lease/bookkeeping separation cannot be evaluated (no usable lease path)")
+    try:
+        lease_real = os.path.realpath(path)
+    except (OSError, ValueError) as exc:
+        return ("lease",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    lease_id = None
+    try:
+        st = os.stat(path)
+        lease_id = (st.st_dev, st.st_ino)
+    except FileNotFoundError:
+        pass  # an absent lease can still collide by resolved path (checked per destination below)
+    except (OSError, ValueError) as exc:
+        return ("lease",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    for dest in dests:
+        if lease_real == os.path.realpath(dest):
+            return ("collision", "the declared lease path coincides with this keeper's own "
+                    "bookkeeping destination ({})".format(dest))
+        try:
+            dst = os.stat(dest)
+        except FileNotFoundError:
+            continue  # an absent destination can only collide by resolved path or parent identity
+        except OSError as exc:
+            return ("state",
+                    "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+        if lease_id is not None and (dst.st_dev, dst.st_ino) == lease_id:
+            return ("collision", "the declared lease shares an inode with this keeper's own "
+                    "bookkeeping destination ({})".format(dest))
+    state_dir = os.path.dirname(dests[0])
+    try:
+        sd_real = os.path.realpath(state_dir)
+        if lease_real == sd_real or os.path.commonpath([sd_real, lease_real]) == lease_real:
+            # refused BEFORE any creation: making the state directory here would create a
+            # directory at (or under) the declared lease name itself
+            return ("collision", "the declared lease path is this keeper's own state directory "
+                    "or an ancestor of it ({})".format(state_dir))
+    except (OSError, ValueError) as exc:
+        return ("state",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    try:
+        sd_st = _orch_lease_hb_statedir_stat(state_dir)
+    except FileNotFoundError:
+        # the parent-identity leg compares REAL identities, so an ABSENT state directory is
+        # created first (idempotent under concurrent creation: exist_ok, so two keepers racing
+        # this creation both pass; the first bookkeeping append would create it anyway): on a
+        # filesystem whose alias spellings realpath cannot fold (case folding, a bind mount),
+        # an absent state directory could otherwise skip this leg and let the first append
+        # create the file of the lease itself under a different spelling
+        try:
+            os.makedirs(state_dir, exist_ok=True)
+            sd_st = os.stat(state_dir)
+        except OSError as exc:
+            return ("state",
+                    "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    except OSError as exc:
+        return ("state",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    try:
+        pst = os.stat(os.path.dirname(lease_real) or os.sep)
+    except FileNotFoundError:
+        return None  # no lease parent directory: nothing of the lease exists to collide with
+    except OSError as exc:
+        return ("lease",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    if (pst.st_dev, pst.st_ino) == (sd_st.st_dev, sd_st.st_ino):
+        return ("collision", "the declared lease lies directly in this keeper's own state "
+                "directory ({}), where its bookkeeping destinations live".format(state_dir))
+    return None
+
+
+def _orch_lease_hb_within(child, ancestor):
+    """Whether the resolved path child IS the resolved path ancestor or lies anywhere beneath
+    it, judged COMPONENT by component (os.path.commonpath), never by a textual prefix: an
+    ancestor of '/' contains every absolute path, a nested descendant is contained, and a
+    sibling sharing the ancestor's textual prefix ('<dir>-old' beside '<dir>') is not. Raises
+    ValueError (or TypeError) when the two cannot be compared (a mix of absolute and relative
+    paths, an unusable value); the caller refuses on that fault. A seam, so the self-test can
+    force a comparison fault and an alias spelling that this leg cannot see."""
+    return os.path.commonpath([child, ancestor]) == ancestor
+
+
+def _orch_lease_hb_lock_sep(path, lock_path, dests):
+    """None when the declared lock_path is DISTINCT from the declared lease, from both
+    bookkeeping replacement targets (the past-holder memory dests[0] and the guard-events log
+    dests[1]) and from EVERY file this plugin's whole-file writers replace (the
+    _ORCH_LEASE_HB_WRITER_NAMES inventory of _orch_write_json_atomic, and anything else inside
+    the state directory where those targets live), else the named refusal detail. The lock must
+    be a STABLE, SEPARATE coordination file NO writer of this plugin ever replaces: flock
+    attaches to the open file description, so a lock any whole-file writer replaced (os.replace
+    publishes a NEW inode under the name) would leave the next cooperating keeper locking the
+    replacement while this keeper still holds the orphaned inode, both inside the critical
+    section at once. This is the ONE shared read-only validation, run at declaration validation
+    and at the resume audit (_orch_lease_hb_config with root) and again at the event's entry,
+    always on paths and destinations resolved from the authoritative root: judged by resolved
+    path (os.path.realpath on both sides, so an alternate or RELATIVE spelling that resolves to
+    a refused target refuses; the declaration validation's string check already refused the
+    spelled name equality), by COMPONENT-aware resolved-path CONTAINMENT in the state directory
+    (_orch_lease_hb_within: a state directory of '/' contains every lock, a nested descendant
+    is contained, a sibling sharing the directory's textual prefix is not, and a comparison
+    fault is the named refusal), by PARENT
+    identity (a lock whose parent directory IS the state directory under an alias spelling
+    realpath cannot fold), and by inode identity where both sides exist (a hard-link alias).
+    It creates NOTHING (an absent state directory skips only the identity legs; the
+    resolved-path legs still refuse every spelling of it), and it is judged AGAIN under the
+    held lock by descriptor identity (_orch_lease_hb_lock_held_sep), so an alias planted
+    between this check and the lock take is refused too. A stat fault other than absence
+    refuses (chkfcl: a separation that cannot be evaluated never licenses the critical
+    section)."""
+    try:
+        lock_real = os.path.realpath(lock_path)
+        lock_id = None
+        try:
+            lst = os.stat(lock_path)
+            lock_id = (lst.st_dev, lst.st_ino)
+        except FileNotFoundError:
+            # an absent lock is the lock open's own named refusal; the resolved-path legs
+            # below still refuse a spelling that RESOLVES onto the lease or a target
+            pass
+        state_dir = os.path.dirname(dests[0])
+        named = [(path, "the declared lease path"),
+                 (dests[0], "this keeper's own past-holder memory ({})".format(dests[0])),
+                 (dests[1], "this keeper's own guard-events log ({})".format(dests[1]))]
+        named.extend((os.path.join(state_dir, writer_name),
+                      "a file this plugin's whole-file writers replace ({})".format(
+                          os.path.join(state_dir, writer_name)))
+                     for writer_name in _ORCH_LEASE_HB_WRITER_NAMES)
+        for other, what in named:
+            if lock_real == os.path.realpath(other):
+                return "the declared lock_path coincides with {}".format(what)
+            if lock_id is None:
+                continue
+            try:
+                ost = os.stat(other)
+            except FileNotFoundError:
+                continue  # an absent target has no inode the lock could alias
+            if (ost.st_dev, ost.st_ino) == lock_id:
+                return "the declared lock_path shares an inode with {}".format(what)
+        sd_real = os.path.realpath(state_dir)
+        try:
+            inside = _orch_lease_hb_within(lock_real, sd_real)
+        except (TypeError, ValueError) as exc:
+            # a containment that cannot be compared never licenses the lock (chkfcl)
+            return ("the lock/state-directory containment cannot be evaluated ({})"
+                    .format(exc))
+        if inside:
+            # resolved-path containment, COMPONENT-aware: ANY name inside the state directory
+            # is a file a whole-file writer of this plugin may replace (today's inventory or a
+            # later one)
+            return ("the declared lock_path lies inside this keeper's own state directory "
+                    "({}), whose files this plugin's whole-file writers replace"
+                    .format(state_dir))
+        try:
+            sd_st = os.stat(state_dir)
+        except FileNotFoundError:
+            # an absent state directory holds nothing whose identity the lock could carry,
+            # and NOTHING is created here (this validation runs at declaration validation,
+            # before any state-directory creation); the resolved-path legs above already
+            # refused every spelling of it
+            return None
+        try:
+            pst = os.stat(os.path.dirname(lock_real) or os.sep)
+        except FileNotFoundError:
+            return None  # no lock parent directory exists to BE the state directory
+        if (pst.st_dev, pst.st_ino) == (sd_st.st_dev, sd_st.st_ino):
+            # parent identity: an alias spelling realpath cannot fold (a bind mount, case
+            # folding) still resolves to the same directory inode
+            return ("the declared lock_path lies inside this keeper's own state directory "
+                    "({}) under an alias spelling, whose files this plugin's whole-file "
+                    "writers replace".format(state_dir))
+        return None
+    except (OSError, ValueError) as exc:
+        return "the lock/lease separation cannot be evaluated ({})".format(exc)
+
+
+def _orch_lease_hb_sep_fd(fd, dests):
+    """The descriptor-bound proof of the lease/bookkeeping separation, run on the lease
+    descriptor currently in hand (the first open, and again on the re-open under a declared
+    lock): None when the open lease's inode is neither bookkeeping destination, else (side,
+    detail) as _orch_lease_hb_bookkeeping_sep returns them. The path-based entry check ran
+    before any descriptor existed; a cooperating writer at an open or lock seam can replace the
+    lease with a hard link to a bookkeeping destination, so the identity is re-proven on the
+    exact descriptor every subsequent read, row and save would be about, and ONLY a pass here
+    hands the event's holder this very descriptor (_orch_lease_hb_holder), the one every
+    bookkeeping write then re-checks its destination against at write time. A stat fault other
+    than a destination's absence refuses too (chkfcl)."""
+    try:
+        lst = os.fstat(fd)
+    except OSError as exc:
+        return ("lease",
+                "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+    for dest in dests:
+        try:
+            dst = os.stat(dest)
+        except FileNotFoundError:
+            continue  # an absent destination has no inode the open lease could alias
+        except OSError as exc:
+            return ("state",
+                    "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+        if (dst.st_dev, dst.st_ino) == (lst.st_dev, lst.st_ino):
+            return ("collision", "the declared lease shares an inode with this keeper's own "
+                    "bookkeeping destination ({})".format(dest))
+    return None
+
+
+def _orch_lease_hb_prove(holder, parent, leaf, name, path, dests):
+    """Build the event's PROVEN holder from the descriptors currently in hand, or return (side,
+    detail) with the holder left unproven: the open lease descriptor is re-proven distinct from
+    both bookkeeping destinations (_orch_lease_hb_sep_fd), the state directory is resolved ONCE
+    by opening it O_RDONLY|O_DIRECTORY|O_NOFOLLOW (a symlink planted at its name is refused,
+    never followed), and that descriptor is compared against the held lease parent-directory
+    descriptor by fstat identity (st_dev, st_ino): when the two are the SAME directory the
+    holder is refused outright, so no bookkeeping write can land beside (or at) the lease
+    through an alias spelling realpath cannot fold (a bind mount, case folding). Only a full
+    pass fills the holder with the lease descriptor, the lease parent-directory descriptor, the
+    lease leaf name and the state-directory descriptor; every bookkeeping write then opens,
+    stats, creates and replaces RELATIVE to those held descriptors (dir_fd), bound to the held
+    directory IDENTITIES rather than to path spellings, and the separation compares
+    descriptors, not names (what a same-user concurrent actor can still do is the SAME-USER
+    CONCURRENCY CLASS in the section comment above _ORCH_LEASE_HB_KIND).
+    The holder OWNS the state-directory descriptor (an under-lock re-proof closes and replaces
+    the first proof's; the event's cleanup, _orch_lease_hb_event_cleanup, closes the last), and
+    THIS function owns the freshly opened descriptor in a try/finally from the moment it is
+    opened until it is transferred to the holder, across both identity fstats and the
+    replacement of a previous holder descriptor, so ANY fault there (not only OSError) closes
+    it exactly once, never a leak. The previous holder descriptor keeps EXPLICIT ownership
+    across its replacement too, under the before/after-close ledger discipline
+    (_orch_lease_hb_close_mark): it stays the holder's, so the event's cleanup closes it, until
+    the close primitive RECORDS it, and a fault at or after the record is never retried; the
+    lease descriptors stay owned by their opener."""
+    sep = _orch_lease_hb_sep_fd(leaf, dests)
+    if sep is not None:
+        return sep
+    try:
+        state_fd = os.open(os.path.dirname(dests[0]), os.O_RDONLY | os.O_DIRECTORY
+                           | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError) as exc:
+        return ("state", "the state directory cannot be opened for the write-time binding "
+                "({})".format(exc))
+    handed = False
+    try:
+        # ownership of the freshly opened state-directory descriptor is exception-safe from
+        # this moment until its transfer to the holder: ANY fault across the identity fstats
+        # or the replacement of a previous holder descriptor still closes it exactly once
+        fault = None
+        try:
+            sst = os.fstat(state_fd)
+            pst = os.fstat(parent)
+        except OSError as exc:
+            fault = ("state",
+                     "the lease/bookkeeping separation cannot be evaluated ({})".format(exc))
+        if fault is None and (sst.st_dev, sst.st_ino) == (pst.st_dev, pst.st_ino):
+            fault = ("collision", "the declared lease lies directly in this keeper's own state "
+                     "directory ({}), where its bookkeeping destinations live"
+                     .format(os.path.dirname(dests[0])))
+        if fault is not None:
+            return fault
+        previous = holder.get("state_fd")
+        if previous is not None:
+            # an under-lock re-proof replaces the first proof's descriptor under the
+            # before/after-close LEDGER discipline (_orch_lease_hb_close_mark), with the
+            # previous descriptor OWNED at every instant: it stays the holder's (the REAL
+            # event cleanup closes it) until the close primitive RECORDS it, so a fault
+            # immediately BEFORE the close leaves exactly one owner and one terminal close,
+            # and a fault AT or AFTER it leaves it recorded as closed and NEVER retried (the
+            # number may already be reused by another acquisition)
+            done = []
+            try:
+                _orch_lease_hb_close_mark(previous, done)
+            finally:
+                if previous in done:
+                    holder["state_fd"] = None
+        holder["state_fd"] = state_fd  # transferred: the event's cleanup owns it from here
+        handed = True
+        holder["lease_fd"] = leaf
+        holder["lease_parent_fd"] = parent
+        holder["lease_name"] = name
+        holder["lease_path"] = path
+        return None
+    finally:
+        if not handed:
+            _orch_lease_hb_close(state_fd)
+
+
+def _orch_lease_hb_crash_row(holder, exc):
+    """Best-effort guard-events row for a fault inside the lease-heartbeat core: the bindings catch
+    their own crashes, because the dispatcher's generic fail-open warning would otherwise print a
+    systemMessage on EVERY tool call for one core fault. The row is the only FILE trace (a
+    no-holder fault instead rides the hook result of the event it happened on, PostToolUse
+    included, as the result's error text); a row that
+    cannot be appended is swallowed here (a recorder fault must never become a per-call banner),
+    the disclosed best-effort residual of this keeper's recording. The recorder consumes ONLY the
+    event's own separation holder, through the same structural gate as every other bookkeeping
+    writer (_orch_lease_hb_holder_ok inside _orch_lease_hb_event): it re-reads NOTHING, so a
+    registry re-read fault or change can never hand it destinations the proof never examined.
+    It is reached with a USABLE holder only from the judge's own handler, while the proven
+    descriptor (and any declared lock) is still held, and the row goes through the write-time
+    descriptor check like every other append; a crash while the holder carries no descriptor
+    (before the first open, an invalid declaration, a failed open or re-open, a busy or faulted
+    lock, or AFTER the cleanup that empties the holder before releasing descriptors and lock)
+    writes nothing anywhere (an unknown lease is unknown, never absent; a refusal is never
+    recorded into the refused lease, crash paths included) and is surfaced AS the named core
+    fault, never folded into a lock deferral: on the busy- and faulted-lock branches it joins
+    the Stop-only deferrals under its own fault text (a crash is reported as the crash; the
+    lock deferral stays its own line; a deferral made on a PostToolUse event is DROPPED with
+    that event's holder, so it surfaces only where the Stop event reproduces the fault, the
+    disclosed narrowing of _orch_lease_hb_withheld_text), elsewhere it is withheld under that
+    text and rides the hook result of its own event."""
+    try:
+        detail = "lease-heartbeat core fault: {}: {}".format(type(exc).__name__, exc)
+        if _orch_lease_hb_holder_ok(holder):
+            _orch_lease_hb_event(holder, "error", detail)
+        elif isinstance(holder, dict) and (holder.get("lock_busy")
+                                           or holder.get("lock_fault") is not None):
+            deferred = holder.setdefault("deferred", [])
+            if detail not in deferred:
+                deferred.append(detail)
+        else:
+            _orch_lease_hb_withheld(holder, detail)
+    except Exception:
+        pass
+
+
+def _orch_lease_hb_git_tracked(root, path):
+    """False when the lease provably cannot be tracked in root's work tree because it lies OUTSIDE
+    that tree (an absolute out-of-tree lease is a legitimate refresh target the probe would
+    otherwise always refuse), or when git PROVES it untracked (ls-files --error-unmatch exits 1
+    under the isolated environment); True when it is tracked, and None on any probe fault. Outside
+    is decided on RESOLVED identities (os.path.realpath on both sides), never the lexical
+    spelling, so an alias spelling of an in-tree lease (a symlinked ancestor, /tmp against
+    /private/tmp) cannot skip the probe, and the resolved path is what the probe asks git about.
+    The caller refuses a content write on anything but False: a tracked lease is a committed
+    surface, and a cannot-evaluate never writes. Run only when a write is already due and no
+    unchanged refusal is backed off (_orch_lease_hb_tracked_refused), so the subprocess cost is
+    bounded, never per tool call."""
+    try:
+        resolved = os.path.realpath(path)
+        rel = os.path.relpath(resolved, os.path.realpath(root))
+    except ValueError:
+        # a resolution compare fault (e.g. different drives once resolved): a PROBE fault the
+        # caller refuses on, never proven-untracked (chkfcl: False would license the write on a
+        # comparison that failed)
+        return None
+    except OSError:
+        return None  # an unresolvable comparison cannot prove outside-ness: a probe fault
+    if rel.split(os.sep)[0] == os.pardir:
+        return False  # outside the work tree: nothing there is tracked in it
+    try:
+        env = _isolate_git_env(dict(os.environ))
+        probe = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", "--", resolved],
+                               capture_output=True, timeout=5, env=env)
+    except Exception:
+        return None
+    if probe.returncode == 0:
+        return True
+    if probe.returncode == 1:
+        return False
+    return None
+
+
+def _orch_lease_hb_protected(root, path, st, state_dir):
+    """A refusal detail when the lease path may not receive a content write, else None (state_dir
+    is the event's ONE resolved state directory, from the same registry read as the bookkeeping
+    destinations, never a fresh re-resolution that could diverge from them): a '.git',
+    '.aiqt' or '.claude' component anywhere on the declared path, the repo's own plugin/ subtree,
+    an inode alias of a registry file, or a lease ANYWHERE inside a protected directory's subtree
+    (the state directory, where the escape sentinel and this keeper's own records live, and the
+    repo's .git, .aiqt, .claude and plugin directories). Containment is established by comparing
+    the identity (st_dev, st_ino) of every ancestor directory of the lease against each protected
+    directory's resolved identity, never by enumerating a directory's immediate children, so a
+    nested path such as <state_dir>/nested/lease.txt refuses too (the lease path itself was walked
+    no-follow; the protected directory is resolved, so a symlinked one protects its target). The
+    keeper refreshes a liveness record; it never touches a guardrail-config or generated surface.
+    A stat fault on any surface that may exist is a refusal (a protection check that cannot be
+    evaluated never licenses a write); only a surface that provably does not exist is skipped."""
+    norm = os.path.normpath(path)
+    for part in norm.split(os.sep):
+        if part in (".git", ".aiqt", ".claude"):
+            return ("the lease path holds a {} component (a protected surface is never rewritten)"
+                    .format(part))
+    rel_parts = os.path.relpath(norm, root).split(os.sep)
+    if rel_parts and rel_parts[0] == "plugin":
+        return "the lease path is under the repo's plugin/ subtree (a generated surface)"
+    for probe in (os.path.join(root, ".aiqt", "orchestration.local.json"),
+                  os.path.join(root, ".aiqt", "orchestration.json")):
+        try:
+            pst = os.lstat(probe)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return "the protected-path check cannot be evaluated ({})".format(probe)
+        if (pst.st_dev, pst.st_ino) == (st.st_dev, st.st_ino):
+            return "the lease shares an inode with a protected file ({})".format(probe)
+    ancestors = set()
+    cursor = os.path.dirname(norm)
+    while cursor:
+        try:
+            ast = os.lstat(cursor)
+        except OSError:
+            return "the protected-path check cannot be evaluated ({})".format(cursor)
+        ancestors.add((ast.st_dev, ast.st_ino))
+        parent_dir = os.path.dirname(cursor)
+        if parent_dir == cursor:
+            break
+        cursor = parent_dir
+    for pdir in (state_dir, os.path.join(root, ".git"),
+                 os.path.join(root, ".aiqt"), os.path.join(root, ".claude"),
+                 os.path.join(root, "plugin")):
+        try:
+            pst = os.stat(pdir)  # resolved: a symlinked protected directory protects its target
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # a surface that does not exist protects nothing
+        except OSError:
+            return "the protected-directory check cannot be evaluated ({})".format(pdir)
+        if not stat.S_ISDIR(pst.st_mode):
+            continue  # a worktree gitfile .git is a regular file: no subtree to contain anything
+        if (pst.st_dev, pst.st_ino) in ancestors:
+            return ("the lease lies inside a protected directory subtree ({}); a protected "
+                    "surface is never rewritten".format(pdir))
+    return None
+
+
+def _orch_lease_hb_flock(fd):
+    """The one flock of a declared coordination lock (LOCK_EX|LOCK_NB), a seam so the self-test can
+    inject a non-busy flock fault (for example ENOLCK) hermetically."""
+    fcntl = __import__("fcntl")
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _orch_lease_hb_lock_ids(fd):
+    """The held lock descriptor's identity stat, bound to the very descriptor flock was taken
+    on. A seam, as _orch_lease_hb_append_fstat is, so the self-test can observe the under-lock
+    lock-separation re-check deterministically."""
+    return os.fstat(fd)
+
+
+def _orch_lease_hb_lock_held_sep(lock_fd, holder):
+    """None when the HELD lock descriptor's identity differs from the held lease descriptor's,
+    from an lstat of the lease name relative to the held lease parent-directory descriptor,
+    from a stat of each bookkeeping replacement target AND from every entry of the state
+    directory, swept by lstat RELATIVE to the held state-directory descriptor (the sweep is
+    bounded by that directory's own entry count, a handful of this plugin's files), else the
+    named refusal detail: the under-the-held-lock leg of the lock separation (the entry leg is
+    _orch_lease_hb_lock_sep), run once the under-lock re-proof has filled the holder, so a
+    lease, a bookkeeping target or ANY state-directory file (one a whole-file writer of this
+    plugin replaces, turn-state.json included) aliased onto the lock AT the lock seam, or the
+    lock renamed INTO the state directory, is refused by fstat identity on the very descriptor
+    flock was taken on (a keeper that wrote past this would REPLACE its own held lock: the
+    next cooperating keeper then locks the replacement while this one still holds the orphaned
+    inode). Any stat fault refuses (chkfcl)."""
+    try:
+        lst = _orch_lease_hb_lock_ids(lock_fd)
+    except OSError as exc:
+        return "the held lock cannot be stat'ed ({})".format(exc)
+    lock_id = (lst.st_dev, lst.st_ino)
+    ids, fault = _orch_lease_hb_lease_ids(holder)
+    if ids is None:
+        return fault
+    if lock_id in ids:
+        return "the declared lock shares an inode with the declared lease"
+    for dest in holder["dests"]:
+        try:
+            dst = os.stat(dest)
+        except FileNotFoundError:
+            continue  # an absent target has no inode the held lock could alias
+        except (OSError, ValueError) as exc:
+            return "the lock/bookkeeping separation cannot be evaluated ({})".format(exc)
+        if (dst.st_dev, dst.st_ino) == lock_id:
+            return ("the declared lock shares an inode with this keeper's own bookkeeping "
+                    "destination ({})".format(dest))
+    try:
+        entries = os.listdir(holder["state_fd"])
+    except OSError as exc:
+        return "the lock/state-directory separation cannot be evaluated ({})".format(exc)
+    for entry in entries:
+        try:
+            est = os.stat(entry, dir_fd=holder["state_fd"], follow_symlinks=False)
+        except FileNotFoundError:
+            continue  # unlinked between the scan and this stat: no inode the lock could alias
+        except (OSError, ValueError) as exc:
+            return "the lock/state-directory separation cannot be evaluated ({})".format(exc)
+        if (est.st_dev, est.st_ino) == lock_id:
+            # swept by identity on the HELD state-directory descriptor: the held lock IS a
+            # file of the state directory (planted there, or renamed into it after the entry
+            # check), where this plugin's whole-file writers replace files
+            return ("the declared lock lives in this keeper's own state directory (entry "
+                    "{}), whose files this plugin's whole-file writers replace".format(entry))
+    return None
+
+
+def _orch_lease_hb_lock(root, lock_path):
+    """Take the declared coordination lock: ('ok', fd) holding LOCK_EX until the caller closes fd,
+    ('skip', None) ONLY when another holder provably has it (flock raised EWOULDBLOCK/EAGAIN: this
+    event simply does not refresh; a later one will), ('no-write', detail) when the lock cannot be
+    evaluated, including any OTHER flock fault (ENOLCK, EINVAL, EBADF...): a fault that is not
+    busy is a NAMED refusal surfaced on Stop, never a silent skip (no guard-events row: the
+    lock seam cleared the holder's descriptor, so every bookkeeping writer defers a refusal
+    NAMING this fault to Stop until the under-lock re-proof, which a faulted lock never
+    reaches). The lock is an
+    existing operator-created file reached by the same no-follow walk as the lease; it is NEVER
+    created here, and a platform without flock cannot honour the declaration (a cannot-evaluate,
+    no write)."""
+    parent, fd, _name, fault = _orch_lease_hb_open(root, _orch_path(root, lock_path))
+    if fault is not None:
+        kind, detail = fault
+        if kind == "absent":
+            return ("no-write", "the declared lock file is absent (a hook never creates it)")
+        return ("no-write", "the declared lock cannot be evaluated ({})".format(detail))
+    held = [parent, fd]
+    handed = False
+    try:
+        # ownership of the held lock descriptor starts at ITS acquisition: the walked parent's
+        # transfer close keeps the ledger exact on a fault BEFORE its close syscall (the parent
+        # stays owned by the terminal cleanup) and AT or AFTER it (never retried), and the lock
+        # descriptor is closed exactly once on every non-handed outcome either way
+        _orch_lease_hb_close_held(held, parent)
+        try:
+            _orch_lease_hb_flock(fd)
+        except ImportError:
+            return ("no-write", "no flock on this platform; the declared lock cannot be honoured")
+        except OSError as exc:
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return ("skip", None)  # busy: this event does not refresh; a later one will
+            return ("no-write", "the declared lock cannot be taken ({})".format(exc))
+        handed = True
+        return ("ok", fd)
+    finally:
+        if handed and fd in held:
+            held.remove(fd)  # the lock descriptor is the caller's from the moment of return
+        fault2 = None
+        for leftover in reversed(list(held)):
+            try:
+                _orch_lease_hb_close_held(held, leftover)
+            except BaseException as exc:  # the remaining closes still run; then it propagates
+                if fault2 is None:  # the FIRST fault, as _orch_lease_hb_close keeps it
+                    fault2 = exc
+        if fault2 is not None:
+            raise fault2
+
+
+_ORCH_LEASE_HB_JSON_WS = re.compile(r"[ \t\n\r]*")  # the whitespace json.loads skips
+
+
+def _orch_lease_hb_json_spans(text):
+    """[(key, start, end), ...]: every top-level member of a json lease in document order, with
+    the span of its VALUE text (start inclusive, end exclusive), walked by the stdlib decoder's
+    own scanners (json.decoder.scanstring for each key, JSONDecoder.raw_decode for each value).
+    None when the text is not exactly one top-level object those scanners walk to its end."""
+    ws = _ORCH_LEASE_HB_JSON_WS
+    decoder = json.JSONDecoder()
+    spans = []
+    try:
+        i = ws.match(text, 0).end()
+        if text[i:i + 1] != "{":
+            return None
+        i = ws.match(text, i + 1).end()
+        if text[i:i + 1] == "}":
+            i += 1
+        else:
+            while True:
+                if text[i:i + 1] != '"':
+                    return None
+                key, i = json.decoder.scanstring(text, i + 1)
+                i = ws.match(text, i).end()
+                if text[i:i + 1] != ":":
+                    return None
+                start = ws.match(text, i + 1).end()
+                _value, end = decoder.raw_decode(text, start)
+                spans.append((key, start, end))
+                i = ws.match(text, end).end()
+                if text[i:i + 1] == ",":
+                    i = ws.match(text, i + 1).end()
+                    continue
+                if text[i:i + 1] != "}":
+                    return None
+                i += 1
+                break
+    except (ValueError, RecursionError):
+        return None
+    return spans if ws.match(text, i).end() == len(text) else None
+
+
+def _orch_lease_hb_json_same(old, new):
+    """Exact equality of two parsed json values: the same type at every level (True is never 1, 1
+    is never 1.0), a float by its repr (so -0.0 is not 0.0 and a NaN equals only a NaN), and
+    containers member by member in order."""
+    if type(old) is not type(new):
+        return False
+    if isinstance(old, float):
+        return repr(old) == repr(new)
+    if isinstance(old, dict):
+        return list(old) == list(new) and all(_orch_lease_hb_json_same(old[k], new[k])
+                                              for k in old)
+    if isinstance(old, list):
+        return len(old) == len(new) and all(_orch_lease_hb_json_same(a, b)
+                                            for a, b in zip(old, new))
+    return old == new
+
+
+def _orch_lease_hb_render(text, cfg, info, new_value):
+    """('ok', the refreshed lease content) or ('cannot', detail): ONLY the declared heartbeat
+    field's value changes, every other byte stays as it was. In lines format the one heartbeat
+    line keeps its own prefix, trailing whitespace and ending, and every other line is
+    byte-identical (the same line split as the reader, _orch_lease_hb_split). In json format the
+    declared field's VALUE text alone is replaced in place (never a re-serialization, which would
+    rewrite other members: 1e400 as Infinity, 0.10000000000000000555 as 0.1, non-ASCII text as
+    escapes), and the result is VERIFIED before it is used: re-parsed by the strict
+    duplicate-rejecting reader, it must carry the same members in the same order, every other
+    member's value text byte-identical and its parsed value exactly equal
+    (_orch_lease_hb_json_same), and the declared field the new value. Anything else is the named
+    cannot-evaluate, and the caller writes nothing."""
+    if cfg["format"] == "lines":
+        pieces = _orch_lease_hb_split(text)
+        index, prefix, _old, trail, ending = info["hb_line"]
+        pieces[index] = prefix + new_value + trail + ending
+        return ("ok", "".join(pieces))
+    refused = ("cannot", "the json lease cannot be rewritten with every other member unchanged")
+    field = cfg["field"]
+    spans = _orch_lease_hb_json_spans(text)
+    hits = [span for span in spans or () if span[0] == field]
+    if len(hits) != 1:
+        return refused
+    _key, start, end = hits[0]
+    rendered = text[:start] + json.dumps(new_value) + text[end:]
+    new_spans = _orch_lease_hb_json_spans(rendered)
+    if new_spans is None or [s[0] for s in new_spans] != [s[0] for s in spans]:
+        return refused
+    for (key, a, b), (_same, c, d) in zip(spans, new_spans):
+        if key != field and text[a:b] != rendered[c:d]:
+            return refused
+    try:
+        obj = json.loads(rendered, object_pairs_hook=_orch_reject_duplicate_keys)
+        if not isinstance(obj, dict) or list(obj) != list(info["json"]) \
+                or obj.get(field) != new_value or not isinstance(obj.get(field), str):
+            return refused
+        for key, value in info["json"].items():
+            if key != field and not _orch_lease_hb_json_same(value, obj[key]):
+                return refused
+    except (ValueError, RecursionError):
+        return refused
+    return ("ok", rendered)
+
+
+def _orch_lease_hb_verify(dirfd, name, cfg, session_id, new_value):
+    """Post-replace verification, a seam the self-test injects a failure through: re-open the lease
+    under the HELD parent descriptor, re-prove the holder, and require the written value. None when
+    confirmed; else the detail both bindings report as a write that HAPPENED (recorded
+    accurately, never claimed clean: the replace is already published when this runs). It reads
+    the lease as it stands AFTER the replace, so it confirms only that this session's refreshed
+    value is there: a lease this replace revived or overwrote carries that very value and
+    passes. A failure is either a verification fault (the refreshed lease cannot be re-opened,
+    re-read or re-parsed) or a change that landed between the replace and this re-read."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+                     | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=dirfd)
+    except (OSError, ValueError) as exc:
+        return "the refreshed lease cannot be re-opened ({})".format(exc)
+    try:
+        loaded = _orch_lease_hb_load(fd)
+    finally:
+        _orch_lease_hb_close(fd)
+    if loaded[0] != "ok":
+        return "the refreshed lease cannot be re-read ({})".format(loaded[1])
+    parse_status, info = _orch_lease_hb_parse(loaded[1][1], cfg)
+    if parse_status != "ok":
+        return "the refreshed lease cannot be re-parsed ({})".format(info)
+    if info["holder"] != session_id or info.get("hb") != new_value:
+        return "the refreshed lease does not carry this session's refreshed value"
+    return None
+
+
+def _orch_lease_hb_tmp_name(name):
+    """The exclusive temporary-file name of ONE field write (a random suffix beside the lease). A
+    seam, as _orch_lease_hb_restat is, so the self-test can FORCE the name onto a planted entry
+    and prove the O_EXCL|O_NOFOLLOW open refuses it (an unforced random name would miss the plant
+    with near certainty, proving nothing about the open discipline)."""
+    return ".{}.{}.hb.tmp".format(name, os.urandom(8).hex())
+
+
+def _orch_lease_hb_field_tmp_fstat(fd):
+    """The field write's temporary-descriptor identity stat, taken on the very descriptor the
+    exclusive create returned, BEFORE its mode change or first byte, so the failure cleanup can
+    check, at its own stat, that it still owns the temporary NAME it would unlink. A seam, as
+    _orch_lease_hb_save_tmp_fstat is, so the self-test can fault it and prove an entry whose
+    ownership was never established is never removed and is disclosed."""
+    return os.fstat(fd)
+
+
+def _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name, st, text, info,
+                               suffix, memory, holder=None):
+    """The heartbeat FIELD write (refresh mode with a declared field): refuse a lease carrying a
+    setuid, setgid or sticky bit (a replace cannot carry those over faithfully: the kernel may
+    clear a setgid bit on the mode change; this refusal is the field write's alone, the mtime
+    form touches such a lease and changes no permission bit), build the new bytes with the
+    event's own clock read, changing ONLY the declared
+    field's value (_orch_lease_hb_render, whose cannot-evaluate is the named no-write refusal),
+    create an exclusive temporary file beside the lease (a random name with
+    O_EXCL|O_NOFOLLOW, so nothing planted at a temporary-like name is ever opened or replaced),
+    learn its identity on the descriptor (_orch_lease_hb_field_tmp_fstat), give it the lease's
+    group (os.fchown on the descriptor: on Linux a new file starts in the creating process's
+    effective group, or in the directory's group where the directory is setgid or the
+    filesystem is mounted with grpid, so it need not be the lease's, and a failure is the named
+    no-write refusal with nothing published), carry over the original permission bits in full
+    (a failure there is that refusal too), write and fsync it, re-check the lease's identity
+    against the proof fstat (dev, ino, mtime_ns, size), replace through the held directory
+    descriptor, fsync that directory, and verify. Returns None, ('no-write', detail) with the
+    lease untouched, ('written-unverified', detail) after a replace that could not be
+    confirmed, or ('written-not-durable', detail) after a confirmed replace whose directory
+    fsync failed (published, but it may not survive a crash: never reported as plain success).
+    The failure cleanup runs from a FINALLY, for ANY exception class, through the
+    same identity-aware cleanup as the bookkeeping saves (_orch_lease_hb_save_cleanup, relative
+    to the held lease parent descriptor): the temporary NAME is unlinked only when one bounded
+    no-follow stat just before the unlink finds it still carrying the inode this write created,
+    so an entry whose ownership is unestablished at that stat (the identity stat itself
+    faulted, or the name now carries another inode) is NEVER removed, while an entry swapped
+    onto the name between that stat and the by-name unlink is removed in its place (the
+    same-user concurrency window _orch_lease_hb_save_cleanup states); a temporary that may
+    remain (identity never learned, a
+    cleanup stat fault other than confirmed absence, a failed unlink) is DISCLOSED by name, in
+    the no-write detail on a named refusal, and through the event holder's withheld report
+    whenever an exception of any other class is propagating to the crash path (a named
+    refusal followed by an interrupting close fault included), save for the residuals stated
+    below: the channel is chosen by whether an exception is propagating, recorded by an except
+    clause that re-raises, never by whether a failure was named. A fault of any other class
+    raised INSIDE that cleanup (an interrupt at its stat or unlink) discloses the temporary by
+    name through the holder too, BEFORE it propagates (with the same residuals), and the FIRST
+    fault wins (an exception already propagating keeps
+    propagating, else the cleanup's own fault does, unchanged), except that a cleanup fault
+    that is a STOP (not an Exception: an interrupt or an exit) propagates ahead of an Exception
+    already propagating, so the crash handling (which catches Exception) never swallows it; the
+    disclosure is recorded first either way, after the named failure when there is one (the
+    propagating fault discards the no-write detail), and it names the temporary even when the
+    fault cannot be rendered: the fixed disclosure is formatted before the temporary is created
+    and recorded BEFORE the fault is rendered, so a stop raised while rendering it propagates by
+    the same rule with the disclosure already recorded, and the rendered detail replaces only
+    that very record (_orch_lease_hb_cleanup_fault_rendered); a fault raised while that record
+    is built or recorded is ordered by the same rule, a preformatted fallback naming the
+    temporary taking the record's place when it cannot be built (_orch_lease_hb_cleanup_record,
+    which makes every withheld record of a temporary that may remain and states the residuals:
+    a stop raised while such a record is itself appended, before that append has taken effect,
+    propagates by the same rule WITHOUT the disclosure, as no fallback can be recorded once
+    that append has stopped; memory exhaustion at a fixed-size step; and a stop delivered as a
+    signal outside its guards). Where the no-write detail itself cannot be built because of an
+    ordinary fault (an Exception), the refusal returns the preformatted fallback TEXT naming the
+    temporary instead (refusal text, never a withheld record). A STOP raised while the no-write
+    detail is built (no fault already propagating) is never absorbed: it propagates with that
+    detail never returned, so the temporary goes unnamed, a disclosed residual of the same
+    class. The protected-path and
+    git-tracking gates run in _orch_lease_hb_refresh BEFORE the form split, so they cover this
+    form and the mtime form alike; this writer does NOT reuse _orch_write_json_atomic, whose
+    makedirs and pathname-resolved directory open fit the state directory, not an
+    adopter-declared lease path."""
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
+        # refused BEFORE any temporary exists: the replace would drop or alter the special bit
+        return ("no-write", "the lease carries a setuid, setgid or sticky bit (mode {:04o}), "
+                "which a field write cannot carry over".format(mode))
+    new_value = now.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%S") + suffix
+    rendered, content = _orch_lease_hb_render(text, cfg, info, new_value)
+    if rendered != "ok":
+        return ("no-write", content)
+    blob = content.encode("utf-8")
+    tmp = _orch_lease_hb_tmp_name(name)
+    # the fixed disclosure and the fallback record are formatted HERE, before the temporary
+    # exists, as in the memory save (_orch_lease_hb_cleanup_record)
+    fixed = _orch_lease_hb_cleanup_fault_fixed(tmp)
+    fallback = _orch_lease_hb_cleanup_fallback("the heartbeat field write", tmp)
+    try:
+        tmp_fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                         | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=parent)
+    except (OSError, ValueError) as exc:
+        # ValueError too (an unusable forced or inherited temporary name): the named no-write
+        # refusal, never a core fault
+        return ("no-write", "the temporary file cannot be created ({})".format(exc))
+    failure = None
+    tmp_id = None
+    step = "checked"
+    published = False
+    interrupted = False
+    first_stop = False
+    try:
+        try:
+            # the temporary's identity is learned FIRST, on its own descriptor, so the cleanup
+            # below can check it still owns the name it would unlink (at its stat; the by-name
+            # unlink after it keeps the window _orch_lease_hb_save_cleanup states)
+            tst = _orch_lease_hb_field_tmp_fstat(tmp_fd)
+            tmp_id = (tst.st_dev, tst.st_ino)
+            step = "given the lease's group"
+            # the temporary got the group a new file gets in this directory, which need not be
+            # the lease's: it takes the lease's group BEFORE the mode change and the first byte,
+            # so the carried-over group bits never grant another group access, and a failure
+            # refuses the write with nothing published
+            os.fchown(tmp_fd, -1, st.st_gid)
+            step = "given the lease's mode"
+            os.fchmod(tmp_fd, mode)  # in full: a special bit was refused above
+            step = "written"
+            view = memoryview(blob)
+            while view:
+                view = view[os.write(tmp_fd, view):]
+            os.fsync(tmp_fd)
+        except OSError as exc:
+            failure = "the temporary file cannot be {} ({})".format(step, exc)
+        finally:
+            try:
+                os.close(tmp_fd)  # once: after a failed close the number may already be reused
+            except OSError as exc:
+                failure = failure or "the temporary file cannot be closed ({})".format(exc)
+        if failure is None:
+            try:
+                rst = _orch_lease_hb_restat(parent, name)
+                if (rst.st_dev, rst.st_ino, rst.st_mtime_ns, rst.st_size) != \
+                        (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size):
+                    failure = "the lease changed between the proof and the replace"
+            except OSError as exc:
+                failure = "the identity re-check failed ({})".format(exc)
+        if failure is None:
+            try:
+                # RESIDUAL (writers that ignore the declared lock): between the re-check above
+                # and this replace such a writer can still unlink the lease (this replace then
+                # revives it under the refreshed content) or swap in its own acquire (this
+                # replace then overwrites it); os.replace creates the destination name either
+                # way. The declared lock closes this for every writer that takes it (the caller
+                # holds it from before the lease was read); for the rest the re-check narrows
+                # the window (it cannot remove it). The post-replace verification does NOT
+                # report either case: it reads this replace's own content, which carries this
+                # session's refreshed value, so the overwritten acquire or the revived lease
+                # reads as a clean refresh. It can report a change that lands between the
+                # replace and its own re-read, or a verification fault (the refreshed lease
+                # cannot be re-opened, re-read or re-parsed), and it can undo nothing.
+                _orch_lease_hb_replace(tmp, name, parent)
+                published = True
+            except OSError as exc:
+                failure = "the replace failed ({})".format(exc)
+    except BaseException as exc:
+        # an exception of ANY class propagates past here to the judge's crash handler, which
+        # discards the named failure: recorded, so the disclosure below rides the holder, with
+        # whether it is a STOP (not an Exception: an interrupt or an exit), so a fault raised
+        # inside the cleanup's guards below never displaces it, unless that fault is a stop
+        # and this one is not (the residual: _orch_lease_hb_cleanup_record)
+        interrupted = True
+        first_stop = not isinstance(exc, Exception)
+        raise
+    finally:
+        if not published:
+            # the failure cleanup and the residue DISCLOSURE run from this finally for ANY
+            # exception class: the name is unlinked only when the stat just before the unlink
+            # finds it carrying the inode this write created (the by-name unlink keeps the
+            # window _orch_lease_hb_save_cleanup states), and a temporary that may remain is
+            # disclosed by name. The
+            # CHANNEL is chosen by whether an exception is propagating, never by whether a
+            # failure was named: the no-write detail below when none is, else the holder's
+            # withheld report (a named failure followed by an interrupting close fault would
+            # otherwise lose the disclosure with the discarded detail). A fault of any other
+            # class INSIDE the cleanup returns no detail and propagates itself, so it takes the
+            # holder too, BEFORE any fault propagates (after the named failure, when there is
+            # one; save for the residual below), and the FIRST fault wins: an exception
+            # already propagating keeps propagating, else this one does, unchanged; except
+            # that a STOP raised in the cleanup (not an Exception: an interrupt, an exit)
+            # propagates ahead of an Exception already propagating, whose crash handling
+            # catches Exception and would otherwise swallow the stop. The FIXED disclosure,
+            # formatted before the temporary existed, is recorded BEFORE that fault is
+            # rendered, so a stop raised while rendering it leaves the disclosure recorded and
+            # takes the same order; a fault raised while the record is built or recorded takes
+            # that order too, but a stop raised while the record itself is appended, before
+            # that append has taken effect, leaves NOTHING recorded (the residual
+            # _orch_lease_hb_cleanup_record states); the rendered detail replaces only the
+            # record its mark binds
+            cleanup_fault = None
+            try:
+                disclosure = _orch_lease_hb_save_cleanup(tmp, tmp_id, parent)
+            except BaseException as exc:
+                cleanup_fault = exc
+                disclosure = fixed
+            mark = lead = None
+            if disclosure is not None:
+                if interrupted or cleanup_fault is not None:
+                    # the named failure leads the disclosure, as in the memory save: the
+                    # propagating fault discards the no-write detail that would carry it
+                    mark, lead, cleanup_fault = _orch_lease_hb_cleanup_record(
+                        holder, "the heartbeat field write was interrupted; ", failure,
+                        disclosure, fallback, cleanup_fault)
+                else:
+                    try:
+                        failure = "{}; {}".format(failure, disclosure)
+                    except Exception:
+                        # the no-write detail cannot be built (a MemoryError): the
+                        # preformatted fallback still names the temporary; a STOP raised
+                        # here is never absorbed and propagates with the detail never
+                        # returned (the residual the docstring states)
+                        failure = fallback
+            if mark is not None and cleanup_fault is not None:
+                cleanup_fault = _orch_lease_hb_cleanup_fault_rendered(
+                    mark, lead, fixed, cleanup_fault, tmp)
+            if cleanup_fault is not None and (not interrupted or (
+                    not first_stop and not isinstance(cleanup_fault, Exception))):
+                raise cleanup_fault
+    if failure is not None:
+        return ("no-write", failure)
+    not_durable = None
+    try:
+        os.fsync(parent)
+    except OSError as exc:
+        # the replace is already published, but its directory entry may not survive a crash:
+        # a distinct written-not-durable result, never plain success
+        not_durable = ("the lease directory fsync failed ({}), so the replace may not survive "
+                       "a crash".format(exc))
+    verify = _orch_lease_hb_verify(parent, name, cfg, session_id, new_value)
+    if verify is not None:
+        if not_durable is not None:
+            verify = "{}; {}".format(verify, not_durable)
+        return ("written-unverified", verify)
+    if not_durable is not None:
+        return ("written-not-durable", not_durable)
+    return None
+
+
+def _orch_lease_hb_refresh(root, cfg, session_id, now, path, parent, name, leaf, st, text, info,
+                           suffix, memory, holder):
+    """One refresh attempt on a lease proven inside the caller's critical section (the caller
+    takes any declared lock BEFORE the lease is read and holds it across this write): None on
+    success, else ('no-write'|'written-unverified'|'written-not-durable', detail) from the
+    write discipline. BOTH forms
+    pass the same protected-path and git-tracking gates BEFORE the form split (in the mtime form
+    the mtime IS the recorded liveness value, so a touch changes lease semantics even though no
+    content byte changes): a protected target, a git-tracked lease, a failed tracking probe
+    (_orch_lease_hb_tracked_refused: an out-of-tree lease passes the gate, and an unchanged
+    refusal backs the probe off) and a protection check that cannot be evaluated all refuse. The
+    mtime form (no declared field) then re-checks the lease identity AND content identity against
+    the proof fstat (dev, ino, mtime_ns, size) and touches the OPEN descriptor only (os.utime on
+    the fd: a clock read, no content change); the field form is _orch_lease_hb_write_field.
+    RESIDUAL (writers that ignore the declared lock): such a writer can still change the lease
+    between the re-check and the touch; the re-check narrows that window (it cannot remove it)
+    and the descriptor-bound touch cannot land on a different inode."""
+    protected = _orch_lease_hb_protected(root, path, st, os.path.dirname(holder["dests"][0]))
+    if protected:
+        return ("no-write", protected)
+    if _orch_lease_hb_tracked_refused(root, path, st, now, memory, holder):
+        return ("no-write", _ORCH_LEASE_HB_TRACKED_DETAIL)
+    if "field" not in cfg:
+        try:
+            rst = _orch_lease_hb_restat(parent, name)
+        except OSError as exc:
+            return ("no-write", "the identity re-check failed ({})".format(exc))
+        if (rst.st_dev, rst.st_ino, rst.st_mtime_ns, rst.st_size) != \
+                (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size):
+            return ("no-write", "the lease changed between the proof and the refresh")
+        try:
+            os.utime(leaf)
+        except OSError as exc:
+            return ("no-write", "the timestamp update failed ({})".format(exc))
+        return None
+    return _orch_lease_hb_write_field(root, cfg, session_id, now, path, parent, name,
+                                      st, text, info, suffix, memory, holder)
+
+
+
+
+def _orch_lease_hb_judge(root, cfg, lease, session_id, event, now, path, parent, leaf, name,
+                         memory, holder):
+    """The decision table over an OPEN lease (every row's fault direction is no-write; the
+    returned text is the Stop banner, and on PostToolUse only a refresh whose write HAPPENED
+    but is not plain success (written-unverified or written-not-durable) returns text, which
+    that binding carries as the result's error text; a refusal that
+    persists unchanged is recorded
+    once per state change, never per call: _orch_lease_hb_row_once). Age is the OLDER of the
+    mtime age and the declared heartbeat field's age, so a rewrite that bumps only the mtime
+    cannot hide a stale recorded liveness value (the incident class). In refresh mode any declared
+    coordination lock is taken BEFORE the lease is read, so holder, state, timestamps, owner and
+    link count are all proven inside the lock's critical section and an in-place change by a
+    writer that used the lock (a holder swapped, a state released) is read here and refuses; a
+    busy lock makes this event a read-only pass (a later event refreshes). Once the lock is held
+    the lease is RE-OPENED under it, so a cooperating takeover between the first open and the lock
+    reads as lease taken (or lost), never as a link-count cannot-evaluate. A writer that ignores
+    the lock can race the proofs at the write sites, and so can any same-user concurrent actor
+    at every path-based step (the SAME-USER CONCURRENCY CLASS, stated once and completely in the
+    section comment above _ORCH_LEASE_HB_KIND). Once
+    re-opened, the lease/bookkeeping separation is RE-PROVEN on the under-lock descriptor
+    (_orch_lease_hb_sep_fd), so a cooperating writer that aliases the lease onto a bookkeeping
+    destination at the lock seam is refused with nothing written and nothing recorded, and the
+    LOCK separation is re-proven there too, by identity on the held lock descriptor
+    (_orch_lease_hb_lock_held_sep: a lock aliased onto the lease or a bookkeeping save target
+    would be REPLACED by this keeper's own writes, voiding the critical section for the next
+    cooperating keeper); where
+    that re-open FAILS there is no descriptor to re-prove the separation on, so the refusal is
+    surfaced on Stop and nothing is recorded there either (chkfcl). Attempting the lock at all
+    EMPTIES the event's holder of its proven descriptor: a busy or faulted lock never re-opens
+    and never re-proves, so until the under-lock re-proof passes EVERY bookkeeping writer
+    withholds (a cooperating lock holder can have re-aliased the declared lease at name level,
+    a swap no proof bound to the pre-lock descriptor can see). A core fault inside this table
+    records its ONE crash row from the handler below, while the proven descriptor and any held
+    lock are still in hand, and the holder is emptied BEFORE the under-lock descriptors or the
+    lock are released, so nothing can append outside the critical section."""
+    held_before = memory.get("session_id") == session_id
+    lock_fd = None
+    lock_busy = False
+    lock_fault = None
+    reopened = (None, None)
+    try:
+        if cfg["mode"] == "refresh" and "lock_path" in cfg:
+            # the lock seam EMPTIES the holder of its proven descriptor BEFORE the lock is
+            # taken: a cooperating lock holder may have re-aliased the declared lease at name
+            # level (a swap no proof bound to the pre-lock descriptor can see), so a row may be
+            # written again only after the under-lock re-open re-proves separation on the NEW
+            # descriptor; a busy or faulted lock never re-proves, so every bookkeeping writer
+            # withholds on those branches (the Stop text is the only surfacing)
+            holder["lease_fd"] = None
+            holder["lease_parent_fd"] = None
+            lock_status, lock_value = _orch_lease_hb_lock(root, cfg["lock_path"])
+            if lock_status == "ok":
+                lock_fd = lock_value
+            elif lock_status == "skip":
+                lock_busy = True
+                # the BUSY-lock branch still runs the decision table with the holder emptied,
+                # so writers are reached with no held descriptor on EVERY call: their refusal
+                # is recorded as a DEFERRAL surfaced on Stop only, never per tool call
+                holder["lock_busy"] = True
+            else:
+                lock_fault = lock_value
+                # the FAULTED-lock branch still runs the decision table with the holder
+                # emptied, exactly as the busy branch does: a writer reached there defers a
+                # refusal NAMING this fault to Stop, never a report on every tool call
+                holder["lock_fault"] = lock_fault
+        if lock_fd is not None:
+            # The lease descriptor was opened BEFORE the lock. A COOPERATING writer that held the
+            # lock in that window may have atomically replaced the lease (a legitimate takeover)
+            # or unlinked it; the pre-lock descriptor then points at an orphaned inode whose load
+            # would refuse as a link-count cannot-evaluate. A cheap re-open UNDER the held lock
+            # names the real outcome instead: absent reads as lease lost and a new holder reads
+            # as lease taken, exactly as they read at the pre-lock seams.
+            reparent, releaf, rename, refault = _orch_lease_hb_open(root, path)
+            reopened = (reparent, releaf)  # owned by the finally from the moment of acquisition
+            if refault is not None:
+                kind, detail = refault
+                if kind == "absent":
+                    if event == "Stop" and held_before:
+                        return ("AIQT guardrail (lease heartbeat): the declared lease is gone and "
+                                "this session held it earlier (lease lost). A hook never creates "
+                                "a lease; reconcile the record and re-acquire through the acquire "
+                                "step.")
+                    return None
+                # the under-lock re-open FAILED, so NO open descriptor exists to re-prove the
+                # lease/bookkeeping separation on, and a separation that cannot be proved is a
+                # collision (chkfcl): at this seam a cooperating writer can have swapped the
+                # declared lease onto a bookkeeping destination (a symlink the no-follow
+                # re-open refuses, an aliased ancestor directory, an unreadable plant), where
+                # a refusal row appended through the destination name would land in the file
+                # the declared lease now resolves to. The refusal is surfaced on Stop; NOTHING
+                # is recorded (a DISCLOSED narrowing: a lease made unreadable under a declared
+                # lock surfaces per turn end without a guard-events row).
+                if event == "Stop":
+                    return ("AIQT guardrail (lease heartbeat): the declared lease cannot be "
+                            "evaluated ({}). Nothing was written: an unreadable, symlinked or "
+                            "ambiguous lease is never rewritten by a hook; inspect and repair it "
+                            "by hand.".format(detail))
+                return None
+            parent, leaf, name = reparent, releaf, rename
+            resep = _orch_lease_hb_prove(holder, reparent, releaf, rename, path,
+                                         holder["dests"])
+            if resep is not None:
+                # a cooperating writer at the lock seam aliased the lease onto a bookkeeping
+                # destination (or the write-time descriptor binding cannot be rebuilt): as at
+                # the event's entry check, NOTHING is written or recorded while the collision
+                # persists; the Stop warning is the only surfacing.
+                if event == "Stop":
+                    return _orch_lease_hb_sep_msg(resep)
+                return None
+            lock_sep = _orch_lease_hb_lock_held_sep(lock_fd, holder)
+            if lock_sep is not None:
+                # the LOCK separation is re-proven under the held lock, by identity on the
+                # very descriptor flock was taken on: a cooperating actor at the lock seam
+                # can have aliased the lease (or a bookkeeping save target) onto the lock,
+                # and a keeper that then refreshed or saved would REPLACE its own held lock
+                # (the next cooperating keeper locks the replacement while this one still
+                # holds the orphaned inode). Nothing is written and nothing is recorded (a
+                # row's own memory save could itself replace the aliased lock); the Stop
+                # warning is the only surfacing while this refusal persists.
+                if event == "Stop":
+                    return ("AIQT guardrail (lease heartbeat): {}. Nothing was written: the "
+                            "declared lock must stay a stable coordination file separate "
+                            "from the lease and from this keeper's bookkeeping records."
+                            .format(lock_sep))
+                return None
+        loaded = _orch_lease_hb_load(leaf)
+        if loaded[0] != "ok":
+            _orch_lease_hb_row_once(holder, memory, now, "no-write", loaded[1], loaded[1])
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the declared lease cannot be evaluated "
+                        "({}). Nothing was written: an unreadable, symlinked or ambiguous lease "
+                        "is never rewritten by a hook; inspect and repair it by hand."
+                        .format(loaded[1]))
+            return None
+        st, text = loaded[1]
+        lease_key = [st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size]
+        head_status, head = _orch_lease_hb_parse(text, cfg, keys=(("holder_field", "holder"),))
+        if head_status != "ok":
+            _orch_lease_hb_row_once(holder, memory, now, "no-write", head, head, lease_key)
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the declared lease cannot be evaluated "
+                        "({}). Nothing was written: a malformed or ambiguous lease is never "
+                        "rewritten by a hook; inspect and repair it by hand.".format(head))
+            return None
+        if head["holder"] != session_id:
+            # EXACT equality on ONE parsed holder field, never token presence: a foreign lease is
+            # never seized, never refreshed, and the only surfacing is to a session the past-holder
+            # memory says held it earlier.
+            if event == "Stop" and held_before:
+                return ("AIQT guardrail (lease heartbeat): the lease now names another holder "
+                        "although this session held it earlier (lease taken). Never seize it "
+                        "back; reconcile the record and coordinate through the acquire step.")
+            return None
+        parse_status, info = _orch_lease_hb_parse(text, cfg)
+        if parse_status != "ok":
+            # the holder is PROVEN here, so a missing or duplicated remaining declared field is
+            # this session's own lease to repair; it is surfaced, and still never rewritten.
+            _orch_lease_hb_row_once(holder, memory, now, "no-write", info, info, lease_key)
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the lease this session holds cannot be "
+                        "evaluated ({}). Nothing was written: a malformed or ambiguous lease is "
+                        "never rewritten by a hook; inspect and repair it by hand.".format(info))
+            return None
+        if memory.get("session_id") != session_id:
+            # the past-holder memory is rewritten on a CHANGE of proven holder, never per call,
+            # and only after the FULL parse validates the lease: bookkeeping follows validation
+            # (the lease/bookkeeping separation was already proven before this core ran)
+            memory["version"] = 1
+            memory["session_id"] = session_id
+            memory["ts"] = now.isoformat()
+            _orch_lease_hb_memory_save(holder, memory)
+        if "state_field" in cfg and info["state"] not in cfg["active_values"]:
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the lease state {!r} is not an active "
+                        "value; a released lease is never revived by a hook. Re-acquire through "
+                        "the acquire step if this session should still hold it."
+                        .format(info["state"]))
+            return None
+        max_age = lease.get("max_age_hours")
+        ages = [now.timestamp() - st.st_mtime]
+        suffix = None
+        if "field" in cfg:
+            parsed, second = _orch_lease_hb_ts(info["hb"])
+            if parsed is None:
+                _orch_lease_hb_row_once(holder, memory, now, "no-write",
+                                        "heartbeat value: {}".format(second),
+                                        "heartbeat value: {}".format(second), lease_key)
+                if event == "Stop":
+                    return ("AIQT guardrail (lease heartbeat): the lease heartbeat value cannot "
+                            "be read ({}). Nothing was written: an unreadable liveness value is "
+                            "never overwritten by a hook.".format(second))
+                return None
+            suffix = second
+            ages.append((now - parsed).total_seconds())
+        classes = [_orch_lease_age_class(a, max_age) for a in ages]
+        if "future" in classes:
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the lease carries a time more than "
+                        "{}s in the future (clock skew or tamper). Nothing was written and the "
+                        "future value is kept as evidence; reconcile it by hand."
+                        .format(_ORCH_CLOCK_SKEW))
+            return None
+        if "cannot" in classes:
+            # unreachable behind _orch_lease_hb_config's horizon validation; kept so an invalid
+            # horizon can never read fresh if the two validations ever diverge (chkfcl)
+            _orch_lease_hb_row_once(holder, memory, now, "no-write",
+                                    "the declared max_age_hours horizon cannot be evaluated",
+                                    "the declared max_age_hours horizon cannot be evaluated",
+                                    lease_key)
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the declared max_age_hours horizon "
+                        "cannot be evaluated; nothing was written (a cannot-evaluate never "
+                        "writes). Correct it in the registry (the confinement's trust root).")
+            return None
+        age = max(ages)
+        if "stale" in classes:
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the lease has lapsed (older than {}h), "
+                        "so the guards it scopes are out of scope. A lapsed lease is never "
+                        "silently renewed: reconcile the record and re-acquire through the "
+                        "acquire step.".format(max_age))
+            return None
+        if age > max_age * 3600 - 2 * _ORCH_CLOCK_SKEW:
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the lease is too close to its {}h "
+                        "staleness horizon to renew safely (inside two clock skews); nothing was "
+                        "written. Re-acquire through the acquire step.".format(max_age))
+            return None
+        if age < cfg["refresh_after_minutes"] * 60:
+            return None
+        gap = age > cfg["warn_after_minutes"] * 60
+        if cfg["mode"] != "refresh":
+            if gap:
+                _orch_lease_hb_row_once(holder, memory, now, "warn", "heartbeat gap (warn mode)",
+                                        "heartbeat gap {:.0f} min (warn mode; nothing written)"
+                                        .format(age / 60), lease_key)
+                if event == "Stop":
+                    return ("AIQT guardrail (lease heartbeat): heartbeat gap {:.0f} min on the "
+                            "lease this session holds (warn mode: nothing was written). Refresh "
+                            "the lease record manually, or declare heartbeat mode 'refresh' in "
+                            "the registry.".format(age / 60))
+            return None
+        if lock_busy:
+            return None  # the declared lock is held elsewhere; a later event refreshes
+        if lock_fault is not None:
+            _orch_lease_hb_row_once(holder, memory, now, "no-write", lock_fault, lock_fault,
+                                    lease_key)
+            if event == "Stop":
+                # the banner below NAMES the flock fault and carries the bookkeeping
+                # consequence, so the row attempt's own faulted-lock deferral is DROPPED
+                # here: the fault is rendered exactly once per turn end, never repeated by
+                # the appended withheld report (a crash deferral keeps its own line)
+                try:
+                    (holder.get("deferred") or []).remove(
+                        _orch_lease_hb_lock_fault_deferral(lock_fault))
+                except ValueError:
+                    pass
+                return ("AIQT guardrail (lease heartbeat): the heartbeat refresh was refused "
+                        "({}); the lease is unchanged and this event's bookkeeping is "
+                        "withheld under the same fault.".format(lock_fault))
+            return None
+        outcome = _orch_lease_hb_refresh(root, cfg, session_id, now, path, parent, name, leaf,
+                                         st, text, info, suffix, memory, holder)
+        if outcome is not None:
+            kind, detail = outcome
+            if kind == "written-unverified":
+                # a write HAPPENED: every one of these is a real event, a guard-events row
+                # ATTEMPTED per occurrence (best-effort, as below), and the warning is returned
+                # on BOTH events, never plain success: the Stop banner, or on PostToolUse the
+                # result's error text (the next Stop can see a fresh lease and would otherwise
+                # say nothing about this write)
+                _orch_lease_hb_event(holder, kind, detail)
+                return ("AIQT guardrail (lease heartbeat): the heartbeat WAS replaced but "
+                        "could not be verified afterwards ({}). A write happened; inspect "
+                        "the lease by hand.".format(detail))
+            if kind == "written-not-durable":
+                # a verified write HAPPENED but may not survive a crash: a guard-events row is
+                # ATTEMPTED per occurrence (best-effort: a failed append is reported through
+                # the withheld-bookkeeping warning, so no row may land) and the warning is
+                # returned on BOTH events, never plain success: the Stop banner, or on
+                # PostToolUse the result's error text (the next Stop sees a fresh lease and
+                # would otherwise say nothing about this write)
+                _orch_lease_hb_event(holder, kind, detail)
+                return ("AIQT guardrail (lease heartbeat): the heartbeat WAS replaced and "
+                        "verified, but it is not durable ({}). A write happened; check the "
+                        "filesystem holding the lease.".format(detail))
+            _orch_lease_hb_row_once(holder, memory, now, kind, detail, detail, lease_key)
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): the heartbeat refresh was refused "
+                        "({}); the lease is unchanged.".format(detail))
+            return None
+        if gap:
+            _orch_lease_hb_event(holder, "refresh",
+                                 "heartbeat gap {:.0f} min closed by a refresh".format(age / 60))
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): heartbeat gap {:.0f} min on the lease "
+                        "this session holds; it is refreshed NOW. A gap past warn_after_minutes "
+                        "usually means the refresh cadence is too slow for this run."
+                        .format(age / 60))
+        return None
+    except Exception as exc:
+        # the ONE crash row of a core fault, recorded HERE while the proven descriptor and any
+        # held lock are still in hand (this handler runs before the finally below releases
+        # them), through the same write-time descriptor check as every other append; the
+        # holder is then emptied, so the binding's own recorder, which runs after cleanup,
+        # finds no held descriptor and withholds a second row
+        _orch_lease_hb_crash_row(holder, exc)
+        holder["lease_fd"] = None
+        holder["lease_parent_fd"] = None
+        raise
+    finally:
+        # the holder is emptied BEFORE the descriptor it carries or the lock is released: a
+        # write attempted after this cleanup (outside the critical section) finds no held
+        # descriptor and withholds
+        if holder.get("lease_fd") is not None and holder["lease_fd"] in reopened:
+            holder["lease_fd"] = None
+        if holder.get("lease_parent_fd") is not None \
+                and holder["lease_parent_fd"] in reopened:
+            holder["lease_parent_fd"] = None
+        # ONE terminal disposition, the lock LAST: a fault at a re-opened descriptor's close
+        # (any exception class) still attempts every remaining close, the lock's included,
+        # exactly once, and then propagates (_orch_lease_hb_close)
+        _orch_lease_hb_close(*reopened, lock_fd)
+
+
+def _orch_lease_hb_sep_msg(sep):
+    """The Stop surfacing of a separation refusal (nothing written, nothing recorded either
+    way). The remediation is chosen from the refusal's own SIDE, carried as (side, detail) from
+    the check that failed, never recovered from a substring of the detail: a faulted
+    state-record access is repaired in the keeper's state directory (redeclaring the lease
+    would not touch it), a faulted lease access is repaired at the declared lease path, and a
+    proven collision names the lease-path remediation."""
+    side, detail = sep
+    if side == "state":
+        return ("AIQT guardrail (lease heartbeat): {}. Nothing was written and nothing was "
+                "recorded (a refusal never records into the refused lease); repair the keeper's "
+                "state directory and its records so the separation can be evaluated."
+                .format(detail))
+    if side == "lease":
+        return ("AIQT guardrail (lease heartbeat): {}. Nothing was written and nothing was "
+                "recorded (a refusal never records into the refused lease); inspect and repair "
+                "the declared lease path so the separation can be evaluated.".format(detail))
+    return ("AIQT guardrail (lease heartbeat): {}. Nothing was written and nothing was recorded "
+            "(a refusal never records into the refused lease); declare a lease path distinct "
+            "from the keeper's own state records.".format(detail))
+
+
+def _orch_lease_hb_event_cleanup(holder, *fds):
+    """The event's ONE terminal cleanup of its separation holder, factored so the suite can
+    drive the REAL cleanup (never a test-side close) across the previous-holder fault
+    injections: the holder is emptied BEFORE the descriptor it owns is released (a crash row
+    attempted after this cleanup finds no held descriptor and withholds; the judge records a
+    core fault's one row while the descriptor is still held), and the holder-owned
+    state-directory descriptor is closed exactly ONCE per acquisition. fds are the caller's
+    own remaining descriptors (the event finalizer passes the lease descriptor and its parent,
+    which stay owned by their opener until this one disposition): the state-directory
+    descriptor and every one of fds go through ONE _orch_lease_hb_close call, so a fault at
+    any close (any exception class, before or after its syscall) still attempts every
+    remaining close exactly once, never retries the faulted one, and then propagates."""
+    state_fd = None
+    if isinstance(holder, dict):
+        holder["lease_fd"] = None
+        holder["lease_parent_fd"] = None
+        state_fd = holder.get("state_fd")
+        holder["state_fd"] = None
+    _orch_lease_hb_close(state_fd, *fds)
+
+
+def _orch_lease_heartbeat(data, event, holder=None):
+    """The ONE lease-heartbeat core behind orch_lease_heartbeat_post and orch_lease_heartbeat_stop:
+    returns the warning text, or None when there is nothing to surface (every warning is
+    returned on Stop only, except a written-unverified or written-not-durable refresh, returned
+    on PostToolUse too, where the binding carries it as the result's error text). Scoped exactly
+    like
+    the other registry components (silent with no root, no ok registry, or no declaration; silent
+    too with no usable payload session_id, because no write and no holder-aimed message can be
+    proven without one). The REAL per-tool-call cost: before any lease check, EVERY event pays the
+    git-toplevel resolution (_orch_root: one scrubbed `git rev-parse --show-toplevel` subprocess),
+    ONE whole-file registry read (_orch_registry reads the registry file to EOF in 1 MiB chunks
+    with NO total-byte bound; unchanged by this control; the bookkeeping destinations are derived
+    from that same read by _orch_lease_hb_dests, never by a second read), and the
+    lease/bookkeeping separation proof (_orch_lease_hb_bookkeeping_sep: os.path.realpath of the
+    lease and of both destinations, one stat of the lease, up to one stat per destination, and up
+    to two parent-directory stats), and, where a lock_path is declared, the shared read-only
+    lock validation (_orch_lease_hb_lock_sep) TWICE per event, both before the quick path: once
+    inside the declaration validation (_orch_lease_hb_config with root) and once more at the
+    entry check, after the separation proof, whose absent-state-directory leg may just have
+    created the directory the identity legs compare against (each run is up to ten
+    os.path.realpath calls and up to eleven stats: the lock, its eight refused targets, namely
+    the lease, both bookkeeping destinations and the five _ORCH_LEASE_HB_WRITER_NAMES files, the
+    state directory and the lock's parent directory), so a healthy lease on PostToolUse costs
+    that subprocess, that whole-file read, that separation work, those two lock validations
+    where a lock is declared, and one os.lstat, never literally one stat; an event
+    that reaches the lease open (Stop always, PostToolUse past the quick path) adds the
+    descriptor-bound separation re-proof and the write-time binding (one fstat plus up to one
+    stat per destination, one state-directory open and two fstats). The
+    quick mtime path applies
+    only where NO heartbeat field is declared (there the mtime IS the recorded liveness value);
+    with a declared field a fresh mtime cannot prove the field's own recorded time fresh (the
+    decision uses the OLDER of the two ages), so the bounded walk-and-read runs on each event.
+    While a refusal persists unchanged, its guard-events row is recorded once per state change
+    (_orch_lease_hb_row_once) and the git tracking probe is backed off
+    (_ORCH_LEASE_HB_RETRY_SECONDS), so neither the event log nor the subprocess count grows per
+    tool call. holder, when given, is the event's separation holder (one is created here
+    otherwise), a dict owned by the calling binding and consumed by EVERY bookkeeping writer:
+    this core records the derived destinations in it and hands it the LEASE DESCRIPTOR itself,
+    the lease parent-directory descriptor and a state-directory descriptor opened ONCE,
+    O_DIRECTORY|O_NOFOLLOW, when _orch_lease_hb_prove passes (at the first open, and again on
+    the re-open under a declared lock; the path-based entry check licenses nothing, and a state
+    directory that IS the lease's parent by descriptor identity refuses the holder outright).
+    Every bookkeeping write then re-opens its own destination no-follow RELATIVE to the held
+    state-directory descriptor (dir_fd; the saves create their exclusive temporary file and
+    replace relative to it too), fstats the descriptor it writes through and refuses a
+    non-regular, multi-link or lease-aliased inode at WRITE time (against the held descriptor
+    and an lstat of the lease name relative to the held parent descriptor, read AFTER the
+    destination stat), and the holder is
+    emptied BEFORE any held descriptor or lock is released, so a writer reached with no held
+    descriptor (an invalid declaration, a failed open or re-open, a busy or faulted lock, a
+    crash before the proof or after cleanup) withholds and reports the refusal through the hook
+    result (the Stop banner or the dispatcher's stderr; a busy or faulted declared lock defers
+    its report to Stop only, at most once per turn end, a fault named as itself and rendered
+    once, since a due refresh's banner names the flock fault and DROPS the deferral; a
+    deferral made on a PostToolUse event is dropped with that event's holder), never into a
+    file; the crash recorder
+    (_orch_lease_hb_crash_row) consumes
+    THAT record only, never a fresh registry read, and records only from inside the judge while
+    the descriptor is still held."""
+    root = _orch_root(data)
+    if root is None:
+        return None
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return None
+    lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else {}
+    if not lease or "heartbeat" not in lease:
+        return None  # byte-for-byte the absent arm of _orch_lease_hb_config: inert, no stat cost
+    now = _orch_now()
+    dests = _orch_lease_hb_dests(root, reg)
+    if holder is None:
+        holder = _orch_lease_hb_holder()  # every bookkeeping writer below requires one
+    holder["dests"] = dests
+    bad_decl = _orch_lease_hb_paths_bad(lease)
+    if bad_decl is not None:
+        # the declared path VALUES are judged BEFORE any filesystem resolution (realpath, stat,
+        # the entry separation proof): an unusable value (an embedded NUL, an empty component)
+        # must be the NAMED refusal on Stop, never a resolution fault the binding records as a
+        # core fault that silently allows. No separation can be proven about an unusable path,
+        # so the holder stays unproven and nothing is written or recorded anywhere.
+        if event == "Stop":
+            return ("AIQT guardrail (lease heartbeat): the registry's lease heartbeat "
+                    "declaration is invalid ({}). Nothing was written and nothing was recorded: "
+                    "an unusable declared path never reaches path resolution and never falls "
+                    "back to another mode. Correct it in the registry (the confinement's trust "
+                    "root).".format(bad_decl))
+        return None
+    cfg_status, cfg = _orch_lease_hb_config(reg, root)
+    if cfg_status == "absent":
+        return None  # unreachable behind the fast path above; kept aligned with it (chkfcl)
+    if cfg_status == "bad":
+        # withheld bookkeeping: no descriptor proof exists before the first open, so the
+        # invalid-declaration refusal is surfaced on Stop ONLY (no guard-events row and no
+        # memory save: a writer with no held descriptor writes nothing anywhere). Validated
+        # BEFORE the separation check, whose absent-state-directory leg CREATES the state
+        # directory: an invalid declaration must create nothing either.
+        if event == "Stop":
+            return ("AIQT guardrail (lease heartbeat): the registry's lease heartbeat declaration "
+                    "is invalid ({}). Nothing was written and no staleness watch ran: an invalid "
+                    "declaration never writes and never falls back to another mode. Correct it in "
+                    "the registry (the confinement's trust root).".format(cfg))
+        return None
+    sep = _orch_lease_hb_bookkeeping_sep(_orch_path(root, lease.get("path")), dests)
+    if sep is not None:
+        # the preliminary path-based refusal, judged BEFORE any memory save or guard-events
+        # append on EVERY path: a refusal never records into the refused lease
+        if event == "Stop":
+            return _orch_lease_hb_sep_msg(sep)
+        return None
+    if "lock_path" in cfg:
+        lock_sep = _orch_lease_hb_lock_sep(_orch_path(root, lease.get("path")),
+                                           _orch_path(root, cfg.get("lock_path")), dests)
+        if lock_sep is not None:
+            # refused BEFORE anything is taken or written: the lock must be a STABLE,
+            # SEPARATE coordination file this keeper never replaces (its own memory save or
+            # field refresh would otherwise replace the very file its flock is held on, and
+            # the next cooperating keeper would lock the replacement while this one still
+            # holds the orphaned inode). The holder is unproven here, so nothing is written
+            # or recorded; the Stop warning is the only surfacing while this persists.
+            if event == "Stop":
+                return ("AIQT guardrail (lease heartbeat): {}. Nothing was written: the "
+                        "declared lock must be a stable coordination file separate from the "
+                        "lease and from this keeper's bookkeeping records; declare a "
+                        "distinct lock_path.".format(lock_sep))
+            return None
+    # the path-based check above licenses NO writer (the holder still carries no descriptor):
+    # a fault anywhere before the first open writes and records nothing anywhere, and the
+    # Stop text is the only surfacing
+    session_id = data.get("session_id")
+    if not (isinstance(session_id, str) and session_id):
+        return None
+    path = _orch_path(root, lease.get("path"))
+    if event == "PostToolUse" and "field" not in cfg:
+        # the quick mtime path: with NO declared heartbeat field the mtime IS the recorded
+        # liveness value, so a fresh mtime alone proves the refresh is not due. With a declared
+        # field the field's own age can be due under a fresh mtime (the decision uses the OLDER
+        # of the two ages), so the shortcut never applies there and the full read runs.
+        try:
+            quick = os.lstat(path)
+            if stat.S_ISREG(quick.st_mode) and \
+                    0 <= now.timestamp() - quick.st_mtime < cfg["refresh_after_minutes"] * 60:
+                return None
+        except OSError:
+            pass  # absent or unstattable: the full walk below classifies it
+    memory = _orch_lease_hb_memory(dests)
+    # the holder still carries NO descriptor here: a row may be written only once the
+    # separation is proven on the descriptor this open yields (_orch_lease_hb_sep_fd below),
+    # so the failed-open branches hold nothing and withhold every row (the Stop text is the
+    # only surfacing)
+    parent, leaf, name, fault = _orch_lease_hb_open(root, path)
+    if fault is not None:
+        kind, detail = fault
+        if kind == "absent":
+            if event == "Stop" and memory.get("session_id") == session_id:
+                return ("AIQT guardrail (lease heartbeat): the declared lease is gone and this "
+                        "session held it earlier (lease lost). A hook never creates a lease; "
+                        "reconcile the record and re-acquire through the acquire step.")
+            return None
+        # the first open FAILED, so NO open descriptor exists to re-prove the lease/bookkeeping
+        # separation on, and a separation that cannot be proved is a collision (chkfcl): at this
+        # seam a cooperating writer can have swapped the declared lease onto a bookkeeping
+        # destination (a symlink this no-follow open refuses, an aliased ancestor directory, an
+        # unreadable plant), where a refusal row appended through the destination name would
+        # land in the file the declared lease now resolves to. The refusal is surfaced on Stop;
+        # NOTHING is recorded (the same discipline as the failed under-lock re-open).
+        if event == "Stop":
+            return ("AIQT guardrail (lease heartbeat): the declared lease cannot be evaluated "
+                    "({}). Nothing was written: an unreadable, symlinked or ambiguous lease is "
+                    "never rewritten by a hook; inspect and repair it by hand.".format(detail))
+        return None
+    try:
+        # descriptor ownership is exception-safe from the MOMENT of acquisition: a fault inside
+        # the first separation proof (or anywhere later) still closes each descriptor exactly
+        # once through this finally, and the holder stays unproven across such a fault
+        first_sep = _orch_lease_hb_prove(holder, parent, leaf, name, path, dests)
+        if first_sep is not None:
+            # the separation is re-proven on the FIRST opened descriptor too (the entry proof
+            # was path-based, and a cooperating writer can alias the lease onto a bookkeeping
+            # destination between that proof and this open, a hard link the path proof can no
+            # longer see), and the write-time binding is built here: the state directory is
+            # opened O_DIRECTORY|O_NOFOLLOW and refused outright when it IS the lease's parent
+            # directory by descriptor identity. Nothing is written and nothing is recorded
+            # while a refusal persists. DISCLOSED residual: the same-user concurrency class,
+            # stated once and completely in the section comment above _ORCH_LEASE_HB_KIND
+            # (these checks cover accidental mis-targeting and a stale or replaced lease,
+            # never a concurrently running process of the same user).
+            if event == "Stop":
+                return _orch_lease_hb_sep_msg(first_sep)
+            return None
+        return _orch_lease_hb_judge(root, cfg, lease, session_id, event, now, path, parent, leaf,
+                                    name, memory, holder)
+    finally:
+        # the holder is emptied BEFORE the descriptors are released: a crash row attempted
+        # after this cleanup (the binding's recorder) finds no held descriptor and withholds
+        # (the judge records a core fault's one row while the descriptor is still held); the
+        # holder OWNS the state-directory descriptor and the REAL event cleanup releases it,
+        # exactly once per acquisition, in ONE disposition with the lease descriptors, so a
+        # fault at any of these closes still attempts the rest
+        _orch_lease_hb_event_cleanup(holder, leaf, parent)
+
+
+def _orch_lease_hb_stop_exits_2(exc):
+    """True when a SystemExit leaving a lease-heartbeat binding would end the hook process with
+    status 2, the platform's blocking status: an integer code congruent to 2 modulo 256 within
+    the signed 64-bit range the interpreter converts the code through (the parent sees only the
+    low byte of the exit status, so a code of 258 ends the process with status 2 as well, while
+    a code outside that range ends it with status 255). Each binding re-raises such a stop as
+    SystemExit(1), so neither binding ever exits 2; every other stop propagates unchanged."""
+    code = exc.code
+    return isinstance(code, int) and -(1 << 63) <= code < (1 << 63) and code % 256 == 2
+
+
+def orch_lease_heartbeat_post(data):
+    """cnclse/recncl, PostToolUse (warn-only keeper, never blocks): run the lease-heartbeat core
+    after every tool call and stay SILENT on stdout (no systemMessage: guard-events rows, and
+    the result's error text, the dispatcher's stderr, are the only traces; the Stop binding
+    owns the message). The error text carries any withheld-bookkeeping report and the warnings
+    the core returns on this event, a written-unverified refresh (published, but the
+    post-replace verification failed) and a written-not-durable refresh (published and
+    verified, but its directory fsync failed), so neither write is ever reported as plain
+    success: the next Stop can see a fresh lease and would say nothing. The binding contains the
+    core's own faults: without this catch a core fault would surface the dispatcher's fail-open
+    systemMessage on EVERY tool call. A stop raised inside the core still propagates, but one
+    that would end the process with status 2 is re-raised as SystemExit(1)
+    (_orch_lease_hb_stop_exits_2), so this binding never exits 2."""
+    try:
+        holder = _orch_lease_hb_holder()
+        notice = None
+        try:
+            notice = _orch_lease_heartbeat(data, "PostToolUse", holder)
+        except Exception as exc:
+            _orch_lease_hb_crash_row(holder, exc)
+        withheld = _orch_lease_hb_withheld_text(holder, "PostToolUse")
+    except SystemExit as exc:
+        if _orch_lease_hb_stop_exits_2(exc):
+            raise SystemExit(1) from exc
+        raise
+    report = " ".join(text for text in (notice, withheld) if text)
+    if report:
+        return (0, None, report)  # exit 0, nothing structured: the report, never a block
+    return _allow()
+
+
+def orch_lease_heartbeat_stop(data):
+    """cnclse/recncl, Stop (warn-only keeper): the same core, and the ONE binding that surfaces its
+    warning (exit 0 systemMessage, at most one per turn end, only about a lease this session
+    holds, held, or has misconfigured). A withheld-bookkeeping report rides the hook result
+    too: appended to the banner where one is surfaced, else carried as the result's error text
+    (the dispatcher's stderr). It covers a turn that made no tool calls, never blocks, and
+    never alters orch_stop_guard's decision. A stop raised inside the core still propagates,
+    but one that would end the process with status 2 is re-raised as SystemExit(1)
+    (_orch_lease_hb_stop_exits_2), so this binding never exits 2."""
+    try:
+        message = None
+        holder = _orch_lease_hb_holder()
+        try:
+            message = _orch_lease_heartbeat(data, "Stop", holder)
+        except Exception as exc:
+            _orch_lease_hb_crash_row(holder, exc)
+        withheld = _orch_lease_hb_withheld_text(holder, "Stop")
+    except SystemExit as exc:
+        if _orch_lease_hb_stop_exits_2(exc):
+            raise SystemExit(1) from exc
+        raise
+    if message:
+        return _stop_warn(message if not withheld else message + " " + withheld)
+    if withheld:
+        return (0, None, withheld)  # exit 0, nothing structured: the report, never a block
+    return _allow()
+
+
+def _orch_lease_hb_resume_findings(reg, root, lease):
+    """The resume-audit layer of the lease heartbeat (shared with tools/orch_doctor.py
+    --resume-audit through _orch_resume_probes): an invalid declaration is a finding (the controls
+    cannot run), and where a valid declaration names a heartbeat field, a field that cannot be
+    evaluated, or whose recorded time is stale or future while the file's mtime may still read
+    fresh (the incident class), is a finding. Probes only; this NEVER writes the lease, and with
+    no declaration it adds nothing."""
+    status, cfg = _orch_lease_hb_config(reg, root)
+    if status == "bad":
+        return ["the lease heartbeat declaration is invalid ({}); the lease-heartbeat controls "
+                "cannot run until it is corrected".format(cfg)]
+    if status != "ok" or "field" not in cfg:
+        return []
+    parent, leaf, _name, fault = _orch_lease_hb_open(root, _orch_path(root, (lease or {}).get("path")))
+    if fault is not None:
+        kind, detail = fault
+        if kind == "absent":
+            return []  # no lease yet is a legitimate resume state (as the mtime probe reads it)
+        return ["the declared lease heartbeat cannot be evaluated ({}): cannot-evaluate"
+                .format(detail)]
+    try:
+        loaded = _orch_lease_hb_load(leaf)
+        if loaded[0] != "ok":
+            return ["the declared lease heartbeat cannot be evaluated ({}): cannot-evaluate"
+                    .format(loaded[1])]
+        parse_status, info = _orch_lease_hb_parse(loaded[1][1], cfg)
+        if parse_status != "ok":
+            return ["the declared lease heartbeat cannot be evaluated ({}): cannot-evaluate"
+                    .format(info)]
+        parsed, second = _orch_lease_hb_ts(info["hb"])
+        if parsed is None:
+            return ["the lease heartbeat value cannot be read ({}): cannot-evaluate".format(second)]
+        max_age = (lease or {}).get("max_age_hours")
+        age_class = _orch_lease_age_class((_orch_now() - parsed).total_seconds(), max_age)
+        if age_class == "cannot":
+            # unreachable behind _orch_lease_hb_config's horizon validation, kept so an invalid
+            # horizon can never read fresh if the two validations ever diverge (chkfcl)
+            return ["the lease max_age_hours declaration is not a usable horizon: cannot-evaluate"]
+        if age_class == "stale":
+            return ["the orchestrator lease heartbeat field is stale (older than {}h) although "
+                    "the file mtime may still read fresh".format(max_age)]
+        if age_class == "future":
+            return ["the orchestrator lease heartbeat field is in the future (clock skew or "
+                    "tamper)"]
+        return []
+    finally:
+        _orch_lease_hb_close(leaf, parent)
 
 
 # --- write-scope guard (EN-8, wrtscp) ----------------------------------------------------------------
@@ -15911,6 +21963,8 @@ HANDLERS = {
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
+    "orch_lease_heartbeat_post": orch_lease_heartbeat_post,
+    "orch_lease_heartbeat_stop": orch_lease_heartbeat_stop,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -15948,7 +22002,425 @@ HANDLER_EVENT = {
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,
+    "orch_lease_heartbeat_post": "PostToolUse",
+    "orch_lease_heartbeat_stop": "Stop",
 }
+
+
+class _HookDeadline(BaseException):
+    """Raised inside a _DeadlineWindow when its deadline passes, carrying that window as its one argument
+    so a catcher can tell its own deadline from an enclosing window's. It derives from BaseException, not
+    Exception, so no handler's own `except Exception` (or narrower) branch, several of which allow on a
+    cannot-evaluate, can catch it and turn an overrun into a decision."""
+
+
+class _DeadlineWindow:
+    """The one shared, nesting-safe borrow of the process real-time timer (ITIMER_REAL and its SIGALRM
+    disposition), used as `with _DeadlineWindow(seconds):` once per instance. Inside the window,
+    _HookDeadline is raised when `seconds` have passed, or earlier when a timer the caller had already
+    set comes due first (the window never outlives the caller's own deadline).
+
+    The caller's timer is restored elapsed-aware, never verbatim: its countdown is taken with
+    setitimer(ITIMER_REAL, 0) and the time of the take is read from time.monotonic, the clock the kernel
+    counts ITIMER_REAL in, so on exit an active caller timer is re-armed with what it had left minus the
+    time the window used (to the microsecond setitimer resolves), keeping its repeat interval; an inactive
+    one stays inactive; one that came due during the window is delivered once its handler is back (a
+    periodic one is first re-armed at the phase it would have reached, its expiries inside the window
+    delivered as the one notification the kernel itself would have left pending). A periodic timer taken
+    between an expiry and the delivery of its signal reads (0, interval), and the kernel no longer re-arms
+    it once taken, so the window counts it as due one interval after the take. A nested window is just
+    such a caller, so nesting restores each level.
+
+    The take and the restore each run with every maskable signal blocked (signal.pthread_sigmask over
+    signal.valid_signals()). A signal sent to the main thread while the mask is held (a caller expiry, an
+    enclosing window's expiry, or any other signal) stays pending until the mask in force before is put
+    back, once the window has fully taken or fully given back: its handler never sees a half-done take or
+    restore, and an exception it raises goes on from there. Two kinds of Python handler can still run while
+    the mask is held: one for a signal that arrived before the mask was set runs inside the call that sets
+    it, once the mask is set and before the take or the restore begins; and one for a signal another thread
+    received runs where the thread limit below says. The mask is put back by a direct call of the C
+    function that the signal module's pthread_sigmask wraps (_SET_MASK), never through that Python wrapper,
+    whose entry is a point where Python can run pending handlers: the call sets the mask before any Python
+    handler can run, so a handler that raises then raises from that call with the mask already back, and a
+    handler left pending behind it runs when Python next runs pending handlers.
+
+    The take (_take) records the caller's disposition, reads the clock, takes the caller's timer, installs
+    the window's handler and arms the window's timer, each once and in that order. A SIGALRM pending once
+    the window's handler is installed, before its timer is armed, cannot be the window's own: the caller's
+    timer came due at or before the take, or the signal was sent while the caller's disposition was in
+    place. The window then counts the caller's timer as due, sets `pending_at_entry`, and ends at once: it
+    gives everything back, the caller's handler receives that SIGALRM once as the mask is put back, and
+    __enter__ raises this window's _HookDeadline (or what that handler raised in its place). An enclosing
+    window's expiry that lands before an inner window's take is such a signal, so its deadline reaches its
+    owner.
+
+    The restore (_give_back) cancels the window's timer, reading what it had left; installs SIG_IGN, which
+    discards a pending SIGALRM, only when that timer had run out and the window's own expiry has not been
+    delivered since the timer was armed (`_unheard`, which _fire clears as below), so the SIGALRM pending is
+    that expiry and it never reaches the caller; reinstalls the caller's disposition; reads the clock and
+    decides, once, whether the caller's timer came due; re-arms the caller's timer; and, for a due expiry,
+    queues a SIGALRM with signal.raise_signal unless one is pending already, so the expiry is delivered
+    once, to the caller's handler, as the mask is put back.
+    Any other SIGALRM pending at the restore (one sent while the mask was held, say) is left pending and
+    reaches the caller's handler the same way, except where the restore takes it for the window's own
+    expiry: when the window's timer had run out, read by a cancel whose first run returned, and `_unheard` is
+    still set, the SIGALRM pending is discarded as that expiry even when it came from elsewhere (the paragraph
+    on _fire's reads below states the residual case). The kernel keeps at most one pending instance of a
+    standard signal, which leaves two merges: a SIGALRM from elsewhere pending with the window's own expiry
+    (in either order) is discarded with it, and a caller expiry that came due and another SIGALRM pending at
+    the restore reach the caller's handler as one delivery. A re-armed periodic timer whose next expiry also
+    falls due before the mask is put back adds no second delivery: the kernel can hold one SIGALRM pending for
+    the process and one for the thread, both are delivered on return from the call that puts the mask back,
+    before Python runs any handler, and Python runs a signal's handler once for all the deliveries it has
+    received since it last ran handlers (observed on Linux with Python 3.14.4: a timer expiry and a
+    raise_signal both pending ran the handler once). An enclosing window's expiry that falls due during the
+    restore is delivered the same way, after the inner window has fully finished. The restore discards nothing
+    in these cases: after an arming setitimer that raised (`_unheard` is set only once it has returned), after
+    a cancel whose first run raised (_twice says why), or after a read in _fire that raised; a window's own
+    expiry then pending reaches the caller's handler. Nothing in the hook installs SIG_DFL for SIGALRM:
+    main(), run as the hook process, runs the window under the disposition that process inherited. Under
+    SIG_DFL, the disposition the hook process normally inherits, that delivery kills the hook process by
+    SIGALRM, so it ends without the exit 2 that fails a PreToolUse call closed. An inherited SIG_IGN stays
+    ignored across exec, and under SIG_IGN the pending signal is discarded (not fatal).
+
+    An operation of the restore that raises (setitimer, signal.signal, sigpending or raise_signal failing)
+    is tried once more inside the same blocked section; the restore then goes on, and the first exception
+    is raised once it has finished. One that raises twice ends the restore there: the window is recorded as
+    broken (`broken` True, `armed` False) and the second exception is raised. Either way the window is
+    closed before the mask is put back, so no restore is left for a later call to finish. A broken window
+    leaves the process where its restore stopped, and nothing restores the caller's state after that: a
+    failed cancel leaves the window's timer running and its handler installed (that expiry then ends
+    nothing), with the caller's disposition and timer not back; a failed discard or reinstall leaves the
+    window's handler, or SIG_IGN, in place of the caller's, with the caller's timer inactive; a failed re-arm
+    leaves the caller's handler back and its timer inactive; and a failed pending check or queue leaves a
+    due expiry undelivered. The ItimerError (an OSError) that a broken window raises therefore reports a
+    timer state that is no longer the caller's, and a caller must let it go on, never swallow it: main()
+    turns it into exit 2 on a PreToolUse mode and a non-blocking warning on a fail-open one.
+
+    The window's own expiry is delivered in whatever frame is running while the window is live, the entry
+    of __exit__ before its first statement included, so _fire closes the window (the restore above) and
+    then raises this window's _HookDeadline. A caller expiry that came due is delivered to the caller's
+    handler as _fire puts the mask back. An enclosing window's _HookDeadline from that handler goes on as
+    it is, to its owner; any other exception it raises is held while the body unwinds on this window's
+    _HookDeadline, so no except branch in the body can catch it and decide on it, and __exit__ (or
+    __enter__'s cleanup) raises it in place of the deadline. Once the window's exit has begun, its own
+    expiry raises no deadline: _fire then only closes the window, if it is still armed.
+
+    Before its close attempts _fire reads whether the SIGALRM it handles is the window's own expiry, and
+    clears `_unheard` only when the window's timer reads as run out and no SIGALRM is pending. A SIGALRM
+    from elsewhere that _fire handles while the window's timer still runs therefore leaves the window's
+    expiry, if it comes pending later in the restore, to be discarded; an expiry already pending when _fire
+    runs inside the call that sets the mask (for a SIGALRM that arrived just before it) is discarded the
+    same way. A read that raises counts the expiry as delivered, and its exception is kept like a close
+    attempt's. Where this read leaves `_unheard` set, one SIGALRM is still taken for that expiry wrongly,
+    and discarded: one sent once the mask is set, when the window's expiry arrived just before the call that
+    sets it and _fire runs inside that call. _fire then reads the timer run out and a SIGALRM pending, as in
+    the ordering the other way round (a SIGALRM from elsewhere just before that call, the window's expiry
+    once the mask is set), so neither of its reads can tell the two apart. This discard is kept as a disclosed
+    residual. It is not the only way a SIGALRM from elsewhere is discarded as the window's expiry; the ways
+    that follow are examples, and the list is not exhaustive. A SIGALRM from elsewhere pending together with
+    the window's expiry merges with it and is discarded with it (the restore above). While the window is live,
+    with _fire installed and the main thread able to run handlers, Python runs _fire once for all the
+    SIGALRMs received since it last ran handlers, so a SIGALRM from elsewhere and the window's expiry that
+    both arrive, in either order, before the main thread next checks for signals (during a long C call, say)
+    are handled as one, and the one from elsewhere never reaches the caller. And the limits below state two
+    more: after a handler that raises at the entry of _fire has taken that expiry with it, and after another
+    thread has taken it.
+
+    CPython runs a Python handler only where it checks for signals: at the entry of a function, at the
+    back edge of a loop, and inside or on return from a call. So a handler can still run before the take or
+    the restore begins: at the entry of _close, and in the calls that read and set the mask (in the one that
+    sets it, once the mask is set). A handler that raises there runs before anything is taken, or before
+    anything is given back (the restore starts only once the call that sets the mask has returned), and
+    leaves the window armed. __exit__, _fire and __enter__'s cleanup therefore each make three close
+    attempts (each a call of _close, which does nothing once the window is closed), one after another with
+    no call, loop or function entry between them, and keep the first exception an attempt (or _fire's read
+    before them) raised, raising it once the attempts are over. The window is left armed only when a
+    raising handler interrupts each of the three attempts before _give_back begins. Its own timer then
+    still runs (only the restore cancels it), and _fire closes the window when that expiry is delivered:
+    once an attempt has marked the exit begun, with three more attempts that raise no deadline of their
+    own, the caller's disposition and timer coming back and an enclosing window's expiry that came due
+    meanwhile reaching its owner as the mask is put back; if none got that far, as the live window's
+    deadline, raised wherever the program is.
+
+    The limits that remain. A handler that raises at the entry of __exit__, before its first statement, or
+    at the return instruction of __enter__, after its last, runs where no code of the window can: the
+    window stays live until its own timer ends it through _fire, which then restores the caller's state and
+    raises its deadline wherever the program is. A handler that raises at the entry of _fire, before its
+    first statement, takes the window's expiry with it: a live window then has no deadline left, and its
+    restore when __exit__ closes it counts a SIGALRM then pending as that expiry and discards it. A window
+    whose three exit attempts are all interrupted, and whose expiry is then lost the same way (at the entry
+    of _fire, or in each of its three attempts), stays armed for good. And the mask is the calling thread's:
+    a signal sent to the process can still be taken by another thread that leaves it unblocked (a worker
+    thread review_dispatch_pin leaves running past its wait is one), and its Python handler then runs in
+    the main thread inside the blocked section, as whichever handler is installed at that moment (so a
+    window's own expiry taken that way can reach the caller's handler, and a SIGALRM from elsewhere then
+    pending at the restore can be discarded as that expiry).
+
+    The borrow is refused, and the window runs with no deadline at all (armed stays False, nothing is
+    changed), where it cannot be done faithfully: no finite positive `seconds` (the fail-open modes pass
+    None), a platform without setitimer, getitimer, pthread_sigmask, sigpending, valid_signals or
+    raise_signal (Windows) or without a callable _SET_MASK (the signal module defines its pthread_sigmask
+    wrapper only when _signal has the C function, so _SET_MASK is there whenever signal.pthread_sigmask is;
+    it is checked as well, so a borrow never starts without it), a thread other than the main thread
+    (Python runs signal handlers only there, and the mask it sets would not be the main thread's), a caller
+    that blocks SIGALRM (a deadline could not fire, and its pending notification could not be kept apart
+    from ours), or a SIGALRM disposition not installed from Python (getsignal returns None, which cannot be
+    reinstalled)."""
+    __slots__ = ("seconds", "armed", "broken", "pending_at_entry", "_live", "_ending", "_unheard", "_handler",
+                 "_timer", "_began", "_held")
+    # Every signal the take and the restore hold back (the kernel never blocks SIGKILL or SIGSTOP).
+    _EVERY_SIGNAL = frozenset(signal.valid_signals()) if hasattr(signal, "valid_signals") else frozenset()
+    # The C function signal.pthread_sigmask wraps, which puts the mask back before any Python handler runs.
+    _SET_MASK = getattr(_signal, "pthread_sigmask", None)
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.armed = self.broken = self.pending_at_entry = self._live = self._ending = self._unheard = False
+        self._handler = self._timer = self._began = self._held = None
+
+    def _fire(self, signum, frame):
+        # Whether the SIGALRM handled is the window's own expiry, read as the class docstring describes: a
+        # read that raises leaves it unknown, counted as delivered, and its exception is kept.
+        heard = True
+        try:
+            heard = (signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+                     and signal.SIGALRM not in signal.sigpending())
+        except BaseException as error:
+            first = error
+        else:
+            first = None
+        if heard:
+            self._unheard = False  # the window's own expiry has been delivered: none is pending for the restore
+        live = self._live
+        if not (live or self._ending):
+            if first is not None:
+                raise first
+            return
+        # The close attempts the class docstring describes, the first exception kept.
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        if not live:
+            # The exit had begun and left the window armed: its expiry only closes it.
+            if first is not None:
+                raise first
+            return
+        if first is None:
+            raise _HookDeadline(self)
+        if isinstance(first, _HookDeadline):
+            raise first  # an enclosing window's deadline, delivered as the caller expiry that came due
+        self._held = first
+        raise _HookDeadline(self) from first
+
+    def _raise_held(self):
+        held, self._held = self._held, None
+        if held is not None:
+            raise held
+
+    @staticmethod
+    def _as_taken(timer):
+        value, interval = timer
+        return (interval, interval) if value <= 0 < interval else timer
+
+    def _can_borrow(self):
+        seconds = self.seconds
+        if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+                or not math.isfinite(seconds) or seconds <= 0):
+            return False
+        if not all(hasattr(signal, name) for name in (
+                "setitimer", "getitimer", "ITIMER_REAL", "SIGALRM", "pthread_sigmask", "sigpending",
+                "valid_signals", "raise_signal")):
+            return False
+        if not callable(self._SET_MASK):
+            return False  # there whenever signal.pthread_sigmask is (the class docstring says why)
+        if threading.current_thread() is not threading.main_thread():
+            return False
+        if signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, ()):
+            return False
+        return signal.getsignal(signal.SIGALRM) is not None
+
+    def __enter__(self):
+        if self.armed or not self._can_borrow():
+            return self
+        # The mask is read first, so a handler already due runs before anything is blocked or taken, and
+        # the mask to put back is known even when a handler raises as the blocking call returns. The return
+        # statement is inside the try, so a handler raising up to it gives everything back (the return
+        # instruction itself is a limit the class docstring states).
+        try:
+            mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+            try:
+                signal.pthread_sigmask(signal.SIG_BLOCK, self._EVERY_SIGNAL)
+                self._take()
+            finally:
+                self._SET_MASK(signal.SIG_SETMASK, mask)
+            return self
+        except BaseException:
+            # The take failed, or a handler raised as the mask was set or put back: whatever the window
+            # holds goes back to the caller before the exception goes on, through the close attempts the
+            # class docstring describes, the first exception kept.
+            try:
+                self._ending = True
+                self._live = False
+                self._close()
+            except BaseException as error:
+                first = error
+            else:
+                first = None
+            try:
+                self._close()
+            except BaseException as error:
+                first = error if first is None else first
+            try:
+                self._close()
+            except BaseException as error:
+                first = error if first is None else first
+            if first is not None:
+                raise first
+            self._raise_held()
+            raise
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            # The close attempts the class docstring describes, the first exception kept.
+            self._ending = True
+            self._live = False
+            self._close()
+        except BaseException as error:
+            first = error
+        else:
+            first = None
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        try:
+            self._close()
+        except BaseException as error:
+            first = error if first is None else first
+        if first is not None:
+            raise first
+        self._raise_held()
+        return False
+
+    def _close(self):
+        """One close attempt: run _give_back with every maskable signal blocked, then put back the mask in
+        force before (through _SET_MASK), which delivers what came pending meanwhile. It marks the exit
+        begun (`_ending` before `_live` goes False, so an armed window that is not live is always one whose
+        exit has begun or whose take is still running). _give_back runs only once the call that sets the
+        mask has returned: a handler that raises before then leaves the window armed and holding everything,
+        and the caller makes its next attempt."""
+        self._ending = True
+        self._live = False
+        if not self.armed:
+            return
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, self._EVERY_SIGNAL)
+            self._give_back()
+        finally:
+            self._SET_MASK(signal.SIG_SETMASK, mask)
+
+    def _take(self):
+        """The take, run with every maskable signal blocked, in the order the class docstring gives. The
+        clock is read just before the take, so the window's use is never undercounted (a caller timer comes
+        back at most microseconds early, never late). Anything that raises once the timer is taken gives it
+        back, with the disposition, before the exception goes on."""
+        handler = signal.getsignal(signal.SIGALRM)
+        began = time.monotonic()
+        timer = self._as_taken(signal.setitimer(signal.ITIMER_REAL, 0))
+        (self._handler, self._timer, self._began, self.pending_at_entry, self._unheard, self._ending,
+         self.broken, self.armed) = (handler, timer, began, False, False, False, False, True)
+        try:
+            signal.signal(signal.SIGALRM, self._fire)
+            if signal.SIGALRM in signal.sigpending():
+                self.pending_at_entry = True  # not the window's expiry: its timer is not armed yet
+                self._give_back()
+                raise _HookDeadline(self)
+            left = timer[0]
+            signal.setitimer(signal.ITIMER_REAL, self.seconds if left <= 0 else min(self.seconds, left))
+            self._unheard = True  # from here on an expiry of the window's timer can be pending at the restore
+            self._live = True
+        except BaseException:
+            self._give_back()
+            raise
+
+    def _give_back(self):
+        """The restore, run with every maskable signal blocked, in the order the class docstring gives: each
+        operation through _twice, the clock read once to decide whether the caller's timer came due, and a
+        due expiry queued last. `armed` is False when it returns or raises."""
+        self._live = False
+        if not self.armed:
+            return
+        errors = []
+        try:
+            reading = self._twice(errors, signal.setitimer, signal.ITIMER_REAL, 0)
+            if not errors and reading == (0.0, 0.0) and self._unheard:
+                # The window's timer ran out (read by a cancel whose first run returned, as _twice says) and
+                # its expiry has not been delivered since: the SIGALRM pending is its own.
+                self._twice(errors, signal.signal, signal.SIGALRM, signal.SIG_IGN)
+            self._unheard = False
+            self._twice(errors, signal.signal, signal.SIGALRM, self._handler)
+            value, interval = self._timer
+            left = value - (time.monotonic() - self._began)
+            due = self.pending_at_entry or (value > 0 and left <= 0)
+            if left > 0:
+                self._twice(errors, signal.setitimer, signal.ITIMER_REAL, left, interval)
+            elif due and interval > 0:
+                self._twice(errors, signal.setitimer, signal.ITIMER_REAL, interval - (-left % interval), interval)
+            if due and signal.SIGALRM not in self._twice(errors, signal.sigpending):
+                self._twice(errors, signal.raise_signal, signal.SIGALRM)
+        except BaseException:
+            self.broken = True
+            raise
+        finally:
+            self.armed = False
+        if errors:
+            raise errors[0]
+
+    @staticmethod
+    def _twice(errors, operation, *args):
+        """One restore operation, tried once more when it raises, returning what the run that returned gave:
+        the first exception is appended to errors, and a second one goes on. Each operation can run twice
+        with the effect of once: setitimer and signal.signal set the same state again, sigpending only
+        reads, and a second queued SIGALRM joins the one already pending. What the cancel reads is the one
+        exception: a first run that cancels the window's timer and then raises leaves the retry reading an
+        inactive timer that was running, so _give_back counts that timer as run out only from a cancel whose
+        first run returned, and after a retried cancel it discards nothing (it never discards on an
+        unknown)."""
+        try:
+            return operation(*args)
+        except BaseException as exc:
+            errors.append(exc)
+            return operation(*args)
+
+
+def _deadline_message(handler_name, seconds, payload):
+    """The stderr refusal main() writes when a PreToolUse check runs out of its deadline: it names the
+    handler, the budget and the payload size, and the two ways to bring the input inside the budget."""
+    if payload is None:
+        size = "an input it had not finished reading"
+    else:
+        size = "an input of {} bytes".format(len(payload.encode("utf-8", "replace")))
+    return ("AIQT guardrail: the {} check could not reach a decision within its {:g}-second budget on {}; "
+            "failing closed. Split the command into smaller calls, or move long content into a file and "
+            "pass its path.".format(handler_name, seconds, size))
+
+
+def _pending_alarm_message(handler_name, seconds):
+    """The stderr refusal main() writes when the window ends at its entry because a SIGALRM was already
+    pending (pending_at_entry): the check did not run, so nothing about the input or the budget applies."""
+    return ("AIQT guardrail: the {} check did not run: a SIGALRM was already pending when its {:g}-second "
+            "deadline was being set, so the deadline ended at once; failing closed.".format(handler_name, seconds))
 
 
 def _dispatcher_fail_open_warn(handler_name, detail):
@@ -15982,6 +22454,24 @@ def _stderr_note(line):
         pass
 
 
+def _exception_text(exc):
+    """'<type name>: <message>' for a diagnostic, built so that it cannot raise out of main(): an exception
+    whose str() raises (or whose type name cannot be formatted) gets a placeholder in its place, so main()
+    still returns its mode's exit. A _HookDeadline that comes due while it formats goes on as it is."""
+    try:
+        return "{}: {}".format(type(exc).__name__, exc)
+    except _HookDeadline:
+        raise
+    except BaseException:
+        pass
+    try:
+        return "{}: <its message could not be read>".format(type(exc).__name__)
+    except _HookDeadline:
+        raise
+    except BaseException:
+        return "<an exception whose type and message could not be read>"
+
+
 def main(argv):
     # The MODE (argv[0]) alone decides the error posture, never the payload (which may be unreadable).
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
@@ -16008,42 +22498,107 @@ def main(argv):
                 return 0
         _stderr_note("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail))
         return 2
+    # The PreToolUse deadline: every mode that is not fail-open reads its payload and runs its handler
+    # inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS, armed before the read; when the check has not
+    # decided by then the window raises _HookDeadline and the call fails CLOSED with exit 2 and a stderr
+    # line naming the handler, the budget and the input size. The window closes (the timer is cancelled
+    # and any caller timer restored) before the stdout decision below is written; the stderr notes of
+    # the unreadable-payload and handler-crash paths are written inside it, and both paths exit 2 even
+    # when the deadline interrupts the note. A fail-open mode gets a window with no deadline, so its
+    # error posture is unchanged. Any other exception out of the window keeps the mode's posture too.
+    window = _DeadlineWindow(None if is_fail_open else PRETOOL_BUDGET_SECONDS)
+    payload = None
     try:
-        data = json.loads(sys.stdin.read())
-        if not isinstance(data, dict):
-            raise ValueError("payload is not a JSON object")
-    except Exception as exc:  # any failure to read the payload is an unreadable payload
-        # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and ALSO a
-        # RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those escape as a
-        # traceback with exit 1, which the platform treats as non-blocking. Every exception is named.
-        detail = "{}: {}".format(type(exc).__name__, exc)
-        if is_fail_open:
-            # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
-            # payload (including a bare '{' or any garbage) can ever wedge the session. The warn print
-            # raising (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
+        with window:
             try:
-                return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
-            except BaseException:
-                return 0
-        # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
-        # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
-        _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
+                payload = sys.stdin.read()
+                data = json.loads(payload)
+                if not isinstance(data, dict):
+                    raise ValueError("payload is not a JSON object")
+            except Exception as exc:  # any failure to read the payload is an unreadable payload
+                # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and
+                # ALSO a RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those
+                # escape as a traceback with exit 1, which the platform treats as non-blocking. Every exception
+                # is named.
+                detail = _exception_text(exc)
+                if is_fail_open:
+                    # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so
+                    # no Stop payload (including a bare '{' or any garbage) can ever wedge the session. The
+                    # warn print raising (a stdout that cannot be written or flushed) loses the warning and
+                    # keeps the 0.
+                    try:
+                        return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
+                    except BaseException:
+                        return 0
+                # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
+                # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
+                _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
+                return 2
+            try:
+                code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
+                # The result is checked here, inside the window and this crash branch, so a malformed one
+                # gets the mode's posture: an exit code other than 0 or 2 (one os._exit cannot take, or one
+                # the platform reads as non-blocking) or a stderr text neither a str nor None (whose truth
+                # test below could raise). The stdout object is checked by its json.dumps below.
+                if type(code) is not int or code not in (0, 2) or not (
+                        stderr_text is None or type(stderr_text) is str):
+                    raise TypeError("the handler result is not an exit code of 0 or 2 with a str or None "
+                                    "stderr text")
+            except Exception as exc:  # a handler crash is an unreadable result
+                if is_fail_open:
+                    # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws
+                    # on a pathological message): WARN and exit 0, never exit 2. The warn print raising (a
+                    # stdout that cannot be written or flushed) loses the warning and keeps the 0.
+                    try:
+                        return _dispatcher_fail_open_warn(
+                            handler_name, "handler crash: {}".format(_exception_text(exc)))
+                    except BaseException:
+                        return 0
+                # A PreToolUse handler crash fails closed (block), not pass.
+                _stderr_note("aiqt_hooks: handler {} failed ({}); failing closed".format(
+                    handler_name, _exception_text(exc)))
+                return 2
+    except _HookDeadline as exc:
+        if exc.args[:1] != (window,):
+            raise  # an enclosing window's deadline (an in-process caller's), not this call's
+        # Built inside a guard like the other diagnostics, so a message that cannot be built (a payload
+        # whose encoding raises, a MemoryError) still leaves exit 2, with a fixed note in its place. A
+        # window that ended at its entry on a SIGALRM already pending gets its own note: its budget did
+        # not run out.
+        try:
+            if window.pending_at_entry:
+                note = _pending_alarm_message(handler_name, window.seconds)
+            else:
+                note = _deadline_message(handler_name, window.seconds, payload)
+        except _HookDeadline:
+            raise
+        except BaseException:
+            note = "AIQT guardrail: a PreToolUse check could not reach a decision within its budget; failing closed."
+        _stderr_note(note)
         return 2
-    try:
-        code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
-    except Exception as exc:  # a handler crash is an unreadable result
+    except BaseException as exc:
+        # Anything else out of the window: an error entering or leaving it (an ItimerError, or a caller's
+        # own alarm handler raising when its expiry is delivered during the take or on the way out), or a
+        # BaseException from the read or the handler that no branch above catches. Left to escape, it
+        # would end the run with a traceback and status 1, which the platform treats as non-blocking.
+        if is_fail_open and isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            # A stop (an exit or an interrupt) raised in a fail-open mode ends the hook as it would with no
+            # window, so a binding that sets its own exit status keeps it (the lease-heartbeat bindings,
+            # whose exit-status vectors run this dispatcher in a child process), save a status the
+            # platform reads as blocking: an exit whose status would be 2 (_orch_lease_hb_stop_exits_2,
+            # which judges any SystemExit) goes on as an exit with status 1, so no fail-open mode exits 2
+            # on this path.
+            if isinstance(exc, SystemExit) and _orch_lease_hb_stop_exits_2(exc):
+                raise SystemExit(1) from exc
+            raise
+        detail = _exception_text(exc)
         if is_fail_open:
-            # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
-            # pathological message): WARN and exit 0, never exit 2. The warn print raising (a stdout
-            # that cannot be written or flushed) loses the warning and keeps the 0.
             try:
-                return _dispatcher_fail_open_warn(
-                    handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
+                return _dispatcher_fail_open_warn(handler_name, "dispatcher error: {}".format(detail))
             except BaseException:
                 return 0
-        # A PreToolUse handler crash fails closed (block), not pass.
-        _stderr_note("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
-            handler_name, type(exc).__name__, exc))
+        _stderr_note("aiqt_hooks: {}: the check did not complete ({}); failing closed".format(
+            handler_name, detail))
         return 2
     if stdout_obj is not None:
         try:
@@ -16059,8 +22614,8 @@ def main(argv):
             # so a lost decision blocks rather than allows.
             if is_fail_open:
                 return 0
-            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}: {}); "
-                         "failing closed".format(handler_name, type(exc).__name__, exc))
+            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}); "
+                         "failing closed".format(handler_name, _exception_text(exc)))
             return 2
     if stderr_text:
         _stderr_note(stderr_text)

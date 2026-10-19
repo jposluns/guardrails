@@ -17,16 +17,47 @@
 #
 # This reads every paginated run from `actions/runs?head_sha=` AND the newest pages of the unfiltered
 # `actions/runs` listing back to a lower bound derived from the commit's committer date, keeping the
-# runs whose head_sha is exactly this commit. Both need only Actions: Read.
+# runs whose head_sha is exactly this commit. Both need only Actions: Read. Under --wait, THE
+# PULL-REQUEST PROBE below also reads the repository's open pull requests (`pulls`) and, when none at
+# this head into the base reads MERGEABLE, the pull requests associated with this commit
+# (`commits/<sha>/pulls`): on a public repository those are public data, expected to need no further
+# permission (not verified live); a private repository's token also needs Pull requests: Read, or
+# every --wait exits 2.
 #
 # Usage:
-#   tools/ci-status.sh                 # current HEAD, report once
-#   tools/ci-status.sh <sha>           # a given commit, report once
-#   tools/ci-status.sh <sha> --wait    # poll until terminal, bounded and fail-loud
+#   tools/ci-status.sh                              # current HEAD, report once
+#   tools/ci-status.sh <sha>                        # a given commit, report once
+#   tools/ci-status.sh <sha> --wait                 # poll until terminal, bounded and fail-loud,
+#                                                   # refusing a head that, with no merge into the
+#                                                   # base shown in its associated pull requests,
+#                                                   # has no open pull request into it now
+#                                                   # or only CONFLICTING ones (THE PULL-REQUEST PROBE)
+#   tools/ci-status.sh <sha> --require-base main    # additionally trust only pull_request runs
+#                                                   # recorded against base main, and require a
+#                                                   # conforming completed successful run of the
+#                                                   # workflow file .github/workflows/quality.yml (see
+#                                                   # THE BASE-BRANCH REQUIREMENT below)
+#   ... --require-base main --require-workflow PATH # the same, requiring the workflow whose file
+#                                                   # is PATH instead of the default quality.yml
 #
-# Exit codes: 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check,
-# 2 no run found, API error, or the repository cannot be determined (see THE REPOSITORY IS THE
-# CHECKOUT'S OWN below). Report-once (no --wait) never returns 0 for a non-terminal run.
+# Exit codes: 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
+# does not satisfy --require-base, or no conforming completed successful run of the required
+# workflow file under --require-base (report-once refuses at once; --wait refuses after its
+# settle window), a --wait whose head, with no merge into the base shown in its associated pull
+# requests, has no open pull request (still at the last of the probe's reads), only open pull
+# requests into another base, or only open pull requests into the base that GitHub reports
+# CONFLICTING (see THE PULL-REQUEST PROBE below; a head whose associated pull requests show a merge
+# into the base is decided by its runs alone), 2 no run found, API error, a malformed run
+# record (in one-shot and --wait mode alike), a missing, unusable or repeated --require-base or
+# --require-workflow value, the repository cannot be determined (see THE REPOSITORY IS THE
+# CHECKOUT'S OWN below), or a --wait whose pull-request probe is refused the pull requests, reads a
+# malformed response, or at its bound still reads UNKNOWN, a pull request that changed between the
+# listing and its own read, or a failed read (a response that is not valid JSON included). So each of
+# those three refusals (exit 1) comes only from a read that also read the head's associated pull
+# requests: where that associated read fails at every read, and in none of the PERMANENT forms, the
+# probe makes all 12 reads (11 re-reads) and exits 2 (before the probe read the associated pull
+# requests, each of the three was refused at once, exit 1).
+# Report-once (no --wait) never returns 0 for a non-terminal run.
 set -uo pipefail
 
 # Resolve whatever rev was given (short SHA, branch, tag, HEAD~1) to a FULL 40-character
@@ -35,18 +66,91 @@ set -uo pipefail
 # actually succeeded. That fails closed, blocking a merge rather than permitting one, but it
 # is still a misreport, so resolve the input rather than trusting it. Fail loudly when the
 # rev does not resolve, because an unresolvable rev is an error, not an absent run.
-# Accept the flag in any position, so `ci-status.sh --wait` means "HEAD, and wait" rather
-# than treating the flag as a rev. The first non-flag argument is the rev; anything starting
-# with a hyphen is a flag.
+# Accept the flags in any position, so `ci-status.sh --wait` means "HEAD, and wait" rather
+# than treating the flag as a rev. The one non-flag argument is the rev; a second non-flag
+# argument is refused (exit 2), never read last-wins, because a stray positional that resolves
+# (a branch name) would silently change which commit is checked. Anything starting
+# with a hyphen is a flag, except the one argument that follows --require-base or
+# --require-workflow, which is its value. Each value is validated AS IT IS CONSUMED, before any
+# git or API read: a missing, empty, whitespace-only or hyphen-led value is refused (exit 2),
+# because an empty or whitespace-only value would silently mean "no requirement", the exact
+# fail-open these options exist to prevent, and a hyphen-led one is a swallowed flag, not a
+# name. A repeated --require-base or --require-workflow is also refused (exit 2), never read
+# last-wins: under last-wins a forgotten earlier value would silently replace the requirement
+# the caller believes is in force. --require-workflow without --require-base is refused too,
+# because alone it would be a silent no-op.
 SHA_IN="HEAD"
+SHA_IN_SET=0
 WAIT=""
+REQUIRE_BASE=""
+REQUIRE_BASE_SET=0
+# The workflow FILE whose conforming completed successful run --require-base additionally
+# demands, matched against each run's recorded workflow path (the runs API's .path), never its
+# display name: any workflow can carry name: Quality, so a name match would let a same-named
+# run from another file stand in. quality.yml is this repository's aggregated workflow, the one
+# required status the merge lane reads.
+REQUIRE_WORKFLOW=".github/workflows/quality.yml"
+REQUIRE_WORKFLOW_SET=0
+EXPECT_VALUE=""
 for arg in "$@"; do
+  if [ -n "$EXPECT_VALUE" ]; then
+    option="$EXPECT_VALUE"
+    EXPECT_VALUE=""
+    label="branch name"
+    [ "$option" = "--require-workflow" ] && label="workflow path"
+    case "$arg" in
+      -*)
+        printf 'ERROR: %s needs a %s; a hyphen-led value is refused (a swallowed flag, not a name).\n' "$option" "$label" >&2
+        exit 2
+        ;;
+      *[![:space:]]*) ;;
+      *)
+        printf 'ERROR: %s needs a %s; an empty or whitespace-only value is refused.\n' "$option" "$label" >&2
+        exit 2
+        ;;
+    esac
+    if [ "$option" = "--require-base" ]; then
+      if [ "$REQUIRE_BASE_SET" -eq 1 ]; then
+        printf 'ERROR: --require-base is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      REQUIRE_BASE="$arg"
+      REQUIRE_BASE_SET=1
+    else
+      if [ "$REQUIRE_WORKFLOW_SET" -eq 1 ]; then
+        printf 'ERROR: --require-workflow is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      REQUIRE_WORKFLOW="$arg"
+      REQUIRE_WORKFLOW_SET=1
+    fi
+    continue
+  fi
   case "$arg" in
     --wait) WAIT="--wait" ;;
-    -*) printf 'ERROR: unknown option %s (only --wait is supported).\n' "$arg" >&2; exit 2 ;;
-    *) SHA_IN="$arg" ;;
+    --require-base) EXPECT_VALUE="--require-base" ;;
+    --require-workflow) EXPECT_VALUE="--require-workflow" ;;
+    -*) printf 'ERROR: unknown option %s (only --wait, --require-base BRANCH and --require-workflow PATH are supported).\n' "$arg" >&2; exit 2 ;;
+    *)
+      if [ "$SHA_IN_SET" -eq 1 ]; then
+        printf 'ERROR: more than one rev was given; a repeated rev is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      SHA_IN="$arg"
+      SHA_IN_SET=1
+      ;;
   esac
 done
+if [ -n "$EXPECT_VALUE" ]; then
+  label="branch name"
+  [ "$EXPECT_VALUE" = "--require-workflow" ] && label="workflow path"
+  printf 'ERROR: %s needs a %s and none was given.\n' "$EXPECT_VALUE" "$label" >&2
+  exit 2
+fi
+if [ "$REQUIRE_WORKFLOW_SET" -eq 1 ] && [ "$REQUIRE_BASE_SET" -ne 1 ]; then
+  printf 'ERROR: --require-workflow is read only under --require-base; alone it would be a silent no-op.\n' >&2
+  exit 2
+fi
 if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
   printf 'ERROR: %s does not resolve to a commit in this repository.\n' "${SHA_IN}" >&2
   exit 2
@@ -227,12 +331,81 @@ SETTLE_OBSERVATIONS=5
 # payload plus a complete GitHub workflow YAML, event-filter, and glob implementation; the SHA and
 # repository files alone cannot answer that question for pull_request base branches or paths.
 
+# THE BASE-BRANCH REQUIREMENT (--require-base BRANCH). The merge lane trusts
+# a green run for a merge into BRANCH only when that run evaluated its pull request against BRANCH: a
+# run that passed while the PR targeted another branch says nothing about a merge into BRANCH, and
+# quality.yml no longer carries `edited`, so a base retarget alone schedules no fresh run. Under this
+# option a run counts only when its event is pull_request AND the pull request GitHub recorded ON THE
+# RUN names BRANCH as its base (the runs API's pull_requests[].base.ref). That stored record, not the
+# PR's current base read from the pulls API for the run's head SHA, is the authoritative source:
+# GitHub fills workflow_run.pull_requests when the run is created and does not rewrite it on later PR
+# edits (observed behaviour: a run created before its PR opens keeps an empty array forever, which a
+# matched-by-head recomputation would backfill), so it names the base the run actually evaluated (its
+# GITHUB_BASE_REF), while the PR's current base reflects a retarget made AFTER the run and would
+# accept exactly the stale pre-retarget run this option exists to refuse. EVERY run of the commit
+# must satisfy the requirement, not just one: skipping nonconforming runs instead would let a
+# conforming green sibling (for example the msg-leaks.yml run a retarget does re-trigger) stand in
+# for the missing pre-retarget Quality run. AND a conforming run set alone is not enough: after a
+# retarget to main the only run on the head can be that msg-leaks.yml run (quality.yml filters
+# pull_request on branches: [main] and does not list edited, so the retarget schedules no fresh
+# Quality run), and that lone conforming sibling would otherwise read green with no Quality
+# evidence at all. The option therefore ALSO requires at least one completed, successful,
+# conforming run whose workflow FILE is the one --require-workflow names (default
+# .github/workflows/quality.yml, the aggregated workflow whose status the merge lane reads),
+# matched by the run's recorded workflow path (the runs API's .path), never by its display
+# name: any workflow can carry name: Quality, so a name match would let a same-named run from
+# another file stand in; absent such a run the result is unmet (exit 1, naming the missing
+# workflow file): report-once refuses on its single snapshot, and --wait keeps polling within
+# the settle window first, because a qualifying run can still be registered late on this head
+# (a reopen schedules one). A run recorded against another
+# base (a pre-retarget run), a run of another event (a push run), and a run whose base cannot be
+# established (an empty pull_requests array, or an entry naming no base branch, which GitHub also
+# leaves for a run created before its PR) are each reported by name and end the check with exit 1,
+# in one-shot and --wait mode alike: a run's recorded base never changes, so no amount of waiting
+# turns that read green. RECOVERY: when a nonconforming run (a pre-retarget run) is RETAINED
+# on this head, a reopen does add a conforming run on the same head, but the retained run still fails the
+# every-run rule, so only a refresh push, which moves the head SHA this script pins, earns a
+# run set this option trusts; a MISSING run of the required workflow file beside an otherwise
+# conforming set needs no new head: a qualifying run on this same head (which a reopen
+# schedules) satisfies it. A record of this commit that under this option lacks a usable
+# event, pull_requests or path field entirely is a malformed run record (exit 2, API error),
+# in one-shot and --wait mode alike:
+# malformed evidence is a property of the stored record, which polling re-reads unchanged, not a
+# retryable API condition.
+# RESIDUAL (disclosed, not closed): that the stored array is never rewritten is observed GitHub
+# behaviour, not a documented contract; if GitHub recomputed it from the PR's current state, a
+# pre-retarget run could read as conforming. Server-side branch protection remains the backstop.
+# RESIDUAL (disclosed, not closed): the required-workflow match reads the runs API's .path as the
+# BARE repository-relative workflow file path (observed live 2026-10-13 on this repository's runs:
+# exactly .github/workflows/quality.yml, with no ref suffix); that format is observed GitHub
+# behaviour, not a documented contract. Should GitHub ever return another format (an @ref suffix,
+# say), the exact raw-JSON comparison fails for every run, so every --require-base check exits 1
+# and the merge lane is blocked: fail closed, never a pass.
+# NOT CHECKED (disclosed): only each recorded entry's base.ref is read, never its base.repo or its
+# head.sha, so an entry naming the required branch of another repository reads as conforming;
+# whether GitHub ever records such an entry on a pull_request run is unverified. AVAILABILITY COST
+# (disclosed, unverified): GitHub can leave pull_requests empty for a run created from a fork PR;
+# such a run never satisfies the requirement, so under this option a fork PR may always be refused
+# (exit 1). CALLER (disclosed): no production caller in this repository passes --require-base (its
+# behaviour self-test exercises the option); the merge-lane
+# invocation lives in the merge lane's own tooling, outside this tree.
+#
 # One jq program, two modes. "step" validates ONE raw page of the unfiltered listing, prints "stop" or
 # "more", then the page reduced to the fields used here as one compact JSON line. "verdict" receives the
 # head_sha query's pages and the reduced scan pages, re-checks every completeness condition, and emits
-# the run rows. Status and conclusion come FIRST in every TSV row. jq's @tsv escaping keeps tabs,
+# the run rows. Status, conclusion, the base-requirement verdict (a fixed token: "-", "met" or
+# "unmet") and the required-workflow verdict (a fixed token: "-", "match" or "other") come FIRST
+# in every TSV row, then the base verdict's display detail, then the run's recorded workflow path
+# (display-only; anything but a nonempty string reads as "-", so an empty or non-string path in
+# plain mode can neither shift later columns nor abort the row), then id, name and URL.
+# The required-workflow match is computed INSIDE jq, on the run's raw JSON .path
+# against the required path passed in as --arg require_workflow, and only the fixed token reaches
+# Bash. An earlier revision compared Bash's @tsv-escaped path column with the unescaped required
+# path, so two different paths that escape alike (a recorded real tab versus a requested literal
+# backslash-t) read as equal, and identical paths holding a tab, newline, carriage return or
+# backslash never matched. jq's @tsv escaping keeps tabs,
 # newlines, and backslashes in display fields from becoming record delimiters, so a workflow name cannot
-# move either gating field. Name and URL remain display-only. The no-run case gets an explicit sentinel
+# move the gating fields. Name, URL and the path column remain display-only. The no-run case gets an explicit sentinel
 # rather than a rendered "null", because a real run's .status is nullable in the schema and must not be
 # mistaken for "no run yet".
 #
@@ -300,7 +473,14 @@ def malformed_run:
   or ((.name | type) != "string")
   or ((.name | length) == 0)
   or ((.html_url | type) != "string")
-  or ((.html_url | length) == 0);
+  or ((.html_url | length) == 0)
+  or (($require_base != "")
+      and (((.event | type) != "string")
+           or ((.event | length) == 0)
+           or ((.path | type) != "string")
+           or ((.path | length) == 0)
+           or ((.pull_requests | type) != "array")
+           or any(.pull_requests[]; (type != "object") or ((.base | type) != "object"))));
 def terminal_page:
   ((.workflow_runs | length) < 100)
   or all(.workflow_runs[]; (.created_at | fromdateiso8601) < $lower_bound);
@@ -314,7 +494,28 @@ def explained_shift($previous):
         and (.workflow_runs[:$repeats] == $previous.workflow_runs[-$repeats:]));
 def scan_page_overrun($index):
   .total_count < (100 * $index + (.workflow_runs | length));
-def projection: [.head_sha, .status, .conclusion, .name, .html_url];
+def projection:
+  [.head_sha, .status, .conclusion, .name, .html_url]
+  + (if $require_base == "" then [] else [.event, .path, [.pull_requests[] | .base.ref]] end);
+def base_requirement:
+  if $require_base == "" then ["-", "-"]
+  elif .event != "pull_request" then
+    ["unmet", "its event is " + (.event | tojson) + ", not pull_request"]
+  elif (.pull_requests | length) == 0 then
+    ["unmet", "no pull request is recorded on the run, so its base cannot be established"]
+  elif any(.pull_requests[]; ((.base.ref | type) != "string") or ((.base.ref | length) == 0)) then
+    ["unmet", "a pull request recorded on the run names no base branch, so its base cannot be established"]
+  elif all(.pull_requests[]; .base.ref == $require_base) then
+    ["met", "-"]
+  else
+    ["unmet", "its recorded base is " + ([.pull_requests[].base.ref] | unique | join(", "))]
+  end;
+def workflow_requirement:
+  if $require_base == "" then "-"
+  elif .path == $require_workflow then "match"
+  else "other" end;
+def display_path:
+  if ((.path | type) == "string") and ((.path | length) > 0) then .path else "-" end;
 if $mode == "step" then
   if (length != 1) or (.[0] | malformed_page) then
     error("malformed workflow-runs response")
@@ -325,7 +526,8 @@ if $mode == "step" then
     | (if terminal_page then "stop" else "more" end),
       ({total_count,
         workflow_runs: [.workflow_runs[]
-                        | {id, head_sha, status, conclusion, name, html_url, created_at}]}
+                        | {id, head_sha, status, conclusion, name, html_url, created_at}
+                          + (if $require_base == "" then {} else {event, path, pull_requests} end)]}
        | tojson)
   end
 elif $mode != "verdict" then
@@ -387,7 +589,10 @@ else
                   (if ($scan_kept | length) < ($scan_all | length) then "__SHIFTED__" else empty end),
                   ($runs[]
                    | .[0]
-                   | [(.status // "-"), (.conclusion // "-"), (.id | tostring), .name, .html_url]
+                   | [(.status // "-"), (.conclusion // "-")]
+                     + base_requirement
+                     + [workflow_requirement, display_path,
+                        (.id | tostring), .name, .html_url]
                    | @tsv)
                 end
             end
@@ -397,7 +602,8 @@ end'
 
 ci_jq() {
   jq -s -r --arg mode "$1" --arg requested_sha "$SHA" --argjson lower_bound "$LOWER_BOUND" \
-    --argjson max_pages "$SCAN_MAX_PAGES" "$CI_STATUS_JQ"
+    --argjson max_pages "$SCAN_MAX_PAGES" --arg require_base "$REQUIRE_BASE" \
+    --arg require_workflow "$REQUIRE_WORKFLOW" "$CI_STATUS_JQ"
 }
 
 query() {
@@ -433,17 +639,375 @@ report() {
   [ -n "${url:-}" ] && [ "$url" != "-" ] && printf '  %s\n' "$url"
 }
 
+# THE PULL-REQUEST PROBE (--wait only). quality.yml runs on pull requests into main only, for the
+# opened, synchronize and reopened types, so only an open pull request into main gets a Quality run,
+# and GitHub's Actions documentation states that a pull_request workflow does not run while the pull
+# request has a merge conflict (not verified live here). So under --wait, before EVERY poll, not only
+# the first, the probe lists the repository's open pull requests and keeps those whose head SHA is
+# exactly this commit. It refuses (exit 1, naming the cause, before that poll reads any run) when none
+# of them targets PR_BASE (the --require-base value, else main; each pull request is named with its
+# base) or GitHub reports every one into PR_BASE CONFLICTING, and when none is open at all (closed,
+# never opened, or its branch moved to another head), but only on a read whose read of the associated
+# pull requests (MERGED below) succeeds and shows no merge into PR_BASE with this head: the first two
+# at once on such a read, the third only if it still holds at the last of its reads (RE-READS below).
+# A refusal never rests on a failed associated read: a failure in a PERMANENT form below is
+# cannot-evaluate (exit 2) at once, and any other is re-read, so an associated read that fails at
+# every read ends the probe cannot-evaluate (exit 2) at its last read, whatever the listing and the
+# pull requests' own reads showed. WHAT A REFUSAL ESTABLISHES: only the state the probe read, and so
+# that no new pull_request run will start for this head while that state holds. A run that started
+# earlier, while the pull request was open and mergeable, may still be running and may still finish;
+# the refusal is chosen because the head cannot merge into PR_BASE through a pull request as it
+# stands, not because no run can come. Every poll is probed because a head that is mergeable when the
+# wait begins can turn CONFLICTING mid-wait when another pull request merges. One reported MERGEABLE
+# lets the poll proceed. Report-once mode runs no probe: it waits on nothing and reports the runs as
+# they are. The probe can only refuse a wait or stop probing, never produce a pass: a green verdict
+# still rests on the runs alone.
+# MERGED: when no open pull request at this head into PR_BASE reads MERGEABLE (none at this head is
+# listed, each one at this head targets another base, or the own reads of those into PR_BASE show
+# each CONFLICTING, UNKNOWN, or no longer open at this head into PR_BASE, as a listing read just
+# after a merge can still show the merged pull request open), the probe also reads the pull requests
+# GitHub associates with this commit (repos/OWNER/REPO/commits/SHA/pulls, paginated). One that is
+# closed with a merge time (.merged_at, a timestamp of the form given under PERMANENT below), whose
+# head SHA is this commit and whose base is PR_BASE, is read as a merge into PR_BASE with this head
+# (auto-merge can merge one as soon as the checks pass, within the settle window), and the head is
+# neither refused nor re-read: the probe says what that read showed, stops for the rest
+# of the wait (a merge is final), and the runs decide as for any other wait, a green verdict (exit 0)
+# only when they settle all successful. A pull request at this head closed without that merge, or
+# merged into another base, and a merge that read does not show, keep the refusal or the re-read the
+# other reads give. A read that finds a MERGEABLE pull request skips this read. GitHub's REST
+# documentation states that for a commit on the default branch this read lists only the merged pull
+# request that introduced it, and otherwise the merged and open pull requests associated with it (not
+# verified live, nor how soon a merge appears there); a merge that introduced this commit through
+# another pull request is not one with this head, so it keeps the refusal.
+# RE-READS: UNKNOWN (GitHub has not finished computing mergeability), a pull request that changed
+# between the listing and its own read, no open pull request at this head (a listing read just after
+# a push can still show the pull request's old head), and a failed read other than the PERMANENT
+# forms below are re-read: at most PR_PROBE_READS reads per probe (so at most 11 re-reads per probe),
+# PR_PROBE_RETRY_SECONDS apart (at most 55 seconds of sleep per probe). The last read decides: no
+# open pull request at this head there is the refusal above (exit 1); anything else still
+# unresolved is cannot-evaluate (exit 2), never a wait. A response gh returned that jq cannot parse (not valid
+# JSON) is a failed read, re-read, as the runs reads under --wait re-read one.
+# PERMANENT (cannot-evaluate, exit 2, at once): a malformed response (valid JSON without the shape
+# below), and a read gh reports in one of its own forms for a status no re-read changes. gh api
+# writes an HTTP error to stderr as the line "gh: MESSAGE (HTTP STATUS)", MESSAGE being the error
+# body's message, or "gh: HTTP STATUS" when the body carries none (gh's api command, cli/cli
+# pkg/cmd/api/api.go; not verified live here). Only these whole lines are permanent ("..." standing
+# for any text):
+#   gh: Not Found (HTTP 404)          gh: HTTP 404
+#   gh: Bad credentials (HTTP 401)    gh: Requires authentication (HTTP 401)    gh: HTTP 401
+#   gh: Resource not accessible by ... (HTTP 403)
+#   gh: Resource protected by organization SAML enforcement... (HTTP 403)
+# Text that merely contains one of them, such as a 502 diagnostic naming "Not Found", "HTTP 404" or a
+# URL for pulls/4041, is a failed read and re-read, and so is any other 403 (a rate limit).
+# The REST pulls API states mergeability as .mergeable: true, false or null, null meaning GitHub has
+# not finished computing it, and a read of the one pull request starts that computation (GitHub's
+# REST documentation, not verified live here; the self-test stubs gh). The probe names the three
+# values MERGEABLE, CONFLICTING and UNKNOWN, as GitHub's GraphQL API does; that false means a merge
+# conflict is inferred from that documentation, not verified live. The listing carries no
+# .mergeable, so each open pull request into PR_BASE at this head is read on its own on every probe
+# read. Every listed, associated and read record must carry a positive integer number, a string
+# state, a head SHA string and a nonempty base branch string; each single read a .mergeable of true,
+# false or null; and each associated record a .merged_at of null or a merge time as GitHub writes
+# one, an ISO 8601 UTC timestamp of the form YYYY-MM-DDTHH:MM:SSZ that reads back unchanged through
+# jq's fromdate and todate (so a year of fewer than four digits is refused too). GitHub's REST
+# documentation states that it returns every timestamp in UTC in that form (not verified live), so
+# another string (no time, fractional seconds, an offset other than Z, even +00:00, or any other
+# text) is a malformed associated record, never a merge. Each single
+# read's response must be exactly one such object whose number is the number requested, checked on
+# its own before the reads are combined: a record of another pull request, two records in one
+# response, or an array is a malformed response, as is anything else that does not have this shape.
+# The listings are offset paginated like the runs listing: a pull request a page shift skips can only
+# make the probe re-read, refuse, or (a merge into PR_BASE it did read) leave the verdict to the runs;
+# a poll proceeds only on a pull request GitHub reported MERGEABLE in its own read, or merged into
+# PR_BASE in the associated read.
+# PERMISSIONS: the runs reads need Actions: Read. On a public repository the pull requests the
+# probe reads are public data, expected to be readable with no further permission (not verified
+# live here). AVAILABILITY COST (disclosed): a private repository's token also needs Pull requests:
+# Read, or the probe's read is refused and every --wait exits 2; the associated read is expected to
+# need the same (not verified live), and where it is refused the probe exits 2 instead of refusing
+# with exit 1. AVAILABILITY COST (disclosed, accepted): a commit with no open pull request whose CI
+# comes from another event (a push to main, such as a merge commit) is refused under --wait although
+# its push run would come; report-once still reads it. AVAILABILITY COST (disclosed, accepted): a
+# pull_request run that started while the pull request was open and mergeable can still be running,
+# and can still finish green, after the pull request closes without a merge into PR_BASE, is
+# retargeted or turns CONFLICTING; the probe refuses that head anyway, because it cannot merge as it
+# stands, so a wait that run could have satisfied is refused; report-once still reads it.
+# AVAILABILITY COST (disclosed, accepted): a head with no open pull request is refused only at the
+# last of the probe's reads: up to 55 seconds of sleep after the first, plus the 11 re-reads' own
+# time, each re-read making two paginated API reads (the listing and the associated pull requests).
+# Every probe read that finds no MERGEABLE pull request makes the associated read, so a CONFLICTING,
+# UNKNOWN or changed read also costs that one paginated API read more.
+# RESIDUAL (disclosed, not closed): neither the poll sleep nor the probe's re-reads consult
+# CI_STATUS_TIMEOUT, so a wait can end up to about 70 seconds past its deadline (the POLL_SECONDS
+# sleep of 15 seconds after the last deadline check, then up to 55 seconds of probe re-reads), plus
+# the reads' own time.
+PR_BASE="${REQUIRE_BASE:-main}"
+PR_PROBE_READS=12
+PR_PROBE_RETRY_SECONDS=5
+# Set once a probe reads a merge into PR_BASE with this head; the probe then stops (see MERGED above).
+PR_PROBE_MERGED=0
+# "list" reads the slurped pages of the open pull-request listing and prints one TSV row: "none",
+# "base" (with each open pull request at this head and its base), or "candidates" (the numbers of
+# those into PR_BASE). "associated" reads the slurped pages of the pull requests associated with this
+# commit and prints "merged" (with the pull requests closed with a merge time, at this head, into
+# PR_BASE) or "unmerged". "record" reads ONE single read's response, refuses it unless it is exactly
+# one well-formed record numbered $number, and prints that record as one compact JSON line. "merge"
+# reads those checked records and prints "mergeable", "unknown" or "conflicting" (with the pull
+# requests named), or "changed" when none is still open at this head into PR_BASE. The first column
+# is always one of those fixed tokens; the second is display-only and @tsv-escaped, so a branch name
+# cannot add a row or a column.
+CI_STATUS_PR_JQ='
+def malformed_pull:
+  (type != "object")
+  or ((.number | type) != "number")
+  or (.number <= 0)
+  or ((.number | floor) != .number)
+  or ((.state | type) != "string")
+  or ((.head | type) != "object")
+  or ((.head.sha | type) != "string")
+  or ((.base | type) != "object")
+  or ((.base.ref | type) != "string")
+  or ((.base.ref | length) == 0);
+def malformed_mergeable:
+  (has("mergeable") | not)
+  or ((.mergeable != null) and ((.mergeable | type) != "boolean"));
+# A merge time as GitHub writes one: the form YYYY-MM-DDTHH:MM:SSZ, and a value that reads back
+# unchanged through the jq builtins fromdate and todate (2026-02-29 or an hour of 24 does not). Each
+# clause refuses a value the other accepts: the form refuses 1-01-01T00:00:00Z, the way todate writes
+# year 1, which reads back unchanged; the read back refuses a date or hour that does not exist.
+def merge_time:
+  (type == "string")
+  and test("\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\\z")
+  and ((try (fromdate | todate) catch null) == .);
+def malformed_merged_at:
+  (has("merged_at") | not)
+  or ((.merged_at != null) and (.merged_at | merge_time | not));
+def malformed_listing:
+  (length != 1) or ((.[0] | type) != "array") or ((.[0] | length) == 0)
+  or any(.[0][]; type != "array");
+def open_at_head: (.state == "open") and (.head.sha == $requested_sha);
+def numbered: map("#" + (.number | tostring)) | join(", ");
+if $mode == "list" then
+  if malformed_listing or any(.[0][][]; malformed_pull) then
+    error("malformed pull-request listing")
+  else
+    [.[0][][] | select(open_at_head)] as $open
+    | [$open[] | select(.base.ref == $base)] as $on_base
+    | if ($open | length) == 0 then ["none", "-"]
+      elif ($on_base | length) == 0 then
+        ["base", ([$open[] | "#" + (.number | tostring) + " into " + .base.ref] | join(", "))]
+      else ["candidates", ([$on_base[] | .number] | unique | map(tostring) | join(" "))]
+      end
+    | @tsv
+  end
+elif $mode == "associated" then
+  if malformed_listing or any(.[0][][]; malformed_pull or malformed_merged_at) then
+    error("malformed associated pull-request listing")
+  else
+    [.[0][][]
+     | select((.state == "closed") and (.merged_at != null)
+              and (.head.sha == $requested_sha) and (.base.ref == $base))] as $merged
+    | if ($merged | length) == 0 then ["unmerged", "-"]
+      else ["merged", ($merged | unique_by(.number) | numbered)]
+      end
+    | @tsv
+  end
+elif $mode == "record" then
+  if (length != 1) or (.[0] | malformed_pull or malformed_mergeable) or (.[0].number != $number) then
+    error("malformed pull-request record")
+  else
+    .[0] | tojson
+  end
+elif $mode == "merge" then
+  # Unreachable through jq output, so no self-test vector reaches it: merge reads only the records
+  # "record" mode already checked and printed, one per listed candidate, and there is at least one.
+  # Kept so that this mode refuses on its own whatever feeds it.
+  if (length == 0) or any(.[]; malformed_pull or malformed_mergeable) then
+    error("malformed pull-request record")
+  else
+    [.[] | select(open_at_head and (.base.ref == $base))] as $live
+    | if ($live | length) == 0 then ["changed", "-"]
+      elif any($live[]; .mergeable == true) then
+        ["mergeable", ([$live[] | select(.mergeable == true)] | numbered)]
+      elif any($live[]; .mergeable == null) then
+        ["unknown", ([$live[] | select(.mergeable == null)] | numbered)]
+      else ["conflicting", ($live | numbered)]
+      end
+    | @tsv
+  end
+else
+  error("unknown mode")
+end'
+
+# $2, the requested pull-request number, is read only in "record" mode.
+pr_jq() {
+  jq -s -r --arg mode "$1" --argjson number "${2:-null}" --arg requested_sha "$SHA" \
+    --arg base "$PR_BASE" "$CI_STATUS_PR_JQ"
+}
+
+# Labels a response gh returned that the jq program refused ($1 the response, $2 the read it
+# answers, $3 why a parsable one is refused). Valid JSON (any number of JSON texts, none included)
+# is a malformed pull-request response, PERMANENT. Text jq cannot parse is an unparsable one, a
+# failed read that is re-read, as the runs reads under --wait re-read a parse error.
+pr_refused() {
+  if printf '%s\n' "$1" | jq -s 'empty' >/dev/null 2>&1; then
+    echo "malformed pull-request response: $2${3:+ $3}"
+  else
+    echo "unparsable pull-request response: $2 is not valid JSON"
+  fi
+}
+
+# One probe read: prints one TSV row from CI_STATUS_PR_JQ, or returns 1 with the raw gh or jq
+# diagnostic and, for a response the jq program refused, the label pr_refused gives it.
+pr_probe_read() {
+  local listing listed outcome associated merged number record checked records=""
+  {
+    listing="$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate --slurp)" || return 1
+    if ! listed="$(printf '%s\n' "$listing" | pr_jq list)"; then
+      pr_refused "$listing" "the open pull-request listing"
+      return 1
+    fi
+    outcome="$listed"
+    if [ "${listed%%$'\t'*}" = "candidates" ]; then
+      for number in ${listed#*$'\t'}; do
+        # jq prints a large number in exponent form (1E+300), which this refuses before it reaches a URL.
+        if ! [[ "$number" =~ ^[123456789][0123456789]*$ ]]; then
+          echo "unexpected pull-request probe output"
+          return 1
+        fi
+        record="$(gh api "repos/$REPO/pulls/$number")" || return 1
+        # Each response is checked on its own, before the reads are combined, so a record of another
+        # pull request, or a second record in the same response, can never stand in for this one.
+        if ! checked="$(printf '%s\n' "$record" | pr_jq record "$number")"; then
+          pr_refused "$record" "the read of pull request #${number}" \
+            "is not exactly one well-formed record of #${number}"
+          return 1
+        fi
+        records+="$checked"$'\n'
+      done
+      if ! outcome="$(printf '%s' "$records" | pr_jq merge)"; then
+        echo "malformed pull-request response: the pull-request reads"
+        return 1
+      fi
+    fi
+    if [ "${outcome%%$'\t'*}" != "mergeable" ]; then
+      # No open pull request at this head into PR_BASE reads MERGEABLE (none at this head is listed,
+      # each targets another base, or the own reads show each one into PR_BASE CONFLICTING, UNKNOWN,
+      # or no longer open at this head into PR_BASE): was one with this head merged into PR_BASE?
+      associated="$(gh api "repos/$REPO/commits/$SHA/pulls?per_page=100" --paginate --slurp)" ||
+        return 1
+      if ! merged="$(printf '%s\n' "$associated" | pr_jq associated)"; then
+        pr_refused "$associated" "the pull requests associated with ${SHA}"
+        return 1
+      fi
+      if [ "${merged%%$'\t'*}" = "merged" ]; then
+        printf '%s\n' "$merged"
+        return 0
+      fi
+    fi
+    printf '%s\n' "$outcome"
+  } 2>&1
+}
+
+# Returns 0 when a line of a failed probe read's diagnostic ($1) is PERMANENT (see THE PULL-REQUEST
+# PROBE): this script's own malformed-response or unexpected-output label, or one of gh's own lines
+# for a status no re-read changes. Each line is matched whole, so a form inside a longer line (a 502
+# diagnostic naming Not Found, HTTP 404 or pulls/4041) does not match.
+pr_probe_permanent() {
+  local diagnostic_line
+  while IFS= read -r diagnostic_line; do
+    case "$diagnostic_line" in
+      "malformed pull-request response: "*|"unexpected pull-request probe output"|\
+      "gh: Not Found (HTTP 404)"|"gh: HTTP 404"|\
+      "gh: Bad credentials (HTTP 401)"|"gh: Requires authentication (HTTP 401)"|"gh: HTTP 401"|\
+      "gh: Resource not accessible by "*" (HTTP 403)"|\
+      "gh: Resource protected by organization SAML enforcement"*" (HTTP 403)")
+        return 0
+        ;;
+    esac
+  done <<<"$1"
+  return 1
+}
+
+# Returns only when the head may be waited on; every refusal exits here (see THE PULL-REQUEST PROBE).
+pr_probe() {
+  local read_no=0 line probe_rc token detail cause refusal
+  while :; do
+    read_no=$((read_no + 1))
+    refusal=""
+    line="$(pr_probe_read)"
+    probe_rc=$?
+    # A successful read prints the one row jq prints in every mode, so an empty line cannot come
+    # from jq output and no self-test vector reaches that clause; it is kept as a failed read.
+    if [ "$probe_rc" -ne 0 ] || [ -z "$line" ]; then
+      if pr_probe_permanent "$line"; then
+        echo "ERROR: cannot evaluate: could not read the pull requests of ${REPO} for ${SHA}, so whether this head has an open pull request into ${PR_BASE} that can merge is unknown; refusing to wait."
+        echo "  raw: ${line}"
+        exit 2
+      fi
+      cause="the pull-request read failed (raw: ${line})"
+    else
+      token="${line%%$'\t'*}"
+      detail="${line#*$'\t'}"
+      case "$token" in
+        mergeable) return 0 ;;
+        merged)
+          PR_PROBE_MERGED=1
+          echo "NOTE: the pull requests associated with ${SHA} show pull request ${detail} with this head merged into ${PR_BASE}; the pull-request probe stops for the rest of this wait, and the verdict rests on the runs alone, as they stand (the merge is not a pass)."
+          return 0
+          ;;
+        none)
+          cause="no open pull request has ${SHA} as its head, and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE} (a listing read just after a push can still show the old head)"
+          refusal="RESULT: refusing to wait: no open pull request has ${SHA} as its head now, and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE} (a pull request for it may have closed or moved to another head, or none was opened), still after ${PR_PROBE_READS} reads ${PR_PROBE_RETRY_SECONDS}s apart, so no new pull_request run will start for it while that holds; a run that started earlier may still finish, but this head cannot merge through a pull request as it stands."
+          ;;
+        base)
+          echo "RESULT: refusing to wait: no open pull request for ${SHA} targets ${PR_BASE} now (${detail}), and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE}, so no new pull_request run into ${PR_BASE} will start for it while that holds; a run that started earlier may still finish, but this head cannot merge into ${PR_BASE} through a pull request as it stands."
+          exit 1
+          ;;
+        conflicting)
+          echo "RESULT: refusing to wait: GitHub reports pull request ${detail} CONFLICTING with ${PR_BASE} now, and the pull requests associated with ${SHA} show none with this head merged into ${PR_BASE}, so no new pull_request run will start for it while that holds; a run that started earlier may still finish, but the pull request cannot merge as it stands. Resolve the conflict (a refresh push moves the head SHA)."
+          exit 1
+          ;;
+        unknown) cause="GitHub reports the mergeability of pull request ${detail} as UNKNOWN (not yet computed)" ;;
+        changed) cause="the open pull request into ${PR_BASE} for this head changed between the listing and its own read" ;;
+        *)
+          echo "ERROR: cannot evaluate: unexpected pull-request probe output for ${SHA} in ${REPO}"
+          echo "  raw: ${line}"
+          exit 2
+          ;;
+      esac
+    fi
+    if [ "$read_no" -ge "$PR_PROBE_READS" ]; then
+      # The last read decides: no open pull request is the refusal, anything else cannot-evaluate.
+      if [ -n "$refusal" ]; then
+        echo "$refusal"
+        exit 1
+      fi
+      echo "ERROR: cannot evaluate: ${cause}, still after ${PR_PROBE_READS} reads ${PR_PROBE_RETRY_SECONDS}s apart; refusing to wait on a head whose pull-request state cannot be established."
+      exit 2
+    fi
+    echo "NOTE: ${cause}; re-reading (read ${read_no} of ${PR_PROBE_READS})."
+    sleep "$PR_PROBE_RETRY_SECONDS"
+  done
+}
+
 SETTLE_FINGERPRINT=""
 SETTLE_COUNT=0
 last_summary="no workflow run registered"
 RETRIED=0
 
 while :; do
+  # THE PULL-REQUEST PROBE (see above): before every poll, because a head can turn CONFLICTING
+  # mid-wait, until a probe reads this head merged into PR_BASE, which is final.
+  if [ "$WAIT" = "--wait" ] && [ "$PR_PROBE_MERGED" -eq 0 ]; then
+    pr_probe
+  fi
   lines="$(query)"
   query_rc=$?
   # A failed query is an API error even if its output resembles a valid sentinel or run row.
-  # Report-once fails with exit 2. Under --wait, ride through a transient query failure until the
-  # deadline, keeping API diagnostics separate from display fields in successful run rows.
+  # Report-once fails with exit 2. Under --wait, ride through a TRANSIENT query failure until the
+  # deadline, keeping API diagnostics separate from display fields in successful run rows; a
+  # malformed run record or response is not transient and exits 2 in both modes (see below).
   if [ "$query_rc" -ne 0 ] || [ -z "$lines" ]; then
     case "$lines" in
       *"conflicting duplicate workflow-run records"*|*"workflow-runs listing shrank during the scan"*|\
@@ -464,6 +1028,12 @@ while :; do
     echo "  raw: ${lines}"
     case "$lines" in
       *"Resource not accessible"*|*"Not Found"*|*"404"*) exit 2 ;;
+      # Malformed evidence (the jq program's own error()s) is a property of the stored record, not
+      # a retryable API condition: polling re-reads the same record, so under --wait it exits 2
+      # here too, instead of polling to a timeout that misreports malformed evidence as a
+      # not-yet-terminal verdict. The conflicting/shrank/duplicate signatures above stay retryable:
+      # each is the signature of the listing changing between requests, which a re-read can settle.
+      *"malformed workflow run record"*|*"malformed workflow-runs response"*) exit 2 ;;
     esac
     [ "$WAIT" != "--wait" ] && exit 2
     if [ "$(date +%s)" -ge "$DEADLINE" ]; then
@@ -484,7 +1054,7 @@ while :; do
     printf '%s  no workflow run registered for this commit yet\n' "$(date -u +%H:%M:%SZ)"
     [ "$WAIT" != "--wait" ] && exit 2
     if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-      echo "RESULT: TIMEOUT; no workflow run ever appeared for ${SHA}."
+      echo "RESULT: TIMEOUT; the latest workflow-run read found no workflow run for ${SHA}."
       echo "  Check that a workflow is triggered by this event and branch."
       exit 1
     fi
@@ -500,14 +1070,30 @@ while :; do
   fi
 
   settled=0
+  require_workflow_met=0
   run_ids=()
   failure_names=()
   failure_conclusions=()
   nonterminal_names=()
   unknown_statuses=()
-  while IFS=$'\t' read -r status concl id name url; do
+  base_unmet=()
+  while IFS=$'\t' read -r status concl base_state base_detail wf_state path id name url; do
     report "$status" "$concl" "$name" "$url"
     run_ids+=("$id")
+    # The gating tokens come from the jq program's fixed sets ("-", "met", "unmet" for the base
+    # requirement; "-", "match", "other" for the required workflow), never from a display field;
+    # under the requirement anything other than "met" or "match" fails closed, so an unexpected
+    # token never passes. base_detail is display-only (@tsv-escaped); path is display-only too:
+    # the required-workflow match is wf_state, computed in jq on the run's raw JSON
+    # .path (validated nonempty under the requirement), never on this escaped column; name stays
+    # display-only.
+    if [ -n "$REQUIRE_BASE" ] && [ "$base_state" != "met" ]; then
+      base_unmet+=("${name}: ${base_detail}")
+    fi
+    if [ -n "$REQUIRE_BASE" ] && [ "$base_state" = "met" ] && [ "$status" = "completed" ] \
+        && [ "$concl" = "success" ] && [ "$wf_state" = "match" ]; then
+      require_workflow_met=1
+    fi
     case "$status" in
       completed)
         if [ "$concl" != "success" ]; then
@@ -528,6 +1114,18 @@ while :; do
     echo "RESULT: CI concluded with non-success workflow runs:"
     for ((i = 0; i < ${#failure_names[@]}; i++)); do
       printf '  %s: %s\n' "${failure_names[i]}" "${failure_conclusions[i]}"
+    done
+    exit 1
+  fi
+
+  # THE BASE-BRANCH REQUIREMENT (see above): an unmet run is refused by name with exit 1 in both
+  # modes, because a run's recorded base never changes: this RETAINED nonconforming run fails the
+  # every-run rule on this head forever, so only a refresh push, under a NEW head SHA, escapes it
+  # (a reopen adds runs on the same head but cannot remove this one).
+  if [ "${#base_unmet[@]}" -ne 0 ]; then
+    echo "RESULT: run(s) do not satisfy --require-base ${REQUIRE_BASE} (a run counts only when its event is pull_request and the pull request recorded on the run names ${REQUIRE_BASE} as its base):"
+    for item in "${base_unmet[@]}"; do
+      printf '  %s\n' "$item"
     done
     exit 1
   fi
@@ -568,7 +1166,23 @@ while :; do
     fi
     echo "RESULT: ${last_summary}; reading again."
   else
+    # THE BASE-BRANCH REQUIREMENT (see above): a conforming run set without a completed successful
+    # run of the required workflow file is unmet (exit 1), but the two modes refuse at different
+    # times. Report-once refuses on its single snapshot. Under --wait a qualifying run can still
+    # be REGISTERED LATE on this same head (a reopen schedules one, and registration also lags
+    # the event), so the poll keeps watching and refuses only once the run set has been stable
+    # for the whole settle window and still holds no qualifying run. Only a RETAINED
+    # nonconforming run (the base_unmet refusal above) needs a NEW head SHA to recover.
+    missing_required=0
+    if [ -n "$REQUIRE_BASE" ] && [ "$require_workflow_met" -ne 1 ]; then
+      missing_required=1
+    fi
+    missing_message="RESULT: no completed successful run of the workflow file ${REQUIRE_WORKFLOW} satisfies --require-base ${REQUIRE_BASE}; a conforming run of that workflow file on this head is required for a green verdict (a reopen schedules one on the same head; a refresh push under a new head SHA also earns one)."
     if [ "$WAIT" != "--wait" ]; then
+      if [ "$missing_required" -eq 1 ]; then
+        echo "$missing_message"
+        exit 1
+      fi
       exit 0
     fi
     fingerprint="$(IFS=,; printf '%s' "${run_ids[*]}")"
@@ -579,7 +1193,14 @@ while :; do
       SETTLE_COUNT=1
     fi
     last_summary="all ${#run_ids[@]} observed workflow run(s) successful; settle observation ${SETTLE_COUNT}/${SETTLE_OBSERVATIONS}"
+    if [ "$missing_required" -eq 1 ]; then
+      last_summary+=" (no completed successful run of the workflow file ${REQUIRE_WORKFLOW} yet)"
+    fi
     if [ "$SETTLE_COUNT" -ge "$SETTLE_OBSERVATIONS" ]; then
+      if [ "$missing_required" -eq 1 ]; then
+        echo "$missing_message"
+        exit 1
+      fi
       settled=1
     else
       echo "RESULT: ${last_summary}; waiting for late-created runs."

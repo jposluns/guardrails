@@ -73,6 +73,7 @@ _SUBSET = [
     ("opf-adopt-state-selftest", "_opf_adopt_state.py", ["--self-test"]),
     ("opf-adopt-hook-selftest", "_opf_adopt_hook.py", ["--self-test"]),
     ("opf-adopt-complete-selftest", "_opf_adopt_complete.py", ["--self-test"]),
+    ("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"]),
     ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]),
     ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]),
     ("opf-adopt-discover-selftest", "_opf_adopt_discover.py", ["--self-test"]),
@@ -104,8 +105,10 @@ _SUBSET = [
 # alone, blocked-isolation, is 31 fixture calls of about 186 s each), and their sum approaches the CI job limit
 # on its own, so no bound on that leg can honour it and still fit the job. Its bound is therefore a deliberate
 # deadline sized from its known runs; when it trips, _report names the bound, never a failure of the leg.
-# Each ceiling below is whole seconds, rounded up, from one of three sources, named on its row: a serial
-# isolated run on 2026-10-11 (1-minute load average 8.8 to 12.9 on 24 CPUs, under nice -n 10); the
+# Each ceiling below is whole seconds, rounded up, from one of the sources named on its row: a serial
+# isolated run on 2026-10-11 (1-minute load average 8.8 to 12.9 on 24 CPUs, under nice -n 10), or, for a
+# leg added after it, a serial run on 2026-10-14 or 2026-10-17 (not under nice; its load average on
+# the row); the
 # 2026-10-11 loaded-host record of the two legs the former bound killed; or, for a leg that run could not
 # measure (its fixtures refuse a scratch directory below an unreadable ancestor), the former 600 s bound,
 # which that record shows the leg finishing under (an inference, not a measurement: re-measure and tighten).
@@ -124,8 +127,10 @@ _LEG_CEILING_S = {
     "opf-adopt-state-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
     "opf-adopt-hook-selftest": 2,  # measured 2026-10-11: 1.3 s
     "opf-adopt-complete-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
+    "opf-import-batch-selftest": 1,  # measured 2026-10-17: 0.6 s (load average 17.7 on 24 CPUs)
     "opf-pack-manifest-selftest": 18,  # measured 2026-10-11: 17.3 s
     "opf-adopt-observe-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
+    "opf-adopt-discover-selftest": 1,  # measured 2026-10-14: 0.4 s (load average 17.1 on 24 CPUs)
     "opf-prompt-pack-selftest": 1,  # measured 2026-10-11: 0.7 s
     "opf-prompt-pack": 1,  # measured 2026-10-11: 0.1 s
     "opf-oplock-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
@@ -313,6 +318,36 @@ def _adopt_observe_registration_self_test():
     print("RED closure-registration -> closure/adopt-observe-registration")
 
 
+def _check_import_batch_registration(subset):
+    """Independent requirement, not inferred from the release manifest.
+
+    Covers this exact closure-roster tuple, not arbitrary dispatcher changes
+    or the registrations of other gates.
+    """
+    expected = ("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"])
+    matches = [row for row in subset
+               if row[0] == expected[0] or row[1] == expected[1]]
+    if matches != [expected]:
+        raise AssertionError("closure/import-batch-registration")
+
+
+def _import_batch_registration_self_test():
+    _check_import_batch_registration(_SUBSET)
+    print("PASS closure/import-batch-registration")
+    # Mutate the real roster, independently of the shell-runner deletion.
+    # No digest or generated-manifest check participates in the verdict.
+    changed = list(_SUBSET)
+    changed.remove(("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"]))
+    try:
+        _check_import_batch_registration(changed)
+    except AssertionError as exc:
+        if str(exc) != "closure/import-batch-registration":
+            raise
+    else:
+        raise AssertionError("closure/import-batch-registration-not-red")
+    print("RED closure-registration -> closure/import-batch-registration")
+
+
 def _isolated_env():
     """A minimal environment for the isolated subset. PYTHONPATH and PYTHONHOME are dropped so nothing off
     the copied tree can be imported (belt-and-suspenders atop `python3 -I`, which already ignores them), and
@@ -362,6 +397,7 @@ def _run_subset(opf_root, run_dir, bounds):
     """Run every subset member under its own bound. Returns a list of (name, rc, tail, elapsed_s, bound_s)."""
     _check_pack_manifest_registration(_SUBSET)
     _check_adopt_observe_registration(_SUBSET)
+    _check_import_batch_registration(_SUBSET)
     env = _isolated_env()
     results = []
     for name, script, args in _SUBSET:
@@ -573,6 +609,7 @@ def self_test_main():
     try:
         _pack_manifest_registration_self_test()
         _adopt_observe_registration_self_test()
+        _import_batch_registration_self_test()
         required = _bounds_self_test(root)
         _timeout_vectors_self_test(required)
     except (AssertionError, _BoundError, OSError) as exc:

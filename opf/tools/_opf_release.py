@@ -303,13 +303,15 @@ def _canonical(value, _depth=0):
     (spec 8.7 permits a finite float in a registered extension; M2). An unexpected type fails CLOSED
     (ReleaseError) rather than serializing lossily, so the digest can never be computed over a value the
     canonicalization does not fully cover. `_depth` is the recursion level, bounded by FIX 2 below."""
-    # FIX 2 (defence-in-depth for a currently-unreachable-from-TOML input): a Python structure nested
-    # deeper than _MAX_CANONICAL_DEPTH would recurse until the interpreter raises an uncontrolled
-    # RecursionError. Such depth cannot arrive via tomllib (its own parser recursion guard fires first at
-    # every recursion limit), so this is unreachable from parsed TOML; the bound is here so the
-    # fail-closed posture never rests on tomllib's limit. Over-depth maps to the module's controlled
-    # ReleaseError, never a RecursionError. The bound is far above any real worklog nesting, so it changes
-    # no output for a real (shallow) input.
+    # FIX 2 (a fail-closed bound on an input parsed TOML can produce): a Python structure nested deeper than
+    # _MAX_CANONICAL_DEPTH would recurse until the interpreter raises an uncontrolled RecursionError.
+    # tomllib's recursion guard covers only its recursive productions (inline arrays and inline tables);
+    # it builds a dotted table header or dotted key ([a.b.c ...]) iteratively, so parsed TOML can carry a
+    # table nested far deeper than any recursion limit (100,000 levels from one header; CPython 3.14.8 and
+    # later refuse a key of more than 1,000 dotted parts, so there one header nests at most 1,000 levels,
+    # still ten times this bound), and this bound is reachable from parsed TOML, not only from a hand-built
+    # structure. Over-depth maps to the module's controlled ReleaseError, never a RecursionError. The bound is
+    # far above any real worklog nesting, so it changes no output for a real (shallow) input.
     if _depth > _MAX_CANONICAL_DEPTH:
         raise ReleaseError("cannot canonicalize a worklog value nested deeper than {} levels (a real "
                            "worklog entry nests only a handful of levels)".format(_MAX_CANONICAL_DEPTH))
