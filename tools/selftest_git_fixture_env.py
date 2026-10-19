@@ -61,7 +61,10 @@ nothing and exits 2 (cannot evaluate).
 Exit 2 is cannot-evaluate: a harness/setup error, including bad arguments, no git binary, no writable
 temp directory, a failed report write, or an unreadable, malformed, or suite-missing expectation
 manifest; and a bounded child that reached its time bound (see _run_bounded): a config-injection
-member (_run_config_member) or a corpus leak lane (_run_corpus, _run_corpus_imported). A member
+member (_run_config_member) or a corpus leak lane (_run_corpus, _run_corpus_imported); and an OPF
+lifecycle probe still running at its own bound (_lifecycle_probe in
+tools/selftest_git_fixture_env_config_system.py, recorded the same way, its message naming the last
+stage the probe reported). A member
 reached its time bound, so this run is no verdict on that member: the timeout is listed under SELF-TEST
 CANNOT EVALUATE, never as a failure of that member. A finding is folded into the cannot-evaluate
 list only when it is attributed to a recorded timeout (see _timeout_cause and
@@ -82,7 +85,8 @@ cannot evaluate (_registered_offenders, _lifecycle_finding). tools/check_selftes
 as CANNOT EVALUATE and itself exits 2 (its self-test leg st/child-rc2-2), so a timeout never reads as
 a pass or as a code failure there either.
 
-Only those children are bounded this way. The suite's own git probes and fixture setup commands
+Only those children are bounded this way (the lifecycle probe keeps its own subprocess timeout and
+records reaching it as above). The suite's own git probes and fixture setup commands
 keep their 60 s subprocess timeouts, and reaching one of those raises (a traceback, exit 1) instead
 of becoming cannot-evaluate; the other helper children keep the timeout handling each documents.
 """
@@ -3908,19 +3912,23 @@ def _self_test_main_isolated(args):
 """
 
 
-def _lifecycle_finding(roster, config_results, definite, problems, recorded=None):
+def _lifecycle_finding(roster, config_results, definite, problems, recorded=None, probes=()):
     """(got, cause) for env/registered-opf-lifecycles. definite holds the paths missing for a
     reason other than their config run; each roster argv whose config run was not clean adds its
-    path to it unless that run only timed out (_split_offenders). With any definite path or
-    problem, got lists ONLY the definite paths and cause is (): a member whose run only timed out
-    is reported by its own timeout message on the cannot-evaluate list, never in this FAIL.
-    Otherwise got lists the timed-out paths and cause their timeout messages."""
+    path to it unless that run only timed out (_split_offenders). probes holds the recorded
+    timeout messages of the lifecycle probes that reached their bound, kept out of problems
+    (_lifecycle_problems in tools/selftest_git_fixture_env_config_system.py). With any definite
+    path or problem, got lists ONLY the definite paths and cause is (): a member whose run only
+    timed out, or a probe that reached its bound, is reported by its own timeout message on the
+    cannot-evaluate list, never in this FAIL. Otherwise got lists the timed-out paths and the
+    probes' timeout messages, and cause every one of those timeout messages."""
     offenders, timed_out, causes = _split_offenders(
         {argv: config_results.get(argv) for argv in roster}, recorded)
     definite = set(definite) | {_command_identity(argv)[0] for argv in offenders}
     if definite or problems:
         return (sorted(definite), problems), ()
-    return (sorted({_command_identity(argv)[0] for argv in timed_out}), problems), causes
+    return ((sorted({_command_identity(argv)[0] for argv in timed_out}), problems + list(probes)),
+            causes + tuple(probes))
 
 
 def _build_decoy(base):
