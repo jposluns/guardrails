@@ -10,10 +10,13 @@
 #
 # [[table]]: append-only tables whose rows are keyed on the declared columns. Every row key present at the
 # post-merge commit's first parent (R1) or newly introduced on the branch (R2) must survive the merge, and
-# with edit = "frozen" a surviving row must be byte-identical cell for cell (R3); edit = "key-stable"
-# allows in-place corrections of non-key cells. Reordering, mid-table insertion, re-padding and TOML
-# reformatting are allowed; a duplicate key in any snapshot fails closed. Rows have no deletion opt-out:
-# supersede a row with a new row, or correct it in place under key-stable.
+# with edit = "frozen" a surviving row must keep its parsed cell values unchanged (R3), compared cell for
+# cell after trimming surrounding whitespace (Markdown) or by typed TOML value, against the first parent
+# and, for rows the branch introduced, against the branch tip; edit = "key-stable" allows in-place
+# corrections of non-key cells. Reordering, mid-table insertion, re-padding (the header line included) and
+# TOML reformatting are allowed; a duplicate key in any snapshot, and a carriage return in a table line or
+# in a header-matching line of any compared snapshot (a CRLF table), fail closed. Rows have no deletion
+# opt-out: supersede a row with a new row, or correct it in place under key-stable.
 schema-version = 2
 opt-out-marker = "<!-- aiqt-record-section: superseded -->"
 
@@ -24,6 +27,6 @@ heading-pattern = '^## [0-9]{4}-[0-9]{2}-[0-9]{2}(?: .+)?$'
 [[table]]
 path = "docs/done-log.md"
 format = "markdown"                    # or "toml" with array = "<top-level array name>"
-header = "| id | pr | closed | note |" # exact header line; table = header, delimiter row, |-lines
+header = "| id | pr | closed | note |" # matched cell for cell after trimming; table = header, delimiter row, |-lines
 key = ["id", "pr"]                     # row identity; must be unique per snapshot
 edit = "frozen"                        # or "key-stable": non-key cells may be corrected in place

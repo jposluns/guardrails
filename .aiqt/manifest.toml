@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1395a3d8b72355f40ed664aa86f1183eb55b58705fc81fa01c0918b70441a0ba"
+tree-sha256 = "a25e62625f1f88dd18cb8439bb3ecb63acc625625e4e60e61a458fce03ce835d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -66,8 +66,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 356046
-sha256 = "07b9f85feef9a2de6ca43b4a5c4126358431aaac2afb90ac64b86d3638d309a0"
+bytes = 356955
+sha256 = "1294d13faed2489ad18ff84d93f743af1ac40c8be0d88726307cb09a47f9725c"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -811,8 +811,8 @@ sha256 = "7854ba7c7fa8221a2b408deaf73505b492ff2d39f67d5addac1b20ed98ac2ba6"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 621940
-sha256 = "831a8064dcee9b3e860df4a7fff7be20df7a8a36c82b8cc2e712d1c8ccfbd2b5"
+bytes = 622849
+sha256 = "32c4c70154373b6cb0d4de2d64c22746445696926fdf37117a2a9600331cf548"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -826,8 +826,8 @@ sha256 = "65b52b33981975a38548c48249386045508eb69fbc7083b2746a4c222cdc97c9"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
-bytes = 1954
-sha256 = "b1ea677dd42365a0097350bd3d75ad1b773f32f34a25709c4bba41716bcc8e65"
+bytes = 2302
+sha256 = "e4b8675bd682f6d0de6b989268155c309aa155b124f97d7350fffa813c5a9256"
 
 [[sources]]
 path = ".aiqt/release/first-pin-demonstration.toml"
@@ -2346,8 +2346,8 @@ sha256 = "b9ab84064341340be432438f6a2e7a6c914b0b64ea56249edd9b22b83d09b6a1"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 368372
-sha256 = "78d2a22e5b4f2dea824beccbdfda50e3999245e480b3c7ac9964077279b48ae3"
+bytes = 369281
+sha256 = "1552f73f1711daeab553030362e2f69e3b591cb613aefb511d614b67478bab8d"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3151,8 +3151,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 423199
-sha256 = "5605ece84b24bb746bf2b7b8e9e53460ce94b9400fe4b41e628db5b90c9bbe40"
+bytes = 424108
+sha256 = "4ac1c864294d9d781db5a7765eecdc37b6ad6049e06f29e27291f736cd8f8cb5"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3471,8 +3471,8 @@ sha256 = "ec8d83d75f38c8875d10cfdc9175c7b70dc432e1bdb10d1fe9b52b8a363bcacb"
 
 [[sources]]
 path = "tools/check_record_sections.py"
-bytes = 128707
-sha256 = "6d8955897648456fbe3d211f4f15bd10253bdb1883aab9f41f742354878aafab"
+bytes = 160921
+sha256 = "09030e1e4829549c862665f95104b1df8d3d163d68ad3ed0d4886ffbbd76e379"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
