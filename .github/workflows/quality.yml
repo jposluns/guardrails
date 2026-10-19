@@ -53,10 +53,12 @@ jobs:
         with:
           python-version: '3.14'
       # SPECIAL-FILE-PRECHECK runs FIRST after checkout and the Python setup action, in EVERY
-      # job of EVERY workflow except this file's two host-patch jobs, which
-      # tools/check_python_host_pin.py holds whole, refusing any inserted step (check_ci_parity
-      # holds every other job to that order and discloses that residual): one walk refuses a
-      # special file (a FIFO
+      # job of EVERY workflow except this file's two host-patch jobs (check_ci_parity holds every
+      # other job to that order and discloses that residual). In those two jobs
+      # tools/check_python_host_pin.py refuses this canonical step wherever it stands (its
+      # one-line job model cannot read the run: | block), but another one-line step added after
+      # its own step runs, like the jobs' own steps, on a tree no precheck walked, and neither
+      # gate flags that. Elsewhere, one walk refuses a special file (a FIFO
       # above all, whose plain read with no writer blocks forever), a symlink to one, an unresolvable
       # symlink that git does not ignore, a symlink to a directory outside the root, git-ignored or
       # not, or, while git can list the tracked paths, a git-ignored symlink to an in-root directory

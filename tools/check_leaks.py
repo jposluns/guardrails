@@ -688,7 +688,7 @@ def main():
     if "--self-test" in sys.argv[1:]:
         return self_test_main()
     # Refuse special files by name before the gate walks and reads the tree (the walk's own
-    # non-blocking reads cover the git-ignored paths the precheck does not). Imported here,
+    # non-blocking reads cover a special file created after the precheck walked). Imported here,
     # not at module level, so a self-test fixture copy of this module beside a gate under
     # test imports without _gen_common.py riding along (only the live gate run needs it).
     from _gen_common import precheck_special_files

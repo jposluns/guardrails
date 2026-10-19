@@ -140,9 +140,9 @@ def run(root):
     path = Path(declared) if os.path.isabs(declared) else root / declared
     try:
         # read_source_text: the registry may DECLARE a findings path outside the tree (an absolute
-        # path, a path through an ignored link), which the special-file precheck walk can never
-        # certify; the fstat-checked reader refuses a non-regular file by name instead of blocking
-        # on it.
+        # path), which the special-file precheck walk never sees, and a path inside it can change
+        # after that walk; the fstat-checked reader refuses a non-regular file by name instead of
+        # blocking on it.
         text = read_source_text(path)
     except OSError as exc:
         print("error: the DECLARED findings register is unreadable ({}); a declared input "
@@ -188,6 +188,7 @@ def run(root):
 
 def self_test():
     import shutil
+    import signal
     import tempfile
     # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
     # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
@@ -251,14 +252,21 @@ def self_test():
         # the FIFO is a recorded failure (no exit within the deadline), never a self-test that
         # hangs. MUTATION: reverting the findings read to path.read_text makes both cases time
         # out, each a named failure.
-        def _fifo_case(name, fifo):
+        def _fifo_child(module_dir, deadline):
+            """run(repo) of the check_record_drift module in module_dir, in a child: its
+            CompletedProcess, or None when it gave no exit within deadline seconds."""
             code = ("import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
                     "import check_record_drift as m; sys.exit(m.run(Path(sys.argv[2])))")
             try:
-                proc = subprocess.run([sys.executable, "-I", "-B", "-c", code,
-                                       str(Path(__file__).resolve().parent), str(repo)],
-                                      capture_output=True, text=True, timeout=30)
+                return subprocess.run([sys.executable, "-I", "-B", "-c", code,
+                                       str(module_dir), str(repo)],
+                                      capture_output=True, text=True, timeout=deadline)
             except subprocess.TimeoutExpired:
+                return None
+
+        def _fifo_case(name, fifo):
+            proc = _fifo_child(Path(__file__).resolve().parent, 30)
+            if proc is None:
                 failures.append("{}: no exit within 30s (a blocking read of the declared FIFO "
                                 "{})".format(name, fifo))
                 return
@@ -266,6 +274,53 @@ def self_test():
             if proc.returncode != 2 or needle not in proc.stdout:
                 failures.append("{}: expected exit 2 naming {!r}, got exit {}: {}".format(
                     name, needle, proc.returncode, (proc.stdout + proc.stderr).strip()[-300:]))
+
+        # The launch deadline itself is held, not only the reader: a stub check_record_drift
+        # module that blocks opening a FIFO with no writer runs through the same launch helper
+        # with a 3-second deadline, under an outer SIGALRM deadline of 60 seconds, and the
+        # helper must report no exit. MUTATION: dropping the timeout from the launch leaves the
+        # stub child blocked; the outer deadline then interrupts the wait, subprocess.run kills
+        # the child, and the control records a named failure, never a self-test that hangs.
+        class _OuterDeadline(Exception):
+            pass
+
+        def _outer_deadline(signum, frame):
+            raise _OuterDeadline()
+
+        def _fifo_deadline_control():
+            name = "fifo-launch-deadline-control"
+            try:
+                alarm_signal = signal.SIGALRM
+            except AttributeError:
+                failures.append("NOT RUN: {} (no SIGALRM for the outer deadline); failing "
+                                "closed".format(name))
+                return
+            stub_dir = tmp / "blocking-stub"
+            stub_dir.mkdir()
+            stub_fifo = tmp / "blocking-stub.fifo"
+            os.mkfifo(stub_fifo)
+            (stub_dir / "check_record_drift.py").write_text(
+                "import os\nos.open({!r}, os.O_RDONLY)\n".format(str(stub_fifo)), encoding="utf-8")
+            previous = signal.signal(alarm_signal, _outer_deadline)
+            pending = 0
+            try:
+                pending = signal.alarm(60)
+                try:
+                    proc = _fifo_child(stub_dir, 3)
+                finally:
+                    signal.alarm(0)
+            except _OuterDeadline:
+                failures.append("{}: the blocking stub child outlived the outer 60s deadline, so "
+                                "the FIFO cases' launch carries no deadline of its own".format(name))
+                return
+            finally:
+                signal.signal(alarm_signal, previous)
+                if pending:
+                    signal.alarm(pending)
+            if proc is not None:
+                failures.append("{}: a child blocked opening a FIFO must hit the 3s launch deadline, "
+                                "got exit {}: {}".format(name, proc.returncode,
+                                                         (proc.stdout + proc.stderr).strip()[-300:]))
 
         if hasattr(os, "mkfifo"):
             outside = tmp / "outside-findings.md"
@@ -280,6 +335,7 @@ def self_test():
                 {"version": 1, "record": {"findings": "findings-fifo.md"},
                  "truth": {"changelog": "truth/releases.toml"}}), encoding="utf-8")
             _fifo_case("declared-in-root-fifo-refused", inside)
+            _fifo_deadline_control()
             inside.unlink()
             (repo / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
                 {"version": 1, "record": {"findings": str(register)},
@@ -288,7 +344,8 @@ def self_test():
             # A capability-gated vector is an
             # explicit NOT RUN and a recorded failure, never a silent pass.
             print("NOT RUN: the declared-external-fifo-refused and declared-in-root-fifo-refused "
-                  "vectors (os.mkfifo unavailable); failing closed")
+                  "vectors and the fifo-launch-deadline-control (os.mkfifo unavailable); failing "
+                  "closed")
             _case("capability-gated FIFO vectors (os.mkfifo unavailable); failing closed",
                   "NOT RUN", "RUN")
         # a truly unmerged ref passes

@@ -200,9 +200,10 @@ def _scan_root(root, subdir, valid):
                       f.relative_to(root), subdir), file=sys.stderr)
             return 2
         try:
-            # read_text_nonblocking, not read_text: this walk reads WHATEVER .html it meets, a
-            # git-ignored page the special-file precheck deliberately does not walk included,
-            # so a FIFO page must be the named refusal (OSError, exit 2 below), never a blocking read.
+            # read_text_nonblocking, not read_text: this walk reads WHATEVER .html it meets, and
+            # the special-file precheck certifies only what stood when it walked (a page created
+            # after that walk, or met by a direct run that skipped it, is not covered), so a FIFO
+            # page must be the named refusal (OSError, exit 2 below), never a blocking read.
             text = read_text_nonblocking(f)
         except (OSError, UnicodeDecodeError) as exc:
             print("error: cannot load {} ({}); fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
@@ -324,8 +325,8 @@ def _self_test():
         if got != 2:
             failures.append("h: page-less site/ expected exit 2 got {}".format(got))
 
-    # F-CORPUS-FIFO-HANG: a FIFO at an .html page (the shape a git-ignored plant takes,
-    # which the special-file precheck deliberately does not walk) must be the named refusal (exit 2), never a
+    # F-CORPUS-FIFO-HANG: a FIFO at an .html page (the shape a plant created after the special-file
+    # precheck walked, or met by a direct run that skipped it, takes) must be the named refusal (exit 2), never a
     # blocking read. MUTATION: reverting the page read to Path.read_text blocks here; the alarm turns
     # that into a recorded failure. POSIX only (os.mkfifo, SIGALRM).
     import os

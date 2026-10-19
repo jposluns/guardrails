@@ -508,8 +508,9 @@ def main(root=None) -> int:
             # a suffixless non-UTF-8 file that took no wide view (no UTF-32 mark, no even-length
             # UTF-16 one) is binary and skipped (gitleaks scans binaries). _read_scan_text reads
             # through the shared non-blocking reader, not a plain read: this walk reads whatever it
-            # meets, including git-ignored paths the precheck does not walk, so a special file must
-            # be a loud refusal (OSError -> exit 2 below), never a blocking read
+            # meets, and the precheck certifies only what stood when it walked (a file created after
+            # that walk, or met by a direct run that skipped it, is not covered), so a special file
+            # must be a loud refusal (OSError -> exit 2 below), never a blocking read
             # (SPECIAL-FILE-PRECHECK).
             texts, note = _read_scan_text(path)
             if note is not None:

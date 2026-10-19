@@ -314,7 +314,8 @@ def run(root):
     try:
         for path in scope_paths(root, policy):
             try:
-                # non-blocking: this walk reads ignored paths too, which the precheck does not cover.
+                # non-blocking: the precheck certifies only what stood when it walked, not a file
+                # created after that walk.
                 lines = read_text_nonblocking(path).splitlines()
             except UnicodeDecodeError:
                 print(f"SKIP (not utf-8): {path.relative_to(root)}")

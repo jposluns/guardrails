@@ -139,8 +139,9 @@ gen_manifest.py at build time).
                                 rationale, an example, a scope note); never empty
   The file is required, at the default path as when named with --exemptions, is read without following a
   symlink, and must hold the `exempt` key: an absent file, an unreadable one, a symlink (to /dev/null, to a
-  regular file, or dangling: each is refused as not openable as a regular non-symlink file), and one with
-  no `exempt` key (an empty file, a comment-only file) are malformed input (exit 2), never read as no
+  regular file, or dangling: each is refused, as not openable as a regular non-symlink file where the
+  platform has O_NOFOLLOW, and by an lstat check as a symlink, not a regular file, where it does not),
+  and one with no `exempt` key (an empty file, a comment-only file) are malformed input (exit 2), never read as no
   exemption, because the file carries findings of its own (a stale, repeated, redundant or reasonless
   exemption) that reading it as empty would hide. An intentionally empty register is the explicit
   `exempt = []`. A file that is not TOML, a top-level key other than `exempt`, and a row whose keys are not
@@ -1214,8 +1215,9 @@ def load_exemptions(path):
     absent file and a file with no `exempt` key (an empty file, a comment-only file) are a GateError (exit
     2), never read as no exemption, because the file carries findings of its own (a stale, repeated,
     redundant or reasonless exemption) that reading it as empty would hide; an intentionally empty register
-    is the explicit `exempt = []`. A symlink (to /dev/null, to a regular file, or dangling) is refused as
-    not openable as a regular non-symlink file, a GateError (exit 2) too, never reported as absent. Every
+    is the explicit `exempt = []`. A symlink (to /dev/null, to a regular file, or dangling) is refused, as
+    not openable as a regular non-symlink file where the platform has O_NOFOLLOW and by an lstat check as a
+    symlink, not a regular file, where it does not, a GateError (exit 2) too, never reported as absent. Every
     other unreadable or malformed input is a GateError (exit 2) too: not readable, not TOML, a top-level key
     other than `exempt`, an `exempt` that is not an array of tables, a row whose keys are not exactly
     corpus-id, text and reason, a value that is not a string, or a corpus-id that is not a well-formed
@@ -2931,6 +2933,15 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
             uncovered = "lies inside no clause row"
             devnull_link = base_tmp / "devnull-exemptions.toml"
             devnull_link.symlink_to(os.devnull)
+            # A symlink to a well-formed register (exempt = [], every sentence covered) reads as a clean pass
+            # through a link-following read, and a dangling symlink reads as "does not exist" through one; the
+            # no-follow reader refuses both as a symlink, so each needle tells the two reads apart.
+            regular_target = base_tmp / "regular-exemptions-target.toml"
+            regular_target.write_text("exempt = []\n", encoding="utf-8")
+            regular_link = base_tmp / "regular-exemptions.toml"
+            regular_link.symlink_to(regular_target)
+            dangling_link = base_tmp / "dangling-exemptions.toml"
+            dangling_link.symlink_to(base_tmp / "no-such-exemptions.toml")
             cover_vectors = [
                 ("both sentences carry a row", "ccova1", two, [(0, two[0]), (1, two[1])], {}, 0, ""),
                 ("a passage stays while its clause row and id-history row are removed", "ccova2", two,
@@ -3082,6 +3093,12 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                 ("an exemptions file that is a symlink to the null device", "ccovn22", two,
                  [(0, two[0]), (1, two[1])], {"exemptions_path": devnull_link}, 2,
                  "refused, cannot open as a regular non-symlink file"),
+                ("an exemptions file that is a symlink to a well-formed regular file", "ccovn28", two,
+                 [(0, two[0]), (1, two[1])], {"exemptions_path": regular_link}, 2,
+                 "refused, cannot open as a regular non-symlink file"),
+                ("an exemptions file that is a dangling symlink", "ccovn29", two,
+                 [(0, two[0]), (1, two[1])], {"exemptions_path": dangling_link}, 2,
+                 "refused, cannot open as a regular non-symlink file"),
                 ("an explicit empty register with every sentence covered", "ccovn23", two,
                  [(0, two[0]), (1, two[1])], {"exemptions_text": "exempt = []\n"}, 0, ""),
                 ("an explicit empty register leaves an uncovered sentence a finding", "ccovn24", two, [(0, two[0])],
@@ -3165,25 +3182,81 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
             except AttributeError:  # no os.mkfifo on this platform
                 fifo_rule = None
             if fifo_rule is not None:
+                import signal
                 import subprocess
-                code = ("import sys\nfrom pathlib import Path\nsys.path.insert(0, sys.argv[1])\n"
-                        "import check_clauses as m\n"
-                        "try:\n    m.check_text_coverage({'cfifo1': Path(sys.argv[2])}, {}, [])\n"
-                        "except m.GateError as exc:\n    print(exc)\n    sys.exit(2)\n"
-                        "sys.exit(0)\n")
+
+                def _fifo_rule_child(module_dir, deadline):
+                    """check_text_coverage on the FIFO rule from the check_clauses module in module_dir, in a
+                    child: its CompletedProcess, or None when it gave no exit within deadline seconds."""
+                    code = ("import sys\nfrom pathlib import Path\nsys.path.insert(0, sys.argv[1])\n"
+                            "import check_clauses as m\n"
+                            "try:\n    m.check_text_coverage({'cfifo1': Path(sys.argv[2])}, {}, [])\n"
+                            "except m.GateError as exc:\n    print(exc)\n    sys.exit(2)\n"
+                            "sys.exit(0)\n")
+                    try:
+                        return subprocess.run([sys.executable, "-I", "-B", "-c", code,
+                                               str(module_dir), str(fifo_rule)],
+                                              capture_output=True, text=True, timeout=deadline)
+                    except subprocess.TimeoutExpired:
+                        return None
+
                 fifo_needle = "{}: refused, not a regular file".format(fifo_rule)
-                try:
-                    proc = subprocess.run([sys.executable, "-I", "-B", "-c", code,
-                                           str(Path(__file__).resolve().parent), str(fifo_rule)],
-                                          capture_output=True, text=True, timeout=30)
-                except subprocess.TimeoutExpired:
+                proc = _fifo_rule_child(Path(__file__).resolve().parent, 30)
+                if proc is None:
                     failures.append("text coverage: a FIFO rule source gave no exit within 30s (a blocking "
                                     "read), not the no-follow reader's refusal")
-                else:
-                    if proc.returncode != 2 or fifo_needle not in proc.stdout:
-                        failures.append("text coverage: a FIFO rule source must be a GateError naming {!r}, got "
-                                        "exit {}: {}".format(fifo_needle, proc.returncode,
-                                                             (proc.stdout + proc.stderr).strip()[-300:]))
+                elif proc.returncode != 2 or fifo_needle not in proc.stdout:
+                    failures.append("text coverage: a FIFO rule source must be a GateError naming {!r}, got "
+                                    "exit {}: {}".format(fifo_needle, proc.returncode,
+                                                         (proc.stdout + proc.stderr).strip()[-300:]))
+
+                # The launch deadline itself is held, not only the reader: a stub check_clauses module that
+                # blocks opening a FIFO with no writer runs through the same launch helper with a 3-second
+                # deadline, under an outer SIGALRM deadline of 60 seconds, and the helper must report no exit.
+                # MUTATION: dropping the timeout from the launch leaves the stub child blocked; the outer
+                # deadline then interrupts the wait, subprocess.run kills the child, and the control records
+                # a named failure, never a self-test that hangs.
+                class _OuterDeadline(Exception):
+                    pass
+
+                def _outer_deadline(signum, frame):
+                    raise _OuterDeadline()
+
+                try:
+                    alarm_signal = signal.SIGALRM
+                except AttributeError:
+                    alarm_signal = None
+                    failures.append("NOT RUN: the FIFO launch deadline control (no SIGALRM for the outer "
+                                    "deadline); failing closed")
+                if alarm_signal is not None:
+                    stub_dir = unreadable / "blocking-stub"
+                    stub_dir.mkdir()
+                    stub_fifo = unreadable / "blocking-stub.fifo"
+                    os.mkfifo(stub_fifo)
+                    (stub_dir / "check_clauses.py").write_text(
+                        "import os\nos.open({!r}, os.O_RDONLY)\n".format(str(stub_fifo)), encoding="utf-8")
+                    previous = signal.signal(alarm_signal, _outer_deadline)
+                    pending = 0
+                    stub_proc = None
+                    try:
+                        pending = signal.alarm(60)
+                        try:
+                            stub_proc = _fifo_rule_child(stub_dir, 3)
+                        finally:
+                            signal.alarm(0)
+                    except _OuterDeadline:
+                        failures.append("text coverage: the FIFO launch deadline control's blocking stub child "
+                                        "outlived the outer 60s deadline, so the FIFO rule launch carries no "
+                                        "deadline of its own")
+                    finally:
+                        signal.signal(alarm_signal, previous)
+                        if pending:
+                            signal.alarm(pending)
+                    if stub_proc is not None:
+                        failures.append("text coverage: the FIFO launch deadline control's child, blocked opening "
+                                        "a FIFO, must hit the 3s launch deadline, got exit {}: {}".format(
+                                            stub_proc.returncode,
+                                            (stub_proc.stdout + stub_proc.stderr).strip()[-300:]))
             else:
                 failures.append("NOT RUN: the FIFO rule-source vector (os.mkfifo unavailable); failing closed")
         finally:
@@ -3250,8 +3323,9 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
           "and ends with '>' (a quoted '<' or '>' included) and one that may open a link reference "
           "definition whose label spans lines are refused, a carriage return is a cannot-evaluate, a GFM "
           "table delimiter row with no leading pipe is refused, an exemptions file with no exempt key "
-          "(empty, comment-only) is a cannot-evaluate, one that is a symlink to the null device is "
-          "refused as not openable as a regular non-symlink file (cannot-evaluate), and an explicit "
+          "(empty, comment-only) is a cannot-evaluate, one that is a symlink (to the null device, to a "
+          "well-formed regular file, or dangling) is refused as not openable as a regular non-symlink "
+          "file (cannot-evaluate), and an explicit "
           "exempt = [] reads as no exemption; and the round-4 reproductions hold: a form feed and a carriage "
           "return, each a line ending to the vendored renderer, are a cannot-evaluate inside a line, at a "
           "line start, in the title and in the frontmatter, while a vertical tab, U+0085, U+2028 and U+2029 "

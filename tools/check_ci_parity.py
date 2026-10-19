@@ -570,14 +570,15 @@ PRECHECK_STEP_RUN_LINES = (
 )
 
 # The two host-patch jobs of quality.yml, exempt from the precheck-step requirement by EXACT job id
-# and ONLY in that file: tools/check_python_host_pin.py holds each of those two jobs WHOLE (every
-# step with exactly name, run and shell: bash, its own gate as the step right after setup-python,
-# then the job's suites in order) and refuses ANY inserted step, the canonical special-file
-# precheck step included, so requiring the step there and keeping that exact job model cannot both
-# hold. The job model is the stricter guard over those two jobs, so it stands unchanged and the
-# order pass exempts exactly these ids; the residual is named in
-# workflow_precheck_order_problems's docstring. The same ids in any other workflow file, and every
-# other job of quality.yml, stay held to the precheck-first order.
+# and ONLY in that file: tools/check_python_host_pin.py holds their job model (its own gate as the
+# step right after setup-python, then the job's suites in order, each held step with exactly name,
+# run and shell: bash) and refuses the canonical special-file precheck step anywhere in either job,
+# because its one-line job model cannot read that step's run: | block, so requiring the step there
+# and keeping that exact job model cannot both hold. The job model stands unchanged and the order
+# pass exempts exactly these ids. It does NOT refuse another one-line step added after its own
+# step, so such a step runs on a tree no precheck walked and neither gate flags it; that residual
+# is named in workflow_precheck_order_problems's docstring. The same ids in any other workflow
+# file, and every other job of quality.yml, stay held to the precheck-first order.
 PRECHECK_ORDER_EXEMPT_SOURCE = ".github/workflows/quality.yml"
 PRECHECK_ORDER_EXEMPT_JOBS = frozenset({"opf-host-patch", "git-fixture-env-host-patch"})
 
@@ -7323,11 +7324,14 @@ def self_test():
         failures.append("36 a tools path outside captured run lines must be a diagnostic, got "
                         "{!r}".format(got_diagnostics))
 
-    # The host-patch exemption: in quality.yml alone, the two jobs tools/check_python_host_pin.py
-    # holds whole (refusing any inserted step, the canonical precheck step included) are exempt
-    # from the precheck-step requirement, by exact job id, and the exemption is disclosed as a
-    # residual. The clean vector fails without the exemption; each control fails if the exemption
-    # matches the same ids in another file or more than the two ids in that one file.
+    # The host-patch exemption: in quality.yml alone, the two host-patch jobs are exempt from the
+    # precheck-step requirement, by exact job id, and the exemption is disclosed as a residual
+    # that states what tools/check_python_host_pin.py refuses there (the canonical precheck step)
+    # and what neither gate flags (another one-line step added after that gate's own step). The
+    # clean vector fails without the exemption; each control fails if the exemption matches the
+    # same ids in another file or more than the two ids in that one file; the disclosure vector
+    # fails on a docstring that omits either statement or claims that gate refuses any inserted
+    # step.
     count += 1
     host_patch_fixture = "\n".join((
         "name: Quality",
@@ -7375,9 +7379,16 @@ def self_test():
     disclosure = " ".join(workflow_precheck_order_problems.__doc__.split())
     if ("opf-host-patch" not in disclosure
             or "git-fixture-env-host-patch" not in disclosure
-            or "check_python_host_pin" not in disclosure):
+            or "check_python_host_pin" not in disclosure
+            or "refuses the canonical special-file precheck step" not in disclosure
+            or "another one-line step added after its own step" not in disclosure
+            or "neither gate flags it" not in disclosure
+            or "any inserted step" in disclosure):
         failures.append("36m the host-patch exemption must be disclosed as a residual naming "
-                        "both job ids and the guard that holds those jobs whole")
+                        "both job ids, the step tools/check_python_host_pin.py refuses there (the "
+                        "canonical precheck step) and that another one-line step added after its "
+                        "own step is flagged by neither gate, never as a refusal of any inserted "
+                        "step")
 
     # SPECIAL-FILE-PRECHECK order (QA round 4): a step key the parse does not model can disable
     # or soften the precheck step while its run body still matches the canonical lines (if: and
@@ -8717,13 +8728,16 @@ def workflow_precheck_order_problems(text, source):
     HOST-PATCH EXEMPTION (disclosed residual): in .github/workflows/quality.yml alone, the jobs
     opf-host-patch and git-fixture-env-host-patch (PRECHECK_ORDER_EXEMPT_JOBS, matched by exact
     job id) are not required to carry the canonical precheck step: tools/check_python_host_pin.py
-    holds each of those two jobs whole (every step with exactly name, run and shell: bash, its
-    own gate as the step right after setup-python, then the job's suites in order) and refuses
-    any inserted step, the canonical special-file precheck step included, so requiring the step
-    there and keeping that exact job model cannot both hold; the exact job model is the stricter
-    guard over those two jobs and stands unchanged. The residual: those two jobs run their gates
-    and suites on a tree no workflow precheck step walked. The same job ids in any other
-    workflow file, and every other job of quality.yml, stay held to the precheck-first order."""
+    holds their job model (its own gate as the step right after setup-python, then the job's
+    suites in order, each held step with exactly name, run and shell: bash) and refuses the
+    canonical special-file precheck step anywhere in either job, because its one-line job model
+    cannot read that step's run: | block, so requiring the step there and keeping that exact job
+    model cannot both hold; the job model stands unchanged. The residual: those two jobs run
+    their gates and suites on a tree no workflow precheck step walked, and that gate does not
+    refuse another one-line step added after its own step (a gate step among them) while this
+    pass requires no precheck step in either job, so such a step also runs on a tree no
+    precheck walked and neither gate flags it. The same job ids in any other workflow file, and
+    every other job of quality.yml, stay held to the precheck-first order."""
     jobs, job_names, run_line_numbers, diagnostics = _workflow_step_model(text, source)
     problems = []
     for number, raw in enumerate(text.split("\n"), 1):
@@ -8764,8 +8778,9 @@ def workflow_precheck_order_problems(text, source):
             continue
         if precheck is None:
             if source == PRECHECK_ORDER_EXEMPT_SOURCE and job in PRECHECK_ORDER_EXEMPT_JOBS:
-                # tools/check_python_host_pin.py holds this job whole and refuses any inserted
-                # step, the canonical precheck step included (PRECHECK_ORDER_EXEMPT_JOBS).
+                # tools/check_python_host_pin.py refuses the canonical precheck step in this job;
+                # a one-line step added after that gate's own step is flagged by neither gate
+                # (PRECHECK_ORDER_EXEMPT_JOBS, the disclosed residual).
                 continue
             problems.append(where + " has no canonical special-file precheck step (the bootstrap "
                             "test-and-abort line, then python3 -I -B tools/_gen_common.py "
@@ -8988,8 +9003,9 @@ def main(argv=None):
     else:
         print("PRECHECK ORDER: every workflow job runs the canonical special-file precheck step "
               "before any other post-checkout run step, except the two host-patch jobs of "
-              "quality.yml, which tools/check_python_host_pin.py holds whole and which refuse "
-              "any inserted step (the disclosed residual).")
+              "quality.yml, where tools/check_python_host_pin.py refuses the canonical step "
+              "and a one-line step added after its own step runs on a tree no precheck walked, "
+              "flagged by neither gate (the disclosed residual).")
     return code
 
 

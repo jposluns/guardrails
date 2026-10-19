@@ -435,9 +435,12 @@ def precheck_special_files(root):
 
     ENTRY POINTS. This module is invoked directly (--precheck) as the FIRST post-checkout run step of
     every job in every CI workflow except the two host-patch jobs of .github/workflows/quality.yml
-    (opf-host-patch and git-fixture-env-host-patch, which tools/check_python_host_pin.py holds whole,
-    refusing any inserted step; tools/check_ci_parity.py holds every other job to that order and
-    names that exemption as its residual) and ahead of every gate in each runner, which stops on
+    (opf-host-patch and git-fixture-env-host-patch: tools/check_python_host_pin.py refuses the
+    canonical precheck step anywhere in them, because its one-line job model cannot read that
+    step's run: | block, but another one-line step added after its own step runs on a tree no
+    precheck walked and neither that gate nor tools/check_ci_parity.py flags it;
+    tools/check_ci_parity.py holds every other job to that order and names that exemption as its
+    residual) and ahead of every gate in each runner, which stops on
     refusal (exit 2), so every gate and self-test after it, outside those two jobs, acts on a checked
     tree. The root comes from _derive_precheck_root (a fixed location, never an
     upward .git search); the INVOKED location (os.path.abspath, no link resolution) and the RESOLVED

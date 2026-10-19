@@ -37,7 +37,8 @@ def main() -> int:
     try:
         for path in sorted(walk_files(root, SKIP_DIRS, suffixes={".md"})):
             try:
-                # non-blocking: this walk reads ignored paths too, which the precheck does not cover.
+                # non-blocking: the precheck certifies only what stood when it walked, not a file
+                # created after that walk.
                 text = read_text_nonblocking(path)
             except UnicodeDecodeError:
                 # a Markdown file that is not utf-8 is a real docs-integrity finding, not a fail-closed

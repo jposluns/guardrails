@@ -1126,7 +1126,9 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
     (("tools/check_clauses.py", "subprocess.run:<no-py-literal>"),
      (1, "one direct call with no .py literal: the text-coverage self-test runs python3 -I -B -c with "
       "a literal program that imports this enumerated module from its own directory and calls "
-      "check_text_coverage on a FIFO rule source under a 30-second deadline")),
+      "check_text_coverage on a FIFO rule source under a 30-second deadline, and the same call "
+      "imports a blocking stub of that name from the self-test scratch under a 3-second deadline "
+      "(the deadline control)")),
     (("tools/check_derived_command_parameters.py", "subprocess.run:<no-py-literal>"),
      (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
@@ -1247,7 +1249,8 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
      (7, "seven direct calls with no .py literal: six git calls (the first-parent log and the "
       "self-test's fixture inits, add and commits) and one python3 -I -B -c child whose literal "
       "program imports this enumerated module from its own directory and calls run() on a FIFO "
-      "fixture under a 30-second deadline")),
+      "fixture under a 30-second deadline, the same call importing a blocking stub of that name "
+      "from the self-test scratch under a 3-second deadline (the deadline control)")),
     (("tools/check_record_sections.py", "subprocess.run:<no-py-literal>"),
      (3, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "

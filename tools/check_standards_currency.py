@@ -336,8 +336,8 @@ def self_test_main(_mkdtemp=None, _vectors=True):
             if _run_quiet(tmp / "does-not-exist") != 2:
                 failures.append("run() with an absent standards dir expected fail-closed exit 2")
             # F-CORPUS-FIFO-HANG: a FIFO at a *.toml path the load_manifests glob picks
-            # up (the shape a git-ignored drop-in takes, which the special-file precheck deliberately does
-            # not walk) must be the named refusal (exit 2), never a blocking read. MUTATION: reverting
+            # up (the shape a drop-in created after the special-file precheck walked, or met by a direct
+            # run that skipped it, takes) must be the named refusal (exit 2), never a blocking read. MUTATION: reverting
             # _standards.load_manifests to a plain open() blocks here; the alarm records the hang.
             # POSIX only (os.mkfifo, SIGALRM).
             if hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"):
