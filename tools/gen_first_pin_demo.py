@@ -160,9 +160,12 @@ def render_demo(agents_sha, delivered, floor, cap):
                      + _list("floor-profile-obligations", floor)) + "\n"
 
 
-def build(root, cap=CAP_BYTES):
-    """Build and check the demonstration text for the tree at root. Raises DemoError (or the corpus
-    loader's ValueError/OSError) on an unreadable or ambiguous input."""
+def measure(root):
+    """Prove AGENTS.md under root is the fresh composition of its own rule corpus and block registry,
+    then locate every rule span in it. Returns (agents_bytes, spans, apex_id), where spans is
+    [(rule_id, start, end)] in AGENTS.md order with absolute UTF-8 byte offsets and end exclusive.
+    The ONE span algorithm this generator and tools/check_must_deliver.py share. Raises DemoError (or
+    the corpus loader's ValueError/OSError) on an unreadable or ambiguous input."""
     agents = read_agents(root / AGENTS_REL)
     src_dir = root.joinpath(*RULES_PARTS)
     if not dir_present(src_dir):
@@ -192,7 +195,14 @@ def build(root, cap=CAP_BYTES):
     if spans[0][0] != apexes[0]:
         raise DemoError("the apex rule {} is not the first rule in {} (found {} first); the floor profile "
                         "cannot be derived from an unexpected layout".format(apexes[0], AGENTS_REL, spans[0][0]))
-    delivered, floor = obligations(spans, apexes[0], cap)
+    return agents, spans, apexes[0]
+
+
+def build(root, cap=CAP_BYTES):
+    """Build and check the demonstration text for the tree at root. Raises DemoError (or the corpus
+    loader's ValueError/OSError) on an unreadable or ambiguous input."""
+    agents, spans, apex_id = measure(root)
+    delivered, floor = obligations(spans, apex_id, cap)
     if not delivered:
         raise DemoError("no rule lies whole inside the first {} bytes of {}".format(cap, AGENTS_REL))
     agents_sha = hashlib.sha256(agents).hexdigest()

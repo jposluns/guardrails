@@ -18,6 +18,5 @@ Before delivering, re-open each cited range at its stated lines and confirm that
 on lines that carry the cited content, not on a blank line, a comment banner, or a closing delimiter.
 
 This rule narrows the reference-capture rule (refcap) to the reviewed commit: refcap requires the
-specific reference to be captured at the moment the claim is made, never reconstructed later from
-memory, and the obligations above scope that capture to a file opened this session at the commit
-under review.
+specific reference captured when the claim is made, never reconstructed from memory, and the
+obligations above scope that capture to a file opened this session at the commit under review.
