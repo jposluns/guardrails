@@ -11903,7 +11903,15 @@ def _main_isolated(monitor):
         # _nest_track that row took 12.5 s in gate_weakening and 12.2 s in bash_absolute_paths (one run each)
         # while every row above fit that code, and unchanged it takes a fraction of a second (on one host at
         # most 0.18 s as the max of five runs in gate_weakening), a margin of about five times against the same
-        # 1 s bound; the figure is host-specific, the 1 s bound and the margin are what the row enforces.
+        # 1 s bound; the figure and the margin are host-specific, and the 1 s bound is what each row
+        # enforces. The doubt-comment-pipes row is the linearity guard for the fail-closed sink test behind
+        # a '#' the lexer cannot judge under both readings (_gate_doubt_sink): a 256 KiB run of '# |' comment
+        # lines between a checker's pipe and an off-list terminal word, so the test scans the whole text and
+        # finds no listed sink word. Its clock is time.process_time (per-process CPU, as every row here). A
+        # probe that re-read the remaining comment lines from every '|' grew about fourfold per doubling
+        # there and took about 20 s of CPU in gate_weakening on a quarter of this input, far over the bound;
+        # the single-pass test took at most 0.21 s on the full input as the max of five runs on one host
+        # across the three guards, a margin of about five times against the same enforced 1 s bound.
         _cost_form = "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\n"
         _cost_inputs = (("long-comment-line", 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
                         ("deep-nesting", "(" * 56000 + " `a`" * (56000 // 3)),
@@ -11911,7 +11919,8 @@ def _main_isolated(monitor):
                         ("retry-long-comment-line", _cost_form + 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
                         ("retry-deep-nesting", _cost_form + "(" * 56000 + " `a`" * (56000 // 3)),
                         ("floor-long-words", _cost_form + "echo " + "a " * (128 * 1024)),
-                        ("main-reading-long-words", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\necho " + "a " * (128 * 1024)))
+                        ("main-reading-long-words", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\necho " + "a " * (128 * 1024)),
+                        ("doubt-comment-pipes", "(true #'\n)\npytest |\n" + "# |\n" * (64 * 1024) + "wc"))
         for _cost_name, _cost_cmd in _cost_inputs:
             for _cost_guard in (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line):
                 _cost_t0 = time.process_time()
@@ -13529,13 +13538,15 @@ def _main_isolated(monitor):
                 "sink allows",
                 "ls ${x# #} <<<x", "allow")
 
-        # (gw-rfail-pin) The reading_failed branch of _gate_recovered_sink is pinned directly here. The raw
-        # _GATE_DOUBT_SINK_RE fallback also denies a pipe into a listed sink across continuation newlines and
-        # comment lines, so it shadows the rfail vectors above at the decision level and no gexpect vector can
-        # isolate the branch (reverting it leaves the regex to deny). So this check exercises the branch
-        # itself: on a reading_failed command the full partial lex of the WHOLE command recovers the sink past
-        # the first uncertain '#', while resuming from the first reading's fork (the behaviour before the fix)
-        # drops the readings that lex whole and misses it.
+        # (gw-rfail-pin) The reading_failed branch of _gate_recovered_sink is pinned directly here. A sink
+        # that branch proves is a lexed pipeline whose listed sink word follows its '|' in the raw text, and
+        # the fail-closed sink test (_gate_doubt_sink) denies exactly that order, so at the decision level
+        # reverting the branch leaves such a command denied and no gexpect vector isolates it. (A probe that
+        # modelled the sink stage gave no such cover: a stage spelling it missed, one opening with a quoted
+        # newline, decided through this branch alone.) So this check exercises the branch itself: on a
+        # reading_failed command the full partial lex of the WHOLE command recovers the sink past the first
+        # uncertain '#', while resuming from the first reading's fork (the behaviour before the fix) drops
+        # the readings that lex whole and misses it.
         for _rf_label, _rf_cmd in (("sink-nl", "pytest |\nhead 3</dev/null${x# #} 4<<<x"),
                                    ("sink-redir", "pytest |\nhead 2>${x:- #} 3> >(cat)")):
             try:
@@ -13558,9 +13569,10 @@ def _main_isolated(monitor):
             except ValueError as _rf_exc:
                 failures.append("(gw-rfail-pin-error) {}: unexpected ValueError {!r}".format(_rf_label, _rf_exc))
 
-        # Behind a '#' the lexer cannot judge under both readings, the raw fallback's sink probe reads a pipe
-        # into a listed sink across the newlines AND the blank or '#' comment lines that continue the pipeline
-        # (bash reads the stage after '|' or '|&' past them). Here the '#' sits inside an open '(' and its
+        # Behind a '#' the lexer cannot judge under both readings, the fail-closed sink test reads a listed
+        # sink word anywhere at or after the first '|' (_gate_doubt_sink), so the newlines and the blank or
+        # '#' comment lines that continue the pipeline (bash reads the stage after '|' or '|&' past them)
+        # never end the scan. Here the '#' sits inside an open '(' and its
         # word-text reading fails on the quote it opens, while the comment reading leaves the pipeline after a
         # subshell prefix the deny tier does not read past (_gate_benign_prefix), so the raw probe is the
         # deciding layer.
@@ -13576,8 +13588,8 @@ def _main_isolated(monitor):
         gexpect("(gw-dbt-sink-wc) control: a stage off the sink list after the continuation newline allows",
                 "(true #'\n)\nls |\nwc", "allow")
         # A '#' comment line between the pipe and the sink continues the pipeline in bash just as a blank line
-        # does, so the doubt probe crosses it too. These denied only after the probe was taught to skip comment
-        # continuation lines; before, the comment stopped the scan short of the sink and the command allowed.
+        # does. The fail-closed sink test never reads the comment at all (no listed sink word stands between
+        # the pipe and the sink here), so the comment cannot stop the scan short of the sink.
         gexpect("(gw-dbt-sink-cmt) a comment after the pipe on its own line, then the sink, denies",
                 "(true #'\n)\npytest | # run the checks\nhead", "deny")
         gexpect("(gw-dbt-sink-cmtamp) a '|&' pipe then a comment then the sink denies too",
@@ -13588,6 +13600,91 @@ def _main_isolated(monitor):
                 "(true #'\n)\nls | # just a note\nwc", "allow")
         gexpect("(gw-dbt-sink-cmtlinewc) control: a comment line then an off-list stage on its own line allows",
                 "(true #'\n)\nls |\n# just a note\nwc", "allow")
+
+        # The fail-closed sink test reads a listed sink word anywhere at or after the first pipe, whatever
+        # stands between them, so a stage spelling a stage-modelling probe would have to enumerate denies by
+        # construction: a quoted newline inside the sink stage, a redirect carrying '&' at the stage's start,
+        # and their combinations with the comment continuation lines above. The controls pin the other side:
+        # with the sink word off the deny list the same cannot-evaluate shapes keep the checker-and-pipe
+        # note, and a checker with no pipe, process substitution or here-string stays a silent allow.
+        gexpect("(gw-dbt-sink-qnl) a quoted newline inside the sink stage does not end the scan, denies",
+                "(true #'\n)\npytest | # note\nA=\"\n\" head", "deny")
+        gexpect("(gw-dbt-sink-ramp) a sink stage starting with a '2>&1' redirect denies",
+                "(true #'\n)\npytest | 2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-rampcmt) a comment line then a '2>&1'-led sink stage denies",
+                "(true #'\n)\npytest | # note\n2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-rerr) a '|&' pipe into a '>&2'-led sink stage denies",
+                "(true #'\n)\npytest |& >&2 head", "deny")
+        gexpect("(gw-dbt-sink-qnlramp) a quoted newline and a '&'-carrying redirect together deny",
+                "(true #'\n)\npytest | A=\"\n\" 2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-cmtqnlramp) a comment line, a quoted newline and the redirect together deny",
+                "(true #'\n)\npytest | # note\nA=\"\n\" 2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-stageramp) a pass-through stage then a '&'-redirect-led sink stage denies",
+                "(true #'\n)\npytest |\ncat |\n2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-braceramp) five unjudged parameter-expansion '#' then the redirect-led sink "
+                "stage denies",
+                "cd /tmp ${x# #} ${y# #} ${z# #} ${w# #} ${v# #}\npytest | 2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-bqramp) a backquote-substitution '#' then the redirect-led sink stage denies",
+                "echo `true #`\npytest | 2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-dbrramp) a '#' inside a ${...} expansion then the redirect-led sink stage denies",
+                "echo ${x:- #'}\npytest | 2>&1 head", "deny")
+        gexpect("(gw-rfail-sink-qnl) a failed reading with a quoted newline inside the sink stage denies",
+                "pytest | A=\"\n\" head 3</dev/null${x# #} 4<<<x", "deny")
+        gexpect("(gw-dbt-note-qnlwc) control: the quoted-newline stage with an off-list word keeps the "
+                "checker-and-pipe note, not a deny",
+                "(true #'\n)\npytest | # note\nA=\"\n\" wc", "allow-note")
+        gexpect("(gw-dbt-note-rampwc) control: a '2>&1'-led stage with an off-list word keeps the note",
+                "(true #'\n)\npytest | 2>&1 wc", "allow-note")
+        gexpect("(gw-dbt-note-noflow) control: a checker with no pipe or flow past the unjudged '#' allows "
+                "silently",
+                "(true #'\n)\npytest", "allow")
+
+        # NO WEAKER THAN THE BASE COMMIT: every cannot-evaluate sink shape above, the combinations, and the
+        # off-list controls, beside the decision the base commit ac813196 gave the same command. HOW THE
+        # COLUMN WAS PRODUCED: ac813196's .aiqt/core/hooks/scripts/aiqt_hooks.py (git show ac813196:<that
+        # path>) was loaded as a module and gate_weakening called on each command with the payload _decision
+        # builds, each result reduced as _reduce_result does: D deny, N allow-note, A allow. Each command
+        # must decide at least as strictly here: behind a '#' the lexer cannot judge under both readings the
+        # command is cannot-evaluate and takes a deny, the raw fallback's decision or the checker-and-pipe
+        # note, never an outcome quieter than the base commit's reading of the same text.
+        _gwb_rows = (
+            ("sink after a continuation newline", "(true #'\n)\npytest |\nhead", "N"),
+            ("sink on the pipe's line", "(true #'\n)\npytest | head", "N"),
+            ("sink after '|&' and a newline", "(true #'\n)\npytest |&\nhead", "N"),
+            ("pass-through stage then the sink", "(true #'\n)\npytest |\ncat |\nhead", "N"),
+            ("comment after the pipe", "(true #'\n)\npytest | # run the checks\nhead", "N"),
+            ("'|&' then a comment", "(true #'\n)\npytest |& # run the checks\nhead", "N"),
+            ("comment line between pipe and sink", "(true #'\n)\npytest |\n# run the checks\nhead", "N"),
+            ("quoted newline inside the sink stage", "(true #'\n)\npytest | # note\nA=\"\n\" head", "N"),
+            ("the same stage with a space in the value", "(true #'\n)\npytest | # note\nA=\" \" head", "N"),
+            ("'2>&1'-led sink stage", "(true #'\n)\npytest | 2>&1 head", "N"),
+            ("comment line then the '2>&1'-led stage", "(true #'\n)\npytest | # note\n2>&1 head", "N"),
+            ("'|&' into a '>&2'-led stage", "(true #'\n)\npytest |& >&2 head", "N"),
+            ("five expansion '#' then the redirect stage",
+             "cd /tmp ${x# #} ${y# #} ${z# #} ${w# #} ${v# #}\npytest | 2>&1 head", "N"),
+            ("backquote '#' then the redirect stage", "echo `true #`\npytest | 2>&1 head", "N"),
+            ("${...} '#' then the redirect stage", "echo ${x:- #'}\npytest | 2>&1 head", "N"),
+            ("quoted newline and the redirect together", "(true #'\n)\npytest | A=\"\n\" 2>&1 head", "N"),
+            ("comment line, quoted newline and redirect",
+             "(true #'\n)\npytest | # note\nA=\"\n\" 2>&1 head", "N"),
+            ("pass-through stage then the redirect stage", "(true #'\n)\npytest |\ncat |\n2>&1 head", "N"),
+            ("failed reading, quoted newline in the stage",
+             "pytest | A=\"\n\" head 3</dev/null${x# #} 4<<<x", "D"),
+            ("failed reading, sink after the newline", "pytest |\nhead 3</dev/null${x# #} 4<<<x", "D"),
+            ("failed reading, redirects on the sink", "pytest |\nhead 2>${x:- #} 3> >(cat)", "D"),
+            ("control: off-list word, quoted-newline stage", "(true #'\n)\npytest | # note\nA=\"\n\" wc", "A"),
+            ("control: off-list word, '2>&1'-led stage", "(true #'\n)\npytest | 2>&1 wc", "A"),
+            ("control: checker with no pipe or flow", "(true #'\n)\npytest", "A"),
+            ("control: no checker before the pipe", "(true #'\n)\nls |\nwc", "A"),
+            ("control: no checker, comment after the pipe", "(true #'\n)\nls | # just a note\nwc", "A"),
+            ("control: failed reading, no run and no sink", "ls ${x# #} <<<x", "A"),
+        )
+        for _gwb_name, _gwb_cmd, _gwb_code in _gwb_rows:
+            _gwb_want = _hash_base_codes[_gwb_code]
+            _gwb_got = _decision(gwg, _gwb_cmd)
+            if _hash_rank.get(_gwb_got, -1) < _hash_rank[_gwb_want]:
+                failures.append("(gw-dbt-base) {}: the base commit decided {}, got {}".format(
+                    _gwb_name, _gwb_want, _gwb_got))
 
         # === gatdis deny tier: a VERIFICATION RUN whose output reaches a truncating sink =====================
         # Two tiers: the narrow verification-run predicate piped into a truncating sink DENIES; everything else

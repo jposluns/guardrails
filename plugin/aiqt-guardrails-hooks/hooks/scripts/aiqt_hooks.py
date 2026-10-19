@@ -10799,16 +10799,30 @@ _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
 # checker's output may reach the sink through it, so the fallback notes it as it notes a raw '| head'.
 _RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
 _RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
-# A pipe and then, in the same stage (after any wrapper), a sink word the gatdis deny tier lists
-# (_truncating_sink_kind): gate_weakening's deny test when a '#' whose comment reading the lexer cannot judge
-# under both readings stops it (read over _hash_doubt_scan). After '|' or '|&' bash continues the pipeline
-# across the blank and comment lines that stand before the next stage, so the probe crosses them too: zero or
-# more continuation lines, each horizontal whitespace then an optional '#' comment to the end of the line then
-# the newline. The sink stage itself stays on one line (the final [^|;&\n]* run before the sink word), since a
-# newline there, outside such a continuation, ends the pipeline. Crossing the comment widens the deny only;
-# a '#' comment that itself holds a sink word on the pipe's own line already matched under the old probe.
-_GATE_DOUBT_SINK_RE = re.compile(
-    r"\|&?(?:[^\S\n]*(?:#[^\n]*)?\n)*[^|;&\n]*\b(?:head|tail|grep|egrep|fgrep|rg)\b")
+# A sink word the gatdis deny tier lists (_truncating_sink_kind) anywhere at or after the first '|':
+# gate_weakening's deny test when a '#' whose comment reading the lexer cannot judge under both readings
+# stops it (read over _hash_doubt_scan). The test deliberately models NOTHING between the pipe and the sink
+# word: behind such a '#' this guard cannot tell a blank or comment continuation line, a redirect, an
+# assignment or a quoted newline from stage text, and a probe that spells out stage shapes misses the next
+# spelling it did not enumerate, so any listed sink word after a pipe is read as reachable by the pipeline
+# and denies. That is fail-closed by construction (the deny rests on no stage grammar a new spelling could
+# escape) and it only widens the deny over a stage-modelling probe, whose every match holds a '|' before a
+# listed sink word. Read over the doubled _hash_doubt_scan text (the command, then its de-quoted copy), a
+# sink word anywhere in the command counts once any '|' stands in it: a match spanning the two parts only
+# over-matches, the fallback's safe direction (_hash_doubt_scan). The scan is linear: one find for the
+# first '|', then one pass of this word probe over the suffix, so each character is read a bounded number
+# of times.
+_GATE_DOUBT_SINK_WORD_RE = re.compile(r"\b(?:head|tail|grep|egrep|fgrep|rg)\b")
+
+
+def _gate_doubt_sink(scan):
+    """True when a sink word the gatdis deny tier lists stands at or after the first '|' in scan (a
+    _hash_doubt_scan text): the fail-closed sink test behind a '#' whose comment reading the shared lexer
+    could not judge under both readings (the comment above _GATE_DOUBT_SINK_WORD_RE)."""
+    pipe = scan.find("|")
+    return pipe >= 0 and _GATE_DOUBT_SINK_WORD_RE.search(scan, pipe) is not None
+
+
 _RAW_COMMIT_MSG_GIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
@@ -11554,8 +11568,11 @@ def gate_weakening(data):
     otherwise the raw fallback stands. A '#' whose comment reading depends on context (the shared lexer's
     comment rule) is judged under both readings: the deny tier on each reading alone, everything else on the
     segments of all readings in turn. Where the lexer cannot judge it that way, text holding quoting
-    _hash_doubt_scan does not decode (_hash_doubt_opaque) DENIES, a pipe into a listed sink word anywhere in
-    its text (_hash_doubt_scan) DENIES, and the raw fallback reads that text otherwise.
+    _hash_doubt_scan does not decode (_hash_doubt_opaque) DENIES, a listed sink word at or after the first
+    '|' in its text DENIES whatever stands between them (_gate_doubt_sink, fail-closed by construction), the
+    raw fallback's probes read that text next, and remaining text holding a checker-shaped word and a pipe,
+    process substitution or here-string ALLOWS-WITH-NOTE, never a silent allow quieter than the note tier a
+    readable spelling of the same shape earns.
     Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A
     FLOOR, above _MainHashReading), main's reading is one more reading here where it lexes. Where it fails, the
     decision of the path main's failed lex takes is a floor: the sink that main's partial lex proves past the
@@ -11604,20 +11621,38 @@ def gate_weakening(data):
             return _hash_doubt_opaque_deny("gatdis (gate-discipline)", "a git hook bypass (a --no-verify "
                                            "spelling, or -n on commit or am) or a verification run piped into "
                                            "a truncating sink", _GATE_ALTS)
-        # Behind a '#' the lexer could not judge under both readings, a pipe into a sink the deny tier
-        # lists (head, tail, grep, egrep, fgrep, rg) may carry a verification run's output past that '#',
-        # so it denies, including where blank or '#' comment continuation lines stand between the pipe and
-        # the sink (bash reads the stage after '|' or '|&' past them); the raw fallback also reads the text
-        # with its backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan).
+        # Behind a '#' the lexer could not judge under both readings, a sink word the deny tier lists
+        # (head, tail, grep, egrep, fgrep, rg) anywhere at or after the first '|' may receive a verification
+        # run's output past that '#' whatever stands between them (a blank or comment continuation line, a
+        # redirect, an assignment, a quoted newline), so it denies fail-closed (_gate_doubt_sink); the raw
+        # fallback also reads the text with its backslash-newlines, quote characters and backslashes removed
+        # (_hash_doubt_scan).
         scan = _hash_doubt_scan(command)
-        if _GATE_DOUBT_SINK_RE.search(scan):
+        if _gate_doubt_sink(scan):
             return _deny(
-                _hash_doubt_reason("gatdis (gate-discipline)", "its text pipes into a stage that can truncate "
-                                   "or swallow a check's output (head, tail, grep, egrep, fgrep or rg), so a "
-                                   "verification run cut short there cannot be ruled out") + " " + _GATE_ALTS,
+                _hash_doubt_reason("gatdis (gate-discipline)", "its text holds a stage word that can truncate "
+                                   "or swallow a check's output (head, tail, grep, egrep, fgrep or rg) after "
+                                   "a pipe, so a verification run cut short there cannot be ruled out") + " " +
+                _GATE_ALTS,
                 "AIQT guardrail: denied a possible verification run piped into a truncating sink behind a '#' "
                 "this guard could not read (rule gatdis, fail-closed).")
-        return _gate_weakening_fallback(scan)
+        # The raw fallback's own probes decide next: a bypass spelling denies and a swallow shape notes.
+        # What remains is still text this guard cannot evaluate: where it holds a checker-shaped word and a
+        # pipe, a process substitution or a here-string, a stage that keeps only part of a check's output
+        # cannot be ruled out past that '#', so the command keeps at least the note the broad tier gives a
+        # readable spelling of the same shape, never a silent allow; text with no such pairing allows.
+        kind = _gate_weakening_fallback_kind(scan)
+        if kind is not None:
+            return _gate_weakening_fallback(scan)
+        if _RAW_CHECKER_RE.search(scan) and ("|" in scan or _RAW_FLOW_RE.search(scan)):
+            return _allow_note(
+                "AIQT guardrail (rule gatdis, gate-discipline): this command carries a '#' whose comment "
+                "reading depends on context that the shared lexer could not judge under both readings, and "
+                "its text holds a checker-shaped word and a pipe, process substitution or here-string, so a "
+                "stage that keeps only part of a check's output cannot be ruled out past that '#'. If a "
+                "check gates this work, run it bare with its full output in a file at an absolute path and "
+                "read that; if this is a benign optional probe, this is allowed.")
+        return _allow()
     floor = _SubstHeredocs.reads != reads  # main's reading of a body the lex read fails: its decision is a floor
     records = [seg for reading in readings for seg in reading]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
