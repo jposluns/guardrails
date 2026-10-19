@@ -66,6 +66,7 @@ import ipaddress
 import os
 import re
 import stat
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -86,7 +87,7 @@ from _opf_store import (  # noqa: E402
 from _opf_schema import (  # noqa: E402
     validate_record, validate_counters, check_unique_ids, check_ids_within_counters, check_monotonic,
     validate_transition, parse_status, BASELINE_SPECS, ACTOR_KINDS, LINK_RELS, _valid_id_shape,
-    SUPPORTED_SCHEMA, _valid_timestamp, IMPORTED_NAMESPACES,
+    SUPPORTED_SCHEMA, _valid_timestamp, IMPORTED_NAMESPACES, validate_imported_record,
 )
 # U3 supplies the ledger validators, the frozen/rotation/partition guards, and the across-time append-only.
 from _opf_release import (  # noqa: E402
@@ -190,23 +191,21 @@ _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
 # Checks a homes-2 store also requires (spec 4.2), inserted after C-ARCHIVE-ENUM. A legacy (homes 1) store's
 # roster, and so its report, is exactly REQUIRED_CHECKS.
 HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
-# The imported-content checks (C-IMPORTED-*, spec 8.2): the content grading of the imported-series
-# leaves, deferred until the spec 1.3.0 activation lands them, so EMPTY today. While it is empty the
-# activation tripwire in _check_containment routes any store whose imported series is ACTIVE to
-# CANNOT-EVALUATE (the leaves would be registered as managed while nothing reads their content), and
-# the self-test asserts imported_content_checks_landed below: once SUPPORTED_SPEC_VERSION reaches
-# IMPORTED_SPEC_VERSION this roster must be non-empty, NEW ids in the exact imported-check grammar
-# (_IMPORTED_ID_RE below), disjoint from REQUIRED_CHECKS and HOMES2_CHECKS, and inside
-# required_checks(h) for EVERY homes generation h from 1 through SUPPORTED_HOMES (activating the
-# imported series and activating homes 2 are separate gates; today an active series is graded
-# against required_checks(1)), so raising that
-# constant alone, or with a placeholder roster, cannot ship. At activation these ids join the
-# required roster of every generation the way HOMES2_CHECKS joins the homes-2 roster: the wiring
-# must place the imported ids inside required_checks(h) for EVERY supported generation while
-# they stay disjoint from REQUIRED_CHECKS and HOMES2_CHECKS themselves, so any OTHER wiring (even a
-# legitimate-looking alternative such as an imported-keyed roster) reads red, which fails
-# closed: a red on a legitimate alternative, never a green on a wiring nothing grades.
-IMPORTED_CONTENT_CHECKS = ()
+# The four imported-series checks spec 8.3 names, which activation MUST add to the doctor roster (spec
+# 4.2). They join the roster only for a store whose imported series is ACTIVE (imported_series_active
+# below), appended after its homes roster, so an inactive store's roster, and so its report, is
+# unchanged. C-IMPORTED-SCHEMA is graded here; until the other three land, result()'s roster
+# reconciliation routes each of them to CANNOT-EVALUATE on an active store (a check that never runs is
+# never a pass), so no active store certifies VALID on a partial imported roster. While this roster is
+# non-empty the activation tripwire in _check_containment stays disarmed, and the self-test asserts
+# imported_content_checks_landed below: once SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION this
+# roster must be non-empty, NEW ids in the exact imported-check grammar (_IMPORTED_ID_RE below),
+# disjoint from REQUIRED_CHECKS and HOMES2_CHECKS, and inside required_checks(h, imported=True) for
+# EVERY homes generation h from 1 through SUPPORTED_HOMES, so emptying it, or swapping in a
+# placeholder, cannot ship once the series is supported. Any OTHER wiring (even a legitimate-looking
+# alternative such as a roster keyed on the generation as well) reads red, which fails closed: a red
+# on a legitimate alternative, never a green on a wiring nothing grades.
+IMPORTED_CHECKS = ("C-IMPORTED-SCHEMA", "C-IMPORTED-IDS", "C-IMPORTED-PROVENANCE", "C-IMPORTED-SEGREGATION")
 # The exact imported-check id grammar, matched in full: the C-IMPORTED- prefix, then one or more
 # runs of upper-case ASCII letters joined by single hyphens. The class is the one every id in
 # REQUIRED_CHECKS and HOMES2_CHECKS uses after its C-, and it admits the four imported-series checks
@@ -216,12 +215,32 @@ IMPORTED_CONTENT_CHECKS = ()
 _IMPORTED_ID_RE = re.compile(r"^C-IMPORTED-[A-Z]+(?:-[A-Z]+)*\Z")
 
 
-def required_checks(homes):
-    """The closed required-check roster for a store's active homes generation."""
+def required_checks(homes, imported=False):
+    """The closed required-check roster for a store's active homes generation, with IMPORTED_CHECKS
+    appended when its imported series is active (`imported`, the imported_series_active flag)."""
     if homes < 2:
-        return REQUIRED_CHECKS
-    at = REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
-    return REQUIRED_CHECKS[:at] + HOMES2_CHECKS + REQUIRED_CHECKS[at:]
+        roster = REQUIRED_CHECKS
+    else:
+        at = REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
+        roster = REQUIRED_CHECKS[:at] + HOMES2_CHECKS + REQUIRED_CHECKS[at:]
+    return roster + IMPORTED_CHECKS if imported else roster
+
+
+def imported_series_active(manifest_data):
+    """The imported-series activation flag (spec 8.2/4.2), keyed on the homes-2 declaration: True only
+    when the store is graded at homes 2 (_opf_store.homes_generation: this tooling activates homes 2
+    and the manifest declares exactly homes = 2 with spec_version 2.0.0) AND that declaration carries
+    the imported series under this tooling's own support (_opf_store.imported_series_declared: a
+    declared spec_version of IMPORTED_SPEC_VERSION or later, with SUPPORTED_SPEC_VERSION at or above
+    it). The 1.3.0 imported-series content activates only inside the 2.0.0 declaration, so a homes-1
+    store never activates it, whatever spec_version it declares, and raising either tooling constant
+    alone activates nothing. False for every store this tooling validates today (SUPPORTED_HOMES is
+    1). The doctor driver (the roster and C-IMPORTED-SCHEMA) reads this ONE flag, and
+    classify_containment derives it internally from the manifest for the containment registration and
+    every other consumer (the write guard, _opf_write_guard.plan_write_scope, included), so they
+    cannot disagree on the imported managed set."""
+    return (_opf_store.homes_generation(manifest_data) >= 2
+            and _opf_store.imported_series_declared(manifest_data))
 
 
 def imported_content_checks_landed():
@@ -229,20 +248,21 @@ def imported_content_checks_landed():
     constants and exercised there under controlled versions, rosters, and wirings. True while the
     imported series is unsupported, judged through _opf_store.imported_series_supported, the
     SAME support comparison the imported_series_declared gate reads (one shared helper, so the
-    gate and this predicate cannot disagree about support): the
-    content checks stay deferred, and the runtime tripwire in _check_containment covers an ACTIVE
-    imported series while this content-check roster stays empty (a populated roster disarms it).
+    gate and this predicate cannot disagree about support): imported_series_active is then False
+    for every store, and the runtime tripwire in _check_containment covers an ACTIVE imported
+    series whose roster is empty (a populated roster disarms it).
     Once support reaches the threshold, True ONLY when
-    IMPORTED_CONTENT_CHECKS is a non-empty roster of NEW ids, each a full match of the exact
+    IMPORTED_CHECKS is a non-empty roster of NEW ids, each a full match of the exact
     imported-check grammar _IMPORTED_ID_RE (the C-IMPORTED- prefix, then upper-case ASCII letter
     runs joined by single hyphens; an id carrying whitespace, a lower-case or mixed-case prefix, or
     any other character is refused, never stripped or case-folded into a match), disjoint from
     REQUIRED_CHECKS and HOMES2_CHECKS (a placeholder reusing an existing id such as C-CONTAINMENT
     implements no imported-content grading, so reuse never stands in), and inside
-    required_checks(h) for EVERY homes generation h from 1 through SUPPORTED_HOMES. Activating the
-    imported series (SUPPORTED_SPEC_VERSION) and activating homes 2 (SUPPORTED_HOMES) are SEPARATE
-    gates: today an active series is graded against required_checks(1), so ids wired only into the
-    homes-2 roster would bind no generation an active store is actually graded against. Raising
+    required_checks(h, imported=True) for EVERY homes generation h from 1 through SUPPORTED_HOMES.
+    An active series is graded only at homes 2 (imported_series_active), but required_checks appends
+    the imported ids whatever the generation, so this predicate keeps the stricter every-generation
+    bound: a variant wiring them into one generation's imported roster only reads red, a red on a
+    legitimate alternative rather than a green on an unwired generation. Raising
     the support constant without landing the checks, or landing a placeholder roster, therefore
     fails the suite through this predicate, and the runtime tripwire never stands alone. This
     predicate grades ROSTER STRUCTURE only -- the ids exist, match the grammar, are NEW, and are
@@ -255,7 +275,7 @@ def imported_content_checks_landed():
     SUPPORTED_HOMES holds."""
     if not _opf_store.imported_series_supported():
         return True
-    ids = set(IMPORTED_CONTENT_CHECKS)
+    ids = set(IMPORTED_CHECKS)
     if not ids:
         return False
     if not all(isinstance(cid, str) and _IMPORTED_ID_RE.fullmatch(cid) for cid in ids):
@@ -265,7 +285,7 @@ def imported_content_checks_landed():
     # Below one supported generation the all() below is vacuously True: refuse instead.
     if _opf_store.SUPPORTED_HOMES < 1:
         return False
-    return all(ids <= set(required_checks(h))
+    return all(ids <= set(required_checks(h, imported=True))
                for h in range(1, _opf_store.SUPPORTED_HOMES + 1))
 
 
@@ -321,11 +341,13 @@ def source_integrity_ok(result, accepted=None):
 
 def source_checks(result):
     """The SOURCE_INTEGRITY checks a result is gated on, in roster order: SOURCE_INTEGRITY_CHECKS, plus the
-    homes-2 checks when the report carries one. result() grades every check its homes roster requires, so a
-    homes-2 report always carries them, and a legacy report never does."""
+    homes-2 checks when the report carries one, plus IMPORTED_CHECKS when it carries one. result() grades
+    every check its roster requires, so a homes-2 report always carries the homes-2 checks and an active
+    imported series' report always carries the imported ones; a legacy report carries neither."""
     checks = getattr(result, "checks", None) or {}
     homes = 2 if any(cid in checks for cid in HOMES2_CHECKS) else 1
-    return tuple(cid for cid in required_checks(homes) if cid not in DELIVERABLE_DRIFT_CHECKS)
+    imported = any(cid in checks for cid in IMPORTED_CHECKS)
+    return tuple(cid for cid in required_checks(homes, imported) if cid not in DELIVERABLE_DRIFT_CHECKS)
 
 
 # Disclosed by-design residuals (OPF-SPEC 17): the sub-checks a parse-only, read-only whole-store engine
@@ -370,9 +392,43 @@ _RESIDUALS = (
 )
 # Disclosed only on a homes-2 report, so a legacy report's residuals are unchanged.
 _HOMES2_RESIDUALS = (
-    "Journal contents are not inspected by doctor. A staged plan does not prove recoverability. "
+    "Journal contents are not inspected by doctor, except that it lists the id reservation home of each "
+    "journal kind and reads each reservation file's bytes, for the reserved numbers alone; that read awaits "
+    "the homes-2 revision of spec section 4.2, which still says doctor excludes journals (a release "
+    "dependency). A staged plan does not prove recoverability. "
     "Homes-2 evidence inventories establish local membership, not actor authenticity; losing a whole "
     "bundle, inventory and payload together, requires independent history to detect.",
+    "A reserved number that no present record carries is treated as issued only where the prior committed "
+    "snapshot (HEAD) held no record with that id; where it held one, the absence is a C-NO-DELETION finding, "
+    "and where no prior enumerating its ids was observed it is CANNOT-EVALUATE. Doctor sees the working "
+    "tree, the reservations and that one commit only, so a record published and deleted again with no "
+    "commit holding it in between (before the first commit, or after HEAD) leaves just its reservation, "
+    "which no check can tell from an orphaned one, and a deletion already committed in HEAD is visible only "
+    "to a doctor run before that commit.",
+)
+# Disclosed only on a report of a homes-1 store that has adopted (its adoption home exists), so a legacy
+# report residuals are unchanged.
+_ADOPTING_RESIDUALS = (
+    "Homes-1 adoption control area (spec 4.2, 17): an admitted adoption run is registered at file level "
+    "only, each path its committed inventories list; its recorded Move destinations are registered only "
+    "once its retirement is recorded, and every other path under the adoption homes is graded. Admission "
+    "and retirement are decided from the committed evidence bundle and run archive alone, whose listed "
+    "bundle, archive and Move-root bytes are verified at their recorded digests; a Move-root row is "
+    "admitted only as a move destination the run's own plan records. A retirement is recorded only by a "
+    "sealed retirement inventory in the shape the retirement-phase transaction derives from its own "
+    "create ops: one row per move row of the plan, occupying or not, whose recorded Move destination lies "
+    "beneath .working/archive/moved/, naming that destination at the moved source's plan digest and "
+    "nothing else (the record of a plan without such a move row lists no files), no row naming a path the "
+    "base inventory also claims and each listed destination holding its recorded bytes live; before a "
+    "recorded retirement, a file at a plan Move destination beneath .working/archive/moved/ is a "
+    "finding. The machine-local journal is "
+    "never read, so a clone grades as the original store. The evidence check detects accidents: an "
+    "interrupted apply, a hand edit that is non-canonical or that changes listed bytes, and a misplaced "
+    "or stale record. It does not detect deliberate forgery: a hand edit that re-emits a canonical, "
+    "self-consistent record is forgery and is not detected. Import and ingest "
+    "records stay unregistered paths until their own activation, a vanished frozen source before its "
+    "recorded retirement is a failure, and a migrate source stays bounded adoption state until the import "
+    "that retires it is read.",
 )
 
 
@@ -382,13 +438,15 @@ class StoreValidation:
     dominates VALID, so an unreadable input is never masked by an otherwise-clean read. `checks` is the
     ordered per-check verdict map; `triage` is the spec-11/14.2 partial-import surface; `evaluated_profiles`
     and `unevaluated_profiles` name the profile scope (spec 16); `residuals` are the disclosed by-design
-    uncovered sub-checks, reported but never changing the status."""
+    uncovered sub-checks, reported but never changing the status. `migration_incomplete` (additive) names
+    each bounded adoption-state path reported rather than failed (spec 11/14.2); it never changes the status."""
     __slots__ = ("status", "findings", "cannot_evaluate", "residuals", "checks", "triage",
-                 "evaluated_profiles", "unevaluated_profiles", "by_check", "unattributed")
+                 "evaluated_profiles", "unevaluated_profiles", "by_check", "unattributed",
+                 "migration_incomplete")
 
     def __init__(self, status, findings=None, cannot_evaluate=None, residuals=None, checks=None,
                  triage=None, evaluated_profiles=None, unevaluated_profiles=None,
-                 by_check=None, unattributed=None):
+                 by_check=None, unattributed=None, migration_incomplete=None):
         self.status = status
         self.findings = findings or []
         self.cannot_evaluate = cannot_evaluate or []
@@ -404,6 +462,7 @@ class StoreValidation:
         # fail closed on an internal fault the per-check map does not carry.
         self.by_check = by_check or {}
         self.unattributed = unattributed or []
+        self.migration_incomplete = migration_incomplete or []
 
 
 def exit_code(result):
@@ -424,7 +483,7 @@ class _Report:
     check that never registered `ran` is routed to CANNOT-EVALUATE naming it, so a silently-skipped check is
     never a pass."""
     __slots__ = ("findings", "cannot", "residuals", "checks", "triage", "_current", "by_check",
-                 "unattributed", "required")
+                 "unattributed", "required", "migration_incomplete")
 
     def __init__(self):
         self.findings = []
@@ -435,12 +494,14 @@ class _Report:
         self._current = None
         self.by_check = {}                # check-id -> list of the source-attributed message strings it emitted
         self.unattributed = []            # no-current findings/cants + duplicate-ran / unknown-id internal faults
-        self.required = REQUIRED_CHECKS   # the closed roster; a homes-2 store widens it via require_homes
+        self.required = REQUIRED_CHECKS   # the closed roster; homes 2 or an imported series widens it
+        self.migration_incomplete = []    # bounded adoption-state paths: reported, never a status change
 
-    def require_homes(self, homes):
-        # Bind the roster to the store's homes generation once the manifest names it. A homes-2 check that
-        # then never runs is CANNOT-EVALUATE, and a legacy report keeps exactly REQUIRED_CHECKS.
-        self.required = required_checks(homes)
+    def require_homes(self, homes, imported=False):
+        # Bind the roster to the store's homes generation and imported-series activation once the manifest
+        # names them. A homes-2 or imported check that then never runs is CANNOT-EVALUATE, and a legacy
+        # report keeps exactly REQUIRED_CHECKS.
+        self.required = required_checks(homes, imported)
         if homes >= 2:
             self.residuals.extend(_HOMES2_RESIDUALS)
 
@@ -467,6 +528,11 @@ class _Report:
 
     def triage_path(self, msg):
         self.triage.append(msg)
+
+    def migration_incomplete_path(self, msg):
+        # A bounded adoption-state path (spec 11/14.2): reported rather than failed, so, like triage, it is
+        # never attributed to a check verdict and never changes the status.
+        self.migration_incomplete.append(msg)
 
     def _attribute(self, status, msg):
         # Attribute the verdict AND the message to the current check. A finding/cant emitted with NO current
@@ -514,7 +580,8 @@ class _Report:
             status = VALID
         return StoreValidation(status, self.findings, self.cannot, self.residuals, ordered, self.triage,
                                sorted(evaluated_profiles or []), sorted(unevaluated_profiles or []),
-                               by_check=self.by_check, unattributed=self.unattributed)
+                               by_check=self.by_check, unattributed=self.unattributed,
+                               migration_incomplete=self.migration_incomplete)
 
 
 # --- a lightweight record descriptor for the cross-record checks -------------------------------------
@@ -531,7 +598,7 @@ class _Rec:
         self.qual = qual              # the status qualifier ("proposed") or None
         self.links = links            # list of (rel, target-id) tuples with a string rel
         self.actor_kind = actor_kind  # the actor.kind string, or None
-        self.location = location      # "active" or "archive/<YYYY>"
+        self.location = location      # "active", "archive/<YYYY>", or "imported" (an imported leaf row)
         self.scopes = scopes          # a block's scoped ids (list), or [] (spec 8.5)
         self.body = body              # the raw record table (immutable-body preservation check; codex-3)
 
@@ -690,9 +757,19 @@ def _list_contained(root_fd, reldir):
                                      "entry; fail-closed)".format(reldir, entry))
             return subdirs, files
         finally:
-            _close_fd_quietly(dfd)
+            # quiet for an OSError; any other exception goes through the one first-interrupt selection,
+            # so an interrupt in flight here keeps propagating as itself (_journal._yield_close_exceptions)
+            listing_inflight = _journal._in_flight_in(sys._getframe())
+            try:
+                _close_fd_quietly(dfd)
+            except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+                _journal._yield_close_exceptions(listing_inflight, [exc])
     finally:
-        _close_fd_quietly(pfd)
+        parent_inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_quietly(pfd)
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(parent_inflight, [exc])
 
 
 def _list_dir(root_fd, reldir, rep):
@@ -714,6 +791,20 @@ def _record_digest(body):
     store (F11). Raises `_opf_emit.EmitError` on an out-of-subset body, which the caller maps to
     CANNOT-EVALUATE, never a silent mismatch."""
     return "sha256:" + hashlib.sha256(_opf_emit.emit(body).encode("utf-8")).hexdigest()
+
+
+def _record_digest_matches(body, recorded):
+    """True iff `recorded` is the per-record digest of `body` (_record_digest), or the digest of the same
+    canonical serialization as an emitter before the U+2028/U+2029 escape spelled it (the escape of each
+    written as the literal character, _opf_emit.prior_separator_spelling), so a digest recorded over a body
+    holding one of those characters before that escape still reconciles. Either spelling is a function of
+    the parsed body alone, so a changed body matches neither. Raises `_opf_emit.EmitError` as _record_digest
+    does."""
+    text = _opf_emit.emit(body)
+    if recorded == "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest():
+        return True
+    prior = _opf_emit.prior_separator_spelling(text)
+    return prior != text and recorded == "sha256:" + hashlib.sha256(prior.encode("utf-8")).hexdigest()
 
 
 def _under_any(p, prefixes):
@@ -1149,11 +1240,11 @@ def _gather_perrecord(root_fd, machine_rel, tname, namespace, rows, where, regis
             recon.append(("finding", "{}: registry row state {} does not match record status {} (spec "
                           "9/13)".format(rw, _safe_display(row_state), _safe_display(body_status))))
         try:
-            want = _record_digest(body)
+            matched = _record_digest_matches(body, row.get("digest"))
         except _opf_emit.EmitError as exc:
             recon.append(("cant", "{}: cannot compute the per-record digest ({})".format(body_rel, exc)))
-            want = None
-        if want is not None and row.get("digest") != want:
+            matched = None
+        if matched is False:
             recon.append(("finding", "{}: per-record digest mismatch for {!r} (the index row and the record "
                           "file disagree; spec 13:999-1001)".format(rw, rid)))
         recs.append(_make_rec(body, tname, "active"))
@@ -1232,6 +1323,78 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
         else:
             recs.extend(_gather_inline(tname, rows, idx_rel, registered_vendors, rep))
     return recs, recon
+
+
+def _imported_leaf_rows(data, where, rows_key, rep):
+    """Validate an imported leaf's top shape and return its rows, or None (CANNOT-EVALUATE). Both leaf
+    shapes are closed {schema, <rows_key>} tables: `record` for a <type>.imported.index.toml, exactly the
+    inline index shape _index_rows reads, and `entry` for worklog.imported.toml, the worklog ledger shape.
+    A value that is not a table, an unsupported schema, or a rows value that is not an array is
+    CANNOT-EVALUATE; an unknown top-level key or an absent `schema` is an INVALID finding."""
+    if not isinstance(data, dict):
+        rep.cant("{}: imported leaf is not a table".format(where))
+        return None
+    extra = set(data) - {"schema", rows_key}
+    if extra:
+        rep.finding("{}: unknown top-level key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
+    if "schema" not in data:
+        rep.finding("{}: imported leaf is missing the required `schema` key (a closed leaf declares its "
+                    "schema; spec 4.2/13)".format(where))
+    else:
+        sch = data.get("schema")
+        if type(sch) is not int or sch != SUPPORTED_SCHEMA:
+            rep.cant("{}: schema {} is not the supported version {} (fail-closed; do not parse under v{} "
+                     "assumptions)".format(where, _safe_display(sch), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+            return None
+    rows = data.get(rows_key, [])
+    if not isinstance(rows, list):
+        rep.cant("{}: [[{}]] is not an array of tables".format(where, rows_key))
+        return None
+    return rows
+
+
+def _gather_imported_records(root_fd, machine_rel, enabled_types, registered_vendors, rep):
+    """C-IMPORTED-SCHEMA (spec 8.3): read the imported-series leaves inline (the first imported-series
+    release keeps them inline in either store layout, spec 4.2) and validate every row through
+    _opf_schema.validate_imported_record, the closed imported envelope and its missingness rules. The
+    leaves are one per enabled type except legacy_fragment, named through _opf_store.imported_leaf_names,
+    the authority the containment registration reads: <type>.imported.index.toml with [[record]] rows,
+    and worklog.imported.toml with [[entry]] rows for the worklog ledger. An imported row NEVER enters the
+    _SCHEMA_DEFERRAL seam (spec 8.3: a conforming imported series can reach VALID), so a type whose clean
+    records defer (a module-tier type) is graded by the imported validator, which refuses a type it holds
+    no schema for. An absent leaf is an INVALID finding (spec 4.2: init and upgrade create every leaf, and
+    a later-enabled type gains its leaf in the same act as its clean index); an unreadable or unparseable
+    leaf, an unsupported schema, and a row the validator cannot identify are CANNOT-EVALUATE; an envelope
+    or missingness defect is an INVALID finding. Returns the _Rec list of the rows (location "imported")
+    for the cross-series checks."""
+    recs = []
+    for tname in sorted(enabled_types):
+        names = _opf_store.imported_leaf_names((tname,))
+        if not names:
+            continue                      # legacy_fragment: the imported series refuses LF (spec 8.1/8.2)
+        (leaf,) = names
+        leaf_rel = _rel(machine_rel, leaf)
+        data, st = _read_toml(root_fd, leaf_rel, rep)
+        if st == "error":
+            continue
+        if st == "absent":
+            rep.finding("enabled type {!r} has no imported leaf {} (an imported-series store holds one for "
+                        "every enabled type except legacy_fragment; spec 4.2)".format(tname, leaf))
+            continue
+        rows = _imported_leaf_rows(data, leaf_rel, "entry" if tname in _LEDGER_TYPES else "record", rep)
+        if rows is None:
+            continue
+        for i, row in enumerate(rows):
+            rw = "{}#{}".format(leaf_rel, i + 1)
+            rv = validate_imported_record(row, expected_type=tname, registered_vendors=registered_vendors)
+            if rv.status == CANNOT_EVALUATE:
+                rep.cant("{}: {}".format(rw, "; ".join(rv.findings)))
+                continue
+            if rv.status != VALID:
+                for f in rv.findings:
+                    rep.finding("{}: {}".format(rw, f))
+            recs.append(_make_rec(row, tname, "imported"))
+    return recs
 
 
 def _worklog_legacy_conflict(_relpath):
@@ -1877,20 +2040,232 @@ def _check_links(recs, by_id, all_ids, rep):
                                 "(spec 8.5)".format(r.id, sid))
 
 
-def _check_worklog_contiguous(numbers, rep):
+# A run id suffix in every journal kind run grammar: with the prefix of a kind it names a placeholder run, so
+# the reservation home of each kind is derived from the one path authority (_opf_store.allocation_record).
+_RESERVATION_PLACEHOLDER = "-00000000T000000Z-0000000000000000"
+
+
+def _reservation_run(kind, name):
+    """The run id that a file name in the reservation home of kind binds (the run id plus .toml), or None
+    when the name is not one (_opf_store.allocation_record is the one grammar authority)."""
+    if not name.endswith(".toml"):
+        return None
+    try:
+        _opf_store.allocation_record(kind, name[:-len(".toml")])
+    except ValueError:
+        return None
+    return name[:-len(".toml")]
+
+
+class _PrefixedReport:
+    """Forwards a contained reader's CANNOT-EVALUATE to the report under one check's message prefix, so a
+    read failure the reader words itself still names the check it fails."""
+    __slots__ = ("_rep", "_prefix")
+
+    def __init__(self, rep, prefix):
+        self._rep = rep
+        self._prefix = prefix
+
+    def cant(self, msg):
+        self._rep.cant(self._prefix + msg)
+
+
+def _reserved_numbers(root_fd, rep):
+    """Homes 2: the clean-series numbers the id reservations hold, as {namespace: set of numbers}, and
+    whether every reservation evaluated. C-NO-DELETION and C-CONTIGUITY skip such a number only where no
+    present record carries it and the prior committed snapshot held no record with that id
+    (_split_reserved), so this reads each reservation read-only and for that purpose alone. Spec 8.2
+    defines the reservation and the next-ID derivation, not this grading; reading the journals at all is
+    the one exception to the spec 4.2 sentence that doctor excludes journals, and it awaits the homes-2
+    revision of that section (a release dependency). The homes are the allocations/ home under journals/
+    of every kind in _opf_store.JOURNAL_KINDS (read at call time), each derived through
+    _opf_store.allocation_record, listed and read through the contained no-follow readers; no journal
+    frame, projection or run directory is opened. A reservation is judged as the record writer judges
+    one: its file name binds a run id of its own kind, and its bytes equal the exact canonical payload
+    (_opf_journal.reservation_payload) that its name and content declare. A staging leftover of a
+    reservation publication (a run that died before its exclusive link) carries no reservation and is
+    skipped unread. Owner uniqueness holds for the number each reservation records (its run's high-water
+    per key): that (series key, number) has one owner across every kind's home, so a second reservation
+    recording it is a conflict naming both files. A residual: a run that claimed several numbers under one
+    key records only the highest, so another run recording one of the lower numbers overlaps it unseen
+    (this doctor cannot read a number no reservation records). An underivable or unlistable home, an entry
+    that is not a reservation, an unreadable, absent-at-read, malformed or non-canonical reservation, and
+    a conflict are each a CANNOT-EVALUATE under C-NO-DELETION naming it, and the result is then
+    ({}, False), so the caller grades as though nothing were reserved, never a wider pass. A [claims]
+    value is the number its run reserved under that key; a run that claimed several numbers under one key
+    records only its new high-water, so if it never published, its lower numbers still read as missing
+    (conservative). An imported-series key reserves on the imported number line, which this doctor does
+    not grade, so it is validated and owner-checked but not used."""
+    # Deferred: _opf_journal imports _opf_oplock, which imports this module.
+    import _opf_journal
+    import _opf_oplock
+    owners = {}      # (series key, number) -> the reservation that claims it
+    ok = True
+    read_rep = _PrefixedReport(rep, "C-NO-DELETION: ")
+    for kind in _opf_store.JOURNAL_KINDS:
+        try:
+            home = _opf_store.allocation_record(
+                kind, _opf_store._HOME_RUN_PREFIXES[kind] + _RESERVATION_PLACEHOLDER).rsplit("/", 1)[0]
+        except (KeyError, ValueError) as exc:
+            rep.cant("C-NO-DELETION: the journal kind {} has no reservation home this build can derive ({}); "
+                     "the reserved numbers are unknown (fail-closed)".format(
+                         _safe_display(kind), _safe_display(str(exc))))
+            ok = False
+            continue
+        try:
+            subdirs, files = _list_contained(root_fd, home)
+        except StoreError as exc:
+            rep.cant("C-NO-DELETION: cannot list the id reservations in {}: {} (fail-closed)".format(
+                home, _safe_display(str(exc))))
+            ok = False
+            continue
+        for entry in subdirs or ():
+            rep.cant("C-NO-DELETION: {} is a directory, not an id reservation (fail-closed)".format(
+                _safe_display(_rel(home, entry))))
+            ok = False
+        for entry in files or ():
+            head, marker, _tail = entry.rpartition(_opf_oplock._STAGING_MARKER)
+            if (marker and entry.startswith(".") and _opf_oplock._is_staging_name(entry, head[1:])
+                    and _reservation_run(kind, head[1:]) is not None):
+                continue     # a publication that died before its link left no reservation; never read
+            rel = _rel(home, entry)
+            run_id = _reservation_run(kind, entry)
+            if run_id is None:
+                rep.cant("C-NO-DELETION: {} is not an id reservation of a {} run, nor a staging leftover of "
+                         "one (fail-closed)".format(_safe_display(rel), kind))
+                ok = False
+                continue
+            raw, st = _read_bytes(root_fd, rel, read_rep)
+            if st == "absent":
+                rep.cant("C-NO-DELETION: the id reservation {} was listed but is absent at read "
+                         "(fail-closed)".format(rel))
+            if st != "ok":
+                ok = False
+                continue
+            try:
+                model = tomllib.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+                # ValueError: tomllib.TOMLDecodeError and an over-long integer literal; RecursionError and
+                # MemoryError: deep nesting and a many-part key.
+                rep.cant("C-NO-DELETION: the id reservation {} is malformed ({}) (fail-closed)".format(
+                    rel, _safe_display(str(exc))))
+                ok = False
+                continue
+            claims = model.get("claims")
+            try:
+                expected = _opf_journal.reservation_payload(kind, run_id, model.get("operation_id"), claims)
+            except (_journal.JournalError, _opf_emit.EmitError) as exc:
+                rep.cant("C-NO-DELETION: the id reservation {} is malformed ({}) (fail-closed)".format(
+                    rel, _safe_display(str(exc))))
+                ok = False
+                continue
+            if raw != expected:
+                rep.cant("C-NO-DELETION: the id reservation {} differs from the exact canonical reservation "
+                         "its name and content declare (a reservation is never rewritten, spec 8.2; "
+                         "fail-closed)".format(rel))
+                ok = False
+                continue
+            for key, number in claims.items():
+                owner = owners.setdefault((key, number), rel)
+                if owner != rel:
+                    rep.cant("C-NO-DELETION: the id reservations {} and {} both claim {} under the series key "
+                             "{} (a reserved number has one owner; fail-closed)".format(owner, rel, number, key))
+                    ok = False
+    if not ok:
+        return {}, False
+    reserved = {}
+    for key, number in owners:
+        if ":" not in key:
+            reserved.setdefault(key, set()).add(number)
+    return reserved, True
+
+
+def _prior_holdings(obs):
+    """What the prior committed snapshot (HEAD) held, for the reserved-number exemption: ((the (namespace,
+    number) of each of its type-index ids, its `held` {namespace: sorted disjoint (lo, hi) intervals}),
+    None), or (None, the reason) when no prior that enumerates every id it held was observed. The
+    type-index records alone cannot decide it: they carry neither the worklog nor the archive."""
+    prior = obs.get("prior")
+    if prior is None:
+        return None, ("the prior committed snapshot observation was supplied but malformed"
+                      if obs.get("prior_malformed") else "no prior committed snapshot was supplied")
+    if prior.get("held") is None:
+        return None, ("the prior committed snapshot does not enumerate every id it held (its worklog and "
+                      "archive included)")
+    ids = {shape for shape in map(_valid_id_shape, prior["records"]) if shape is not None}
+    return (ids, prior["held"]), None
+
+
+def _prior_held(holdings, ns, n):
+    """Whether the prior committed snapshot held a record with the id <ns>-<n> (an interval lookup, never
+    a range expansion; F15)."""
+    ids, held = holdings
+    if (ns, n) in ids:
+        return True
+    spans = held.get(ns, ())
+    i = bisect.bisect_right(spans, n, key=lambda span: span[0])
+    return i > 0 and n <= spans[i - 1][1]
+
+
+def _split_reserved(ns, reserved, present, holdings):
+    """Of the numbers the id reservations hold under ns that no present record carries, (issued,
+    undecided). Issued: the prior committed snapshot held no record with that id, so it is an orphaned
+    reservation's number, never published there, and is not owed. Undecided: no usable prior was
+    observed, so whether a record was published and deleted cannot be established. A number the prior
+    held is in neither: a reservation is irrevocable and outlives the publication it preceded, so a
+    record the prior held and the store now lacks is graded missing exactly as without reservations."""
+    issued, undecided = set(), set()
+    for n in reserved:
+        if n in present:
+            continue
+        if holdings is None:
+            undecided.add(n)
+        elif not _prior_held(holdings, ns, n):
+            issued.add(n)
+    return issued, undecided
+
+
+def _report_undecided(check_id, ns, numbers, reason, rep):
+    """One CANNOT-EVALUATE naming how many reserved numbers no usable prior can decide, and the first."""
+    if numbers:
+        rep.cant("{}: {} reserved {} number(s) that no present record carries, the first {}-{}, cannot be told "
+                 "from deleted records: {}; the reserved-number exemption is not granted (fail-closed)".format(
+                     check_id, len(numbers), ns, ns, min(numbers), reason))
+
+
+def _unreserved(expected, present, skipped):
+    """The first number from expected up to the present number that is not skipped (an issued or undecided
+    reserved number, _split_reserved). It steps over skipped numbers only, so the scan is sized by the
+    reservations actually read, never by a gap (F15)."""
+    while expected < present and expected in skipped:
+        expected += 1
+    return expected
+
+
+def _unreserved_overhang(high, max_present, skipped):
+    """How many allocated numbers in (max_present, high] are not skipped (_split_reserved): the
+    allocated-but-absent count above the highest present number, counted over the reservations read,
+    never by expanding the range (F15)."""
+    return high - max_present - sum(1 for n in skipped if max_present < n <= high)
+
+
+def _check_worklog_contiguous(numbers, rep, skipped=frozenset()):
     """C-CONTIGUITY: read across active + archive the worklog tiles from WL-1 with no gap (OPF-SPEC 6.1),
     so the released spans map to real coverage. A pairwise scan over the sorted present numbers finds the
-    first gap; nothing is sized by a declared high-water (F15)."""
+    first gap; nothing is sized by a declared high-water (F15). A skipped worklog number (an orphaned
+    reservation's, or one no usable prior can decide, which the caller reports; _split_reserved) is not
+    reported missing: the scan steps over skipped numbers only."""
     nums = sorted(n for n in numbers if isinstance(n, int) and not isinstance(n, bool))
     if not nums:
         return
-    if nums[0] != 1:
+    if _unreserved(1, nums[0], skipped) != nums[0]:
         rep.finding("C-CONTIGUITY: the worklog does not start at WL-1 (first present is WL-{}; span tiling "
                     "starts at WL-1, spec 6.1)".format(nums[0]))
     for i in range(1, len(nums)):
-        if nums[i] != nums[i - 1] + 1:
+        missing = _unreserved(nums[i - 1] + 1, nums[i], skipped)
+        if missing != nums[i]:
             rep.finding("C-CONTIGUITY: the worklog (active + archive) is not contiguous; WL-{} is missing "
-                        "(a gap breaks span tiling, spec 6.1/11)".format(nums[i - 1] + 1))
+                        "(a gap breaks span tiling, spec 6.1/11)".format(missing))
             break
 
 
@@ -1912,12 +2287,12 @@ def _verify_immutable_body(rid, cur, prior_digests, rep):
                  "prior digest".format(rid))
         return
     try:
-        cur_dig = _record_digest(body)
+        preserved = _record_digest_matches(body, pdig)
     except _opf_emit.EmitError as exc:
         rep.cant("C-HISTORY-RESURRECTION: cannot canonicalize the current body of immutable record {!r} to "
                  "compare against the prior digest ({})".format(rid, exc))
         return
-    if cur_dig != pdig:
+    if not preserved:
         rep.finding("C-HISTORY-RESURRECTION: immutable record {!r} body changed since the prior committed "
                     "snapshot (a created-terminal record does not change; spec 8.5)".format(rid))
 
@@ -1991,8 +2366,10 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
 
 def _evidence_claim(bundle, kind, run_id, path):
     """Validate one inventory row path against what its bundle may claim: a member of the bundle itself
-    other than a bundle-root inventory, a default Move destination, or, for an adoption bundle, a retire
-    preimage of the same run."""
+    other than a bundle-root inventory, a Move destination (any path beneath .working/archive/moved/,
+    default or explicit), or, for an adoption bundle, a retire preimage of the same run. (This docstring
+    was corrected in review round 7 as a deliberate, documentation-only exception to the byte-identical
+    protected set; the body is unchanged.)"""
     _opf_store._home_file(path)
     if path.startswith(bundle + "/"):
         member = path[len(bundle) + 1:]
@@ -2010,14 +2387,106 @@ class _LegacyIngestInventory(ValueError):
     """Recognized unsupported format: a named finding, not an unreadable inventory."""
 
 
+ADOPTION_BASE_PHASE = "base"    # the [adoption] identity phase of inventory.toml (spec 4.2)
+ADOPTION_PLAN_NAME = "plan.toml"   # the adoption bundle's own sealed plan (spec 4.2, 14.1)
+
+
+def _inventory_phase(name):
+    """The identity phase a bundle-root inventory file name carries (spec 4.2): `inventory.toml` is the
+    base phase; `inventory-<phase>.toml` is that later phase, whose name is never `base` (the base phase
+    name is reserved, so one phase spelling never answers to two file names). Raises ValueError."""
+    if not _opf_store.is_evidence_inventory_name(name):
+        raise ValueError("{!r} is not an evidence inventory name".format(name))
+    if name == "inventory.toml":
+        return ADOPTION_BASE_PHASE
+    phase = name[len("inventory-"):-len(".toml")]
+    if phase == ADOPTION_BASE_PHASE:
+        raise ValueError("a later phase inventory is never named {!r}: the base phase name is reserved "
+                         "for inventory.toml (spec 4.2)".format(name))
+    return phase
+
+
+def _adoption_identity(run_id, doc):
+    """The validated (phase, plan_digest) identity of ONE adoption inventory (spec 4.2): the [adoption]
+    table holds exactly the bundle's own run id, a phase name and a sha256:<64 lowercase hex> plan
+    digest. Anything else raises ValueError, so a copied, misplaced or malformed record never evaluates;
+    the phase-to-file-name and plan-digest-to-proven-plan bindings are each caller's own check (this
+    helper sees neither the file name nor the plan)."""
+    block = doc.get("adoption") if isinstance(doc, dict) else None
+    if not isinstance(block, dict) or set(block) != {"run_id", "phase", "plan_digest"}:
+        raise ValueError("the [adoption] identity table holds exactly run_id, phase and plan_digest "
+                         "(spec 4.2)")
+    if block["run_id"] != run_id:
+        raise ValueError("the [adoption] identity names run {!r}, not the bundle run {!r} (an inventory "
+                         "copied from another run, spec 4.2)".format(block["run_id"], run_id))
+    phase = block["phase"]
+    if not isinstance(phase, str) or (phase != ADOPTION_BASE_PHASE and not (
+            _opf_store.is_evidence_inventory_name("inventory-{}.toml".format(phase)))):
+        raise ValueError("the [adoption] identity phase {!r} is not a phase name (spec 4.2)".format(phase))
+    digest = block["plan_digest"]
+    if (not isinstance(digest, str) or not digest.startswith("sha256:")
+            or not _HEX64_RE.fullmatch(digest[len("sha256:"):])):
+        raise ValueError("the [adoption] identity plan_digest is not a sha256:<64 lowercase hex> digest "
+                         "(spec 4.2)")
+    return phase, digest
+
+
+def _adoption_plan_digest(root_fd, bundle, run_id, rep):
+    """(digest, bytes): the plan_digest of an adoption bundle's own plan.toml, proven from ONE read of
+    its bytes, and those exact bytes, so the caller checks the plan's inventory row against the bytes
+    the seal proof read, never a second read (spec 4.2). An absent or unreadable plan, and every refusal
+    of _prove_adoption_plan, raises ValueError, so no inventory of that bundle evaluates as this run's
+    record."""
+    rel = _rel(bundle, ADOPTION_PLAN_NAME)
+    raw, state = _read_bytes(root_fd, rel, rep)
+    if state == "absent":
+        raise ValueError("the adoption bundle has no {} to prove its inventories' plan digest against "
+                         "(spec 4.2)".format(ADOPTION_PLAN_NAME))
+    if state != "ok":
+        raise ValueError("the adoption bundle's {} is unreadable, so no plan digest is proven (spec "
+                         "4.2)".format(ADOPTION_PLAN_NAME))
+    return _prove_adoption_plan(raw, run_id), raw
+
+
+def _prove_adoption_plan(raw, run_id):
+    """The plan_digest an adoption bundle's plan.toml bytes prove (spec 4.2): canonical TOML naming the
+    bundle's run id, whose plan_digest re-seals it (the planner's seal: the digest of the canonical
+    emission of the plan without its plan_digest). Every adoption inventory's [adoption] identity must
+    name this digest. Pure over bytes its caller read once, and shared by the doctor and the apply
+    side's bundle verifier; a non-canonical, foreign-run or unsealed plan raises ValueError."""
+    try:
+        plan = tomllib.loads(raw.decode("utf-8"))
+        canonical = _opf_emit.emit_checked(plan).encode("utf-8")
+        body = dict(plan)
+        claimed = body.pop("plan_digest", None)
+        sealed = "sha256:" + hashlib.sha256(_opf_emit.emit_checked(body).encode("utf-8")).hexdigest()
+    except (TypeError, ValueError, RecursionError, MemoryError, _opf_emit.EmitError) as exc:
+        raise ValueError("the adoption bundle's {} is malformed TOML ({})".format(ADOPTION_PLAN_NAME, exc))
+    if canonical != raw or claimed != sealed:
+        raise ValueError("the adoption bundle's {} is not a canonical plan whose plan_digest seals its own "
+                         "bytes (an edited plan, spec 4.2)".format(ADOPTION_PLAN_NAME))
+    if plan.get("run_id") != run_id:
+        raise ValueError("the adoption bundle's {} names run {!r}, not the bundle run {!r} (a plan of "
+                         "another run, spec 4.2)".format(ADOPTION_PLAN_NAME, plan.get("run_id"), run_id))
+    return sealed
+
+
 def _evidence_rows(bundle, kind, run_id, doc):
-    """Shared schema/path validation for doctor and the adoption apply shell; never upgrades old bytes."""
+    """Shared schema/path validation for doctor and the adoption apply shell; never upgrades old bytes.
+    An adoption inventory additionally holds exactly one [adoption] identity table, validated here
+    against the bundle's own run id (spec 4.2); an inventory of any other kind never carries one."""
     if isinstance(doc, dict) and doc.get("format") == "opf.ingest.evidence-inventory/v1":
         raise _LegacyIngestInventory("legacy-ingest-inventory: old-format ingest inventory is unsupported; "
                                      "refused without migration or rewrite")
-    if (not isinstance(doc, dict) or set(doc) != {"format", "file"}
+    keys = {"format", "file", "adoption"} if kind == "adoption" else {"format", "file"}
+    if (not isinstance(doc, dict) or set(doc) != keys
             or doc["format"] != EVIDENCE_FORMAT or not isinstance(doc["file"], list)):
+        if kind == "adoption":
+            raise ValueError("an adoption inventory holds exactly format {!r}, an [adoption] identity "
+                             "table and a file array (spec 4.2)".format(EVIDENCE_FORMAT))
         raise ValueError("an inventory holds exactly format {!r} and a file array".format(EVIDENCE_FORMAT))
+    if kind == "adoption":
+        _adoption_identity(run_id, doc)
     for row in doc["file"]:
         if not isinstance(row, dict) or set(row) != {"path", "size", "sha256"}:
             raise ValueError("file rows require exactly path, size and sha256")
@@ -2039,9 +2508,14 @@ def _check_evidence(root_fd, homes, rep):
     inventory, missing listed files, and a recognized legacy ingest inventory are findings.
     An unreadable or malformed input, and a bundle with
     a phase inventory but no inventory.toml, cannot evaluate; a malformed inventory stops the
-    reconciliation, since its claims are unknown. Deleting a whole bundle, inventory and payload
-    together, is outside this local snapshot check; history coverage is separate. Reads use the contained
-    readers and their per-file cap, with a bounded walk.
+    reconciliation, since its claims are unknown. An adoption inventory's [adoption] identity must name
+    the phase its file name carries and the plan digest its bundle's own sealed plan.toml proves; a
+    foreign identity, or a bundle whose plan.toml is absent or does not prove, cannot evaluate. The
+    plan's seal proof and its inventory row are checked against ONE read of its bytes, so a plan swapped
+    between two reads never combines into a clean result.
+    Deleting a whole bundle, inventory and payload together, is outside this local snapshot check;
+    history coverage is separate. Reads use the contained readers and their per-file cap, with a
+    bounded walk.
     """
     if homes < 2:
         return
@@ -2050,6 +2524,8 @@ def _check_evidence(root_fd, homes, rep):
     bundles = []
     budget = [0]
     failed = [False]
+    plans = {}    # adoption bundle -> (its proven plan digest, the bytes proven), or the ValueError raised
+    proven = {}   # plan.toml path -> the bytes its seal proof read, the ONE read its row is checked against
 
     def listing(rel, depth, required):
         # A directory reached through its parent's listing is required: its absence is a race.
@@ -2087,6 +2563,26 @@ def _check_evidence(root_fd, homes, rep):
                 if row["path"] in expected:
                     raise ValueError("{!r} is claimed more than once".format(row["path"]))
                 expected[row["path"]] = row
+            if kind == "adoption":
+                phase, plan_digest = _adoption_identity(run_id, doc)
+                named_phase = _inventory_phase(rel.rsplit("/", 1)[-1])
+                if phase != named_phase:
+                    raise ValueError("the [adoption] identity names phase {!r}, not the {!r} phase its "
+                                     "file name carries (an inventory copied from another phase, "
+                                     "spec 4.2)".format(phase, named_phase))
+                if bundle not in plans:
+                    try:
+                        plans[bundle] = _adoption_plan_digest(root_fd, bundle, run_id, rep)
+                    except ValueError as exc:
+                        plans[bundle] = exc
+                    else:
+                        proven[_rel(bundle, ADOPTION_PLAN_NAME)] = plans[bundle][1]
+                if isinstance(plans[bundle], ValueError):
+                    raise plans[bundle]
+                if plan_digest != plans[bundle][0]:
+                    raise ValueError("the [adoption] identity names plan digest {!r}, not its bundle's own "
+                                     "sealed plan's {!r} (an inventory of another run or plan, spec "
+                                     "4.2)".format(plan_digest, plans[bundle][0]))
         except _LegacyIngestInventory as exc:
             rep.finding("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))
             failed[0] = True
@@ -2143,7 +2639,10 @@ def _check_evidence(root_fd, homes, rep):
             if full not in expected:
                 rep.finding("C-EVIDENCE-ENUM: off-inventory file {!r}".format(full))
                 continue
-            raw, status = _read_bytes(root_fd, full, rep)
+            if full in proven:
+                raw, status = proven[full], "ok"    # the bytes the seal proof read: never a second read
+            else:
+                raw, status = _read_bytes(root_fd, full, rep)
             if status == "absent":
                 continue    # reported below with every other missing listed file
             seen.add(full)
@@ -2198,7 +2697,7 @@ ContainmentClassification = collections.namedtuple(
      "worklog_errors"))
 
 
-def classify_containment(manifest_data, machine_rel, imported=False):
+def classify_containment(manifest_data, machine_rel):
     """Pure, side-effect-free derivation of the C-CONTAINMENT managed-set classification from the manifest
     and the machine-store relpath (spec 14.2). It does NO I/O and holds no `rep`: a malformed [unmanaged]
     entry is collected into `malformed` (the checker re-emits it as a CANNOT-EVALUATE) and a colliding
@@ -2207,13 +2706,16 @@ def classify_containment(manifest_data, machine_rel, imported=False):
     adoption-content managed set from, so a second consumer cannot diverge from it by construction (F10-1).
     `enabled_types` and `layout` are derived internally from `manifest_data` by the SAME pure helpers the
     caller uses (D2), so the classification cannot drift from the manifest the caller validated.
-    `imported` is the EXPLICIT imported-series activation flag (spec 8.2/4.2): the caller derives it
-    through _opf_store.imported_series_declared, which requires BOTH the declared spec_version AND
-    this tooling's own support (SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION), so it is
-    False for every store this tooling validates today, the accepted 2.0.0 / homes = 2 reservation
-    included. When True, the imported managed leaves join the managed set; the default False keeps
-    every current store's grading unchanged, so the registration ships inert until activation
-    raises SUPPORTED_SPEC_VERSION to 1.3.0. Returns a ContainmentClassification."""
+    The imported-series activation (spec 8.2/4.2) is DERIVED HERE from `manifest_data` through
+    imported_series_active, which requires the graded homes-2 declaration AND this tooling's own
+    imported-series support (SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION), so it is False
+    for every store this tooling validates today, the accepted 2.0.0 / homes = 2 reservation included.
+    There is NO caller-supplied activation flag: every consumer gets the manifest-derived activation, so
+    a consumer cannot read an activated store as inactive by omitting an argument (the former optional
+    parameter defaulted to False and allowed exactly that divergence). When activation holds, the
+    imported managed leaves join the managed set; until it does, every current store's grading is
+    unchanged, so the registration ships inert until activation raises both SUPPORTED_HOMES and
+    SUPPORTED_SPEC_VERSION. Returns a ContainmentClassification."""
     mrel = machine_rel
     dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
@@ -2266,13 +2768,14 @@ def classify_containment(manifest_data, machine_rel, imported=False):
     # managed leaf IF PRESENT even without a declaration, mirroring C-COUNTERS' optional_namespaces
     # (accepted-if-present, never required). Ledger importer types (none today) are excluded.
     importer_index_types = frozenset(IMPORTER_TYPES) - _LEDGER_TYPES
-    # The imported-series managed leaves (spec 8.2/4.2): part of the managed set ONLY under the
-    # explicit `imported` activation flag (never true today: imported_series_declared also requires
-    # SUPPORTED_SPEC_VERSION to reach IMPORTED_SPEC_VERSION, so even the reserved 2.0.0 / homes = 2
-    # declaration C-MANIFEST accepts stays inactive until activation raises it), and
-    # admitted ONLY directly in the machine store. The names derive from the enabled-type roster in
-    # _opf_store, so the leaf set cannot drift from the imported id/counter namespace set; the
-    # importer-only legacy_fragment contributes no leaf.
+    # The imported-series managed leaves (spec 8.2/4.2): part of the managed set ONLY while the store's
+    # imported series is ACTIVE, derived right here from the manifest (never true today:
+    # imported_series_active requires the graded homes-2 declaration and SUPPORTED_SPEC_VERSION at or
+    # above IMPORTED_SPEC_VERSION, so even the reserved 2.0.0 / homes = 2 declaration C-MANIFEST accepts
+    # stays inactive until activation), and admitted ONLY directly in the machine store. The names derive
+    # from the enabled-type roster in _opf_store, so the leaf set cannot drift from the imported
+    # id/counter namespace set; the importer-only legacy_fragment contributes no leaf.
+    imported = imported_series_active(manifest_data)
     imported_leaves = _opf_store.imported_leaf_names(enabled_types) if imported else frozenset()
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
     # imports is store-scope (`.working/imports`), a SIBLING of the machine subdir (disjoint from mrel), read
@@ -2302,8 +2805,8 @@ def classify_containment(manifest_data, machine_rel, imported=False):
                 if r in imported_leaves:
                     # An imported-series leaf (worklog.imported.toml or <type>.imported.index.toml)
                     # is managed only HERE, directly in the machine store; a deeper path of the same
-                    # name stays a stray, and while `imported` is False the set is empty, so a 1.2.0
-                    # store grades these names exactly as before (spec 8.2/4.2).
+                    # name stays a stray, and while `imported` is False the set is empty, so an
+                    # inactive store grades these names exactly as before (spec 8.2/4.2).
                     return True
                 if r.endswith(INDEX_SUFFIX):
                     t = r[:-len(INDEX_SUFFIX)]
@@ -2393,7 +2896,21 @@ def _legacy_import_staging(machine_rel):
     return _rel(machine_rel, _LEGACY_IMPORTS_DIRNAME), review
 
 
-def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, imported=False):
+def _adoption_state(root_fd, machine_rel, in_repo, rep):
+    """The homes-1 adoption state through the read-only `_opf_adopt_state` reader (spec 4.2, 11, 14.2, 17),
+    or None after a CANNOT-EVALUATE: any fault inside the reader is a named cannot-evaluate, never a silent
+    fallback to the not-adopting grading. The reader is imported lazily, so the doctor gains no top-level
+    import of the adoption modules."""
+    try:
+        import _opf_adopt_state
+        return _opf_adopt_state.adoption_state(root_fd, machine_rel, in_repo=in_repo)
+    except Exception as exc:  # noqa: BLE001  fail-closed barrier around the whole reader
+        rep.cant("C-CONTAINMENT: the adoption state cannot be read ({}); fail-closed".format(
+            _safe_display(repr(exc))))
+        return None
+
+
+def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, *, in_repo=None):
     """C-CONTAINMENT: recursively walk `.working/`, matching every regular file against the managed set
     (the ledgers, the enabled non-ledger type indexes, per-record bodies, the archive tree, declared
     store-scope view targets, and files under a valid declared [unmanaged] path). A path in neither set is
@@ -2404,19 +2921,25 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     (view targets, the collision-filtered valid_unmanaged, and the malformed / colliding declarations) is
     derived by the pure `classify_containment`, the SINGLE authority for adoption content (F10-1).
     enabled_types / layout are derived inside that helper from the manifest (D2), so they are no longer
-    passed in. `imported` is the explicit imported-series activation flag classify_containment
-    documents; the walk itself needs no imported awareness (the imported leaves are plain managed
-    leaves directly in the machine store, spec 8.2/4.2). While IMPORTED_CONTENT_CHECKS is empty, an
-    ACTIVE imported series is routed to CANNOT-EVALUATE (the activation tripwire below):
-    registration without content grading never certifies."""
-    cls = classify_containment(manifest_data, machine_rel, imported=imported)
-    # The activation tripwire (spec 8.2/4.2): an ACTIVE imported series while every imported-content
-    # check (C-IMPORTED-*) is still deferred must never certify, or the imported leaves would be
-    # registered as managed while nothing reads their content (the PRC-F1 N-1 blind spot, reopened
-    # at activation). A CANNOT-EVALUATE, not a finding: the store is not known bad, the tooling is
-    # known incomplete. The spec 1.3.0 activation lands the checks, populates
-    # IMPORTED_CONTENT_CHECKS, and so disarms this.
-    if imported and not IMPORTED_CONTENT_CHECKS:
+    passed in, and so is the imported-series activation (imported_series_active), so no caller can
+    read an activated store as inactive by omitting a flag; the walk itself needs no imported
+    awareness (the imported leaves are plain managed leaves directly in the machine store, spec
+    8.2/4.2; C-IMPORTED-SCHEMA reads their content). Were IMPORTED_CHECKS empty, an ACTIVE imported
+    series would be routed to CANNOT-EVALUATE (the activation tripwire below): registration without
+    content grading never certifies. On homes 1 a store that has adopted also registers, at file
+    level, each admitted adoption run's committed-evidence record paths and reports its frozen
+    sources as bounded adoption state (`_opf_adopt_state`); `in_repo` (keyword only, unknown by
+    default) is the store topology the adoption plan identity is checked against."""
+    cls = classify_containment(manifest_data, machine_rel)
+    # The SAME activation predicate classify_containment just derived its managed set from (the ONE
+    # function imported_series_active), read again only for the tripwire; the two reads cannot disagree.
+    imported = imported_series_active(manifest_data)
+    # The activation tripwire (spec 8.2/4.2): an ACTIVE imported series with an EMPTY imported roster
+    # must never certify, or the imported leaves would be registered as managed while nothing reads
+    # their content (the PRC-F1 N-1 blind spot, reopened at activation). A CANNOT-EVALUATE, not a
+    # finding: the store is not known bad, the tooling is known incomplete. The populated
+    # IMPORTED_CHECKS roster disarms this; it stays as the guard against emptying that roster.
+    if imported and not IMPORTED_CHECKS:
         rep.cant("C-CONTAINMENT: the imported series is active but every imported-content check "
                  "(C-IMPORTED-*) is still deferred; the imported leaves would be certified "
                  "unread, so the store cannot be evaluated (spec 8.2/4.2)")
@@ -2446,6 +2969,54 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     staged_roots = (imports_root, staging_root) if homes2 else (imports_root,)
     kind_roots = tuple(staging_root + "/" + k for k in _opf_store.STAGING_KINDS) if homes2 else ()
     skipped_roots = cls.evidence_roots + ((_opf_store.JOURNALS_REL,) if homes2 else ())
+    # Homes-1 adoption control area and bounded adoption state (spec 4.2, 11, 14.2, 17), read by the read-only
+    # _opf_adopt_state reader. Without the adoption home it is NOT_ADOPTING after one lstat and every line
+    # below grades exactly as before. Homes 2 registers its evidence roots wholesale above.
+    adoption = None if homes2 else _adoption_state(root_fd, machine_rel, in_repo, rep)
+    adopting = adoption is not None and adoption.adopting
+    frozen = adoption.frozen if adopting else {}
+    adoption_dirs = frozenset()
+    if adopting:
+        import _opf_adopt_state
+        for msg in adoption.cannot:
+            rep.cant(msg)
+        for msg in adoption.findings:
+            rep.finding(msg)
+        rep.residuals.extend(_ADOPTING_RESIDUALS)
+        # QA round 1: registration is at FILE level (each committed-inventory-listed path and recorded
+        # Move destination), never a whole tree, so a stray under an admitted run's homes is graded.
+        registered_files = frozenset(adoption.registered)
+        # spec 14.2: an [unmanaged] declaration MUST NOT equal, contain or lie within the control area. A
+        # colliding one is a finding and covers nothing, so every path beneath it is graded.
+        control = _opf_adopt_state.CONTROL_ROOTS
+        collided = [u for u in valid_unmanaged
+                    if _under_any(u, control) or any(_under_any(c, (u,)) for c in control)]
+        for u in collided:
+            rep.finding("C-CONTAINMENT: unmanaged path {!r} equals, contains or lies within the OPF control "
+                        "area ({}) of an adopting store, so it covers nothing (spec 14.2)".format(
+                            u, ", ".join(repr(c) for c in control)))
+        if collided:
+            valid_unmanaged = [u for u in valid_unmanaged if u not in collided]
+            classified_file = managed_file
+
+            def managed_file(p):
+                if _under_any(p, collided) and not _under_any(p, valid_unmanaged):
+                    return False
+                return classified_file(p)
+        # Walked as namespaces so that every entry beneath them other than a registered FILE is graded:
+        # the adoption homes themselves, each strict ancestor directory of a registered file (so a stray
+        # beside it is graded one by one), and each strict ancestor directory of a LIVE frozen source (an
+        # ancestor whose frozen source is gone is graded as one unregistered entry). With no admitted run
+        # the namespaces keep the legacy whole-entry grading.
+        live = [p for p, src in frozen.items() if src.grade != "absent"]
+        covered = list(registered_files) + live
+        adoption_dirs = frozenset(_opf_adopt_state.ADOPTION_NAMESPACES if adoption.runs else ()) | frozenset(
+            p.rsplit("/", i)[0] for p in covered for i in range(1, p.count("/")))
+        if registered_files:
+            graded_file = managed_file
+
+            def managed_file(p):
+                return p in registered_files or graded_file(p)
 
     unmanaged_files = []
 
@@ -2456,7 +3027,7 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
         # handled by the caller's skip.) Anything else under the store is an UNREGISTERED directory, graded
         # as a stray even when empty (round-14: the walk previously graded files only, so an empty rogue
         # directory, or a tree of only empty dirs, escaped grading entirely).
-        if full == mrel or _under_any(full, staged_roots):
+        if full == mrel or _under_any(full, staged_roots) or full in adoption_dirs:
             return True
         if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
             try:
@@ -2498,7 +3069,8 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
                 unmanaged_files.append(full)
         for d in subdirs:
             full = reldir + "/" + d
-            # Journal contents are outside doctor coverage; only journal validation reads them.
+            # Journal contents are outside containment; only journal validation reads them. Doctor reads
+            # just the id reservations, for the reserved numbers (_reserved_numbers).
             # Evidence bytes have their own exact inventory check, distinct from record rotation.
             if full in skipped_roots:
                 continue
@@ -2527,12 +3099,33 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
                     "or migration actually running (spec 11:943/14.2)")
     walk(WORKING_DIRNAME, 0)
     for p in sorted(unmanaged_files):
-        if partial_active:
+        if p in frozen:
+            continue      # a frozen source is graded below from the adoption state, whatever the status
+        # Ruling R-a (QA round 1, codex MAJOR 1): the partial triage posture is for legacy (non-adopting)
+        # stores only; in an adopting store every unenumerated path stays a finding at required.
+        if partial_active and not adopting:
             rep.triage_path("unregistered path {!r} at the store location (an import or migration is in "
                             "progress; triage per spec 14.2)".format(p))
         else:
             rep.finding("C-CONTAINMENT: unregistered path {!r} at the store location is neither OPF-managed "
                         "nor enumerated as unmanaged (spec 14.2/11)".format(p))
+    # spec 11/14.2: a frozen source whose live bytes match its plan digest is bounded adoption state, reported
+    # rather than failed at any import_status; a drifted or vanished one fails at required, even under a
+    # substantiated partial (never triage). A source the reader could not grade is already a cannot-evaluate.
+    for p in sorted(frozen):
+        src = frozen[p]
+        if src.grade == "bounded":
+            rep.migration_incomplete_path(
+                "migration_incomplete: frozen {} source {!r} of adoption run {}: {}; bounded adoption state "
+                "until its retirement is recorded (spec 11/14.2)".format(src.disposition, p, src.run_id, src.detail))
+        elif src.grade in ("drifted", "absent"):
+            rep.finding("C-CONTAINMENT: frozen {} source {!r} of adoption run {}: {} (spec 11/14.2)".format(
+                src.disposition, p, src.run_id, src.detail))
+            # QA round 1 (codex MEDIUM 3): the approved source remains unresolved, so the report carries
+            # migration_incomplete as well as the required-grade failure above (spec 11).
+            rep.migration_incomplete_path(
+                "migration_incomplete: frozen {} source {!r} of adoption run {} remains unresolved: {} "
+                "(spec 11)".format(src.disposition, p, src.run_id, src.detail))
 
 
 def _check_lease(root_fd, machine_rel, rep):
@@ -2599,11 +3192,12 @@ def _wellformed_release_row(row):
 
 def _normalize_prior(prior):
     """Validate the injected prior committed snapshot: {releases: list, counters_high: {ns: int},
-    records: {id: (type, status)}, digests: {id: str} (optional)}. Every record id is shape-validated and
-    its namespace reconciled against its declared type's roster namespace, so a malformed id or a
-    namespace/type mismatch makes the WHOLE prior malformed -> CANNOT-EVALUATE naming the observation,
-    never a store INVALID (codex-9/F4). Returns the normalized dict or None when any field is malformed
-    (which the caller routes to CANNOT-EVALUATE, never a permissive pass)."""
+    records: {id: (type, status)}, digests: {id: str} (optional), held: {ns: [[lo, hi], ...]} (optional)}.
+    Every record id is shape-validated and its namespace reconciled against its declared type's roster
+    namespace, so a malformed id or a namespace/type mismatch makes the WHOLE prior malformed ->
+    CANNOT-EVALUATE naming the observation, never a store INVALID (codex-9/F4). Returns the normalized
+    dict or None when any field is malformed (which the caller routes to CANNOT-EVALUATE, never a
+    permissive pass)."""
     if not isinstance(prior, dict):
         return None
     releases = prior.get("releases")
@@ -2651,8 +3245,39 @@ def _normalize_prior(prior):
             if not isinstance(did, str) or not isinstance(dval, str):
                 return None
             norm_digests[did] = dval
+    # `held` (optional): every id the prior commit held, active or archived, worklog included, as
+    # {namespace: [[lo, hi], ...]} inclusive intervals; only the reserved-number exemption reads it, and its
+    # absence makes that exemption CANNOT-EVALUATE. Each bound is an id number in TOML's integer range.
+    held = prior.get("held")
+    norm_held = None
+    if held is not None:
+        if not isinstance(held, dict):
+            return None
+        norm_held = {}
+        for ns, spans in held.items():
+            if not isinstance(ns, str) or ns not in _ROSTER_NS_SET or not isinstance(spans, (list, tuple)):
+                return None
+            rows = []
+            for span in spans:
+                if not (isinstance(span, (list, tuple)) and len(span) == 2
+                        and all(type(v) is int and 1 <= v <= (1 << 63) - 1 for v in span) and span[0] <= span[1]):
+                    return None
+                rows.append((span[0], span[1]))
+            norm_held[ns] = _merge_spans(rows)
     return {"releases": list(releases), "counters_high": norm_high, "records": norm_records,
-            "digests": norm_digests}
+            "digests": norm_digests, "held": norm_held}
+
+
+def _merge_spans(spans):
+    """Inclusive (lo, hi) intervals sorted and merged, so adjacent or overlapping ones become one and a
+    lookup can bisect them."""
+    merged = []
+    for lo, hi in sorted(spans):
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
 
 
 def _normalize_observations(observations):
@@ -2779,9 +3404,19 @@ def validate_store(resolution, supported_profiles=None, *, observations=None, an
     finally:
         # The store verdict is already computed by the barrier above; a descriptor close that raises
         # (EINTR / EIO / an invalid fd) during teardown must not crash the validator (S4-F3, outside B6).
-        _close_fd_quietly(root_fd)
+        # Any other exception a close raises never abandons the other close, and goes through the one
+        # first-interrupt selection, so an interrupt in flight here keeps propagating as itself.
+        inflight, raised = _journal._in_flight_in(sys._getframe()), []
+        try:
+            _close_fd_quietly(root_fd)
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            raised.append(exc)
         if product_root_fd is not None:
-            _close_fd_quietly(product_root_fd)
+            try:
+                _close_fd_quietly(product_root_fd)
+            except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+                raised.append(exc)
+        _journal._yield_close_exceptions(inflight, raised)
     return rep.result(evaluated_profiles, unevaluated_profiles)
 
 
@@ -2825,7 +3460,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         else frozenset()
     enabled_modules = _enabled_modules(manifest_data)
     homes = _opf_store.homes_generation(manifest_data)
-    rep.require_homes(homes)
+    # The imported-series activation flag (imported_series_active: the graded homes-2 declaration and
+    # this tooling's imported-series support), derived here for the roster and C-IMPORTED-SCHEMA;
+    # C-CONTAINMENT's classification derives its own activation inside classify_containment from the
+    # SAME predicate, so the leaf registration and the content grading cannot diverge.
+    imported = imported_series_active(manifest_data)
+    rep.require_homes(homes, imported)
 
     # --- C-ROSTER: reconcile the manifest [types] against the authoritative roster (spec 9/8.1) -------
     rep.ran("C-ROSTER")
@@ -2861,6 +3501,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             rep.cant(msg)
         else:
             rep.finding(msg)
+
+    # --- C-IMPORTED-SCHEMA (an active imported series only): every imported row against the imported
+    # envelope, never through the schema deferral (spec 8.3) ------------------------------------------
+    if imported:
+        rep.ran("C-IMPORTED-SCHEMA")
+        _gather_imported_records(root_fd, machine_rel, enabled_types, registered_vendors, rep)
 
     # --- C-ARCHIVE-ENUM: walk + reconcile the archive; collect rotation-eligibility for C-ROTATION -----
     rep.ran("C-ARCHIVE-ENUM")
@@ -3011,19 +3657,33 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         else:
             rep.cant("C-NO-DELETION: the ancestral floor is malformed; the seeded-store deletion floor is "
                      "not evaluable")
+    # Homes 2: a number an id reservation holds is skipped here and under C-CONTIGUITY only where no present
+    # record carries it and the prior committed snapshot held no record with that id (an orphaned
+    # reservation; _split_reserved). A reservation outlives the publication it preceded, so a number whose
+    # record the prior held is owed exactly as without reservations, and one no usable prior can decide is
+    # CANNOT-EVALUATE, never granted. A reservation that does not evaluate is CANNOT-EVALUATE, graded as
+    # though nothing were reserved, never a silently wider pass.
+    reserved, reservations_ok = _reserved_numbers(root_fd, rep) if homes >= 2 else ({}, True)
+    holdings, no_holdings = _prior_holdings(obs)
     present_wl = sorted(merged)
     wl_hw = high.get("WL")
+    wl_issued, wl_undecided = _split_reserved("WL", reserved.get("WL", ()), merged, holdings)
+    wl_skipped = wl_issued | wl_undecided
     if isinstance(wl_hw, int) and not isinstance(wl_hw, bool) and wl_hw >= 0:
         max_present = max(present_wl[-1] if present_wl else 0, floor.get("WL", 0))
-        if wl_hw > max_present:
+        owed = _unreserved_overhang(wl_hw, max_present, wl_skipped)
+        if owed > 0:
             rep.finding("C-NO-DELETION: {} allocated worklog id(s) above WL-{} are absent from both the "
                         "active worklog and the archive (counters WL high-water is {}; nothing is ever "
-                        "deleted, spec 12/13)".format(wl_hw - max_present, max_present, wl_hw))
+                        "deleted, spec 12/13)".format(owed, max_present, wl_hw))
         # The gap below the max is scanned here too, from the floor: C-CONTIGUITY tiles from WL-1 and knows
         # no ancestral floor, so it cannot own a deletion from between floor+1 and the max.
         base = floor.get("WL", 0)
+        _report_undecided("C-NO-DELETION", "WL", [n for n in wl_undecided if base < n <= wl_hw], no_holdings,
+                          rep)
         expected = base + 1
         for n in (n for n in present_wl if n > base):
+            expected = _unreserved(expected, n, wl_skipped)
             if n != expected:
                 rep.finding("C-NO-DELETION: WL-{} is absent from both the active worklog and the archive "
                             "(an allocated id between 1 and WL-{} cannot be deleted; spec 12/13)".format(
@@ -3054,12 +3714,17 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         # and the WL scan's above, skip it deliberately).
         nums = sorted(n for n in present_by_ns.get(ns, ()) if n > base)
         max_present = nums[-1] if nums else base
-        if hw > max_present:
+        ns_issued, ns_undecided = _split_reserved(ns, reserved.get(ns, ()), present_by_ns.get(ns, ()), holdings)
+        ns_skipped = ns_issued | ns_undecided
+        owed = _unreserved_overhang(hw, max_present, ns_skipped)
+        if owed > 0:
             rep.finding("C-NO-DELETION: {} allocated {}-<n> id(s) above {}-{} are absent from both the "
                         "active store and the archive (counters {} high-water is {}; nothing is ever "
-                        "deleted, spec 12/13)".format(hw - max_present, ns, ns, max_present, ns, hw))
+                        "deleted, spec 12/13)".format(owed, ns, ns, max_present, ns, hw))
+        _report_undecided("C-NO-DELETION", ns, [n for n in ns_undecided if base < n <= hw], no_holdings, rep)
         expected = base + 1
         for n in nums:
+            expected = _unreserved(expected, n, ns_skipped)
             if n != expected:
                 rep.finding("C-NO-DELETION: {}-{} is absent from both the active store and the archive (an "
                             "allocated id between 1 and {}-{} cannot be deleted; spec 12/13)".format(
@@ -3072,7 +3737,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.finding("C-PARTITION: {}".format(f))
 
     rep.ran("C-CONTIGUITY")
-    _check_worklog_contiguous(merged.keys(), rep)
+    if not reservations_ok:
+        rep.cant("C-CONTIGUITY: the id reservations did not evaluate (see C-NO-DELETION), so a reserved "
+                 "worklog number cannot be told from a missing one (fail-closed)")
+    _report_undecided("C-CONTIGUITY", "WL", [n for n in wl_undecided if present_wl and n < present_wl[-1]],
+                      no_holdings, rep)
+    _check_worklog_contiguous(merged.keys(), rep, wl_skipped)
 
     # --- C-TRACKED / C-SYNC-AGREE: topology, from the injected observations (spec 5.1/5.6) ------------
     rep.ran("C-TRACKED")
@@ -3194,14 +3864,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-CONTAINMENT: whole-tree path / unmanaged-path containment (spec 14.2/11) -------------------
     rep.ran("C-CONTAINMENT")
-    # The explicit imported-series activation flag (spec 8.2/4.2), derived through
-    # _opf_store.imported_series_declared: the declared spec_version AND this tooling's own
-    # support. False for every store this tooling validates: the helper itself answers False until
-    # activation raises SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION, which
-    # C-MANIFEST alone does not guarantee (it accepts the reserved 2.0.0 / homes = 2 declaration
+    # The imported-series activation flag (spec 8.2/4.2) is derived inside classify_containment from
+    # the SAME imported_series_active the roster read above, so no flag is forwarded here and the leaf
+    # registration cannot diverge from the roster. False for every store this tooling validates today,
+    # which C-MANIFEST alone does not guarantee (it accepts the reserved 2.0.0 / homes = 2 declaration
     # today, spec 4.2).
-    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep,
-                       imported=_opf_store.imported_series_declared(manifest_data))
+    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, in_repo=in_repo)
 
     # --- C-VIEW-DRIFT: byte-level drift of every declared deterministic view (spec 5.8/10) ------------
     rep.ran("C-VIEW-DRIFT")
@@ -3407,6 +4075,21 @@ def self_test():
         if not cond:
             failures.append(name)
 
+    # The tomllib parse-site floor (tools/check_python_floor.py, tomllib leg): _prove_adoption_plan
+    # disposes of RecursionError, MemoryError and the ValueError family at its parse, refusing as its
+    # contract ValueError. Deep nesting feeds a real RecursionError; MemoryError shares the handler
+    # (the static floor scan is its per-site guard). Regression guard: RecursionError was already in
+    # the handler before the floor change, which added only MemoryError, so this case guards behaviour
+    # that already held.
+    try:
+        _prove_adoption_plan(("x = " + "[" * 6000 + "]" * 6000).encode("utf-8"),
+                             "adopt-20260917T120000Z-0123456789abcdef")
+        deep_why = None
+    except ValueError as exc:
+        deep_why = str(exc)
+    check("adoption-plan-deep-nesting-refused-as-valueerror",
+          deep_why is not None and "malformed TOML" in deep_why)
+
     TS = "2026-06-01T00:00:00Z"
 
     def wl(n):
@@ -3556,7 +4239,8 @@ def self_test():
                           "counters_high": counters()["counters"],
                           "records": {"BI-1": ("backlog_item", "done"), "BI-2": ("backlog_item", "open"),
                                       "DN-1": ("done", "recorded"), "HO-1": ("handoff", "current")},
-                          "digests": {"DN-1": _record_digest(dn(1, "BI-1"))}}}
+                          "digests": {"DN-1": _record_digest(dn(1, "BI-1"))},
+                          "held": {"BI": [[1, 2]], "DN": [[1, 1]], "HO": [[1, 1]], "WL": [[1, 4]]}}}
 
     base = Path(tempfile.mkdtemp(prefix="opf-check-selftest-")).resolve()
     counter = [0]
@@ -3949,6 +4633,42 @@ def self_test():
         check("per-record-digest-flip-invalid", r.status == INVALID)
         check("per-record-digest-flip-named",
               any("C-PERRECORD-RECONCILE" in f or "digest mismatch" in f for f in r.findings))
+        # A registry digest taken over the earlier spelling (U+2028 and U+2029 written literally, as the
+        # emitter wrote them before it escaped both) still reconciles. A digest over a naive text replacement,
+        # which also rewrites the text after an escaped backslash, is no emitter's spelling: a mismatch.
+        def _sha_text(text):
+            return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+        sep_fn = envelope("FN-1", "finding", "open", summary="a" + chr(0x2028) + "b" + chr(0x2029) + "c")
+        sep_prior = _opf_emit.emit(sep_fn).replace("\\u2028", chr(0x2028)).replace("\\u2029", chr(0x2029))
+        prl = copy.deepcopy(pr_machine)
+        prl["finding/FN-1.toml"] = sep_fn
+        prl["finding.index.toml"]["record"][0]["digest"] = _sha_text(sep_prior)
+        check("per-record-prior-separator-digest-valid",
+              sep_prior != _opf_emit.emit(sep_fn) and run(prl, product=pr_product, obs=pr_obs).status == VALID)
+        slash_fn = envelope("FN-1", "finding", "open", summary="x\\u2028y")
+        prn = copy.deepcopy(pr_machine)
+        prn["finding/FN-1.toml"] = slash_fn
+        prn["finding.index.toml"]["record"][0]["digest"] = _sha_text(
+            _opf_emit.emit(slash_fn).replace("\\u2028", chr(0x2028)))
+        prn_r = run(prn, product=pr_product, obs=pr_obs)
+        check("per-record-naive-separator-digest-invalid",
+              prn_r.status == INVALID and any("digest mismatch" in f for f in prn_r.findings))
+        # C-HISTORY-RESURRECTION: a prior body digest taken over the earlier spelling still proves the
+        # immutable body unchanged; the same digest against a changed body is still a finding.
+        sep_dn = dict(dn(1, "BI-1"), summary="done" + chr(0x2028) + "now")
+        hist = clean_machine()
+        hist["done.index.toml"] = idx([sep_dn])
+        hist_obs = copy.deepcopy(clean_prior())
+        hist_obs["prior"]["digests"]["DN-1"] = _sha_text(
+            _opf_emit.emit(sep_dn).replace("\\u2028", chr(0x2028)))
+        hist_r = run(hist, obs=hist_obs)
+        check("history-immutable-body-prior-separator-digest-valid",
+              hist_r is not None and hist_r.status == VALID)
+        hist["done.index.toml"] = idx([dict(sep_dn, summary="done" + chr(0x2028) + "later")])
+        hist_r = run(hist, obs=hist_obs)
+        check("history-immutable-body-prior-separator-digest-changed-invalid",
+              hist_r is not None and any("C-HISTORY-RESURRECTION" in f and "body changed" in f
+                                         for f in hist_r.findings))
         # two-field row (missing state, path) -> INVALID
         prk = copy.deepcopy(pr_machine)
         prk["finding.index.toml"]["record"][0] = {"id": "FN-1", "digest": d1}
@@ -4195,17 +4915,34 @@ def self_test():
               and any("legacy_fragment" in m and "schema-deferred" in m
                       for m in rlfr.by_check.get("C-RECORDS", [])))
         # OPF-IMPORTED-SERIES IS-2: the imported-series managed leaves (spec 8.2/4.2), behind the
-        # explicit `imported` activation flag. ACTIVE (imported=True, the spec_version >= 1.3.0 store):
-        # worklog.imported.toml and each enabled non-ledger type <type>.imported.index.toml are managed
-        # leaves DIRECTLY in the machine store; the importer-only legacy_fragment contributes none (its
-        # LF namespace is outside the imported series), and a deeper path of a leaf name stays a stray.
-        # The pure legs drive classify_containment directly; the full-doctor legs below cover the
-        # INACTIVE grading (the 1.2.0 store and the accepted 2.0.0 / homes = 2 reservation) and,
-        # with SUPPORTED_SPEC_VERSION patched to IMPORTED_SPEC_VERSION inside the vector, the
-        # ACTIVATED grading end to end through the driver's own derived flag.
+        # DERIVED activation. ACTIVE (the activated 2.0.0 / homes = 2 store, both tooling gates patched
+        # inside the vector): worklog.imported.toml and each enabled non-ledger type
+        # <type>.imported.index.toml are managed leaves DIRECTLY in the machine store; the importer-only
+        # legacy_fragment contributes none (its LF namespace is outside the imported series), and a
+        # deeper path of a leaf name stays a stray. The pure legs drive classify_containment directly,
+        # each as the bare two-argument call (the classification derives the activation from the
+        # manifest itself; a caller-supplied flag with an inactive default let an omitting consumer
+        # grade an activated store's imported leaves as strays); the full-doctor legs below cover
+        # the INACTIVE grading (the 1.2.0 store and the accepted 2.0.0 / homes = 2 reservation) and
+        # the ACTIVATED grading end to end through the driver.
         _is2_m = base_manifest()
         _is2_m["types"]["legacy_fragment"] = {"namespace": "LF"}
-        _is2_on = classify_containment(_is2_m, ".working/toml", imported=True)
+        _is2_act_m = copy.deepcopy(_is2_m)
+        _is2_act_m["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+        _is2_act_m["opf"]["homes"] = 2
+        _is2_prev_gates = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
+        try:
+            _opf_store.SUPPORTED_HOMES = 2
+            _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_on = classify_containment(_is2_act_m, ".working/toml")
+        finally:
+            _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _is2_prev_gates
+        # The omission vector: the bare call on an ACTIVATED manifest yields the ACTIVATED
+        # classification (red on a caller-supplied activation flag whose default is inactive: this
+        # exact call then grades the imported leaves as unregistered strays).
+        check("containment-imported-derived-on-omission-activated",
+              _is2_on.homes == 2
+              and _is2_on.managed_file(".working/toml/worklog.imported.toml"))
         check("containment-imported-leaf-managed-when-active",
               _is2_on.managed_file(".working/toml/worklog.imported.toml")
               and _is2_on.managed_file(".working/toml/backlog_item.imported.index.toml"))
@@ -4222,13 +4959,42 @@ def self_test():
               _is2_on.managed_file(".working/toml/worklog.toml")
               and _is2_on.managed_file(".working/toml/backlog_item.index.toml")
               and not _is2_on.managed_file(".working/toml/transaction.imported.index.toml"))
-        # INACTIVE (the explicit flag False, every 1.2.0 store): the same names stay unregistered
-        # strays, pure and full-doctor alike, so an old imported leaf cannot register itself before
-        # activation (red here if the flag or its default ever admits them early).
+        # INACTIVE (the derived activation False at the SHIPPED constants, every 1.2.0 store): the same
+        # names stay unregistered strays, pure and full-doctor alike, so an old imported leaf cannot
+        # register itself before activation (red here if the derivation ever admits them early).
         _is2_off = classify_containment(_is2_m, ".working/toml")
         check("containment-imported-leaf-unmanaged-when-inactive",
               not _is2_off.managed_file(".working/toml/worklog.imported.toml")
               and not _is2_off.managed_file(".working/toml/backlog_item.imported.index.toml"))
+        # The paired controls for the omission vector above, the SAME bare call: the 2.0.0 / homes = 2
+        # pair derives an INACTIVE series both at the shipped constants (the accepted reservation) and
+        # with SUPPORTED_HOMES alone raised (support still below IMPORTED_SPEC_VERSION), so the
+        # derivation requires BOTH tooling gates, never the declaration or one gate alone.
+        _is2_res = classify_containment(_is2_act_m, ".working/toml")
+        _is2_prev_h = _opf_store.SUPPORTED_HOMES
+        try:
+            _opf_store.SUPPORTED_HOMES = 2
+            _is2_half = classify_containment(_is2_act_m, ".working/toml")
+        finally:
+            _opf_store.SUPPORTED_HOMES = _is2_prev_h
+        check("containment-imported-derived-control-inactive",
+              _is2_res.homes == 1
+              and not _is2_res.managed_file(".working/toml/worklog.imported.toml")
+              and _is2_half.homes == 2
+              and not _is2_half.managed_file(".working/toml/worklog.imported.toml"))
+        # The activation can no longer be supplied (or starved) by a caller at all: a keyword or a
+        # third positional argument is a TypeError, so a stale flag cannot override the
+        # manifest-derived activation and the former omission divergence cannot be reintroduced
+        # without reddening here.
+        def _is2_refused(thunk):
+            try:
+                thunk()
+            except TypeError:
+                return True
+            return False
+        check("containment-activation-argument-refused",
+              _is2_refused(lambda: classify_containment(_is2_m, ".working/toml", imported=True))
+              and _is2_refused(lambda: classify_containment(_is2_m, ".working/toml", True)))
         _is2_store = clean_machine()
         _is2_store["worklog.imported.toml"] = {"schema": 1, "entry": []}
         _is2_store["backlog_item.imported.index.toml"] = idx([])
@@ -4242,7 +5008,7 @@ def self_test():
         # The accepted 2.0.0 / homes = 2 reservation (spec 4.2) is the ONE store C-MANIFEST
         # validates today with a spec_version above IMPORTED_SPEC_VERSION, so it is exactly where a
         # declaration-only gate would activate early: the imported leaves must stay unregistered
-        # strays there too (red if imported_series_declared ever reads the declaration alone), and
+        # strays there too (red if imported_series_active ever reads the declaration alone), and
         # the clean pair itself stays VALID (the planted leaves, never the declaration, cause the
         # findings; the planted bytes are not even TOML, so a VALID verdict would certify files
         # nothing read).
@@ -4272,35 +5038,102 @@ def self_test():
               == frozenset({(_opf_store.IMPORTED_WORKLOG_NAME if t in _LEDGER_TYPES
                              else t + _opf_store.IMPORTED_INDEX_SUFFIX)
                             for t, ns in _is2_roster.items() if ns in IMPORTED_NAMESPACES}))
-        # ACTIVATED full-doctor fixtures: SUPPORTED_SPEC_VERSION is patched to
-        # IMPORTED_SPEC_VERSION inside the vector (the spec 1.3.0 activation, the same per-vector
-        # patch idiom check_opf_homes uses for SUPPORTED_HOMES), so a spec_version 1.3.0 store
-        # validates and the driver-derived flag is True end to end.
+        # ACTIVATED full-doctor fixtures. The imported series activates only inside the 2.0.0 / homes = 2
+        # declaration (imported_series_active), so BOTH tooling gates are patched inside the vector,
+        # SUPPORTED_HOMES to 2 and SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION (the per-vector patch
+        # idiom check_opf_homes uses for SUPPORTED_HOMES), and the store declares the 2.0.0 pair, so the
+        # driver-derived flag is True end to end. act_machine() is that store with every imported leaf
+        # present and empty: one per enabled type except legacy_fragment (spec 4.2), the worklog's as
+        # worklog.imported.toml.
+        def act_machine():
+            m = clean_machine()
+            m["manifest.toml"]["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+            m["manifest.toml"]["opf"]["homes"] = 2
+            for leaf in _opf_store.imported_leaf_names(m["manifest.toml"]["types"]):
+                m[leaf] = ({"schema": 1, "entry": []} if leaf == _opf_store.IMPORTED_WORKLOG_NAME
+                           else idx([]))
+            return m
+
+        # Imported rows in the closed imported envelope (spec 8.3), each VALID under
+        # validate_imported_record as built: a backlog item, and a worklog entry whose omitted `detail`
+        # carries its missingness row. `over` replaces or adds fields.
+        IMP_RUN = "imp-20260601T000000Z-0123456789abcdef"
+
+        def imp_row(rid, rtype, status, **over):
+            r = {"id": rid, "type": rtype, "status": status, "title": "t",
+                 "actor": {"kind": "importer", "id": "import-assistant"},
+                 "import": {"source": ".working/imported/import/{}/originals/TODO.md".format(IMP_RUN),
+                            "source_sha256": "0123456789abcdef" * 4, "run": IMP_RUN, "imported_at": TS}}
+            r.update(over)
+            return r
+
+        def imp_bi(n, status="open", **over):
+            r = imp_row("imported:BI-{}".format(n), "backlog_item", status, created_at=TS, updated_at=TS)
+            r.update(over)
+            return r
+
+        def imp_wl(n, **over):
+            r = imp_row("imported:WL-{}".format(n), "worklog", "recorded", date=TS, kind="added",
+                        summary="w{}".format(n),
+                        unrecorded=[{"field": "detail", "reason": "not_recorded_in_source"}])
+            r.update(over)
+            return r
+
+        # The imported checks this release grades (C-IMPORTED-SCHEMA); every OTHER id of IMPORTED_CHECKS
+        # never runs yet, so on an active store result()'s roster reconciliation routes each to
+        # CANNOT-EVALUATE. pending_only(res) holds when those reconciliation cants are the ONLY cants:
+        # an active store never certifies on a partial imported roster, and nothing else is uncertain.
+        _imp_landed = ("C-IMPORTED-SCHEMA",)
+        _imp_pending = tuple(cid for cid in IMPORTED_CHECKS if cid not in _imp_landed)
+
+        def pending_only(res):
+            return (res is not None and len(res.cannot_evaluate) == len(_imp_pending)
+                    and all(res.checks.get(cid) == "CANNOT-EVALUATE"
+                            and any(repr(cid) in m and "did not run" in m for m in res.cannot_evaluate)
+                            for cid in _imp_pending))
+
+        def imp_msgs(res):
+            return res.by_check.get("C-IMPORTED-SCHEMA", []) if res is not None else []
+
         _is2_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        _is2_prev_homes = _opf_store.SUPPORTED_HOMES
+        _is3_g = globals()
+        _is3_prev_roster = IMPORTED_CHECKS
         try:
+            _opf_store.SUPPORTED_HOMES = 2
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-            # The clean activated store with both imported leaves present REGISTERS them: no
-            # unregistered-stray finding (red when EITHER flag-forwarding step, the driver to
-            # _check_containment or _check_containment to classify_containment, is removed, because
-            # the leaves then grade as unregistered strays), and the activation tripwire routes the
-            # run to CANNOT-EVALUATE with the deferred C-IMPORTED-* roster as the ONLY cant, never
-            # VALID, because nothing reads the leaves' content yet (red if an activated store ever
-            # certifies while the imported-content checks are deferred).
-            _is2_act = clean_machine()
-            _is2_act["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
-            _is2_act["worklog.imported.toml"] = {"schema": 1, "entry": []}
-            _is2_act["backlog_item.imported.index.toml"] = idx([])
+            # The clean activated store with every imported leaf present REGISTERS them: no
+            # unregistered-stray finding (red when the derivation inside classify_containment is
+            # removed or weakened, because the leaves then grade as unregistered strays).
+            # C-IMPORTED-SCHEMA reads the empty leaves and passes, and the only cants are the
+            # reconciliation's for the imported checks not yet landed, so the activated store is
+            # never VALID on a partial imported roster.
+            _is2_act = act_machine()
             _is2_act_run = run(copy.deepcopy(_is2_act))
             check("containment-imported-leaf-registered-when-activated",
                   _is2_act_run is not None and not _is2_act_run.findings
                   and _is2_act_run.status == CANNOT_EVALUATE
-                  and len(_is2_act_run.cannot_evaluate) == 1
-                  and "C-IMPORTED" in _is2_act_run.cannot_evaluate[0])
+                  and _is2_act_run.checks.get("C-IMPORTED-SCHEMA") == "PASS"
+                  and pending_only(_is2_act_run))
+            # The roster of an activated 2.0.0 store is the homes-2 roster plus the four imported
+            # checks (spec 4.2 / 8.3), in that order, and the report carries exactly it: the three not
+            # yet landed are CANNOT-EVALUATE by reconciliation, never silently absent (red when the
+            # roster drops the imported ids, or a check is skipped without its reconciliation).
+            _h2_at = REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
+            _h2_roster = REQUIRED_CHECKS[:_h2_at] + HOMES2_CHECKS + REQUIRED_CHECKS[_h2_at:]
+            check("imported-roster-includes-four-checks-when-active",
+                  IMPORTED_CHECKS == ("C-IMPORTED-SCHEMA", "C-IMPORTED-IDS", "C-IMPORTED-PROVENANCE",
+                                      "C-IMPORTED-SEGREGATION")
+                  and required_checks(2, True) == _h2_roster + IMPORTED_CHECKS
+                  and required_checks(2) == _h2_roster and required_checks(1) == REQUIRED_CHECKS
+                  and _is2_act_run is not None
+                  and tuple(_is2_act_run.checks) == required_checks(2, True)
+                  and pending_only(_is2_act_run))
             # The leaf roster the classification derives is the ENABLED types, never the full
             # section-8.1 roster: a disabled module type (release is not enabled here) gets no leaf,
             # so its imported index stays an unregistered stray even while activated (red if the
             # imported_leaf_names call is ever fed the full roster instead of enabled_types). The
-            # activation-tripwire cant dominates the finding, so the status is asserted as
+            # pending imported checks' cants dominate the finding, so the status is asserted as
             # not-VALID, and the discriminating assertion is the unregistered finding itself.
             _is2_act["release.imported.index.toml"] = idx([])
             _is2_dis_run = run(_is2_act)
@@ -4308,18 +5141,17 @@ def self_test():
                   _is2_dis_run is not None and _is2_dis_run.status != VALID
                   and any("C-CONTAINMENT" in f and "release.imported.index.toml" in f
                           and "unregistered" in f for f in _is2_dis_run.findings))
-            # Writer/doctor single authority (F10-1): plan_write_scope passes the SAME derived flag
-            # to the SAME classify_containment, so on an activated manifest whose [unmanaged]
-            # declaration names an imported leaf BOTH refuse the collision, naming the same finding
-            # (red when the write guard falls back to the default flag: it would then plan writes
-            # over a declaration the doctor flags as colliding).
+            # Writer/doctor single authority (F10-1): plan_write_scope reads the SAME
+            # classify_containment, which derives the SAME activation from the manifest, so on an
+            # activated manifest whose [unmanaged] declaration names an imported leaf BOTH refuse the
+            # collision, naming the same finding (red when either consumer could read the series as
+            # inactive: it would then plan writes over a declaration the doctor flags as colliding).
             import _opf_write_guard
             _is2_wg_m = base_manifest()
-            _is2_wg_m["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _is2_wg_m["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+            _is2_wg_m["opf"]["homes"] = 2
             _is2_wg_m["unmanaged"] = dict(paths=[".working/toml/worklog.imported.toml"])
-            _is2_wg_cls = classify_containment(
-                _is2_wg_m, ".working/toml",
-                imported=_opf_store.imported_series_declared(_is2_wg_m))
+            _is2_wg_cls = classify_containment(_is2_wg_m, ".working/toml")
             try:
                 _opf_write_guard.plan_write_scope(".working/toml", _is2_wg_m,
                                                   (".working/toml/manifest.toml",), "upgrade")
@@ -4332,11 +5164,10 @@ def self_test():
             # The SAME agreement in the doctor's own idiom, not a direct classify call: the FULL
             # doctor run over the colliding declaration emits the C-CONTAINMENT collision
             # finding, and plan_write_scope refuses the SAME manifest naming that collision
-            # verbatim (red when the write guard falls back to the default flag while the
-            # doctor-derived flag is True: the writer would then plan writes over a
-            # declaration the doctor flags as colliding).
-            _is2_agx = clean_machine()
-            _is2_agx["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            # verbatim (red when the write guard's classification could read the series as
+            # inactive while the doctor's reads it as active: the writer would then plan
+            # writes over a declaration the doctor flags as colliding).
+            _is2_agx = act_machine()
             _is2_agx["manifest.toml"]["unmanaged"] = dict(
                 paths=[".working/toml/worklog.imported.toml"])
             _is2_agx_run = run(copy.deepcopy(_is2_agx))
@@ -4353,29 +5184,273 @@ def self_test():
                   and any("worklog.imported.toml" in f for f in _is2_agx_coll)
                   and _is2_agx_refused is not None
                   and all(f in _is2_agx_refused for f in _is2_agx_coll))
-            # The activation tripwire end to end, the garbage-leaf probe fail-closed: both
-            # imported leaves hold bytes that are not even TOML, and with every imported-content
-            # check deferred nothing reads them, so a VALID verdict would certify files nothing
-            # read. The tripwire routes the ACTIVE store to CANNOT-EVALUATE naming the deferred
-            # checks (red if an activated store with unread imported leaves ever certifies).
-            _is2_p1 = clean_machine()
-            _is2_p1["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            # The garbage-leaf probe, fail-closed: both imported leaves hold bytes that are not even
+            # TOML, so a VALID verdict would certify files nothing read. C-IMPORTED-SCHEMA reads them
+            # and routes each to a CANNOT-EVALUATE naming it (red if an activated store with unread
+            # imported leaves ever certifies).
+            _is2_p1 = act_machine()
             _is2_p1["worklog.imported.toml"] = "deliberately invalid TOML ["
             _is2_p1["backlog_item.imported.index.toml"] = "garbage = ["
             _is2_p1_run = run(_is2_p1)
             check("containment-activated-garbage-leaf-never-certified",
                   _is2_p1_run is not None and _is2_p1_run.status == CANNOT_EVALUATE
+                  and _is2_p1_run.checks.get("C-IMPORTED-SCHEMA") == "CANNOT-EVALUATE"
+                  and all(any("cannot read .working/toml/" + leaf in m for m in imp_msgs(_is2_p1_run))
+                          for leaf in ("worklog.imported.toml", "backlog_item.imported.index.toml")))
+            # The activation tripwire stays the guard against an EMPTIED imported roster: with
+            # IMPORTED_CHECKS patched to () an activated store is CANNOT-EVALUATE with the tripwire's
+            # own message naming the deferred C-IMPORTED-* checks (red when the tripwire is removed;
+            # C-IMPORTED-SCHEMA then runs as an unknown id, a different fault this vector does not
+            # accept in its place).
+            _is3_g["IMPORTED_CHECKS"] = ()
+            try:
+                _is2_tw_run = run(act_machine())
+            finally:
+                _is3_g["IMPORTED_CHECKS"] = _is3_prev_roster
+            check("containment-imported-tripwire-on-empty-roster",
+                  _is2_tw_run is not None and _is2_tw_run.status == CANNOT_EVALUATE
                   and any("C-IMPORTED" in m and "unread" in m
-                          for m in _is2_p1_run.cannot_evaluate))
+                          for m in _is2_tw_run.by_check.get("C-CONTAINMENT", [])))
+
+            # --- OPF-IMPORTED-SERIES IS-3a: C-IMPORTED-SCHEMA over the imported leaves (spec 8.3) ------
+            # A conforming imported row reaches VALID: C-IMPORTED-SCHEMA passes and adds no cant of its
+            # own, never the _SCHEMA_DEFERRAL seam (spec 8.3), the full roster's only cants are the
+            # pending imported checks, and with the roster patched to the checks landed so far the
+            # SAME store is VALID end to end (red when imported rows are routed to the deferral,
+            # which reads CANNOT-EVALUATE).
+            _v = act_machine()
+            _v["backlog_item.imported.index.toml"] = idx([imp_bi(1)])
+            _v["worklog.imported.toml"] = {"schema": 1, "entry": [imp_wl(1)]}
+            _v_run = run(copy.deepcopy(_v))
+            _is3_g["IMPORTED_CHECKS"] = _imp_landed
+            try:
+                _v_landed = run(_v)
+            finally:
+                _is3_g["IMPORTED_CHECKS"] = _is3_prev_roster
+            check("imported-valid-row-reaches-valid",
+                  _v_run is not None and not _v_run.findings
+                  and _v_run.checks.get("C-IMPORTED-SCHEMA") == "PASS" and pending_only(_v_run)
+                  and not any(_SCHEMA_DEFERRAL in m for m in _v_run.cannot_evaluate)
+                  and _v_landed is not None and _v_landed.status == VALID
+                  and tuple(_v_landed.checks) == _h2_roster + _imp_landed)
+            # An omitted non-exempt field with no missingness row is an INVALID finding naming the
+            # leaf, the row and the field (red when rows are deferred, which reads CANNOT-EVALUATE,
+            # or not validated, which reads PASS).
+            _mu_row = imp_bi(1)
+            del _mu_row["created_at"]
+            _mu = act_machine()
+            _mu["backlog_item.imported.index.toml"] = idx([_mu_row])
+            _mu_run = run(_mu)
+            check("imported-missing-unrecorded-row-finding",
+                  _mu_run is not None and _mu_run.checks.get("C-IMPORTED-SCHEMA") == "FINDING"
+                  and any(f.startswith(".working/toml/backlog_item.imported.index.toml#1: imported "
+                                       "record 'imported:BI-1': ")
+                          and "'created_at'" in f and "no unrecorded row" in f for f in imp_msgs(_mu_run)))
+            # An imported status never takes /proposed (spec 8.3): done/proposed is a legal clean
+            # backlog_item status, so only the imported rule refuses it.
+            _pr = act_machine()
+            _pr["backlog_item.imported.index.toml"] = idx([imp_bi(1, status="done/proposed")])
+            _pr_run = run(_pr)
+            check("imported-proposed-status-finding",
+                  _pr_run is not None and _pr_run.checks.get("C-IMPORTED-SCHEMA") == "FINDING"
+                  and any("takes /proposed" in f for f in imp_msgs(_pr_run)))
+            # worklog.imported.toml rows are [[entry]] rows validated as the worklog type: an imported
+            # worklog row's status is fixed at recorded (spec 8.3; red when the worklog leaf is read
+            # under the index shape, or its rows go unvalidated).
+            _wo = act_machine()
+            _wo["worklog.imported.toml"] = {"schema": 1, "entry": [imp_wl(1, status="open")]}
+            _wo_run = run(_wo)
+            check("imported-worklog-row-finding",
+                  _wo_run is not None and _wo_run.checks.get("C-IMPORTED-SCHEMA") == "FINDING"
+                  and any(f.startswith(".working/toml/worklog.imported.toml#1: imported record "
+                                       "'imported:WL-1': ") and "not a worklog state" in f
+                          for f in imp_msgs(_wo_run)))
+            # One unparseable leaf in an otherwise conforming store: C-IMPORTED-SCHEMA is
+            # CANNOT-EVALUATE naming that leaf, and nothing is a finding (red when the leaf is not
+            # read, which reads PASS).
+            _up = act_machine()
+            _up["backlog_item.imported.index.toml"] = "garbage = ["
+            _up_run = run(_up)
+            check("imported-leaf-unparseable-cannot-evaluate",
+                  _up_run is not None and _up_run.status == CANNOT_EVALUATE and not _up_run.findings
+                  and _up_run.checks.get("C-IMPORTED-SCHEMA") == "CANNOT-EVALUATE"
+                  and any(m.startswith("cannot read .working/toml/backlog_item.imported.index.toml")
+                          for m in imp_msgs(_up_run)))
+            # An absent leaf of an enabled type is an INVALID finding (spec 4.2: every enabled type
+            # but legacy_fragment holds one); a declared legacy_fragment owes none (red when the
+            # absence passes, or when LF is not excluded).
+            _ab = act_machine()
+            del _ab["finding.imported.index.toml"]
+            _ab_run = run(_ab)
+            check("imported-leaf-absent-finding",
+                  _ab_run is not None and _ab_run.checks.get("C-IMPORTED-SCHEMA") == "FINDING"
+                  and any("'finding' has no imported leaf finding.imported.index.toml" in f
+                          for f in imp_msgs(_ab_run)))
+            _lf = act_machine()
+            _lf["manifest.toml"]["types"]["legacy_fragment"] = {"namespace": "LF"}
+            _lf["counters.toml"] = counters(LF=0)
+            _lf["legacy_fragment.index.toml"] = idx([])
+            _lf_run = run(_lf)
+            check("imported-lf-owes-no-leaf",
+                  _lf_run is not None and not _lf_run.findings
+                  and _lf_run.checks.get("C-IMPORTED-SCHEMA") == "PASS" and pending_only(_lf_run))
+            # The closed leaf shape, one vector per arm: an unknown top-level key and an absent schema
+            # are findings; an unsupported schema and a rows value that is not an array are
+            # CANNOT-EVALUATE (each red when its arm is removed).
+            _sh = act_machine()
+            _sh["backlog_item.imported.index.toml"] = dict(idx([]), colour="teal")
+            _sh_run = run(_sh)
+            check("imported-leaf-unknown-top-key-finding",
+                  _sh_run is not None and _sh_run.checks.get("C-IMPORTED-SCHEMA") == "FINDING"
+                  and any("backlog_item.imported.index.toml: unknown top-level key(s): colour" in f
+                          for f in imp_msgs(_sh_run)))
+            _sh = act_machine()
+            _sh["worklog.imported.toml"] = {"entry": []}
+            _sh_run = run(_sh)
+            check("imported-leaf-schema-absent-finding",
+                  _sh_run is not None and _sh_run.checks.get("C-IMPORTED-SCHEMA") == "FINDING"
+                  and any("worklog.imported.toml: imported leaf is missing the required `schema` key" in f
+                          for f in imp_msgs(_sh_run)))
+            _sh = act_machine()
+            _sh["backlog_item.imported.index.toml"] = {"schema": 2, "record": [imp_bi(1)]}
+            _sh_run = run(_sh)
+            check("imported-leaf-unsupported-schema-cannot-evaluate",
+                  _sh_run is not None and _sh_run.checks.get("C-IMPORTED-SCHEMA") == "CANNOT-EVALUATE"
+                  and any("backlog_item.imported.index.toml: schema 2 is not the supported version" in m
+                          for m in imp_msgs(_sh_run)))
+            _sh = act_machine()
+            _sh["worklog.imported.toml"] = {"schema": 1, "entry": "not an array"}
+            _sh_run = run(_sh)
+            check("imported-leaf-rows-not-array-cannot-evaluate",
+                  _sh_run is not None and _sh_run.checks.get("C-IMPORTED-SCHEMA") == "CANNOT-EVALUATE"
+                  and any("worklog.imported.toml: [[entry]] is not an array of tables" in m
+                          for m in imp_msgs(_sh_run)))
+            # A module-tier type's imported row is graded by the imported validator, which holds no
+            # module schema and so refuses the type: an INVALID finding, never the module-schema
+            # deferral its clean index takes (spec 8.3; red when imported rows reuse the clean
+            # deferral route).
+            _mt = act_machine()
+            _mt_types = {"artifact": "AR", "gate_run": "GR", "release": "RL", "waiver": "WV"}
+            _mt["manifest.toml"]["modules"] = {"delivery_assurance": True}
+            _mt["counters.toml"] = counters(AR=0, GR=0, RL=0, WV=0)
+            for _t, _ns in _mt_types.items():
+                _mt["manifest.toml"]["types"][_t] = {"namespace": _ns}
+                _mt[_t + ".index.toml"] = idx([])
+            for _leaf in _opf_store.imported_leaf_names(_mt_types):
+                _mt[_leaf] = idx([])
+            _mt["artifact.imported.index.toml"] = idx([imp_row("imported:AR-1", "artifact", "recorded",
+                                                               created_at=TS, updated_at=TS)])
+            _mt_run = run(_mt)
+            check("imported-module-type-row-never-deferred",
+                  _mt_run is not None and _mt_run.checks.get("C-IMPORTED-SCHEMA") == "FINDING"
+                  and any(f.startswith(".working/toml/artifact.imported.index.toml#1: ")
+                          and "'artifact' is not a supported record type" in f for f in imp_msgs(_mt_run))
+                  and not any(_SCHEMA_DEFERRAL in m for m in imp_msgs(_mt_run)))
+            # Each row is validated against its LEAF's type: a finding row planted in the backlog-item
+            # leaf is refused (red when the leaf type is not passed as the expected type); a row that
+            # is not a table is CANNOT-EVALUATE naming it (red when that verdict is dropped); and a
+            # registered x-<vendor> table passes, the manifest's registered vendors reaching the
+            # validator (red when they do not, which reads it as an unknown key).
+            _ty = act_machine()
+            _ty["backlog_item.imported.index.toml"] = idx([imp_row("imported:FN-1", "finding", "open",
+                                                                   created_at=TS, updated_at=TS)])
+            _ty_run = run(_ty)
+            check("imported-row-type-must-match-leaf",
+                  _ty_run is not None and _ty_run.checks.get("C-IMPORTED-SCHEMA") == "FINDING"
+                  and any("type 'finding' does not match the expected type 'backlog_item'" in f
+                          for f in imp_msgs(_ty_run)))
+            _nt = act_machine()
+            _nt["backlog_item.imported.index.toml"] = "schema = 1\nrecord = [1]\n"
+            _nt_run = run(_nt)
+            check("imported-row-not-a-table-cannot-evaluate",
+                  _nt_run is not None and _nt_run.checks.get("C-IMPORTED-SCHEMA") == "CANNOT-EVALUATE"
+                  and (".working/toml/backlog_item.imported.index.toml#1: imported record is not a "
+                       "table (fail-closed)") in imp_msgs(_nt_run))
+            _vd = act_machine()
+            _vd["manifest.toml"]["vendors"] = {"registered": ["x-acme"]}
+            _vd["backlog_item.imported.index.toml"] = idx([imp_bi(1, **{"x-acme": {"lane": "history"}})])
+            _vd_run = run(_vd)
+            check("imported-row-registered-vendor-accepted",
+                  _vd_run is not None and not _vd_run.findings
+                  and _vd_run.checks.get("C-IMPORTED-SCHEMA") == "PASS" and pending_only(_vd_run))
+            # The writer/doctor agreement on a declaration-only activation: a 1.3.0 store on homes 1
+            # whose [unmanaged] names an imported-leaf name certifies, the name not being a
+            # managed leaf there, and plan_write_scope plans the SAME manifest without refusing (red
+            # when the write guard reads the declared spec_version alone: it would then refuse a
+            # declaration the doctor certifies).
+            _h1u = clean_machine()
+            _h1u["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            _h1u["manifest.toml"]["unmanaged"] = dict(paths=[".working/toml/worklog.imported.toml"])
+            _h1u["worklog.imported.toml"] = "unmanaged legacy bytes, never read ["
+            _h1u_run = run(copy.deepcopy(_h1u))
+            try:
+                _h1u_scope = _opf_write_guard.plan_write_scope(
+                    ".working/toml", _h1u["manifest.toml"], (".working/toml/manifest.toml",), "upgrade")
+            except _opf_write_guard.WriteGuardError:
+                _h1u_scope = None
+            check("containment-writer-doctor-agree-on-homes1-130-unmanaged-imported-name",
+                  _h1u_run is not None and _h1u_run.status == VALID
+                  and _h1u_scope is not None and ".working/toml/manifest.toml" in _h1u_scope["store"])
+            # The imported series activates only inside the graded 2.0.0 / homes = 2 declaration.
+            # A spec_version 1.3.0 store on homes 1, which C-MANIFEST accepts at this
+            # support, keeps the legacy roster and grades every imported leaf as an unregistered stray
+            # (red when the flag reads the declared spec_version alone).
+            _h1 = act_machine()
+            _h1["manifest.toml"]["opf"]["spec_version"] = _opf_store.IMPORTED_SPEC_VERSION
+            del _h1["manifest.toml"]["opf"]["homes"]
+            _h1_run = run(_h1)
+            check("imported-series-inactive-on-homes1-130-store",
+                  _h1_run is not None and tuple(_h1_run.checks) == REQUIRED_CHECKS
+                  and any("C-CONTAINMENT" in f and "worklog.imported.toml" in f and "unregistered" in f
+                          for f in _h1_run.findings))
+            # The pure flag over its arms, the support threshold sampled just below, at, and just
+            # above IMPORTED_SPEC_VERSION: True only for the 2.0.0 / homes = 2 pair with both
+            # tooling gates raised (red when either arm, or the threshold, moves).
+            _pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
+            _flag_rows = (
+                (2, "1.3.0", _pair, True), (2, "1.3.1", _pair, True), (2, "1.2.99", _pair, False),
+                (2, "1.2.0", _pair, False), (1, "1.3.0", _pair, False),
+                (2, "1.3.0", {"opf": {"spec_version": "1.3.0"}}, False),
+                (2, "1.3.0", {"opf": {"spec_version": "1.3.0", "homes": 2}}, False),
+                (2, "1.3.0", {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION}}, False),
+                (2, "1.3.0", None, False))
+            _flag_got = []
+            for _fh, _fv, _fm, _want in _flag_rows:
+                _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _fh, _fv
+                _flag_got.append(imported_series_active(_fm) is _want)
+            _opf_store.SUPPORTED_HOMES = 2
+            _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+            check("imported-series-active-keyed-on-homes2-declaration",
+                  _flag_got == [True] * len(_flag_rows))
+            # Homes 2 activated WITHOUT imported-series support (the child flip the record and homes
+            # suites run): the 2.0.0 store keeps the plain homes-2 roster and its imported leaves stay
+            # unregistered strays (red when the flag reads the homes-2 declaration alone).
+            _opf_store.SUPPORTED_SPEC_VERSION = _is2_prev_ssv
+            _ns_run = run(act_machine())
+            check("imported-series-inactive-at-homes2-without-support",
+                  _ns_run is not None and tuple(_ns_run.checks) == required_checks(2)
+                  and any("C-CONTAINMENT" in f and "worklog.imported.toml" in f and "unregistered" in f
+                          for f in _ns_run.findings))
         finally:
             _opf_store.SUPPORTED_SPEC_VERSION = _is2_prev_ssv
+            _opf_store.SUPPORTED_HOMES = _is2_prev_homes
+            _is3_g["IMPORTED_CHECKS"] = _is3_prev_roster
+        # The render source gate follows the imported roster: a report that carries the imported
+        # checks is gated on them too, so a C-IMPORTED-SCHEMA finding refuses source integrity (red
+        # when source_checks drops the imported ids).
+        _src_imp = dict.fromkeys(required_checks(2, True), "PASS")
+        _src_imp["C-IMPORTED-SCHEMA"] = "FINDING"
+        check("source-gate-imported-schema-finding-refuses",
+              source_checks(StoreValidation(INVALID, checks=_src_imp))
+              == tuple(cid for cid in required_checks(2, True) if cid not in DELIVERABLE_DRIFT_CHECKS)
+              and not source_integrity_ok(StoreValidation(INVALID, checks=_src_imp)))
         # The writer/doctor agreement in the OTHER direction, at the SHIPPED support (the derived
         # flag False): an [unmanaged] declaration of an imported-leaf NAME is a legitimate
         # declaration while the series is inactive (the name is not a managed leaf), so the FULL
         # doctor run certifies the store with the declared file covered, and plan_write_scope
-        # plans the SAME manifest without refusing (red when the write guard forces or defaults
-        # the flag ACTIVE: it would then refuse a declaration the doctor certifies, the
-        # over-refusal divergence; fail-closed, but a divergence all the same).
+        # plans the SAME manifest without refusing (red when the write guard's classification
+        # reads the series as ACTIVE here: it would then refuse a declaration the doctor
+        # certifies, the over-refusal divergence; fail-closed, but a divergence all the same).
         _is2_agi = clean_machine()
         _is2_agi["manifest.toml"]["unmanaged"] = dict(paths=[".working/toml/worklog.imported.toml"])
         _is2_agi["worklog.imported.toml"] = "unmanaged legacy bytes, never read ["
@@ -4392,12 +5467,12 @@ def self_test():
               and _is2_agi_scope is not None
               and ".working/toml/manifest.toml" in _is2_agi_scope["store"])
         # The tooling-side tripwire at the SHIPPED constants (red on a bare activation): once
-        # SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION the imported-content checks must
-        # exist, be NEW ids in the exact id grammar (never a placeholder reusing an id from
-        # REQUIRED_CHECKS or HOMES2_CHECKS), and sit inside required_checks(h) for EVERY homes
-        # generation h from 1 through SUPPORTED_HOMES. Activating the imported series and
-        # activating homes 2 are SEPARATE gates: today an active series is graded against
-        # required_checks(1), so membership in the homes-2 roster alone binds nothing. The
+        # SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION the imported checks must exist, be
+        # NEW ids in the exact id grammar (never a placeholder reusing an id from REQUIRED_CHECKS
+        # or HOMES2_CHECKS), and sit inside required_checks(h, imported=True) for EVERY homes
+        # generation h from 1 through SUPPORTED_HOMES. An active series is graded only at homes 2
+        # (imported_series_active), but the predicate keeps the every-generation bound, so a
+        # wiring into one generation's imported roster alone reads red. The
         # assertion calls the module predicate imported_content_checks_landed itself, so this
         # shipped-constants call and the controlled vectors below exercise the SAME code, and
         # the runtime tripwire above never stands alone.
@@ -4414,7 +5489,7 @@ def self_test():
         # positions; their comment states the exact coverage and the set-order residual.
         _icc_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
         _icc_prev_homes = _opf_store.SUPPORTED_HOMES
-        _icc_prev_roster = IMPORTED_CONTENT_CHECKS
+        _icc_prev_roster = IMPORTED_CHECKS
         _icc_prev_rc = required_checks
         _icc_prev_req = REQUIRED_CHECKS
         _icc_prev_h2 = HOMES2_CHECKS
@@ -4425,8 +5500,9 @@ def self_test():
             # answers first, so this vector reds a predicate that tests the generation floor
             # before the deferral.
             _opf_store.SUPPORTED_SPEC_VERSION = "1.2.0"
+            _icc_g["IMPORTED_CHECKS"] = ()
             _icc_unsup_empty = imported_content_checks_landed()
-            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-PLACEHOLDER",)
+            _icc_g["IMPORTED_CHECKS"] = ("C-IMPORTED-PLACEHOLDER",)
             _icc_unsup_placeholder = imported_content_checks_landed()
             _opf_store.SUPPORTED_HOMES = 0
             _icc_unsup_nohomes = imported_content_checks_landed()
@@ -4435,19 +5511,23 @@ def self_test():
                   _icc_unsup_empty and _icc_unsup_placeholder and _icc_unsup_nohomes)
             # Supported tooling, empty roster: red (the non-empty arm).
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-            _icc_g["IMPORTED_CONTENT_CHECKS"] = ()
+            _icc_g["IMPORTED_CHECKS"] = ()
             check("imported-content-gate-empty-roster-red-once-supported",
                   not imported_content_checks_landed())
             # Supported, a NEW id nothing wires into any required roster: red (the membership
-            # arm; this is the vector a deleted membership condition reds).
-            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-PLACEHOLDER",)
+            # arm; this is the vector a deleted membership condition reds). The shipped
+            # required_checks wires whatever IMPORTED_CHECKS holds, so the unwired roster is a
+            # wiring that ignores its imported flag, the one-argument roster before IS-3a.
+            _icc_g["IMPORTED_CHECKS"] = ("C-IMPORTED-PLACEHOLDER",)
+            _icc_g["required_checks"] = lambda homes, imported=False, _rc=_icc_prev_rc: _rc(homes)
             check("imported-content-gate-out-of-roster-red-once-supported",
                   not imported_content_checks_landed())
+            _icc_g["required_checks"] = _icc_prev_rc
             # Supported, a placeholder reusing an EXISTING required id: red (the disjointness
             # and prefix arms TOGETHER; C-CONTAINMENT sits inside every required roster, so the
             # membership arm alone would pass it, and each of the two arms is discriminated on
             # its own by the three vectors below).
-            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-CONTAINMENT",)
+            _icc_g["IMPORTED_CHECKS"] = ("C-CONTAINMENT",)
             check("imported-content-gate-reused-id-red-once-supported",
                   not imported_content_checks_landed())
             # ONLY the grammar arm refuses a FRESH id outside the exact grammar wired into every
@@ -4468,16 +5548,17 @@ def self_test():
             _icc_canonical = ("C-IMPORTED-SCHEMA", "C-IMPORTED-IDS", "C-IMPORTED-PROVENANCE",
                               "C-IMPORTED-SEGREGATION", "C-IMPORTED-A-B")
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc, _w=_icc_spelled + _icc_canonical: _rc(homes) + _w)
+                lambda homes, imported=False, _rc=_icc_prev_rc, _w=_icc_spelled + _icc_canonical:
+                _rc(homes) + (_w if imported else ()))
             _icc_unpref_one = []
             for _icc_cid in _icc_spelled:
-                _icc_g["IMPORTED_CONTENT_CHECKS"] = (_icc_cid,)
+                _icc_g["IMPORTED_CHECKS"] = (_icc_cid,)
                 _icc_unpref_one.append(imported_content_checks_landed())
             check("imported-content-gate-unprefixed-new-id-red-once-supported",
                   _icc_unpref_one == [False] * 15)
             _icc_canonical_one = []
             for _icc_cid in _icc_canonical:
-                _icc_g["IMPORTED_CONTENT_CHECKS"] = (_icc_cid,)
+                _icc_g["IMPORTED_CHECKS"] = (_icc_cid,)
                 _icc_canonical_one.append(imported_content_checks_landed())
             check("imported-content-gate-canonical-id-green-once-supported",
                   _icc_canonical_one == [True] * 5)
@@ -4553,7 +5634,7 @@ def self_test():
                     stage(offender)
                     for order in _icc_orders[len(ids)]:
                         roster = tuple(ids[i] for i in order)
-                        _icc_g["IMPORTED_CONTENT_CHECKS"] = roster
+                        _icc_g["IMPORTED_CHECKS"] = roster
                         verdicts.append(imported_content_checks_landed())
                         cases.add((offender, roster))
                         placed = (placed and sorted(roster) == sorted(ids)
@@ -4564,7 +5645,8 @@ def self_test():
             def _icc_unwire(offender):
                 wired = tuple(cid for cid in _icc_quad if cid != offender)
                 _icc_g["required_checks"] = (
-                    lambda homes, _rc=_icc_prev_rc, _w=wired: _rc(homes) + _w)
+                    lambda homes, imported=False, _rc=_icc_prev_rc, _w=wired:
+                    _rc(homes) + (_w if imported else ()))
 
             def _icc_collide_required(offender):
                 _icc_g["REQUIRED_CHECKS"] = _icc_prev_req + (offender,)
@@ -4577,7 +5659,8 @@ def self_test():
             # passes. Each patched roster is staged back after its battery and restored again in
             # finally.
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc, _w=_icc_quad: _rc(homes) + _w)
+                lambda homes, imported=False, _rc=_icc_prev_rc, _w=_icc_quad:
+                _rc(homes) + (_w if imported else ()))
             check("imported-content-gate-required-collision-red-once-supported",
                   _icc_battery(_icc_rotated, _icc_rotated_placed, _icc_collide_required, 118, False))
             _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
@@ -4587,8 +5670,9 @@ def self_test():
             # ONLY the grammar arm refuses: each set holds one fresh offender outside the
             # grammar, and every id is wired into every required roster.
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc, _w=tuple(sorted(
-                    {cid for _, _, ids in _icc_grammar_rows for cid in ids})): _rc(homes) + _w)
+                lambda homes, imported=False, _rc=_icc_prev_rc, _w=tuple(sorted(
+                    {cid for _, _, ids in _icc_grammar_rows for cid in ids})):
+                _rc(homes) + (_w if imported else ()))
             check("imported-content-gate-multi-id-unprefixed-red-once-supported",
                   _icc_battery(_icc_grammar_rows, _icc_grammar_placed, lambda offender: None,
                                130, False))
@@ -4598,21 +5682,25 @@ def self_test():
             # Green control over the same 118 cases: every id wired and nothing colliding reads
             # True, so no red above comes from the roster size or the order.
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc, _w=_icc_quad: _rc(homes) + _w)
+                lambda homes, imported=False, _rc=_icc_prev_rc, _w=_icc_quad:
+                _rc(homes) + (_w if imported else ()))
             check("imported-content-gate-multi-id-wired-green-once-supported",
                   _icc_battery(_icc_rotated, _icc_rotated_placed, lambda offender: None, 118, True))
-            # Supported, the legitimate activation wiring: a NEW id joined into
-            # required_checks(h) for every generation reads True, and the SAME id wired ONLY
-            # into the homes-2 roster stays red while generation 1 is supported, because an
-            # active series is graded against required_checks(1) today.
-            _icc_g["IMPORTED_CONTENT_CHECKS"] = ("C-IMPORTED-CONTENT",)
-            _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-CONTENT",))
+            # Supported, the legitimate activation wiring: the SHIPPED roster under the SHIPPED
+            # required_checks, which appends IMPORTED_CHECKS to every generation's imported roster,
+            # reads True (red when required_checks stops honouring its imported flag). The same
+            # id wired ONLY into the homes-2 imported roster stays red while generation 1 is
+            # supported: the predicate keeps the every-generation bound although an active series
+            # is graded only at homes 2, a red on a legitimate alternative, never a green on an
+            # unwired generation.
+            _icc_g["IMPORTED_CHECKS"] = _icc_prev_roster
+            _icc_g["required_checks"] = _icc_prev_rc
             check("imported-content-gate-legitimate-roster-green-once-supported",
                   imported_content_checks_landed())
+            _icc_g["IMPORTED_CHECKS"] = ("C-IMPORTED-CONTENT",)
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc:
-                _rc(homes) + (("C-IMPORTED-CONTENT",) if homes >= 2 else ()))
+                lambda homes, imported=False, _rc=_icc_prev_rc:
+                _rc(homes) + (("C-IMPORTED-CONTENT",) if imported and homes >= 2 else ()))
             check("imported-content-gate-homes2-only-wiring-red-once-supported",
                   not imported_content_checks_landed())
             # The bound is EVERY supported generation, never the top or the bottom generation
@@ -4625,20 +5713,22 @@ def self_test():
             check("imported-content-gate-homes2-only-wiring-red-at-homes-2",
                   not imported_content_checks_landed())
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc:
-                _rc(homes) + (("C-IMPORTED-CONTENT",) if homes < 2 else ()))
+                lambda homes, imported=False, _rc=_icc_prev_rc:
+                _rc(homes) + (("C-IMPORTED-CONTENT",) if imported and homes < 2 else ()))
             check("imported-content-gate-generation1-only-wiring-red-at-homes-2",
                   not imported_content_checks_landed())
             _icc_omissions = []
             for _icc_skip in range(1, _opf_store.SUPPORTED_HOMES + 1):
                 _icc_g["required_checks"] = (
-                    lambda homes, _rc=_icc_prev_rc, _skip=_icc_skip:
-                    _rc(homes) if homes == _skip else _rc(homes) + ("C-IMPORTED-CONTENT",))
+                    lambda homes, imported=False, _rc=_icc_prev_rc, _skip=_icc_skip:
+                    _rc(homes) if homes == _skip or not imported
+                    else _rc(homes) + ("C-IMPORTED-CONTENT",))
                 _icc_omissions.append(imported_content_checks_landed())
             check("imported-content-gate-each-generation-omission-red-at-homes-2",
                   _icc_omissions == [False] * _opf_store.SUPPORTED_HOMES)
             _icc_g["required_checks"] = (
-                lambda homes, _rc=_icc_prev_rc: _rc(homes) + ("C-IMPORTED-CONTENT",))
+                lambda homes, imported=False, _rc=_icc_prev_rc:
+                _rc(homes) + (("C-IMPORTED-CONTENT",) if imported else ()))
             check("imported-content-gate-every-generation-green-at-homes-2",
                   imported_content_checks_landed())
             # With the series still supported, below one supported generation the EVERY-generation
@@ -4650,7 +5740,7 @@ def self_test():
         finally:
             _opf_store.SUPPORTED_SPEC_VERSION = _icc_prev_ssv
             _opf_store.SUPPORTED_HOMES = _icc_prev_homes
-            _icc_g["IMPORTED_CONTENT_CHECKS"] = _icc_prev_roster
+            _icc_g["IMPORTED_CHECKS"] = _icc_prev_roster
             _icc_g["required_checks"] = _icc_prev_rc
             _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
             _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
@@ -5712,6 +6802,392 @@ def self_test():
         check("c-contiguity-start-not-wl1-named",
               _f6ar is not None and any("C-CONTIGUITY" in f and "does not start at WL-1" in f
                                         for f in _f6ar.findings))
+        # Homes 2: a number an id reservation holds that no present record carries and no record of the
+        # prior committed snapshot held (an orphaned reservation's) is not reported missing by C-NO-DELETION
+        # or C-CONTIGUITY, which read each reservation for that purpose alone; an unreadable or malformed
+        # reservation is CANNOT-EVALUATE. Homes 2 is activated only inside these vectors; the shipped
+        # ceiling stays 1. The gap store holds BI-1, BI-2, BI-4 and WL-1 to WL-4 and WL-6 under BI = 4 and
+        # WL = 6, so BI-3 and WL-5 are allocated with no published record; the clean prior held BI-1, BI-2
+        # and WL-1 to WL-4.
+        from unittest.mock import patch as _patch
+        import _opf_journal as _ojr
+        import _opf_oplock as _oplk
+
+        def h2_manifest(machine):
+            machine = copy.deepcopy(machine)
+            machine["manifest.toml"]["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+            machine["manifest.toml"]["opf"]["homes"] = 2
+            return machine
+
+        def h2_run_id(kind, n):
+            return "{}-20260927T00{:04d}Z-{:016x}".format(_opf_store._HOME_RUN_PREFIXES[kind], n, n)
+
+        def h2_reservation(kind, n, claims):
+            # The reservation of one run: its path under .working/ and its canonical bytes.
+            rid = h2_run_id(kind, n)
+            return (_opf_store.allocation_record(kind, rid)[len(WORKING_DIRNAME) + 1:],
+                    _ojr.reservation_payload(kind, rid, "op-{}".format(n), claims).decode("utf-8"))
+
+        def h2(machine, working, product=None, obs="clean"):
+            with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+                return run(machine, product=product, working=working, obs=obs)
+
+        def h2_gap(*reservations):
+            machine = h2_manifest(clean_machine())
+            machine["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open"), bi(4, "open")])
+            machine["counters.toml"] = counters(BI=4, WL=6)
+            machine["worklog.toml"] = {"schema": 1, "entry": [wl(3), wl(4), wl(6)]}
+            return machine, dict(reservations)
+
+        def nd(r, needle, check_id="C-NO-DELETION"):
+            return r is not None and any(needle in m for m in r.by_check.get(check_id, []))
+
+        published = h2_reservation("record", 2, {"BI": 4, "WL": 6})
+        orphan = h2_reservation("record", 1, {"BI": 3, "WL": 5})
+        r = h2(h2_manifest(clean_machine()), {})
+        check("homes2-reservations-clean-valid", r is not None and r.status == VALID
+              and "C-EVIDENCE-ENUM" in r.checks)
+        r = h2(*h2_gap(published, orphan))
+        check("homes2-reserved-gap-valid", r is not None and r.status == VALID)
+        check("homes2-reserved-gap-checks-pass", r is not None and r.checks.get("C-NO-DELETION") == "PASS"
+              and r.checks.get("C-CONTIGUITY") == "PASS")
+        r = h2(*h2_gap(published))
+        check("homes2-unreserved-gap-invalid", r is not None and r.status == INVALID
+              and nd(r, "BI-3 is absent") and nd(r, "WL-5 is absent") and nd(r, "WL-5 is missing", "C-CONTIGUITY"))
+        for kind in _opf_store.JOURNAL_KINDS:
+            r = h2(*h2_gap(published, h2_reservation(kind, 1, {"BI": 3, "WL": 5})))
+            check("homes2-reserved-gap-kind-" + kind, r is not None and r.status == VALID)
+        r = h2(*h2_gap(published, h2_reservation("import", 1, {"imported:BI": 3, "imported:WL": 5})))
+        check("homes2-imported-key-reserves-no-clean-number", r is not None and r.status == INVALID
+              and nd(r, "BI-3 is absent") and nd(r, "WL-5 is missing", "C-CONTIGUITY"))
+        # Journal frames, projections and run directories are never opened by doctor: every contained open
+        # passes _journal._open_parent, and while the store is validated (after its resolution) the spy
+        # refuses any path under journals/ but an allocation home and a file directly inside one, recording
+        # each, so a read that ignored the bytes still fails here.
+        journal_root = WORKING_DIRNAME + "/journals"
+        allocation_homes = {_opf_store.allocation_record(kind, h2_run_id(kind, 1)).rsplit("/", 1)[0]
+                            for kind in _opf_store.JOURNAL_KINDS}
+
+        def journal_refused(relpath):
+            return ((relpath == journal_root or relpath.startswith(journal_root + "/"))
+                    and relpath not in allocation_homes and relpath.rsplit("/", 1)[0] not in allocation_homes)
+
+        def h2_spied(machine, working):
+            opened = []
+            real_open_parent = _journal._open_parent
+
+            def spy(root_fd, relpath):
+                opened.append(relpath)
+                if journal_refused(relpath):
+                    raise _journal.JournalError("a journal frame, projection or run path was opened: " + relpath)
+                return real_open_parent(root_fd, relpath)
+            with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+                res = resolve_store(build(machine, None, working))
+                if res.status != RESOLVED:
+                    return None, opened
+                with _patch.object(_journal, "_open_parent", spy):
+                    return validate_store(res, observations=clean_prior()), opened
+
+        gm, gw = h2_gap(published, orphan)
+        for kind in _opf_store.JOURNAL_KINDS:
+            gw["journals/{}/journal/frames.log".format(kind)] = "torn"
+            gw["journals/{}/runs/{}/transaction.toml".format(kind, h2_run_id(kind, 1))] = "not toml ["
+        r, opened = h2_spied(gm, gw)
+        check("homes2-journal-frames-unread", r is not None and r.status == VALID
+              and not any(journal_refused(p) for p in opened)
+              and WORKING_DIRNAME + "/" + orphan[0] in opened)
+
+        # Above the highest present number, only the allocated numbers in (max, high] that no reservation
+        # holds are owed: each end tested at, just inside and just outside it.
+        def h2_overhang(*numbers):
+            # BI-1 and BI-2 present under BI = 4: BI-3 and BI-4 are allocated above the highest present.
+            machine = h2_manifest(clean_machine())
+            machine["counters.toml"] = counters(BI=4)
+            return h2(machine, dict(h2_reservation("record", i + 1, {"BI": n}) for i, n in enumerate(numbers)))
+
+        def owed(r, count):
+            return r is not None and r.status == INVALID and nd(r, "C-NO-DELETION: {} allocated BI-".format(count))
+
+        r = h2_overhang(3, 4)
+        check("homes2-overhang-reserved-valid", r is not None and r.status == VALID)
+        check("homes2-overhang-unreserved-counted", owed(h2_overhang(3), 1))
+        check("homes2-overhang-above-high-water-not-counted", owed(h2_overhang(3, 5), 1))
+        check("homes2-overhang-at-max-present-not-counted", owed(h2_overhang(2, 4), 1))
+        check("homes2-overhang-below-max-present-not-counted", owed(h2_overhang(1, 4), 1))
+
+        # The worklog overhang is scanned at its own site and steps over reserved numbers the same way:
+        # WL-1 to WL-4 present under WL = 6, so WL-5 and WL-6 are allocated above the highest present.
+        def h2_wl_overhang(*numbers):
+            machine = h2_manifest(clean_machine())
+            machine["counters.toml"] = counters(WL=6)
+            return h2(machine, dict(h2_reservation("record", i + 1, {"WL": n}) for i, n in enumerate(numbers)))
+
+        r = h2_wl_overhang(5, 6)
+        check("homes2-wl-overhang-reserved-valid", r is not None and r.status == VALID)
+        r = h2_wl_overhang(5)
+        check("homes2-wl-overhang-unreserved-counted", r is not None and r.status == INVALID
+              and nd(r, "C-NO-DELETION: 1 allocated worklog id(s) above WL-4"))
+
+        # Below the highest present number the scan steps over reserved numbers only and names the first
+        # unreserved one.
+        def h2_below(*numbers):
+            # BI-1, BI-2 and BI-5 present under BI = 5: BI-3 and BI-4 lie below the highest present.
+            machine = h2_manifest(clean_machine())
+            machine["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open"), bi(5, "open")])
+            machine["counters.toml"] = counters(BI=5)
+            return h2(machine, dict(h2_reservation("record", i + 1, {"BI": n}) for i, n in enumerate(numbers)))
+
+        r = h2_below(3, 4)
+        check("homes2-gap-reserved-run-valid", r is not None and r.status == VALID)
+        r = h2_below(4)
+        check("homes2-gap-first-unreserved-named", r is not None and r.status == INVALID and nd(r, "BI-3 is absent"))
+        r = h2_below(3)
+        check("homes2-gap-last-unreserved-named", r is not None and r.status == INVALID and nd(r, "BI-4 is absent"))
+        # The worklog may start at a reserved WL-1 (the F-6a store: WL-2 and WL-3 under WL = 3, whose prior
+        # held FN-1, FN-2, WL-2 and WL-3).
+        _f6a_h2_obs = copy.deepcopy(_f6a_obs)
+        _f6a_h2_obs["prior"]["held"] = {"FN": [[1, 2]], "WL": [[2, 3]]}
+        r = h2(h2_manifest(_f6a), dict([h2_reservation("record", 1, {"WL": 1})]), pr_product, _f6a_h2_obs)
+        check("homes2-wl-start-reserved-valid", r is not None and r.status == VALID)
+        r = h2(h2_manifest(_f6a), {}, pr_product, _f6a_h2_obs)
+        check("homes2-wl-start-unreserved-invalid", r is not None and r.status == INVALID
+              and nd(r, "does not start at WL-1", "C-CONTIGUITY"))
+
+        # An unreadable or malformed reservation is CANNOT-EVALUATE under C-NO-DELETION, C-CONTIGUITY points
+        # to it, and both then grade as though nothing were reserved (never a wider pass).
+        def h2_cant(r, needle):
+            return (r is not None and r.status == CANNOT_EVALUATE
+                    and r.checks.get("C-NO-DELETION") == "CANNOT-EVALUATE"
+                    and r.checks.get("C-CONTIGUITY") == "CANNOT-EVALUATE"
+                    and any(needle in m and m in r.cannot_evaluate for m in r.by_check.get("C-NO-DELETION", []))
+                    and nd(r, "BI-3 is absent") and nd(r, "WL-5 is missing", "C-CONTIGUITY"))
+
+        bad = h2_reservation("import", 9, {"BI": 3})
+        import_home = bad[0].rsplit("/", 1)[0]
+        staged = import_home + "/." + h2_run_id("import", 9) + ".toml" + _oplk._STAGING_MARKER
+        for label, entry, needle in (
+                ("not-toml", (bad[0], "not toml [\n"), "is malformed"),
+                ("claims-out-of-range", (bad[0], bad[1].replace("BI = 3", "BI = 0")), "is malformed"),
+                ("non-canonical", (bad[0], bad[1] + "\n"), "differs from the exact canonical"),
+                ("other-kind-payload", (bad[0], _ojr.reservation_payload(
+                    "ingest", h2_run_id("import", 9), "op-9", {"BI": 3}).decode("utf-8")),
+                 "differs from the exact canonical"),
+                ("misnamed", (import_home + "/notes.txt", bad[1]), "is not an id reservation"),
+                ("other-kind-name", (import_home + "/" + h2_run_id("record", 9) + ".toml", bad[1]),
+                 "is not an id reservation"),
+                ("near-staging-name", (staged + "0" * 31, "torn"), "is not an id reservation"),
+                ("directory", (bad[0] + "/inner.toml", bad[1]), "is a directory")):
+            gm, gw = h2_gap(published, orphan)
+            gw[entry[0]] = entry[1]
+            check("homes2-reservation-cannot-evaluate-" + label, h2_cant(h2(gm, gw), needle))
+        gm, gw = h2_gap(published, orphan)
+        gw[staged + "0" * 32] = "torn"
+        r = h2(gm, gw)
+        check("homes2-reservation-staging-leftover-skipped", r is not None and r.status == VALID)
+
+        # A reserved number has one owner across every kind's home: a second canonical reservation claiming
+        # the same number under the same series key is CANNOT-EVALUATE naming both files (dup and first, the
+        # orphan's reservation unless another is given; the store keeps the published and orphan ones).
+        def h2_conflict(dup, needle, first=orphan):
+            r = h2(*h2_gap(published, orphan, first, dup))
+            names = [WORKING_DIRNAME + "/" + p for p in (first[0], dup[0])]
+            return h2_cant(r, needle) and any(needle in m and all(n in m for n in names) for m in r.cannot_evaluate)
+
+        check("homes2-reservation-conflict-same-kind",
+              h2_conflict(h2_reservation("record", 3, {"BI": 3}), "both claim 3 under the series key BI"))
+        check("homes2-reservation-conflict-cross-kind",
+              h2_conflict(h2_reservation("ingest", 3, {"WL": 5}), "both claim 5 under the series key WL"))
+        imported = h2_reservation("import", 3, {"imported:BI": 3})
+        check("homes2-reservation-conflict-imported-key", h2_conflict(
+            h2_reservation("import", 4, {"imported:BI": 3}), "both claim 3 under the series key imported:BI", imported))
+
+        # A reservation read failure names C-NO-DELETION, so the C-CONTIGUITY pointer is accurate: an
+        # unreadable regular file, and one listed but absent at read.
+        orphan_rel = WORKING_DIRNAME + "/" + orphan[0]
+        real_read_contained, real_list_contained = _journal._read_contained, _list_contained
+
+        def unreadable(fd, relpath, *args, **kwargs):
+            if relpath == orphan_rel:
+                raise _journal.JournalError("injected read error")
+            return real_read_contained(fd, relpath, *args, **kwargs)
+
+        phantom = h2_run_id("record", 7) + ".toml"
+
+        def listed_phantom(fd, reldir):
+            subdirs, files = real_list_contained(fd, reldir)
+            if reldir == orphan_rel.rsplit("/", 1)[0]:
+                files = sorted((files or []) + [phantom])
+            return subdirs, files
+
+        with _patch.object(_journal, "_read_contained", unreadable):
+            r = h2(*h2_gap(published, orphan))
+        check("homes2-reservation-cannot-evaluate-unreadable",
+              h2_cant(r, "C-NO-DELETION: cannot read " + orphan_rel))
+        with _patch.dict(globals(), {"_list_contained": listed_phantom}):
+            r = h2(*h2_gap(published, orphan))
+        check("homes2-reservation-cannot-evaluate-absent-at-read", h2_cant(
+            r, "C-NO-DELETION: the id reservation {}/{} was listed but is absent at read".format(
+                orphan_rel.rsplit("/", 1)[0], phantom)))
+
+        def h2_built(mutate):
+            gm, gw = h2_gap(published, orphan)
+            root = build(gm, None, gw)
+            mutate(root / WORKING_DIRNAME)
+            with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+                return validate_store(resolve_store(root), observations=clean_prior())
+
+        def symlinked_entry(working):
+            os.symlink("nowhere", str(working / orphan[0].rsplit("/", 1)[0] / (h2_run_id("record", 8) + ".toml")))
+
+        def symlinked_home(working):
+            (working / "journals" / "layout").mkdir(parents=True)
+            os.symlink("nowhere", str(working / "journals" / "layout" / "allocations"))
+
+        def home_not_directory(working):
+            (working / "journals" / "adoption").mkdir(parents=True)
+            (working / "journals" / "adoption" / "allocations").write_text("x", encoding="utf-8")
+
+        for label, mutate in (("symlink-entry", symlinked_entry), ("symlink-home", symlinked_home),
+                              ("home-not-directory", home_not_directory)):
+            check("homes2-reservation-cannot-evaluate-" + label, h2_cant(h2_built(mutate), "cannot list"))
+        with _patch.object(_opf_store, "JOURNAL_KINDS", _opf_store.JOURNAL_KINDS + ("bogus",)):
+            r = h2(*h2_gap(published, orphan))
+        check("homes2-reservation-cannot-evaluate-unknown-kind", h2_cant(r, "no reservation home"))
+        # A legacy store reads no reservation, even under activated tooling: the malformed one is never
+        # read and the gap is reported.
+        gm, gw = h2_gap(published, orphan)
+        gm["manifest.toml"] = clean_machine()["manifest.toml"]
+        gw[bad[0]] = "not toml [\n"
+        r = h2(gm, gw)
+        check("homes1-reservations-unread", r is not None and r.checks.get("C-NO-DELETION") == "FINDING"
+              and r.checks.get("C-CONTIGUITY") == "FINDING" and nd(r, "BI-3 is absent"))
+        # Read-only: the store tree, bytes and modification times, is unchanged by the read.
+        gm, gw = h2_gap(published, orphan)
+        ro_root = build(gm, None, gw)
+
+        def tree(root):
+            return sorted((p.relative_to(root).as_posix(), p.read_bytes() if p.is_file() else b"",
+                           p.stat().st_mtime_ns) for p in root.rglob("*"))
+        ro_before = tree(ro_root)
+        with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            r = validate_store(resolve_store(ro_root), observations=clean_prior())
+        check("homes2-reservations-read-only", r is not None and r.status == VALID and tree(ro_root) == ro_before)
+
+        # A reservation is irrevocable and outlives the publication it preceded, so the exemption holds only
+        # where the prior committed snapshot held no record with that id. BI-1 to BI-4 are allocated (BI = 4),
+        # each reserved by its own record run as homes 2 requires before a publication; `present` are the BI
+        # numbers the store carries, `prior` those the prior's type index held, `archived` those it held in
+        # its archive alone.
+        def h2_history(present, prior=(1, 2), archived=(), obs=None):
+            machine = h2_manifest(clean_machine())
+            machine["backlog_item.index.toml"] = idx([bi(1, "done")] + [bi(n, "open") for n in present if n > 1])
+            machine["counters.toml"] = counters(BI=4)
+            if obs is None:
+                obs = clean_prior()
+                obs["prior"]["counters_high"]["BI"] = max((2,) + tuple(prior) + tuple(archived))
+                obs["prior"]["records"].update({"BI-{}".format(n): ("backlog_item", "open") for n in prior if n > 2})
+                obs["prior"]["held"]["BI"] = [[n, n] for n in sorted(set(prior) | set(archived))]
+            return h2(machine, dict(h2_reservation("record", n, {"BI": n}) for n in (1, 2, 3, 4)), obs=obs)
+
+        r = h2_history((1, 2, 3), prior=(1, 2, 3, 4))
+        check("homes2-published-tail-deleted-invalid", r is not None and r.status == INVALID
+              and nd(r, "C-NO-DELETION: 1 allocated BI-<n> id(s) above BI-3"))
+        r = h2_history((1, 2, 4), prior=(1, 2, 3, 4))
+        check("homes2-published-mid-deleted-invalid", r is not None and r.status == INVALID
+              and nd(r, "C-NO-DELETION: BI-3 is absent"))
+        r = h2_history((1, 2, 3), prior=(1, 2, 3), archived=(4,))
+        check("homes2-archived-at-prior-deleted-invalid", r is not None and r.status == INVALID
+              and r.checks.get("C-HISTORY-RESURRECTION") == "PASS"
+              and nd(r, "C-NO-DELETION: 1 allocated BI-<n> id(s) above BI-3"))
+        r = h2_history((1, 2, 3), prior=(1, 2, 3))
+        check("homes2-orphan-never-committed-valid", r is not None and r.status == VALID)
+        # A record published and deleted again before any commit leaves only its reservation: with no prior
+        # commit (an unborn HEAD's empty prior) it cannot be told from an orphan (the disclosed residual).
+        r = h2_history((1, 2, 3), obs={"tracked": "tracked", "prior": {
+            "releases": [], "counters_high": {}, "records": {}, "digests": {}, "held": {}}})
+        check("homes2-no-prior-commit-residual-valid", r is not None and r.status == VALID)
+
+        # No usable prior: the exemption is CANNOT-EVALUATE, never granted.
+        def no_prior_cant(r, reason, check_id="C-NO-DELETION"):
+            return (r is not None and r.status == CANNOT_EVALUATE and r.checks.get(check_id) == "CANNOT-EVALUATE"
+                    and nd(r, "cannot be told from deleted records: " + reason, check_id))
+
+        malformed = clean_prior()
+        malformed["prior"]["records"] = "not a table"
+        stripped = clean_prior()
+        del stripped["prior"]["held"]
+        for label, obs, reason in (
+                ("malformed", malformed, "the prior committed snapshot observation was supplied but malformed"),
+                ("absent", {"tracked": "tracked"}, "no prior committed snapshot was supplied"),
+                ("no-held", stripped, "the prior committed snapshot does not enumerate every id it held")):
+            check("homes2-prior-" + label + "-cannot-evaluate",
+                  no_prior_cant(h2_history((1, 2, 3), obs=obs), reason))
+
+        # The worklog likewise: WL-5 published, committed and deleted with its reservation standing is owed,
+        # at the tail and mid-series, and with no prior a reserved worklog gap is CANNOT-EVALUATE under
+        # C-CONTIGUITY too.
+        def h2_wl_history(present, high, prior_high, obs=None):
+            machine = h2_manifest(clean_machine())
+            machine["counters.toml"] = counters(WL=high)
+            machine["worklog.toml"] = {"schema": 1, "entry": [wl(n) for n in present if n > 2]}
+            if obs is None:
+                obs = clean_prior()
+                obs["prior"]["counters_high"]["WL"] = prior_high
+                obs["prior"]["held"]["WL"] = [[1, prior_high]]
+            return h2(machine, dict(h2_reservation("record", n, {"WL": n}) for n in range(5, high + 1)), obs=obs)
+
+        r = h2_wl_history((1, 2, 3, 4), 5, 5)
+        check("homes2-wl-published-tail-deleted-invalid", r is not None and r.status == INVALID
+              and nd(r, "C-NO-DELETION: 1 allocated worklog id(s) above WL-4"))
+        r = h2_wl_history((1, 2, 3, 4, 6), 6, 6)
+        check("homes2-wl-published-mid-deleted-invalid", r is not None and r.status == INVALID
+              and nd(r, "C-NO-DELETION: WL-5 is absent") and nd(r, "WL-5 is missing", "C-CONTIGUITY"))
+        r = h2_wl_history((1, 2, 3, 4, 6), 6, 6, obs={"tracked": "tracked"})
+        check("homes2-wl-no-prior-contiguity-cannot-evaluate",
+              no_prior_cant(r, "no prior committed snapshot was supplied", "C-CONTIGUITY")
+              and no_prior_cant(r, "no prior committed snapshot was supplied"))
+
+        # Each end of each new interval, tested just outside, at and just inside it. The prior-held lookup
+        # over BI-3 to BI-5 and BI-8, and FN-1 from the type index alone:
+        bounds = ({("FN", 1)}, {"BI": [(3, 5), (8, 8)]})
+        check("homes2-prior-held-interval-ends",
+              [n for n in range(1, 11) if _prior_held(bounds, "BI", n)] == [3, 4, 5, 8]
+              and _prior_held(bounds, "FN", 1) and not _prior_held(bounds, "FN", 2)
+              and not _prior_held(bounds, "WL", 4))
+
+        # The observed `held` bounds: an id number in 1 to 2**63 - 1, a span low end not above its high end,
+        # a roster namespace; anything else makes the whole prior malformed. Adjacent spans merge.
+        def held_prior(held):
+            prior = clean_prior()["prior"]
+            prior["held"] = held
+            return _normalize_prior(prior)
+
+        top = (1 << 63) - 1
+        check("homes2-prior-held-normalizer-bounds",
+              held_prior({"BI": [[1, 1], [2, top]]})["held"] == {"BI": [(1, top)]}
+              and held_prior({"BI": [[3, 3]]})["held"] == {"BI": [(3, 3)]}
+              and all(held_prior(bad) is None for bad in (
+                  {"BI": [[0, 1]]}, {"BI": [[1, top + 1]]}, {"BI": [[3, 2]]}, {"BI": [[True, 2]]},
+                  {"ZZ": [[1, 1]]}, {"BI": [[1]]}, {"BI": "1-2"}, ["BI"])))
+        # With no prior, the undecided numbers C-NO-DELETION reports lie in (floor, high-water]: WL-5 to WL-7
+        # reserved over WL-1 to WL-4 under WL = 6 report WL-5 and WL-6, not WL-7, and none lies below the
+        # highest present worklog number, so C-CONTIGUITY passes.
+        machine = h2_manifest(clean_machine())
+        machine["counters.toml"] = counters(WL=6)
+        r = h2(machine, dict(h2_reservation("record", n, {"WL": n}) for n in (5, 6, 7)), obs={"tracked": "tracked"})
+        check("homes2-undecided-high-water-end", r is not None and r.status == CANNOT_EVALUATE
+              and nd(r, "C-NO-DELETION: 2 reserved WL number(s) that no present record carries, the first WL-5,")
+              and r.checks.get("C-CONTIGUITY") == "PASS")
+        # Under an ancestral floor of BI = 3, BI-2 (below it) and BI-3 (at it) are not reported, BI-4 is.
+        machine = h2_manifest(clean_machine())
+        machine["backlog_item.index.toml"] = idx([bi(1, "done"), bi(5, "open")])
+        machine["counters.toml"] = counters(BI=5)
+        floor_root = build(machine, None, dict(h2_reservation("record", n, {"BI": n}) for n in (2, 3, 4, 5)))
+        with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            r = validate_store(resolve_store(floor_root), observations={"tracked": "tracked"},
+                               ancestral_floor={"BI": 3})
+        check("homes2-undecided-floor-end", r is not None and r.status == CANNOT_EVALUATE
+              and nd(r, "C-NO-DELETION: 1 reserved BI number(s) that no present record carries, the first BI-4,"))
         # F-6b: the "archived worklog WL-n not enumerated in a worklog_moved span" branch is the SOLE
         # layer catching an archived worklog id no span accounts for. A bucket holding WL-1, WL-2 whose
         # span enumerates only WL-1 is INVALID solely via it.

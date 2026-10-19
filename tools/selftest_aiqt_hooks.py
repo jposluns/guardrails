@@ -100,9 +100,12 @@ kind=block entry ALLOW, Bash is out of scope, and component-boundary matching me
 GEN.md.bak do not match gen/ and GEN.md. A PRESENT registry it cannot read (unreadable, malformed, or
 unknown-version, or a malformed entry) DENIES, fail closed; the other cannot-evaluate branches (an
 unresolvable repo root, a non-contained target, an unreadable payload field) ALLOW with a note; an absent
-registry is the inert ALLOW, and a missing tool_name also denies.
-Fixtures are throwaway git repos under the temp tree (a registry-carrying repo, a registry-less repo, a
-mutable-bad-registry repo, and a plain non-git dir), removed in the finally.
+registry is the inert ALLOW, and a missing tool_name also denies. An entry scoped "authoring" (the shipped
+.claude/settings.json entry) allows silently in a tree with no .aiqt/authoring.toml (an adopter tree), denies
+naming gen_hooks with the exact marker, and denies fail-closed on a present malformed marker; an unknown
+scope is a malformed entry. Fixtures are throwaway git repos under the temp tree (a registry-carrying repo, a
+registry-less repo, a mutable-bad-registry repo, a plain non-git dir, and adopter, authoring and
+malformed-marker repos holding the real registry), removed in the finally.
 
 It also covers the write-scope guard (write_scope_guard, wrtscp, EN-8): a Write/Edit/MultiEdit is confined
 to a harness-set per-slice declaration (write-scope.json at the registry-declared state_dir, out of the
@@ -170,7 +173,7 @@ import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import load_toml, repo_root  # noqa: E402
 from _git_fixture_env import _MAINTENANCE_PIN_VARS, git_fixture_env, scrub_git_environment  # noqa: E402
 import gen_hooks  # noqa: E402  (the one source of the hook timeout the deadline derives from)
 import gen_secret_patterns  # noqa: E402  (same tools dir, for the drift-gate F-129 self-test)
@@ -5212,7 +5215,7 @@ def _main_isolated(monitor):
         # === boundary: the true fail-open boundary ALLOWS ====================================
         expect("(bound-a) non-git command allows", "ls -la {}".format(rp), "allow")
         # An UNPARSEABLE command (unbalanced quote) is not a free ALLOW: a raw scan finds git AND a lossy
-        # verb (checkout) it cannot prove safe -> DENY (D-423-NARROW: the fallback denies every raw-flagged
+        # verb (checkout) it cannot prove safe -> DENY (the unparseable-command fallback denies every raw-flagged
         # unparseable command, with no snapshot); a non-lossy unparseable stays ALLOW. No override exists on
         # any path, so a command carrying the removed GUARDRAIL_ALLOW_DISCARD prefix gets
         # the same outcome as the bare one (tombstones of the retired opt-out: bound-b3, the r15-raw-* battery).
@@ -5912,7 +5915,7 @@ def _main_isolated(monitor):
         # exactly, and case (d) the same deny DECISION with the reason text differing (the prefix stays on
         # the pristine dir-simple path; FOO takes the view-override branch) - and
         # that can differ from the unprefixed command's decision. (c) On an unparseable command (an unquoted <<EOF heredoc whose body holds a lone quote) the
-        # fallback denies every raw-flagged command (D-423-NARROW), prefixed or not, so the prefixed and the
+        # fallback denies every raw-flagged command, prefixed or not, so the prefixed and the
         # FOO forms get exactly the bare command's deny. (d) A lossy keyword in the value brings 'git log -1'
         # into scope and it denies, where the unprefixed command is allowed silently.
         for _case, _bare_cmd, _v, _want_bare, _want_pref in (
@@ -6230,7 +6233,7 @@ def _main_isolated(monitor):
         # R7C MAJOR 5: a leading stdout redirect to a path other than /dev/null is not preserved -> DENIES.
         expect("(pristine-gram-lead-redirect) a leading redirect to a file now DENIES (R7C MAJOR 5)",
                "> log git reset --hard", "deny", cwd=rp)
-        # D-423-NARROW: every wrapper, interpreter, eval, reserved-word compound or substitution that
+        # Every wrapper, interpreter, eval, reserved-word compound or substitution that
         # reaches a git word is outside the closed grammar and denies (previously each snapshot-then-
         # allowed against the session cwd).
         for _flbl, _fcmd in (
@@ -6871,8 +6874,8 @@ def _main_isolated(monitor):
             failures.append("(rec-heredoc-snap) a DENIED heredoc discard must NOT write a recovery "
                             "ref (R8: refused, nothing lost)")
 
-        # (rec-unbalanced) an unbalanced-quote discard reaches _git_discard_fallback, which under
-        # D-423-NARROW DENIES every raw-flagged unparseable command and attempts NO recovery snapshot (the
+        # (rec-unbalanced) an unbalanced-quote discard reaches _git_discard_fallback, which, as the
+        # unparseable-command fallback, DENIES every raw-flagged unparseable command and attempts NO recovery snapshot (the
         # command is refused, so nothing is lost and no snapshot basis is claimed).
         rec_ub = _init_repo(tmp / "rec-unbalanced")
         (rec_ub / "file.txt").write_text("committed line\nunbalanced dirty\n", encoding="utf-8")
@@ -7016,7 +7019,7 @@ def _main_isolated(monitor):
         if not _recovery_refs(rec_fd):
             failures.append("(rec-fd-nonpristine-snap) expected a recovery ref on a non-pristine in-scope ASK "
                             "of a dirty tree (F-D EXPAND)")
-        # A non-pristine WRAPPED form is outside the closed grammar (D-423-NARROW): it DENIES, and no
+        # A non-pristine WRAPPED form is outside the closed allowlist grammar: it DENIES, and no
         # snapshot is taken (the command is refused, so the dirty tree is untouched).
         rec_fdw = _init_repo(tmp / "rec-fd-wrap")
         (rec_fdw / "file.txt").write_text("committed line\nwrapped fd\n", encoding="utf-8")
@@ -7301,7 +7304,7 @@ def _main_isolated(monitor):
             failures.append("(rec-ledger-nonfatal-snap) the successful snapshot ref must be present despite a "
                             "ledger fault")
 
-        # (rec-c6-subst/rec-c6-wrap/rec-c6-eval) D-423-NARROW: a non-pristine in-scope command that hides a
+        # (rec-c6-subst/rec-c6-wrap/rec-c6-eval) A non-pristine in-scope command that hides a
         # verb behind shell substitution ($(...)), a wrapper (sudo), or split-quoting/eval reaches a git
         # word outside the closed grammar, so it DENIES outright (previously snapshot-then-allow); nothing
         # runs, so no snapshot is warranted or taken.
@@ -7465,7 +7468,7 @@ def _main_isolated(monitor):
         # FINDING 3b: a WRAPPED git carrying a -C redirect to T loses T -> DENY (was allow-with-session-snap).
         expect("(r6-f3-wrapper) 'env git -C T restore' (wrapped + redirect) DENIES (finding 3)",
                "env git -C {} restore -- file.txt".format(r6tc), "deny", cwd=rp)
-        # D-423-NARROW: a subshell, substitution or wrapper reaching a git word is outside the closed
+        # A subshell, substitution or wrapper reaching a git word is outside the closed
         # grammar even with NO redirect, so these former snapshot-then-allow controls now DENY by design.
         expect("(r6-f3-ctl-subshell-nocd) '(git reset --hard)' with no internal cd denies (closed grammar)",
                "(git reset --hard)", "deny", cwd=rp)
@@ -7479,7 +7482,7 @@ def _main_isolated(monitor):
         expect("(r6-f4-fallback-redirect) unparseable 'git -C Tdirty restore <<EOF' on a clean cwd DENIES "
                "(finding 4)", "git -C {} restore -- file.txt <<EOF\nx\nEOF".format(r6tc), "deny",
                cwd=str(r6clean))
-        # D-423-NARROW: the fallback denies EVERY raw-flagged unparseable command, redirect or not, clean
+        # The unparseable-command fallback denies EVERY raw-flagged unparseable command, redirect or not, clean
         # session cwd or not (the disclosed fallback cost).
         expect("(r6-f4-ctl-noredirect) unparseable 'git checkout -- x <<EOF' with no redirect denies",
                "git checkout -- file.txt <<EOF\nx\nEOF", "deny", cwd=str(r6clean))
@@ -7493,7 +7496,7 @@ def _main_isolated(monitor):
                "deny", cwd=rp)
         # === PR #423 ROUND-4 (codex findings 1-3, claude MAJOR-1): wrapped and stash discards preserve
         # === or deny. Each vector below flips on the pinned base commit.
-        # (r9f1) D-423-NARROW: a WRAPPED work-losing verb is outside the closed grammar even after a
+        # (r9f1) A WRAPPED work-losing verb is outside the closed grammar even after a
         # resolvable cd, so it DENIES and takes no snapshot (the plain 'cd B && git reset --hard' spelling
         # is the accepted route, covered by r3f1b and the g423 preserve-then-allow battery).
         r9_sess = _init_repo(tmp / "r9-sess")                       # clean session repo
@@ -7788,7 +7791,7 @@ def _main_isolated(monitor):
         expect("(clf1-checkout-index) a -C-redirected 'checkout-index -a -f' DENIES (CLAUDE-F1)",
                "git -C {} checkout-index -a -f".format(rp), "deny", cwd=rp)
 
-        # === PR #423 D-423-NARROW (g423): the closed allowlist grammar, ONE representative per category =
+        # === PR #423 (g423): the closed allowlist grammar, ONE representative per category =
         # Every vector is RED ON REVERT of the narrowing: the allow categories assert the grammar's own
         # note text (the pin's note read "is not a pristine single bare ..." instead), each deny category
         # asserts the GRAMMAR reason (never a snapshot failure; the pin allow-noted these or denied with a
@@ -13561,7 +13564,7 @@ def _main_isolated(monitor):
         for _ct_label, _ct_cmd, _ct_want in _ct_r7:
             gexpect(_ct_label, _ct_cmd, _ct_want)
         # Round 8: printf is never a benign earlier command and echo is benign only with plain literal words; a run
-        # joined to an earlier command by '||' notes (by '&&' it denies since round 10, D-469-AND-DENY); a limiting
+        # joined to an earlier command by '||' notes (by '&&' it denies since round 10); a limiting
         # grep option is matched at any abbreviation length; a stage reads its stdin when any input operand or file
         # option names it; the rg grammar carries -./--hidden and the negations its --help names (r8-x: codex,
         # r8-c: claude).
@@ -13676,7 +13679,7 @@ def _main_isolated(monitor):
         # Round 10 (answers QA round 9): a grep directory mode is resolved in option order, so a later -d read or
         # skip undoes -r; every stdin name, file option and rg grammar entry has a pin its mutant fails; a stdin
         # path is normalised lexically; a run joined by '&&' to known-benign commands denies, by '||' notes
-        # (r9-x: codex, r9-c: claude, r9-d: decision D-469-AND-DENY).
+        # (r9-x: codex, r9-c: claude, r9-d: the decision that a '&&' join denies).
         _ct_r9 = [
             ('(gw-r9-x1.1) grep -r then -d read reads its stdin, notes',
              'pytest | grep -r -d read -m 1 x', 'allow-note'),
@@ -16310,6 +16313,244 @@ def _main_isolated(monitor):
                     tool="Write", file_path=os.path.join(grrace, "GEN.md"), cwd=grrace)
         finally:
             os.lstat = _real_lstat
+        # (gs-res) The control residue must say what the cases above prove: a present-but-unreadable registry
+        # and the delete race DENY (gs-i*, gs-ag, gs-ah), so the residue lists them under the fail-closed
+        # DENY and never among the allow-with-a-note branches. Read from the manifest the generator renders
+        # into ENFORCEMENT.md, so reverting the residue correction fails here.
+        try:
+            _gs_hooks = load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]
+            _gs_residue = [h for h in _gs_hooks if h.get("id") == "gensrc-edit-guard"][0]["residue"]
+        except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+            _gs_residue = ""
+            failures.append("(gs-res-read) could not read the gensrc-edit-guard residue: {}".format(exc))
+        if "fails safe to DENY rather than reading as absent" not in _gs_residue:
+            failures.append("(gs-res-deny) the residue must say the delete race fails safe to DENY")
+        if "fails safe to ALLOW-WITH-A-NOTE" in _gs_residue:
+            failures.append("(gs-res-noallow) the residue must not say the delete race allows with a note")
+        _gs_deny_at = _gs_residue.find("A PRESENT registry that cannot be read DENIES fail-closed")
+        _gs_bad_at = _gs_residue.find("an unreadable, non-UTF-8, oversized")
+        _gs_note_at = _gs_residue.find("These cannot-evaluate branches ALLOW WITH AN INFORMATIONAL NOTE")
+        _gs_note_end = _gs_residue.find("Besides a confirmed registry match", _gs_note_at)
+        if not 0 <= _gs_deny_at < _gs_bad_at < _gs_note_at < _gs_note_end:
+            failures.append("(gs-res-order) the residue must list the unreadable-registry cases under the fail-closed "
+                            "DENY, before the allow-with-a-note branches")
+        else:
+            _gs_note_text = _gs_residue[_gs_note_at:_gs_note_end]
+            for _gs_word in ("registry that", "malformed registry", "registry version", "delete race"):
+                if _gs_word in _gs_note_text:
+                    failures.append("(gs-res-list) the allow-with-a-note list names a registry fault ({!r}) the "
+                                    "guard denies".format(_gs_word))
+        if "generated .claude/settings.json (tools/gen_hooks.py)" not in _gs_residue:
+            failures.append("(gs-res-wiring) the residue must name the generated project wiring")
+        # (gs-res-scope) The residue states the authoring scope as gs-auth-* below prove it: the absent marker
+        # skips silently, a present malformed marker denies fail-closed, and an older guard honours everywhere.
+        for _gs_phrase in ("An entry scoped authoring", "skips that entry silently",
+                           "DENIES fail-closed and names the marker repair",
+                           "a present-but-malformed authoring marker on an authoring-scoped match",
+                           "honours the entry in every tree"):
+            if _gs_phrase not in _gs_residue:
+                failures.append("(gs-res-scope) the residue must state the authoring scope: {!r}".format(_gs_phrase))
+        # (gs-res-local) Beside the Bash residual, the residue discloses that a Write, Edit or MultiEdit to a sibling
+        # settings file is not judged (gs-auth-b-local below) yet can change hook behaviour for later sessions, that
+        # keeping that file personal is a convention, and that gen_hooks applies the same marker size bound as the
+        # guard (gs-auth-f below).
+        for _gs_phrase in ("A Write, Edit or MultiEdit to a sibling settings file such as .claude/settings.local.json "
+                           "is not judged by this guard", "can change hook behaviour for later sessions",
+                           "is a convention, not enforced", "the two apply the same size bound"):
+            if _gs_phrase not in _gs_residue:
+                failures.append("(gs-res-local) the residue must state: {!r}".format(_gs_phrase))
+
+        # === gs-auth: an authoring-scoped registry entry never blocks an adopter's own settings ==========
+        # The fixtures hold the REAL .aiqt/gensrc.json bytes this repository ships (tools/gen_gensrc.py scopes
+        # its .claude/settings.json entry "authoring"), so a generator that drops the scope, or a guard that
+        # ignores it, fails gs-auth-a. The authoring fixture holds the exact marker, spelled literally here because the
+        # shipped tree carries no .aiqt/authoring.toml (never read from the repo root); gs-auth-f pins it to gen_hooks.
+        def _gs_auth_reason(cwd, rel):
+            _code, _obj, _err = aiqt_hooks.gensrc_guard(
+                {"hook_event_name": "PreToolUse", "tool_name": "Write",
+                 "tool_input": {"file_path": os.path.join(cwd, rel)}, "cwd": cwd})
+            try:
+                return _obj["hookSpecificOutput"]["permissionDecisionReason"]
+            except (TypeError, KeyError):
+                return ""
+
+        _gs_exact_marker = b"format-version = 1\nrole = \"pack-authoring-repository\"\n"
+        try:
+            _gs_real_registry = (repo_root() / ".aiqt" / "gensrc.json").read_bytes()
+            gs_adopt = _gs_init("gsadopt")          # the shipped registry, no marker: an adopter tree
+            gs_author = _gs_init("gsauthor")        # the shipped registry and the real marker
+            gs_badm = _gs_init("gsbadmarker")       # the shipped registry and a mutable malformed marker
+            for _gs_root in (gs_adopt, gs_author, gs_badm):
+                os.makedirs(str(_gs_root / ".aiqt"), exist_ok=True)
+                (_gs_root / ".aiqt" / "gensrc.json").write_bytes(_gs_real_registry)
+            (gs_author / ".aiqt" / "authoring.toml").write_bytes(_gs_exact_marker)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the gensrc authoring-scope fixtures: {}".format(exc),
+                  file=sys.stderr)
+            return 2
+        gad, gau, gbm = str(gs_adopt), str(gs_author), str(gs_badm)
+        _gs_settings = os.path.join(".claude", "settings.json")
+        # (gs-auth-a) The adopter tree: a Write, Edit or MultiEdit of its OWN .claude/settings.json allows
+        # silently (the scoped entry is skipped), while an unscoped registered target there still denies: the
+        # skip is per entry, never the whole registry.
+        for _gs_tool in ("Write", "Edit", "MultiEdit"):
+            gexpect("(gs-auth-a-{}) an adopter tree (no marker) allows a {} of its own .claude/settings.json"
+                    .format(_gs_tool, _gs_tool), "allow", tool=_gs_tool,
+                    file_path=os.path.join(gad, _gs_settings), cwd=gad,
+                    edits=[{"old_string": "a", "new_string": "b"}] if _gs_tool == "MultiEdit" else None)
+        gexpect("(gs-auth-a-unscoped) an adopter tree still denies an unscoped registered target", "deny",
+                tool="Write", file_path=os.path.join(gad, ".claude", "RULES-INDEX.md"), cwd=gad)
+        # (gs-auth-b) The authoring tree still denies it, naming gen_hooks and its source.
+        gexpect("(gs-auth-b) the authoring tree denies a Write to .claude/settings.json", "deny",
+                tool="Write", file_path=os.path.join(gau, _gs_settings), cwd=gau)
+        # (gs-auth-b-local) The disclosed residual: no generator writes a sibling settings file, so no registry entry
+        # covers it and a Write, Edit or MultiEdit to it in the authoring tree is not judged (allowed silently).
+        for _gs_tool in ("Write", "Edit", "MultiEdit"):
+            gexpect("(gs-auth-b-local-{}) the authoring tree does not judge a {} to .claude/settings.local.json"
+                    .format(_gs_tool, _gs_tool), "allow", tool=_gs_tool,
+                    file_path=os.path.join(gau, ".claude", "settings.local.json"), cwd=gau,
+                    edits=[{"old_string": "a", "new_string": "b"}] if _gs_tool == "MultiEdit" else None)
+        _gs_why = _gs_auth_reason(gau, _gs_settings)
+        if ("python3 tools/gen_hooks.py" not in _gs_why or ".aiqt/core/hooks/manifest.toml" not in _gs_why
+                or "authoring marker" in _gs_why):
+            failures.append("(gs-auth-b-names) the authoring-tree deny must name gen_hooks and its source, "
+                            "not the marker, got {!r}".format(_gs_why))
+        # (gs-auth-c) A PRESENT marker that is not exact denies fail-closed (tools/gen_hooks.py exits 2 on each)
+        # and names the marker, never the regenerate command: other content, a bool format-version (true == 1
+        # in Python), unparseable, non-UTF-8, empty, a directory, a symlink to the real marker (lstat, never
+        # followed), a FIFO (lstat first, so no open and no hang), one byte over the size bound and a delete race (regular at the lstat,
+        # gone at the open). (gs-auth-d) With a malformed marker present, every other edit is unaffected.
+        _gs_marker = gs_badm / ".aiqt" / "authoring.toml"
+        _gs_real_lstat = os.lstat
+        _gs_regular_st = _gs_real_lstat(os.path.join(gau, ".aiqt", "authoring.toml"))
+
+        def _gs_race_lstat(p, *a, **k):
+            if str(p).endswith(os.path.join("gsbadmarker", ".aiqt", "authoring.toml")):
+                return _gs_regular_st
+            return _gs_real_lstat(p, *a, **k)
+
+        def _gs_padded_marker(size):
+            return _gs_exact_marker + b"#" + b"x" * (size - len(_gs_exact_marker) - 2) + b"\n"
+
+        def _gs_plant(kind):
+            if kind == "other content":
+                _gs_marker.write_text("format-version = 1\nrole = \"adopter\"\n", encoding="utf-8")
+            elif kind == "a bool format-version":
+                _gs_marker.write_text("format-version = true\nrole = \"pack-authoring-repository\"\n",
+                                      encoding="utf-8")
+            elif kind == "unparseable":
+                _gs_marker.write_text("not toml [\n", encoding="utf-8")
+            elif kind == "non-UTF-8":
+                _gs_marker.write_bytes(b"\xff\xfe format-version = 1\n")
+            elif kind == "empty":
+                _gs_marker.write_bytes(b"")
+            elif kind == "a directory":
+                os.makedirs(str(_gs_marker))
+            elif kind == "a symlink":
+                os.symlink(os.path.join(gau, ".aiqt", "authoring.toml"), str(_gs_marker))
+            elif kind == "a FIFO":
+                os.mkfifo(str(_gs_marker))
+            elif kind == "one byte over the bound":
+                _gs_marker.write_bytes(_gs_padded_marker(aiqt_hooks._GENSRC_MAX_BYTES + 1))
+
+        def _gs_clear():
+            if os.path.isdir(str(_gs_marker)) and not os.path.islink(str(_gs_marker)):
+                shutil.rmtree(str(_gs_marker))
+            elif os.path.lexists(str(_gs_marker)):
+                os.remove(str(_gs_marker))
+
+        for _gs_kind in ("other content", "a bool format-version", "unparseable", "non-UTF-8", "empty",
+                         "a directory", "a symlink", "a FIFO", "one byte over the bound", "a delete race"):
+            try:
+                _gs_clear()
+                if _gs_kind == "a delete race":
+                    os.lstat = _gs_race_lstat
+                else:
+                    _gs_plant(_gs_kind)
+                gexpect("(gs-auth-c) a marker that is {} DENIES fail-closed".format(_gs_kind), "deny",
+                        tool="Write", file_path=os.path.join(gbm, _gs_settings), cwd=gbm)
+                _gs_why = _gs_auth_reason(gbm, _gs_settings)
+                if "authoring marker .aiqt/authoring.toml is PRESENT but malformed" not in _gs_why or (
+                        "gen_hooks.py" in _gs_why):
+                    failures.append("(gs-auth-c-names) a marker that is {} must deny naming the marker, not "
+                                    "the regenerate command, got {!r}".format(_gs_kind, _gs_why))
+                if _gs_kind == "other content":
+                    gexpect("(gs-auth-d-unregistered) a malformed marker leaves an unregistered edit allowed",
+                            "allow", tool="Write", file_path=os.path.join(gbm, "README.md"), cwd=gbm)
+                    _gs_why = _gs_auth_reason(gbm, os.path.join(".claude", "RULES-INDEX.md"))
+                    if "is a generated artefact" not in _gs_why or "authoring marker" in _gs_why:
+                        failures.append("(gs-auth-d-unscoped) a malformed marker must leave the unscoped deny "
+                                        "unchanged, got {!r}".format(_gs_why))
+            except (OSError, NotImplementedError) as exc:
+                failures.append("(gs-auth-c-setup) could not plant a marker that is {}: {}".format(_gs_kind, exc))
+            finally:
+                os.lstat = _gs_real_lstat
+        try:
+            _gs_clear()
+        except OSError as exc:
+            failures.append("(gs-auth-c-clear) could not clear the planted marker: {}".format(exc))
+        # (gs-auth-e) The scope in a synthetic registry: on a file and on a tree entry, an absent marker allows
+        # the target silently and the exact marker denies it; an unknown scope value, a JSON null included, is a
+        # malformed entry and DENIES fail-closed (it must never widen or narrow coverage).
+        gs_reg3.write_text(json.dumps({"version": 1, "generated": [
+            {"kind": "file", "target": "GEN.md", "sources": ["s"], "regenerate": "r", "scope": "authoring"},
+            {"kind": "tree", "target": "gen/", "sources": ["s"], "regenerate": "r", "scope": "authoring"}]}),
+            encoding="utf-8")
+        for _gs_rel in ("GEN.md", os.path.join("gen", "part.md")):
+            gexpect("(gs-auth-e-absent) a scoped {} with no marker allows".format(_gs_rel), "allow",
+                    tool="Edit", file_path=os.path.join(gr3, _gs_rel), cwd=gr3)
+        _gs_marker3 = gs_repo3 / ".aiqt" / "authoring.toml"
+        try:
+            _gs_marker3.write_bytes(_gs_exact_marker)
+            for _gs_rel in ("GEN.md", os.path.join("gen", "part.md")):
+                gexpect("(gs-auth-e-exact) a scoped {} with the exact marker DENIES".format(_gs_rel), "deny",
+                        tool="Edit", file_path=os.path.join(gr3, _gs_rel), cwd=gr3)
+        finally:
+            os.remove(str(_gs_marker3))
+        for _gs_scope in ("adopter", "Authoring", None, 1, ["authoring"]):
+            gs_reg3.write_text(json.dumps({"version": 1, "generated": [
+                {"kind": "file", "target": "GEN.md", "sources": ["s"], "regenerate": "r",
+                 "scope": _gs_scope}]}), encoding="utf-8")
+            gexpect("(gs-auth-e-unknown) a scope of {!r} is a malformed entry and DENIES fail-closed"
+                    .format(_gs_scope), "deny", tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
+        # (gs-auth-f) The dispatcher spells the marker and the scope itself (it imports nothing from tools/), so
+        # pin them against the generators that own them.
+        import gen_gensrc
+        import gen_hooks
+        if aiqt_hooks._GENSRC_MARKER != gen_hooks.AUTHORING_MARKER or (
+                aiqt_hooks._GENSRC_MARKER_REL.replace(os.sep, "/") != gen_hooks.AUTHORING_MARKER_REL):
+            failures.append("(gs-auth-f-marker) the guard marker must equal gen_hooks.AUTHORING_MARKER(_REL)")
+        if aiqt_hooks._GENSRC_SCOPES != (gen_gensrc.SCOPE_AUTHORING,):
+            failures.append("(gs-auth-f-scope) the guard scopes must be exactly gen_gensrc.SCOPE_AUTHORING")
+        # The literal marker bytes above are the ones gen_hooks reads as the authoring tree, and the two readers share
+        # one size bound: a marker of exactly the bound is the authoring marker to both (the guard denies naming
+        # gen_hooks, not the marker), and one byte over it is refused by both (gs-auth-c above for the guard).
+        if aiqt_hooks._GENSRC_MAX_BYTES != gen_hooks.AUTHORING_MARKER_MAX_BYTES:
+            failures.append("(gs-auth-f-bound) the guard marker bound must equal gen_hooks.AUTHORING_MARKER_MAX_BYTES")
+
+        def _gs_gen_reads(root):
+            try:
+                return gen_hooks.authoring_tree(root)
+            except (ValueError, OSError) as exc:
+                return "refused ({})".format(exc)
+        if _gs_gen_reads(gs_author) is not True:
+            failures.append("(gs-auth-f-bytes) gen_hooks must read the literal marker as the authoring tree, got "
+                            "{!r}".format(_gs_gen_reads(gs_author)))
+        try:
+            _gs_marker.write_bytes(_gs_padded_marker(aiqt_hooks._GENSRC_MAX_BYTES))
+            _gs_why = _gs_auth_reason(gbm, _gs_settings)
+            if "python3 tools/gen_hooks.py" not in _gs_why or "authoring marker" in _gs_why:
+                failures.append("(gs-auth-f-at-bound-guard) a marker of exactly the bound must be honoured by the guard, "
+                                "got {!r}".format(_gs_why))
+            if _gs_gen_reads(gs_badm) is not True:
+                failures.append("(gs-auth-f-at-bound-gen) gen_hooks must read a marker of exactly the bound as the "
+                                "authoring tree, got {!r}".format(_gs_gen_reads(gs_badm)))
+            _gs_marker.write_bytes(_gs_padded_marker(aiqt_hooks._GENSRC_MAX_BYTES + 1))
+            if _gs_gen_reads(gs_badm) is True:
+                failures.append("(gs-auth-f-over-bound) gen_hooks must refuse a marker one byte over the bound")
+            os.remove(str(_gs_marker))
+        except OSError as exc:
+            failures.append("(gs-auth-f-setup) could not plant a marker at the size bound: {}".format(exc))
 
         # === abspth: absolute paths across typed-path tools and the Bash cwd floor (GS-7) ============
         # FAILING-FIRST battery: no abspth coverage existed before GS-7, and every case here is one the
@@ -17924,7 +18165,7 @@ def _main_isolated(monitor):
           "inside the repo, a ref collision, an embedded-NUL or no-session cwd), when the command cannot "
           "be classified/resolved (an inline -c alias, an unrecognized flagged subcommand such as "
           "checkout-index or read-tree --reset, an unresolvable worktree), and when a non-pristine "
-          "in-scope command falls outside the D-423-NARROW closed allowlist grammar (a wrapper, "
+          "in-scope command falls outside the closed allowlist grammar (a wrapper, "
           "interpreter, eval, xargs, subshell or brace group reaching a git word; an unlisted global, "
           "-c key, leading assignment or subcommand; an unhonoured cd; or any raw-flagged unparseable "
           "command, which the fallback now denies outright with no snapshot); a provably-clean tree ALLOWS "

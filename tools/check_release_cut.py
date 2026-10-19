@@ -1811,6 +1811,9 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      _CS_LEGS.format("journal-root open (or None until one)")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "root_fd", "", 7,
      _CS_LEGS.format("_open_dir_nofollow")),
+    ("opf/tools/_opf_adopt_apply.py", "run_adopt_transaction", "TRY", "mine_held", "mine_held", 1,
+     "false positive: _close_held and _close_held_into pop each number out of the list before its one close, "
+     "so the final close-out's pass over a list the release path already emptied closes none twice"),
     ("opf/tools/_opf_emit.py", "_boom_close7", "AFTER", "fd", "fd", 1,
      "false positive: a self-test close stub; its swallowed close is followed by a raise in the same block, so the "
      "later close never runs after it"),
@@ -1845,6 +1848,27 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/gen_skill.py", "_open_dir_fd", "TRY", "prev", "fd", 1,
      _CS_P1.format("prev, fd = fd, nxt runs before os.close(prev), so the handler closes nxt (or nothing, once "
                    "an absent component left fd None), never prev")),
+    ("tools/orch_register.py", "_dirs_created", "TRY", "prev", "dir_fd", 1,
+     _CS_P1.format("prev, dir_fd = dir_fd, nxt runs before os.close(prev), so the handler closes nxt, never "
+                   "prev")),
+    ("tools/orch_register.py", "_dirs_created", "AFTER", "dir_fd", "dir_fd", 1,
+     "false positive: the unwind handler's wrapped close (its OSError suppressed so the in-flight refusal "
+     "wins) sits in a handler whose own block ends in a raise, so the wrapped close after the try never "
+     "runs after it"),
+    ("tools/orch_register.py", "_made_dirs_swept", "REBIND", "prev", "", 2,
+     _CS_P1.format("the sweep's every close is _swept_closed(prev, ...), and prev joins cur_fd and nxt_fd; "
+                   "each of these two body closes (the descent handoff and the stopped-descent release) "
+                   "runs only after the statement that took its number OUT of the slots (cur_fd, cur_on, "
+                   "nxt_fd, nxt_on = nxt_fd, nxt_on, None, None, or prev, nxt_fd = nxt_fd, None), so no "
+                   "slot holds the closed number even when the close raises any exception class, and each "
+                   "later re-binding of prev takes a different, still-open number out of a slot")),
+    ("tools/orch_register.py", "_made_dirs_swept", "TRY", "prev", "prev", 4,
+     _CS_P1.format("the three body closes (descent handoff, stopped-descent release, climb handoff) each "
+                   "close a number already re-bound out of both slots, and the finally closes only what a "
+                   "slot still holds, clearing that slot first (prev, nxt_fd = nxt_fd, None in the nested "
+                   "try, prev, cur_fd = cur_fd, None in its finally), so the finally never reaches a number "
+                   "a body close closed, and its nxt_fd close (the fourth line) and cur_fd close are two "
+                   "slots, the second attempted even when the first raises")),
     ("tools/check_release_cut.py", "working_blob", "TRY", "parent", "directory", 1,
      _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally closes "
                    "child, never parent")),

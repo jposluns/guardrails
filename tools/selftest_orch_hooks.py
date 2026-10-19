@@ -2037,7 +2037,7 @@ def _rdp_scope_cases(base, plain):
                "git clone a b", "git", "git --version")
     check("rdp/plain-git-allowlisted-subcommand-allows", [_rdp_kind(go.run(c)) for c in allowed],
           ["allow"] * len(allowed))
-    # The binding record (D-433-FAILCLOSED-BINDING): once the hook has seen the registry bind, a registry
+    # The binding record fails closed: once the hook has seen the registry bind, a registry
     # removed or rewritten by any command leaves the next dispatch withheld as UNVERIFIABLE, its reason naming
     # the binding record, never allowed. Each change is made directly, as a command the hook did not judge
     # would make it, after one dispatch has been checked under the binding.
@@ -15737,20 +15737,111 @@ def _main_isolated(report_path=None):
               bool(aiqt_hooks._orch_validate_attestations(areg, str(a.root))), True)
         a.set_turn_state({})
         check("attest/broken-chain-stop-holds", _verdict(astop()), "block2")
+        # the hooks mirror carries the gate's strict anchor shape: a seq of 0, -1 or false
+        # (each formerly int()-coerced past the digest comparison), a short digest and a
+        # non-object anchor are each a HOLD, never ok
+        mirror_tip = chained(
+            {"seq": 1, "id": "AT-1", "ts": now_iso(0), "status": "accepted",
+             "mistake": "attests ci", "evidence": "run pending", "rule": "corexc",
+             "guardrail": "n/a", "ref": "ci", "check_ref": "seed.txt"})
+        at_reg.write_text(mirror_tip, encoding="utf-8")
+        at_anchor_file = Path(str(at_reg) + ".anchor")
+        authority = lambda: aiqt_hooks._orch_register_authority(str(a.root), str(at_reg))[0]
+        at_anchor_file.write_text(json.dumps({"seq": 0, "digest": "0" * 64}),
+                                  encoding="utf-8")
+        check("attest/anchor-seq-zero-holds", authority(), "hold")
+        at_anchor_file.write_text(json.dumps({"seq": -1, "digest": "0" * 64}),
+                                  encoding="utf-8")
+        check("attest/anchor-seq-negative-holds", authority(), "hold")
+        at_anchor_file.write_text(json.dumps({"seq": False, "digest": "0" * 64}),
+                                  encoding="utf-8")
+        check("attest/anchor-seq-false-holds", authority(), "hold")
+        at_anchor_file.write_text(json.dumps({"seq": 1, "digest": "a" * 63}),
+                                  encoding="utf-8")
+        # the SHAPE check must own these two holds (the specific malformed-anchor
+        # classification): a short digest already held on the base code through the digest
+        # COMPARISON, and a non-object anchor through the unreadable-authority catch, so the
+        # verdict alone does not discriminate the strict shape check.
+        # attest/anchor-digest-short-holds and attest/anchor-non-object-holds are CONTROLS
+        # (they pass without the strict shape check); the paired -names-malformed checks are
+        # the regression checks
+        short_auth = aiqt_hooks._orch_register_authority(str(a.root), str(at_reg))
+        check("attest/anchor-digest-short-holds", short_auth[0], "hold")
+        check("attest/anchor-digest-short-names-malformed",
+              "anchor is malformed" in str(short_auth[1]), True)
+        at_anchor_file.write_text(json.dumps([1, 2]), encoding="utf-8")
+        nonobj_auth = aiqt_hooks._orch_register_authority(str(a.root), str(at_reg))
+        check("attest/anchor-non-object-holds", nonobj_auth[0], "hold")
+        check("attest/anchor-non-object-names-malformed",
+              "anchor is malformed" in str(nonobj_auth[1]), True)
+        # attest/anchor-valid-after-shape-vectors-ok is a CONTROL: a valid anchor restored after
+        # the shape vectors answers ok, so the holds above come from the shapes, not from a
+        # fixture that never answers ok
+        at_anchor(mirror_tip)
+        check("attest/anchor-valid-after-shape-vectors-ok", authority(), "ok")
+        # the anchor is opened ONCE without following a final symlink and without blocking, and
+        # its type is checked on the opened descriptor: a live symlink to a VALID anchor (which
+        # the base code followed to ok), a live symlink to a directory (held on the base code
+        # too, as an unreadable target, so the hold must name the link) and a FIFO (on which
+        # the base code's open blocked; TIMED, so that is a named red, never a hung suite) are
+        # each a HOLD
+        mirror_anchor = at_anchor_file.read_text(encoding="utf-8")
+        anchor_store = a.root / "anchor-store.json"
+        anchor_store.write_text(mirror_anchor, encoding="utf-8")
+        anchor_store_dir = a.root / "anchor-store-dir"
+        anchor_store_dir.mkdir()
+        at_anchor_file.unlink()
+        at_anchor_file.symlink_to(anchor_store)
+        check("attest/anchor-live-symlink-holds", authority(), "hold")
+        at_anchor_file.unlink()
+        at_anchor_file.symlink_to(anchor_store_dir)
+        dir_link_auth = aiqt_hooks._orch_register_authority(str(a.root), str(at_reg))
+        check("attest/anchor-directory-symlink-holds-naming-link",
+              (dir_link_auth[0], "symlink" in str(dir_link_auth[1])), ("hold", True))
+        at_anchor_file.unlink()
+        os.mkfifo(str(at_anchor_file))
+        check("attest/anchor-fifo-holds-without-blocking", _leasehb_timed(authority, seconds=10),
+              (True, "hold"))
+        at_anchor_file.unlink()
+        # a CONTROL: the same anchor as a regular file answers ok, so the three holds above
+        # come from the entry types, not from the anchor's content
+        at_anchor_file.write_text(mirror_anchor, encoding="utf-8")
+        check("attest/anchor-regular-after-type-vectors-ok", authority(), "ok")
+        # the tracked DECISION fails closed, as in the gate: a root where git ls-files answers
+        # neither 0 (tracked) nor 1 (not tracked), here a non-repository root (exit 128), is a
+        # HOLD, never a fall-through into the anchor leg
+        nonrepo = tmp / "authority-nonrepo"
+        nonrepo.mkdir()
+        nr_reg = nonrepo / "attestations.jsonl"
+        nr_reg.write_text(mirror_tip, encoding="utf-8")
+        nr_lines = mirror_tip.splitlines()
+        Path(str(nr_reg) + ".anchor").write_text(json.dumps(
+            {"seq": len(nr_lines), "digest": _hashlib.sha256(
+                nr_lines[-1].encode("utf-8")).hexdigest()}), encoding="utf-8")
+        check("attest/git-failure-tracked-decision-holds",
+              aiqt_hooks._orch_register_authority(str(nonrepo), str(nr_reg))[0], "hold")
 
         # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
-        regtool = str(repo_root() / "tools" / "orch_register.py")
+        # The appender validates in the register gate's own root, resolved from the gate's
+        # location; install the appender (with the gate modules it imports) inside the fixture
+        # repository so that root IS the fixture, exactly like an adopter's installed tool.
+        fixture_tools = a.root / "tools"
+        fixture_tools.mkdir()
+        for tool_name in ("orch_register.py", "check_mistakes_register.py", "_gen_common.py"):
+            shutil.copy(str(repo_root() / "tools" / tool_name), str(fixture_tools / tool_name))
+        regtool = str(fixture_tools / "orch_register.py")
 
-        def mr_append(rid, check_ref):
+        def mr_append(rid, check_ref, *extra):
             subprocess.run([sys.executable, "-I", "-B", regtool, "append",
                             "--register", str(mr_reg),
                             "--id", rid, "--mistake", "premature wind-down claim",
                             "--evidence", "resume-audit finding", "--rule", "cntdef",
                             "--guardrail", "stop-guard hardening", "--klass", "systemic-lapse",
-                            "--check-ref", check_ref],
+                            "--check-ref", check_ref, *extra],
                            check=True, capture_output=True, timeout=30)
 
-        mr_append("MR-1", "seed.txt")
+        # the register's first row: --bootstrap establishes the anchor the later append needs
+        mr_append("MR-1", "seed.txt", "--bootstrap")
         check("lapse/klass-recorded",
               '"class": "systemic-lapse"' in mr_reg.read_text(encoding="utf-8"), True)
         proj = subprocess.run([sys.executable, "-I", "-B", regtool, "project",

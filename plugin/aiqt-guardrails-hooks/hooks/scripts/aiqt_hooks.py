@@ -3573,7 +3573,7 @@ _REMOVED_DISCARD_PREFIX_NOTE = (
 # git AND a recognized work-losing verb: any of the always-lossy verbs, or 'branch' in ANY form. On the
 # raw path we do NOT parse branch flags: an unparseable 'git branch -d -f topic <heredoc>' / '-df' /
 # '--del --for' cannot be told from a create or a list, so ANY raw 'git' + 'branch' is treated as lossy
-# regardless of a delete flag. A hit on an unparseable command -> DENY (D-423-NARROW: the guard cannot
+# regardless of a delete flag. A hit on an unparseable command -> DENY (the unparseable-command fallback: the guard cannot
 # prove it safe and cannot establish a snapshot basis); no hit -> ALLOW (the true boundary). This
 # over-denies a benign unparseable 'git branch --list' (rare, safe), a disclosed fallback cost. No
 # override exists on this path (or any other): an unparseable in-scope command DENIES whatever prefix it
@@ -4997,7 +4997,7 @@ def _worktree_within_repo(wt_dir, repo_probe):
 
 
 def _git_discard_fallback(command):
-    """D-423-NARROW fail-closed fallback when the shared tokenizer cannot parse the command (an unbalanced
+    """The fail-closed unparseable-command fallback when the shared tokenizer cannot parse the command (an unbalanced
     quote or an unsupported construct): the closed allowlist grammar cannot be applied to a command that
     cannot be segmented, so the ONLY allow is the true boundary - the raw scan, run on the FULL raw
     command (ROUND 8: heredoc bodies are no longer stripped on this path; stripping removed text, so
@@ -5715,7 +5715,7 @@ def _gitdir_is_session_repo(tokens, cwd):
     return gd_c == sess_c
 
 
-# PR #423 D-423-NARROW ROUND 8: the POSITIVE LITERAL closed allowlist grammar for a NON-PRISTINE
+# PR #423: the POSITIVE LITERAL closed allowlist grammar for a NON-PRISTINE
 # in-scope command. The round-7 walk MODELLED shell behaviour (heredoc stripping, builtin
 # directory-neutrality, environment tracking) and each round left a sibling of a closed class accepted
 # (R7C blockers 1-4, majors 5-6). ROUND 8 stops modelling: the grammar RECOGNIZES a closed positive
@@ -6485,8 +6485,8 @@ def _discard_git_segment_grammar(words, eff):
 
 
 def _discard_positive_grammar(command, cwd):
-    """Judge a NON-PRISTINE in-scope command against the positive literal grammar (D-423-NARROW
-    ROUND 8; see the block comment above _SAFE_STASH_OPS), directly on the RAW command string. `cwd`
+    """Judge a NON-PRISTINE in-scope command against the positive literal grammar (the closed
+    allowlist grammar; see the block comment above _SAFE_STASH_OPS), directly on the RAW command string. `cwd`
     is the session working directory (the caller already denied when none exists). The effective
     directory for a git segment starts at `cwd` and changes ONLY through an accepted absolute-literal
     cd, and only while every join from that cd to the git segment is '&&' (across ';' or a newline
@@ -6569,7 +6569,7 @@ def _discard_positive_grammar(command, cwd):
     return out
 
 
-# The deny texts for each positive-grammar violation class (D-423-NARROW ROUND 8). {0} is the
+# The deny texts for each positive-grammar violation class. {0} is the
 # offending byte, token or form, {1} the safe-alternatives text. Every reason names the closed
 # allowlist grammar, so a denial is attributable to the grammar (not to a snapshot failure), and each
 # names the plain spelling that would be accepted. None steers toward a destructive spelling.
@@ -6799,7 +6799,7 @@ def git_discard(data):
     config-forced porcelain probe reports no tracked change AND no untracked entry) - in which cases ALLOW.
     A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no pathspec, switch
     --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope is judged by the
-    POSITIVE LITERAL closed allowlist grammar (D-423-NARROW ROUND 8, _discard_positive_grammar,
+    POSITIVE LITERAL closed allowlist grammar (_discard_positive_grammar,
     judged on the RAW command string): a non-pristine in-scope command is accepted ONLY when every
     token is a bare literal word over the closed character class (letters, digits and
     _ . / @ : = + , % -) or ONE standalone single-quoted literal; every command word, spelled bare,
@@ -6864,8 +6864,8 @@ def git_discard(data):
     skipped when no per-user location resolves, the path would land inside the repo, or the write fails), on
     the ALLOW and ASK paths alike (the hook fires once, with no post-approval callback). It NEVER mutates the real index, worktree, HEAD, or any
     branch. If a warranted snapshot cannot be made, a would-be ALLOW is downgraded to ASK ('no recovery point
-    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. D-423-NARROW:
-    an ACCEPTED non-pristine in-scope command is snapshot-backed against EACH worktree the grammar
+    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. Under the
+    closed allowlist grammar, an ACCEPTED non-pristine in-scope command is snapshot-backed against EACH worktree the grammar
     resolves (a plain git segment's own literal -C chain over the '&&'-followed literal cd chain) PLUS
     the session cwd as a best-effort catch-all for EVERY in-scope command (a verb that actually acts on
     the session repository stays recoverable even when no segment resolved it); a resolved plain stash
@@ -6899,7 +6899,7 @@ def git_discard(data):
         # it reads only the single segment that ends the command, and drops that one too when it has no word.
         segments = _segments(command, skip_empty=True)
     except ValueError:
-        # Conservative raw scan, not a silent allow (D-423-NARROW): an unparseable command the raw scan
+        # Conservative raw scan, not a silent allow (the unparseable-command fallback): an unparseable command the raw scan
         # flags is denied outright; only a command the scan clears is allowed at the true boundary.
         return _git_discard_fallback(command)
 
@@ -6928,7 +6928,7 @@ def git_discard(data):
     # a real discard and widen acceptance (the round-7 stripper erased a real 'git -C stash clear'
     # behind nested heredoc data). The cost is disclosed: a lossy keyword quoted inside heredoc prose
     # now brings the harmless outer command in scope, where the positive grammar denies the heredoc
-    # operator itself - an over-deny, the safe direction under D-423-NARROW.
+    # operator itself - an over-deny, the safe direction under the closed allowlist grammar.
     # Beside the raw text the scope scan reads the JOINED text (_join_continuations,
     # continuations removed as bash removes them) and the DE-QUOTED copy (_dequoted_text: continuations
     # joined, a '$' before a quote, quote characters and backslashes removed), unstripped like the raw text
@@ -6962,7 +6962,7 @@ def git_discard(data):
         if not lossy and _lex_uncertain(command):
             lossy = _uncertain_line_lossy(command)
         kind = lossy[0][1] if lossy else "a git work-losing verb"
-        # D-423-NARROW ROUND 8: a non-pristine in-scope command is accepted ONLY when its RAW text
+        # A non-pristine in-scope command is accepted ONLY when its RAW text
         # fits the positive literal grammar (_discard_positive_grammar); anything outside it DENIES with the
         # grammar reason. An accepted command keeps the preserve-then-allow posture of the pin: every
         # resolved stash drop/clear preserves its target repository's stash under durable refs first (or
@@ -10766,6 +10766,17 @@ _GENSRC_TOOLS = ("Write", "Edit", "MultiEdit")   # MultiEdit carries ONE top-lev
 _GENSRC_REGISTRY_REL = os.path.join(".aiqt", "gensrc.json")
 _GENSRC_VERSION = 1
 _GENSRC_MAX_BYTES = 1_000_000  # the real registry is ~5 KB; a larger one is malformed (SECA bound)
+# The optional entry scope. Absent: the entry governs every tree holding the registry. "authoring": tools/
+# gen_gensrc.py marks the tools/gen_hooks.py AUTHORING_ONLY_REL targets (the repository-local
+# .claude/settings.json), which exist only in the pack authoring tree, so the entry is honoured only where the
+# authoring marker below sits at the repo root (_gensrc_authoring_marker); an adopter tree holding the shipped
+# registry keeps its own .claude/settings.json. Any other value is a malformed entry.
+_GENSRC_SCOPES = ("authoring",)
+# The authoring marker tools/gen_hooks.py reads (AUTHORING_MARKER_REL, AUTHORING_MARKER), spelled here because
+# the dispatcher imports nothing from tools/; tools/selftest_aiqt_hooks.py pins both, and _GENSRC_MAX_BYTES as the
+# marker size bound (AUTHORING_MARKER_MAX_BYTES), against gen_hooks.
+_GENSRC_MARKER_REL = os.path.join(".aiqt", "authoring.toml")
+_GENSRC_MARKER = {"format-version": 1, "role": "pack-authoring-repository"}
 
 
 def _gensrc_fail_ask(detail):
@@ -10787,9 +10798,11 @@ def _gensrc_fail_ask(detail):
 
 def _load_gensrc_registry(root):
     """Read <root>/.aiqt/gensrc.json AT DECISION TIME and return one of ("absent", None),
-    ("ok", entries), or ("bad", detail). `entries` is the list of (kind, target, sources, regenerate)
+    ("ok", entries), or ("bad", detail). `entries` is the list of (kind, target, sources, regenerate, scope)
     tuples in registry order with kind=block entries dropped (a path guard cannot see which lines an
-    edit touches; the block drift gates backstop those).
+    edit touches; the block drift gates backstop those). scope is None for an entry with no "scope" key and
+    "authoring" for an authoring-only entry (_GENSRC_SCOPES); any other present value, a JSON null
+    included, is a malformed entry.
 
     ABSENT (FileNotFoundError from the lstat probe: ENOENT on the file or a missing .aiqt/ component) is
     the inert boundary: a repo with no registry gets no coverage (adopters author their own). Every OTHER
@@ -10805,8 +10818,10 @@ def _load_gensrc_registry(root):
     validation only guarantees THIS repo's registry; an adopter-authored or hand-tampered registry the
     guard cannot fully read is BAD (it cannot prove no-match). Unknown extra keys within version 1 are
     tolerated: the version field pins the schema, and strictness on additions would break a
-    forward-compatibly authored registry. This loader is BEST-EFFORT against the ACCIDENTAL case, not a
-    hardened TOCTOU check: it rejects a STATIONARY non-regular registry and fails a delete race safe to
+    forward-compatibly authored registry. "scope" is the one optional key this guard reads; a guard older
+    than it tolerated the key as unknown, so it honours an authoring-only entry in every tree. This loader
+    is BEST-EFFORT against the ACCIDENTAL case, not a hardened TOCTOU check: it rejects a STATIONARY
+    non-regular registry and fails a delete race safe to
     BAD, but a registry concurrently SWAPPED to a different file type in the lstat-to-open window is a
     disclosed residual (see the comment below and the control residue), a sibling of the hard-link,
     case-insensitive-filesystem, and NFC/NFD aliases."""
@@ -10903,10 +10918,59 @@ def _load_gensrc_registry(root):
             return ("bad", "a registry entry has malformed sources")
         if not isinstance(regenerate, str) or not regenerate:
             return ("bad", "a registry entry has a malformed regenerate command")
+        # Validated BEFORE the block skip, like the control-character rule: a scope this guard cannot read
+        # must never silently widen or narrow coverage, so an unknown value (null included) is BAD.
+        scope = item.get("scope")
+        if "scope" in item and scope not in _GENSRC_SCOPES:
+            return ("bad", "a registry entry has an unknown scope")
         if kind == "block":
             continue  # blocks are excluded from matching by design; the block drift gates backstop them
-        entries.append((kind, target, sources, regenerate))
+        entries.append((kind, target, sources, regenerate, scope))
     return ("ok", entries)
+
+
+def _gensrc_authoring_marker(root):
+    """Read <root>/.aiqt/authoring.toml, the pack authoring-tree marker, and return ("absent", None),
+    ("authoring", None) or ("bad", detail). Called only when an authoring-scoped registry entry matches the
+    target, so a damaged marker never touches any other edit. It mirrors tools/gen_hooks.py authoring_tree,
+    which exits 2 on a present marker that is not exact: ABSENT (FileNotFoundError from the lstat probe) is
+    an adopter tree; a REGULAR file whose UTF-8 TOML is exactly _GENSRC_MARKER (format-version the integer 1,
+    never the bool true, which == 1 in Python) is the authoring tree; everything else is BAD and the caller
+    denies fail-closed: any other lstat fault, a symlink, FIFO, directory or other non-regular file (lstat
+    is probed BEFORE the open, so a STATIONARY FIFO never blocks), a marker gone at the open (a delete race
+    in the lstat->open window, never read as absent), an unreadable, oversized (over _GENSRC_MAX_BYTES, the
+    same bound gen_hooks applies), non-UTF-8, unparseable or too deeply nested file, or any other content. A
+    marker SWAPPED to another type in the lstat->open window is the same disclosed residual as the registry
+    read."""
+    path = os.path.join(root, _GENSRC_MARKER_REL)
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return ("absent", None)
+    except OSError as exc:
+        return ("bad", "the authoring marker could not be stat'd ({})".format(exc))
+    if not stat.S_ISREG(st.st_mode):
+        return ("bad", "the authoring marker is not a regular file (a symlink, FIFO, directory, ...)")
+    try:
+        with open(path, "rb") as handle:
+            raw_bytes = handle.read(_GENSRC_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return ("bad", "the authoring marker disappeared during the read (a concurrent change); failing safe")
+    except OSError as exc:
+        return ("bad", "the authoring marker could not be read ({})".format(exc))
+    if len(raw_bytes) > _GENSRC_MAX_BYTES:
+        return ("bad", "the authoring marker exceeds the {}-byte bound".format(_GENSRC_MAX_BYTES))
+    try:
+        import tomllib  # read here only: the one handler branch that parses TOML
+        data = tomllib.loads(raw_bytes.decode("utf-8"))
+    except (ImportError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError covers UnicodeDecodeError, TOMLDecodeError and the bare ValueError tomllib raises on an
+        # oversized integer; RecursionError or MemoryError a too deeply nested table.
+        return ("bad", "the authoring marker is not readable UTF-8 TOML ({})".format(exc))
+    if data != _GENSRC_MARKER or type(data.get("format-version")) is not int:
+        return ("bad", "the authoring marker does not hold exactly format-version = 1 and "
+                       "role = \"pack-authoring-repository\"")
+    return ("authoring", None)
 
 
 _GENSRC_MATCH_FAULT = object()  # sentinel: a resolution/containment fault so no-match cannot be PROVEN
@@ -10932,29 +10996,41 @@ def _gensrc_within(candidate, parent):
 
 def _gensrc_match(entries, target, root_c):
     """The first registry entry that `target` (an already-realpath'd absolute path) matches, as
-    (entry_target, sources, regenerate); None on a PROVEN no-match; or the _GENSRC_MATCH_FAULT sentinel
-    when a resolution or containment fault means no-match cannot be proven (the handler turns the
+    (entry_target, sources, regenerate, marker); None on a PROVEN no-match; or the _GENSRC_MATCH_FAULT
+    sentinel when a resolution or containment fault means no-match cannot be proven (the handler turns the
     sentinel into an allow with a warning systemMessage via _gensrc_fail_ask, never a match and never a
     silent allow; there is no ask posture). A FILE entry matches on
     realpath EQUALITY; a TREE entry matches when `target` is the tree root or lies under it, by
     component-boundary containment (_gensrc_within), never a raw string prefix, so gen-extra/ never
     matches gen/ and GEN.md.bak never matches GEN.md. Each entry target is repo-root-relative, so it is
     joined onto root_c and canonicalized under try/except: an unresolvable entry is a fault, not a
-    no-match. Block entries were dropped at load."""
-    for kind, entry_target, sources, regenerate in entries:
+    no-match. Block entries were dropped at load. A matching AUTHORING-scoped entry consults the marker
+    (_gensrc_authoring_marker, read at most once per call): an ABSENT marker (an adopter tree) skips the
+    entry SILENTLY and matching goes on with the next entry, so an adopter keeps its own
+    .claude/settings.json; a present marker returns the match with marker ("authoring", None) or
+    ("bad", detail), and the handler denies either way. An unscoped match returns marker None."""
+    marker = None
+    for kind, entry_target, sources, regenerate, scope in entries:
         try:
             entry_c = os.path.realpath(os.path.join(root_c, entry_target))
         except (OSError, ValueError):
             return _GENSRC_MATCH_FAULT
         if kind == "file":
-            if entry_c == target:
-                return (entry_target, sources, regenerate)
+            if entry_c != target:
+                continue
         else:  # tree
             verdict = _gensrc_within(target, entry_c)
             if verdict == "err":
                 return _GENSRC_MATCH_FAULT
-            if verdict == "in":
-                return (entry_target, sources, regenerate)
+            if verdict != "in":
+                continue
+        if scope is None:
+            return (entry_target, sources, regenerate, None)
+        if marker is None:
+            marker = _gensrc_authoring_marker(root_c)
+        if marker[0] == "absent":
+            continue  # an adopter tree: the authoring-only entry is not this tree's to enforce
+        return (entry_target, sources, regenerate, marker)
     return None
 
 
@@ -10965,7 +11041,11 @@ def gensrc_guard(data):
     fires only when the file_path resolves onto a kind=file or kind=tree registry entry. Coverage is
     exactly the registry, so an ABSENT registry is the inert ALLOW by design; kind=block entries are
     EXCLUDED (a path guard cannot see which lines an edit touches); Bash is EXCLUDED by design
-    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. NO-ASK posture:
+    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. A Write, Edit or
+    MultiEdit to a sibling settings file such as .claude/settings.local.json is not judged either (no generator
+    writes it, so no registry entry names it; that it holds only personal settings is a convention, not
+    enforced), yet it can change hook behaviour for later sessions; the settings precedence Claude Code gives
+    it is not verified by this pack. NO-ASK posture:
     a CONFIRMED registry match DENIES and names the source to edit and the regenerate command (a reachable
     correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES, fail-closed (round-2 finding
     8): a corrupted registry must not silently disable the generated-artefact protection, so a cannot-read of
@@ -10976,10 +11056,15 @@ def gensrc_guard(data):
     target outside the repo or a containment fault, a registry entry that cannot be resolved for containment)
     are NOT confirmed generated-artefact edits, have no "edit the source" action to name, and are outside any
     expected coverage, so they ALLOW with an informational note rather than block a legitimate edit; a
-    genuinely-ABSENT registry is likewise the inert ALLOW (adopters author their own). The CI
+    genuinely-ABSENT registry is likewise the inert ALLOW (adopters author their own). An entry scoped
+    "authoring" (gen_gensrc marks the tools/gen_hooks.py AUTHORING_ONLY_REL targets) is honoured only in the
+    pack authoring tree: on its match the guard reads .aiqt/authoring.toml at the repo root, an ABSENT marker
+    skips the entry silently (an adopter's own .claude/settings.json is theirs), the exact marker honours it,
+    and a PRESENT-but-malformed marker denies fail-closed (_gensrc_authoring_marker). The CI
     generated-artefact drift gate remains the authoritative backstop. Besides a confirmed registry match, the
-    guard denies fail-closed in exactly three cases: a missing tool_name (the shared fail-closed contract), a
-    PRESENT-but-unreadable/malformed registry, and a mis-wired event (a hard block, exit 2). The repo root is
+    guard denies fail-closed in exactly four cases: a missing tool_name (the shared fail-closed contract), a
+    PRESENT-but-unreadable/malformed registry, a PRESENT-but-malformed authoring marker on a matching
+    authoring-scoped entry, and a mis-wired event (a hard block, exit 2). The repo root is
     the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
     _gen_common.repo_root, which falls back to cwd and would fabricate a root)."""
     if data.get("hook_event_name") != PRETOOL:
@@ -10987,13 +11072,15 @@ def gensrc_guard(data):
                            .format(data.get("hook_event_name")))
     tool_name = data.get("tool_name")
     if tool_name is None:
-        # A missing field cannot be matched. This is one of three fail-closed denies, with a present but
-        # unreadable/malformed registry and a mis-wired event (the hard block above).
+        # A missing field cannot be matched. This is one of four fail-closed denies, with a present but
+        # unreadable/malformed registry, a present but malformed authoring marker on an authoring-scoped
+        # match, and a mis-wired event (the hard block above).
         return _deny_missing_tool_name("gensrc")
     if not isinstance(tool_name, str) or not tool_name:
         # A present-but-unreadable tool_name (an empty string, a list, a bool) cannot be matched against
         # the scope set; allow with a warning systemMessage rather than silently allow. The fail-closed
-        # denies are a MISSING tool_name, a present but unreadable/malformed registry, and a mis-wired event.
+        # denies are a MISSING tool_name, a present but unreadable/malformed registry, a present but
+        # malformed authoring marker on an authoring-scoped match, and a mis-wired event.
         return _gensrc_fail_ask("the tool_name was unreadable")
     if tool_name not in _GENSRC_TOOLS:
         return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit)
@@ -11061,8 +11148,24 @@ def gensrc_guard(data):
         return _gensrc_fail_ask("a registry entry could not be resolved for containment, so a no-match "
                                 "cannot be proven")
     if match is None:
-        return _allow()  # not a registered generated artefact
-    entry_target, sources, regenerate = match
+        return _allow()  # not a registered generated artefact (or an authoring-only one in an adopter tree)
+    entry_target, sources, regenerate, marker = match
+    if marker is not None and marker[0] == "bad":
+        # An authoring-only entry matched and the authoring marker is PRESENT but not exact: the guard cannot
+        # tell the authoring tree from an adopter tree, so it fails CLOSED, as tools/gen_hooks.py exits 2 on
+        # the same marker. The message names the marker repair, never the regenerate command, which a
+        # damaged marker would not reconcile.
+        return _deny(
+            "AIQT rule gensrc (generated-artefact-source-only): {} is an authoring-only generated artefact "
+            "({} in .aiqt/gensrc.json, scope authoring), and the authoring marker .aiqt/authoring.toml is "
+            "PRESENT but malformed ({}), so this guard cannot tell the pack authoring tree from an adopter "
+            "tree. It fails closed and denies the edit. Repair .aiqt/authoring.toml (exactly format-version = "
+            "1 and role = \"pack-authoring-repository\"), or remove it if this is not the pack authoring "
+            "repository, through Bash, which this guard does not judge, then retry."
+            .format(file_path, entry_target, marker[1]),
+            "AIQT guardrail: denied a {} to the authoring-only artefact {} because .aiqt/authoring.toml is "
+            "present but malformed, a fail-closed cannot-evaluate (rule gensrc); repair or remove the marker, "
+            "then retry.".format(tool_name, entry_target))
     reason = ("AIQT rule gensrc (generated-artefact-source-only): {} is a generated artefact ({} in "
               ".aiqt/gensrc.json); it is changed only through its source, so a hand-edit is denied. Edit {} "
               "and regenerate with '{}' instead; source and derivative land in the same change."
@@ -20079,12 +20182,19 @@ def _orch_register_authority(root, path):
     except (OSError, ValueError):
         rel = None
     if rel and not rel.startswith(os.pardir + os.sep) and rel != os.pardir:
+        # The tracked/untracked DECISION is an authority read (the same rule as the gate's
+        # verify_append_only): git confirms "not tracked" only with exit 1; any other exit (a
+        # corrupt index: 128, a non-repository root), launch error or timeout leaves the
+        # question open and is a HOLD, never a fall-through into the anchor leg.
         try:
-            tracked = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", rel],
-                                     capture_output=True, timeout=10, env=env).returncode == 0
+            probe = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", rel],
+                                   capture_output=True, timeout=10, env=env)
         except (OSError, subprocess.SubprocessError) as exc:
             return ("hold", "cannot determine register tracking ({})".format(exc), None)
-        if tracked:
+        if probe.returncode not in (0, 1):
+            return ("hold", "cannot determine register tracking (git ls-files exited "
+                    "{})".format(probe.returncode), None)
+        if probe.returncode == 0:
             try:
                 base = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "origin/HEAD"],
                                       capture_output=True, text=True, timeout=10, env=env)
@@ -20103,15 +20213,48 @@ def _orch_register_authority(root, path):
                         "register is not an append-only extension of its merge-base state", None)
             return _orch_register_tip(lines)
     anchor = path + ".anchor"
+    # The gate's anchor rule: the anchor is opened ONCE, non-blocking and without following a
+    # final symlink, its type is checked on the OPENED descriptor, and its bytes are read from
+    # that same descriptor, so a symlink (live or dangling), a directory, a FIFO or any other
+    # non-regular entry is a HOLD, never a file the link names and never a blocked hook.
     try:
-        with open(anchor, "r", encoding="utf-8") as fh:
-            a = json.load(fh)
-        n, digest = int(a["seq"]), str(a["digest"])
-    except (OSError, ValueError, KeyError, TypeError):
+        fd = os.open(anchor, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+                     | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return ("hold", "the register anchor is a symlink, which is never followed", None)
         return ("hold", "declared register has no readable anchor authority", None)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ("hold", "the register anchor is not a regular file", None)
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return ("hold", "declared register has no readable anchor authority", None)
+    finally:
+        os.close(fd)
+    try:
+        a = json.loads(b"".join(chunks).decode("utf-8"))
+    except ValueError:
+        return ("hold", "declared register has no readable anchor authority", None)
+    # The same strict anchor shape as the gate: an object whose seq is an int (bools excluded)
+    # of at least 1 and whose digest is 64 lowercase hex. A zero, negative or false seq, a
+    # wrong-length or non-hex digest, and a non-object anchor are each a HOLD, never a
+    # bypassed digest comparison.
+    n = a.get("seq") if isinstance(a, dict) else None
+    digest = a.get("digest") if isinstance(a, dict) else None
+    if (not isinstance(n, int) or isinstance(n, bool) or n < 1
+            or not isinstance(digest, str) or len(digest) != 64
+            or set(digest) - set("0123456789abcdef")):
+        return ("hold", "the register anchor is malformed (an anchor is an object with an "
+                "integer seq >= 1 and a 64-hex digest)", None)
     if len(lines) < n:
         return ("hold", "register is shorter than its verified anchor (rows removed)", None)
-    if n > 0 and _orch_sha256_hex(lines[n - 1]) != digest:
+    if _orch_sha256_hex(lines[n - 1]) != digest:
         return ("hold", "the anchored row was rewritten (tamper or reorder)", None)
     return _orch_register_tip(lines)
 

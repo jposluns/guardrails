@@ -358,7 +358,8 @@ effect.
 
 A declared `attestations` register is a chained, append-only row file (AT-N ids; the
 mistakes-register machinery under a different prefix: `tools/orch_register.py append --prefix AT`
-writes it and `tools/check_mistakes_register.py` gates it). It is validated at audit cadence (the
+writes it, its first row with `--bootstrap`, which establishes the anchor later appends require,
+and `tools/check_mistakes_register.py` gates it). It is validated at audit cadence (the
 resume audit and `tools/orch_doctor.py --resume-audit`), never synchronously at yield time: the
 validation pass writes `attestations-validated.json`, and the stop guard classifies an external or
 foreign-lease blocker as blocked only when its ref is covered by a fresh validated row (the
