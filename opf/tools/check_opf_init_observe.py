@@ -1021,10 +1021,15 @@ _FAULT_CHANNEL_CASES = (
     ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
     ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
     ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
-    # The ends of the C int range: os._exit raises OverflowError on a code beyond either end instead
-    # of exiting, which would let the loaded code's atexit callbacks run after the verdict; the gate
-    # takes the low byte first, so the exit always runs. The codes AT both ends have a zero low byte
-    # and fail closed as exit 2 like any other non-zero multiple of 256.
+    # Codes around the ends of the C int range: os._exit raises OverflowError on a code outside that
+    # range instead of exiting, which would let the loaded code's atexit callbacks run after the
+    # verdict; the gate takes the low byte first, so the exit always runs. The wide codes (beyond
+    # each end, with non-zero low bytes) reach the parent as their low bytes only through that
+    # ordering. The boundary codes (2**31, just past the positive end, and -(2**31), exactly the
+    # negative end) have a zero low byte and fail closed as exit 2; the multiple-of-256 rule alone
+    # already gives both that outcome, so those two cases are preservation controls over the range
+    # ends, not evidence that the ordering is required. The code at the positive end itself,
+    # 2**31 - 1, has low byte 255 and is inside os._exit's accepted range.
     ("exit-status-wide-positive", "import atexit, sys\n"
      "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
      "raise SystemExit(2**31 + 1)\n", 1, False, "FAULT-FIXTURE-ATEXIT-RAN"),

@@ -105,16 +105,19 @@ def _ending_kind(exc):
 # loaded code's cleanup itself: it waits for every other thread (_CHILD_SETTLE_SECONDS in all), runs the
 # atexit callbacks the loaded code registered and collects garbage. An atexit callback or a collected
 # destructor can itself start a worker, which the settle (taken before those cleanup phases) never saw:
-# every thread-start entry is wrapped from BEFORE the load (threading.Thread.start and the low-level
-# _thread entry points, so a start method the loaded code saved at load time still lands in the wrapper),
-# a start during the cleanup phases is recorded, and the thread list is enumerated afresh after them, so
-# a worker started by cleanup is a fault whether it finishes or not (a low-level worker never joins
-# threading's census, so recording its start is what refuses it). Only when no fault
-# was recorded, no worker was started by cleanup and no other thread still runs does it write the
-# result, LAST, and end by os._exit(0) bound before the load, so no loaded code runs after the result
-# is written (an os._exit at load, in the membership test, in a worker or in an atexit callback ends
-# the child before the result). The parent accepts only exit 0, both streams empty and a well-formed
-# result.
+# every thread-start entry is wrapped from BEFORE the load (threading.Thread.start, the low-level _thread
+# entry points, and every alias of those entry points the threading module itself holds, bound when it was
+# imported, so a start method or alias the loaded code saved at load time still lands in a wrapper), a
+# start during the cleanup phases is recorded, and the thread list is enumerated afresh after them, so a
+# worker started by cleanup is a fault whether it finishes or not. A low-level worker never joins
+# threading's census, so each low-level start also wraps the function it runs: the worker's lifetime is
+# tracked to its end, an ending by an exception or by a SystemExit whose code is not None or 0 is a
+# recorded fault whenever it was started, the settle waits for tracked workers too, and one still pending
+# at the late look is refused like a late thread. Only when no fault was recorded, no worker was started
+# by cleanup and no other thread or tracked worker still runs does it write the result, LAST, and end by
+# os._exit(0) bound before the load, so no loaded code runs after the result is written (an os._exit at
+# load, in the membership test, in a worker or in an atexit callback ends the child before the result).
+# The parent accepts only exit 0, both streams empty and a well-formed result.
 _CHILD_SETTLE_SECONDS = 60.0
 _LOADED_CHILD = """import atexit, gc, json, os, runpy, sys, threading, time, _thread
 validator, out, settle = sys.argv[1], sys.argv[2], float(sys.argv[3])
@@ -137,16 +140,44 @@ sys.unraisablehook = record_unraisable
 threading.excepthook = record_thread
 in_cleanup = False
 started = []
+workers = []
 def record_starts(original):
     def record(*args, **kwargs):
         if in_cleanup:
             started.append("cleanup-started-worker")
         return original(*args, **kwargs)
     return record
+def record_lowlevel(original):
+    def record(function, *args, **kwargs):
+        if in_cleanup:
+            started.append("cleanup-started-worker")
+        state = [True]
+        def run(*wargs, **wkwargs):
+            try:
+                return function(*wargs, **wkwargs)
+            except BaseException as exc:
+                code = getattr(exc, "code", None) if isinstance(exc, SystemExit) else None
+                if not (isinstance(exc, SystemExit) and (code is None or (type(code) is int and code == 0))):
+                    faults.append("lowlevel-worker")
+                raise
+            finally:
+                state[0] = False
+        workers.append(state)
+        return original(run, *args, **kwargs)
+    return record
 threading.Thread.start = record_starts(threading.Thread.start)
+wrapped = []
 for entry in ("start_new_thread", "start_new", "start_joinable_thread"):
     if hasattr(_thread, entry):
-        setattr(_thread, entry, record_starts(getattr(_thread, entry)))
+        original = getattr(_thread, entry)
+        replacement = record_lowlevel(original)
+        setattr(_thread, entry, replacement)
+        wrapped.append((original, replacement))
+for alias in dir(threading):
+    value = getattr(threading, alias)
+    for original, replacement in wrapped:
+        if value is original:
+            setattr(threading, alias, replacement)
 ns = runpy.run_path(validator)
 live = ns.get("_RESERVED")
 if type(live) is not tuple:
@@ -158,16 +189,21 @@ current = threading.current_thread()
 deadline = time.monotonic() + settle
 while True:
     running = [worker for worker in threading.enumerate() if worker is not current and worker.is_alive()]
-    if not running or time.monotonic() >= deadline:
+    pending = [state for state in workers if state[0]]
+    if (not running and not pending) or time.monotonic() >= deadline:
         break
-    running[0].join(min(max(deadline - time.monotonic(), 0.0), 0.5))
+    if running:
+        running[0].join(min(max(deadline - time.monotonic(), 0.0), 0.5))
+    else:
+        time.sleep(0.05)
 in_cleanup = True
 atexit._run_exitfuncs()
 gc.collect()
 late = [worker for worker in threading.enumerate() if worker is not current and worker.is_alive()]
-if faults or running or started or late:
-    sys.stderr.write("LOADED-CODE-FAULT: the validator child recorded a fault, a running thread, "
-                     "or a worker started by cleanup\\n")
+late_pending = [state for state in workers if state[0]]
+if faults or running or pending or started or late or late_pending:
+    sys.stderr.write("LOADED-CODE-FAULT: the validator child recorded a fault, a running thread or "
+                     "worker, or a worker started by cleanup\\n")
     sys.stderr.flush()
     end(3)
 with open(out, "w", encoding="utf-8") as handle:
@@ -191,11 +227,13 @@ def _validator_missing(path, views):
     outcome. ANY other ending of the loaded code, an os._exit with ANY status (in a worker or an atexit
     callback included), a sys.exit or SystemExit (0 or None included), a KeyboardInterrupt, a signal
     handler it installs, any other BaseException, a background fault (a worker's exception or unsuccessful
-    SystemExit, a destructor or atexit fault, recorded in the child), a worker its atexit callbacks or
-    garbage collection start (every start entry is wrapped from before the load, threading.Thread.start
-    and the low-level _thread entry points alike, so a start method saved at load time is still seen;
-    a start during those cleanup phases is a fault whether or not the worker finishes, and the thread
-    list is re-enumerated after them), or a thread still running at the
+    SystemExit, a destructor or atexit fault, recorded in the child; a low-level worker's unsuccessful
+    ending is recorded through its tracked lifetime whenever it was started), a worker its atexit callbacks
+    or garbage collection start (every start entry is wrapped from before the load: threading.Thread.start,
+    the low-level _thread entry points and threading's own module-level aliases of them alike, so a start
+    method or alias saved at load time is still seen; a start during those cleanup phases is a fault
+    whether or not the worker finishes, and the thread list is re-enumerated after them), or a thread or
+    tracked low-level worker still running at the
     bound, leaves a missing result, a non-zero exit, or a non-empty stream, and is CANNOT-EVALUATE (exit
     2), never this gate's pass: the loaded code never runs in this gate's process, so the os._exit channel
     of the in-process load is unreachable here, not disclosed. An operator's Ctrl-C is a KeyboardInterrupt
@@ -395,10 +433,13 @@ def _expect(condition, message=None):
 
 def _child_outcome(child_source, body):
     """"ACCEPTED" when the child at child_source accepts the validator source body (exit 0, both streams
-    empty, a result written), "REFUSED" when it ran and refused, "NO-RUN" when it did not run (distinct,
-    so a control expecting either outcome fails on a dead child); the leg controls drive a deliberately
-    weakened copy of _LOADED_CHILD through this to show which refusal leg carries each cleanup-worker
-    vector."""
+    empty, a result written that carries the production payload, an empty missing list for these bodies),
+    "MALFORMED" when the process legs held but the result payload is absent or wrong (distinct, so an
+    acceptance is never credited to a child that did not evaluate the body), "REFUSED" when it ran and
+    refused, "NO-RUN" when it did not run (distinct, so a control expecting either outcome fails on a dead
+    child); the leg controls drive a deliberately weakened copy of _LOADED_CHILD through this to show
+    which refusal leg carries each cleanup-worker vector."""
+    import json
     import subprocess
     import tempfile
     with tempfile.TemporaryDirectory(prefix="opf-init-contract-leg-control-") as tmp:
@@ -414,8 +455,12 @@ def _child_outcome(child_source, body):
                 capture_output=True, timeout=600)
         except (OSError, subprocess.SubprocessError):
             return "NO-RUN"
-        if child.returncode == 0 and not child.stdout and not child.stderr and out.is_file():
-            return "ACCEPTED"
+        if child.returncode == 0 and not child.stdout and not child.stderr:
+            try:
+                payload = json.loads(out.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return "MALFORMED"
+            return "ACCEPTED" if payload == {"missing": []} else "MALFORMED"
         return "REFUSED"
 
 
@@ -423,11 +468,18 @@ def _loaded_exit_failure(label, path, expect_missing=None):
     """None when _validator_missing over the validator at path ends as the case requires, else the failure.
     A refused case (expect_missing is None) must end exit 2 with the CANNOT-EVALUATE line (the child
     contract refuses the loaded code's ending, an os._exit with any status included), never this
-    process's own end and never a pass; a clean case must return exactly expect_missing. The
-    CANNOT-EVALUATE line is captured and required, never printed, so a passing self-test shows none. An
-    operator's Ctrl-C propagates (nothing here catches KeyboardInterrupt)."""
+    process's own end and never a pass; a clean case must return exactly expect_missing. A refusal is
+    credited only when the fixture at path exists and the captured diagnostic is one the parent writes
+    after the child process COMPLETED (the child ending outside the contract, ending inside it without a
+    result, or reporting a loaded _RESERVED that is not a tuple): an absent fixture, a child that could
+    not launch or timed out, and a malformed child result are each this test's failure, never a refusal,
+    so a case whose fixture was never evaluated cannot read as refused. The CANNOT-EVALUATE line is
+    captured and required, never printed, so a passing self-test shows none. An operator's Ctrl-C
+    propagates (nothing here catches KeyboardInterrupt)."""
     import contextlib
     import io
+    if not Path(path).is_file():
+        return "{}: the fixture to load does not exist".format(label)
     captured = io.StringIO()
     try:
         with contextlib.redirect_stderr(captured):
@@ -437,8 +489,14 @@ def _loaded_exit_failure(label, path, expect_missing=None):
             return "{}: expected a clean child run, got SystemExit".format(label)
         if not (type(exc) is SystemExit and type(exc.code) is int and exc.code == 2):
             return "{}: expected exit 2, got another SystemExit".format(label)
-        if not captured.getvalue().startswith("CANNOT-EVALUATE: "):
+        diagnostic = captured.getvalue()
+        if not diagnostic.startswith("CANNOT-EVALUATE: "):
             return "{}: exit 2 without the CANNOT-EVALUATE line".format(label)
+        if ("the child ended outside the fail-closed contract" not in diagnostic
+                and "the child wrote no result" not in diagnostic
+                and "validator _RESERVED is not a tuple" not in diagnostic):
+            return "{}: exit 2 for a reason other than the completed child refusing the loaded code".format(
+                label)
         return None
     except KeyboardInterrupt:
         raise
@@ -469,7 +527,17 @@ def _self_test_loaded_exit():
     threading.Thread.start; the joined-worker case is red without the start record (its leg control
     shows a record-disabled child accepts it); the never-ending case is red without the late census
     (the same control child still refuses it through the census alone); and the clean finishing-worker
-    case above shows a load-started worker the settle waits out still passes. The exit-status leg, which no
+    case above shows a load-started worker the settle waits out still passes. A cleanup worker started
+    through threading's own saved module alias of a low-level start entry is refused (red when only the
+    _thread attributes are rebound: its leg control shows a child without the alias rebinding accepts it);
+    a cleanup worker through each further low-level entry has a case of its own (red when that entry's
+    wrap is dropped: the narrowed-entry control child accepts both); and a low-level worker started at
+    LOAD time is refused when it ends unsuccessfully (red without the lifetime fault record, shown by its
+    leg control) or still runs at the verdict (red without the lifetime tracking, shown by its leg
+    control), while the clean low-level finishing-worker case shows one the settle waits out still passes.
+    The refusal oracle itself is pinned: an absent fixture must read as this test's failure, never as a
+    refusal (red when any CANNOT-EVALUATE exit 2 is accepted without evidence the child completed). The
+    exit-status leg, which no
     loaded code reaches once the child ends by its own os._exit(0) after the result, is pinned by
     _child_contract_kept's own cases. A clean child must still return the exact missing-views list, red if
     the child result is not read back. Run by _self_test in a CHILD of the self-test (_LOADED_EXIT_PROBE),
@@ -543,6 +611,22 @@ def _self_test_loaded_exit():
          valid + "import atexit, _thread, threading\ndef cleanup():\n"
          "    _thread.start_new_thread(threading.Event().wait, ())\n"
          "atexit.register(cleanup)\n"),
+        ("worker started by an atexit callback through threading's saved module alias",
+         valid + "import atexit, threading\n"
+         "atexit.register(lambda: threading._start_joinable_thread(threading.Event().wait))\n"),
+        ("low-level worker started by an atexit callback through start_new",
+         valid + "import atexit, _thread, threading\n"
+         "atexit.register(lambda: _thread.start_new(threading.Event().wait, ()))\n"),
+        ("low-level worker started by an atexit callback through start_joinable_thread",
+         valid + "import atexit, _thread, threading\n"
+         "atexit.register(lambda: _thread.start_joinable_thread(threading.Event().wait))\n"),
+        ("low-level thread worker started at load, still running at the verdict",
+         valid + "import _thread, threading\n"
+         "_thread.start_new_thread(threading.Event().wait, ())\n"),
+        ("low-level thread worker started at load, ending by SystemExit(7)",
+         valid + "import _thread, threading\ndone = threading.Event()\n"
+         "def worker():\n    try:\n        raise SystemExit(7)\n    finally:\n        done.set()\n"
+         "_thread.start_new_thread(worker, ())\ndone.wait()\n"),
         ("worker started by an atexit callback, faulting later",
          valid + "import atexit, threading, time\ndef fault():\n    time.sleep(0.3)\n"
          "    raise RuntimeError('loaded')\ndef cleanup():\n"
@@ -568,6 +652,9 @@ def _self_test_loaded_exit():
         ("clean with a worker that finishes after the load",
          '_RESERVED = (".working/a.md",)\nimport threading, time\n'
          "threading.Thread(target=time.sleep, args=(0.3,)).start()\n", []),
+        ("clean with a low-level worker that finishes after the load",
+         '_RESERVED = (".working/a.md",)\nimport _thread, time\n'
+         "_thread.start_new_thread(time.sleep, (0.3,))\n", []),
     )
     failures = []
     with tempfile.TemporaryDirectory(prefix="opf-init-contract-selftest-") as tmp:
@@ -583,6 +670,11 @@ def _self_test_loaded_exit():
             failure = _loaded_exit_failure(label, path, expect_missing=expected)
             if failure is not None:
                 failures.append(failure)
+        # The refusal oracle's own control: a fixture that was never evaluated (the file is absent, so
+        # the child's load could not have run it as intended) must be this test's failure, never a
+        # credited refusal.
+        if _loaded_exit_failure("an absent fixture (oracle control)", Path(tmp) / "loaded_absent.py") is None:
+            failures.append("oracle control: an absent fixture was read as a refused loaded ending")
     _expect(not failures, "loaded-exit vectors: " + "; ".join(failures))
     # Leg controls: each refusal leg added for cleanup-started workers must carry weight on its own. A
     # copy of the child with the start record disabled (the recording line replaced, required to exist)
@@ -603,6 +695,43 @@ def _self_test_loaded_exit():
              "atexit.register(cleanup)\n")
     _expect(_child_outcome(record_off, never) == "REFUSED",
             "leg control: the late census refuses a cleanup worker the start record missed")
+    # Low-level leg controls, each a deliberately weakened child that must ACCEPT the vector its leg
+    # refuses (an acceptance requires the production payload, so each control also shows its child ran
+    # and evaluated the body): without the lifetime tracking a load-started low-level worker still
+    # running at the verdict is invisible; without the lifetime fault record its unsuccessful ending is
+    # silent; without the alias rebinding a worker started through threading's saved module alias is
+    # unseen; and with the entry tuple narrowed to start_new_thread the other two entries are unseen.
+    track_off = _LOADED_CHILD.replace("workers.append(state)", "pass")
+    _expect(track_off != _LOADED_CHILD, "leg control: the low-level tracking line is present to disable")
+    low_still = valid + "import _thread, threading\n_thread.start_new_thread(threading.Event().wait, ())\n"
+    _expect(_child_outcome(track_off, low_still) == "ACCEPTED",
+            "leg control: the load-started low-level worker is refused by the lifetime tracking alone")
+    fault_off = _LOADED_CHILD.replace('faults.append("lowlevel-worker")', "pass")
+    _expect(fault_off != _LOADED_CHILD, "leg control: the low-level fault line is present to disable")
+    low_exit = (valid + "import _thread, threading\ndone = threading.Event()\n"
+                "def worker():\n    try:\n        raise SystemExit(7)\n    finally:\n        done.set()\n"
+                "_thread.start_new_thread(worker, ())\ndone.wait()\n")
+    _expect(_child_outcome(fault_off, low_exit) == "ACCEPTED",
+            "leg control: the low-level unsuccessful ending is refused by the lifetime fault record alone")
+    alias_off = _LOADED_CHILD.replace("setattr(threading, alias, replacement)", "pass")
+    _expect(alias_off != _LOADED_CHILD, "leg control: the alias rebinding line is present to disable")
+    alias_worker = (valid + "import atexit, threading\n"
+                    "atexit.register(lambda: threading._start_joinable_thread(threading.Event().wait))\n")
+    _expect(_child_outcome(alias_off, alias_worker) == "ACCEPTED",
+            "leg control: the cleanup worker through threading's saved alias is refused by the rebinding "
+            "alone")
+    entry_off = _LOADED_CHILD.replace('("start_new_thread", "start_new", "start_joinable_thread")',
+                                      '("start_new_thread",)')
+    _expect(entry_off != _LOADED_CHILD, "leg control: the low-level entry tuple is present to narrow")
+    via_start_new = (valid + "import atexit, _thread, threading\n"
+                     "atexit.register(lambda: _thread.start_new(threading.Event().wait, ()))\n")
+    _expect(_child_outcome(entry_off, via_start_new) == "ACCEPTED",
+            "leg control: the cleanup worker through _thread.start_new is refused by its wrap alone")
+    via_joinable = (valid + "import atexit, _thread, threading\n"
+                    "atexit.register(lambda: _thread.start_joinable_thread(threading.Event().wait))\n")
+    _expect(_child_outcome(entry_off, via_joinable) == "ACCEPTED",
+            "leg control: the cleanup worker through _thread.start_joinable_thread is refused by its "
+            "wrap alone")
 
 
 # The loaded-exit vectors run in a child of the self-test that must end 0 with exactly this file's
@@ -882,10 +1011,15 @@ _FAULT_CHANNEL_CASES = (
     ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
     ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
     ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
-    # The ends of the C int range: os._exit raises OverflowError on a code beyond either end instead
-    # of exiting, which would let the loaded code's atexit callbacks run after the verdict; the gate
-    # takes the low byte first, so the exit always runs. The codes AT both ends have a zero low byte
-    # and fail closed as exit 2 like any other non-zero multiple of 256.
+    # Codes around the ends of the C int range: os._exit raises OverflowError on a code outside that
+    # range instead of exiting, which would let the loaded code's atexit callbacks run after the
+    # verdict; the gate takes the low byte first, so the exit always runs. The wide codes (beyond
+    # each end, with non-zero low bytes) reach the parent as their low bytes only through that
+    # ordering. The boundary codes (2**31, just past the positive end, and -(2**31), exactly the
+    # negative end) have a zero low byte and fail closed as exit 2; the multiple-of-256 rule alone
+    # already gives both that outcome, so those two cases are preservation controls over the range
+    # ends, not evidence that the ordering is required. The code at the positive end itself,
+    # 2**31 - 1, has low byte 255 and is inside os._exit's accepted range.
     ("exit-status-wide-positive", "import atexit, sys\n"
      "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
      "raise SystemExit(2**31 + 1)\n", 1, False, "FAULT-FIXTURE-ATEXIT-RAN"),

@@ -1764,6 +1764,7 @@ expected-check-ids = [
   "harness/fault-channel-exit-status-boundary-negative-exit-2",
   "harness/fault-channel-flush-window-recheck-exit-2",
   "harness/fault-channel-entry-wiring-exact",
+  "harness/fault-channel-failures-all-mapped",
   "revert/character-set-red",
   "revert/ascii-token-and-frontmatter-red",
   "revert/frontmatter-scalar-red",

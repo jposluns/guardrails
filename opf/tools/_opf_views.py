@@ -108,7 +108,12 @@ module's _fail_closed_main, which installs sys.unraisablehook and threading.exce
 gate's work (a worker-thread or destructor fault from loaded code, a worker ending by SystemExit with a
 non-zero code included, is recorded and forces exit 2 over a passing verdict; before a passing verdict the
 settle waits, bounded, for every other thread still running, so a worker's later fault is recorded, and a
-thread still running at the bound fails the verdict closed; the record is re-checked after the exit flushes,
+thread still running at the bound fails the verdict closed; that settle's census covers threading's threads
+alone, so a worker started through the low-level _thread entry points is invisible to it and only a fault
+such a worker already raised is recorded, a disclosed residual at these wrapped gates, not closed, while the
+contract gate's child-contract load closes it for the validator load alone, wrapping the low-level start
+entries and threading's saved module alias of them and tracking each such worker to its end; the record is
+re-checked after the exit flushes,
 so a fault recorded while a flush was blocked still fails the verdict) and ends the process with os._exit,
 so an atexit callback registered by loaded code can never run after the verdict (that channel is
 unreachable, not disclosed). Every OTHER launched script's `__main__` entry remains unwrapped
@@ -5181,10 +5186,15 @@ _FAULT_CHANNEL_CASES = (
     ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
     ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
     ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
-    # The ends of the C int range: os._exit raises OverflowError on a code beyond either end instead
-    # of exiting, which would let the loaded code's atexit callbacks run after the verdict; the gate
-    # takes the low byte first, so the exit always runs. The codes AT both ends have a zero low byte
-    # and fail closed as exit 2 like any other non-zero multiple of 256.
+    # Codes around the ends of the C int range: os._exit raises OverflowError on a code outside that
+    # range instead of exiting, which would let the loaded code's atexit callbacks run after the
+    # verdict; the gate takes the low byte first, so the exit always runs. The wide codes (beyond
+    # each end, with non-zero low bytes) reach the parent as their low bytes only through that
+    # ordering. The boundary codes (2**31, just past the positive end, and -(2**31), exactly the
+    # negative end) have a zero low byte and fail closed as exit 2; the multiple-of-256 rule alone
+    # already gives both that outcome, so those two cases are preservation controls over the range
+    # ends, not evidence that the ordering is required. The code at the positive end itself,
+    # 2**31 - 1, has low byte 255 and is inside os._exit's accepted range.
     ("exit-status-wide-positive", "import atexit, sys\n"
      "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
      "raise SystemExit(2**31 + 1)\n", 1, False, "FAULT-FIXTURE-ATEXIT-RAN"),

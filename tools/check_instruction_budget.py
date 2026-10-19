@@ -2350,28 +2350,35 @@ def self_test(report_path=None):
         # The background fault channels of code loaded in process (atexit, worker thread, destructor), each
         # driven through the real _fail_closed_main entry in a child.
         fault_failures = _fault_channel_vectors()
-        for fault_label, fault_id in (
-                ("clean", "harness/fault-channel-clean-exit-0"),
-                ("atexit", "harness/fault-channel-atexit-unreachable"),
-                ("joined-thread", "harness/fault-channel-thread-recorded-exit-2"),
-                ("destructor", "harness/fault-channel-destructor-recorded-exit-2"),
-                ("thread-systemexit", "harness/fault-channel-thread-systemexit-recorded-exit-2"),
-                ("thread-systemexit-zero", "harness/fault-channel-thread-systemexit-zero-clean"),
-                ("finishing-thread", "harness/fault-channel-finishing-thread-clean"),
-                ("unjoined-thread", "harness/fault-channel-unjoined-thread-recorded-exit-2"),
-                ("unfinished-thread", "harness/fault-channel-unfinished-thread-exit-2"),
-                ("exit-status-255", "harness/fault-channel-exit-status-255-passes-through"),
-                ("exit-status-256", "harness/fault-channel-exit-status-256-exit-2"),
-                ("exit-status-257", "harness/fault-channel-exit-status-257-low-byte-1"),
-                ("exit-status-negative-256", "harness/fault-channel-exit-status-negative-256-exit-2"),
-                ("exit-status-wide-positive", "harness/fault-channel-exit-status-wide-positive-low-byte-1"),
-                ("exit-status-wide-negative", "harness/fault-channel-exit-status-wide-negative-low-byte-255"),
-                ("exit-status-boundary-positive", "harness/fault-channel-exit-status-boundary-positive-exit-2"),
-                ("exit-status-boundary-negative", "harness/fault-channel-exit-status-boundary-negative-exit-2"),
-                ("flush-window", "harness/fault-channel-flush-window-recheck-exit-2"),
-                ("entry-wiring", "harness/fault-channel-entry-wiring-exact")):
+        fault_checks = (
+            ("clean", "harness/fault-channel-clean-exit-0"),
+            ("atexit", "harness/fault-channel-atexit-unreachable"),
+            ("joined-thread", "harness/fault-channel-thread-recorded-exit-2"),
+            ("destructor", "harness/fault-channel-destructor-recorded-exit-2"),
+            ("thread-systemexit", "harness/fault-channel-thread-systemexit-recorded-exit-2"),
+            ("thread-systemexit-zero", "harness/fault-channel-thread-systemexit-zero-clean"),
+            ("finishing-thread", "harness/fault-channel-finishing-thread-clean"),
+            ("unjoined-thread", "harness/fault-channel-unjoined-thread-recorded-exit-2"),
+            ("unfinished-thread", "harness/fault-channel-unfinished-thread-exit-2"),
+            ("exit-status-255", "harness/fault-channel-exit-status-255-passes-through"),
+            ("exit-status-256", "harness/fault-channel-exit-status-256-exit-2"),
+            ("exit-status-257", "harness/fault-channel-exit-status-257-low-byte-1"),
+            ("exit-status-negative-256", "harness/fault-channel-exit-status-negative-256-exit-2"),
+            ("exit-status-wide-positive", "harness/fault-channel-exit-status-wide-positive-low-byte-1"),
+            ("exit-status-wide-negative", "harness/fault-channel-exit-status-wide-negative-low-byte-255"),
+            ("exit-status-boundary-positive", "harness/fault-channel-exit-status-boundary-positive-exit-2"),
+            ("exit-status-boundary-negative", "harness/fault-channel-exit-status-boundary-negative-exit-2"),
+            ("flush-window", "harness/fault-channel-flush-window-recheck-exit-2"),
+            ("entry-wiring", "harness/fault-channel-entry-wiring-exact"))
+        for fault_label, fault_id in fault_checks:
             check(fault_id, [failure for failure in fault_failures
                              if failure.startswith("fault-channel/" + fault_label + ":")], [])
+        # Every fault-channel failure must be claimed by a mapped label above: a case added without a
+        # mapping would otherwise have its failures discarded by the per-label filters, a silent pass.
+        check("harness/fault-channel-failures-all-mapped",
+              [failure for failure in fault_failures
+               if not any(failure.startswith("fault-channel/" + fault_label + ":")
+                          for fault_label, _ in fault_checks)], [])
         code_ran = []
 
         class _CodeProperty(SystemExit):
@@ -2969,10 +2976,15 @@ _FAULT_CHANNEL_CASES = (
     ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
     ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
     ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
-    # The ends of the C int range: os._exit raises OverflowError on a code beyond either end instead
-    # of exiting, which would let the loaded code's atexit callbacks run after the verdict; the gate
-    # takes the low byte first, so the exit always runs. The codes AT both ends have a zero low byte
-    # and fail closed as exit 2 like any other non-zero multiple of 256.
+    # Codes around the ends of the C int range: os._exit raises OverflowError on a code outside that
+    # range instead of exiting, which would let the loaded code's atexit callbacks run after the
+    # verdict; the gate takes the low byte first, so the exit always runs. The wide codes (beyond
+    # each end, with non-zero low bytes) reach the parent as their low bytes only through that
+    # ordering. The boundary codes (2**31, just past the positive end, and -(2**31), exactly the
+    # negative end) have a zero low byte and fail closed as exit 2; the multiple-of-256 rule alone
+    # already gives both that outcome, so those two cases are preservation controls over the range
+    # ends, not evidence that the ordering is required. The code at the positive end itself,
+    # 2**31 - 1, has low byte 255 and is inside os._exit's accepted range.
     ("exit-status-wide-positive", "import atexit, sys\n"
      "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
      "raise SystemExit(2**31 + 1)\n", 1, False, "FAULT-FIXTURE-ATEXIT-RAN"),
