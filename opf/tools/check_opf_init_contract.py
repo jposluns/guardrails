@@ -103,11 +103,15 @@ def _ending_kind(exc):
 # other unraisable fault; a worker thread ending by an exception or by a SystemExit whose code is not None
 # or 0) from BEFORE the load, computes the result (the load and the membership test), then runs the
 # loaded code's cleanup itself: it waits for every other thread (_CHILD_SETTLE_SECONDS in all), runs the
-# atexit callbacks the loaded code registered and collects garbage. Only when no fault was recorded and no
-# other thread still runs does it write the result, LAST, and end by os._exit(0) bound before the load,
-# so no loaded code runs after the result is written (an os._exit at load, in the membership test, in a
-# worker or in an atexit callback ends the child before the result). The parent accepts only exit 0, both
-# streams empty and a well-formed result.
+# atexit callbacks the loaded code registered and collects garbage. An atexit callback or a collected
+# destructor can itself start a worker, which the settle (taken before those cleanup phases) never saw:
+# every Thread.start during the cleanup phases is recorded, and the thread list is enumerated afresh
+# after them, so a worker started by cleanup is a fault whether it finishes or not. Only when no fault
+# was recorded, no worker was started by cleanup and no other thread still runs does it write the
+# result, LAST, and end by os._exit(0) bound before the load, so no loaded code runs after the result
+# is written (an os._exit at load, in the membership test, in a worker or in an atexit callback ends
+# the child before the result). The parent accepts only exit 0, both streams empty and a well-formed
+# result.
 _CHILD_SETTLE_SECONDS = 60.0
 _LOADED_CHILD = """import atexit, gc, json, os, runpy, sys, threading, time
 validator, out, settle = sys.argv[1], sys.argv[2], float(sys.argv[3])
@@ -142,10 +146,19 @@ while True:
     if not running or time.monotonic() >= deadline:
         break
     running[0].join(min(max(deadline - time.monotonic(), 0.0), 0.5))
+started = []
+original_start = threading.Thread.start
+def record_start(worker):
+    started.append("cleanup-started-worker")
+    return original_start(worker)
+threading.Thread.start = record_start
 atexit._run_exitfuncs()
 gc.collect()
-if faults or running:
-    sys.stderr.write("LOADED-CODE-FAULT: the validator child recorded a fault or a running thread\\n")
+threading.Thread.start = original_start
+late = [worker for worker in threading.enumerate() if worker is not current and worker.is_alive()]
+if faults or running or started or late:
+    sys.stderr.write("LOADED-CODE-FAULT: the validator child recorded a fault, a running thread, "
+                     "or a worker started by cleanup\\n")
     sys.stderr.flush()
     end(3)
 with open(out, "w", encoding="utf-8") as handle:
@@ -169,14 +182,16 @@ def _validator_missing(path, views):
     outcome. ANY other ending of the loaded code, an os._exit with ANY status (in a worker or an atexit
     callback included), a sys.exit or SystemExit (0 or None included), a KeyboardInterrupt, a signal
     handler it installs, any other BaseException, a background fault (a worker's exception or unsuccessful
-    SystemExit, a destructor or atexit fault, recorded in the child), or a thread still running at the
+    SystemExit, a destructor or atexit fault, recorded in the child), a worker its atexit callbacks or
+    garbage collection start (re-checked after those cleanup phases, a fault whether or not it finishes),
+    or a thread still running at the
     bound, leaves a missing result, a non-zero exit, or a non-empty stream, and is CANNOT-EVALUATE (exit
     2), never this gate's pass: the loaded code never runs in this gate's process, so the os._exit channel
     of the in-process load is unreachable here, not disclosed. An operator's Ctrl-C is a KeyboardInterrupt
     in THIS process (the signal reaches the whole group) and propagates to stop the runner. Residual:
     deliberately hostile loaded code forging the child contract (writing the result file itself and
     ending cleanly) is the reporting-machinery channel disclosed once in the _opf_views class disclosure
-    (D-411-HOSTILE-DISCLOSED), with the hostile-object residual stated there."""
+    (accepted there, not closed), with the hostile-object residual stated there."""
     import json
     import subprocess
     import tempfile
@@ -409,7 +424,11 @@ def _self_test_loaded_exit():
     (each the only leg its case breaks); the child's recorders, its own atexit run and its running-thread
     refusal each have a case with a valid _RESERVED that only that leg refuses (worker SystemExit(7), an
     atexit os._exit(0) or fault, a worker still running at the bound), and its thread wait has a clean
-    case (a worker finishing after the load) that is refused without it. The exit-status leg, which no
+    case (a worker finishing after the load) that is refused without it. A worker started by the child's
+    OWN cleanup run (an atexit callback or a destructor the child's garbage collection runs) is refused
+    whether it finishes, faults later or never ends: those four cases are red when the running-thread
+    list is taken only before the cleanup phases, while the clean finishing-worker case above shows a
+    load-started worker the settle waits out still passes. The exit-status leg, which no
     loaded code reaches once the child ends by its own os._exit(0) after the result, is pinned by
     _child_contract_kept's own cases. A clean child must still return the exact missing-views list, red if
     the child result is not read back. Run by _self_test in a CHILD of the self-test (_LOADED_EXIT_PROBE),
@@ -459,6 +478,24 @@ def _self_test_loaded_exit():
          "threading.Thread(target=fault).start()\n"),
         ("worker still running at the bound after a valid result",
          valid + "import threading\nthreading.Thread(target=threading.Event().wait, daemon=True).start()\n"),
+        ("worker started by an atexit callback, finishing",
+         valid + "import atexit, threading, time\ndef cleanup():\n"
+         "    threading.Thread(target=time.sleep, args=(0.2,)).start()\n"
+         "atexit.register(cleanup)\n"),
+        ("worker started by an atexit callback, faulting later",
+         valid + "import atexit, threading, time\ndef fault():\n    time.sleep(0.3)\n"
+         "    raise RuntimeError('loaded')\ndef cleanup():\n"
+         "    threading.Thread(target=fault).start()\n"
+         "atexit.register(cleanup)\n"),
+        ("worker started by an atexit callback, never ending",
+         valid + "import atexit, threading\ndef cleanup():\n"
+         "    threading.Thread(target=threading.Event().wait, daemon=True).start()\n"
+         "atexit.register(cleanup)\n"),
+        ("worker started by a destructor in the child's garbage collection",
+         valid + "import gc, threading\ngc.disable()\n"
+         "class Late:\n    def __del__(self):\n"
+         "        threading.Thread(target=threading.Event().wait, daemon=True).start()\n"
+         "cycle = Late()\ncycle.self = cycle\ndel cycle\n"),
         ("destructor fault after a valid result",
          valid + "class Fault:\n    def __del__(self):\n        raise RuntimeError('loaded')\nFault()\n"),
         ("stderr noise after a valid result", valid + "import sys\nsys.stderr.write('loaded noise\\n')\n"),
@@ -570,7 +607,7 @@ def _self_test():
 # non-zero, and an ACCIDENTAL fault in an atexit callback cannot turn that non-zero end into exit 0, so
 # no background fault reads as a pass there. Residual: loaded code replacing these hooks, this record or
 # the exit itself is the reporting-machinery channel disclosed once in the _opf_views class disclosure
-# (D-411-HOSTILE-DISCLOSED).
+# (deliberately hostile loaded code is accepted there and not closed).
 _LOADED_FAULTS = []
 _FAULT_MARKER = "LOADED-CODE-FAULT"
 
@@ -638,6 +675,12 @@ def _gate_exit(code):
         # The code object is never formatted: a loaded object's __str__ must not run here.
         sys.stderr.write("{}: a non-int SystemExit code at the gate entry; exit 1\n".format(_FAULT_MARKER))
         code = 1
+    if code != 0 and (code & 0xFF) == 0:
+        # os._exit truncates its status to the low 8 bits, so this non-zero code would end the
+        # process with exit status 0, a silent pass; fail closed instead.
+        sys.stderr.write("{}: a SystemExit code outside the exit-status range at the gate entry; exit 2\n".format(
+            _FAULT_MARKER))
+        code = 2
     if code == 0:
         current = _threads.current_thread()
         deadline = time.monotonic() + _SETTLE_SECONDS
@@ -744,6 +787,13 @@ _FAULT_CHANNEL_CASES = (
      "threading.Thread(target=fault).start()\n", 2, True, None),
     ("unfinished-thread", "import threading\n"
      "threading.Thread(target=threading.Event().wait, daemon=True).start()\n", 2, True, None),
+    # Exit-status range: os._exit truncates its status to the low 8 bits, so a non-zero SystemExit
+    # code that is a multiple of 256 would end the child with status 0, a silent pass; the gate maps
+    # it to 2. The neighbouring codes pass through (257 reaches the parent as its low byte, 1).
+    ("exit-status-255", "raise SystemExit(255)\n", 255, False, None),
+    ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
+    ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
+    ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
 )
 
 

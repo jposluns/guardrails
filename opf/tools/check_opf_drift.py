@@ -530,7 +530,7 @@ def main(argv=None):
 # non-zero, and an ACCIDENTAL fault in an atexit callback cannot turn that non-zero end into exit 0, so
 # no background fault reads as a pass there. Residual: loaded code replacing these hooks, this record or
 # the exit itself is the reporting-machinery channel disclosed once in the _opf_views class disclosure
-# (D-411-HOSTILE-DISCLOSED).
+# (deliberately hostile loaded code is accepted there and not closed).
 _LOADED_FAULTS = []
 _FAULT_MARKER = "LOADED-CODE-FAULT"
 
@@ -598,6 +598,12 @@ def _gate_exit(code):
         # The code object is never formatted: a loaded object's __str__ must not run here.
         sys.stderr.write("{}: a non-int SystemExit code at the gate entry; exit 1\n".format(_FAULT_MARKER))
         code = 1
+    if code != 0 and (code & 0xFF) == 0:
+        # os._exit truncates its status to the low 8 bits, so this non-zero code would end the
+        # process with exit status 0, a silent pass; fail closed instead.
+        sys.stderr.write("{}: a SystemExit code outside the exit-status range at the gate entry; exit 2\n".format(
+            _FAULT_MARKER))
+        code = 2
     if code == 0:
         current = _threads.current_thread()
         deadline = time.monotonic() + _SETTLE_SECONDS
@@ -702,6 +708,13 @@ _FAULT_CHANNEL_CASES = (
      "threading.Thread(target=fault).start()\n", 2, True, None),
     ("unfinished-thread", "import threading\n"
      "threading.Thread(target=threading.Event().wait, daemon=True).start()\n", 2, True, None),
+    # Exit-status range: os._exit truncates its status to the low 8 bits, so a non-zero SystemExit
+    # code that is a multiple of 256 would end the child with status 0, a silent pass; the gate maps
+    # it to 2. The neighbouring codes pass through (257 reaches the parent as its low byte, 1).
+    ("exit-status-255", "raise SystemExit(255)\n", 255, False, None),
+    ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
+    ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
+    ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
 )
 
 

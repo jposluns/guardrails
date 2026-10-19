@@ -70,7 +70,7 @@ The `opf render` CLI requires exactly one of `--check | --write` (no default): `
 detection) is IMPLEMENTED and keeps working, while `--write` stays fail-closed until VC-4 composes the gate.
 This is a refusal pending the real composition, never a fabricated gate.
 
-In-process loaders on gate paths, disclosed residual of the class (tracked as HARDEN-GATE-ENTRY-WRAP, which
+In-process loaders on gate paths, disclosed residual of the class (planned hardening
 closes it by wrapping every gate entry). A process-ending exception (SystemExit 0 or None, GeneratorExit or
 another BaseException) raised in-process by repository code a gate imports lazily or calls is a failure, never
 the gate's own status, ONLY at these guarded sites (cannot-evaluate, exit 2, at each, except that a load or
@@ -112,12 +112,12 @@ thread still running at the bound fails the verdict closed; the record is re-che
 so a fault recorded while a flush was blocked still fails the verdict) and ends the process with os._exit,
 so an atexit callback registered by loaded code can never run after the verdict (that channel is
 unreachable, not disclosed). Every OTHER launched script's `__main__` entry remains unwrapped
-(HARDEN-GATE-ENTRY-WRAP tracks those), so outside the wrapped set such an exit ends that gate with the
+(wrapping those is planned hardening), so outside the wrapped set such an exit ends that gate with the
 exception's own status (exit 0 for SystemExit 0 or None), and its loaded code's background faults are not
 settled. Loaded code calling os._exit ITSELF remains a disclosed residual at every wrapped gate whose load
 stays in its own process (an in-process entry cannot catch it); only the contract gate's child-contract
-load closes that channel, and moving the other gates' loads to children is tracked under
-HARDEN-GATE-ENTRY-WRAP (each calls into its loaded objects, so a child move needs a result contract per
+load closes that channel, and moving the other gates' loads to children is planned
+hardening (each calls into its loaded objects, so a child move needs a result contract per
 gate).
 The instances below are the ones confirmed and named; the list is not exhaustive, and the sentence above
 covers every other. Confirmed unguarded instances: the function-local sibling imports in
@@ -128,8 +128,8 @@ check_gensrc_failclose._close_vectors and import_cwe.self_test; and the re-execu
 in check_release_cut (_close_vectors, _self_test_isolated), gen_crosswalk (its flipped helper),
 check_python_floor (_rule_reverts) and pin (_recover_close_vectors). Also
 outside every guard above: an exit raised while a guarded module's own top-level imports run, before its guard
-is entered, and the opf.py aggregate, which runs each unit in-process until the unit runner of #385 is on main
-(see _opf_emit).
+is entered, and the opf.py aggregate, which runs each unit in-process until its planned subprocess-per-unit
+runner ships (see _opf_emit).
 """
 import sys
 
@@ -2329,8 +2329,8 @@ def self_test():
     installs the fault recorders before any in-process load, settles them after the suite, and ends the
     process with os._exit, so sys.exit(self_test()) never returns and no atexit callback registered by
     loaded code runs after the verdict. Called in-process (the opf.py aggregate), it runs the suite
-    plainly and returns its result; that aggregate entry is the disclosed HARDEN-GATE-ENTRY-WRAP residual
-    until the unit runner of #385 lands."""
+    plainly and returns its result; that aggregate entry is a disclosed residual
+    until the aggregate gains a subprocess-per-unit runner."""
     if __name__ == "__main__":
         _fail_closed_main(_self_test)
     return _self_test()
@@ -4759,7 +4759,7 @@ def _entry(wid, kind, summary):
 # non-zero, and an ACCIDENTAL fault in an atexit callback cannot turn that non-zero end into exit 0, so
 # no background fault reads as a pass there. Residual: loaded code replacing these hooks, this record or
 # the exit itself is the reporting-machinery channel disclosed once in the _opf_views class disclosure
-# (D-411-HOSTILE-DISCLOSED).
+# (deliberately hostile loaded code is accepted there and not closed).
 _LOADED_FAULTS = []
 _FAULT_MARKER = "LOADED-CODE-FAULT"
 
@@ -4827,6 +4827,12 @@ def _gate_exit(code):
         # The code object is never formatted: a loaded object's __str__ must not run here.
         sys.stderr.write("{}: a non-int SystemExit code at the gate entry; exit 1\n".format(_FAULT_MARKER))
         code = 1
+    if code != 0 and (code & 0xFF) == 0:
+        # os._exit truncates its status to the low 8 bits, so this non-zero code would end the
+        # process with exit status 0, a silent pass; fail closed instead.
+        sys.stderr.write("{}: a SystemExit code outside the exit-status range at the gate entry; exit 2\n".format(
+            _FAULT_MARKER))
+        code = 2
     if code == 0:
         current = _threads.current_thread()
         deadline = time.monotonic() + _SETTLE_SECONDS
@@ -4931,6 +4937,13 @@ _FAULT_CHANNEL_CASES = (
      "threading.Thread(target=fault).start()\n", 2, True, None),
     ("unfinished-thread", "import threading\n"
      "threading.Thread(target=threading.Event().wait, daemon=True).start()\n", 2, True, None),
+    # Exit-status range: os._exit truncates its status to the low 8 bits, so a non-zero SystemExit
+    # code that is a multiple of 256 would end the child with status 0, a silent pass; the gate maps
+    # it to 2. The neighbouring codes pass through (257 reaches the parent as its low byte, 1).
+    ("exit-status-255", "raise SystemExit(255)\n", 255, False, None),
+    ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
+    ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
+    ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
 )
 
 
