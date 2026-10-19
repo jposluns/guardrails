@@ -9,7 +9,7 @@ SEMVER regex and _parse helper (the sibling-import idiom check_rule_placement.py
 
 Layer A (changelog-history append-only, buildable now). The authoritative history is the git history of
 changelog.toml itself. The baseline file is read with `git show BASE:changelog.toml`; the current file is
-read from the working tree via _gen_common.load_toml. Invariants:
+read from the working tree once, through check_release_cut.working_blob (see _HeadInputs). Invariants:
   M1 (prefix identity): the base release version list is a prefix of the head release version list, same
      version strings in the same order, with no removal, no insertion before an existing entry, and no
      rewrite of an existing entry's version. Title, date, and items of a shipped release MAY change (this
@@ -96,7 +96,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import io
 import os
-import stat
 import subprocess
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
@@ -116,11 +115,13 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml  # noqa: E402
+from _gen_common import repo_root  # noqa: E402
 from check_versions import _parse  # noqa: E402  reuse the shipped bare-SemVer parser (M3 well-formedness)
 # Reuse the release-cut declaration parser and transition evaluator (one reading of the declaration,
 # one schema): the relabel exception grants nothing without a declaration that evaluator accepts.
-from check_release_cut import evaluate_transition  # noqa: E402
+# Every working-tree input is read through that gate's own no-follow reader (see _HeadInputs).
+from check_release_cut import CannotEvaluate as _ReaderRefusal  # noqa: E402
+from check_release_cut import evaluate_transition, working_blob  # noqa: E402
 
 
 class GateError(Exception):
@@ -317,11 +318,53 @@ def _releases_from_data(data, side):
     return out
 
 
-def _load_head_releases(root):
-    try:
-        data = load_toml(root / "changelog.toml")
-    except (OSError, ValueError) as exc:
-        raise GateError("cannot read changelog.toml at HEAD: {}".format(exc))
+class _HeadInputs:
+    """The working-tree (HEAD) inputs of one run: changelog.toml, .aiqt/core/releases.toml,
+    .aiqt/core/id-history.toml and .aiqt/release-cut.toml. Each is read AT MOST ONCE, at its first
+    access, through check_release_cut.working_blob (the release-cut gate's own reader, imported, not
+    copied), and every later check parses those captured bytes, so no check re-reads a path that
+    another check already judged. That reader opens every path component relative to its parent
+    directory descriptor with O_NOFOLLOW, so a symlink at ANY component (a symlinked .aiqt or
+    .aiqt/core included) is refused; it opens the final component non-blocking and reads it only
+    when the opened descriptor is a regular file, so a FIFO, device or other non-regular file is
+    refused before any read (a socket already fails at the open, a directory when its file object
+    is made). A refused or unreadable input is GateError (exit 2) naming it; an absent one (any
+    component missing) reads as None, and each caller decides what absence means. A hard link is a
+    regular file and is read as one; the repository root itself is opened by its path, as the
+    release-cut gate opens it."""
+
+    def __init__(self, root):
+        self.root = root
+        self._raw = {}
+
+    def raw(self, rel):
+        """The exact bytes of the head input rel, or None when it is absent."""
+        if rel not in self._raw:
+            try:
+                self._raw[rel] = working_blob(self.root, rel)
+            except (OSError, _ReaderRefusal) as exc:
+                raise GateError("cannot read {} at HEAD (a symlink at any path component, a "
+                                "non-regular file, and an unreadable file are each refused): "
+                                "{}".format(rel, exc))
+        return self._raw[rel]
+
+    def toml(self, rel):
+        """The head input rel parsed from its captured bytes, or None when it is absent."""
+        raw = self.raw(rel)
+        if raw is None:
+            return None
+        try:
+            return tomllib.loads(raw.decode("utf-8"))
+        # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply
+        # nested array or inline table; a UnicodeDecodeError is a ValueError.
+        except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+            raise GateError("cannot read {} at HEAD: {}".format(rel, exc))
+
+
+def _load_head_releases(head):
+    data = head.toml("changelog.toml")
+    if data is None:
+        raise GateError("cannot read changelog.toml at HEAD: it is absent")
     return _releases_from_data(data, "head")
 
 
@@ -525,7 +568,9 @@ def _born_relabel_shape(base_data, head_data):
     relabel shape: no row, base or appended, may hold the never-released version at head), and the
     [[tombstone]] and [[successor]] sections exactly EQUAL on both sides (appending to those sections
     beside a relabel is refused; appending NEW [[born]] rows beyond the base rows at any OTHER version
-    stays deliberately allowed, exactly as in an ordinary append-only transition).
+    stays deliberately allowed, exactly as in an ordinary append-only transition). Id uniqueness is
+    not judged here: an appended row that repeats an existing id passes this shape, as it passes an
+    ordinary append; check_clauses.load_register refuses a duplicate [[born]] id (exit 2).
     Returns (old_version, new_version, relabelled_row_count) when that whole-register shape holds with
     at least one base row, else None. Pure row logic over already-parsed data; whether the relabel is
     PERMITTED is _relabel_window_reason's question."""
@@ -559,20 +604,24 @@ def _born_relabel_shape(base_data, head_data):
     return old_version, new_versions.pop(), len(base_rows)
 
 
-def _relabel_window_reason(root, base_commit, head_releases, old_version, new_version):
+def _relabel_window_reason(root, base_commit, head_releases, old_version, new_version, head=None):
     """Every file-sourced condition of the one-time born-release relabel (see layer_d), checked from
     the single-source files only, never from git tags (guard-input-soundness, as _base_is_genesis).
     Returns None when every condition holds, else a short reason naming the FIRST condition that reads
     false (the caller then keeps the plain append-only findings). Raises GateError (exit 2) when a
     condition CANNOT be read: an unparseable or schema-invalid release-order record on either side, an
-    unparseable base changelog, an unreadable head changelog or declaration file, or a declaration or
-    changelog that check_release_cut's parsers refuse; an unreadable condition is never a pass. The
-    release-cut declaration is REQUIRED here, not optional: the relabel is granted only when
+    unparseable base changelog, a head changelog, release-order record or declaration that the
+    no-follow reader refuses or cannot read (see _HeadInputs), or a declaration or changelog that
+    check_release_cut's parsers refuse; an unreadable condition is never a pass. head is the run's
+    _HeadInputs, so each head input is read once per run; a direct call without it reads through a
+    fresh one. The release-cut declaration is REQUIRED here, not optional: the relabel is granted only when
     check_release_cut.evaluate_transition accepts this exact base-to-head changelog transition under
     the present declaration (full five-field schema, operation, previous-version, next-version and the
     digest of the complete base changelog blob all matching, exactly one appended release, and the
     declaration absent or different at base, so a stale declaration counts for nothing). The
     declaration is a required matching input, not proof of authorization or review."""
+    if head is None:
+        head = _HeadInputs(root)
     # The pre-first-release window: the release-order record exists on BOTH sides with ZERO rows (the
     # relabel self-expires once releases.toml records a row; rows are append-only under layer_c, so
     # the window can never reopen). An ABSENT record cannot confirm zero shipped and refuses the
@@ -587,12 +636,9 @@ def _relabel_window_reason(root, base_commit, head_releases, old_version, new_ve
         raise GateError("baseline {} does not parse: {}".format(RELEASES_REL, exc))
     if _validated_ledger_rows(base_ledger, "baseline " + RELEASES_REL):
         return "the base {} already records a release row".format(RELEASES_REL)
-    try:
-        head_ledger = load_toml(root / RELEASES_REL)
-    except FileNotFoundError:
+    head_ledger = head.toml(RELEASES_REL)
+    if head_ledger is None:
         return "{} is absent at HEAD, so zero shipped releases cannot be confirmed".format(RELEASES_REL)
-    except (OSError, ValueError) as exc:
-        raise GateError("cannot read {} at HEAD: {}".format(RELEASES_REL, exc))
     if _validated_ledger_rows(head_ledger, RELEASES_REL):
         return "the head {} already records a release row".format(RELEASES_REL)
     # The old version must be well-formed and NEVER RELEASED: recorded as no base changelog release
@@ -640,45 +686,26 @@ def _relabel_window_reason(root, base_commit, head_releases, old_version, new_ve
     # The cut must be DECLARED, and the declaration must match this exact base-to-head changelog
     # transition. The declaration is read and judged ONLY by check_release_cut's parser and transition
     # evaluator (no second schema here), over the exact file bytes: the base side from the comparison-
-    # base blob, the head side from a REGULAR working-tree file (a symlinked or otherwise non-regular
-    # head input is fail-closed, never followed, matching the release-cut gate's own refusal of
-    # symlinked working files). The five-field schema, the operation, the previous and next versions,
-    # the complete-base-changelog digest, the single-append shape, and the staleness rule (a
+    # base blob, the head side from the bytes _HeadInputs captured through the release-cut gate's own
+    # working-file reader (check_release_cut.working_blob): a symlink at any path component, or a
+    # final component that is not a regular file, is refused (exit 2) before any read, never
+    # followed, and the head changelog bytes judged here are the ones run() already parsed. The
+    # five-field schema, the operation, the previous and next versions, the
+    # complete-base-changelog digest, the single-append shape, and the staleness rule (a
     # declaration already present unchanged at base counts for nothing) are all the release-cut gate's
     # own rules; a matching declaration is a required input, not proof of authorization or review. An
     # ABSENT declaration refuses the relabel; an unreadable or schema-invalid input on either side is
     # fail-closed.
-    try:
-        head_cut_mode = os.lstat(root / RELEASE_CUT_REL).st_mode
-    except FileNotFoundError:
+    head_cut_bytes = head.raw(RELEASE_CUT_REL)
+    if head_cut_bytes is None:
         return ("{} is absent at HEAD; the relabel requires a release-cut declaration that "
                 "matches the cut".format(RELEASE_CUT_REL))
-    except OSError as exc:
-        raise GateError("cannot read {} at HEAD: {}".format(RELEASE_CUT_REL, exc))
-    if not stat.S_ISREG(head_cut_mode):
-        raise GateError("{} at HEAD is not a regular file; a symlink or special file is never "
-                        "followed here".format(RELEASE_CUT_REL))
-    try:
-        head_cut_bytes = (root / RELEASE_CUT_REL).read_bytes()
-    except FileNotFoundError:
-        return ("{} is absent at HEAD; the relabel requires a release-cut declaration that "
-                "matches the cut".format(RELEASE_CUT_REL))
-    except OSError as exc:
-        raise GateError("cannot read {} at HEAD: {}".format(RELEASE_CUT_REL, exc))
     base_cut_bytes = None
     if _path_in_commit(root, base_commit, RELEASE_CUT_REL):
         base_cut_bytes = _show_file_bytes(root, base_commit, RELEASE_CUT_REL)
-    try:
-        head_log_mode = os.lstat(root / "changelog.toml").st_mode
-    except OSError as exc:
-        raise GateError("cannot read changelog.toml at HEAD: {}".format(exc))
-    if not stat.S_ISREG(head_log_mode):
-        raise GateError("changelog.toml at HEAD is not a regular file; a symlink or special file "
-                        "is never followed here")
-    try:
-        head_changelog_bytes = (root / "changelog.toml").read_bytes()
-    except OSError as exc:
-        raise GateError("cannot read changelog.toml at HEAD: {}".format(exc))
+    head_changelog_bytes = head.raw("changelog.toml")
+    if head_changelog_bytes is None:
+        raise GateError("cannot read changelog.toml at HEAD: it is absent")
     code, detail = evaluate_transition(_show_file_bytes(root, base_commit, "changelog.toml"),
                                        head_changelog_bytes, base_cut_bytes, head_cut_bytes)
     if code == 2:
@@ -688,7 +715,7 @@ def _relabel_window_reason(root, base_commit, head_releases, old_version, new_ve
     return None
 
 
-def layer_d(root, base_commit, head_data, head_releases):
+def layer_d(root, base_commit, head_data, head_releases, head):
     """Id-history append-only (7.3): per section (born, tombstone, successor), base register rows are an
     exact full-row prefix of head register rows. NOT APPLICABLE while HEAD has no baseline, the register
     is absent at HEAD, or the file is absent at base. head_data is the parsed HEAD id-history.toml, or
@@ -716,9 +743,11 @@ def layer_d(root, base_commit, head_data, head_releases):
     input, not proof of authorization or review). A condition that cannot be read is
     fail-closed (GateError, exit 2); one that reads false leaves the plain append-only findings
     (exit 1) exactly as without the exception. head_releases is the validated HEAD changelog release
-    list run() already loaded. The exception ends permanently once releases.toml records a row: the
-    window keys on ledger rows, which are themselves append-only under layer_c; a recorded changelog
-    tag does not CLOSE the window (only a ledger row does), it is one of the window's preconditions."""
+    list run() already loaded, and head is the run's _HeadInputs, through which the relabel conditions
+    reuse the head bytes already read and read the declaration. The exception ends permanently once
+    releases.toml records a row: the window keys on ledger rows, which are themselves append-only
+    under layer_c; a recorded changelog tag does not CLOSE the window (only a ledger row does), it is
+    one of the window's preconditions."""
     if head_data is None:
         print("id-history-append-only: NOT APPLICABLE ({} is absent at HEAD)".format(IDHISTORY_REL))
         return []
@@ -745,7 +774,7 @@ def layer_d(root, base_commit, head_data, head_releases):
         if relabel is not None:
             old_version, new_version, changed = relabel
             if _relabel_window_reason(root, base_commit, head_releases,
-                                      old_version, new_version) is None:
+                                      old_version, new_version, head) is None:
                 print("id-history-append-only: PASS (one-time pre-release born-release relabel "
                       "{} -> {} on {} [[born]] row(s), every other row and section prefix-preserved; "
                       "this exception ends once {} records a release row)".format(
@@ -756,28 +785,26 @@ def layer_d(root, base_commit, head_data, head_releases):
     return findings
 
 
-def _load_head_toml(root, rel):
-    """Parse a HEAD record for the prefix layers. Returns None when the file is absent at HEAD (the
-    prefix layer then reports NOT APPLICABLE; the file's REQUIRED presence is owned by check_manifest,
-    which fails closed exit 2 on a deleted manifest-covered register, VC-4 QA #10 verified). A
-    present-but-unreadable or unparseable file is fail-closed here too (GateError, exit 2)."""
-    try:
-        return load_toml(root / rel)
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as exc:
-        raise GateError("cannot read {} at HEAD: {}".format(rel, exc))
+def _load_head_toml(head, rel):
+    """Parse a HEAD record for the prefix layers from the run's _HeadInputs. Returns None when the
+    file is absent at HEAD (the prefix layer then reports NOT APPLICABLE; the file's REQUIRED presence
+    is owned by check_manifest, which fails closed exit 2 on a deleted manifest-covered register, VC-4
+    QA #10 verified). A present file the no-follow reader refuses, an unreadable one, or an
+    unparseable one is fail-closed here too (GateError, exit 2)."""
+    return head.toml(rel)
 
 
 def run(root, base):
     """Run every layer against `root`, resolving the baseline from `base` (None means the default
-    merge-base). Returns the exit code 0/1/2."""
+    merge-base). Returns the exit code 0/1/2. Every head input is read once, through one _HeadInputs."""
     try:
-        head_releases = _load_head_releases(root)
+        head = _HeadInputs(root)
+        head_releases = _load_head_releases(head)
         findings = layer_a(root, base, head_releases) + layer_b(root, head_releases)
         base_commit = _resolve_base_commit(root, base)
-        findings += layer_c(root, base_commit, _load_head_toml(root, RELEASES_REL))
-        findings += layer_d(root, base_commit, _load_head_toml(root, IDHISTORY_REL), head_releases)
+        findings += layer_c(root, base_commit, _load_head_toml(head, RELEASES_REL))
+        findings += layer_d(root, base_commit, _load_head_toml(head, IDHISTORY_REL), head_releases,
+                            head)
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -819,6 +846,15 @@ def _run_capture(root, base):
     with redirect_stdout(out), redirect_stderr(io.StringIO()):
         rc = run(root, base)
     return rc, out.getvalue()
+
+
+def _run_streams(root, base):
+    """As _run_capture, but returns (exit_code, stdout_text, stderr_text) so a case can assert which
+    input a fail-closed refusal names."""
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = run(root, base)
+    return rc, out.getvalue(), err.getvalue()
 
 
 def _not_run(failures, case, cause):
@@ -1029,7 +1065,8 @@ class _SigchldIgnoredError(RuntimeError):
 
 def _run_bounded_child(args, env, timeout=_CHILD_TIMEOUT, ready_path=None):
     """The one bounded launcher every fresh Python VECTOR-ENTRY self-test child goes
-    through. That scope is deliberately narrower than every child process of this tool: the
+    through; the git-level FIFO case (R35) also runs its gate-run children through it, for the
+    same bounds. That scope is deliberately narrower than every child process of this tool: the
     parent self-test's direct git launches (_default_git_probe; the fixture repositories'
     git init/config/add/commit/tag/rev-parse calls; and the gate's own _git launches,
     rev-parse, cat-file, merge-base, ls-tree and show, which the live run and every
@@ -3477,6 +3514,139 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
                     failures.append("git case R33{}: a symlinked head {} expected fail-closed exit 2 "
                                     "(a non-regular head file is never followed)".format(
                                         label33, rel33))
+
+            # R34 a symlink at ANY path component of a head input is refused, not only at the final
+            # one: a symlinked .aiqt parent directory (a), release-order record (b) or id-history
+            # register (c) is fail-closed (exit 2) naming the input whose read was refused (for the
+            # parent, the first input read under it, the release-order record). Each case first runs
+            # its regular-file control in the same repository (exit 0 with the relabel PASS line),
+            # then moves the path outside the repository and links it back, so the link points at
+            # exactly the bytes the control accepted. A host where symlinks cannot be created records
+            # a NAMED NOT RUN failure.
+            for label34, rel34, named34 in (("a", ".aiqt", RELEASES_REL),
+                                            ("b", RELEASES_REL, RELEASES_REL),
+                                            ("c", IDHISTORY_REL, IDHISTORY_REL)):
+                rr34 = _relabel_repo("relabel-component-symlink-" + label34)
+                _write(rr34, head_log)
+                _write_register(rr34, reg_relabelled)
+                _write_cut(rr34, _cut_text())
+                rc34, out34, _err34 = _run_streams(rr34, "HEAD")
+                if rc34 != 0 or "relabel 1.1.0 -> 1.1.1 on 2 [[born]] row(s)" not in out34:
+                    failures.append("git case R34{} control: the relabel with a regular {} expected "
+                                    "exit 0 and the relabel PASS line (got exit {})".format(
+                                        label34, rel34, rc34))
+                victim34 = rr34 / rel34
+                target34 = base_tmp / ("relabel-component-target-" + label34)
+                if victim34.is_dir():
+                    shutil.copytree(victim34, target34, symlinks=True)
+                    shutil.rmtree(victim34)
+                else:
+                    target34.write_bytes(victim34.read_bytes())
+                    victim34.unlink()
+                try:
+                    victim34.symlink_to(target34, target_is_directory=target34.is_dir())
+                except OSError as exc:
+                    _not_run(failures, "git case R34{}".format(label34),
+                             "cannot create a symlink here ({})".format(exc))
+                    continue
+                rc34, _out34, err34 = _run_streams(rr34, "HEAD")
+                if rc34 != 2 or "cannot read {} at HEAD".format(named34) not in err34:
+                    failures.append("git case R34{}: a symlinked head {} expected fail-closed exit 2 "
+                                    "naming {} (a symlink at any path component is never followed; "
+                                    "got exit {}, stderr {!r})".format(
+                                        label34, rel34, named34, rc34, err34))
+
+            # R35 a FIFO head changelog is refused before any read: the reader opens it non-blocking
+            # and refuses it by the opened descriptor's type, so the run neither blocks on the open
+            # nor consumes the pipe. Each variant runs the gate in a child through the bounded
+            # launcher with a 30-second deadline (a reader that opens the FIFO blocking, or reads it,
+            # hangs there, and the deadline turns that into this case's named failure): (a) no
+            # writer, and (b) the child holds the FIFO open for writing with the bytes of the head
+            # changelog the control accepts, which must still be unread in the pipe when the run
+            # returns. The regular-file control runs first, in process; a host where a FIFO cannot
+            # be created records a NAMED NOT RUN failure.
+            rr35 = _relabel_repo("relabel-fifo")
+            _write(rr35, head_log)
+            _write_register(rr35, reg_relabelled)
+            _write_cut(rr35, _cut_text())
+            if _run_quiet(rr35, "HEAD") != 0:
+                failures.append("git case R35 control: the relabel with a regular head changelog "
+                                "expected exit 0")
+            (rr35 / "changelog.toml").unlink()
+            try:
+                os.mkfifo(rr35 / "changelog.toml")
+            except (OSError, AttributeError) as exc:
+                _not_run(failures, "git case R35", "cannot create a FIFO here ({})".format(exc))
+            else:
+                fifo_child = (
+                    "import io, os, sys\n"
+                    "from contextlib import redirect_stderr, redirect_stdout\n"
+                    "sys.path.insert(0, os.path.dirname(sys.argv[1]))\n"
+                    "import check_version_monotonicity as gate\n"
+                    "payload = sys.argv[3].encode('utf-8')\n"
+                    "held = None\n"
+                    "if payload:\n"
+                    "    held = os.open(os.path.join(sys.argv[2], 'changelog.toml'),\n"
+                    "                   os.O_RDWR | os.O_NONBLOCK)\n"
+                    "try:\n"
+                    "    if held is not None:\n"
+                    "        os.write(held, payload)\n"
+                    "    err = io.StringIO()\n"
+                    "    with redirect_stdout(io.StringIO()), redirect_stderr(err):\n"
+                    "        rc = gate.run(gate.Path(sys.argv[2]), 'HEAD')\n"
+                    "    left = payload\n"
+                    "    if held is not None:\n"
+                    "        try:\n"
+                    "            left = os.read(held, len(payload) + 1)\n"
+                    "        except BlockingIOError:\n"
+                    "            left = b''\n"
+                    "finally:\n"
+                    "    if held is not None:\n"
+                    "        os.close(held)\n"
+                    "text = err.getvalue()\n"
+                    "named = ('cannot read changelog.toml at HEAD' in text\n"
+                    "         and 'not a regular file' in text)\n"
+                    "print('FIFO-CASE rc={} named={} unread={}'.format(rc, named, left == payload))\n")
+                want35 = "FIFO-CASE rc=2 named=True unread=True"
+                for label35, payload35 in (("a", ""), ("b", head_log)):
+                    outcome = _run_bounded_child(["-c", fifo_child, str(Path(__file__).resolve()),
+                                                  str(rr35), payload35], os.environ, timeout=30)
+                    if (outcome.timed_out or outcome.survivors or outcome.returncode != 0
+                            or _exact_line_count(outcome.stdout, want35) != 1):
+                        failures.append("git case R35{}: a FIFO head changelog expected a prompt "
+                                        "fail-closed exit 2 naming changelog.toml as not a regular "
+                                        "file, with any written bytes left unread (want {!r}; got "
+                                        "exit {}, timed out {}, survivors {}, stdout {!r})".format(
+                                            label35, want35, outcome.returncode, outcome.timed_out,
+                                            outcome.survivors, outcome.stdout))
+
+            # R36 each head input is read ONCE per run, at its first access, through the shared
+            # no-follow reader: a spy on this module's working_blob binding records the reads of one
+            # in-window relabel run (which reaches all four inputs), and they must be exactly the
+            # four inputs, once each, in first-access order. A loader that bypasses the reader, or a
+            # later check that reads a path again instead of parsing the captured bytes, changes the
+            # record.
+            rr36 = _relabel_repo("relabel-read-once")
+            _write(rr36, head_log)
+            _write_register(rr36, reg_relabelled)
+            _write_cut(rr36, _cut_text())
+            real_reader36 = globals().get("working_blob")
+            reads36 = []
+
+            def _recording_reader(root, rel):
+                reads36.append(rel)
+                return real_reader36(root, rel)
+
+            globals()["working_blob"] = _recording_reader
+            try:
+                rc36 = _run_quiet(rr36, "HEAD")
+            finally:
+                globals()["working_blob"] = real_reader36
+            want36 = ["changelog.toml", RELEASES_REL, IDHISTORY_REL, RELEASE_CUT_REL]
+            if rc36 != 0 or reads36 != want36:
+                failures.append("git case R36: an in-window relabel run expected exit 0 with each head "
+                                "input read once through the shared reader, in the order {!r} (got "
+                                "exit {}, reads {!r})".format(want36, rc36, reads36))
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
