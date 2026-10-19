@@ -2559,16 +2559,20 @@ expected-check-ids = [
   "tracker/shape-qa-round-caught",
   "tracker/shape-reviewer-source-caught",
   "tracker/negative-controls-unflagged",
+  "tracker/same-line-multiplicity-counted",
   # ---------- path-only exemptions, scope membership, no line marker ----------
   "tracker/frozen-allowlist-sha-bound",
   "tracker/history-allowlist-path-bound",
   "tracker/scope-membership-decides",
   "tracker/internal-allow-not-honoured",
-  # ---------- the closed baseline schema ----------
+  # ---------- the closed baseline schema and the closed manifest read ----------
   "tracker/baseline-malformed-refused",
   "tracker/baseline-duplicate-refused",
   "tracker/baseline-unknown-key-refused",
   "tracker/baseline-nonshipped-path-refused",
+  "tracker/baseline-noncanonical-refused",
+  "tracker/manifest-missing-sources-refused",
+  "tracker/manifest-malformed-refused",
   # ---------- mutation flips (each guard load-bearing) ----------
   "tracker/mutation-pattern-fix-id",
   "tracker/mutation-pattern-review-round",
@@ -2589,4 +2593,8 @@ expected-check-ids = [
   "tracker/wired-absent-source-exit-2",
   "tracker/wired-non-utf8-source-exit-2",
   "tracker/wired-missing-manifest-exit-2",
+  # ---------- suffix-independent path validation and byte-bound exemption ----------
+  "tracker/excluded-suffix-path-still-validated",
+  "tracker/unfamiliar-suffix-decode-decides",
+  "tracker/frozen-allowlist-byte-bound",
 ]

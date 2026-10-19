@@ -50,22 +50,33 @@ shape (counts and paths only, never label text); a path absent from the baseline
 its baseline is a finding naming the path, the shape and each matching line (exit 1: no new label can
 enter while the existing ones are removed by later per-area changes), and a count BELOW its baseline is a
 finding telling the maintainer to lower the baseline to the new count, so the baseline only ever tightens
-and stays exact. `--write-baseline` prints the canonical baseline from a real scan (the delivered file is
-that exact output). This layer honours no internal-allow marker and no skip-by-name list (the gate's own
+and stays exact. `--write-baseline` prints the canonical baseline from a real scan; the delivered file is
+that exact output, and the gate ENFORCES the exactness: a baseline that is not the byte-exact canonical
+render of its own entries is refused, so no TOML comment, alternate integer spelling, reordering or other
+text the parser would drop can ride in the one file this layer skips by name. This layer honours no
+internal-allow marker and no other skip-by-name (the gate's own
 source is scanned like any other shipped file; its self-test vectors are assembled at run time); the
-path-only allowlists TRACKER_LABEL_FROZEN (relpath plus sha256 pairs, exempt only while the bytes still
-hash to the record) and TRACKER_LABEL_HISTORY both ship EMPTY. FAIL CLOSED (exit 2): a missing or
-unparseable manifest, a listed path that is absent or not a regular file, a text-suffix shipped file that
-is not valid UTF-8, and a malformed, duplicate, unknown or non-shipped baseline entry. A shipped file
-whose suffix is outside the leak gate's text-suffix list (the committed .zip archives) is skipped, the
-role rule's existing skip, and so is the baseline file itself (its shape-key-next-to-count lines would
-match the review-round pattern by construction; its closed schema, which admits only shipped paths and
-integer counts, is what holds its content instead). DISCLOSED LIMITS of this layer: a label moved between shapes or between lines
+path-only allowlists TRACKER_LABEL_FROZEN (relpath plus sha256 pairs, exempt only while the file's RAW
+BYTES still hash to the record) and TRACKER_LABEL_HISTORY both ship EMPTY. FAIL CLOSED (exit 2): a
+missing or unparseable manifest, a manifest with no [[sources]] array, a listed path that is absent or
+not a regular file (checked before any suffix or decode decision, so an excluded suffix never hides a
+missing path), a text-suffix shipped file that
+is not valid UTF-8, and a malformed, non-canonical, duplicate, unknown or non-shipped baseline entry.
+Every present shipped file is read; one whose suffix is outside the leak gate's text-suffix list is
+skipped only when its bytes do not decode as UTF-8 (the committed .zip archives), the role rule's
+existing decode-then-skip rule, so a decodable file is scanned whatever its suffix; the one by-name skip
+is the baseline file itself (its shape-key-next-to-count lines would
+match the review-round pattern by construction; its closed schema plus the canonical-render byte check
+above is what holds its content instead). DISCLOSED LIMITS of this layer: a label moved between shapes or between lines
 within the same per-file count is not caught; the baseline is trusted input like any configuration file;
 a label shape outside the four patterns (a bare one-letter revision token, a lower-case fix word with a
-number, a model id used as a source, a split or encoded label) is not matched; prose that legitimately
-puts a review-round word next to a digit, or a reviewer family name next to a severity word, is a false
-positive this shape layer cannot avoid; and archive contents are not unpacked.
+number, a model id used as a source, a family name for the product it names outside the parenthesized
+family-then-version-digit form below, a split or encoded label) is not matched; prose that legitimately
+puts a review-round word next to a digit (any letter case), an upper-case FIX word next to a number, a QA
+word glued to a number, a reviewer family name next to a severity word, or a parenthesized family name
+directly before a version digit (ordinary product-version prose included) is a false
+positive this shape layer cannot avoid, absorbed by its path's baseline entry rather than exempted by
+line; and archive contents are not unpacked.
 
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
@@ -234,9 +245,10 @@ def _tracker_hits(text, labels=None):
 
 def _shipped_tracker_set(root, tracked):
     """The sorted shipped set this layer scans: every [[sources]] path of the working-tree manifest plus
-    every tracked relpath under .github/ or opf/. A missing or unparseable manifest, or a malformed
-    sources entry, raises OSError to the fail-closed caller (exit 2); the manifest is read at run time,
-    never baked in, so the scope follows the release inventory."""
+    every tracked relpath under .github/ or opf/. A missing or unparseable manifest, a manifest with no
+    [[sources]] array at all (a misspelled table name must never read as an empty inventory), or a
+    malformed sources entry, raises OSError to the fail-closed caller (exit 2); the manifest is read at
+    run time, never baked in, so the scope follows the release inventory."""
     manifest = _read_present_text(root / TRACKER_MANIFEST_RELPATH)
     if manifest is None:
         raise OSError("{} is missing; the shipped set cannot be read".format(TRACKER_MANIFEST_RELPATH))
@@ -246,7 +258,10 @@ def _shipped_tracker_set(root, tracked):
         # TOMLDecodeError is a ValueError; tomllib can also raise a bare ValueError (an over-long
         # integer), RecursionError (deep nesting) or MemoryError, each disposed of here fail-closed.
         raise OSError("{} cannot be parsed ({!r})".format(TRACKER_MANIFEST_RELPATH, exc))
-    sources = data.get("sources", [])
+    if "sources" not in data:
+        raise OSError("{} carries no [[sources]] array; the shipped set cannot be read".format(
+            TRACKER_MANIFEST_RELPATH))
+    sources = data["sources"]
     if not isinstance(sources, list):
         raise OSError("{}: [[sources]] is not an array".format(TRACKER_MANIFEST_RELPATH))
     shipped = set()
@@ -265,15 +280,23 @@ def load_tracker_baseline(root, shipped):
     """The ratchet baseline as {relpath: {shape key: count}}. An ABSENT baseline is an empty one (every
     path then has zero); a PRESENT baseline is validated CLOSED: only format-version = 1 and [[path]]
     entries, each entry a path plus at least one shape-count key from TRACKER_SHAPE_KEYS with an integer
-    count of one or more. A malformed file, an unknown key, a duplicate path, or an entry for a path
-    outside the shipped set raises OSError to the fail-closed caller (exit 2), never a silent default."""
-    content = _read_present_text(root / TRACKER_BASELINE_RELPATH)
-    if content is None:
+    count of one or more, and the whole file must be the BYTE-EXACT canonical render of those entries
+    (render_tracker_baseline over its own counts, the exact --write-baseline output), because the parser
+    drops a TOML comment and normalizes an alternate integer spelling, so the closed schema alone can
+    never see text riding in the one shipped file this layer skips by name. A malformed file, an unknown
+    key, a duplicate path, an entry for a path outside the shipped set, or a non-canonical byte raises
+    OSError to the fail-closed caller (exit 2), never a silent default."""
+    raw = _read_present_bytes(root / TRACKER_BASELINE_RELPATH)
+    if raw is None:
         return {}
 
     def refuse(reason):
         raise OSError("{}: {}".format(TRACKER_BASELINE_RELPATH, reason))
 
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        refuse("not valid UTF-8 ({})".format(exc))
     try:
         data = tomllib.loads(content)
     except (ValueError, RecursionError, MemoryError) as exc:
@@ -283,7 +306,10 @@ def load_tracker_baseline(root, shipped):
     unknown = set(data) - {"format-version", "path"}
     if unknown:
         refuse("unknown top-level key {!r}".format(sorted(unknown)[0]))
-    if data.get("format-version") != 1:
+    version = data.get("format-version")
+    # The TYPE is pinned as well as the value: bool is an int subclass and a TOML float compares equal
+    # to its integer value, so true and 1.0 would otherwise both read as the integer 1.
+    if type(version) is not int or version != 1:
         refuse("format-version must be the integer 1")
     entries = data.get("path", [])
     if not isinstance(entries, list):
@@ -312,35 +338,47 @@ def load_tracker_baseline(root, shipped):
         if not row:
             refuse("entry {} carries no shape count; drop the entry".format(rel))
         baseline[rel] = row
+    canonical = render_tracker_baseline(
+        {rel: {key: range(count) for key, count in row.items()} for rel, row in baseline.items()})
+    if content != canonical:
+        refuse("not the byte-exact canonical render of its own entries; regenerate it with "
+               "--write-baseline (a comment, an alternate integer spelling or a reordering could "
+               "otherwise carry text this layer never scans)")
     return baseline
 
 
 def _collect_tracker_counts(root, tracked, frozen, history):
-    """{relpath: per-shape line lists} over the shipped set. A shipped file whose present suffix is
-    outside TEXT_SUFFIXES (the committed .zip archives) is skipped; a frozen-allowlisted path whose
-    bytes still hash to its recorded sha256, and a history-allowlisted path, are skipped; everything
-    else is read as UTF-8. An absent shipped path raises OSError (fail closed, exit 2); a non-UTF-8
-    text-suffix shipped file raises UnicodeDecodeError to the same fail-closed caller."""
+    """{relpath: per-shape line lists} over the shipped set. Every listed path must be PRESENT and a
+    REGULAR file before any suffix or decode decision: an absent or non-regular shipped path raises
+    OSError (fail closed, exit 2) whatever its suffix. A present file is read as raw bytes and decoded
+    as UTF-8; one whose suffix is outside TEXT_SUFFIXES is skipped only when its bytes do not decode
+    (the committed .zip archives), the role rule's existing decode-then-skip rule, so a decodable file
+    is scanned whatever its suffix, while a non-UTF-8 text-suffix shipped file raises to the same
+    fail-closed caller. A frozen-allowlisted path whose RAW on-disk bytes still hash to its recorded
+    sha256, and a history-allowlisted path, are skipped."""
     import hashlib
     frozen_map = dict(frozen)
     counts = {}
     for rel in _shipped_tracker_set(root, tracked):
-        suffix = Path(rel).suffix
-        if suffix and suffix not in TEXT_SUFFIXES:
-            continue
         if rel == TRACKER_BASELINE_RELPATH:
             # The baseline itself is a shipped file whose shape-key-next-to-count lines would match the
             # review-round pattern by construction, so scanning it can never settle. Its content is held
-            # instead by load_tracker_baseline's CLOSED schema (shipped paths and integer counts only,
-            # so no label text can ride in it), the one by-name skip this layer carries.
+            # instead by load_tracker_baseline's CLOSED schema plus its byte-exact canonical-render
+            # check (shipped paths and integer counts only, rendered exactly as --write-baseline prints
+            # them, so no comment or other label-bearing text can ride in it), the one by-name skip
+            # this layer carries.
             continue
-        try:
-            text = _read_present_text(root / rel)
-        except UnicodeDecodeError as exc:
-            raise OSError("shipped path {} is not valid UTF-8 ({}); fail closed".format(rel, exc))
-        if text is None:
+        raw = _read_present_bytes(root / rel)
+        if raw is None:
             raise OSError("shipped path {} is absent from the working tree; fail closed".format(rel))
-        if rel in frozen_map and hashlib.sha256(text.encode("utf-8")).hexdigest() == frozen_map[rel]:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            suffix = Path(rel).suffix
+            if suffix and suffix not in TEXT_SUFFIXES:
+                continue
+            raise OSError("shipped path {} is not valid UTF-8 ({}); fail closed".format(rel, exc))
+        if rel in frozen_map and hashlib.sha256(raw).hexdigest() == frozen_map[rel]:
             continue
         if rel in history:
             continue
@@ -445,6 +483,24 @@ def _read_present_text(path):
     if not stat.S_ISREG(st.st_mode):
         raise OSError("{} is present but not a regular file; fail closed".format(path))
     return path.read_text(encoding="utf-8")
+
+
+def _read_present_bytes(path):
+    """_read_present_text's RAW-BYTE sibling for the tracker-label layer: the same presence
+    classification (S_ISREG before any open so a FIFO never blocks, a broken symlink re-raised
+    fail-closed, a genuinely absent path None), returning the file's bytes undecoded. The tracker
+    layer hashes and decodes these same bytes itself: read_text's universal-newline translation would
+    otherwise hash a normalized form that never existed on disk, letting a digest of that form exempt
+    a file whose on-disk bytes differ."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        if path.is_symlink():
+            raise
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        raise OSError("{} is present but not a regular file; fail closed".format(path))
+    return path.read_bytes()
 
 
 def load_hashes(root):
@@ -1003,10 +1059,12 @@ def _self_test(caller_env=None):
         repo = tmp / "tracked-repo"
         repo.mkdir()
         # The real gate now also runs the shipped tracker-label layer, which fails closed without a
-        # shipped manifest; this fixture holds an empty one (no [[sources]]), so the role and
-        # decision-id expectations below stay the deciding layers.
+        # shipped manifest; this fixture holds an explicitly empty inventory (a bare sources = [] array,
+        # since a manifest with no sources array at all is refused), so the role and decision-id
+        # expectations below stay the deciding layers.
         (repo / ".aiqt").mkdir()
-        (repo / ".aiqt" / "manifest.toml").write_text("format-version = 1\n", encoding="utf-8")
+        (repo / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
+                                                      encoding="utf-8")
         def gate(at):
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -1105,12 +1163,20 @@ def _self_test(caller_env=None):
             if rc != 2 or "bad.md: tracked file is absent" not in report:
                 failures.append("a tracked file absent from the working tree expected cannot-evaluate (exit 2), "
                                 "got rc={} {!r}".format(rc, report))
-        # Outside a git repository the tracked set cannot be listed: the gate fails closed (exit 2).
+        # Outside a git repository the tracked set cannot be listed: the gate fails closed (exit 2)
+        # NAMING the git listing. The fixture holds a valid empty manifest so this exit 2 can only come
+        # from the listing: without one, a listing failure silently read as an empty tracked set (which
+        # must stay a fail-closed error) could hide behind the missing manifest's own fail-closed exit,
+        # and this assertion would still see a 2.
         norepo = tmp / "not-a-repo"
         norepo.mkdir()
+        (norepo / ".aiqt").mkdir()
+        (norepo / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
+                                                        encoding="utf-8")
         rc, report = gate(norepo)
-        if rc != 2:
-            failures.append("a root that is not a git repository expected exit 2, got rc={} {!r}".format(rc, report))
+        if rc != 2 or "git ls-files" not in report:
+            failures.append("a root that is not a git repository expected exit 2 naming the git listing, "
+                            "got rc={} {!r}".format(rc, report))
 
         # 18. DISCRIMINATING (finding-3: an unknown option is a LOUD exit 2, never a silent default path): a
         #     subprocess given a misspelled --self-testx or a stray --bogus exits 2, never 0 by silently
@@ -1494,10 +1560,12 @@ def _self_test(caller_env=None):
             try:
                 (wired / "tools").mkdir()
                 (wired / "docs").mkdir()
-                # An empty shipped manifest keeps the tracker-label layer from failing closed here, so
-                # the planted decision id alone decides each probe's result (as in the fixture above).
+                # An explicitly empty shipped inventory (a manifest with no sources array at all is
+                # refused) keeps the tracker-label layer from failing closed here, so the planted
+                # decision id alone decides each probe's result (as in the fixture above).
                 (wired / ".aiqt").mkdir()
-                (wired / ".aiqt" / "manifest.toml").write_text("format-version = 1\n", encoding="utf-8")
+                (wired / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
+                                                               encoding="utf-8")
                 for name in ("_walk.py", "check_internal_names.py", "check_leaks.py"):
                     shutil.copy(str(Path(toolsdir) / name), str(wired / "tools" / name))
                 note = wired / "docs" / "note.md"
@@ -1722,6 +1790,16 @@ def _self_test(caller_env=None):
         wrongly_flagged = [v for v in negatives
                            if any(_tracker_hits("a {} b\n".format(v))[key] for key in TRACKER_SHAPE_KEYS)]
         check("tracker/negative-controls-unflagged", not wrongly_flagged, wrongly_flagged)
+        # One line carrying TWO matches of one shape counts BOTH (counts are match counts, never
+        # deduplicated per line), and the ratchet finding reports that line once: a count that
+        # collapsed per-line duplicates would let a second label ride an already-counted line.
+        twice = "x {} y {} z\n".format("QA" + "26", "QA" + "31")
+        twice_hits = _tracker_hits(twice)
+        twice_report = _tracker_compare({"docs/twice.md": twice_hits}, {})
+        check("tracker/same-line-multiplicity-counted",
+              twice_hits["qa-round"] == [1, 1] and len(twice_report) == 1
+              and "qa-round count 2 exceeds its ratchet baseline 0" in twice_report[0]
+              and twice_report[0].endswith("lines 1)"), (twice_hits, twice_report))
 
         # 28. DISCRIMINATING (path-only allowlists, scope membership, no line marker, and the closed
         #     baseline schema), in process over a fixture root; the tracked argument stands in for the
@@ -1753,14 +1831,20 @@ def _self_test(caller_env=None):
             outside = scan_shipped_tracker_labels(ratch, ["docs/c.md"], history=exempt_pair)
             (ratch / ".github").mkdir()
             (ratch / ".github" / "note.md").write_text("x {} y\n".format(qa_label), encoding="utf-8")
-            tracked_in = scan_shipped_tracker_labels(ratch, ["docs/c.md", ".github/note.md"],
-                                                     history=exempt_pair)
+            (ratch / "opf").mkdir()
+            (ratch / "opf" / "util.py").write_text("x {} y\n".format(qa_label), encoding="utf-8")
+            tracked_in = scan_shipped_tracker_labels(ratch, ["docs/c.md", ".github/note.md",
+                                                             "opf/util.py"], history=exempt_pair)
             (ratch / ".aiqt" / "manifest.toml").write_text(
                 man_two + '\n[[sources]]\npath = "docs/c.md"\n', encoding="utf-8")
             listed = scan_shipped_tracker_labels(ratch, [], history=exempt_pair)
+            # Both supplemental tracked branches decide membership: a tracked file under .github/ AND
+            # one under opf/ join the shipped set while a tracked file outside both stays out, so
+            # dropping either branch turns this red.
             check("tracker/scope-membership-decides",
                   not outside and not any("docs/c.md" in f for f in tracked_in)
                   and any(".github/note.md" in f for f in tracked_in)
+                  and any("opf/util.py" in f for f in tracked_in)
                   and any("docs/c.md" in f for f in listed), (outside, tracked_in, listed))
             (ratch / "docs" / "c.md").write_text("{} kept on purpose  # internal-allow\n".format(qa_label),
                                                  encoding="utf-8")
@@ -1784,6 +1868,10 @@ def _self_test(caller_env=None):
             accepted = [bad for bad in (
                 'format-version = 1\n\n[[path]]\npath = 3\n',
                 'format-version = 2\n',
+                # The version's TYPE is pinned too: a boolean and a float each compare EQUAL to the
+                # integer 1 in Python, so either would otherwise slip the equality test.
+                'format-version = true\n',
+                'format-version = 1.0\n',
                 'zz = 3\nformat-version = 1\n',
                 entry_a + "{} = 0\n".format(qkey),
                 entry_a + "{} = -2\n".format(qkey),
@@ -1802,6 +1890,47 @@ def _self_test(caller_env=None):
                                  + "{} = 1\n".format(qkey))
             check("tracker/baseline-nonshipped-path-refused",
                   nonshipped is not None and "not a shipped path" in nonshipped, nonshipped)
+            # The file must be the BYTE-EXACT canonical render of its own entries (the --write-baseline
+            # output): a TOML comment is dropped by the parser, so the closed schema alone never sees
+            # it, and an alternate integer spelling or a missing header is equally parser-invisible;
+            # each must be refused while the exact canonical text stays accepted.
+            header_render = render_tracker_baseline({})
+            entry_render = render_tracker_baseline({"docs/a.md": {qkey: [1]}})
+            comment_line = "# " + "QA" + "26 riding in a comment\n"
+            noncanonical = [bad for bad in (
+                header_render + "\n" + comment_line,
+                entry_render.replace("{} = 1".format(qkey), "{} = 0x1".format(qkey)),
+                entry_render.replace("{} = 1".format(qkey), "{} = +1".format(qkey)),
+                'format-version = 1\n',
+                entry_render + "\n",
+            ) if refused(bad) is None]
+            canonical_ok = refused(entry_render)
+            check("tracker/baseline-noncanonical-refused",
+                  not noncanonical and canonical_ok is None, (noncanonical, canonical_ok))
+            # A manifest whose [[sources]] array is absent entirely (a misspelled table name, say) is
+            # refused, never read as an empty shipped inventory that would scan nothing at exit 0.
+            base_path.unlink()
+            (ratch / ".aiqt" / "manifest.toml").write_text(
+                'format-version = 1\n\n[[source]]\npath = "docs/a.md"\n', encoding="utf-8")
+            try:
+                scan_shipped_tracker_labels(ratch, [], history=exempt_pair)
+                no_sources = None
+            except OSError as exc:
+                no_sources = str(exc)
+            check("tracker/manifest-missing-sources-refused",
+                  no_sources is not None and "sources" in no_sources, no_sources)
+            # An unparseable manifest and a malformed [[sources]] entry are equally refused: neither
+            # may silently shrink the shipped inventory.
+            manifest_faults = []
+            for bad_manifest in ('format-version = 1\nnot closed [\n',
+                                 'format-version = 1\n\n[[sources]]\npath = 3\n'):
+                (ratch / ".aiqt" / "manifest.toml").write_text(bad_manifest, encoding="utf-8")
+                try:
+                    scan_shipped_tracker_labels(ratch, [], history=exempt_pair)
+                    manifest_faults.append(bad_manifest)
+                except OSError:
+                    pass
+            check("tracker/manifest-malformed-refused", not manifest_faults, manifest_faults)
         finally:
             shutil.rmtree(ratch, ignore_errors=True)
 
@@ -1971,6 +2100,61 @@ def _self_test(caller_env=None):
                   rc == 2 and "manifest.toml is missing" in err, (rc, out, err))
         finally:
             shutil.rmtree(wiredlab, ignore_errors=True)
+
+        # 32. DISCRIMINATING (presence and regularity precede any suffix decision, the decode decides
+        #     an unfamiliar suffix, and the frozen allowlist binds raw bytes): a listed path that is
+        #     absent or is a directory fails closed even under a suffix outside TEXT_SUFFIXES (a suffix
+        #     skip taken before validation would read both as clean); a UTF-8 shipped file under an
+        #     unfamiliar suffix is scanned like any text file; undecodable bytes under such a suffix (a
+        #     committed archive) are skipped; undecodable bytes under a text suffix still fail closed.
+        sufx = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-suffix-"))
+        try:
+            (sufx / ".aiqt").mkdir()
+            (sufx / "docs").mkdir()
+            man_head = 'format-version = 1\n\n[[sources]]\npath = "docs/a.md"\n'
+            (sufx / "docs" / "a.md").write_text("clean\n", encoding="utf-8")
+            manifest = sufx / ".aiqt" / "manifest.toml"
+
+            def suffix_scan(extra):
+                manifest.write_text(man_head + extra, encoding="utf-8")
+                try:
+                    return None, scan_shipped_tracker_labels(sufx, [])
+                except OSError as exc:
+                    return str(exc), None
+
+            absent_err, _unused = suffix_scan('\n[[sources]]\npath = "docs/missing.zip"\n')
+            (sufx / "docs" / "d.zip").mkdir()
+            nonreg_err, _unused = suffix_scan('\n[[sources]]\npath = "docs/d.zip"\n')
+            check("tracker/excluded-suffix-path-still-validated",
+                  absent_err is not None and "docs/missing.zip is absent" in absent_err
+                  and nonreg_err is not None and "not a regular file" in nonreg_err,
+                  (absent_err, nonreg_err))
+            qa_vec = "QA" + "26"
+            (sufx / "docs" / "t.csv").write_text("x {} y\n".format(qa_vec), encoding="utf-8")
+            csv_err, csv_findings = suffix_scan('\n[[sources]]\npath = "docs/t.csv"\n')
+            (sufx / "docs" / "blob.zip").write_bytes(b"PK\x03\x04\xff\xfe not text \xff\n")
+            zip_err, zip_findings = suffix_scan('\n[[sources]]\npath = "docs/blob.zip"\n')
+            (sufx / "docs" / "bad.md").write_bytes(b"\xff\xfe undecodable \xff\n")
+            txt_err, _unused = suffix_scan('\n[[sources]]\npath = "docs/bad.md"\n')
+            check("tracker/unfamiliar-suffix-decode-decides",
+                  csv_err is None and any("docs/t.csv" in f for f in csv_findings)
+                  and zip_err is None and not zip_findings
+                  and txt_err is not None and "docs/bad.md is not valid UTF-8" in txt_err,
+                  (csv_err, csv_findings, zip_err, zip_findings, txt_err))
+            # The frozen allowlist binds a path to its RAW on-disk bytes: the digest of those bytes
+            # exempts the file, and the digest of the newline-normalized text form does not, so a hash
+            # of a form that never existed on disk can never exempt anything.
+            crlf = sufx / "docs" / "c.md"
+            crlf.write_bytes("x {} y\r\n".format(qa_vec).encode("utf-8"))
+            manifest.write_text(man_head + '\n[[sources]]\npath = "docs/c.md"\n', encoding="utf-8")
+            raw_digest = hashlib.sha256(crlf.read_bytes()).hexdigest()
+            text_digest = hashlib.sha256("x {} y\n".format(qa_vec).encode("utf-8")).hexdigest()
+            by_bytes = scan_shipped_tracker_labels(sufx, [], frozen=(("docs/c.md", raw_digest),))
+            by_text = scan_shipped_tracker_labels(sufx, [], frozen=(("docs/c.md", text_digest),))
+            check("tracker/frozen-allowlist-byte-bound",
+                  not by_bytes and any("docs/c.md" in f for f in by_text), (by_bytes, by_text))
+        finally:
+            shutil.rmtree(sufx, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2065,12 +2249,19 @@ def _self_test(caller_env=None):
           "a decision id is exempt; and in the real scan the tree-wide layer fails closed outside the scoped "
           "surfaces: an unreadable file, an unlistable directory and a FIFO each exit 2 naming the input, and a "
           "file that vanishes during the walk is a fail-closed finding naming it; and the shipped "
-          "tracker-label layer is held: each label shape is caught and each negative control stays "
-          "unflagged over run-time-assembled vectors, the path-only frozen (sha-bound) and history "
+          "tracker-label layer is held: each label shape is caught, each negative control stays "
+          "unflagged and two matches on one line both count, over run-time-assembled vectors, the "
+          "path-only frozen (bound to the sha256 of the RAW on-disk bytes) and history "
           "exemptions are honoured and bounded, a line carrying the internal-allow marker is still "
-          "flagged, the closed baseline schema refuses a malformed, duplicate, unknown or non-shipped "
-          "entry, each pattern row, the case flag, the separator bound, the severity guard and both "
-          "ratchet comparisons are load-bearing (a disabled one turns its case red), and the real gate "
+          "flagged, a tracked file under .github/ and one under opf/ each join the shipped set, the "
+          "closed baseline schema refuses a malformed, wrongly-typed-version, duplicate, unknown, "
+          "non-shipped or non-canonical "
+          "entry (the file must be the byte-exact --write-baseline render of its own entries) and a "
+          "manifest with no sources array is refused, each pattern row, the case flag, the separator "
+          "bound, the severity guard and both "
+          "ratchet comparisons are load-bearing (a disabled one turns its case red), a listed path that "
+          "is absent or non-regular fails closed before any suffix decision while the decode decides an "
+          "unfamiliar suffix, and the real gate "
           "on a fixture repository holds the per-file count at, one above and one below its baseline, "
           "round-trips --write-baseline byte-exact, and fails closed loud on a missing shipped manifest, "
           "an absent listed path, a non-UTF-8 listed text file and a baseline entry for a non-shipped "
