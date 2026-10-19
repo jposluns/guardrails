@@ -55,7 +55,9 @@ Row identity. For a Markdown table, exactly one line of the file must match `hea
 trimming surrounding cell whitespace (so a re-padded header still locates the table) and be followed by a
 GFM delimiter row; a file carries at most one declared table (a duplicate table path in the config is
 refused); the table's rows are the consecutive following lines that start with `|`, and each row line must
-also end with an unescaped `|` (a GFM-style row without the trailing pipe is refused); cells are split
+also end with an unescaped `|` (a GFM-style row without the trailing pipe is refused); the first line that
+does not start with `|` ends the rows, and it is exit 2 when it still carries an unescaped `|` (an indented
+row, or a row without its leading pipe, which GFM renders as a further row); cells are split
 on unescaped `|` and trimmed of surrounding ASCII spaces and tabs ONLY, matching the GFM cell grammar, so
 a cell edited only in other Unicode whitespace (a no-break space) is a real edit, not a re-padding; the
 cell count must equal the header's cell count;
@@ -66,7 +68,11 @@ fails closed rather than reading as absent. A declared table the header search c
 parent or at the branch tip, while the file exists there and that snapshot's own config declared the table
 (CR-only line endings, an indented table, or any other unlocatable form), is exit 2 naming the file and
 snapshot, never read as the table not existing yet; only a file genuinely absent at that snapshot, or an
-existing file whose snapshot config had not yet declared the table, is skippable. For a TOML table, rows
+existing file whose snapshot config had not yet declared the table, is skippable. A snapshot's config
+declared the table when it declares the same path, format, and header cells (Markdown) or array name
+(TOML); a declaration of another table at the same path (another array, another header) does not count,
+so a new table added beside a declared one reads as not-yet at the snapshots that did not declare it,
+while the earlier declaration stays in force for its own table. For a TOML table, rows
 are the declared
 top-level array, which must be an array of tables whose key fields are present strings or integers, compared
 by parsed value so key order and layout do not matter. A row's identity is the tuple of its `key` columns; a
@@ -93,10 +99,11 @@ commit. R3 (edit = "frozen" only): a key present at both the first parent and th
 any cell changed is a finding, and a branch-owned key surviving into the post-merge commit with any cell
 changed from its branch-tip content is a finding too. Cells and TOML values compare by parsed value with
 type-aware equality: an integer never equals a boolean or a float (so such a substitution is an edit), and
-floats and datetimes additionally compare by type plus exact repr, so a signed-zero substitution (0.0 to
--0.0) and a timezone-aware instant rewritten in another UTC offset are edits, while an unchanged NaN is
-not an edit (equal reprs) and a spelling change that parses to the identical value (Z versus +00:00) is
-not one either. Reordering, appending or inserting rows anywhere, re-padding or alignment
+floats and datetimes additionally compare by type plus exact repr, floats by their sign bit too, so a
+signed-zero substitution (0.0 to -0.0), a NaN sign flip (nan to -nan), and a timezone-aware instant
+rewritten in another UTC offset are edits, while an unchanged NaN is not an edit and a spelling change
+that parses to the identical value (Z versus +00:00, nan versus +nan) is not one either. Reordering,
+appending or inserting rows anywhere, re-padding or alignment
 changes (header line included), TOML
 reformatting, and (in key-stable mode) non-key cell edits are all allowed. Rows have no deletion opt-out: a
 supersession is a new row or, in key-stable mode, a non-key cell edit. A whole declared file deleted while
@@ -112,12 +119,16 @@ Exit convention:
   1  at least one in-scope branch-owned heading was dropped from the post-merge commit, a declared table
      row key disappeared (R1 or R2), a frozen row was edited (R3), or a declared table file that existed
      at the compared base was deleted
-  2  malformed or unreadable config/input, a missing, duplicate or misshapen declared table, a declared
+  2  malformed or unreadable config/input (a heading-pattern that cannot be compiled included, whatever
+     the compiler raises), a missing, duplicate or misshapen declared table, a declared
      table that cannot be located at the first parent or the branch tip while the file exists there and
      that snapshot's config declared it, a duplicate
      row key in any snapshot, a missing key column, a CR in a table line or in a header-matching line of
-     any compared snapshot, an explicit --base-ref on a single-parent commit with no branch ref, a
-     first-parent config that is not a valid version-1 or version-2 config, a declared TOML array that
+     any compared snapshot, a line directly after a table's rows that carries a pipe without starting
+     with one, an explicit --base-ref on a single-parent commit with no branch ref, a
+     first-parent config that is not a valid version-1 or version-2 config, a branch-tip config that is
+     not a valid version-1 or version-2 config when a declared table cannot be located at the branch tip
+     (the only case that reads the branch tip's config), a declared TOML array that
      is not an array of tables or carries a non-scalar key value, a version-2 config with unknown keys,
      a config path whose canonicalization net-redirects through a
      symlink (its real target differs from the literal name) or that resolves outside the repository root,
@@ -132,7 +143,10 @@ Exit convention:
 RESIDUAL, table leg. Key-stable mode lets a row's content be gutted while its key survives. Only declared
 tables and the stated grammar are covered; HTML tables and lists are not, and the grammar is textual, so a
 table that still parses inside an HTML comment or other non-rendering wrapper is counted even though it is
-not rendered. Archive rotation of rows to
+not rendered. A non-blank line with no unescaped pipe directly after the rows ends the table although
+GFM would render it as a further row, so a row placed after such a line is not tracked; a heading or
+block quote that carries a pipe directly after the rows is refused like an unstarted row, an over-deny
+whose in-band fix is a blank line after the table. Archive rotation of rows to
 another file reads as disappearance, an over-deny, since no archive path list exists. Changing a declared
 table's header line (beyond re-padding) is refused while the first parent's declaration is in force, an
 over-deny: a column rename or addition cannot land through a gated merge that keeps the old declaration in
@@ -214,6 +228,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import argparse
 import datetime
 import io
+import math
 import os
 import re
 import subprocess
@@ -474,8 +489,25 @@ def _load_marker(data, path):
     return marker
 
 
+def _compile_heading_pattern(pattern, where):
+    """Compile one heading-pattern, turning EVERY compilation failure into a contextual refusal.
+
+    re.compile raises re.error for a malformed pattern, but also OverflowError for a repetition count
+    past the engine's limit (a{4294967296}) and RecursionError for nesting deeper than the interpreter's
+    recursion limit; MemoryError is caught too, should compilation exhaust memory. Catching only re.error
+    let the others escape as a traceback (exit 1, the finding code) that names neither the config nor the
+    snapshot, for the working config and for every historical config alike."""
+    try:
+        return re.compile(pattern)
+    except (re.error, OverflowError, RecursionError, MemoryError) as exc:
+        raise GateError("{}: heading-pattern is invalid ({}: {})".format(where, type(exc).__name__, exc))
+
+
 def _load_record_specs(rows, path):
-    if not isinstance(rows, list) or not rows:
+    if not isinstance(rows, list):
+        raise GateError("{}: record must be a non-empty array of [[record]] tables, got {}"
+                        .format(path, type(rows).__name__))
+    if not rows:
         raise GateError("{}: at least one [[record]] table is required".format(path))
     specs = []
     seen = set()
@@ -490,10 +522,7 @@ def _load_record_specs(rows, path):
         pattern = row.get("heading-pattern")
         if not isinstance(pattern, str) or not pattern:
             raise GateError("{}: heading-pattern must be a non-empty string".format(where))
-        try:
-            compiled = re.compile(pattern)
-        except re.error as exc:
-            raise GateError("{}: heading-pattern is invalid ({})".format(where, exc))
+        compiled = _compile_heading_pattern(pattern, where)
         if compiled.fullmatch(""):
             raise GateError("{}: heading-pattern must not match the empty string".format(where))
         specs.append(RecordSpec(record_path, compiled))
@@ -805,6 +834,34 @@ def _normalize_cells(parts):
     return tuple(part.strip(" \t") for part in parts)
 
 
+def _has_unescaped_pipe(line):
+    """True when line carries a `|` that no backslash escapes, using _split_cells's escape rule."""
+    index = 0
+    while index < len(line):
+        if line[index] == "\\":
+            index += 2
+            continue
+        if line[index] == "|":
+            return True
+        index += 1
+    return False
+
+
+def _check_row_run_end(line, where):
+    """The first line after a table's rows that does not start with `|` ends the table; it fails closed
+    when it still carries an unescaped pipe. Such a line is usually a row written without its leading
+    pipe or indented before it, which GFM renders as a further table row; ending the table there silently
+    would leave that row, and every row after it, outside the obligations, so a merge could drop them
+    unseen. A line that opens another block yet carries a pipe (a heading or a block quote placed directly
+    after the rows) is refused too, an over-deny whose in-band fix is a blank line after the table. A
+    blank line, or a non-blank line with no unescaped pipe, still ends the table."""
+    if line.strip() and _has_unescaped_pipe(line):
+        raise GateError(
+            "{}: a line directly after the table's rows carries a pipe but does not start with one (an "
+            "indented row or a row without its leading pipe); every row must start with a pipe, so the "
+            "line fails closed rather than silently ending the table".format(where))
+
+
 def _check_cell_count(count, expected, where):
     if count != expected:
         raise GateError("{}: a table row has {} cell(s), the header has {}".format(where, count, expected))
@@ -936,6 +993,7 @@ def _read_table_rows(text, decl, where):
     rows = {}
     for line in lines[start + 2:]:
         if not line.startswith("|"):
+            _check_row_run_end(line, where)
             break
         _check_no_cr(line, where)
         cells = _normalize_cells(_split_cells(line, where))
@@ -964,7 +1022,8 @@ def _require_locatable(rows, text, declared, decl, where):
     rows is None when _read_table_rows could not locate the declared table. With the file itself absent
     (text is None) the table genuinely did not exist at that snapshot, so None passes through and the
     caller skips that snapshot's obligations. With the file present, the decision follows the config that
-    applies to that snapshot: when that snapshot's own config declared the table (declared), an
+    applies to that snapshot: when that snapshot's own config declared the table (declared: it carries a
+    declaration with the same _table_locator, not merely one at the same path), an
     unlocatable form (CR-only line endings, an indented table, or anything else the header search cannot
     find) is ambiguous input, and reading it as "the table did not exist yet" would silently empty the
     snapshot's row obligations and let a simultaneous drop pass, so it is exit 2 naming the file and
@@ -1009,15 +1068,20 @@ def _row_values_equal(before, after):
     as unchanged; NaN never equals itself, so an untouched NaN cell would read as an edit; and == treats
     0.0 == -0.0 and compares timezone-aware datetimes by instant, so a signed-zero substitution or an
     instant rewritten in another UTC offset would read as unchanged. Values of different concrete types
-    are therefore never equal; floats and datetime values compare by type plus exact repr (repr round-
-    trips a float exactly and spells a datetime's tzinfo offset, so -0.0, a re-offset instant and a
-    changed value are edits, two NaNs are equal, and a pure spelling change that parses to the identical
-    value, Z versus +00:00, is not an edit); and lists, tuples, and tables compare element by element
-    under the same rules.
+    are therefore never equal; floats compare by exact repr plus sign bit and datetime values by type plus
+    exact repr. repr distinguishes every non-NaN float value (so -0.0 and a changed value are edits) but
+    spells every NaN "nan" whatever its sign, so the sign bit is compared too and a TOML nan rewritten as
+    -nan is an edit, while two NaNs of the same sign are equal (TOML spells no NaN payload); repr also
+    spells a datetime's tzinfo offset, so a re-offset instant is an edit while a pure spelling change that
+    parses to the identical value, Z versus +00:00, is not. Lists, tuples, and tables compare element by
+    element under the same rules.
     """
     if type(before) is not type(after):
         return False
-    if isinstance(before, (float, datetime.datetime, datetime.date, datetime.time)):
+    if isinstance(before, float):
+        return (repr(before) == repr(after)
+                and math.copysign(1.0, before) == math.copysign(1.0, after))
+    if isinstance(before, (datetime.datetime, datetime.date, datetime.time)):
         return repr(before) == repr(after)
     if isinstance(before, dict):
         return (before.keys() == after.keys()
@@ -1052,8 +1116,9 @@ def _snapshot_config_tables(root, config_rel, commit, label):
     The snapshot's text goes through _parse_config_data, the SAME parser and shape checks the working
     config is loaded with (shared code, never a second looser copy), so a historical config that is
     present but not a valid schema-version-1 or schema-version-2 config (unparseable TOML, a version-1
-    config carrying [[table]], a bare schema-version 2, a non-list record, any other invalid shape) fails
-    closed: the declarations such a config may carry cannot be known. A valid version-1 config validates
+    config carrying [[table]], a bare schema-version 2, a non-list record, a heading-pattern that cannot
+    be compiled, any other invalid shape) fails closed with exit 2 naming the config and the snapshot: the
+    declarations such a config may carry cannot be known. A valid version-1 config validates
     whole and contributes no tables, because version 1 cannot declare them.
     """
     text = _tree_text(root, commit, config_rel)
@@ -1084,35 +1149,48 @@ def _base_config_tables(root, config_path, target):
     return _snapshot_config_tables(root, config_rel, target, "the pre-merge target")
 
 
-def _branch_decl_paths(root, config_rel, branch_commit):
-    """Table paths the branch tip's own config declares, read ONLY to decide whether an unlocatable
-    branch-tip table fails closed (_require_locatable), never to add obligations. An absent or
-    out-of-root config declares none; an invalid branch-tip config fails closed here, since whether the
-    unlocatable table was declared at that snapshot then cannot be known. The read is lazy: it happens
-    only once a branch-tip table was found unlocatable, so an ordinary merge never pays it."""
+def _table_locator(spec):
+    """What locates a declared table in its file: the path, the format, and the trimmed header cells
+    (Markdown) or the array name (TOML). Two declarations with the same locator name the same table
+    whatever their key columns, edit mode, or header padding, so a snapshot "declared the table" when its
+    config carries a declaration with this locator; a declaration of a DIFFERENT table at the same path
+    (another TOML array, another header) is not a declaration of this one."""
+    return (spec.path, spec.table_format, spec.header_cells, spec.array)
+
+
+def _branch_decl_locators(root, config_rel, branch_commit):
+    """Locators (_table_locator) of the tables the branch tip's own config declares, read ONLY to decide
+    whether an unlocatable branch-tip table fails closed (_require_locatable), never to add obligations.
+    An absent or out-of-root config declares none; an invalid branch-tip config fails closed here (exit
+    2), since whether the unlocatable table was declared at that snapshot then cannot be known. The read
+    is lazy: it happens only once a branch-tip table was found unlocatable, so an ordinary merge never
+    pays it, and an invalid branch-tip config is refused only on that path."""
     if config_rel is None:
         return frozenset()
-    return frozenset(spec.path for spec in
+    return frozenset(_table_locator(spec) for spec in
                      _snapshot_config_tables(root, config_rel, branch_commit, "the branch tip"))
 
 
-def _compare_tables(root, decls, base_decl_paths, config_rel, target, graph, post_merge):
+def _compare_tables(root, decls, base_decl_locators, config_rel, target, graph, post_merge):
     """Evaluate R1 (and R3 for frozen tables) against the first parent, plus R2 (and branch-side R3 for
     frozen tables) when the branch graph is resolvable, for every declared table. Returns (checked key
     count, findings). An unlocatable declared table in an existing file fails closed at the first parent
-    (when the first parent's config declared that path: base_decl_paths) and at the branch tip (when the
-    branch tip's own config did, read lazily); at the merge-base it reads as absent, which can only ADD
-    branch-owned obligations, never shed one."""
+    (when the first parent's config declared that same table: base_decl_locators) and at the branch tip
+    (when the branch tip's own config did, read lazily); at the merge-base it reads as absent, which can
+    only ADD branch-owned obligations, never shed one. Every first-parent declaration is itself in decls,
+    so each table the first parent declared is checked under its own declaration; a working-config table
+    the first parent did not declare (a new TOML array or header at an already-declared path) reads as
+    not-yet there, like any adoption."""
     findings = []
     checked = 0
-    branch_paths = None
+    branch_locators = None
     r1_base = _r1_base_commit(target, graph[0] if graph else None)
     for decl in decls:
         base_where = "{} at the pre-merge target".format(decl.path)
         base_text = _tree_text(root, r1_base, decl.path)
         base_rows = _require_locatable(
             None if base_text is None else _read_table_rows(base_text, decl, base_where),
-            base_text, decl.path in base_decl_paths, decl, base_where)
+            base_text, _table_locator(decl) in base_decl_locators, decl, base_where)
         post_where = "{} at post-merge".format(decl.path)
         post_text = _tree_text(root, post_merge, decl.path)
         if post_text is None:
@@ -1138,10 +1216,11 @@ def _compare_tables(root, decls, base_decl_paths, config_rel, target, graph, pos
             branch_parsed = (None if branch_text is None else
                              _read_table_rows(branch_text, decl, branch_where))
             if branch_parsed is None and branch_text is not None:
-                if branch_paths is None:
-                    branch_paths = _branch_decl_paths(root, config_rel, branch_commit)
+                if branch_locators is None:
+                    branch_locators = _branch_decl_locators(root, config_rel, branch_commit)
                 branch_parsed = _require_locatable(
-                    branch_parsed, branch_text, decl.path in branch_paths, decl, branch_where)
+                    branch_parsed, branch_text, _table_locator(decl) in branch_locators, decl,
+                    branch_where)
             branch_rows = branch_parsed or {}
             checked += sum(1 for key in branch_rows if key not in mergebase_rows)
             findings.extend(_r2_findings(decl, mergebase_rows, branch_rows, post_rows))
@@ -1246,7 +1325,7 @@ def run(root, config_path, config_required, post_merge_ref="HEAD",
         tables_declared = len(decls)
         if decls:
             table_keys_checked, table_findings = _compare_tables(
-                root, decls, frozenset(spec.path for spec in base_tables),
+                root, decls, frozenset(_table_locator(spec) for spec in base_tables),
                 _repo_relative(root, config_path), target, graph, post_merge)
             findings.extend(table_findings)
     except GateError as exc:
@@ -1342,6 +1421,12 @@ def _self_test_isolated():
         if got != want:
             failures.append("{}: got {}, want {}".format(name, got, want))
 
+    def expect_refusal(name, result, needle):
+        code, text = result
+        if code != 2 or needle not in text:
+            failures.append("{}: got (exit {}, {!r}), want exit 2 naming {!r}"
+                            .format(name, code, text.strip(), needle))
+
     # F-TOML-BARE-VALUEERROR-CLASS: an integer literal past CPython's
     # 4300-digit int-string limit makes tomllib raise a BARE ValueError
     # (not TOMLDecodeError); load_config must still refuse with GateError.
@@ -1366,7 +1451,7 @@ def _self_test_isolated():
     sys.set_int_max_str_digits(4300)
     try:
         for big_label, big_value, big_needle in (
-                ("an over-long integer literal", "9" * 4400, ""),
+                ("an over-long integer literal", "9" * 4400, "cannot parse config"),
                 ("a parser overflow", "1  # injected-overflow",
                  "injected parser overflow")):
             with tempfile.TemporaryDirectory(
@@ -1724,20 +1809,20 @@ def _self_test_isolated():
                 ["commit-tree", target_tree, "-p", target,
                  "-p", duplicate],
                 input_text="ambiguous merge\n")
-            expect(
+            expect_refusal(
                 "duplicate selected heading",
-                _quiet_run(
+                _quiet_run_refusal(
                     root, config_path, True, dupmerge, None, None),
-                2)
+                "duplicate selected heading")
 
             bad_config = aiqt / "bad-record-sections.toml"
             bad_config.write_text(
                 'schema-version = true\nrecord = "wrong"\n',
                 encoding="utf-8")
-            expect(
+            expect_refusal(
                 "malformed config",
-                _quiet_run(root, bad_config, True, bad, None, None),
-                2)
+                _quiet_run_refusal(root, bad_config, True, bad, None, None),
+                "bad-record-sections.toml: top-level keys must be exactly")
             expect(
                 "absent default config is not applicable",
                 _quiet_run(
@@ -2012,6 +2097,7 @@ def _self_test_isolated():
                 2)
 
             failures.extend(_v2_self_test_cases(Path(directory)))
+            failures.extend(_heading_pattern_self_test_cases(Path(directory)))
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print("error: self-test could not build its synthetic git fixture "
               "({}); fail-closed".format(exc), file=sys.stderr)
@@ -2041,25 +2127,33 @@ def _self_test_isolated():
           "leg refuses the exercised dropped and edited row classes (R1 "
           "against the first parent, R2 for branch-owned rows, R3 for frozen "
           "rows against the first parent and the branch tip with type-aware "
-          "TOML comparison and floats and datetimes compared by exact repr, "
+          "TOML comparison, floats and datetimes compared by exact repr and "
+          "floats by sign too, so a NaN sign flip is an edit, "
           "a CR-bearing header, a CR-prefixed one included, in any compared "
           "snapshot, an unlocatable declared table in an existing file at "
           "the first parent or the branch tip under that snapshot's own "
-          "declaration, a schema downgrade or any invalid first-parent "
+          "declaration of the same table, an invalid branch-tip config read "
+          "for that decision, a schema downgrade or any invalid first-parent "
           "config (validated by the working loader's own shape checks) that "
-          "would shed declarations, an explicit --base-ref on a "
+          "would shed declarations, a heading-pattern the compiler rejects "
+          "with OverflowError or RecursionError in the working or the "
+          "first-parent config, a row-shaped line directly after a table's "
+          "rows that does not start with a pipe, an explicit --base-ref on a "
           "single-parent commit, a no-break-space cell edit, and the "
-          "exercised grammar, shape and graph refusals, each grammar and "
-          "config-shape refusal asserted by its specific message), shows "
+          "exercised grammar, shape and graph refusals, each table-leg "
+          "refusal and each config-shape refusal asserted by its specific "
+          "message), shows "
           "each row-loss, row-edit, graph and "
           "declaration-scope refusal load-bearing against a mutant with that "
           "check swapped out, and allows reorder, insertion, re-padding of "
           "rows and of the header line (tabs included), TOML reformatting, "
           "an unchanged NaN "
-          "value, a datetime respelled to the identical parsed value, "
+          "value, a NaN respelled as +nan, a datetime respelled to the "
+          "identical parsed value, a heading directly after a table's rows, "
           "escaped pipes, key-stable corrections, new tables, a table "
           "adopted into an existing file, a branch forked before adoption, "
-          "a valid version-1 first-parent config, a clean "
+          "a new table declared beside an already-declared one at the same "
+          "path, a valid version-1 first-parent config, a clean "
           "squash, a rows-preserved schema downgrade, and a mixed "
           "heading-and-table config with both legs live, each allowed change "
           "shown failing under a naive variant or discriminated by a paired "
@@ -2099,9 +2193,10 @@ def _v2_self_test_cases(directory):
     PASS or, where the fixture also carries a real drop, into the underlying exit-1 finding. Allowed
     changes are each shown deliberate by re-running the fixture under the naive comparison they guard
     against and expecting a failure, or discriminated by a paired refusing fixture on the same surface.
-    Grammar and config-shape refusals are asserted with their SPECIFIC refusal message (so an earlier,
-    unrelated refusal cannot satisfy them); those whose check is a single swappable
-    helper also carry a mutant. Returns failure strings.
+    Every refusing fixture here is asserted with its SPECIFIC refusal message (so an earlier, unrelated
+    refusal cannot satisfy it); only the mutant and naive-variant re-runs are judged by exit code alone,
+    since what they show is the change of outcome. Refusals whose check is a single swappable helper also
+    carry a mutant. Returns failure strings.
     """
     failures = []
 
@@ -2227,8 +2322,9 @@ def _v2_self_test_cases(directory):
     with _swapped("_key_positions", lambda header_cells, key, where: (0,)):
         expect("side-by-side rows fail under id-only keying (naive variant)",
                _quiet_run(root, cfg_frozen, True, m3, None, None), 2)
-    expect("duplicate key under a declared id-only key",
-           _quiet_run(root, cfg_idonly, True, m3, None, None), 2)
+    expect_refusal("duplicate key under a declared id-only key",
+                   _quiet_run_refusal(root, cfg_idonly, True, m3, None, None),
+                   "duplicate row key ('X')")
     with _swapped("_register_key",
                   lambda rows, key, row, where: rows.__setitem__(key, row)):
         expect("duplicate key accepted once the duplicate guard is removed (mutant)",
@@ -2283,10 +2379,12 @@ def _v2_self_test_cases(directory):
     # An explicit --base-ref on a single-parent commit has no branch graph to validate it against, so it
     # is never silently ignored: it falls through to the graph resolution and fails closed, whether the
     # supplied ref is a genuine ancestor or unresolvable.
-    expect("an explicit --base-ref on a single-parent squash fails closed (real ancestor)",
-           _quiet_run(root, cfg_frozen, True, squash_clean, None, target), 2)
-    expect("an explicit --base-ref on a single-parent squash fails closed (unresolvable ref)",
-           _quiet_run(root, cfg_frozen, True, squash_clean, None, "0" * 40), 2)
+    expect_refusal("an explicit --base-ref on a single-parent squash fails closed (real ancestor)",
+                   _quiet_run_refusal(root, cfg_frozen, True, squash_clean, None, target),
+                   "cannot infer the branch tip")
+    expect_refusal("an explicit --base-ref on a single-parent squash fails closed (unresolvable ref)",
+                   _quiet_run_refusal(root, cfg_frozen, True, squash_clean, None, "0" * 40),
+                   "cannot infer the branch tip")
     with _swapped("_tables_only_squash",
                   lambda parents, b_ref, ba_ref, record_specs:
                   len(parents) == 1 and b_ref is None and not record_specs):
@@ -2339,6 +2437,41 @@ def _v2_self_test_cases(directory):
     with _swapped("_r1_findings", lambda decl, base_rows, post_rows: []):
         expect("the orphaned tail passes once the R1 check is removed (mutant)",
                _quiet_run(root, cfg_frozen, True, m8, None, None), 0)
+
+    # A line directly after the rows that carries a pipe without starting with one is a row GFM still
+    # renders; ending the table there would leave it untracked, so dropping it later would pass. A
+    # pipe-less line (a heading) still ends the table, and fails only under a variant that refuses any
+    # non-blank line after the rows.
+    for case_name, branch_name, stray in (
+            ("a row without its leading pipe directly after the rows", "v2-no-lead-pipe",
+             "X | PR1 | 2026-02-01 | target row |"),
+            ("a row indented three spaces directly after the rows", "v2-indented-row",
+             "   " + row_x1)):
+        stray_base = _v2_branch_commit(root, branch_name, target, {"done.md": md(row_y, stray)},
+                                       "a row written outside the pipe grammar")
+        stray_drop = _v2_branch_commit(root, branch_name + "-drop", stray_base,
+                                       {"done.md": md(row_y)}, "that row dropped")
+        expect_refusal(case_name,
+                       _quiet_run_refusal(root, cfg_frozen, True, stray_drop, None, None),
+                       "done.md at the pre-merge target: a line directly after the table's rows "
+                       "carries a pipe but does not start with one")
+        with _swapped("_check_row_run_end", lambda line, where: None):
+            expect(case_name + "; the drop passes unseen once the row-run end check is removed "
+                   "(mutant)",
+                   _quiet_run(root, cfg_frozen, True, stray_drop, None, None), 0)
+    heading_after = _v2_branch_commit(root, "v2-heading-after", target,
+                                      {"done.md": md(row_y, row_x1) + "## Notes\nprose\n"},
+                                      "a heading directly after the rows")
+
+    def any_nonblank_end(line, where):
+        if line.strip():
+            raise GateError("{}: a non-blank line follows the rows".format(where))
+
+    expect("control: a pipe-less heading directly after the rows ends the table",
+           _quiet_run(root, cfg_frozen, True, heading_after, None, None), 0)
+    with _swapped("_check_row_run_end", any_nonblank_end):
+        expect("the heading after the rows fails when any non-blank line is refused (naive variant)",
+               _quiet_run(root, cfg_frozen, True, heading_after, None, None), 2)
 
     # The whole declared file deleted: every row disappeared.
     file_deleter = _v2_branch_commit(root, "v2-delete-file", target,
@@ -2483,16 +2616,19 @@ def _v2_self_test_cases(directory):
     cr_clean = _v2_branch_commit(root, "v2-cr-header-clean", cr_base,
                                  {"done.md": md(row_y, row_x1)},
                                  "normalized to LF, no row lost")
-    expect("a CR-bearing header at the first parent fails closed",
-           _quiet_run(root, cfg_frozen, True, cr_clean, None, None), 2)
+    cr_needle = "a line matching the declared header contains a carriage return"
+    expect_refusal("a CR-bearing header at the first parent fails closed",
+                   _quiet_run_refusal(root, cfg_frozen, True, cr_clean, None, None),
+                   "done.md at the pre-merge target: " + cr_needle)
     with _swapped("_locate_header", cr_tolerant_locate):
         expect("the clean normalization passes once the header CR check is removed (mutant)",
                _quiet_run(root, cfg_frozen, True, cr_clean, None, None), 0)
     cr_drop = _v2_branch_commit(root, "v2-cr-header-drop", cr_base,
                                 {"done.md": md(row_y)},
                                 "normalized to LF, a row dropped")
-    expect("a CR-bearing header at the first parent fails closed before a drop can hide",
-           _quiet_run(root, cfg_frozen, True, cr_drop, None, None), 2)
+    expect_refusal("a CR-bearing header at the first parent fails closed before a drop can hide",
+                   _quiet_run_refusal(root, cfg_frozen, True, cr_drop, None, None),
+                   "done.md at the pre-merge target: " + cr_needle)
     with _swapped("_locate_header", cr_tolerant_locate):
         expect("the hidden drop surfaces as a finding once the header CR check is removed (mutant)",
                _quiet_run(root, cfg_frozen, True, cr_drop, None, None), 1)
@@ -2502,8 +2638,9 @@ def _v2_self_test_cases(directory):
                                 "CR-terminated header on the branch")
     m_crb = _v2_synthetic_merge(root, target, [target, cr_feat],
                                 "merge keeps the target file, branch row gone")
-    expect("a CR-bearing header at the branch tip fails closed",
-           _quiet_run(root, cfg_frozen, True, m_crb, None, None), 2)
+    expect_refusal("a CR-bearing header at the branch tip fails closed",
+                   _quiet_run_refusal(root, cfg_frozen, True, m_crb, None, None),
+                   "done.md at branch tip: " + cr_needle)
     with _swapped("_locate_header", cr_tolerant_locate):
         expect("the dropped branch row surfaces once the header CR check is removed (mutant)",
                _quiet_run(root, cfg_frozen, True, m_crb, None, None), 1)
@@ -2516,16 +2653,18 @@ def _v2_self_test_cases(directory):
                                 {"done.md": md(row_y, row_x1, row_x2)}, "branch adds a row")
     m_crmb = _v2_synthetic_merge(root, cr_mb_b, [cr_mb_t, cr_mb_b],
                                  "merge keeps every row")
-    expect("a CR-bearing header at the merge-base fails closed",
-           _quiet_run(root, cfg_frozen, True, m_crmb, None, None), 2)
+    expect_refusal("a CR-bearing header at the merge-base fails closed",
+                   _quiet_run_refusal(root, cfg_frozen, True, m_crmb, None, None),
+                   "done.md at merge-base: " + cr_needle)
     with _swapped("_locate_header", cr_tolerant_locate):
         expect("the clean merge passes once the merge-base header CR check is removed (mutant)",
                _quiet_run(root, cfg_frozen, True, m_crmb, None, None), 0)
     cr_post = _v2_branch_commit(root, "v2-cr-post", target,
                                 {"done.md": cr_header_md},
                                 "CR-terminated header post-merge")
-    expect("a CR-bearing header post-merge stays fail-closed",
-           _quiet_run(root, cfg_frozen, True, cr_post, None, None), 2)
+    expect_refusal("a CR-bearing header post-merge stays fail-closed",
+                   _quiet_run_refusal(root, cfg_frozen, True, cr_post, None, None),
+                   "done.md at post-merge: " + cr_needle)
     with _swapped("_locate_header", cr_tolerant_locate):
         expect("the post-merge CR header parses once the CR check is removed (mutant)",
                _quiet_run(root, cfg_frozen, True, cr_post, None, None), 0)
@@ -2569,6 +2708,35 @@ def _v2_self_test_cases(directory):
     with _swapped("_row_values_equal", lambda before, after: before == after):
         expect("the unchanged NaN fails under plain equality (naive variant)",
                _quiet_run(root, cfg_tomlnan, True, m_nan, None, None), 1)
+
+    # repr spells every NaN "nan", so the sign bit is compared too: nan rewritten as -nan is an edit,
+    # while +nan, which parses to the same positive NaN, is a respelling and stays allowed.
+    def repr_only_equal(before, after):
+        if type(before) is not type(after):
+            return False
+        if isinstance(before, (float, datetime.datetime, datetime.date, datetime.time)):
+            return repr(before) == repr(after)
+        if isinstance(before, dict):
+            return (before.keys() == after.keys()
+                    and all(repr_only_equal(before[key], after[key]) for key in before))
+        if isinstance(before, (list, tuple)):
+            return (len(before) == len(after)
+                    and all(repr_only_equal(b, a) for b, a in zip(before, after)))
+        return before == after
+
+    nan_flip = _v2_branch_commit(root, "v2-nan-flip", nan_target,
+                                 {"nanlog.toml": '[[done]]\nid = "N1"\nscore = -nan\n'},
+                                 "frozen NaN sign flipped")
+    expect("a frozen TOML nan rewritten as -nan",
+           _quiet_run(root, cfg_tomlnan, True, nan_flip, None, None), 1)
+    with _swapped("_row_values_equal", repr_only_equal):
+        expect("the NaN sign flip passes once floats compare by repr alone (mutant)",
+               _quiet_run(root, cfg_tomlnan, True, nan_flip, None, None), 0)
+    nan_plus = _v2_branch_commit(root, "v2-nan-plus", nan_target,
+                                 {"nanlog.toml": '[[done]]\nid = "N1"\nscore = +nan\n'},
+                                 "frozen NaN respelled as +nan")
+    expect("control: a frozen TOML nan respelled as +nan is not an edit",
+           _quiet_run(root, cfg_tomlnan, True, nan_plus, None, None), 0)
 
     # Floats and datetimes compare by type plus exact repr: plain equality reads 0.0 == -0.0 and compares
     # timezone-aware datetimes by instant, so a signed-zero substitution or a re-offset instant would land
@@ -2674,8 +2842,9 @@ def _v2_self_test_cases(directory):
                _quiet_run(root, root / ".aiqt" / "absent.toml", False, m3, None, None), 2)
 
     # Ambiguous or malformed inputs fail closed, and each refusal is load-bearing.
-    expect("the declared header absent from a present file",
-           _quiet_run(root, cfg_badheader, True, m3, None, None), 2)
+    expect_refusal("the declared header absent from a present file",
+                   _quiet_run_refusal(root, cfg_badheader, True, m3, None, None),
+                   "done.md at post-merge: the declared table (| id | status |) is absent post-merge")
     with _swapped("_require_present",
                   lambda rows, decl, where: {} if rows is None else rows):
         expect("the absent table passes once the presence check is removed (mutant)",
@@ -2686,16 +2855,18 @@ def _v2_self_test_cases(directory):
         {"done.md": md(row_y, row_x1) + "\n```\n" + header + "\n```\n"},
         "header duplicated inside a code fence")
     m11 = _v2_synthetic_merge(root, doubled, [target, doubled], "doubled header lands")
-    expect("the header present twice (once inside a code fence)",
-           _quiet_run(root, cfg_frozen, True, m11, None, None), 2)
+    expect_refusal("the header present twice (once inside a code fence)",
+                   _quiet_run_refusal(root, cfg_frozen, True, m11, None, None),
+                   "done.md at post-merge: the declared header line appears 2 times")
     with _swapped("_locate_header",
                   lambda lines, table_header, where:
                   lines.index(table_header) if table_header in lines else None):
         expect("the doubled header passes once the uniqueness check is removed (mutant)",
                _quiet_run(root, cfg_frozen, True, m11, None, None), 0)
 
-    expect("a key column missing from the header",
-           _quiet_run(root, cfg_typokey, True, mrs, None, None), 2)
+    expect_refusal("a key column missing from the header",
+                   _quiet_run_refusal(root, cfg_typokey, True, mrs, None, None),
+                   "typokey.toml [[table]] #1: key column 'typo' must appear exactly once in the header")
     with _swapped("_key_positions",
                   lambda header_cells, key, where:
                   tuple(header_cells.index(name) for name in key if name in header_cells)):
@@ -2708,8 +2879,9 @@ def _v2_self_test_cases(directory):
         "TOML row missing a key field")
     mtm = _v2_synthetic_merge(root, toml_missing, [target, toml_missing],
                               "missing key field lands")
-    expect("a TOML row missing a key column",
-           _quiet_run(root, cfg_toml, True, mtm, None, None), 2)
+    expect_refusal("a TOML row missing a key column",
+                   _quiet_run_refusal(root, cfg_toml, True, mtm, None, None),
+                   "notes.toml at post-merge row #2: key column 'pr' is missing")
     with _swapped("_toml_row_key",
                   lambda row, key, where:
                   tuple(str(row.get(name, "")) for name in key)):
@@ -2722,8 +2894,9 @@ def _v2_self_test_cases(directory):
         "row with one cell too many")
     mwc = _v2_synthetic_merge(root, extra_cell, [target, extra_cell],
                               "extra cell lands")
-    expect("a row with one cell too many",
-           _quiet_run(root, cfg_frozen, True, mwc, None, None), 2)
+    expect_refusal("a row with one cell too many",
+                   _quiet_run_refusal(root, cfg_frozen, True, mwc, None, None),
+                   "done.md at post-merge: a table row has 5 cell(s), the header has 4")
     with _swapped("_check_cell_count", lambda count, expected, where: None):
         expect("the wrong cell count passes once the count check is removed (mutant)",
                _quiet_run(root, cfg_frozen, True, mwc, None, None), 0)
@@ -2733,8 +2906,9 @@ def _v2_self_test_cases(directory):
         "row with one cell too few")
     mwf = _v2_synthetic_merge(root, few_cells, [target, few_cells],
                               "missing cell lands")
-    expect("a row with one cell too few",
-           _quiet_run(root, cfg_frozen, True, mwf, None, None), 2)
+    expect_refusal("a row with one cell too few",
+                   _quiet_run_refusal(root, cfg_frozen, True, mwf, None, None),
+                   "done.md at post-merge: a table row has 3 cell(s), the header has 4")
     with _swapped("_check_cell_count", lambda count, expected, where: None):
         expect("the missing cell passes once the count check is removed (mutant)",
                _quiet_run(root, cfg_frozen, True, mwf, None, None), 0)
@@ -2744,8 +2918,9 @@ def _v2_self_test_cases(directory):
         {"done.md": md(row_y, row_x1, "| C | PR9 | 2026-03-02 | a\rb |")},
         "CR inside a table line")
     mcr = _v2_synthetic_merge(root, cr_row, [target, cr_row], "CR lands")
-    expect("a CR inside a table line",
-           _quiet_run(root, cfg_frozen, True, mcr, None, None), 2)
+    expect_refusal("a CR inside a table line",
+                   _quiet_run_refusal(root, cfg_frozen, True, mcr, None, None),
+                   "done.md at post-merge: a table line contains a carriage return")
     with _swapped("_check_no_cr", lambda line, where: None):
         expect("the CR passes once the CR check is removed (mutant)",
                _quiet_run(root, cfg_frozen, True, mcr, None, None), 0)
@@ -2755,8 +2930,9 @@ def _v2_self_test_cases(directory):
                                   "declared TOML array of non-tables")
     mtb = _v2_synthetic_merge(root, bad_array, [target, bad_array],
                               "bad array lands")
-    expect("a declared TOML array that is not an array of tables",
-           _quiet_run(root, cfg_tomlbad, True, mtb, None, None), 2)
+    expect_refusal("a declared TOML array that is not an array of tables",
+                   _quiet_run_refusal(root, cfg_tomlbad, True, mtb, None, None),
+                   "notes2.toml at post-merge: bad must be an array of tables")
     with _swapped("_toml_rows_array",
                   lambda data, array, where:
                   ([row for row in data[array] if isinstance(row, dict)]
@@ -2771,16 +2947,19 @@ def _v2_self_test_cases(directory):
         "non-scalar key value")
     mts = _v2_synthetic_merge(root, non_scalar, [target, non_scalar],
                               "non-scalar key value lands")
-    expect("a non-scalar TOML key value",
-           _quiet_run(root, cfg_toml, True, mts, None, None), 2)
+    expect_refusal("a non-scalar TOML key value",
+                   _quiet_run_refusal(root, cfg_toml, True, mts, None, None),
+                   "notes.toml at post-merge row #2 key column 'pr': a key field must be a string or an "
+                   "integer, got list")
     with _swapped("_toml_row_value",
                   lambda value, where:
                   value if type(value) in (str, int) else repr(value)):
         expect("the non-scalar key value passes once the scalar check is removed (mutant)",
                _quiet_run(root, cfg_toml, True, mts, None, None), 0)
 
-    expect("a version-2 config with unknown top-level keys",
-           _quiet_run(root, cfg_unknown, True, m3, None, None), 2)
+    expect_refusal("a version-2 config with unknown top-level keys",
+                   _quiet_run_refusal(root, cfg_unknown, True, m3, None, None),
+                   "unknown.toml: unknown top-level keys ['surprise'] in a schema-version 2 config")
     with _swapped("_check_v2_top_keys", lambda data, path: None):
         expect("the unknown config key passes once the key check is removed (mutant)",
                _quiet_run(root, cfg_unknown, True, m3, None, None), 0)
@@ -2816,8 +2995,9 @@ def _v2_self_test_cases(directory):
                   lambda rows, key, row, where: rows.__setitem__(key, row)):
         expect("the duplicate TOML row key passes once the duplicate guard is removed (mutant)",
                _quiet_run(root, cfg_toml, True, dup_toml_key, None, None), 0)
-    expect("a root (parentless) post-merge commit fails closed",
-           _quiet_run(root, cfg_frozen, True, fork, None, None), 2)
+    expect_refusal("a root (parentless) post-merge commit fails closed",
+                   _quiet_run_refusal(root, cfg_frozen, True, fork, None, None),
+                   "post-merge commit has no first parent")
     root_parents = _parents
     with _swapped("_parents",
                   lambda root_path, commit: root_parents(root_path, commit) or [target]):
@@ -2905,8 +3085,9 @@ def _v2_self_test_cases(directory):
                                    {"done.md": md(row_y, row_x1,
                                                   "| Q | PR10 | 2026-03-04 | squash row |")},
                                    "single-parent commit under the mixed config")
-    expect("[[record]] entries keep the branch-graph requirement on a single parent",
-           _quiet_run(root, cfg_mixed, True, mix_squash, None, None), 2)
+    expect_refusal("[[record]] entries keep the branch-graph requirement on a single parent",
+                   _quiet_run_refusal(root, cfg_mixed, True, mix_squash, None, None),
+                   "cannot infer the branch tip")
     with _swapped("resolve_graph",
                   lambda root_path, post_ref, b_ref=None, ba_ref=None:
                   (mix_base, mix_squash, mix_squash)):
@@ -2914,8 +3095,9 @@ def _v2_self_test_cases(directory):
                _quiet_run(root, cfg_mixed, True, mix_squash, None, None), 0)
     octopus = _v2_synthetic_merge(root, m3_tree, [target, feat, deleter],
                                   "octopus merge, no row dropped")
-    expect("an octopus merge fails closed for the table leg",
-           _quiet_run(root, cfg_frozen, True, octopus, None, None), 2)
+    expect_refusal("an octopus merge fails closed for the table leg",
+                   _quiet_run_refusal(root, cfg_frozen, True, octopus, None, None),
+                   "post-merge commit has 3 parents (an octopus merge)")
     true_parents = _parents
     with _swapped("_parents",
                   lambda root_path, commit: true_parents(root_path, commit)[:2]):
@@ -3022,8 +3204,9 @@ def _v2_self_test_cases(directory):
          "done.md": md(row_y)},
         "declarations narrowed under an uninterpretable first-parent config, a row dropped")
     vthree_config = vthree / ".aiqt" / "record-sections.toml"
-    expect("an uninterpretable first-parent config version fails closed",
-           _quiet_run(vthree, vthree_config, True, vthree_drop, None, None), 2)
+    expect_refusal("an uninterpretable first-parent config version fails closed",
+                   _quiet_run_refusal(vthree, vthree_config, True, vthree_drop, None, None),
+                   ".aiqt/record-sections.toml at the pre-merge target: top-level keys must be exactly")
     with _swapped("_base_config_tables",
                   lambda root_path, config_path, target_commit: ()):
         expect("the uninterpretable first-parent config is skipped once the read is removed (mutant)",
@@ -3050,6 +3233,12 @@ def _v2_self_test_cases(directory):
     bshape_config = bshape / ".aiqt" / "record-sections.toml"
     other_table_cfg = ('schema-version = 2\n\n[[table]]\npath = "newlog.md"\nformat = "markdown"\n'
                        'header = "| id | pr |"\nkey = ["id", "pr"]\nedit = "frozen"\n')
+    # The non-list record value sits beside a valid marker and a valid table declaration, so only the
+    # record-type check can refuse it (no pairing or empty-config rule fires first).
+    record_not_list_cfg = ('schema-version = 2\n'
+                           'opt-out-marker = "<!-- aiqt-record-section: superseded -->"\n'
+                           'record = 42\n\n' + md_table + 'edit = "frozen"\n')
+    shaped_drops = {}
     for shape_index, (refusal_name, needle, bad_text) in enumerate((
             ("a first-parent version-1 config carrying [[table]] fails closed",
              "top-level keys must be exactly",
@@ -3058,8 +3247,9 @@ def _v2_self_test_cases(directory):
              "at least one [[record]] or [[table]] table is required",
              "schema-version = 2\n"),
             ("a first-parent config whose record value is not a list fails closed",
-             "declared together or not at all",
-             "schema-version = 2\nrecord = 42\n")), 1):
+             ".aiqt/record-sections.toml at the pre-merge target: record must be a non-empty array of "
+             "[[record]] tables, got int",
+             record_not_list_cfg)), 1):
         shaped = _v2_branch_commit(bshape, "v2-shape-{}".format(shape_index), bshape_seed,
                                    {".aiqt/record-sections.toml": bad_text},
                                    "malformed config lands ungated")
@@ -3074,6 +3264,14 @@ def _v2_self_test_cases(directory):
                       lambda root_path, config_path, target_commit: ()):
             expect(refusal_name + "; the drop hides once the base-config read is removed (mutant)",
                    _quiet_run(bshape, bshape_config, True, shaped_drop, None, None), 0)
+        shaped_drops[shape_index] = shaped_drop
+    true_record_specs = _load_record_specs
+    with _swapped("_load_record_specs",
+                  lambda rows, path:
+                  () if not isinstance(rows, list) else true_record_specs(rows, path)):
+        expect("the non-list record value is accepted once only the record-type check is removed, so "
+               "its table declaration reports the dropped row instead (mutant)",
+               _quiet_run(bshape, bshape_config, True, shaped_drops[3], None, None), 1)
     valid_v1_parent = _v2_branch_commit(bshape, "v2-shape-valid-v1", bshape_seed,
                                         {".aiqt/record-sections.toml": v1_config},
                                         "valid version-1 config lands")
@@ -3202,6 +3400,97 @@ def _v2_self_test_cases(directory):
                "(mutant)",
                _quiet_run(uloc, uloc_config, True, m_tip, None, None), 0)
 
+    # The branch tip's config is read only once a branch-tip table is unlocatable, and an invalid one
+    # then fails closed: whether that snapshot declared the table cannot be known. Reading it as
+    # declaring nothing would hide the dropped branch row. Each branch below changes the config, so the
+    # working tree is returned to the target (whose config is the valid one under test) before each run.
+    uloc_badtip_b = _v2_branch_commit(uloc, "v2-uloc-badtip-b", uloc_clean,
+                                      {"done.md": tip_cr_md,
+                                       ".aiqt/record-sections.toml": "schema-version = 2\n"},
+                                      "branch adds a row, CR-only endings, invalid config")
+    m_badtip = _v2_synthetic_merge(uloc, uloc_tip_t, [uloc_tip_t, uloc_badtip_b],
+                                   "merge keeps the target file, branch row gone")
+    _selftest_git(uloc, ["checkout", "-q", uloc_tip_t])
+    expect_refusal("an invalid branch-tip config read for an unlocatable branch-tip table fails closed",
+                   _quiet_run_refusal(uloc, uloc_config, True, m_badtip, None, None),
+                   ".aiqt/record-sections.toml at the branch tip: at least one [[record]] or [[table]] "
+                   "table is required")
+    true_branch_locators = _branch_decl_locators
+
+    def lenient_branch_locators(root_path, config_rel, branch_commit):
+        try:
+            return true_branch_locators(root_path, config_rel, branch_commit)
+        except GateError:
+            return frozenset()
+
+    with _swapped("_branch_decl_locators", lenient_branch_locators):
+        expect("the dropped branch row hides once an invalid branch-tip config reads as declaring "
+               "nothing (mutant)",
+               _quiet_run(uloc, uloc_config, True, m_badtip, None, None), 0)
+
+    # A snapshot declared the table when its config declares the same table (path, format, header cells
+    # or array), whatever its key or edit mode: a branch that switched the table to key-stable still
+    # declared it, so its unlocatable copy fails closed, which matching the whole declaration would miss.
+    uloc_keystable_b = _v2_branch_commit(uloc, "v2-uloc-ks-b", uloc_clean,
+                                         {"done.md": tip_cr_md,
+                                          ".aiqt/record-sections.toml":
+                                              "schema-version = 2\n\n" + md_table
+                                              + 'edit = "key-stable"\n'},
+                                         "branch adds a row, CR-only endings, key-stable config")
+    m_kstip = _v2_synthetic_merge(uloc, uloc_tip_t, [uloc_tip_t, uloc_keystable_b],
+                                  "merge keeps the target file, branch row gone")
+    _selftest_git(uloc, ["checkout", "-q", uloc_tip_t])
+    expect_refusal("an unlocatable branch-tip table its config declares under another edit mode "
+                   "fails closed",
+                   _quiet_run_refusal(uloc, uloc_config, True, m_kstip, None, None),
+                   "done.md at branch tip: the file exists and that snapshot's config declares the "
+                   "table")
+    with _swapped("_table_locator", lambda spec: spec):
+        expect("the dropped branch row hides once the whole declaration must match (mutant)",
+               _quiet_run(uloc, uloc_config, True, m_kstip, None, None), 0)
+
+    # A declaration of ANOTHER table at an already-declared path (a new TOML array, a new Markdown
+    # header) is not a declaration of the new table at the first parent, so the new table reads as
+    # not-yet there while the old declaration keeps guarding its own table; matching on the path alone
+    # refuses both.
+    locr = directory / "v2locator"
+    locr.mkdir()
+    _selftest_git(locr, ["init", "-q", "-b", "main"])
+    _selftest_git(locr, ["config", "user.name", "AIQT Self-Test"])
+    _selftest_git(locr, ["config", "user.email", "selftest@example.invalid"])
+    toml_decl = ('[[table]]\npath = "notes.toml"\nformat = "toml"\narray = "{}"\nkey = ["id"]\n'
+                 'edit = "key-stable"\n')
+    new_header = "| id | pr | closed | note | owner |"
+    new_md_decl = ('[[table]]\npath = "done.md"\nformat = "markdown"\nheader = "' + new_header
+                   + '"\nkey = ["id", "pr"]\nedit = "frozen"\n')
+    (locr / ".aiqt").mkdir()
+    (locr / ".aiqt" / "record-sections.toml").write_text(
+        "schema-version = 2\n\n" + toml_decl.format("done") + "\n" + md_table + 'edit = "frozen"\n',
+        encoding="utf-8")
+    (locr / "notes.toml").write_text('[[done]]\nid = "N1"\n', encoding="utf-8")
+    (locr / "done.md").write_text(md(row_y), encoding="utf-8")
+    _selftest_git(locr, ["add", "-A"])
+    _selftest_git(locr, ["commit", "-q", "-m", "two tables declared"])
+    locr_base = _selftest_git(locr, ["rev-parse", "HEAD"])
+    locr_config = locr / ".aiqt" / "record-sections.toml"
+    for case_name, branch_name, writes in (
+            ("a new TOML array declared at an already-declared path", "v2-loc-array",
+             {".aiqt/record-sections.toml": "schema-version = 2\n\n" + toml_decl.format("archive")
+                                            + "\n" + md_table + 'edit = "frozen"\n',
+              "notes.toml": '[[done]]\nid = "N1"\n\n[[archive]]\nid = "A1"\n'}),
+            ("a new Markdown header declared at an already-declared path", "v2-loc-header",
+             {".aiqt/record-sections.toml": "schema-version = 2\n\n" + toml_decl.format("done")
+                                            + "\n" + new_md_decl,
+              "done.md": md(row_y) + "\n" + new_header + "\n| --- | --- | --- | --- | --- |\n"
+                         "| Z | PR9 | 2026-03-01 | new | owner |\n"})):
+        locr_next = _v2_branch_commit(locr, branch_name, locr_base, writes,
+                                      "another table declared beside the first")
+        expect("control: " + case_name + " reads as not-yet at the first parent",
+               _quiet_run(locr, locr_config, True, locr_next, None, None), 0)
+        with _swapped("_table_locator", lambda spec: spec.path):
+            expect(case_name + " fails when a declaration matches on the path alone (naive variant)",
+                   _quiet_run(locr, locr_config, True, locr_next, None, None), 2)
+
     # The rule is bounded by the snapshot's OWN declarations: a table (and its declaration) adopted in
     # the very commit under gate, and an old branch that forked before adoption, both leave the earlier
     # snapshot's existing file legitimately table-free, so neither fails; an unbounded variant that
@@ -3241,6 +3530,98 @@ def _v2_self_test_cases(directory):
         expect("the pre-adoption branch fails under an unbounded unlocatable rule (naive variant)",
                _quiet_run(adop, adop_config, True, m_adop, None, None), 2)
 
+    return failures
+
+
+def _heading_pattern_self_test_cases(directory):
+    """A heading-pattern the compiler rejects with something other than re.error must still be a
+    contextual exit-2 refusal naming the config, in the working config and in the first parent's config.
+
+    A repetition count past the engine's limit raises OverflowError from a real pattern. A recursion
+    overflow is INJECTED (re.compile raises RecursionError on a marked pattern) rather than provoked by a
+    deeply nested one, because the nesting depth that overflows depends on the interpreter's recursion
+    limit. Each refusal is paired with a mutant whose compile step catches re.error only, under which the
+    same fixture lets the exception escape run(). Returns failure strings.
+    """
+    failures = []
+
+    def outcome(repo_root, config, post):
+        try:
+            return _quiet_run_refusal(repo_root, config, True, post, None, None)
+        except (OverflowError, RecursionError) as exc:
+            return "escaped", type(exc).__name__
+
+    def expect_refusal(name, result, needle):
+        code, text = result
+        if code != 2 or needle not in text:
+            failures.append("pattern {}: got ({}, {!r}), want exit 2 naming {!r}"
+                            .format(name, code, text.strip(), needle))
+
+    def expect_escape(name, result, exc_name):
+        if result != ("escaped", exc_name):
+            failures.append("pattern {}: got {!r}, want a bare {} escaping run()"
+                            .format(name, result, exc_name))
+
+    def re_error_only(pattern, where):
+        try:
+            return re.compile(pattern)
+        except re.error as exc:
+            raise GateError("{}: heading-pattern is invalid ({})".format(where, exc))
+
+    def v1_config(pattern):
+        return ('schema-version = 1\n'
+                'opt-out-marker = "<!-- aiqt-record-section: superseded -->"\n\n'
+                '[[record]]\npath = "records.md"\nheading-pattern = \'' + pattern + "'\n")
+
+    tables_only = ('schema-version = 2\n\n[[table]]\npath = "done.md"\nformat = "markdown"\n'
+                   'header = "| id | pr |"\nkey = ["id", "pr"]\nedit = "frozen"\n')
+    real_compile = re.compile
+
+    def injected_compile(pattern, flags=0):
+        if isinstance(pattern, str) and "injected-recursion" in pattern:
+            raise RecursionError("injected compiler recursion overflow")
+        return real_compile(pattern, flags)
+
+    for label, pattern, exc_name, needle_detail in (
+            ("a repetition count past the engine's limit", "^## a{4294967296}$", "OverflowError",
+             "OverflowError: the repetition number is too large"),
+            ("an injected compiler recursion overflow", "^## injected-recursion$", "RecursionError",
+             "RecursionError: injected compiler recursion overflow")):
+        repo = directory / "pattern-{}".format(exc_name.lower())
+        repo.mkdir()
+        _selftest_git(repo, ["init", "-q", "-b", "main"])
+        _selftest_git(repo, ["config", "user.name", "AIQT Self-Test"])
+        _selftest_git(repo, ["config", "user.email", "selftest@example.invalid"])
+        (repo / ".aiqt").mkdir()
+        (repo / ".aiqt" / "record-sections.toml").write_text(v1_config(pattern), encoding="utf-8")
+        (repo / "records.md").write_text("# R\n\n## 2026-08-01 Existing\n", encoding="utf-8")
+        (repo / "done.md").write_text("| id | pr |\n| --- | --- |\n| A1 | PR0 |\n", encoding="utf-8")
+        _selftest_git(repo, ["add", "-A"])
+        _selftest_git(repo, ["commit", "-q", "-m", "first parent carries the pattern"])
+        parent = _selftest_git(repo, ["rev-parse", "HEAD"])
+        child = _v2_branch_commit(repo, "pattern-next", parent,
+                                  {".aiqt/record-sections.toml": tables_only},
+                                  "valid tables-only config replaces it")
+        working = directory / "pattern-working-{}.toml".format(exc_name.lower())
+        working.write_text(v1_config(pattern), encoding="utf-8")
+        historical = repo / ".aiqt" / "record-sections.toml"
+        re.compile = injected_compile
+        try:
+            expect_refusal(label + " in the working config",
+                           outcome(repo, working, child),
+                           "{} [[record]] #1: heading-pattern is invalid ({}".format(
+                               working.name, needle_detail))
+            expect_refusal(label + " in the first parent's config",
+                           outcome(repo, historical, child),
+                           ".aiqt/record-sections.toml at the pre-merge target [[record]] #1: "
+                           "heading-pattern is invalid ({}".format(needle_detail))
+            with _swapped("_compile_heading_pattern", re_error_only):
+                expect_escape(label + " in the working config escapes once only re.error is "
+                              "caught (mutant)", outcome(repo, working, child), exc_name)
+                expect_escape(label + " in the first parent's config escapes once only re.error is "
+                              "caught (mutant)", outcome(repo, historical, child), exc_name)
+        finally:
+            re.compile = real_compile
     return failures
 
 
