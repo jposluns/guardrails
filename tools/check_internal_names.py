@@ -15,8 +15,8 @@ are reused, so the two gates agree and no plaintext internal name is re-typed he
   2. A HASHED codename denylist (tools/internal-name-hashes.txt): SHA-256 only, for names a generic shape
      cannot catch, above all a sibling-repo name. Shipped EMPTY by default; the private generator fills it.
 
-SCOPE, deliberately narrow and explicit (all but the role-name rule, whose whole-tree scope is described
-below). This gate scans ONLY the QA-suite shipped surfaces plus the shipped
+SCOPE, deliberately narrow and explicit (all but the role-name rule and the decision-id layer, whose
+whole-tree scopes are described below). Layers 1 and 2 scan ONLY the QA-suite shipped surfaces plus the shipped
 gate-runner and CI-workflow files this PR modifies (tools/run_all_checks.sh and .github/workflows/quality.yml,
 both verified clean of provenance shapes), plus the public .preview/ channel, NOT the whole tree: the existing pack legitimately carries
 guardrail-decision ids in its hooks and a dogfood-adopter name in its site and docs, so a whole-tree
@@ -28,6 +28,18 @@ whose target is missing) is a present-but-unreadable input, not an absent one: i
 an OSError, exit 2) at both the hashes-file load and the scoped-file scan, never read as absent. A line
 carrying an `internal-allow`
 marker is exempt from the STRUCTURAL layer (the same escape hatch the leak gate offers).
+
+DECISION-ID LAYER, tree-wide (scan_tree_decision_ids). The internal maintainer-decision id shape (DECISION_ID)
+is checked over the WHOLE working tree, walked fail-closed with the skips and text suffixes above, not only
+over SCOPE_RELPATHS: no file in the tree carries one, so this layer has no legitimate occurrence to exempt.
+A line carrying an internal-allow marker is exempt here as well. In this layer a file that is not valid
+UTF-8 is skipped, where the whole-tree leak gate decodes it losslessly and scans it; a scoped surface that
+is not valid UTF-8 still fails closed. The walk reads untracked and git-ignored files too (everything on
+disk outside the skipped directories), does not follow a symlinked directory, and reads a file only when
+its suffix is one of the leak gate's TEXT_SUFFIXES or it has no suffix, so a file under any other suffix
+(a .csv, say) is not read. A bare ordinal with no further segment (D-3) is not matched. An unlistable
+directory, an unreadable file and a non-regular file (a FIFO) each fail closed with exit 2; a file that
+vanishes between the walk and the read is a fail-closed finding, as in the scoped layer.
 
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
@@ -58,8 +70,11 @@ change that differs from the working-tree copy (it reads the working tree), and 
 
 Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error or a tracked file the role
 rule cannot evaluate (fail-closed). `--self-test` proves the gate FAILS on a seeded internal name (a
-provenance id, a host path, a hashed codename, and the role name in a tracked file outside SCOPE_RELPATHS)
-and passes clean generic content, so removing a layer makes a case fail. The self-test exits 0 only when
+provenance id, a host path, a hashed codename, the role name in a tracked file outside SCOPE_RELPATHS, and a
+maintainer-decision id of each shape anywhere in the tree) and passes clean generic content, so removing a
+layer makes a case fail. It also runs the real scan over a planted fixture repository to prove the tree-wide
+decision-id layer is wired in and fails closed on an unreadable file, an unlistable directory, a FIFO and a
+vanished file. The self-test exits 0 only when
 every case ran and passed; 1 when any case failed (it also prints the cases it did not run); otherwise, when
 it skipped a case, 3. It never exits 0 after a skip. Skip reasons it prints include, as examples rather than
 a complete set:
@@ -67,8 +82,9 @@ a complete set:
   "case 12 (a dangling symlink could not be created)"
   "case 19 at the {} path (a FIFO could not be created)" ({} is hash-file or scoped-file)
   "case 19 (os.mkfifo is unavailable)"
-  "cases 19 to 23 (the child sentinel matched the parent pid)"
+  "cases 19 to 23 and 25 (the child sentinel matched the parent pid)"
   "case 23 (the inherited-probe sentinel matched the parent pid)"
+  "case 25 (an unreadable file could not be planted: permissions do not bind here)"
 """
 import sys
 
@@ -139,6 +155,15 @@ _ROLE_NAMES = [
 # Reuse the leak gate's structural host/IP/token/account patterns verbatim (imported, never re-typed, so
 # this file stays self-clean the way check_leaks.py does), and add the provenance-id and role-name shapes.
 STRUCTURAL = list(check_leaks.STRUCTURAL) + _PROVENANCE + _ROLE_NAMES
+
+# Internal maintainer-decision id SHAPE (generic; carries no codename), checked over the WHOLE tree by
+# scan_tree_decision_ids rather than over SCOPE_RELPATHS alone. A D- head that is an ordinal or an upper-case
+# word of two or more characters, then one or more segments of upper-case letters and digits: an ordinal head
+# with word segments, a segment carrying a digit, a word head with word segments, a final one-letter segment.
+# It does NOT match a bare ordinal with no further segment (D-3), a lower-case check id or label (D-no-remote,
+# D-a4), a lower-case prose word (D-part), or a D- glued to a longer word (GD-, PD-: no word boundary before
+# the D).
+DECISION_ID = (re.compile(r'\bD-(?:[0-9]+|[A-Z][A-Z0-9]+)(?:-[A-Z0-9]+)+\b'), "internal maintainer-decision id")
 
 
 def _read_present_text(path):
@@ -263,6 +288,34 @@ def scan_scope(root, scope_relpaths, hashes, maxn):
     return findings
 
 
+def scan_tree_decision_ids(root):
+    """Return findings for the maintainer-decision id shape (DECISION_ID) over the WHOLE tree under root,
+    walked fail-closed (an unlistable directory raises OSError) with SKIP_DIRS, SKIP_NAMES and TEXT_SUFFIXES
+    as in _iter_scope. A line carrying an internal-allow marker is exempt, as in scan_text. A present file
+    that is not a readable regular file raises OSError (through _read_present_text, so a FIFO never blocks);
+    a file that vanished during the walk is a fail-closed finding; a file that is not valid UTF-8 is skipped
+    (the whole-tree leak gate instead decodes such a file losslessly and scans it)."""
+    pattern, label = DECISION_ID
+    findings = []
+    for path in sorted(walk_files(root, SKIP_DIRS)):
+        if path.name in SKIP_NAMES:
+            continue
+        if path.suffix and path.suffix not in TEXT_SUFFIXES:
+            continue
+        rel = path.relative_to(root).as_posix()
+        try:
+            text = _read_present_text(path)
+        except UnicodeDecodeError:
+            continue
+        if text is None:
+            findings.append("{}: file vanished during the tree scan; fail-closed".format(rel))
+            continue
+        for number, line in enumerate(text.splitlines(), 1):
+            if "internal-allow" not in line and pattern.search(line):
+                findings.append("{}:{}: {}".format(rel, number, label))
+    return findings
+
+
 def tracked_files(root):
     """The sorted tracked relpaths under `root` from `git ls-files -z --cached`, the role rule's input set.
     Pinned like gen_manifest's index read: the GIT_* environment is dropped (a repository-selecting variable
@@ -327,22 +380,24 @@ def scan_tracked_roles(root, relpaths):
 
 
 def run_gate(root):
-    """The real scan of the tree at `root`: the scoped layers over SCOPE_RELPATHS plus the role rule over
-    every tracked file. Returns the exit code and prints the report."""
+    """The real scan of the tree at `root`: the scoped layers over SCOPE_RELPATHS, the role rule over every
+    tracked file, and the decision-id layer over the whole tree. Returns the exit code and prints the report."""
     try:
         hashes, maxn, findings = load_hashes(root)
         findings = list(findings)
         findings += scan_scope(root, SCOPE_RELPATHS, hashes, maxn)
         role_findings, unevaluable = scan_tracked_roles(root, tracked_files(root))
         findings += role_findings
+        findings += scan_tree_decision_ids(root)
     except (OSError, UnicodeDecodeError) as exc:
-        print("error: cannot read a required input (denylist, scoped surface or tracked file) ({}); "
+        print("error: cannot read a required input (denylist, scoped surface, tracked file or tree) ({}); "
               "fail-closed".format(exc), file=sys.stderr)
         return 2
     # A role-name hit inside a tracked scoped file is reported by both scans in the same form; report it once.
     findings = sorted(set(findings))
     if findings:
-        print("FAIL: {} internal-name leak(s) in the scanned surfaces".format(len(findings)))
+        print("FAIL: {} internal-name leak(s) in the scanned surfaces or decision id(s) in the tree".format(
+            len(findings)))
         for finding in findings:
             print("  " + finding)
     if unevaluable:
@@ -353,8 +408,8 @@ def run_gate(root):
         return 2
     if findings:
         return 1
-    print("PASS: no internal provenance vocabulary in the scanned QA-suite surfaces, and no internal role "
-          "name in any tracked file")
+    print("PASS: no internal provenance vocabulary in the scanned QA-suite surfaces, no internal role "
+          "name in any tracked file, and no maintainer-decision id in the tree")
     return 0
 
 
@@ -410,7 +465,7 @@ def _caller_snapshot(environ):
 
 
 # A self-test that launches a child self-test sets _CHILD_SENTINEL in the child's environment to its OWN pid,
-# and the child skips the subprocess-launching cases 19 to 23 (its parent runs them; a child running them
+# and the child skips the subprocess-launching cases 19 to 23 and 25 (its parent runs them; a child running them
 # would recurse). Case 23 likewise sets _INHERITED_PROBE to its own pid in three of the runs it launches (its
 # two mutated lanes and its clean lane), which skips case 23 alone. A value is honoured only when it equals
 # this process's parent pid. That match does not prove a self-test launched this process: a caller that
@@ -770,7 +825,7 @@ def _self_test(caller_env=None):
         # (which re-enters --self-test) skips them rather than recursing without bound. A run recognized as a
         # child (see _CHILD_SENTINEL) skips them and therefore exits 3, or 1 when a case also failed, never 0.
         if launched_child:
-            not_run.append("cases 19 to 23 (the child sentinel matched the parent pid)")
+            not_run.append("cases 19 to 23 and 25 (the child sentinel matched the parent pid)")
         else:
             child_tag = {_CHILD_SENTINEL: str(os.getpid())}
             childenv = dict(os.environ, **child_tag)
@@ -860,7 +915,7 @@ def _self_test(caller_env=None):
             #     whenever neither GIT_CONFIG_NOSYSTEM=1 nor GIT_CONFIG_SYSTEM is set (where git reads the
             #     host's system file), and only the fixture git lifecycle's PATH wrapper reasserts that pin
             #     after the drop. Each child must pass, print the child line and exit 3 (it skips cases 19
-            #     to 23, which this run runs). Reverting self_test_main to a bare _self_test() lets
+            #     to 23 and 25, which this run runs). Reverting self_test_main to a bare _self_test() lets
             #     the child's tracked-file read load the malformed file, so its cases 14 to 17 exit 2 and the
             #     child fails all three; applying the scrub without the lifecycle fails the system case. A
             #     control first proves each poisoned configuration breaks a git read that honours it; the home
@@ -980,7 +1035,7 @@ def _self_test(caller_env=None):
             #     cases 21 and 22 share (it fails case 21's system lane and case 22). This case requires all
             #     five failure messages, so honouring the inherited value (as a child) fails it. It shows this
             #     for these two values only: a value equal to the launching run's pid is honoured by design, and
-            #     a run misrecognized that way skips cases 19 to 23, so it exits 3, or 1 when a case also
+            #     a run misrecognized that way skips cases 19 to 23 and 25, so it exits 3, or 1 when a case also
             #     failed, never 0. The copy is launched with _INHERITED_PROBE naming this process, so it
             #     skips this case and does not recurse. Each copy therefore fails cases and skips one, and must
             #     exit 1 with its not-run line naming this case: a failure outranks a skip. A last lane runs
@@ -1124,6 +1179,147 @@ def _self_test(caller_env=None):
                 finally:
                     shutil.rmtree(platform_dir, ignore_errors=True)
 
+            # 25. DISCRIMINATING (the tree-wide decision-id layer is WIRED into the real scan): a copy of this
+            #     gate (with _walk and check_leaks) in a fixture git repository, run with no arguments, exits 1
+            #     naming a synthetic maintainer-decision id in docs/, a path outside SCOPE_RELPATHS, and exits 0
+            #     once the id is gone. The copy and the note are tracked so the role rule's tracked-file read
+            #     succeeds and the decision-id layer alone decides the result. Dropping the
+            #     scan_tree_decision_ids call from run_gate lets the planted run exit 0, failing this. The id is
+            #     assembled at runtime, as in case 26. The copy list starts with _walk.py so it does not repeat
+            #     the case 20 list that case 23 mutates (each mutated text must occur once in this file).
+            wired = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-wired-"))
+            try:
+                (wired / "tools").mkdir()
+                (wired / "docs").mkdir()
+                for name in ("_walk.py", "check_internal_names.py", "check_leaks.py"):
+                    shutil.copy(str(Path(toolsdir) / name), str(wired / "tools" / name))
+                note = wired / "docs" / "note.md"
+                note.write_text("Decided under a plain rule here.\n", encoding="utf-8")
+                init = subprocess.run(["git", "-C", str(wired), "init", "-q"], capture_output=True, text=True,
+                                      env=_git_fixture_env.git_fixture_env(), timeout=60)
+                add = subprocess.run(["git", "-C", str(wired), "add", "--", "tools", "docs/note.md"],
+                                     capture_output=True, text=True, env=_git_fixture_env.git_fixture_env(),
+                                     timeout=60)
+                if init.returncode != 0 or add.returncode != 0:
+                    failures.append("the wired decision-id fixture repository could not be built: init rc={} "
+                                    "add rc={} {!r}".format(init.returncode, add.returncode,
+                                                            init.stderr + add.stderr))
+                for planted, want in ((True, 1), (False, 0)):
+                    note.write_text("Decided under {} here.\n".format(
+                        "D-" + "000-SYNTHETIC-FIXTURE" if planted else "a plain rule"), encoding="utf-8")
+                    try:
+                        proc = subprocess.run(
+                            [sys.executable, "-I", "-B", str(wired / "tools" / "check_internal_names.py")],
+                            capture_output=True, text=True, env=childenv, timeout=120)
+                    except subprocess.TimeoutExpired:
+                        failures.append("the wired tree-wide scan (planted={}) timed out".format(planted))
+                        continue
+                    named = "docs/note.md:1: internal maintainer-decision id" in proc.stdout
+                    if proc.returncode != want or named != planted:
+                        failures.append("the real scan over a tree {} a decision id expected exit {} (finding "
+                                        "named: {}), got rc={} out={!r} err={!r}".format(
+                                            "holding" if planted else "without", want, planted,
+                                            proc.returncode, proc.stdout, proc.stderr))
+
+                # 25 (continued). DISCRIMINATING (the tree-wide layer FAILS CLOSED in the real scan): each input
+                #     below is planted alone, untracked and outside SCOPE_RELPATHS, in the otherwise clean tree
+                #     above. An unreadable file, an unlistable directory and a FIFO each exit 2 with the
+                #     read-error diagnostic naming the input; a file that vanishes between the walk listing it
+                #     and the read exits 1 with the fail-closed vanished finding naming it, as in the scoped
+                #     layer. Skipping an OSError in scan_tree_decision_ids, skipping a vanished file, an rglob
+                #     walk (which lists nothing under an unlistable directory and bypasses the walker the vanish
+                #     probe wraps), and a run_gate that swallows the tree layer's OSError each fail at least one
+                #     probe. A plant this platform cannot produce (an unreadable entry when permissions do not
+                #     bind, as for root, or a FIFO without os.mkfifo) is a case not run, so the run exits 3 (or 1
+                #     when a case also failed), never 0.
+                gate = str(wired / "tools" / "check_internal_names.py")
+                readerr = "error: cannot read a required input"
+
+                def expect_fail_closed(label, script_args, want, stream, needles):
+                    try:
+                        proc = subprocess.run([sys.executable, "-I", "-B", *script_args], capture_output=True,
+                                              text=True, env=childenv, timeout=120)
+                    except subprocess.TimeoutExpired:
+                        failures.append("the tree-wide scan over {} timed out, not failed closed".format(label))
+                        return
+                    text = proc.stdout if stream == "stdout" else proc.stderr
+                    if proc.returncode != want or not all(n in text for n in needles):
+                        failures.append("the tree-wide scan over {} expected exit {} with {!r} on {}, got rc={} "
+                                        "out={!r} err={!r}".format(label, want, needles, stream, proc.returncode,
+                                                                   proc.stdout, proc.stderr))
+
+                unreadable = wired / "docs" / "unreadable.md"
+                unreadable.write_text("plain text\n", encoding="utf-8")
+                os.chmod(str(unreadable), 0)
+                try:
+                    try:
+                        unreadable.read_bytes()
+                        not_run.append("case 25 (an unreadable file could not be planted: permissions do not "
+                                       "bind here)")
+                    except PermissionError:
+                        expect_fail_closed("an unreadable file", (gate,), 2, "stderr",
+                                           (readerr, "docs/unreadable.md"))
+                finally:
+                    os.chmod(str(unreadable), 0o600)
+                    unreadable.unlink()
+
+                locked = wired / "notes" / "locked"
+                locked.mkdir(parents=True)
+                (locked / "inner.md").write_text("plain text\n", encoding="utf-8")
+                os.chmod(str(locked), 0)
+                try:
+                    try:
+                        os.listdir(str(locked))
+                        not_run.append("case 25 (an unlistable directory could not be planted: permissions do "
+                                       "not bind here)")
+                    except PermissionError:
+                        expect_fail_closed("an unlistable directory", (gate,), 2, "stderr",
+                                           (readerr, "notes/locked"))
+                finally:
+                    os.chmod(str(locked), 0o700)
+                    shutil.rmtree(wired / "notes")
+
+                pipe = wired / "docs" / "pipe.md"
+                made = False
+                if hasattr(os, "mkfifo"):
+                    try:
+                        os.mkfifo(str(pipe))
+                        made = True
+                    except OSError:
+                        made = False
+                if made:
+                    try:
+                        expect_fail_closed("a FIFO", (gate,), 2, "stderr",
+                                           (readerr, "docs/pipe.md is present but not a regular file"))
+                    finally:
+                        pipe.unlink()
+                else:
+                    not_run.append("case 25 (a FIFO could not be planted: os.mkfifo unavailable or refused)")
+
+                (wired / "docs" / "vanish.md").write_text("plain text\n", encoding="utf-8")
+                vanish_probe = (
+                    "import sys\n"
+                    "sys.path.append({tools!r})\n"
+                    "import check_internal_names as cin\n"
+                    "listed = cin.walk_files\n"
+                    "def vanishing_walk(*args, **kwargs):\n"
+                    "    for p in listed(*args, **kwargs):\n"
+                    "        if p.name == 'vanish.md':\n"
+                    "            p.unlink()\n"
+                    "        yield p\n"
+                    "cin.walk_files = vanishing_walk\n"
+                    "sys.exit(cin.main())\n"
+                ).format(tools=str(wired / "tools"))
+                expect_fail_closed("a file that vanishes during the walk", ("-c", vanish_probe), 1, "stdout",
+                                   ("docs/vanish.md: file vanished during the tree scan; fail-closed",))
+            finally:
+                for entry in (wired / "docs" / "unreadable.md", wired / "notes" / "locked"):
+                    try:
+                        os.chmod(str(entry), 0o700)
+                    except OSError:
+                        pass
+                shutil.rmtree(wired, ignore_errors=True)
+
         # 24. DISCRIMINATING (the inherited child-sentinel values case 23 runs, by direct calls, so no real
         #     PID 1 run is needed): "1" and the parent pid normally, and the replacements
         #     _stale_sentinel_values documents for a run that is PID 1 (parent pid 0, and parent pid 2, which
@@ -1137,6 +1333,62 @@ def _self_test(caller_env=None):
             if got != expected:
                 failures.append("the inherited child-sentinel values for own pid {} and parent pid {} expected "
                                 "{!r}, got {!r}".format(own, parent, expected, got))
+
+        # 26. DISCRIMINATING (maintainer-decision id SHAPES, tree-wide): one synthetic id of each decision
+        #     shape, planted in docs/ (outside SCOPE_RELPATHS), is caught by scan_tree_decision_ids, and so is
+        #     the first shape planted outside docs/ (a suffix-less file at the tree root and a page in site/);
+        #     removing DECISION_ID, or narrowing a head or segment class so a shape no longer matches, fails
+        #     its case.
+        #     Each non-id token class seen in the tree is a negative control that must stay unflagged, and an
+        #     internal-allow line is exempt as for the other shapes. The ids are SYNTHETIC (the 000 ordinal
+        #     and the SYNTHETIC word name no real decision) and assembled at runtime, so no contiguous
+        #     decision-id shape sits in this source.
+        tree = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-tree-"))
+        try:
+            (tree / "docs").mkdir()
+            note = tree / "docs" / "note.md"
+            positives = (
+                ("an ordinal head with word segments", "D-" + "000-SYNTHETIC-FIXTURE"),
+                ("an ordinal head with a segment carrying a digit", "D-" + "000-R0-FIXTURE"),
+                ("a word head with word segments", "D-" + "SYNTHETIC-FIXTURE-ONLY"),
+                ("a word head with a final one-letter segment", "D-" + "SYNTHETIC-Z"),
+            )
+            negatives = (
+                ("a bare ordinal", "closes D-3; a duplicate item D-1"),
+                ("a lower-case check id", 'ok("D-roster-excludes-init") and ("D-no-remote", argv)'),
+                ("a lower-case short label", "the D-a2 rename and the D-a4 header"),
+                ("a lower-case prose word", "a chain of depth D emits a D-part header"),
+                ("a D- glued to a longer word", "GD-" + "000-SYNTHETIC-FIXTURE"),
+            )
+            for shape, token in positives:
+                note.write_text("Decided under {} in prose.\n".format(token), encoding="utf-8")
+                f = scan_tree_decision_ids(tree)
+                if f != ["docs/note.md:1: internal maintainer-decision id"]:
+                    failures.append("a decision id ({}) expected one tree-wide finding, got {}".format(shape, f))
+                note.write_text("{} kept on purpose  # internal-allow\n".format(token), encoding="utf-8")
+                f = scan_tree_decision_ids(tree)
+                if f:
+                    failures.append("an internal-allow line holding a decision id ({}) expected exemption, "
+                                    "got {}".format(shape, f))
+            for shape, text in negatives:
+                note.write_text(text + "\n", encoding="utf-8")
+                f = scan_tree_decision_ids(tree)
+                if f:
+                    failures.append("a non-id token ({}) expected no decision-id finding, got {}".format(shape, f))
+            # The same id outside docs/: a suffix-less file at the tree root (read, as every file with no
+            # suffix is) and a listed text suffix in a nested directory, each named by its own path.
+            note.unlink()
+            for rel in ("NOTICE", "site/pages/index.html"):
+                elsewhere = tree / rel
+                elsewhere.parent.mkdir(parents=True, exist_ok=True)
+                elsewhere.write_text("Decided under {} here.\n".format(positives[0][1]), encoding="utf-8")
+                f = scan_tree_decision_ids(tree)
+                if f != ["{}:1: internal maintainer-decision id".format(rel)]:
+                    failures.append("a decision id in {} (outside docs/) expected one tree-wide finding, got "
+                                    "{}".format(rel, f))
+                elsewhere.unlink()
+        finally:
+            shutil.rmtree(tree, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1195,7 +1447,14 @@ def _self_test(caller_env=None):
           "PROMPTLY (classified non-regular before any open) rather than blocking on the open; and a hostile "
           "sibling json.py/hashlib.py beside the script does NOT shadow a stdlib import (the sibling modules "
           "are imported via sys.path.append, keeping stdlib precedence), so the copy still runs and passes its "
-          "self-test as a child under -I rather than being silently neutered.")
+          "self-test as a child under -I rather than being silently neutered; a maintainer-decision id of each "
+          "shape (an ordinal or word head, word segments, a segment carrying a digit, a final one-letter "
+          "segment) is caught anywhere in the tree, outside the scoped surfaces too, by the real scan on a "
+          "fixture repository as well as by scan_tree_decision_ids, while a bare ordinal, a lower-case check "
+          "id, label or prose word and a D- glued to a longer word are not, and an internal-allow line holding "
+          "a decision id is exempt; and in the real scan the tree-wide layer fails closed outside the scoped "
+          "surfaces: an unreadable file, an unlistable directory and a FIFO each exit 2 naming the input, and a "
+          "file that vanishes during the walk is a fail-closed finding naming it.")
     return 0
 
 

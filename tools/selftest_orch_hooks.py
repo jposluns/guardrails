@@ -2034,7 +2034,7 @@ def _rdp_scope_cases(base, plain):
                "git clone a b", "git", "git --version")
     check("rdp/plain-git-allowlisted-subcommand-allows", [_rdp_kind(go.run(c)) for c in allowed],
           ["allow"] * len(allowed))
-    # The binding record (D-433-FAILCLOSED-BINDING): once the hook has seen the registry bind, a registry
+    # The binding record fails closed: once the hook has seen the registry bind, a registry
     # removed or rewritten by any command leaves the next dispatch withheld as UNVERIFIABLE, its reason naming
     # the binding record, never allowed. Each change is made directly, as a command the hook did not judge
     # would make it, after one dispatch has been checked under the binding.

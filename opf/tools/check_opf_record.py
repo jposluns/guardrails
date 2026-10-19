@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T88)
+  check_opf_record.py --self-test                    the fixture suite (T1-T90)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -504,6 +504,19 @@ Each case runs on its own copy of that template; the root is removed in a finall
       once on every path. Accepted: the declared injection reaching its own backstop (flips: a
       discriminator that refuses only stray backstop lines; T75's earlier collection, which drops
       each child's stderr when an assertion fails before its verdict reads)
+  T89 a store whose backlog index an earlier emitter wrote with a literal U+2028 and U+2029 inside a
+      basic string (doctor-VALID, views rendered over those bytes) takes a create: the write succeeds,
+      the file is re-spelled with the \\u2028 and \\u2029 escapes, the existing record reads back
+      unchanged, and doctor stays VALID; the same store with a literal separator in a comment, the
+      separators in a literal string, or one extra space, each reading back as the same model, refuses
+      exit 2 with every byte untouched (flips: no separator escape; the strict byte comparison; an
+      acceptance that admits any bytes)
+  T90 the store-read cap over every file a record operation would publish: with a small cap patched
+      over the shared store module, a create whose re-spelled, appended index would exceed the cap
+      refuses exit 2 BEFORE publication, naming the store-read cap, every byte untouched; with room
+      under the cap the same create records, re-spells the legacy index, and stays doctor-VALID
+      (flip: the size guard removed, so the over-cap index is published and the byte comparison
+      turns red)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -8653,6 +8666,135 @@ _INTENDED_BACKSTOPS = {
 }
 
 
+# --- T89: a store an earlier emitter wrote with a literal U+2028 and U+2029 ---------------------------------
+
+T89_SUMMARY = "one" + chr(0x2028) + "two" + chr(0x2029) + "three"
+T89_LITERALS = (chr(0x2028).encode("utf-8"), chr(0x2029).encode("utf-8"))
+
+
+def _t89_prior_spelling(data):
+    """The bytes an emitter before the U+2028/U+2029 escape wrote for the same content: each escape as the
+    literal character (exact here, since the fixture holds no other backslash-u text)."""
+    return data.replace(b"\\u2028", T89_LITERALS[0]).replace(b"\\u2029", T89_LITERALS[1])
+
+
+def _t89_store(fx, name):
+    """A doctor-VALID store whose backlog index holds BI-1 with a separator-bearing summary in the earlier
+    spelling, its views rendered over those bytes, everything committed."""
+    env = fx.env
+    root = fx.case(name)
+    step(fx, root, CREATE + ["--summary", T89_SUMMARY], "a separator-bearing record")
+    written = read(root, BI_INDEX)
+    if _t89_prior_spelling(written) != written:     # an emitter that escapes nothing already wrote them literally
+        write_commit(env, root, BI_INDEX, _t89_prior_spelling(written), "the earlier spelling")
+    rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+    assert rc == 0, ("T89 render over the earlier spelling", rc, err[-800:])
+    if env.git(root, "status", "--porcelain", "--", ".working").strip():
+        fx.commit_all(root, "views over the earlier spelling")
+    held = read(root, BI_INDEX)
+    assert all(lit in held for lit in T89_LITERALS) and b"\\u2028" not in held, (
+        "T89 the fixture index holds the literal characters", held[-400:])
+    doctor_valid(env, root)
+    return root
+
+
+def t89_prior_separator_spelling(fx):
+    env = fx.env
+    root = _t89_store(fx, "t89-respelled")
+    kept = row(root, "BI-1")
+    assert kept["summary"] == T89_SUMMARY, kept
+    recorded(record_cli(env, root, CREATE))
+    after = read(root, BI_INDEX)
+    assert not any(lit in after for lit in T89_LITERALS), ("T89 the write re-spells the file", after[-400:])
+    assert b'summary = "one\\u2028two\\u2029three"' in after, ("T89 the escapes are written", after[-400:])
+    assert row(root, "BI-1") == kept, "T89 the existing record reads back unchanged"
+    assert [r["id"] for r in model(root, BI_INDEX)["record"]] == ["BI-1", "BI-2"], (
+        "T89 the new record is appended")
+    doctor_valid(env, root)
+
+
+def t89_bounded_acceptance(fx):
+    env = fx.env
+    base = _t89_store(fx, "t89-base")
+    prior = read(base, BI_INDEX)
+    kept = model(base, BI_INDEX)
+    for name, data in (
+            ("comment", b"# a note" + T89_LITERALS[0] + b"\n" + prior),
+            ("literal-string",
+             prior.replace(b'summary = "one', b"summary = 'one").replace(b'three"', b"three'")),
+            ("extra-space", prior.replace(b"summary = ", b"summary  = "))):
+        root = fx.case("t89-" + name, source=base)
+        write_commit(env, root, BI_INDEX, data, "hand edit: " + name)
+        assert read(root, BI_INDEX) != prior and model(root, BI_INDEX) == kept, (
+            "T89 the edited index reads back as the same model", name)
+        refused_untouched(env, root, CREATE, "not in canonical new-document form")
+
+
+def flip_t89_no_escape():
+    return patch.object(emit, "_LINE_SEPARATORS", frozenset())
+
+
+def flip_t89_strict():
+    return patch.object(emit, "matches_store_bytes", lambda raw, fresh: raw == fresh)
+
+
+def flip_t89_any_bytes():
+    return patch.object(emit, "matches_store_bytes", lambda raw, fresh: True)
+
+
+# --- T90: the store-read cap over every file a record operation would publish -------------------------------
+# Re-spelling grows each literal separator from three bytes to six and the appended row adds its whole
+# body, so a legacy index near the cap could otherwise be rewritten into one the resolver and doctor then
+# refuse. The operation sizes every emitted operand against the cap and refuses BEFORE publication.
+
+T90_SUMMARY = "s" * 16000 + chr(0x2028) + "t" + chr(0x2029) + "u"
+
+
+def t90_reader_cap(fx):
+    env = fx.env
+    root = fx.case("t90-cap")
+    step(fx, root, CREATE + ["--summary", T90_SUMMARY], "a large separator-bearing record")
+    written = read(root, BI_INDEX)
+    if _t89_prior_spelling(written) != written:
+        write_commit(env, root, BI_INDEX, _t89_prior_spelling(written), "the earlier spelling")
+    rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+    assert rc == 0, ("T90 render over the earlier spelling", rc, err[-800:])
+    if env.git(root, "status", "--porcelain", "--", ".working").strip():
+        fx.commit_all(root, "views over the earlier spelling")
+    doctor_valid(env, root)
+    held = read(root, BI_INDEX)
+    assert all(lit in held for lit in T89_LITERALS), ("T90 the fixture holds the literals", held[-200:])
+    # The patched cap must admit every capped pre-publication read (the resolver reads the manifest
+    # through it) while the re-spelled index plus the appended record exceeds it.
+    manifest_size = len(read(root, MACH + "/manifest.toml"))
+    assert manifest_size <= len(held), ("T90 the capped resolver read must fit", manifest_size, len(held))
+    with patch.object(record._opf_store, "MAX_STORE_READ_BYTES", len(held) + 8):
+        refused_untouched(env, root, CREATE, "store-read cap")
+    # The boundary matches the reader's own comparison (only a LARGER file is refused): just inside
+    # and exactly at the cap are admitted, one byte over refuses.
+    with patch.object(record._opf_store, "MAX_STORE_READ_BYTES", 16):
+        record._require_within_read_cap("x", b"a" * 15)
+        record._require_within_read_cap("x", b"a" * 16)
+        try:
+            record._require_within_read_cap("x", b"a" * 17)
+            raise AssertionError("T90 one byte over the cap must refuse")
+        except record.RecordError as exc:
+            assert "store-read cap" in str(exc) and "17 bytes" in str(exc), exc
+    # Boundary control: with room for the growth under the same patch seam, the create records, the
+    # legacy index is re-spelled, and the store stays doctor-VALID.
+    with patch.object(record._opf_store, "MAX_STORE_READ_BYTES", len(held) + (1 << 16)):
+        recorded(record_cli(env, root, CREATE))
+    after = read(root, BI_INDEX)
+    assert not any(lit in after for lit in T89_LITERALS), ("T90 the admitted write re-spells", after[-200:])
+    assert [r["id"] for r in model(root, BI_INDEX)["record"]] == ["BI-1", "BI-2"], (
+        "T90 the new record is appended")
+    doctor_valid(env, root)
+
+
+def flip_t90_no_cap():
+    return patch.object(record, "_require_within_read_cap", lambda rel, data: None)
+
+
 TESTS = (
     ("T1-precondition-byte-reproduction", t1_precondition, flip_t1),
     ("T2-round-trip-emit-checked", t2_round_trip, flip_t2),
@@ -8806,6 +8948,10 @@ TESTS = (
                                                                           flip_t87_repr_substring)),
     ("T88-expected-injection-seen", t88_expected_injection_seen, (flip_t88_unchecked,
                                                                   flip_t88_t75_unwinding)),
+    ("T89-prior-separator-spelling-respelled", t89_prior_separator_spelling, (flip_t89_no_escape,
+                                                                            flip_t89_strict)),
+    ("T89-prior-separator-spelling-bounded", t89_bounded_acceptance, flip_t89_any_bytes),
+    ("T90-store-read-cap-before-publication", t90_reader_cap, flip_t90_no_cap),
 )
 
 

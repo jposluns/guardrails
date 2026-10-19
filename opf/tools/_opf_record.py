@@ -526,12 +526,28 @@ def _require_canonical(operand):
     serialized and comment-free, so a whole-document regeneration loses nothing. A file carrying comments
     or non-canonical serialization refuses and is left untouched. It proves SERIALIZATION only: a hand edit
     or hand merge that leaves canonical bytes is not detectable here, so spec 5.7's integration-base merge
-    policy remains a separate requirement this check does not enforce."""
-    if _emit_bytes(operand.model) != operand.raw:
+    policy remains a separate requirement this check does not enforce. A file an earlier emitter wrote with
+    a literal U+2028 or U+2029 inside a basic string still passes, and only when that is its sole difference
+    (_opf_emit.matches_store_bytes); this operation's write re-spells it with the escapes."""
+    if not _opf_emit.matches_store_bytes(operand.raw, _emit_bytes(operand.model)):
         raise RecordError("{} is not in canonical new-document form (it carries comments or non-canonical "
                           "serialization); refusing a whole-document rewrite that could lose content. "
                           "Restore it from the integration base and redo the operation there (spec 5.7); "
                           "nothing written (fail-closed)".format(operand.rel))
+
+
+def _require_within_read_cap(rel, data):
+    """PRECONDITION (store-read cap, applied to every file this operation publishes): the emitted bytes
+    must stay readable by the store reader, which refuses any store file LARGER than
+    _opf_store.MAX_STORE_READ_BYTES (a file of exactly that size still reads, so only a larger emission
+    refuses here). The appended rows, and the re-spelling of a literal U+2028/U+2029 as its six-byte
+    escape, both grow the emission, so a file near the cap could otherwise be rewritten into one the
+    resolver and doctor then refuse. Refusing before publication leaves the store byte-for-byte
+    unchanged."""
+    if len(data) > _opf_store.MAX_STORE_READ_BYTES:
+        raise RecordError("{} would be {} bytes after this write, over the {}-byte store-read cap its "
+                          "reader enforces; nothing written (fail-closed)".format(
+                              rel, len(data), _opf_store.MAX_STORE_READ_BYTES))
 
 
 # --- the store context ------------------------------------------------------------------------------
@@ -3103,6 +3119,7 @@ def _run_operation(req):
         plan = _PLANNERS[req.subcommand](req, ctx, operand, now)
         for op in plan.operands:
             op.new_raw = _emit_bytes(op.new_model)
+            _require_within_read_cap(op.rel, op.new_raw)
         _postcondition(plan, request, ctx, now)
         # 6. the planned-destination cleanliness gate, then the single-writer lease.
         scope = _opf_write_guard.plan_write_scope(ctx.machine_rel, ctx.manifest,
@@ -3528,6 +3545,17 @@ def _self_test_planners(check, ctx_of, full, now):
           _require_canonical(Operand("x", canonical, 0o644, {"schema": 1, "record": []})) is None)
     check("a comment-bearing operand refuses", _refuses(lambda: _require_canonical(Operand(
         "x", b"# note\n" + canonical, 0o644, {"schema": 1, "record": []})), "canonical"))
+    # An earlier emitter wrote U+2028 and U+2029 literally inside a basic string: that spelling passes, and
+    # only when it is the sole difference (a literal one in a comment or a literal string still refuses).
+    sep_model = {"schema": 1, "record": [{"id": "BI-1", "summary": "a\u2028b\u2029c"}]}
+    sep_prior = _emit_bytes(sep_model).replace(b"\\u2028", "\u2028".encode("utf-8")).replace(
+        b"\\u2029", "\u2029".encode("utf-8"))
+    check("an operand in the earlier separator spelling passes",
+          b"\\u2028" not in sep_prior and _require_canonical(Operand("x", sep_prior, 0o644, sep_model)) is None)
+    for label, raw in (("a comment", "# n\u2028\n".encode("utf-8") + sep_prior),
+                       ("a literal string", sep_prior.replace(b'"a', b"'a").replace(b'c"', b"c'"))):
+        check("a literal separator in {} refuses".format(label),
+              _refuses(lambda raw=raw: _require_canonical(Operand("x", raw, 0o644, sep_model)), "canonical"))
     base_rows = [{"id": "BI-1", "title": "kept"}]
     argv = ["create", "--type", "backlog_item", "--title", "b", "--actor", "maintainer"]
     p, c, op = plan(argv, rows=base_rows, counters=dict(full, BI=1))

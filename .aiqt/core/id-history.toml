@@ -3117,3 +3117,15 @@ born-release = "1.1.0"
 [[born]]
 id = "setcmp.10"
 born-release = "1.1.0"
+
+[[born]]
+id = "citint.4"
+born-release = "1.1.0"
+
+[[born]]
+id = "rdbchr.2"
+born-release = "1.1.0"
+
+[[born]]
+id = "secsup.7"
+born-release = "1.1.0"
