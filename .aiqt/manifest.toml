@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "20d717c4a2f59d1d25ed3a5a9cc9712db2c73dafada9c0d2e9d1833f9b109328"
+tree-sha256 = "fd9c3d13467b8bcd371a7be3696562b569726c9d892ef2b23fc94d7ad94f09a7"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2271,13 +2271,13 @@ sha256 = "e17facda37c55d470ba89699973848f7d99f0132961a95954ce99c7e109c8924"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 65593
-sha256 = "73ffe5d7d7827584e02e2212f7e8c13e8b545510db4fc57e357a653f2e766cbc"
+bytes = 66052
+sha256 = "8411a044563d40f75881057c7c5abe73f6fb0d258d365a26f4a57d1ab8690dcb"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 984
-sha256 = "48f7f6545685d87588b87cee8f38d998d7f9f9158c1d09924df836f08796b969"
+sha256 = "957663ca302ccb60c6c3d39befbf3fc054e520fe5d3b1573e7bc990986ce9c5b"
 
 [[sources]]
 path = ".preview/char-policy-write.py"
@@ -2316,8 +2316,8 @@ sha256 = "ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 495505
-sha256 = "0897036c0b9c249f3d7f3ac49d6245b9f20950aeb65ffe056cc8c9861e947671"
+bytes = 500723
+sha256 = "747edc5caa03e74296e74b1daacc8153f88546261665af087de5dc9ddee3d9d0"
 
 [[sources]]
 path = ".preview/unbounded-wait.py"

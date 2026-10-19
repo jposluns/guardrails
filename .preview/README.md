@@ -188,7 +188,7 @@ files are served from this repository's main branch; for a raw download, use
 | `pattern-self-match.py` | `9687140625e12fe271c20a876f01642f5cdd374197ad12850f24078cd0eb9660` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `0897036c0b9c249f3d7f3ac49d6245b9f20950aeb65ffe056cc8c9861e947671` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `747edc5caa03e74296e74b1daacc8153f88546261665af087de5dc9ddee3d9d0` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
 
@@ -512,7 +512,9 @@ section of its opening docstring. Read that section before relying on a hook; in
   not yet in the transcript stores that message hash, at most eight, the oldest evicted when a ninth is
   stored, so the late arrival is passed over once instead of refused again when it is read from the
   transcript; only an actual refusal stores a hash (a violating stop allowed at the cap or fail-open
-  stores none: its warning names the violation, and the message is checked again when it arrives);
+  stores none, including a refusal that fails open because its raised count could not be recorded: its
+  warning names the violation, and the message is checked like any other record when a later stop of
+  the same turn reads it, but not at all when a new user message follows it before a stop reads it);
   the stored hashes are spent by count at the earliest matching transcript records of a
   scan, one hash per record, so no more records are ever passed over than refusals stored a hash: a
   later stop that supplies a stored message as its own final message is refused again (that refused
@@ -524,7 +526,10 @@ section of its opening docstring. Read that section before relying on a hook; in
   message beyond the stored count is never passed over as that final; a verbatim repeat that is NOT
   the final record of its scan is, with `stop_hook_active` true, refused only together with a refused
   final message (a clean final message then ends the stop without re-refusing older records), while
-  with the field false or absent such a repeat is refused on its own; after a failed read of the
+  with the field false or absent such a repeat is refused on its own (within the refusal cap, and
+  only when the stop can save its new boundary: where that save fails or the state cannot be locked,
+  only the final message can be refused, and a stop that finds the lock held by another evaluation is
+  allowed unchecked); after a failed read of the
   stored state older records are not checked at all, so such a repeat can
   pass; a transient failed read of that stored
   state on a stop whose transcript is readable keeps the stored hashes only through a re-read,
