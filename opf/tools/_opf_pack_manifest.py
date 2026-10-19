@@ -362,6 +362,16 @@ def _case_passes(case):
 _RUNNER_PATH_PIN = "readonly PATH\n"
 
 
+# The exact precheck abort line opf/tools/run_all_checks.sh carries before its first
+# run_gate registration (SPECIAL-FILE-PRECHECK).
+PRECHECK_LINE = 'python3 -I -B "$here/_containment.py" --precheck || exit 2'
+
+# The D-400 BOOTSTRAP line ahead of the precheck: a pure shell test-and-abort that refuses a
+# non-regular or symlinked precheck script by name BEFORE python3 could block loading it. It
+# calls no python3, so it adds no roster entry; any other spelling that names the precheck
+# module is refused below.
+PRECHECK_BOOTSTRAP_LINE = '[ -f "$here/_containment.py" ] && [ ! -h "$here/_containment.py" ] || { echo "error: opf/tools/_containment.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }'
+
 def _runner_check(expected, text=None, *, fail_own=0):
     """Prove exact dispatch using the real shell text, as the P0 suite does.
 
@@ -430,6 +440,26 @@ def _runner_check(expected, text=None, *, fail_own=0):
     roster = []
     try:
         for line in runner.read_text(encoding="utf-8").splitlines():
+            if line.strip() == PRECHECK_LINE:
+                # SPECIAL-FILE-PRECHECK: the runner's first python3 call is the
+                # tree precheck, outside run_gate; it reaches the same executable
+                # fixture, so the recorded roster carries it in order.
+                roster.append(tuple(os.fsencode(word) for word in
+                                    ("-I", "-B", str(here / "_containment.py"),
+                                     "--precheck")))
+                continue
+            if line.strip() == PRECHECK_BOOTSTRAP_LINE:
+                # D-400 bootstrap: shell-only, calls no python3, so no roster entry.
+                continue
+            if line.strip().startswith("python3 "):
+                # Any OTHER bare python3 line (including a mutated precheck
+                # spelling) is an unrecognized invocation the fixture would
+                # record outside the roster: refuse before launch.
+                raise ValueError(line)
+            if "_containment.py" in line and not line.lstrip().startswith("#"):
+                # Any OTHER non-comment spelling that names the precheck module (a mutated
+                # bootstrap, a braced or renamed expansion) is unrecognized: refuse before launch.
+                raise ValueError(line)
             if line.lstrip().startswith("run_gate "):
                 words = [word.replace("$here", str(here)) for word in shlex.split(line)]
                 if (any("$" in word for word in words)

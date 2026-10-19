@@ -113,6 +113,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import hashlib
 import io
+import os
 import re
 import stat
 import struct
@@ -283,10 +284,22 @@ def _read_bytes(path):
     """The content read, through one descriptor: its first four bytes, then, when the name or those bytes
     mark a ZIP archive (_is_zip), at most MAX_ARCHIVE_FILE_SIZE + 1 bytes in all, else the rest of the
     file. The caller checks the bytes returned against the bound, so a file that grows or is replaced
-    after the stat probe is never read or accepted past it. A module-level seam so the self-test can raise
+    after the stat probe is never read or accepted past it. The open is non-blocking and the OPENED
+    descriptor must still be a regular file (fstat), because this walk reads git-ignored paths too,
+    which the special-file precheck does not cover: a FIFO swapped in between the stat probe and this
+    open raises instead of blocking the gate (the final symlink is still followed: a symlink to a
+    regular file reads as its target, the file rule). A module-level seam so the self-test can raise
     a read error deterministically (case 7) on a runner whose chmod 0 cannot bite (root or
     CAP_DAC_OVERRIDE)."""
-    with path.open("rb") as handle:
+    fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("{}: not a regular file on the opened descriptor; its content was not read"
+                          .format(path))
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as handle:
         data = handle.read(4)
         if _is_zip(path.name, data):
             return data + handle.read(max(MAX_ARCHIVE_FILE_SIZE + 1 - len(data), 0))
@@ -674,7 +687,12 @@ def run(root):
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test_main()
-    return run(Path(__file__).resolve().parents[1])
+    # Refuse special files by name before the gate walks and reads the tree (the walk's own
+    # non-blocking reads cover the git-ignored paths the precheck does not). Imported here,
+    # not at module level, so a self-test fixture copy of this module beside a gate under
+    # test imports without _gen_common.py riding along (only the live gate run needs it).
+    from _gen_common import precheck_special_files
+    return run(precheck_special_files(Path(__file__).resolve().parents[1]))
 
 
 # --- self-test ----------------------------------------------------------------------------------------

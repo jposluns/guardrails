@@ -1604,7 +1604,8 @@ def _repo_root():
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test_main()
-    return run(_repo_root())
+    from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
+    return run(precheck_special_files(_repo_root()))
 
 
 # --- self-test ----------------------------------------------------------------------------------------
@@ -2931,9 +2932,15 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    note = ("" if not skipped else
-            " NOTE: skipped {} case(s) the runner cannot exercise: {}"
-            .format(len(skipped), ", ".join(skipped)))
+    if skipped:
+        # #400 re-cut round 9 (round-8 codex 4): a capability-gated case the runner cannot
+        # exercise is INCOMPLETE COVERAGE, never a successful omission: a defect detectable
+        # only by a skipped assertion (a permissions, /dev/null, /dev/full or bash witness)
+        # could survive such a run, so the run exits 3 instead of printing a success
+        print("SELF-TEST INCOMPLETE: {} case(s) NOT RUN (the runner lacks the fixture "
+              "capability): {}; run with POSIX read bits enforced, bash, /dev/null and "
+              "/dev/full available (exit 3)".format(len(skipped), ", ".join(skipped)))
+        return 3
     print("SELF-TEST PASS: a sibling json.py neuters a bare interpreter and -I defeats it; a fully-"
           "isolated tree passes; a bare launcher, a partial -P -E, and flags after the script each fail "
           "(exit 1); malformed JSON, a non-list args, and an unreadable required input fail closed "
@@ -3022,7 +3029,7 @@ def self_test_main():
           "file (a symlink of any kind, a directory, or another non-regular entry) is a named "
           "cannot-evaluate (exit 2); and "
           "the gate refuses to run non-isolated (exit 2), with stderr on /dev/full and with descriptor "
-          "2 closed too" + note)
+          "2 closed too")
     return 0
 
 

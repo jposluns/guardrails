@@ -60,7 +60,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import repo_root, precheck_special_files  # noqa: E402
 import _journal  # noqa: E402
 # the SAME 9.1 component computation the engine binds cutovers to, and the SAME validated terminal
 # classification the engine uses (fix #3), so the gate never selects an invalid or non-cutover terminal.
@@ -737,7 +737,7 @@ def main():
         return self_test()
     root = repo_root()
     if "--root" in args:
-        root = Path(args[args.index("--root") + 1]).resolve()
+        root = precheck_special_files(Path(args[args.index("--root") + 1]).resolve())
     try:
         return run(root)
     except GateError as exc:

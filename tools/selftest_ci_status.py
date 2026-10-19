@@ -102,6 +102,10 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _gen_common import load_toml  # noqa: E402  QA r6: repo-content reads go through the
+from _walk import read_text_nonblocking  # noqa: E402  non-blocking, fstat-checked readers
+
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_PATH = "/usr/bin:/bin"
 GIT = "/usr/bin/git"
@@ -435,7 +439,7 @@ def probe_read(*pulls, records=None, raw_records=None, record_errors=None, assoc
 
 
 def jq_program():
-    source = SCRIPT.read_text(encoding="utf-8")
+    source = read_text_nonblocking(SCRIPT)
     prefix = "CI_STATUS_JQ='\n"
     suffix = "'\n\nci_jq()"
     if source.count(prefix) != 1:
@@ -594,8 +598,7 @@ class Fixture:
 
 def _expected_check_ids():
     try:
-        with open(CHECKS_MANIFEST, "rb") as handle:
-            data = tomllib.load(handle)
+        data = load_toml(CHECKS_MANIFEST)
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).

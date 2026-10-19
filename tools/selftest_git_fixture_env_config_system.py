@@ -48,6 +48,9 @@ from selftest_git_fixture_env import (  # noqa: E402
     CANNOT_EVALUATE, OPF_LIFECYCLE_EXEMPTIONS, ROOT, _command_identity, _config_poison_fixture,
     _config_results, _is_timeout, _lifecycle_finding, _opf_lifecycle_delegates,
     _registered_offenders, _registered_selftests)
+# Tree scans read through the shared non-blocking reader, so a special file (a FIFO above all) at a
+# scanned path is refused by name instead of blocking the suite.
+from _walk import read_text_nonblocking  # noqa: E402
 
 SUITE_ID = "git-fixture-env-config-system"
 # check() is the engine choke point: every id this runner records flows into the one
@@ -279,7 +282,7 @@ def _opf_home_lifecycles(config_results):
     problems = []
     try:
         trees = {Path(relative).stem: ast.parse(
-            (ROOT / relative).read_text(encoding="utf-8")) for relative in sorted(paths)}
+            read_text_nonblocking(ROOT / relative)) for relative in sorted(paths)}
         registrations = _opf_lifecycle_delegates(trees)
     except (OSError, SyntaxError, ValueError) as exc:
         registrations = {}

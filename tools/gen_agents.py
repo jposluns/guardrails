@@ -33,7 +33,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import repo_root, read_source_text  # noqa: E402
 from _adapter_compose import legacy_render, run  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -69,7 +69,7 @@ def sort_key(fm):
 
 
 def body_of(path):
-    text = path.read_text(encoding="utf-8")
+    text = read_source_text(path)
     end = text.find("\n---\n", 4)
     body = text[end + 5:].strip()
     if body.startswith("# "):        # demote the rule title to a section heading under the AGENTS.md H1

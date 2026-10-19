@@ -66,6 +66,7 @@ import gen_hooks            # noqa: E402  build_desired, PLUGIN_ROOT_PARTS, HOOK
 import gen_skill            # noqa: E402  build_outputs, RESERVED_PARTS (the generated chat-skill surface)
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
 from _standards import dir_present, load_manifests, map_keys, validate_mappings, ManifestError  # noqa: E402
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 
 
 # Status constants for a single check's outcome.
@@ -657,7 +658,7 @@ def main():
     root, self_test = parsed
     if self_test:
         return self_test_main()
-    return run(root or Path.cwd())
+    return run(precheck_special_files(root or Path.cwd()))
 
 
 # --- self-test --------------------------------------------------------------------------------------
@@ -1496,11 +1497,16 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    skip_note = ("" if not skipped_unreadable else
-                 " NOTE: {} unreadable-input-dir case(s) (9-15, 16f) were SKIPPED this run because the "
-                 "runner could still read the chmod-0 dir (root/DAC-bypass): {}; run where POSIX read "
-                 "bits are enforced to exercise them.".format(
-                     len(skipped_unreadable), ", ".join(skipped_unreadable)))
+    if skipped_unreadable:
+        # #400 re-cut round 9 (round-8 codex 4): a capability-gated case the runner cannot
+        # exercise is INCOMPLETE COVERAGE, never a successful omission: a defect detectable
+        # only by a skipped assertion could survive such a run, so the run exits 3 instead
+        # of printing a success
+        print("SELF-TEST INCOMPLETE: {} unreadable-input-dir case(s) (9-15, 16f) NOT RUN "
+              "because the runner could still read the chmod-0 dir (root/DAC-bypass): {}; "
+              "run where POSIX read bits are enforced (exit 3)".format(
+                  len(skipped_unreadable), ", ".join(skipped_unreadable)))
+        return 3
     print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, the .cursor/rules Cursor tree, the GEMINI.md/copilot "
           "adapters, and the chat-skill surface in both its SKILL.md text and its binary download zip), "
           "empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
@@ -1513,7 +1519,7 @@ def self_test_main():
           "orphan, or an orphaned surface with no source; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
           "(standards, core rules, generated families, the .aiqt/.claude/.github parents, and the plugin "
-          "hooks subtree), and a bad --root fail closed" + skip_note)
+          "hooks subtree), and a bad --root fail closed")
     return 0
 
 

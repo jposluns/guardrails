@@ -118,7 +118,8 @@ import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _walk import walk_files, read_bytes_nonblocking  # noqa: E402  fail-closed tree walk and non-blocking read
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".working"}
 # Skip THIS file (it enumerates credential patterns) by its repo-relative PATH, not by basename, so a
@@ -422,7 +423,10 @@ def _read_scan_text(path):
     overlapping UTF-32-LE mark (that one keeps its UTF-32 views; the round-6 residual above) yields
     no wide view; it is judged as any other non-UTF-8 file: a SUFFIXLESS one is treated as binary and skipped, as the existing rule
     (_is_scan_candidate) defines, and a declared-text one keeps the lossless view."""
-    data = path.read_bytes()
+    # read_bytes_nonblocking, not path.read_bytes: every byte this scanner decodes comes through the
+    # shared non-blocking reader, so a special file (a FIFO above all) on any decode path is a loud
+    # OSError refusal (exit 2 in main), never a blocking read (SPECIAL-FILE-PRECHECK).
+    data = read_bytes_nonblocking(path)
     try:
         return (data.decode("utf-8"),), None
     except UnicodeDecodeError:
@@ -487,7 +491,10 @@ def main(root=None) -> int:
     if error is not None:
         print(f"error: invalid entropy control constant ({error}); fail-closed", file=sys.stderr)
         return 2
-    root = Path(__file__).resolve().parents[1] if root is None else Path(root)
+    # SPECIAL-FILE-PRECHECK: whatever root the scan runs over (the repository by default, a
+    # caller-supplied fixture root in the self-test), refuse a tree holding a blocking-read hazard
+    # before any file of it is opened.
+    root = precheck_special_files(Path(__file__).resolve().parents[1] if root is None else Path(root))
     findings = []
     try:
         for path in sorted(walk_files(root, SKIP_DIRS)):
@@ -499,7 +506,11 @@ def main(root=None) -> int:
                 continue
             # A text-by-declaration file with a stray non-UTF-8 byte is scanned (lossless decode); only
             # a suffixless non-UTF-8 file that took no wide view (no UTF-32 mark, no even-length
-            # UTF-16 one) is binary and skipped (gitleaks scans binaries).
+            # UTF-16 one) is binary and skipped (gitleaks scans binaries). _read_scan_text reads
+            # through the shared non-blocking reader, not a plain read: this walk reads whatever it
+            # meets, including git-ignored paths the precheck does not walk, so a special file must
+            # be a loud refusal (OSError -> exit 2 below), never a blocking read
+            # (SPECIAL-FILE-PRECHECK).
             texts, note = _read_scan_text(path)
             if note is not None:
                 print(f"{note}: {path.relative_to(root)}")

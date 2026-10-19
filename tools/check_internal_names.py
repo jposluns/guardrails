@@ -426,7 +426,11 @@ def main():
         return 2
     if "--self-test" in argv:
         return self_test_main()
-    return run_gate(root)
+    # Refuse special files by name before the gate reads the tree. Imported here, not at module
+    # level, so a self-test fixture copy of this module beside a gate under test imports without
+    # _gen_common.py riding along (only the live gate run walks a real repository root).
+    from _gen_common import precheck_special_files
+    return run_gate(precheck_special_files(root))
 
 
 def self_test_main():
@@ -892,7 +896,8 @@ def _self_test(caller_env=None):
             #     the self-test runs.
             sib = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-sibling-"))
             try:
-                for name in ("check_internal_names.py", "_walk.py", "check_leaks.py", "_git_fixture_env.py"):
+                for name in ("check_internal_names.py", "_walk.py", "check_leaks.py", "_git_fixture_env.py",
+                             "_gen_common.py"):
                     shutil.copy(str(Path(toolsdir) / name), str(sib / name))
                 for hostile in ("json.py", "hashlib.py"):
                     (sib / hostile).write_text("raise SystemExit(0)\n", encoding="utf-8")
@@ -1106,7 +1111,7 @@ def _self_test(caller_env=None):
             else:
                 inherited_dir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-inherited-"))
                 try:
-                    for name in ("_walk.py", "check_leaks.py", "_git_fixture_env.py"):
+                    for name in ("_walk.py", "check_leaks.py", "_git_fixture_env.py", "_gen_common.py"):
                         shutil.copy(str(Path(toolsdir) / name), str(inherited_dir / name))
                     (inherited_dir / "check_internal_names.py").write_text(mutant, encoding="utf-8")
                     pin_dir = inherited_dir / "system-config-pin"
@@ -1157,7 +1162,7 @@ def _self_test(caller_env=None):
                     failures.append("a top-level self-test that skips case 23 timed out")
                 platform_dir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-platform-"))
                 try:
-                    for name in ("_walk.py", "check_leaks.py", "_git_fixture_env.py"):
+                    for name in ("_walk.py", "check_leaks.py", "_git_fixture_env.py", "_gen_common.py"):
                         shutil.copy(str(Path(toolsdir) / name), str(platform_dir / name))
                     (platform_dir / "check_internal_names.py").write_text(platform_copy, encoding="utf-8")
                     platform_env = dict(caller)
@@ -1180,7 +1185,8 @@ def _self_test(caller_env=None):
                     shutil.rmtree(platform_dir, ignore_errors=True)
 
             # 25. DISCRIMINATING (the tree-wide decision-id layer is WIRED into the real scan): a copy of this
-            #     gate (with _walk and check_leaks) in a fixture git repository, run with no arguments, exits 1
+            #     gate (with _walk, check_leaks and _gen_common, whose special-file precheck the live main()
+            #     runs) in a fixture git repository, run with no arguments, exits 1
             #     naming a synthetic maintainer-decision id in docs/, a path outside SCOPE_RELPATHS, and exits 0
             #     once the id is gone. The copy and the note are tracked so the role rule's tracked-file read
             #     succeeds and the decision-id layer alone decides the result. Dropping the
@@ -1191,7 +1197,7 @@ def _self_test(caller_env=None):
             try:
                 (wired / "tools").mkdir()
                 (wired / "docs").mkdir()
-                for name in ("_walk.py", "check_internal_names.py", "check_leaks.py"):
+                for name in ("_walk.py", "check_internal_names.py", "check_leaks.py", "_gen_common.py"):
                     shutil.copy(str(Path(toolsdir) / name), str(wired / "tools" / name))
                 note = wired / "docs" / "note.md"
                 note.write_text("Decided under a plain rule here.\n", encoding="utf-8")
@@ -1226,7 +1232,11 @@ def _self_test(caller_env=None):
                 #     above. An unreadable file, an unlistable directory and a FIFO each exit 2 with the
                 #     read-error diagnostic naming the input; a file that vanishes between the walk listing it
                 #     and the read exits 1 with the fail-closed vanished finding naming it, as in the scoped
-                #     layer. Skipping an OSError in scan_tree_decision_ids, skipping a vanished file, an rglob
+                #     layer. The unlistable-directory and FIFO probes drive run_gate directly (through the same
+                #     gate copy): main()'s special-file precheck, held by its own suites, would refuse either
+                #     plant before the tree-wide layer reads anything, so only the direct call keeps these
+                #     probes discriminating this layer's own refusal. Skipping an OSError in
+                #     scan_tree_decision_ids, skipping a vanished file, an rglob
                 #     walk (which lists nothing under an unlistable directory and bypasses the walker the vanish
                 #     probe wraps), and a run_gate that swallows the tree layer's OSError each fail at least one
                 #     probe. A plant this platform cannot produce (an unreadable entry when permissions do not
@@ -1234,6 +1244,13 @@ def _self_test(caller_env=None):
                 #     when a case also failed), never 0.
                 gate = str(wired / "tools" / "check_internal_names.py")
                 readerr = "error: cannot read a required input"
+                gate_probe = (
+                    "import sys\n"
+                    "from pathlib import Path\n"
+                    "sys.path.append({tools!r})\n"
+                    "import check_internal_names as cin\n"
+                    "sys.exit(cin.run_gate(Path(cin.__file__).resolve().parents[1]))\n"
+                ).format(tools=str(wired / "tools"))
 
                 def expect_fail_closed(label, script_args, want, stream, needles):
                     try:
@@ -1273,7 +1290,7 @@ def _self_test(caller_env=None):
                         not_run.append("case 25 (an unlistable directory could not be planted: permissions do "
                                        "not bind here)")
                     except PermissionError:
-                        expect_fail_closed("an unlistable directory", (gate,), 2, "stderr",
+                        expect_fail_closed("an unlistable directory", ("-c", gate_probe), 2, "stderr",
                                            (readerr, "notes/locked"))
                 finally:
                     os.chmod(str(locked), 0o700)
@@ -1289,7 +1306,7 @@ def _self_test(caller_env=None):
                         made = False
                 if made:
                     try:
-                        expect_fail_closed("a FIFO", (gate,), 2, "stderr",
+                        expect_fail_closed("a FIFO", ("-c", gate_probe), 2, "stderr",
                                            (readerr, "docs/pipe.md is present but not a regular file"))
                     finally:
                         pipe.unlink()

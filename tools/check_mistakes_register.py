@@ -88,6 +88,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import errno
 import hashlib
+import io
 import json
 import os
 import stat
@@ -213,6 +214,31 @@ def _read_regular(path, label):
         raise CannotEvaluate("{} at {} cannot be read ({})".format(label, path, exc))
     finally:
         os.close(fd)
+
+
+def _read_text_nonblocking(path, encoding="utf-8"):
+    """path.read_text(encoding=...) through ONE O_NONBLOCK descriptor, for the registry and the
+    declared-register reads: a declared path can be ignored or planted content, and the open of a
+    FIFO with no writer returns at once instead of blocking, with a descriptor that fstat says is
+    not a regular file refused as OSError (exit 2 through the callers' OSError arms). A final
+    symlink is followed exactly as read_text follows it (the anchor read is stricter and goes
+    through _read_regular, which never follows one). This mirrors the shared reader in
+    tools/_walk.py; it is duplicated here because this gate installs standalone beside the
+    appender, with no sibling module riding along."""
+    fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("{}: refused, not a regular file (a FIFO, device, socket, or directory); "
+                          "a plain read of it could block forever".format(path))
+        chunks = []
+        while True:
+            chunk = os.read(fd, READ_CHUNK)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return io.TextIOWrapper(io.BytesIO(b"".join(chunks)), encoding=encoding).read()
 
 
 def gate_root(start):
@@ -540,7 +566,7 @@ def run(root, update=False):
             continue
         reg_found = True
         try:
-            reg = json.loads(p.read_text(encoding="utf-8"))
+            reg = json.loads(_read_text_nonblocking(p))
         except (OSError, ValueError) as exc:
             print("error: cannot read the orchestration registry: {}".format(exc))
             return 2
@@ -569,7 +595,7 @@ def run(root, update=False):
     for key, prefix, declared in surfaces:
         path = Path(declared) if os.path.isabs(declared) else Path(root) / declared
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = _read_text_nonblocking(path).splitlines()
         except OSError as exc:
             print("error: the DECLARED {} is unreadable ({}); fail-closed".format(key, exc))
             return 2

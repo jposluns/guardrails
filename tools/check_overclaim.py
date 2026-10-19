@@ -268,6 +268,7 @@ from urllib.parse import urlsplit, unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files  # noqa: E402  SPECIAL-FILE-PRECHECK
 import gen_gensrc  # noqa: E402  build_registry: the in-memory gensrc recomputation (collector 3)
 import gen_manifest  # noqa: E402  load_ownership: the [checkout].binary roster (collector 3 skip set)
 import gen_enforceability  # noqa: E402  build_ledger: recompute the residual map for the source-side residue-cleanliness leg
@@ -2321,7 +2322,7 @@ def _collect(root, registry, binary_set):
 def main():
     if "--self-test" in sys.argv[1:]:
         return _self_test()
-    root = Path(__file__).resolve().parents[1]
+    root = precheck_special_files(Path(__file__).resolve().parents[1])
     try:
         registry = json.loads(gen_gensrc.build_registry(root))["generated"]
         _, _, _, binary_set = gen_manifest.load_ownership(root)
@@ -2545,6 +2546,9 @@ NEGATIVE = [
 
 def _self_test():
     failures = []
+    # round 10 (#400 re-cut, decided 6): a vector whose fixture capability is unavailable
+    # is recorded here and the run exits 3 (INCOMPLETE), never a silent omission
+    skipped = []
     for line in POSITIVE:
         if not scan(line, site=True):
             failures.append("MISS (should flag): {!r}".format(line))
@@ -2566,11 +2570,11 @@ def _self_test():
     if not scan("Releases are signed with minisign.", site=False):
         failures.append("SCOPING: a release-integrity claim should flag on a generated surface too")
 
-    failures.extend(_collector_self_test())
+    failures.extend(_collector_self_test(skipped))
     failures.extend(_single_descriptor_self_test())
     failures.extend(_self_closing_meta_self_test())
     failures.extend(_page_bound_source_self_test())
-    failures.extend(_asset_closure_self_test())
+    failures.extend(_asset_closure_self_test(skipped))
     failures.extend(_block_boundary_negation_self_test())
     import _close_selftest
     try:
@@ -2585,6 +2589,14 @@ def _self_test():
         for f in failures:
             print("  " + f)
         return 1
+    if skipped:
+        # round 10 (decided 6): incomplete coverage is a NONZERO exit (3, as conformance,
+        # gen_enforceability and launcher-isolation report it), never a silent omission
+        print("SELF-TEST INCOMPLETE: {} vector(s) NOT RUN; failing closed (exit 3):".format(
+            len(skipped)))
+        for entry in skipped:
+            print("  - NOT RUN: " + entry)
+        return 3
     print("PASS: check_overclaim self-test ({} positive, {} negative, plus scoping and collector cases, plus "
           "{} #378 close-vector runs)".format(len(POSITIVE), len(NEGATIVE), close_runs))
     return 0
@@ -2860,7 +2872,7 @@ def _self_closing_meta_self_test():
     return failures
 
 
-def _collector_self_test():
+def _collector_self_test(skipped):
     """Exercise the three surface collectors against synthetic trees, bypassing gen_gensrc (a synthetic
     registry is passed to _collect directly): a required absent surface fails closed (exit 2 via
     _FailClosed), a registered file / block / tree finding is reported, a binary target is skipped, and an
@@ -3011,8 +3023,12 @@ def _collector_self_test():
         try:
             os.symlink(r / "README.md", r / "alias.md")
             made = True
-        except OSError:
+        except OSError as exc:
+            # round 10 (decided 6): an unavailable symlink fixture is a recorded NOT RUN
+            # (exit 3), never a silent omission of the fail-closed vector
             made = False
+            skipped.append("COLLECTOR symlink-output vector (FIX B): os.symlink failed "
+                           "({})".format(exc))
         if made:
             try:
                 _collect(r, [{"target": "alias.md", "kind": "file"}], set())
@@ -3045,8 +3061,10 @@ def _collector_self_test():
         try:
             os.link(r / "site" / "dup.html", r / "dup.txt")  # same inode, two paths, two scan modes
             linked = True
-        except OSError:
-            linked = False  # a filesystem that cannot hard-link cannot exercise this vector
+        except OSError as exc:
+            # round 10 (decided 6): an unavailable hard-link fixture is a recorded NOT RUN
+            linked = False
+            skipped.append("HARDLINK dual-mode scan vector: os.link failed ({})".format(exc))
         if linked:
             hl = _collect(r, [{"target": "dup.txt", "kind": "file"}], set())
             if not any(x.startswith("site/dup.html") for x in hl):
@@ -3413,7 +3431,7 @@ def _page_bound_source_self_test():
     return failures
 
 
-def _asset_closure_self_test():
+def _asset_closure_self_test(skipped):
     """Adversarial roster for the register-page asset-closure scan (FIX 4, GER-1). Synthetic site trees are
     built so no real page is needed: a CSS content: marketing injection in an inline <style>, a marketing
     content: string in a LINKED CSS asset, and a marketing string in a LINKED JS asset are each FLAGGED; a
@@ -3753,15 +3771,22 @@ def _asset_closure_self_test():
         (r / "site").mkdir(parents=True)
         (r / HTML_REL).write_text(
             '<html><head><script src="/dev.js"></script></head><body>ok</body></html>', encoding="utf-8")
+        # round 10 (decided 6): fixture construction is SEPARATED from the tested
+        # operation, so an unexpected OSError out of the scan can never be swallowed as
+        # fixture unavailability; an unavailable symlink is a recorded NOT RUN (exit 3)
         try:
             os.symlink("/dev/zero", r / "site" / "dev.js")
+            dev_made = True
+        except OSError as exc:
+            dev_made = False
+            skipped.append("BOUND symlinked-device vector (FIX 1): os.symlink failed "
+                           "({})".format(exc))
+        if dev_made:
             try:
                 _scan_asset_closure(r)
                 failures.append("BOUND: a symlinked device asset must fail closed (FIX 1, round 16)")
             except _FailClosed:
                 pass
-        except OSError:
-            pass  # a platform that cannot create the symlink cannot exercise this vector
         # (q8) FIX A (round 17): a same-origin FIFO asset does NOT HANG the gate. O_NONBLOCK makes the FIFO
         # open return immediately (a blocking O_RDONLY open would wait forever for a writer, killing the run
         # rc=-9), then the S_ISREG fstat rejects it fail-closed BEFORE any os.read. MUTATION: dropping
@@ -3772,8 +3797,12 @@ def _asset_closure_self_test():
             made = True
             try:
                 os.mkfifo(fifo)
-            except OSError:
-                made = False  # a platform/filesystem that cannot create a FIFO cannot exercise this vector
+            except OSError as exc:
+                # round 10 (decided 6): a FIFO the fixture cannot create is a recorded
+                # NOT RUN (exit 3), never a silent omission
+                made = False
+                skipped.append("BOUND FIFO-asset vector (FIX A): mkfifo failed "
+                               "({})".format(exc))
             if made:
                 reads = []
                 real_read = os.read
@@ -3786,6 +3815,8 @@ def _asset_closure_self_test():
                         failures.append("BOUND: a FIFO asset must be rejected by fstat BEFORE any os.read (FIX A)")
                 finally:
                     os.read = real_read
+        else:
+            skipped.append("BOUND FIFO-asset vector (FIX A): os.mkfifo unavailable")
         # (q7) FIX 3 (round 16): an oversized asset NAME (ENAMETOOLONG-shaped) produces a BOUNDED failure
         # message that neither interpolates the whole label nor echoes str(exc) (which carries the full
         # pathname). _read_regular_bounded routes the label through _bounded_label and reports only the
