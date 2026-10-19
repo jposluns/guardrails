@@ -39,7 +39,7 @@ store can be built by hand from those sections.
 ## Read the specification first
 
 Read these files in full before you write any code, at the pinned commit
-`27c6cb30db72d836c4b2d69fc583c46840562d3b` of `jposluns/guardrails`. These pins name the
+`5db83d8ffae70ae83823fcfe490dcf2153f9a320` of `jposluns/guardrails`. These pins name the
 specification this prompt quotes: every quotation of OPF-SPEC.md in this prompt is taken from that
 file at that commit, whose SHA-256 the table gives. Read them from the pinned URLs, not from a
 branch, so the text cannot change under you. After downloading each file, compute its
@@ -48,22 +48,22 @@ stop and report it. Do not work from memory or from a summary, this one included
 
 | File | Role | SHA-256 at the pinned commit |
 |---|---|---|
-| `opf/spec/OPF-SPEC.md` | The authoritative specification | `a87d8d839551be210b899546efab3922bc2faf96ee12af4ea43aec0b06f0e7a3` |
+| `opf/spec/OPF-SPEC.md` | The authoritative specification | `80131d168abae3bcbfaf3c2a314a545f044d5a4373ec337d327b1ab8ddf34504` |
 | `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `d52a9e62b500b123aa1adf45d0916bf2deedb0d6300936a849c1208561619cdf` |
 | `opf/spec/OPF-INIT-D2B.md` | The coupled initialization contract | `4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec` |
 | `opf/spec/OPF-INIT-D2B-REVIEW.md` | The review register for that contract | `5b29499173ed8ad47607d3d604bb77e59cd47a639f35046fb4815e241a794ffa` |
 | `opf/enforcement/ci/opf-ci.sh` | The reference CI recipe (read for behaviour; do not copy) | `0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104` |
-| `opf/enforcement/ci/github-actions.yml` | The reference CI workflow template (read; do not copy) | `f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5` |
+| `opf/enforcement/ci/github-actions.yml` | The reference CI workflow template (read; do not copy) | `3048d80af20e7c6699aa54d908c6bddb905fe1f4b056b85c30559e5e94be5262` |
 | `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `460f69cbff54a80101704ea2c8e8fcf5732668257b60468286bd5ce30e983ece` |
 
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
 ```text
-https://raw.githubusercontent.com/jposluns/guardrails/27c6cb30db72d836c4b2d69fc583c46840562d3b/<path>
+https://raw.githubusercontent.com/jposluns/guardrails/5db83d8ffae70ae83823fcfe490dcf2153f9a320/<path>
 ```
 
 For example, the specification itself is at
-`https://raw.githubusercontent.com/jposluns/guardrails/27c6cb30db72d836c4b2d69fc583c46840562d3b/opf/spec/OPF-SPEC.md`.
+`https://raw.githubusercontent.com/jposluns/guardrails/5db83d8ffae70ae83823fcfe490dcf2153f9a320/opf/spec/OPF-SPEC.md`.
 
 Facts about these sources that shape the work:
 
@@ -2013,17 +2013,23 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
     homes-2 rule, though section 4.2 does not limit that paragraph to homes 2, and the same
     paragraph opens with "Durable `imported/` and `archive/` evidence MUST stay tracked", which is
     not tied to homes 2. Whichever generation it
-    binds, section 4.2 says of a store under pre-1.3.0 tooling, as every origin store of this
-    upgrade was, that "the homes-2 names are ordinary store paths there, graded, detected, and
-    dispositioned exactly as before", and section 5.1 makes "An untracked or ignored `.working/`
-    tree" a hard failure, so in a homes-1 origin store a journal entry is a store path, not
-    machine-local data. Section 4.2 also says doctor "MUST NOT consult a journal to decide partial
-    status" and "Containment and doctor exclude journals and make no recovery claim", without saying
-    which homes generation the second sentence binds; this prompt's reading is that those rules bind
-    doctor and containment, not this pre-write check of the upgrade, so the check treats a journal
-    entry like any other entry under the rule above. Your own tooling writes no journal there (open
-    point 11). Whether journal entries, or those of some kinds, should instead be left out of the
-    check is the maintainer's to rule; until ruled, this prompt's choice is that every entry counts.
+    binds, section 4.2 says that under pre-1.3.0 tooling, the tooling of every origin store of this
+    upgrade, "a store that has not started an adoption keeps, within that tooling's own version
+    ceiling, its legacy grading: the homes-2 names are ordinary store paths there, graded, detected,
+    and dispositioned exactly as before", and section 5.1 makes "An untracked or ignored `.working/`
+    tree" a hard failure, so in a homes-1 origin store that has not started an adoption a journal
+    entry is a store path, not machine-local data. Of a store whose adoption home
+    `.working/imported/adoption/` exists, section 4.2 says instead that it "has started an adoption
+    and receives the adoption grading from the same pre-1.3.0 tooling", whose doctor "MUST NOT read
+    the machine-local journal"; the check still counts that store's journal entries, as the rule
+    above says of every entry. Section 4.2 also says doctor "MUST NOT consult a journal to decide
+    partial status" and "Containment and doctor exclude journals and make no recovery claim",
+    without saying which homes generation the second sentence binds; this prompt's reading is that
+    those rules bind doctor and containment, not this pre-write check of the upgrade, so the check
+    treats a journal entry like any other entry under the rule above. Your own tooling writes no
+    journal there (open point 11). Whether journal entries, or those of some kinds, should instead
+    be left out of the check is the maintainer's to rule; until ruled, this prompt's choice is that
+    every entry counts.
 
   If you find another location that the specification names for legacy import or ingest state, add
   it to this list, give it fixtures under the same rule, and ask the maintainer to ratify the

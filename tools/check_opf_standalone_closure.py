@@ -109,8 +109,8 @@ _SUBSET = [
 # deadline sized from its known runs; when it trips, _report names the bound, never a failure of the leg.
 # Each ceiling below is whole seconds, rounded up, from one of the sources named on its row: a serial
 # isolated run on 2026-10-11 (1-minute load average 8.8 to 12.9 on 24 CPUs, under nice -n 10), or, for a
-# leg added after it, a serial run on 2026-10-14 or 2026-10-17 (not under nice; its load average on
-# the row); the
+# leg added after it, a serial run on 2026-10-14, 2026-10-17 or 2026-10-19 (not under nice; its load
+# average on the row); the
 # 2026-10-11 loaded-host record of the two legs the former bound killed; or, for a leg that run could not
 # measure (its fixtures refuse a scratch directory below an unreadable ancestor), the former 600 s bound,
 # which that record shows the leg finishing under (an inference, not a measurement: re-measure and tighten).
@@ -135,6 +135,8 @@ _LEG_CEILING_S = {
     "opf-adopt-discover-selftest": 1,  # measured 2026-10-14: 0.4 s (load average 17.1 on 24 CPUs)
     "opf-prompt-pack-selftest": 1,  # measured 2026-10-11: 0.7 s
     "opf-prompt-pack": 1,  # measured 2026-10-11: 0.1 s
+    "opf-prompt-pin-selftest": 2,  # measured 2026-10-19: 1.03 s (load average 29.1 on 24 CPUs)
+    "opf-prompt-pin": 1,  # measured 2026-10-19: 0.4 s (load average 29.2 on 24 CPUs)
     "opf-oplock-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
     "opf-init-substrate-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
     "opf-init-builders-selftest": 1,  # measured 2026-10-11: 0.2 s
