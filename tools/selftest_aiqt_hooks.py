@@ -17018,6 +17018,16 @@ def _main_isolated(monitor):
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
 
+        def ldexpect(label, want_status, want_substr, root):
+            # Assert the LOADER's own verdict and diagnostic, not only the downstream denial: a bad
+            # declaration and a governed merge both deny, so a handler-level expectation alone cannot
+            # tell a rejected declaration from an accepted one that still denies the probe command.
+            got_status, got_payload = aiqt_hooks._load_operations(root)
+            if got_status != want_status or (
+                    want_substr is not None and want_substr not in str(got_payload)):
+                failures.append("{}: expected {} ({}), got {} ({})".format(
+                    label, want_status, want_substr, got_status, got_payload))
+
         _mp_decl = {"version": 1,
                     "merge": {"argv": ["python3", "tools/merge_pr.py"], "repos": ["owner/repo"]},
                     "prepush": {"command": "bash tools/pre-push-guard.sh"}}
@@ -17072,12 +17082,90 @@ def _main_isolated(monitor):
             mpexpect("(mp-d17) gh pr merge --auto DENIES (arming auto-merge is a merge)", "deny",
                      "gh pr merge 3 --auto", mpd)
             mpexpect("(mp-d18) sudo wrapper DENIES through the peel", "deny", "sudo gh pr merge 3", mpd)
-            mpexpect("(mp-d19) uncertain lex (unquoted #) with a merge spelling DENIES", "deny",
+            mpexpect("(mp-d19) a trailing unquoted comment leaves the structured merge deny in place "
+                     "(the uncertain-lex backstop itself is exercised by mp-d34)", "deny",
                      "gh pr merge 3 # on green", mpd)
             mpexpect("(mp-d20) refused lex (unbalanced quote) with a merge spelling DENIES", "deny",
                      'gh pr merge 3 "unbalanced', mpd)
             mpexpect("(mp-d21) literal absolute cd into the declaring repo DENIES from outside", "deny",
                      "cd {} && gh pr merge 3".format(mpd), mpp)
+            # loop and conditional bodies: the lexer leaves the reserved word at the segment front
+            mpexpect("(mp-d24) a merge inside a for-loop body DENIES (the do keyword is peeled)",
+                     "deny", 'for pr in 1 2; do gh pr merge "$pr" --squash; done', mpd)
+            mpexpect("(mp-d24b) a merge inside an if-then body DENIES", "deny",
+                     "if gh pr checks 3; then gh pr merge 3 --squash; fi", mpd)
+            mpexpect("(mp-d24c) a merge as a while condition DENIES", "deny",
+                     "while gh pr merge 3; do true; done", mpd)
+            mpexpect("(mp-a14) a loop body with no merge still allows (the keyword peel adds no "
+                     "over-fire)", "allow", 'for pr in 1 2; do gh pr view "$pr"; done', mpd)
+            # option values and stray operands must never move the target out of scope
+            mpexpect("(mp-d25) a PR URL inside --body is an option value, never the target", "deny",
+                     "gh pr merge 3 --body https://github.com/other/x/pull/1", mpd)
+            mpexpect("(mp-d25b) a PR URL inside -t (--subject) is an option value, never the target",
+                     "deny", "gh pr merge 3 -t https://github.com/other/x/pull/1", mpd)
+            mpexpect("(mp-d25c) a stray URL after the PR operand is governed, never the target",
+                     "deny", "gh pr merge 3 --unknown https://github.com/other/x/pull/1", mpd)
+            mpexpect("(mp-d25e) with no PR operand a --body URL still never reads as the target",
+                     "deny", "gh pr merge --body https://github.com/other/x/pull/1", mpd)
+            mpexpect("(mp-d25f) a stray URL makes the target unprovable even beside an out-of-scope "
+                     "-R", "deny", "gh pr merge 3 --unknown https://github.com/other/x/pull/1 "
+                     "-R other/x", mpd)
+            mpexpect("(mp-d25d) an expansion PR operand outranks an out-of-scope -R (unprovable "
+                     "target)", "deny", 'gh pr merge "$U" -R other/x', mpd)
+            # attached short-flag spellings of the graphql field options
+            mpexpect("(mp-d26) an attached -f field naming a merge mutation DENIES", "deny",
+                     'gh api graphql -f"query=mutation{mergePullRequest(input:{})}"', mpd)
+            mpexpect("(mp-d26b) an attached -F field naming enqueuePullRequest DENIES", "deny",
+                     'gh api graphql -F"query=mutation{enqueuePullRequest(input:{})}"', mpd)
+            mpexpect("(mp-d26c) enablePullRequestAutoMerge in a separated field DENIES", "deny",
+                     "gh api graphql -f query='mutation{enablePullRequestAutoMerge(input:{})}'", mpd)
+            mpexpect("(mp-d26d) a --raw-field spelling naming a merge mutation DENIES", "deny",
+                     "gh api graphql --raw-field query='mutation{mergePullRequest(input:{})}'", mpd)
+            mpexpect("(mp-d26e) a --field= spelling naming a merge mutation DENIES", "deny",
+                     "gh api graphql --field='query=mutation{mergePullRequest(input:{})}'", mpd)
+            mpexpect("(mp-a15) an attached -f field with a plain query allows", "allow",
+                     'gh api graphql -f"query=query{viewer{login}}"', mpd)
+            # the raw backstop carries no gap bound (201 was one past an earlier bounded regex)
+            mpexpect("(mp-d28) a 201-space gap inside a bash -c body still DENIES", "deny",
+                     "bash -c 'gh" + " " * 201 + "pr merge 3'", mpd)
+            mpexpect("(mp-d28b) an 800-character filler gap inside a shell body still DENIES",
+                     "deny", "bash -c 'gh " + "x" * 800 + " pr merge 3'", mpd)
+            # literal gh api endpoint spellings reduce to the same pathname
+            mpexpect("(mp-d29) a query string on the merge endpoint still DENIES", "deny",
+                     "gh api -X PUT 'repos/owner/repo/pulls/3/merge?x=1'", mpd)
+            mpexpect("(mp-d29b) a clustered -iXPUT method still DENIES", "deny",
+                     "gh api -iXPUT repos/owner/repo/pulls/3/merge", mpd)
+            mpexpect("(mp-d29c) a trailing slash on the merge endpoint still DENIES", "deny",
+                     "gh api -X PUT repos/owner/repo/pulls/3/merge/", mpd)
+            mpexpect("(mp-d29d) a full-URL merge endpoint still DENIES", "deny",
+                     "gh api -X PUT https://api.github.com/repos/owner/repo/pulls/3/merge", mpd)
+            # wrappers and shells beside bash
+            mpexpect("(mp-d30) nice -n 5 peels to the merge and DENIES", "deny",
+                     "nice -n 5 gh pr merge 3", mpd)
+            mpexpect("(mp-d30b) a zsh -c body DENIES through the raw backstop", "deny",
+                     "zsh -c 'gh pr merge 3'", mpd)
+            mpexpect("(mp-d30c) a dash -c body DENIES through the raw backstop", "deny",
+                     "dash -c 'gh pr merge 3'", mpd)
+            mpexpect("(mp-d30d) a backslash-newline inside a wrapper body cannot split the spelling",
+                     "deny", "bash -c 'gh pr \\\nmerge 3'", mpd)
+            mpexpect("(mp-d30e) an sh -c body DENIES through the raw backstop", "deny",
+                     "sh -c 'gh pr merge 3'", mpd)
+            mpexpect("(mp-d30h) a ksh -c body DENIES through the raw backstop", "deny",
+                     "ksh -c 'gh pr merge 3'", mpd)
+            mpexpect("(mp-d30f) an eval body DENIES through the raw backstop", "deny",
+                     "eval 'gh pr merge 3'", mpd)
+            mpexpect("(mp-d30g) an xargs-built merge DENIES through the raw backstop", "deny",
+                     "echo 3 | xargs gh pr merge", mpd)
+            mpexpect("(mp-d34) a brace-group merge DENIES through the uncertain-lex backstop", "deny",
+                     "{ gh pr merge 3; }", mpd)
+            # read-down and scope spellings beside the existing pairs
+            mpexpect("(mp-d32) --disable-auto beside a method flag is still a merge", "deny",
+                     "gh pr merge 3 --disable-auto --squash", mpd)
+            mpexpect("(mp-a17) -h is the help read-down and allows", "allow", "gh pr merge 3 -h", mpd)
+            mpexpect("(mp-a18) separated --repo outside the scope allows", "allow",
+                     "gh pr merge 3 --repo other/x", mpd)
+            mpexpect("(mp-d33) --repo= naming the declared repo DENIES", "deny",
+                     "gh pr merge 3 --repo=owner/repo", mpd)
             # --- ALLOW controls: each the minimal pair of a deny above ---------------------------------
             mpexpect("(mp-a1) gh pr view allows (no merge verb; kills a drop-verb-check mutant)",
                      "allow", "gh pr view 12", mpd)
@@ -17117,7 +17205,16 @@ def _main_isolated(monitor):
                      "gh pr merge 1", mpd)
             os.environ["GH_REPO"] = "other/x"
             mpexpect("(mp-a11) ambient GH_REPO outside the scope allows", "allow", "gh pr merge 1", mpd)
+            # an env-wrapper assignment is what the invoked process receives, so it outranks the
+            # hook's ambient value in BOTH directions (bash last-wins)
+            mpexpect("(mp-d27) env GH_REPO= naming the declared repo DENIES over an outside ambient",
+                     "deny", "env GH_REPO=owner/repo gh pr merge 3", mpd)
+            os.environ["GH_REPO"] = "owner/repo"
+            mpexpect("(mp-a16) env GH_REPO= outside the scope allows over a declared ambient",
+                     "allow", "env GH_REPO=other/x gh pr merge 3", mpd)
             os.environ.pop("GH_REPO", None)
+            mpexpect("(mp-d27b) a plain env assignment still peels to the merge", "deny",
+                     "env FOO=1 gh pr merge 3", mpd)
             # the declared argv as a gh shape: the exact prefix allows, any other spelling denies
             mpexpect("(mp-a12) the declared gh argv allows by exact prefix", "allow",
                      "gh pr merge --auto", mpg)
@@ -17127,22 +17224,60 @@ def _main_isolated(monitor):
                      "gh pr merge", mpg)
             mpexpect("(mp-d23b) a different method spelling DENIES beside the declared prefix", "deny",
                      "gh pr merge 3 --squash", mpg)
+            mpexpect("(mp-d23c) an extra merge behaviour flag past the declared prefix DENIES "
+                     "(--admin is not the declared path)", "deny", "gh pr merge --auto --admin 3", mpg)
             # --- present-but-bad declarations: DENY merge shapes, leave ordinary commands alone --------
             mp_badreg.write_text("{ not json", encoding="utf-8")
             mpexpect("(mp-d14) malformed JSON declaration DENIES a merge shape", "deny",
                      "gh pr merge 3", mpb)
+            ldexpect("(mp-ld1) the loader reads malformed JSON as bad", "bad", "malformed JSON", mpb)
+            mpexpect("(mp-d14b) a literal absolute cd into a repo with a bad declaration DENIES from "
+                     "outside", "deny", "cd {} && gh pr merge 3".format(mpb), mpp)
             mpexpect("(mp-a13) malformed declaration leaves a non-merge command alone", "allow",
                      "git status", mpb)
             mp_badreg.write_text(json.dumps({"version": True, "merge": {"argv": ["x"]}}),
                                  encoding="utf-8")
             mpexpect("(mp-d15) boolean version is bad, never version 1", "deny", "gh pr merge 3", mpb)
+            ldexpect("(mp-ld2) the loader names the version fault", "bad",
+                     "unknown declaration version", mpb)
             mp_badreg.write_text(json.dumps({"version": 1, "merge": {"argv": ["x"], "extra": 1}}),
                                  encoding="utf-8")
             mpexpect("(mp-d15b) unknown merge key is bad (strict schema)", "deny", "gh pr merge 3", mpb)
+            ldexpect("(mp-ld3) the loader names the unknown merge key", "bad", "unknown merge key", mpb)
             mp_badreg.write_text(json.dumps({"version": 1, "merge": {"argv": []}}), encoding="utf-8")
             mpexpect("(mp-d15c) empty merge.argv is bad", "deny", "gh pr merge 3", mpb)
+            ldexpect("(mp-ld4) the loader names the argv fault", "bad", "merge.argv", mpb)
             mp_badreg.write_text(json.dumps({"version": 1, "ops": {}}), encoding="utf-8")
             mpexpect("(mp-d15d) unknown top-level key is bad", "deny", "gh pr merge 3", mpb)
+            ldexpect("(mp-ld5) the loader names the unknown top-level key", "bad",
+                     "unknown declaration key", mpb)
+            # the mcp_tools contract: a name the installed tool matcher never routes must read BAD
+            mp_badreg.write_text(json.dumps(
+                {"version": 1, "merge": {"argv": ["x"], "mcp_tools": ["land_pr"]}}), encoding="utf-8")
+            ldexpect("(mp-ld6) an mcp_tools name without 'merge' is bad (the matcher never routes "
+                     "it)", "bad", "mcp_tools", mpb)
+            mpexpect("(mp-d15e) a declaration naming an unroutable mcp tool DENIES merge shapes "
+                     "(never a weaker read)", "deny", "gh pr merge 3", mpb)
+            mp_badreg.write_text(json.dumps(
+                {"version": 1, "merge": {"argv": ["x"], "mcp_tools": ["release_merge"]}}),
+                encoding="utf-8")
+            ldexpect("(mp-ld7) an mcp_tools name containing 'merge' is accepted", "ok", None, mpb)
+            mcp_name = "mcp__github__release_merge"
+            mpexpect("(mp-m8) a declared custom merge tool DENIES by its short name", "deny",
+                     tool=mcp_name, tool_input={"owner": "o", "repo": "r"}, cwd=mpb)
+            _mp_hooks_cfg = json.loads(
+                (repo_root() / "plugin" / "aiqt-guardrails-hooks" / "hooks" / "hooks.json")
+                .read_text(encoding="utf-8"))
+            _mp_matcher = None
+            for _mp_entry in _mp_hooks_cfg.get("hooks", {}).get("PreToolUse", []):
+                if any(h.get("args", [None])[-1] == "merge_path_guard"
+                       for h in _mp_entry.get("hooks", [])):
+                    _mp_matcher = _mp_entry.get("matcher")
+            if not isinstance(_mp_matcher, str) or not all(
+                    re.fullmatch(_mp_matcher, name)
+                    for name in ("Bash", "mcp__github__merge_pull_request", mcp_name)):
+                failures.append("(mp-matcher) the generated matcher does not route Bash and every "
+                                "loader-accepted MCP merge tool name: {!r}".format(_mp_matcher))
             # byte bound, each end: exactly at the cap is read, one byte over is bad (boundary pair)
             _mp_prefix = json.dumps(
                 {"version": 1, "merge": {"argv": ["python3", "tools/merge_pr.py"]}})[:-1] \
@@ -17156,14 +17291,21 @@ def _main_isolated(monitor):
             mp_badreg.write_text(_mp_at, encoding="utf-8")
             mpexpect("(mp-bound-at) a declaration exactly at the byte cap is read (merge still denies)",
                      "deny", "gh pr merge 3", mpb)
+            ldexpect("(mp-ld8) the loader ACCEPTS the at-the-cap declaration (the boundary "
+                     "discriminates)", "ok", None, mpb)
             mp_badreg.write_text(_mp_at + "\n", encoding="utf-8")
             mpexpect("(mp-bound-over) one byte over the cap is bad (merge shape denies as bad)",
                      "deny", "gh pr merge 3", mpb)
+            ldexpect("(mp-ld9) the loader names the over-cap fault", "bad", "exceeds", mpb)
             mp_badreg.unlink()
             mpexpect("(mp-k5) declaration removed again: inert", "allow", "gh pr merge 3", mpb)
+            ldexpect("(mp-ld10) the loader reads genuine absence as absent, never bad", "absent",
+                     None, mpb)
             os.symlink(str(mp_decl / ".aiqt" / "operations.json"), str(mp_badreg))
             mpexpect("(mp-d16) a symlinked declaration is bad (regular file only)", "deny",
                      "gh pr merge 3", mpb)
+            ldexpect("(mp-ld11) the loader names the non-regular-file fault", "bad",
+                     "not a regular file", mpb)
             mp_badreg.unlink()
             # --- cannot-evaluate notes (the _merge_path_note sites) -----------------------------------
             mpexpect("(mp-nogit) a merge shape in a non-git session allows WITH A NOTE", "allow-note",
@@ -17191,6 +17333,27 @@ def _main_isolated(monitor):
             mcp("(mp-m7) MCP merge tool under a bad declaration DENIES fail-closed", "deny",
                 "mcp__github__merge_pull_request", {"owner": "o", "repo": "r"}, mpb)
             mp_badreg.unlink()
+            # a work-tree DISCOVERY FAULT is not absence: inject a failing git probe (attribute
+            # patch, restored immediately) and require fail-closed on every consumer
+            _mp_real_git = aiqt_hooks._recovery_git
+
+            def _mp_git_fault(repo, args, env_extra=None, timeout=10):
+                raise subprocess.TimeoutExpired(cmd=["git"], timeout=timeout)
+
+            aiqt_hooks._recovery_git = _mp_git_fault
+            try:
+                mpexpect("(mp-fault1) a discovery fault DENIES a merge shape fail-closed, never the "
+                         "no-work-tree note", "deny", "gh pr merge 3", mpd)
+                mcp("(mp-fault2) a discovery fault DENIES an MCP merge call fail-closed", "deny",
+                    "mcp__github__merge_pull_request", {"owner": "o", "repo": "r"}, mpd)
+                ppexpect("(pp-w6) a discovery fault WARNS on the pre-push side, never silent",
+                         "allow-note", mpd)
+            finally:
+                aiqt_hooks._recovery_git = _mp_real_git
+            mpexpect("(mp-fault3) control: with the probe restored the same call denies as governed",
+                     "deny", "gh pr merge 3", mpd)
+            ppexpect("(pp-w6-ctl) control: with the probe restored a non-git session is silent again",
+                     "allow", mpp)
             # --- fail posture ---------------------------------------------------------------------------
             mpexpect("(mp-f1) missing tool_name DENIES (shared fail-closed contract)", "deny",
                      with_tool=False, tool_input=None)
@@ -17221,6 +17384,22 @@ def _main_isolated(monitor):
             else:
                 ppexpect("(pp-w3) an installed but non-executable hook WARNS (git will not run it)",
                          "allow-note", mpd)
+            # deterministic sibling of pp-w3: inject the access answer so the executable-bit check is
+            # exercised on every runner, including one whose DAC bypass reads 0644 as executable
+            _pp_real_access = os.access
+
+            def _pp_no_exec(path, mode, **kwargs):
+                if mode == os.X_OK and os.path.realpath(os.fspath(path)) == os.path.realpath(
+                        str(_pp_hook)):
+                    return False
+                return _pp_real_access(path, mode, **kwargs)
+
+            aiqt_hooks.os.access = _pp_no_exec
+            try:
+                ppexpect("(pp-w3b) a hook the runner cannot execute WARNS (injected access answer)",
+                         "allow-note", mpd)
+            finally:
+                aiqt_hooks.os.access = _pp_real_access
             os.chmod(_pp_hook, 0o755)
             ppexpect("(pp-s5) an installed, executable hook carrying the declared line is silent",
                      "allow", mpd)
