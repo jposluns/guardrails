@@ -64,6 +64,18 @@ reason = "Repository-local corpus config for tools/check_cited_standards.py, pas
 path = ".aiqt/license-qualification.toml"
 reason = "Repository-local licence-qualification gate configuration (the declared licence identity plus the class-3 exception list) read by tools/check_license_qualification.py; tracked, not shipped. Adopters own their configuration (an absent file applies no declaration and no exceptions), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
+# The authoring-only roster (tools/gen_hooks.py AUTHORING_ONLY_REL): tracked here, never shipped. gen_manifest
+# refuses either path a release class, requires both tracked together under these exact literals, and allows
+# this one exclusion over a gensrc-registered kind=file target; every other gensrc target stays refused.
+
+[[exclusion]]
+path = ".claude/settings.json"
+reason = "Repository-local project hook registration (the gensrc-edit-guard dogfood wiring), generated whole and drift-gated by tools/gen_hooks.py in the authoring tree only, and gensrc-registered. Tracked, never shipped, so no release, pin or install can carry it over an adopter's own project settings."
+
+[[exclusion]]
+path = ".aiqt/authoring.toml"
+reason = "The authoring-tree marker tools/gen_hooks.py reads before it renders .claude/settings.json. Tracked, never shipped, so an adopter tree never carries it and an adopter run never touches its own .claude/settings.json."
+
 # --- concern-1: manifest-self and the managed block ----------------------------------------------------
 
 [[release-class]]
