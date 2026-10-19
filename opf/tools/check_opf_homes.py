@@ -6198,13 +6198,19 @@ def main(argv=None):
 # load) and settles them AFTER it: a fault the interpreter reports only to stderr (a destructor, weakref
 # or similar callback through sys.unraisablehook; an unhandled exception ending a worker thread through
 # threading.excepthook) is recorded and forces exit 2 over a passing verdict, never a silent pass. Before
-# a passing verdict the settle waits (_SETTLE_SECONDS in all) for every other thread still running, so a
-# worker's later fault is recorded instead of killed silently by the exit, and a thread still running at
-# the bound fails the verdict closed (exit 2). The verdict then ends the process with os._exit, so an
+# a passing verdict the settle waits (_SETTLE_SECONDS in all) for every other thread still running,
+# threading's census and the runtime's live count of low-level _thread workers together, so a worker's
+# later fault is recorded instead of killed silently by the exit, and a thread or low-level worker still
+# running at the bound fails the verdict closed (exit 2). The verdict then ends the process with os._exit, so an
 # atexit callback registered by loaded code can never run after it (that channel is unreachable, not
 # merely disclosed). Only a SystemExit with code None or 0 ending a worker thread is the interpreter's
 # normal SUCCESSFUL thread exit (default-hook parity) and is not recorded; any other code is an
 # unsuccessful exit a worker reported, so it is recorded.
+# A low-level _thread worker's SystemExit never reaches any hook (the interpreter drops it), so the
+# start entries and threading's saved module aliases of them are wrapped from before the gate's work and
+# a non-zero code ending such a worker is recorded as a fault there. A thread outside the Python runtime,
+# one a C extension starts say, stays invisible to the census and the live count: a disclosed residual,
+# not closed.
 # Each recorder chains to the hook it wrapped, so the usual traceback still reaches stderr after the
 # marker line. The settle re-checks the record after the exit flushes, so a fault recorded while a
 # flush was blocked on a full pipe still fails the verdict.
@@ -6214,6 +6220,10 @@ def main(argv=None):
 # the exit itself is the reporting-machinery channel disclosed once in the _opf_views class disclosure
 # (deliberately hostile loaded code is accepted there and not closed).
 _LOADED_FAULTS = []
+# A started low-level worker's liveness flag, set synchronously at the start call: the runtime
+# live count misses the brief window before a just-started worker's OS thread registers, so the
+# settle also waits while any flag is set, never breaking on that transient zero.
+_LOADED_WORKERS = []
 _FAULT_MARKER = "LOADED-CODE-FAULT"
 
 
@@ -6256,6 +6266,67 @@ def _install_fault_hooks():
     sys.unraisablehook = _record_unraisable
     _threads.excepthook = _record_thread
 
+    import _thread as _lowlevel
+
+    def _record_lowlevel_fault():
+        _LOADED_FAULTS.append("lowlevel-worker")
+        try:
+            sys._loaded_code_fault = True
+            sys.stderr.write("{}: a lowlevel-worker fault was recorded; a passing verdict will fail "
+                             "closed\n".format(_FAULT_MARKER))
+        except Exception:
+            pass
+
+    import types as _types
+    _bootstrap = _threads.Thread._bootstrap
+
+    def _genuine_bootstrap(target):
+        # A thread start is threading's own only when its target is exactly a bound method whose function
+        # is threading.Thread._bootstrap and whose instance is a threading.Thread (read through the exact
+        # method type, never an attribute the target supplies). Such a worker's fault already reaches
+        # threading.excepthook, so it is passed through untouched; wrapping it would also replace the
+        # target an audit-based observer reads, making threading's own start look like a raw one.
+        return (type(target) is _types.MethodType and target.__func__ is _bootstrap
+                and isinstance(target.__self__, _threads.Thread))
+
+    def _wrap_lowlevel(original):
+        # A raw low-level worker's SystemExit reaches no hook (the interpreter drops it), so the start
+        # entry wraps the worker's function and records a non-zero code as a fault (None or 0 is the
+        # successful low-level exit, default-interpreter parity; the code is read through exact built-in
+        # types alone and never formatted), and tracks the worker's liveness flag. A genuine threading
+        # start is passed through untouched.
+        def _start(function, *args, **kwargs):
+            if _genuine_bootstrap(function):
+                return original(function, *args, **kwargs)
+            state = [True]
+            def _run(*wargs, **wkwargs):
+                try:
+                    return function(*wargs, **wkwargs)
+                except SystemExit as exc:
+                    code = getattr(exc, "code", None)
+                    if not (code is None or (type(code) is int and code == 0)):
+                        _record_lowlevel_fault()
+                    raise
+                finally:
+                    state[0] = False
+            result = original(_run, *args, **kwargs)
+            _LOADED_WORKERS.append(state)
+            return result
+        return _start
+
+    _wrapped = []
+    for _entry in ("start_new_thread", "start_new", "start_joinable_thread"):
+        if hasattr(_lowlevel, _entry):
+            _original = getattr(_lowlevel, _entry)
+            _replacement = _wrap_lowlevel(_original)
+            setattr(_lowlevel, _entry, _replacement)
+            _wrapped.append((_original, _replacement))
+    for _alias in dir(_threads):
+        _value = getattr(_threads, _alias)
+        for _original, _replacement in _wrapped:
+            if _value is _original:
+                setattr(_threads, _alias, _replacement)
+
 
 _SETTLE_SECONDS = 60.0
 
@@ -6263,9 +6334,10 @@ _SETTLE_SECONDS = 60.0
 def _gate_exit(code):
     """Settle and END the process: before a passing verdict, wait (up to _SETTLE_SECONDS in all) for every
     other thread still running, so a fault it raises later is recorded, never killed silently by the exit,
-    and fail closed (exit 2) if one still runs at the bound (the census covers threading's threads; a worker
-    started through the low-level _thread entry points is invisible to it, so only a fault such a worker
-    has already raised is recorded: a disclosed residual, not closed); force a recorded background fault to exit 2
+    and fail closed (exit 2) if one still runs at the bound (the census covers threading's threads and,
+    through the runtime's live count, workers started through the low-level _thread entry points, so a
+    low-level worker still running at the bound also fails closed; a thread outside the Python runtime,
+    one a C extension starts say, is invisible to both: a disclosed residual, not closed); force a recorded background fault to exit 2
     over a passing verdict, flush both streams, re-check the record AFTER the flushes (a fault recorded
     while a flush was blocked, on a full pipe say, must still fail the verdict; its late marker is written
     straight to fd 2, past the buffers), then os._exit, so no atexit callback registered by loaded code
@@ -6274,6 +6346,7 @@ def _gate_exit(code):
     import os
     import threading as _threads
     import time
+    import _thread as _lowlevel
     if type(code) is bool:
         code = 1 if code else 0
     elif code is None:
@@ -6300,13 +6373,17 @@ def _gate_exit(code):
         while True:
             running = [worker for worker in _threads.enumerate()
                        if worker is not current and worker.is_alive()]
+            pending = _lowlevel._count() or any(_state[0] for _state in _LOADED_WORKERS)
             remaining = deadline - time.monotonic()
-            if not running or remaining <= 0:
+            if (not running and not pending) or remaining <= 0:
                 break
-            running[0].join(min(remaining, 0.5))
-        if running:
-            sys.stderr.write("{}: a worker thread was still running at the verdict; fail-closed\n".format(
-                _FAULT_MARKER))
+            if running:
+                running[0].join(min(remaining, 0.5))
+            else:
+                time.sleep(min(remaining, 0.05))
+        if running or pending:
+            sys.stderr.write("{}: a worker thread or low-level worker was still running at the verdict; "
+                             "fail-closed\n".format(_FAULT_MARKER))
             code = 2
     if code == 0 and (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False)):
         sys.stderr.write("{}: {} background fault(s) from loaded code over a passing verdict; "
@@ -6398,6 +6475,32 @@ _FAULT_CHANNEL_CASES = (
      "threading.Thread(target=fault).start()\n", 2, True, None),
     ("unfinished-thread", "import threading\n"
      "threading.Thread(target=threading.Event().wait, daemon=True).start()\n", 2, True, None),
+    # Low-level _thread workers: the interpreter drops a SystemExit ending one without calling any hook,
+    # so the wrapped start entry records a non-zero code as a fault (None or 0 stays the successful
+    # low-level exit), and the settle waits on the runtime's live count, so one still running at the
+    # bound fails the verdict closed while one that finishes is waited out.
+    ("lowlevel-systemexit", "import _thread, threading\n"
+     "done = threading.Event()\n"
+     "def worker():\n"
+     "    try:\n"
+     "        raise SystemExit(7)\n"
+     "    finally:\n"
+     "        done.set()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "done.wait()\n", 2, True, None),
+    ("lowlevel-systemexit-zero", "import _thread, threading\n"
+     "done = threading.Event()\n"
+     "def worker():\n"
+     "    try:\n"
+     "        raise SystemExit(0)\n"
+     "    finally:\n"
+     "        done.set()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "done.wait()\n", 0, False, None),
+    ("lowlevel-finishing", "import _thread, time\n"
+     "_thread.start_new_thread(time.sleep, (0.3,))\n", 0, False, None),
+    ("lowlevel-unfinished", "import _thread, threading\n"
+     "_thread.start_new_thread(threading.Event().wait, ())\n", 2, True, None),
     # Exit-status range: os._exit truncates its status to the low 8 bits, so a non-zero SystemExit
     # code that is a multiple of 256 would end the child with status 0, a silent pass; the gate maps
     # it to 2. The neighbouring codes pass through (257 reaches the parent as its low byte, 1).
