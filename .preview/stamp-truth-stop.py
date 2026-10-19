@@ -85,10 +85,14 @@ fail-open ALLOW stores none, nor does a block that turns into a fail-open allow 
 raise the stored counter (the warning names the violation; the arrival is checked like any other record
 when a later Stop of the SAME turn reads it, still under the cap, and is never checked when a new genuine
 user message follows it before a Stop reads it). The block's save RESERVES its raised counter but stores
-no entry; main() then writes the block decision to stdout, still under the state lock, and the entry is
+no entry; main() then writes the block decision to stdout while the evaluation still holds the state lock
+(a Stop with no transcript_path, or one that could not take the lock, holds none, and it saves no state and
+so stores no entry), and the entry is
 COMMITTED only when that write succeeded locally (print and flush raised nothing), so a refusal whose
 write failed stores none and its arrival is checked like the allows' above. A successful local write is
-not proof that the host received the line. RESIDUAL: a hook killed between that write and the commit
+not proof that the host received the line. While that write BLOCKS (a stdout whose reader has stalled),
+the lock stays held, so every other Stop of the same transcript is allowed UNCHECKED with the busy warning
+(see evaluate()). RESIDUAL: a hook killed between that write and the commit
 stores no entry for a refusal it did write, so that arrival is checked once more (refused again within
 the cap, the strict direction). So the entries never outnumber the refusals written to stdout.
 Consumption is by
@@ -117,8 +121,11 @@ UNPERSISTABLE state (the boundary could not be written at a block) mean the boun
 FINAL message (last_assistant_message, else the last collected transcript assistant entry) is checked, never
 older messages, because re-checking already-reported messages would re-block every Stop and wedge the actor.
 (At an unpersistable save the older messages were already checked; their violations can no longer block,
-but they are still reported, with the final message's refusal or in the warning of the allow, so a
-violation detected there is never dropped in silence.)
+but they are still counted in the final message's refusal (`+N more`) or in the warning of the allow
+(`N UNRESOLVED`), each line naming only its first violation (the final message's, when it has one), so a
+violation detected there is never dropped in silence. A transcript read that fails part-way is not
+covered: no boundary can be persisted, and the older violations that read found are dropped with no
+warning, a known gap.)
 A pass rewrites an unavailable state so it recovers. State I/O never crashes.
 STOP_HOOK_ACTIVE (the corrective loop after a block): violations only in messages older than the final one
 never block; a bad FINAL message still blocks, and then older violations are reported with it. So a corrected
@@ -1873,7 +1880,9 @@ def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None,
                         f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}")
         return None
     try:
-        # the reason is written while the lock is still held, so the commit after it writes the same state
+        # the reason is written while the lock is still held, so the commit after it writes the same state;
+        # a write that blocks keeps the lock, and every other Stop of this transcript meanwhile takes the
+        # busy path above, allowed unchecked
         return _deliver(_evaluate(payload, now, start, notes, dfd, status == "held", report, diag, owed), emit,
                         owed)
     finally:
@@ -2291,9 +2300,11 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     def commit_late(off, tl, nb, late):
         """Add the `late` entries of a block whose reason was written, still under the lock, to the state
         this Stop saved; True only when they were written. The state is re-read first and the entries are
-        stored only when it still holds this Stop's boundary and counter (a writer that ignored the lock
-        changed it otherwise), so the commit never revives an older boundary or lowers a counter; a state
-        that changed or cannot be read stores no entry, and the arrival is then checked."""
+        stored only when it still holds this Stop's boundary (offset and tail hash) and counter (a writer
+        that ignored the lock changed them otherwise), so the commit never revives an older boundary or
+        lowers a counter; a state whose boundary or counter changed, or that cannot be read, stores no
+        entry, and the arrival is then checked. Only those fields are compared: a pending list or a reset
+        or unknown flag that changed is kept as read, with the entries added."""
         cur = {}
         o2, t2, p2, ok2 = load_state(None, tp, cur, dfd)
         if not ok2 or cur.get("absent") or (o2, t2, cur.get("blocks")) != (off, tl, nb):
@@ -2324,9 +2335,9 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
             saved = save(*held) if held is not None else save(t["end"], t["tail"], remaining, late)
             if not saved:
                 # the boundary cannot be PERSISTED: only the final message may block, but the older
-                # violations stay detected and are still REPORTED (kept), with the final message's refusal
-                # or in the allow's warning; dropping them let an earlier-message-only violation pass with
-                # no warning at all
+                # violations stay detected and are still REPORTED (kept): counted in the final message's
+                # refusal or in the allow's warning, which names the first violation; dropping them let an
+                # earlier-message-only violation pass with no warning at all
                 kept, earlier_bad = earlier_bad, []
         elif had_state or not state_ok or absent_unknown:
             # advance, or repair an unreadable state, or (round 43) persist the unknown marker a CLEAN Stop
@@ -2368,7 +2379,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
         cap = "open"
     if kept and not final_bad and cap is None:
         # an explicit-false Stop whose only violations lie in older messages that can no longer block: an
-        # allow, but a loud one that names them, like the unrecorded block above
+        # allow, but a loud one that counts them and names the first, like the unrecorded block above
         cap = "open"
     add(final_bad)
     add(earlier_bad)
@@ -7376,12 +7387,14 @@ def _self_test():
             """One Stop through main() refusing a final message not yet in the transcript, with stdout for
             `leg`: "written" (a working stream, the control), "none" (descriptor 1 closed at startup), or
             "failed" (every write raises). Returns (the refused text, the stored pending list, the stored
-            counter, main()'s stdout text)."""
+            counter, main()'s stdout text, the text of each write attempted on the "failed" stream)."""
             missing = "[2099-01-01T00:00Z] refused but not yet in the transcript"
             null = os.open(os.devnull, os.O_WRONLY)
+            tried = []
 
             class Unwritable(io.StringIO):
                 def write(self, s):
+                    tried.append(s)
                     raise OSError("stdout write failed")
 
                 def fileno(self):
@@ -7403,7 +7416,7 @@ def _self_test():
             extra = {}
             st = load_state(default_state_dir(), self.tr, extra)
             self.assertTrue(st[3], leg)
-            return missing, st[2], extra["blocks"], out
+            return missing, st[2], extra["blocks"], out, tried
 
         def test_unwritten_refusal_stores_no_pending_entry(self):
             # the defect: the block's save stored its late-arrival entry BEFORE main() wrote the block
@@ -7412,21 +7425,24 @@ def _self_test():
             # the raised counter, and the entry is committed after _emit_line reports a successful local
             # write; the written control stores it, so the failed write alone makes the difference
             for leg in ("written", "none", "failed"):
-                missing, pending, blocks, out = self.unwritten_refusal(leg)
+                missing, pending, blocks, out, tried = self.unwritten_refusal(leg)
                 self.assertEqual(blocks, 1, leg)  # the counter is reserved whether or not the write succeeded
                 if leg == "written":
                     self.assertEqual(json.loads(out)["decision"], "block")
                     self.assertEqual(pending, [_sha(missing)])
-                else:
-                    self.assertFalse(out, leg)
-                    self.assertEqual(pending, [], leg)  # no entry for a refusal that was never written
+                    continue
+                self.assertEqual(pending, [], leg)  # no entry for a refusal that was never written
+                if leg == "failed":
+                    # the block decision was attempted on the stream and that write failed, so the failed
+                    # write is what left no entry (the stream's own text is always empty: it cannot show this)
+                    self.assertEqual([json.loads(s)["decision"] for s in tried], ["block"])
 
         def test_unwritten_refusal_arrival_is_checked(self):
             # the arrival of a refused final whose refusal was never written is checked like any other record
             # (here refused again, under the cap), never passed over as the late arrival of a delivered
             # refusal; the written control's arrival is passed over once, as before
             for leg in ("written", "none", "failed"):
-                missing, _, _, _ = self.unwritten_refusal(leg)
+                missing = self.unwritten_refusal(leg)[0]
                 self.write([self.asst(missing)], "a")
                 p = json.dumps({"transcript_path": self.tr, "hook_event_name": "Stop", "stop_hook_active": True})
                 old_err, sys.stderr = sys.stderr, io.StringIO()
@@ -7448,25 +7464,86 @@ def _self_test():
                 self.assertEqual(extra["blocks"], 2, leg)
 
         def test_late_entry_commit_never_overwrites_a_changed_state(self):
-            # the entry is committed after the write, in a second save; when the state changed in between (a
-            # writer ignoring the lock recorded counter 3), the commit stores nothing, so it never writes this
-            # Stop's older counter back over the higher one. The control (state unchanged) stores the entry
+            # the entry is committed after the write, in a second save that re-reads the state first and
+            # stores nothing unless the boundary (offset and tail hash) and the counter are still the ones
+            # this Stop saved, so it never writes an older boundary or a lower counter back. Between the
+            # block's save and the commit a writer ignoring the lock changes ONE compared field (the counter
+            # alone, the boundary alone, or the tail alone at the same offset) or, as before, the offset and
+            # the counter together, keeping every other field, so each half of the comparison is needed on
+            # its own: the intervening state stays exactly as written and no entry is added. The control
+            # (state unchanged) stores the entry
             missing = "[2026-09-23T21:00Z] refused but not yet in the transcript"
-            for changed in (False, True):
+            other_tail = _sha("the tail of different transcript bytes")
+            for leg in ("unchanged", "offset and counter", "counter", "boundary", "tail"):
+                self.write([self.user("go")])
+                self.seed(0)
+                seen = []
+
+                def emit(reason):
+                    off, tail = load_state(self.sdir, self.tr)[:2]  # as this Stop's save wrote it, counter 1
+                    new = {"unchanged": None, "offset and counter": (0, None, 3), "counter": (off, tail, 3),
+                           "boundary": (0, None, 1), "tail": (off, other_tail, 1)}[leg]
+                    if new is not None:
+                        self.assertTrue(save_state(self.sdir, self.tr, new[0], new[1], [], new[2]))
+                    seen.append((off, tail, new))
+                    return True
+                r = evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                              "last_assistant_message": missing}, self.now, self.start, self.sdir, emit=emit)
+                self.assertTrue(r, leg)
+                self.assertEqual(len(seen), 1, leg)
+                off, tail, new = seen[0]
+                self.assertGreater(off, 0, leg)  # the block saved a boundary past the user message
+                self.assertNotEqual(tail, other_tail, leg)
+                extra = {}
+                st = load_state(self.sdir, self.tr, extra)
+                self.assertTrue(st[3], leg)
+                want = (off, tail, [_sha(missing)], 1) if new is None else (new[0], new[1], [], new[2])
+                self.assertEqual((st[0], st[1], st[2], extra["blocks"]), want, leg)
+
+        def test_late_entry_commit_keeps_the_reset_and_unknown_flags(self):
+            # the commit rewrites the state with the entry added, so it must carry over the stored reset
+            # flag and unknown marker, each cleared ONLY by an explicit false: writing either as False here
+            # would erase it at a refusal inside the corrective loop, and a later user message read from the
+            # transcript could then restart the count (the fail-open direction). Each flag alone, and the
+            # control with neither; the stored entry shows that the commit ran
+            missing = "[2026-09-23T21:00Z] refused but not yet in the transcript"
+            for flags in ((False, False), (True, False), (False, True)):
+                self.write([self.user("go")])
+                self.assertTrue(save_state(self.sdir, self.tr, 0, None, [], 1, reset=flags[0], unknown=flags[1]))
+                r = evaluate({"transcript_path": self.tr, "stop_hook_active": True,
+                              "last_assistant_message": missing}, self.now, self.start, self.sdir,
+                             emit=lambda reason: True)
+                self.assertTrue(r, flags)
+                extra = {}
+                st = load_state(self.sdir, self.tr, extra)
+                self.assertTrue(st[3], flags)
+                self.assertEqual(st[2], [_sha(missing)], flags)
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (2,) + flags, flags)
+
+        def test_late_entry_commit_keeps_an_uncompared_change(self):
+            # only the boundary and the counter are compared before the commit: a writer ignoring the lock
+            # that changed only the pending list, or only the reset and unknown flags, leaves them as it
+            # wrote them, and the entry is added to that list
+            missing = "[2026-09-23T21:00Z] refused but not yet in the transcript"
+            other = _sha("an entry another writer stored")
+            for leg in ("pending", "flags"):
                 self.write([self.user("go")])
                 self.seed(0)
 
                 def emit(reason):
-                    if changed:
-                        self.assertTrue(save_state(self.sdir, self.tr, 0, None, [], 3))
+                    off, tail = load_state(self.sdir, self.tr)[:2]  # as this Stop's save wrote it, counter 1
+                    self.assertTrue(save_state(self.sdir, self.tr, off, tail, [other] if leg == "pending" else [],
+                                               1, reset=leg == "flags", unknown=leg == "flags"))
                     return True
                 r = evaluate({"transcript_path": self.tr, "stop_hook_active": False,
                               "last_assistant_message": missing}, self.now, self.start, self.sdir, emit=emit)
-                self.assertTrue(r, changed)
+                self.assertTrue(r, leg)
                 extra = {}
                 st = load_state(self.sdir, self.tr, extra)
-                self.assertTrue(st[3], changed)
-                self.assertEqual((st[2], extra["blocks"]), ([], 3) if changed else ([_sha(missing)], 1), changed)
+                self.assertTrue(st[3], leg)
+                self.assertEqual(st[2], ([other] if leg == "pending" else []) + [_sha(missing)], leg)
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]),
+                                 (1, leg == "flags", leg == "flags"), leg)
 
         def test_unraised_save_warns_for_an_earlier_only_violation(self):
             # the defect: a block whose save did not RAISE the stored counter (another writer recorded the
@@ -7541,6 +7618,10 @@ def _self_test():
                     if not failing or final == wrong:
                         self.assertTrue(r, case)
                         self.assertEqual(notes, [], case)
+                        if final == wrong:
+                            # the emitted refusal names the final message's violation and counts the older one
+                            self.assertIn("`2026-09-23T22:00Z`", r, case)
+                            self.assertIn("; +1 more", r, case)
                         continue
                     self.assertIsNone(r)
                     self.assertEqual(len(notes), 1, notes)
