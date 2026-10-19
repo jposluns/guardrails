@@ -13686,16 +13686,18 @@ def _main_isolated(monitor):
         # it does readable. The stated cost is an over-denial, pinned by gw-dbt-nv-overdeny: a harmless
         # option on those subcommands denies there too. The controls pin the bound the other way: a
         # listed verb with no dash-prefixed token, and a git subcommand outside the --no-verify set,
-        # still allow.
-        gexpect("(gw-dbt-nv-nm) behind the unjudged '#', a clustered -nm hook bypass denies",
+        # still allow. The first five vectors are REGRESSION GUARDS: the earlier spelling probes and the
+        # readable parsed path already denied each of them, so they keep the deny rather than tell this
+        # test apart from those; the vectors after them each allowed before this test.
+        gexpect("(gw-dbt-nv-nm) regression guard: behind the unjudged '#', a clustered -nm hook bypass denies",
                 "(true #'\n)\ngit commit -nm x", "deny")
-        gexpect("(gw-dbt-nv-anm) a -anm cluster (the n after other flag letters) denies too",
+        gexpect("(gw-dbt-nv-anm) regression guard: a -anm cluster (the n after other flag letters) denies too",
                 "(true #'\n)\ngit commit -anm x", "deny")
-        gexpect("(gw-dbt-nv-n3) a -n3 on git am (a digit after the n) denies",
+        gexpect("(gw-dbt-nv-n3) regression guard: a -n3 on git am (a digit after the n) denies",
                 "(true #'\n)\ngit am -n3 p", "deny")
-        gexpect("(gw-dbt-nv-nove) a --no-ve abbreviation (a conservative long prefix) denies",
+        gexpect("(gw-dbt-nv-nove) regression guard: a --no-ve abbreviation (a conservative long prefix) denies",
                 "(true #'\n)\ngit commit --no-ve", "deny")
-        gexpect("(gw-dbt-nv-non) the shortest --n abbreviation denies",
+        gexpect("(gw-dbt-nv-non) regression guard: the shortest --n abbreviation denies",
                 "(true #'\n)\ngit commit --n", "deny")
         gexpect("(gw-dbt-nv-nodash) a bare --no- abbreviation denies",
                 "(true #'\n)\ngit commit --no-", "deny")
@@ -13727,6 +13729,30 @@ def _main_isolated(monitor):
         gexpect("(gw-dbt-nv-otherverb) control: a git subcommand outside the --no-verify set keeps its "
                 "option behind the '#'",
                 "(true #'\n)\ngit status -s", "allow")
+        # The option test needs a character after the '-' that does not end the token in bash, so a lone
+        # '-' (git am's stdin operand) allows when a shell operator ends it just as when a blank does (the
+        # blank-ended 'git am -' control allowed before this rule too). A character bash does not split
+        # on, a carriage return included, stays in the token and counts; a process substitution glued to
+        # the '-' forms the dash-prefixed word '-/dev/fd/N' and counts too (a guard: it denied before this
+        # rule, and a rule that excluded '<' and '>' alone would let it allow).
+        gexpect("(gw-dbt-nv-lone) control: a lone '-' stdin operand ended by a blank allows",
+                "(true #'\n)\ngit am -", "allow")
+        gexpect("(gw-dbt-nv-lonesemi) control: a lone '-' ended by ';' allows",
+                "(true #'\n)\ngit am -;true", "allow")
+        gexpect("(gw-dbt-nv-lonelt) control: a lone '-' ended by a '<' redirect allows",
+                "(true #'\n)\ngit am -<p", "allow")
+        gexpect("(gw-dbt-nv-loneparen) control: a lone '-' ended by ')' in a subshell allows",
+                "(true #'\n)\n(git am -)", "allow")
+        gexpect("(gw-dbt-nv-loneamp) control: a lone '-' ended by '&' allows",
+                "(true #'\n)\ngit am -&", "allow")
+        gexpect("(gw-dbt-nv-lonepipe) control: a lone '-' ended by a pipe allows",
+                "(true #'\n)\ngit am -|cat", "allow")
+        gexpect("(gw-dbt-nv-lonegt) control: a lone '-' ended by a '>' redirect allows",
+                "(true #'\n)\ngit am ->o", "allow")
+        gexpect("(gw-dbt-nv-cr) a carriage return after the '-' stays in the token and denies",
+                "(true #'\n)\ngit commit -\rn", "deny")
+        gexpect("(gw-dbt-nv-procsub) regression guard: a process substitution glued to the '-' denies",
+                "(true #'\n)\ngit am -<(true)", "deny")
         # The checker-shaped test behind the unjudged '#' calls the parsed recognizer's own name splitter
         # and lexicon (_gate_doubt_checker), so its boundary semantics are the splitter's: a non-ASCII
         # letter (the dotless 'ı' below) separates name parts exactly as _name_parts_hit separates

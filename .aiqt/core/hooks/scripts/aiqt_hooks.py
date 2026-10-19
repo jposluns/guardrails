@@ -10835,9 +10835,19 @@ def _gate_doubt_sink(scan):
 # that subcommand's grammar, so no dash-prefixed token can be proven harmless, and a probe that spells
 # out bypass forms (--no-verify abbreviations, -n cluster alphabets, token endings) misses the next
 # spelling it did not enumerate. An option token starts at the text's start, after whitespace or after a
-# shell operator character (; & | < > ( )) and needs one non-whitespace character after its '-', so a
-# lone '-' (a stdin operand) never matches, while '--' (the end-of-options word) does: behind the doubt
-# nothing proves the bypass sits after it. The deliberate cost is an OVER-DENIAL, stated in the
+# shell operator character (; & | < > ( )), and needs one character after its '-' that does not end the
+# token in bash: anything but a blank (space, tab, newline) or one of those operator characters. So a
+# lone '-' (a stdin operand) never matches, even where an operator ends it ('git am -;true', 'git am -<p',
+# '(git am -)'), while '--' (the end-of-options word) does: behind the doubt nothing proves the bypass
+# sits after it. A carriage return, form feed or other character Python's \s holds but bash does not
+# split on stays part of the token ('-\rn' is one word to bash), so it counts. A '<' or '>' that opens a
+# process substitution also counts, because bash glues the substitution's path to the '-'
+# ('-<(true)' is the one word '-/dev/fd/63'). The start class holds every character bash splits words
+# on, so leaving out the characters that open an expansion, a substitution or a brace ('$', '`', '{',
+# '}', ',') never counts a lone '-' as an option, which only narrows the over-denial below; it also
+# means a word whose expansion leaves a leading '-' ('${x}-n', '`true`-n', '{,-n}' with x and the
+# substitution empty) is not read as an option here, a reading the readable parsed path shares (it
+# allows the same text when no '#' stops it). The deliberate cost is an OVER-DENIAL, stated in the
 # gate_weakening docstring and the manifest residue: behind such a '#' a harmless option on those
 # subcommands ('git commit -m x', 'git push --dry-run') also denies; put a blank before the '#' outside
 # any grouping or substitution, or drop it. The two searches run over the doubled _hash_doubt_scan text
@@ -10845,7 +10855,7 @@ def _gate_doubt_sink(scan):
 # over-denies, the fallback's safe direction, and each search is one linear pass. These doubt tests run
 # ONLY behind such an unjudged '#': the plain parse-error fallback and the failed-main-reading floor keep
 # the conservative spelling probes above, so a command outside the doubt path keeps its decision.
-_RAW_DOUBT_OPTION_RE = re.compile(r"(?:^|[\s;&|<>()])-\S")
+_RAW_DOUBT_OPTION_RE = re.compile(r"(?:^|[\s;&|<>()])-(?:[^ \t\n;&|<>()]|[<>]\()")
 
 
 def _gate_doubt_bypass(scan):
