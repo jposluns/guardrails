@@ -297,7 +297,12 @@ _HOOKS_TOML = (
     '[[hook]]\nid = "h7"\nplatform = "claude-code"\ndefault = "warn"\n'
     '[[hook]]\nid = "h8"\nplatform = "other"\ndefault = "block"\n'
 )
-_ENFORCEMENT = "# Register\n\n| Status | Count |\n| --- | --- |\n| Enforced | 1 |\n"
+_ENFORCEMENT = (
+    "# Register\n\n| Status | Count |\n| --- | --- |\n"
+    "| Gate-linked (class a) | 1 |\n| Gate-linked (class a), partial | 0 |\n"
+    "| Gate-linked (class c only) | 0 |\n| Gate-linked (class c only), partial | 0 |\n"
+    "| Hook-linked | 0 |\n| Hook-linked, partial | 0 |\n"
+)
 
 # Every rendered landing figure, asserted as a LITERAL expectation (never built with the live
 # templates or renderers, which a regression under test would share): the whole proof line, then one
@@ -471,7 +476,10 @@ def self_test_main():
         (gatemove / ".aiqt" / "standards" / "gamma.toml").write_text(
             _MANIFEST.format(k="gamma", name="Gamma Framework", ed="3.0"), encoding="utf-8")
         (gatemove / "ENFORCEMENT.md").write_text(
-            "# Register\n\n| Status | Count |\n| --- | --- |\n| Enforced | 2 |\n", encoding="utf-8")
+            "# Register\n\n| Status | Count |\n| --- | --- |\n"
+            "| Gate-linked (class a) | 1 |\n| Gate-linked (class a), partial | 0 |\n"
+            "| Gate-linked (class c only) | 0 |\n| Gate-linked (class c only), partial | 0 |\n"
+            "| Hook-linked | 1 |\n| Hook-linked, partial | 0 |\n", encoding="utf-8")
         if run_quiet(gatemove, check=True) != 1:
             failures.append("all-counts move expected exit 1 (every rendered figure must move)")
         if run_quiet(gatemove, check=False) != 0:
