@@ -212,8 +212,10 @@ took at most 0.10 s of wall-clock time at 64 KB, 0.49 s at 256 KB and 2.07 s at 
 git_stash_ref). With the raw-text push backstop and the joined and de-quoted readings of the command,
 runs on 2026-10-17 on a 24-core host with Python 3.14.4 that was running other work measured at most
 0.13 s at 64 KB (protected_line, whose backstop reads the whole command before its 65,536-character
-commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard). Interpreter
-start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
+commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard); which clock those
+runs read, CPU or wall-clock time, was not recorded. Interpreter start-up adds about 0.1 to 0.2 s to each
+call, a figure first written on 2026-10-15 whose date of measurement, host and clock were not recorded.
+Outside the deadline: interpreter start-up and
 module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
 uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
 check for signals), which holds the deadline back until it returns, as does review_dispatch_pin's wait for
@@ -7478,13 +7480,13 @@ class _RawMirrorConfig:
     cost time quadratic in its length: about 3.1 s of CPU for one search of a 180 KB run, against about
     0.02 s for this probe on a 1 MB run (in-process on a 24-core host with Python 3.14.4, 2026-10-18).
     Here `option` finds each option once, in order, `key` reads the run after it and `mirror` looks for
-    '.mirror' in that run once; an option whose key starts inside a run already read with no '.mirror' after that earlier key is passed over, because its
-    own run is a tail of that one. `option` matches what the regex's two alternatives match before their
-    shared key run; at a given start at most one alternative can match, and only up to one place, so each
-    option the regex can start from is read with the key it would read. No option match starts inside
-    another, so the runs read do not overlap. Only the start of the leftmost match is read again, by
-    `pattern` itself, for the match it returns. tools/selftest_aiqt_hooks.py holds this probe equal to the
-    regex over a generated corpus."""
+    '.mirror' in that run once; an option whose key starts inside a run already read with no '.mirror'
+    after that earlier key is passed over, because its own run is a tail of that one. `option` matches
+    what the regex's two alternatives match before their shared key run; at a given start at most one
+    alternative can match, and only up to one place, so each option the regex can start from is read with
+    the key it would read. No option match starts inside another, so the runs read do not overlap. Only
+    the start of the leftmost match is read again, by `pattern` itself, for the match it returns.
+    tools/selftest_aiqt_hooks.py holds this probe equal to the regex over a generated corpus."""
     __slots__ = ("pattern", "option", "key", "mirror")
 
     def __init__(self, pattern, option, key, mirror):

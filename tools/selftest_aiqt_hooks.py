@@ -3006,10 +3006,10 @@ _DEADLINE_SHAPES = {
         "'-c'remote.", n - 9, "; git push --force origin main")}),
     # A run of adjacent process substitutions, which the push backstop's segment split walked by copying
     # the rest of the command for each one, in time quadratic in the length of the run (about 3.4 s of
-    # CPU for one call of the copying split alone at 1 MB, in-process on a 24-core host, 2026-10-18,
-    # against about 0.11 s for the in-place walk), then a force-push to a protected branch. The bounds
-    # here are not what pins the in-place walk (the copying split stayed under the 1 MB CPU bound when
-    # measured); the call record (dl-procsubst-taken) does.
+    # CPU for one call of the copying split alone at 1 MB, in-process on a 24-core host with Python
+    # 3.14.4, 2026-10-18, against about 0.11 s for the in-place walk), then a force-push to a protected
+    # branch. The bounds here are not what pins the in-place walk (the copying split stayed under the
+    # 1 MB CPU bound when measured); the call record (dl-procsubst-taken) does.
     "procsubst_run_after": lambda n, base: ("Bash", {"command": "cat " + _repeat(
         "<(x) >(x) ", n - 4, "; git push --force origin main")}),
     "write_content": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": "a" * n}),
