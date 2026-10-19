@@ -866,12 +866,41 @@ def self_test():
     """Isolate fixture git configuration and restore the caller even on failure: the fixture git
     calls (built through _scrubbed_env, which carries HOME) must read a fresh, empty HOME and
     XDG_CONFIG_HOME with the system config disabled, never the caller's or the host's, so the
-    self-test stays hermetic under an injected caller or system git configuration."""
+    self-test stays hermetic under an injected caller or system git configuration. The direct
+    `--self-test` entry calls this without main()'s backstop, so a harness error raised here,
+    outside the suite's own guard (the fixture HOME cannot be created, say), is cannot-evaluate
+    (2) too, never an uncaught exception that exits 1."""
     from unittest.mock import patch
-    with tempfile.TemporaryDirectory(prefix="opf-prompt-pin-selftest-home-") as home:
-        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                        GIT_CONFIG_NOSYSTEM="1"):
-            return _self_test_isolated()
+    try:
+        with tempfile.TemporaryDirectory(prefix="opf-prompt-pin-selftest-home-") as home:
+            with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                            GIT_CONFIG_NOSYSTEM="1"):
+                return _self_test_isolated()
+    except Exception as exc:  # noqa: BLE001  a harness error is cannot-evaluate, never a pass
+        print("OPF-PROMPT-PIN SELF-TEST: CANNOT EVALUATE ({!r})".format(exc), file=sys.stderr)
+        return 2
+
+
+def _direct_entry_harness_error():
+    """Run self_test() with the fixture HOME refused, as the direct `--self-test` entry would meet
+    it; the result must be cannot-evaluate (exit 2), never an exception escaping the entry. The
+    inner run's diagnostic is captured, so it is not read as this suite's own verdict."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    def refuse(*args, **kwargs):
+        raise OSError("injected: the fixture HOME cannot be created")
+
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(captured), patch.object(tempfile, "TemporaryDirectory",
+                                                                 refuse):
+            rc = self_test()
+    except Exception as exc:  # noqa: BLE001  an escaping exception is this vector's finding
+        return ("raised", None, repr(exc))
+    status = {code: name for name, code in EXIT_CODES.items()}.get(rc, "exit {!r}".format(rc))
+    return (status, None, "self_test() returned {!r}; stderr {!r}".format(rc, captured.getvalue()))
 
 
 def _self_test_isolated():
@@ -914,6 +943,9 @@ def _self_test_isolated():
                     count += 1
                     check(name + "-disabled-" + covering, disabled, (VALID, None))
             count += _history_vectors(tmp, check)
+            count += 1
+            check("direct-entry-harness-error", _direct_entry_harness_error(),
+                  (CANNOT_EVALUATE, None))
     except Exception as exc:  # noqa: BLE001  a harness error is cannot-evaluate, never a pass
         print("OPF-PROMPT-PIN SELF-TEST: CANNOT EVALUATE ({!r})".format(exc), file=sys.stderr)
         return 2
@@ -949,4 +981,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(main())
