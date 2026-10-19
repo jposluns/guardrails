@@ -1365,7 +1365,8 @@ def _reap_within(pid, wait):
     deadlines). Every wait here is a WNOHANG poll against a monotonic deadline, never a blocking waitpid, so no
     caller can block in this helper (leg reap-deadline); a caller reads UNREAPED as its own named failure or
     cannot-evaluate, never as a reaped child. Only the callers of this helper are bounded by it: the
-    blocking waitpid calls that remain in _reuse_bound, _refused_named, _leftover_children and _hang_credit
+    blocking child waits that remain, the waitpid calls in _reuse_bound, _refused_named, _leftover_children
+    and _hang_credit and the Popen waits in _kill_confirmed (holder.wait and its Popen context exits),
     do not use it, and are not claimed bounded here."""
     def polled():
         deadline = time.monotonic() + wait
@@ -2397,8 +2398,10 @@ def _high_descriptor_probes(hold=False, bound=WITNESS_WAIT):
     blocking waitpid; a child still unreaped at the reap deadline, the stalled one included, is a named
     cleanup failure and the verdict is then False, never read as reaped or as not exercised (leg
     probe-stopped-unreaped). The restore of the soft bound sits in the outermost finally of the cleanup, so
-    no earlier cleanup step (every close, then the reap, each in an enclosing finally) can skip it, whatever
-    that step raises (an exception other than OSError included); a failed raise of the bound is named and
+    no earlier cleanup step (one loop over the closes, then the reap, each inside a finally the restore
+    encloses) can skip it, whatever that step raises (an exception other than OSError included; a close that
+    raises one ends the close loop, so the later descriptors are neither closed nor recorded, and the
+    exception escapes with the reap and the restore still run); a failed raise of the bound is named and
     the verdict is False, the probe not run, after the restore; any cleanup failure, a failed restore
     included, is named in the returned detail and the verdict is then False, never a silent pass; and while
     an exception unwinds out of this function, every cleanup failure recorded, a failed restore included, is
@@ -2519,10 +2522,14 @@ def _token_boundaries():
     dead zero-or-below comparison remains in _pid_token). The width clause is held by entries only it can
     refuse: digit strings past the integer-conversion limit (sys.get_int_max_str_digits), bytes and str,
     which int would refuse with ValueError, so with the width clause removed those entries read as a raise,
-    never as None (the discrimination assumes the conversion limit is enabled, its default); the ten- and
+    never as None (on a host that has disabled the conversion limit, where int would convert any width, the
+    default limit is set around the judgements and the disabled state restored after them, so those entries
+    still read as a raise there and never as the numeric bound's None); the ten- and
     eleven-digit entries hold the width end itself, though past it the numeric bound refuses them too. A
     raise inside _pid_token is recorded as the mismatch, never an escape: (ok, mismatches)."""
-    over = max(sys.get_int_max_str_digits(), len(str(PID_BOUND))) + 1
+    saved = sys.get_int_max_str_digits()
+    limit = saved or sys.int_info.default_max_str_digits
+    over = max(limit, len(str(PID_BOUND))) + 1
 
     def judged(token):
         try:
@@ -2538,8 +2545,14 @@ def _token_boundaries():
         (b"0", None), ("0", None), (b"007", None), ("007", None), (b"02147483647", None),
         (b"", None), ("", None), (b"-1", None), (b"+1", None), ("1a", None), (b"1 2", None),
         ("\u0662\u0663", None), (" 1", None))
-    mismatched = [(_token_preview(token), judged(token), want) for token, want in table
-                  if judged(token) != want]
+    try:
+        if not saved:
+            sys.set_int_max_str_digits(limit)
+        mismatched = [(_token_preview(token), judged(token), want) for token, want in table
+                      if judged(token) != want]
+    finally:
+        if not saved:
+            sys.set_int_max_str_digits(saved)
     return not mismatched, mismatched
 
 
@@ -3950,21 +3963,39 @@ def _unreaped_hang_uncredited():
     to WITNESS_TIMEOUT: a run that hangs reads "hung; unreaped (...)" (the hang visible, the reap failure
     attached) and is None under a mutant, so that mutant is not caught by it (an exposure here, from a bare
     "unreaped" read as a completed run, is the regression); a run that returns with its child unreaped is
-    None under a mutant as well: (ok, detail)."""
+    None under a mutant as well. The confirmation re-run refuses both unreaped forms the same way, held by
+    injected _gate result sequences, an initial hang then each unreaped form: the outcome is None, both
+    aggregate verdicts are unresolved, and the two runs were made at GATE_TIMEOUT then BLOCK_CONFIRM (a
+    confirmation run whose killed child is still unreaped read as a completed run, an exposure crediting
+    the mutant, is the regression): (ok, detail)."""
     this, real = sys.modules[__name__], _reap_within
 
     def reaping(pid, wait):
         real(pid, wait)
         return UNREAPED
     vector = ("scratch/unreaped", ROOT, 0, "PASS", None)
+
+    def confirmed(form):
+        results, calls = [("hung", ""), (form, "")], []
+
+        def gate(module, root, timeout=GATE_TIMEOUT, forked=None, expiring=None):
+            calls.append(timeout)
+            return results.pop(0)
+        with _patched(this, "_gate", gate):
+            outcome = _vector_outcome(this, vector, "scratch-mutant")[0]
+        verdicts = _mutation_verdicts([("scratch-mutant", vector[0], {vector[0]: outcome})], [vector[0]])[:2]
+        return outcome, verdicts, calls
     with _patched(this, "_reap_within", reaping), _patched(this, "GATE_TIMEOUT", WITNESS_TIMEOUT):
         hung = _vector_outcome(types.SimpleNamespace(run=lambda root: time.sleep(HANG_SECONDS)), vector,
                                "scratch-mutant")
         returned = _vector_outcome(types.SimpleNamespace(run=lambda root: 1), vector, "scratch-mutant")
     caught = _mutation_verdicts([("scratch-mutant", vector[0], {vector[0]: hung[0]})], [vector[0]])[0]
+    confirm = dict((form, confirmed(form)) for form in ("unreaped (scripted)", "hung; unreaped (scripted)"))
     ok = (hung[0] is None and str(hung[1][0]).startswith("hung; unreaped (") and returned[0] is None
-          and str(returned[1][0]).startswith("unreaped (") and caught is None)
-    return ok, dict(hung=hung, returned=returned, caught=caught)
+          and str(returned[1][0]).startswith("unreaped (") and caught is None
+          and all(result == (None, (None, None), [GATE_TIMEOUT, BLOCK_CONFIRM])
+                  for result in confirm.values()))
+    return ok, dict(hung=hung, returned=returned, caught=caught, confirm=confirm)
 
 
 def _credit_verdict(detail):
@@ -4015,8 +4046,9 @@ def _hang_credit(vectors, base):
     Hung then hung outside BLOCK_CREDIT reads None even with the FIFO subject's evidence. This gate, hung then
     held, reads False with no re-run. With every run hung and no evidence, every vector fails against this gate
     and neither aggregate passes. Each half of the evidence is necessary on its own (_evidence_halves). A run
-    whose killed child is still unreaped, hung or not, is None under a mutant, never an exposure
-    (_unreaped_hang_uncredited, through the real _gate). The cases
+    whose killed child is still unreaped, hung or not, is None under a mutant, never an exposure, on the
+    initial run through the real _gate and on the confirmation re-run through injected result sequences
+    (_unreaped_hang_uncredited). The cases
     that need no reading from the FIFO subject, the undeclared pair's stall among them, are decided first and
     fail as False; only when every one of them holds and that subject never showed its wait is the verdict None
     (cannot evaluate). The decision is _credit_verdict, held over injected details by _stall_decided."""
