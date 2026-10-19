@@ -328,8 +328,10 @@ class _HeadInputs:
     .aiqt/core included) is refused; it opens the final component non-blocking and reads it only
     when the opened descriptor is a regular file, so a FIFO, device or other non-regular file is
     refused before any read (a socket already fails at the open, a directory when its file object
-    is made). A refused or unreadable input is GateError (exit 2) naming it; an absent one (any
-    component missing) reads as None, and each caller decides what absence means. A hard link is a
+    is made). A refused or unreadable input, or a read that runs out of memory, is GateError (exit 2)
+    naming it; an absent one (any component missing) reads as None, and each caller decides what
+    absence means. An input no check reaches is never read, so it is never refused either (the
+    declaration is read only when layer_d evaluates an otherwise eligible relabel). A hard link is a
     regular file and is read as one; the repository root itself is opened by its path, as the
     release-cut gate opens it."""
 
@@ -346,6 +348,11 @@ class _HeadInputs:
                 raise GateError("cannot read {} at HEAD (a symlink at any path component, a "
                                 "non-regular file, and an unreadable file are each refused): "
                                 "{}".format(rel, exc))
+            # A read that runs out of memory is fail-closed and names the input too, as a parse
+            # that runs out of memory is in toml() below; it never escapes run() as a traceback.
+            except MemoryError as exc:
+                raise GateError("cannot read {} at HEAD: out of memory reading it ({})".format(
+                    rel, exc))
         return self._raw[rel]
 
     def toml(self, rel):
@@ -613,7 +620,7 @@ def _relabel_window_reason(root, base_commit, head_releases, old_version, new_ve
     unparseable base changelog, a head changelog, release-order record or declaration that the
     no-follow reader refuses or cannot read (see _HeadInputs), or a declaration or changelog that
     check_release_cut's parsers refuse; an unreadable condition is never a pass. head is the run's
-    _HeadInputs, so each head input is read once per run; a direct call without it reads through a
+    _HeadInputs, so each head input is read at most once per run; a direct call without it reads through a
     fresh one. The release-cut declaration is REQUIRED here, not optional: the relabel is granted only when
     check_release_cut.evaluate_transition accepts this exact base-to-head changelog transition under
     the present declaration (full five-field schema, operation, previous-version, next-version and the
@@ -796,7 +803,8 @@ def _load_head_toml(head, rel):
 
 def run(root, base):
     """Run every layer against `root`, resolving the baseline from `base` (None means the default
-    merge-base). Returns the exit code 0/1/2. Every head input is read once, through one _HeadInputs."""
+    merge-base). Returns the exit code 0/1/2. Each head input the run accesses is read at most once,
+    through one _HeadInputs."""
     try:
         head = _HeadInputs(root)
         head_releases = _load_head_releases(head)
@@ -3620,33 +3628,80 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
                                             label35, want35, outcome.returncode, outcome.timed_out,
                                             outcome.survivors, outcome.stdout))
 
-            # R36 each head input is read ONCE per run, at its first access, through the shared
-            # no-follow reader: a spy on this module's working_blob binding records the reads of one
-            # in-window relabel run (which reaches all four inputs), and they must be exactly the
-            # four inputs, once each, in first-access order. A loader that bypasses the reader, or a
-            # later check that reads a path again instead of parsing the captured bytes, changes the
-            # record.
+            # R36 each head input a run accesses is read AT MOST ONCE, at its first access, through
+            # the shared no-follow reader, and every later check uses the captured bytes. An
+            # unwatched in-window relabel run (which reaches all four inputs) first records the
+            # expected outcome (exit 0 with the relabel PASS line). A second run of the same
+            # repository then goes through a spy on this module's working_blob binding that records
+            # each read and deletes the input from the working tree as soon as its bytes are
+            # captured. The record must be exactly the four inputs, once each, in first-access
+            # order, and the run must print exactly what the unwatched run printed. A loader that
+            # bypasses the reader changes the record; a later check that reads a path again (open,
+            # Path.read_bytes, os.open or a stat) finds the input gone, so it raises or reads an
+            # absence, and the outcome changes.
             rr36 = _relabel_repo("relabel-read-once")
             _write(rr36, head_log)
             _write_register(rr36, reg_relabelled)
             _write_cut(rr36, _cut_text())
+            control36 = _run_streams(rr36, "HEAD")
+            if control36[0] != 0 or "relabel 1.1.0 -> 1.1.1 on 2 [[born]] row(s)" not in control36[1]:
+                failures.append("git case R36 control: the unwatched relabel run expected exit 0 and "
+                                "the relabel PASS line (got exit {})".format(control36[0]))
             real_reader36 = globals().get("working_blob")
             reads36 = []
 
             def _recording_reader(root, rel):
                 reads36.append(rel)
-                return real_reader36(root, rel)
+                captured = real_reader36(root, rel)
+                if captured is not None:
+                    (root / rel).unlink()
+                return captured
 
             globals()["working_blob"] = _recording_reader
             try:
-                rc36 = _run_quiet(rr36, "HEAD")
+                watched36 = _run_streams(rr36, "HEAD")
+            except OSError as exc:
+                watched36 = "raised {}: {}".format(type(exc).__name__, exc)
             finally:
                 globals()["working_blob"] = real_reader36
             want36 = ["changelog.toml", RELEASES_REL, IDHISTORY_REL, RELEASE_CUT_REL]
-            if rc36 != 0 or reads36 != want36:
-                failures.append("git case R36: an in-window relabel run expected exit 0 with each head "
-                                "input read once through the shared reader, in the order {!r} (got "
-                                "exit {}, reads {!r})".format(want36, rc36, reads36))
+            if watched36 != control36 or reads36 != want36:
+                failures.append("git case R36: an in-window relabel run expected each head input read "
+                                "once through the shared reader, in the order {!r}, and the same "
+                                "outcome as the unwatched run once each input was deleted after its "
+                                "capture (got reads {!r}, outcome {!r}, unwatched {!r})".format(
+                                    want36, reads36, watched36, control36))
+
+            # R37 a read that runs out of memory is fail-closed (exit 2) naming the input, as a parse
+            # that runs out of memory is, and never escapes run(): a spy on this module's
+            # working_blob binding raises MemoryError for one input of an in-window relabel run
+            # (which reaches all four inputs, as its control shows), each input in turn.
+            rr37 = _relabel_repo("relabel-read-memoryerror")
+            _write(rr37, head_log)
+            _write_register(rr37, reg_relabelled)
+            _write_cut(rr37, _cut_text())
+            if _run_quiet(rr37, "HEAD") != 0:
+                failures.append("git case R37 control: the relabel with every head input readable "
+                                "expected exit 0")
+            real_reader37 = globals().get("working_blob")
+            for rel37 in ("changelog.toml", RELEASES_REL, IDHISTORY_REL, RELEASE_CUT_REL):
+
+                def _exhausted_reader(root, rel, _target=rel37):
+                    if rel == _target:
+                        raise MemoryError("injected while reading " + rel)
+                    return real_reader37(root, rel)
+
+                globals()["working_blob"] = _exhausted_reader
+                try:
+                    rc37, _out37, err37 = _run_streams(rr37, "HEAD")
+                except MemoryError as exc:
+                    rc37, err37 = "escaped run()", "MemoryError: {}".format(exc)
+                finally:
+                    globals()["working_blob"] = real_reader37
+                if rc37 != 2 or "cannot read {} at HEAD: out of memory".format(rel37) not in err37:
+                    failures.append("git case R37: a MemoryError reading the head {} expected "
+                                    "fail-closed exit 2 naming it (got exit {}, stderr {!r})".format(
+                                        rel37, rc37, err37))
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
