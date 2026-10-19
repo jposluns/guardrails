@@ -892,6 +892,26 @@ def _self_test() -> int:
             failures.append("UTF-32 wide view must keep a lone surrogate as its lone code point "
                             "(surrogatepass first; errors=replace only when surrogatepass itself "
                             "raises), got {!r}".format(sur_texts and sur_texts[0]))
+        # The SAME pin for the UTF-16 decodes, at the unit level: the decoded UTF-16 view must
+        # itself carry the lone code point, little- and big-endian, and in the kept UTF-16 reading
+        # of the overlapping FF FE 00 00 mark (the view at index 1 there; index 0 in the plain
+        # UTF-16 branch). The surrogate-bearing token fixtures above cannot discriminate here: a
+        # sanitizing decode that keeps the view but maps the lone surrogate to U+FFFD leaves every
+        # ASCII token finding intact, and only these direct code-point assertions go red under it.
+        u16_units = (
+            ("u16sur_le_unit.txt", codecs.BOM_UTF16_LE + "x".encode("utf-16-le") + b"\x00\xd8", 0),
+            ("u16sur_be_unit.txt", codecs.BOM_UTF16_BE + "x".encode("utf-16-be") + b"\xd8\x00", 0),
+            ("u16sur_nul_unit.txt",
+             codecs.BOM_UTF16_LE + "\x00x".encode("utf-16-le") + b"\x00\xd8", 1),
+        )
+        for name16, raw16, view16 in u16_units:
+            path16 = troot / name16
+            path16.write_bytes(raw16)
+            texts16, _note16 = _read_scan_text(path16)
+            if texts16 is None or len(texts16) <= view16 or "\ud800" not in texts16[view16]:
+                failures.append("UTF-16 wide view ({}) must keep a lone surrogate as its lone code "
+                                "point (surrogatepass, lossless for the wide view), got "
+                                "{!r}".format(name16, texts16))
     scan_out = out.getvalue()
     non_utf8_cases = [
         ("  notes.md:2: GitHub token", True),            # one invalid byte BESIDE a planted token: a finding

@@ -2812,7 +2812,12 @@ def _pin_fixture_version(repo, failures, version="1.0.0"):
             failures.append("fixture setup ({}): could not init/stage the archive-extracted tree for "
                             "version pinning; the archive-backed case cannot be normalized".format(repo.name))
             return False
-    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)],
+    # The sibling gen_manifest runs by ABSOLUTE path under the isolated interpreter: a bare
+    # "python3 tools/gen_manifest.py" resolved both the interpreter and the script through the
+    # caller's working directory, so the self-test failed at setup from any directory other than
+    # the repo root, and a planted tools/gen_manifest.py in that directory would have run instead.
+    if subprocess.run([sys.executable, "-I", "-B",
+                       str(Path(__file__).resolve().parent / "gen_manifest.py"), "--root", str(repo)],
                       capture_output=True, env=env).returncode != 0:
         failures.append("fixture setup ({}): gen_manifest --root failed while pinning to {}; a fixture-setup "
                         "gen failure FAILS the self-test rather than silently passing as the intended "
@@ -2829,7 +2834,10 @@ def _regen_fixture_manifest(root, case, failures, env):
     verdict assertion, where a coincidental exit (a stale/broken manifest ALSO drives exit 2) could
     otherwise be misread as the intended gate verdict and pass by luck. Returns True only when the manifest
     was actually regenerated."""
-    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(root)],
+    # The sibling gen_manifest by ABSOLUTE path under the isolated interpreter, exactly as
+    # _pin_fixture_version launches it: never resolved through the caller's working directory.
+    if subprocess.run([sys.executable, "-I", "-B",
+                       str(Path(__file__).resolve().parent / "gen_manifest.py"), "--root", str(root)],
                       capture_output=True, env=env).returncode != 0:
         failures.append("fixture setup ({}): gen_manifest --root failed; a fixture-setup gen failure FAILS "
                         "the self-test rather than silently passing as the intended assertion".format(case))
@@ -3444,7 +3452,9 @@ def _real_pack_not_run_vectors(tmp, failures):
     built, and a clause inventory with no sole-coverer clause to edit (corpus content, so reachable in
     CI). Each drives the real _real_pack_e2e over a tiny stub archive (only the archive read and the
     version pin are stubbed; the real extract, git add/commit/tag and clause search run) and requires a
-    False return AND a NOT RUN failure naming the cause."""
+    False return AND a NOT RUN failure naming the cause. The per-site failure-injection vectors for the
+    later fixtures (_real_pack_fault_vectors) dispatch from here, so a nested self-test run that stubs
+    this set skips them with it."""
     import tarfile
     env = _selftest_env()
     # Two clauses that both cover lines 1-2 of one source: no line has a sole coverer, so the real
@@ -3494,6 +3504,163 @@ def _real_pack_not_run_vectors(tmp, failures):
             failures.append("(NOT RUN {}) _real_pack_e2e must return False AND record a NOT RUN failure "
                             "naming {!r}, never print a SKIPPED note beside a PASS (got ran={!r}, "
                             "failures={})".format(name, want, ran, got))
+    _real_pack_fault_vectors(tmp, failures)
+
+
+def _real_pack_fault_vectors(tmp, failures):
+    """Failure-injection vectors, one per _not_run site PAST _real_pack_e2e's primary cases (sites an
+    ordinary run never reaches because the host, git and the archive all behave, so removing one
+    recording call would otherwise leave the self-test green): the per-fixture archive extractions,
+    the two fixture version pins that return True early, the per-fixture predecessor commits, the
+    smudge worktree set-up proof, the genesis staging, and the profiles symlink. Each vector drives
+    the REAL _real_pack_e2e over a small stub archive with exactly ONE failure injected (an
+    extraction that raises for one named fixture, a version pin that reports failure, a stale index
+    lock that fails the fixture's next git index write, a pre-created worktree path, a pre-planted
+    regular file at the symlink target) and requires the documented True return AND a NOT RUN
+    failure naming that site's case and cause. Everything else the stubbed run records is ignored,
+    so each assertion is red exactly when its own site stops recording. The run() legs and the
+    manifest regeneration are stubbed: these vectors pin the failure RECORDING contract, never the
+    delta semantics, which the unstubbed end-to-end cases pin."""
+    import tarfile
+    env = _selftest_env()
+    # A stub tree rich enough to carry _real_pack_e2e past its primary cases: a sole-coverer clause
+    # (so the consistent edit succeeds), the files the later fixtures read or mutate, and the
+    # record-file parents the later fixtures write into.
+    files = {
+        "rules/stub.md": "First stub sentence.\nSecond stub line follows.\n",
+        "tools/_gen_common.py": "# stub closure module\n",
+        ".gitattributes": "",
+        "NOTICE": "stub notice\n",
+        CLAUSES_REL: ('[[clause]]\nclause-id = "stub.1"\nsource-path = "rules/stub.md"\n'
+                      'start-line = 1\nend-line = 1\ncanonical-text = "First stub sentence."\n'),
+        MANIFEST_REL: ('format-version = 1\n\n[[sources]]\npath = "NOTICE"\n\n[[sources]]\n'
+                       'path = "README.md"\n\n[[artifacts]]\npath = "a.md"\n'),
+        RELEASES_REL: "format-version = 1\n",
+        DISPOSITIONS_REL: "format-version = 1\n",
+        IDHISTORY_REL: "format-version = 1\n",
+        ORDER_REL: 'families = ["apex", "aiqt", "security"]\nmembers = ["PROGR"]\n',
+        RENDERERS_REL: 'targets = ["AGENTS.md"]\n',
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for rel, text in sorted(files.items()):
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(rel)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    stub_arch = buf.getvalue()
+
+    def _fault_extract(raise_name, lock_name):
+        # One injected extraction fault: raise for the one named fixture, or extract and plant a
+        # stale index lock in it (git init accepts the pre-made .git directory; the fixture's next
+        # git index write then fails on the lock, at the exact site under test).
+        def _ext(arch_bytes, dest):
+            if dest.name == raise_name:
+                raise OSError("injected: archive extraction failed")
+            saved["_extract"](arch_bytes, dest)
+            if lock_name is not None and dest.name == lock_name:
+                (dest / ".git").mkdir(exist_ok=True)
+                (dest / ".git" / "index.lock").write_text("", encoding="utf-8")
+            return dest
+        return _ext
+
+    def _fault_pin(fail_name):
+        # The pin helper, stubbed: init + stage the stub tree (its gen_manifest leg has its own
+        # fixture-setup failure contract and is not under test here), or report a pin failure for
+        # the ONE named fixture exactly as the real helper does: append and return False.
+        def _pin(repo, pin_failures, version="1.0.0"):
+            if repo.name == fail_name:
+                pin_failures.append("fixture setup ({}): injected pin failure".format(repo.name))
+                return False
+            (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
+            (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "{}"\n'.format(version),
+                                              encoding="utf-8")
+            for args in (["init", "-q"], ["add", "-A"]):
+                subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env)
+            return True
+        return _pin
+
+    def _occupy_worktree(vtmp):
+        # git worktree add refuses an existing non-empty directory at its path.
+        (vtmp / "smudge-wt").mkdir(parents=True)
+        (vtmp / "smudge-wt" / "occupied.txt").write_text("occupied\n", encoding="utf-8")
+
+    def _occupy_profiles(vtmp):
+        # os.symlink refuses an existing entry at the target path (the archive extraction leaves
+        # the pre-planted regular file in place: it is not an archive member).
+        core = vtmp / "genesis-profiles-loop" / ".aiqt" / "core"
+        core.mkdir(parents=True)
+        (core / "profiles.toml").write_text("occupied\n", encoding="utf-8")
+
+    # (vector name, extraction that raises, stale-lock fixture, failing pin fixture, pre-plant,
+    #  the case the site must name, the cause the site must name)
+    vectors = (
+        ("smudge-extract", "real-pack-smudge", None, None, None,
+         "the smudge-filter predecessor case and every later real full-pack case",
+         "could not extract the archive"),
+        ("smudge-pin", None, None, "real-pack-smudge", None,
+         "the smudge-filter predecessor case and every later real full-pack case",
+         "the fixture version pin failed"),
+        ("smudge-commit", None, "real-pack-smudge", None, None,
+         "the smudge-filter predecessor case (round-4 findings 1/4)",
+         "could not build the predecessor commit"),
+        ("smudge-worktree", None, None, None, _occupy_worktree,
+         "the smudge-filter attack set-up proof (round-4 findings 1/4)",
+         "could not add a checkout worktree"),
+        ("omit-extract", "real-pack-omit", None, None, None,
+         "the under-claimed predecessor manifest case and every later real full-pack case",
+         "could not extract the archive"),
+        ("omit-pin", None, None, "real-pack-omit", None,
+         "the under-claimed predecessor manifest case and every later real full-pack case",
+         "the fixture version pin failed"),
+        ("omit-commit", None, "real-pack-omit", None, None,
+         "the under-claimed predecessor manifest case (round-8 finding 1)",
+         "could not build the predecessor commit"),
+        ("pred-extract", "real-pack-pred-idhist", None, None, None,
+         "predecessor-record case (real-pack-pred-idhist)",
+         "could not extract the archive"),
+        ("pred-commit", None, "real-pack-pred-idhist", None, None,
+         "predecessor-record case (real-pack-pred-idhist)",
+         "could not build the predecessor commit"),
+        ("genesis-extract", "genesis-clean", None, None, None,
+         "real genesis full-pack case (genesis-clean)",
+         "could not extract the archive"),
+        ("genesis-stage", None, "genesis-clean", None, None,
+         "real genesis full-pack case (genesis-clean)",
+         "could not stage the extracted tree"),
+        ("profiles-symlink", None, None, None, _occupy_profiles,
+         "the self-referential profiles.toml symlink case (round-5 finding 5)",
+         "could not create the symlink"),
+    )
+    # Saved and rebound by name: each globals() key is a constant string (gen_renderers.py refuses
+    # a computed key), and _archive_head is referenced only through its string key (the
+    # git-fixture-env trust check pins its one direct call shape).
+    saved = {"_archive_head": globals()["_archive_head"],
+             "_pin_fixture_version": globals()["_pin_fixture_version"],
+             "_extract": globals()["_extract"],
+             "_regen_fixture_manifest": globals()["_regen_fixture_manifest"],
+             "_run_quiet_root": globals()["_run_quiet_root"]}
+    for name, raise_name, lock_name, pin_fail, preplant, want_case, want_cause in vectors:
+        vtmp = tmp / ("fault-" + name)
+        vtmp.mkdir(parents=True)
+        if preplant is not None:
+            preplant(vtmp)
+        got = []
+        globals()["_archive_head"] = lambda _root: stub_arch
+        globals()["_pin_fixture_version"] = _fault_pin(pin_fail)
+        globals()["_extract"] = _fault_extract(raise_name, lock_name)
+        globals()["_regen_fixture_manifest"] = lambda _root, _case, _failures, _env: True
+        globals()["_run_quiet_root"] = lambda _root: 0
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                ran = _real_pack_e2e(vtmp, got)
+        finally:
+            globals().update(saved)
+        wanted = "NOT RUN: " + want_case + ": "
+        if ran is not True or not any(f.startswith(wanted) and want_cause in f for f in got):
+            failures.append("(real-pack fault {}) _real_pack_e2e must return True AND record a NOT "
+                            "RUN failure naming {!r} with cause {!r} (got ran={!r}, "
+                            "failures={})".format(name, want_case, want_cause, ran, got))
 
 
 def _not_run_net_vectors(tmp, failures):
@@ -3730,12 +3897,14 @@ def _real_pack_e2e(tmp, failures):
     renderer-closure attack that the raw-blob materialization defeats (round-4 findings 1/4), and genesis
     full-pack manifest/profiles/invalid-UTF-8 mutations (round-5 findings 1/3/5). Returns True when the
     primary cases ran and False when they could not. A path that ends a case early records a failure
-    first, never a printed note beside a PASS: 14 named NOT RUN sites (_not_run: 12 in this body, and one
+    first, never a printed note beside a PASS: 16 named NOT RUN sites (_not_run: 14 in this body, and one
     each in _plant_notice_omission and _plant_noncanon_source_path for the two corpus-dependent
     fixtures), the existing NOT RUN failures for an unavailable or unextractable archive, and the existing
     fixture-setup failures that _pin_fixture_version and _regen_fixture_manifest record; a failed
     `git tag` raises (check=True). The caller (_e2e_git_cases) adds a NOT RUN failure for a False return
-    that recorded none. Hermetic: private temp git repos, neutralized identity."""
+    that recorded none. Every _not_run site past the primary cases has its own failure-injection vector
+    in _real_pack_fault_vectors, the true-return paths included. Hermetic: private temp git repos,
+    neutralized identity."""
     import re
     env = _selftest_env()
     arch = _archive_head(repo_root())
@@ -3990,7 +4159,11 @@ def _real_pack_e2e(tmp, failures):
     # attack under test); it only binds release-version to 1.0.0 so the gate reaches that check instead of
     # failing at the version-binding rejection. A gen failure is recorded in `failures` by the helper.
     if not _pin_fixture_version(repo2, failures):
-        return True  # the primary cases already ran; the setup failure is recorded in failures
+        # The helper recorded its own fixture-setup failure; ALSO name the cases this early return
+        # skips, exactly as the extract-failure path above names them.
+        _not_run(failures, "the smudge-filter predecessor case and every later real full-pack case",
+                 "the fixture version pin failed (the setup failure is recorded beside this one)")
+        return True  # the primary cases already ran; both causes are recorded in failures
     orig_gcommon = (repo2 / gcommon).read_text(encoding="utf-8")
     (repo2 / gcommon).write_text(orig_gcommon + "\n# predecessor-only undeclared edit\n", encoding="utf-8")
     attrs = repo2 / ".gitattributes"
@@ -4056,7 +4229,12 @@ def _real_pack_e2e(tmp, failures):
     # under-claimed predecessor manifest, now reachable past the version-binding check. A gen failure is
     # recorded in `failures` by the helper.
     if not _pin_fixture_version(repo3, failures):
-        return True  # the primary cases already ran; the setup failure is recorded in failures
+        # The helper recorded its own fixture-setup failure; ALSO name the cases this early return
+        # skips, exactly as the extract-failure path above names them.
+        _not_run(failures, "the under-claimed predecessor manifest case and every later real "
+                 "full-pack case",
+                 "the fixture version pin failed (the setup failure is recorded beside this one)")
+        return True  # the primary cases already ran; both causes are recorded in failures
     if _plant_notice_omission(repo3 / MANIFEST_REL, failures):
         ok3 = True
         for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
