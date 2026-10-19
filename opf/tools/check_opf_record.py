@@ -1436,16 +1436,80 @@ def journal_states(root, rel=None):
 
 def _clean_current_handoffs(data):
     """The clean (non-importer) current-handoff count of one on-disk handoff index state (the spec 8.5/8.6
-    join over these bytes alone). Bytes that do not parse as TOML count no handoff: a torn payload is
-    neither state, shows a reader no second current handoff, and is recovery's business (the write-ahead
-    evidence assertion)."""
+    join over these bytes alone). Bytes that do not parse as TOML, and a parsed index whose record value
+    is not an array, count no handoff: a torn payload is neither state, shows a reader no second current
+    handoff, and is recovery's business (the write-ahead evidence assertion)."""
     try:
         rows = tomllib.loads(data.decode("utf-8")).get("record", [])
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+    except (ValueError, RecursionError, MemoryError):
+        # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
+        # RecursionError: deep nesting; MemoryError: a parse that exhausts memory.
+        return 0
+    if not isinstance(rows, list):
         return 0
     return sum(1 for r in rows if isinstance(r, dict) and r.get("type") == "handoff"
                and r.get("status") == "current"
                and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer"))
+
+
+def t5_handoff_count_malformed(fx):
+    """The count behind the continuous at-most-one-current assertion reads a torn or malformed handoff
+    index as no handoff, never as a crash of the matrix: undecodable bytes, a TOML syntax error, an
+    over-long integer literal (a bare ValueError), deep nesting (RecursionError), a parse that exhausts
+    memory (MemoryError, injected at the parser) and a record value that is not an array each count 0.
+    Well-formed indexes count exactly their clean current handoffs (one or two current, while a
+    superseded or importer-authored one counts nothing), so a count that reads every index as empty is
+    red too. Every vector runs and every wrong count is named, so a red lists each vector it reaches."""
+    current = '[[record]]\ntype = "handoff"\nstatus = "current"\n'
+    wrong = []
+
+    def expect(label, data, want):
+        try:
+            got = _clean_current_handoffs(data)
+        except (ValueError, RecursionError, MemoryError, TypeError) as exc:
+            got = "escaped {!r}".format(exc)[:160]
+        if got != want:
+            wrong.append((label, got, want))
+    for label, data in (("undecodable", b"\xff" + current.encode()),
+                        ("unparseable", b"[[record]\n"),
+                        ("over-long-integer", ("x = 1" + "0" * 5000 + "\n").encode()),
+                        ("deeply-nested", ("x = " + "[" * 5000 + "]" * 5000 + "\n").encode()),
+                        ("integer-record", b"record = 5\n"),
+                        ("boolean-record", b"record = true\n"),
+                        ("string-record", b'record = "handoff"\n'),
+                        ("table-record", b'[record]\ntype = "handoff"\nstatus = "current"\n')):
+        expect(label, data, 0)
+
+    def exhausted(text):
+        raise MemoryError("synthetic parse exhaustion")
+    with patch.object(tomllib, "loads", exhausted):
+        expect("memory-exhausting", current.encode(), 0)
+    for label, data, want in (("one-current", current, 1),
+                              ("two-current", current + "\n" + current, 2),
+                              ("superseded", current.replace("current", "superseded"), 0),
+                              ("importer-current", current + 'actor = { kind = "importer" }\n', 0)):
+        expect(label, data.encode(), want)
+    assert not wrong, ("T5 the handoff count of each (index, got, want) below is wrong", wrong)
+
+
+def flip_t5_count_narrow():
+    """The pre-fix count: only a UnicodeDecodeError or a TOMLDecodeError reads as no handoff, so a bare
+    ValueError, a RecursionError or a MemoryError escapes the parse, and a scalar record value raises
+    TypeError when iterated."""
+    def narrow(data):
+        try:
+            rows = tomllib.loads(data.decode("utf-8")).get("record", [])
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            return 0
+        return sum(1 for r in rows if isinstance(r, dict) and r.get("type") == "handoff"
+                   and r.get("status") == "current"
+                   and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer"))
+    return patch.object(sys.modules[__name__], "_clean_current_handoffs", narrow)
+
+
+def flip_t5_count_empty():
+    """A count that reads every index as holding no handoff, malformed or not."""
+    return patch.object(sys.modules[__name__], "_clean_current_handoffs", lambda data: 0)
 
 
 def _t5_scenarios(fx):
@@ -9239,6 +9303,8 @@ TESTS = (
                                                               flip_boolean_claims_admitted)),
     ("T23-homes2-crash-typed", t23_homes2_crash, flip_t23),
     ("T5-flip-unjournaled-write", t5_flip_write, None),     # FLIP_T5 itself is T5's discriminator
+    ("T5-handoff-count-malformed-index", t5_handoff_count_malformed, (flip_t5_count_narrow,
+                                                                      flip_t5_count_empty)),
     ("T24-broken-manifest-fail-closed", t24_broken_manifest, flip_t24),
     ("T25-recovery-plan-under-capability", t25_plan_under_capability, flip_t25),
     ("T26-complete-before-projection", t26_complete_before_projection, flip_t26),

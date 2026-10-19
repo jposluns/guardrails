@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "30e8fcdb4e76a91de3f279c6729939efb81f7aacb8cdbc248502d8c3435f1764"
+tree-sha256 = "fca99a2aef5aa9e3da8e16cef6425d925ab89dae19b5cfc95b8df8b8f17e45ea"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3021,8 +3021,8 @@ sha256 = "b089b183c86fb696cb9b967efd7409c925204a1b2860c22ad9914e3b1c54db7e"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
-bytes = 534727
-sha256 = "1f89e3811f07b26a63a83f5117d9dd2741ab504fffaf61085cd8a65a4f35c78d"
+bytes = 538600
+sha256 = "c0eb984bebb738ef62fa7f8f7cc37522fbf25d1d2c60f2555b2e9a8f5b10e0df"
 
 [[sources]]
 path = "opf/tools/check_opf_upgrade.py"
@@ -3801,8 +3801,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 24268
-sha256 = "b1ba350ad6e7c06529c6df5b8e94c0f8fe4dcd9edd8b21289e2afe853e122288"
+bytes = 24572
+sha256 = "71d56ab776a7b8d6db62d07fcdc989bd0cdf9c8e819148735bd02239fd8e3a4b"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"
