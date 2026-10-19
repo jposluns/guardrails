@@ -2350,27 +2350,31 @@ def self_test(report_path=None):
         # The background fault channels of code loaded in process (atexit, worker thread, destructor), each
         # driven through the real _fail_closed_main entry in a child.
         fault_failures = _fault_channel_vectors()
-        fault_checks = (
-            ("clean", "harness/fault-channel-clean-exit-0"),
-            ("atexit", "harness/fault-channel-atexit-unreachable"),
-            ("joined-thread", "harness/fault-channel-thread-recorded-exit-2"),
-            ("destructor", "harness/fault-channel-destructor-recorded-exit-2"),
-            ("thread-systemexit", "harness/fault-channel-thread-systemexit-recorded-exit-2"),
-            ("thread-systemexit-zero", "harness/fault-channel-thread-systemexit-zero-clean"),
-            ("finishing-thread", "harness/fault-channel-finishing-thread-clean"),
-            ("unjoined-thread", "harness/fault-channel-unjoined-thread-recorded-exit-2"),
-            ("unfinished-thread", "harness/fault-channel-unfinished-thread-exit-2"),
-            ("exit-status-255", "harness/fault-channel-exit-status-255-passes-through"),
-            ("exit-status-256", "harness/fault-channel-exit-status-256-exit-2"),
-            ("exit-status-257", "harness/fault-channel-exit-status-257-low-byte-1"),
-            ("exit-status-negative-256", "harness/fault-channel-exit-status-negative-256-exit-2"),
-            ("exit-status-wide-positive", "harness/fault-channel-exit-status-wide-positive-low-byte-1"),
-            ("exit-status-wide-negative", "harness/fault-channel-exit-status-wide-negative-low-byte-255"),
-            ("exit-status-boundary-positive", "harness/fault-channel-exit-status-boundary-positive-exit-2"),
-            ("exit-status-boundary-negative", "harness/fault-channel-exit-status-boundary-negative-exit-2"),
-            ("flush-window", "harness/fault-channel-flush-window-recheck-exit-2"),
-            ("entry-wiring", "harness/fault-channel-entry-wiring-exact"))
-        for fault_label, fault_id in fault_checks:
+        # The rows stay an inline literal in the for statement, the only form besides a string literal from
+        # which the execution gate resolves a check id; the loop collects each mapped label as it runs, so the
+        # all-mapped check below reads exactly these labels without a second hand-kept copy.
+        fault_labels = set()
+        for fault_label, fault_id in (
+                ("clean", "harness/fault-channel-clean-exit-0"),
+                ("atexit", "harness/fault-channel-atexit-unreachable"),
+                ("joined-thread", "harness/fault-channel-thread-recorded-exit-2"),
+                ("destructor", "harness/fault-channel-destructor-recorded-exit-2"),
+                ("thread-systemexit", "harness/fault-channel-thread-systemexit-recorded-exit-2"),
+                ("thread-systemexit-zero", "harness/fault-channel-thread-systemexit-zero-clean"),
+                ("finishing-thread", "harness/fault-channel-finishing-thread-clean"),
+                ("unjoined-thread", "harness/fault-channel-unjoined-thread-recorded-exit-2"),
+                ("unfinished-thread", "harness/fault-channel-unfinished-thread-exit-2"),
+                ("exit-status-255", "harness/fault-channel-exit-status-255-passes-through"),
+                ("exit-status-256", "harness/fault-channel-exit-status-256-exit-2"),
+                ("exit-status-257", "harness/fault-channel-exit-status-257-low-byte-1"),
+                ("exit-status-negative-256", "harness/fault-channel-exit-status-negative-256-exit-2"),
+                ("exit-status-wide-positive", "harness/fault-channel-exit-status-wide-positive-low-byte-1"),
+                ("exit-status-wide-negative", "harness/fault-channel-exit-status-wide-negative-low-byte-255"),
+                ("exit-status-boundary-positive", "harness/fault-channel-exit-status-boundary-positive-exit-2"),
+                ("exit-status-boundary-negative", "harness/fault-channel-exit-status-boundary-negative-exit-2"),
+                ("flush-window", "harness/fault-channel-flush-window-recheck-exit-2"),
+                ("entry-wiring", "harness/fault-channel-entry-wiring-exact")):
+            fault_labels.add(fault_label)
             check(fault_id, [failure for failure in fault_failures
                              if failure.startswith("fault-channel/" + fault_label + ":")], [])
         # Every fault-channel failure must be claimed by a mapped label above: a case added without a
@@ -2378,7 +2382,7 @@ def self_test(report_path=None):
         check("harness/fault-channel-failures-all-mapped",
               [failure for failure in fault_failures
                if not any(failure.startswith("fault-channel/" + fault_label + ":")
-                          for fault_label, _ in fault_checks)], [])
+                          for fault_label in fault_labels)], [])
         code_ran = []
 
         class _CodeProperty(SystemExit):
