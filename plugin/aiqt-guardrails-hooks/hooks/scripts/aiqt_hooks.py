@@ -10781,18 +10781,30 @@ _GATE_ALTS = (
     "through a reviewed change, never bypassed for one run.")
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
-# mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
-# deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
-# probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
+# mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. The long probe
+# covers every spelling the parsed path reads as the bypass (any '--' token whose whole name, up to '=' or
+# the token's end, is a prefix of 'no-verify', the _has_long_prefix rule) plus the '--no-ver' substring,
+# which deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); a distinct long
+# option ('--no-ff', '--amend') never matches, because its name runs past the probe's token end. The short
+# cluster probe requires a whitespace-preceded single-dash token, so a long option never matches, and
+# reads an 'n' ANYWHERE in the cluster ('-nm', '-anm', '-n3'): the raw text cannot bind a cluster letter
+# to a value-taking option the way the parsed path does, so a value cluster like '-mn' over-matches, the
+# safe direction.
 _RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
-_RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
+_RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver|--n(?:o(?:-ve?)?)?(?=[=\s]|$)")
 _RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
-_RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
+_RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z0-9]*n")
+# The checker probe conservatively covers the broad recognizer's whole lexicon (_CHECKER_WORDS and every
+# _CHECKER_NAME_PARTS part), each counted between any non-alphanumeric boundaries exactly as
+# _NAME_SPLIT_RE splits a name ('run_all_checks.sh' hits on 'checks', 'latest' never hits on 'test'), so
+# a command the note tier marks in a readable spelling is never quieter here; a runner form needs no
+# probe of its own, since the operand that qualifies it carries a listed word or name part itself.
 _RAW_CHECKER_RE = re.compile(
-    r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
+    r"(?i)(?<![a-z0-9])(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
     r"vitest|mocha|rspec|rubocop|phpunit|phpstan|golangci-lint|staticcheck|shellcheck|hadolint|"
     r"yamllint|markdownlint|gitleaks|pre-commit|ctest|cppcheck|clang-tidy|"
-    r"tests?|selftests?|checks?|checker|lint\w*|verify|validate|audit|conformance)\b")
+    r"tests?|selftests?|checks?|checker|lint\w*|verify|validate|audit|conformance|vet|clippy|gates?)"
+    r"(?![a-z0-9])")
 _RAW_SWALLOW_RE = re.compile(r"\|\|\s*(?:true|:)(?=\s|$)")
 _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
 # A process substitution or here-string (the lexer cannot parse either) with a head, tail or cut word: the
@@ -11568,8 +11580,8 @@ def gate_weakening(data):
     otherwise the raw fallback stands. A '#' whose comment reading depends on context (the shared lexer's
     comment rule) is judged under both readings: the deny tier on each reading alone, everything else on the
     segments of all readings in turn. Where the lexer cannot judge it that way, text holding quoting
-    _hash_doubt_scan does not decode (_hash_doubt_opaque) DENIES, a listed sink word at or after the first
-    '|' in its text DENIES whatever stands between them (_gate_doubt_sink, fail-closed by construction), the
+    _hash_doubt_scan does not decode (_hash_doubt_opaque) DENIES, a listed sink word in text that holds a
+    '|' DENIES wherever each stands (_gate_doubt_sink, fail-closed by construction over the doubled scan), the
     raw fallback's probes read that text next, and remaining text holding a checker-shaped word and a pipe,
     process substitution or here-string ALLOWS-WITH-NOTE, never a silent allow quieter than the note tier a
     readable spelling of the same shape earns.
@@ -11622,17 +11634,18 @@ def gate_weakening(data):
                                            "spelling, or -n on commit or am) or a verification run piped into "
                                            "a truncating sink", _GATE_ALTS)
         # Behind a '#' the lexer could not judge under both readings, a sink word the deny tier lists
-        # (head, tail, grep, egrep, fgrep, rg) anywhere at or after the first '|' may receive a verification
-        # run's output past that '#' whatever stands between them (a blank or comment continuation line, a
-        # redirect, an assignment, a quoted newline), so it denies fail-closed (_gate_doubt_sink); the raw
-        # fallback also reads the text with its backslash-newlines, quote characters and backslashes removed
-        # (_hash_doubt_scan).
+        # (head, tail, grep, egrep, fgrep, rg) anywhere in text that holds a '|' may receive a verification
+        # run's output past that '#' whatever stands between or around them (a blank or comment continuation
+        # line, a redirect, an assignment, a quoted newline; the doubled scan makes a word before the pipe
+        # count too), so it denies fail-closed (_gate_doubt_sink); the raw fallback also reads the text with
+        # its backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan).
         scan = _hash_doubt_scan(command)
         if _gate_doubt_sink(scan):
             return _deny(
-                _hash_doubt_reason("gatdis (gate-discipline)", "its text holds a stage word that can truncate "
-                                   "or swallow a check's output (head, tail, grep, egrep, fgrep or rg) after "
-                                   "a pipe, so a verification run cut short there cannot be ruled out") + " " +
+                _hash_doubt_reason("gatdis (gate-discipline)", "its text holds a pipe and a stage word that "
+                                   "can truncate or swallow a check's output (head, tail, grep, egrep, fgrep "
+                                   "or rg), wherever each stands in it, so a verification run cut short there "
+                                   "cannot be ruled out") + " " +
                 _GATE_ALTS,
                 "AIQT guardrail: denied a possible verification run piped into a truncating sink behind a '#' "
                 "this guard could not read (rule gatdis, fail-closed).")

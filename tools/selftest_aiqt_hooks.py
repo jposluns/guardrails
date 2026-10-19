@@ -11921,14 +11921,36 @@ def _main_isolated(monitor):
                         ("floor-long-words", _cost_form + "echo " + "a " * (128 * 1024)),
                         ("main-reading-long-words", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\necho " + "a " * (128 * 1024)),
                         ("doubt-comment-pipes", "(true #'\n)\npytest |\n" + "# |\n" * (64 * 1024) + "wc"))
+        _cost_doubt_got = None
         for _cost_name, _cost_cmd in _cost_inputs:
             for _cost_guard in (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line):
                 _cost_t0 = time.process_time()
-                _decision(_cost_guard, _cost_cmd)
+                _cost_got = _decision(_cost_guard, _cost_cmd)
                 _cost_cpu = time.process_time() - _cost_t0
                 if _cost_cpu >= 1.0:
                     failures.append("(lex-cost-{}) {} took {:.2f} s of CPU on a {}-character command; the bound "
                                     "is 1 s".format(_cost_name, _cost_guard.__name__, _cost_cpu, len(_cost_cmd)))
+                if _cost_name == "doubt-comment-pipes" and _cost_guard is aiqt_hooks.gate_weakening:
+                    _cost_doubt_got = _cost_got
+        # The doubt-comment-pipes row bounds the fail-closed sink test only while its input still reaches
+        # that test: the lex must keep raising the uncertain-'#' doubt on it and gate_weakening must keep
+        # giving it the checker-and-pipe note (its terminal word is off the deny list), or the row would
+        # time an unrelated path and a superlinear sink test could ship behind a green bound.
+        _cost_doubt_cmd = dict(_cost_inputs)["doubt-comment-pipes"]
+        try:
+            aiqt_hooks._lex_readings(_cost_doubt_cmd)
+            failures.append("(lex-cost-doubt-path) the doubt-comment-pipes input now lexes, so its row no "
+                            "longer times the fail-closed sink test behind an unjudged '#'")
+        except aiqt_hooks._UncertainHashError:
+            pass
+        except ValueError as _cost_exc:
+            failures.append("(lex-cost-doubt-error) the doubt-comment-pipes input fails the lex with {!r} "
+                            "instead of the uncertain-'#' doubt, so its row no longer times the fail-closed "
+                            "sink test".format(_cost_exc))
+        if _cost_doubt_got != "allow-note":
+            failures.append("(lex-cost-doubt-note) gate_weakening decided {} on the doubt-comment-pipes input "
+                            "instead of the checker-and-pipe note, so the row no longer runs the sink test to "
+                            "the end of its scan".format(_cost_doubt_got))
         # The other scanners main's lexer helpers carry read a comment their own way, beside the lexer:
         # the continuation join keeps a backslash-newline after a '#' at a word start ('(' included) and removes
         # one after a '#' glued to a substitution's ')'; the uncertainty causes report any '#' outside quotes
@@ -13609,6 +13631,9 @@ def _main_isolated(monitor):
         # note, and a checker with no pipe, process substitution or here-string stays a silent allow.
         gexpect("(gw-dbt-sink-qnl) a quoted newline inside the sink stage does not end the scan, denies",
                 "(true #'\n)\npytest | # note\nA=\"\n\" head", "deny")
+        gexpect("(gw-dbt-sink-spcnl) a space-valued assignment inside the sink stage denies too (the deny "
+                "this vector pins is stricter than the note its floor row records)",
+                "(true #'\n)\npytest | # note\nA=\" \" head", "deny")
         gexpect("(gw-dbt-sink-ramp) a sink stage starting with a '2>&1' redirect denies",
                 "(true #'\n)\npytest | 2>&1 head", "deny")
         gexpect("(gw-dbt-sink-rampcmt) a comment line then a '2>&1'-led sink stage denies",
@@ -13639,8 +13664,35 @@ def _main_isolated(monitor):
                 "silently",
                 "(true #'\n)\npytest", "allow")
 
-        # NO WEAKER THAN THE BASE COMMIT: every cannot-evaluate sink shape above, the combinations, and the
-        # off-list controls, beside the decision the base commit ac813196 gave the same command. HOW THE
+        # Behind the same unjudged '#', the raw fallback's bypass and checker probes read every spelling the
+        # parsed path reads: a clustered short -n with letters or digits after the 'n' ('-nm', '-anm',
+        # '-n3'), a long --no-verify abbreviation down to '--n' (the conservative-prefix rule), an
+        # underscore-separated checker name ('run_all_checks.sh' hits on 'checks'), and the 'clippy' and
+        # 'vet' name parts, so a hook bypass or checker shape the guard denies or notes readable never
+        # decides more quietly behind a '#' it cannot judge. The plain-commit control shows the cluster
+        # probe still needs an 'n' inside a dash cluster.
+        gexpect("(gw-dbt-nv-nm) behind the unjudged '#', a clustered -nm hook bypass denies",
+                "(true #'\n)\ngit commit -nm x", "deny")
+        gexpect("(gw-dbt-nv-anm) a -anm cluster (the n after other flag letters) denies too",
+                "(true #'\n)\ngit commit -anm x", "deny")
+        gexpect("(gw-dbt-nv-n3) a -n3 on git am (a digit after the n) denies",
+                "(true #'\n)\ngit am -n3 p", "deny")
+        gexpect("(gw-dbt-nv-nove) a --no-ve abbreviation (a conservative long prefix) denies",
+                "(true #'\n)\ngit commit --no-ve", "deny")
+        gexpect("(gw-dbt-nv-non) the shortest --n abbreviation denies",
+                "(true #'\n)\ngit commit --n", "deny")
+        gexpect("(gw-dbt-nv-plain) control: a commit with no bypass spelling behind the '#' allows",
+                "(true #'\n)\ngit commit -m x", "allow")
+        gexpect("(gw-dbt-note-uscore) an underscore-separated checker name piped to cut keeps the note",
+                "(true #'\n)\nrun_all_checks.sh | cut -c1", "allow-note")
+        gexpect("(gw-dbt-note-clippy) cargo clippy piped to cut keeps the note",
+                "(true #'\n)\ncargo clippy | cut -c1", "allow-note")
+        gexpect("(gw-dbt-note-vet) go vet piped to cut keeps the note",
+                "(true #'\n)\ngo vet ./... | cut -c1", "allow-note")
+
+        # NO WEAKER THAN THE BASE COMMIT: every cannot-evaluate sink, bypass and checker-note shape above,
+        # the combinations, and the off-list controls, beside the decision the base commit ac813196 gave
+        # the same command. HOW THE
         # COLUMN WAS PRODUCED: ac813196's .aiqt/core/hooks/scripts/aiqt_hooks.py (git show ac813196:<that
         # path>) was loaded as a module and gate_weakening called on each command with the payload _decision
         # builds, each result reduced as _reduce_result does: D deny, N allow-note, A allow. Each command
@@ -13672,6 +13724,11 @@ def _main_isolated(monitor):
              "pytest | A=\"\n\" head 3</dev/null${x# #} 4<<<x", "D"),
             ("failed reading, sink after the newline", "pytest |\nhead 3</dev/null${x# #} 4<<<x", "D"),
             ("failed reading, redirects on the sink", "pytest |\nhead 2>${x:- #} 3> >(cat)", "D"),
+            ("clustered -nm hook bypass", "(true #'\n)\ngit commit -nm x", "D"),
+            ("'--no-ve' long abbreviation", "(true #'\n)\ngit commit --no-ve", "D"),
+            ("underscore-named check into cut", "(true #'\n)\nrun_all_checks.sh | cut -c1", "N"),
+            ("cargo clippy into cut", "(true #'\n)\ncargo clippy | cut -c1", "N"),
+            ("go vet into cut", "(true #'\n)\ngo vet ./... | cut -c1", "N"),
             ("control: off-list word, quoted-newline stage", "(true #'\n)\npytest | # note\nA=\"\n\" wc", "A"),
             ("control: off-list word, '2>&1'-led stage", "(true #'\n)\npytest | 2>&1 wc", "A"),
             ("control: checker with no pipe or flow", "(true #'\n)\npytest", "A"),
