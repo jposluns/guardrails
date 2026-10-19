@@ -559,7 +559,7 @@ def local_report(root, protected=None, before=None):
 
 
 
-# ---- D-400 raw-read lint (QA rounds 5 and 6; #400 re-cut rounds 1 to 6) --------------------------
+# ---- Raw-read lint -----------------------------------------------------------------------------
 # Every Python module a registered gate executes -- named on a non-comment line of the two runners
 # or the two workflow files, declared as a `runner` in tools/selftest_checks.toml, present in
 # .preview/ (check_hooks_preview executes each), or one of the two committed hook scripts -- plus
@@ -705,7 +705,7 @@ def local_report(root, protected=None, before=None):
 # order independently); (3) an OPTIONAL THIRD-PARTY import inside _vendor/
 # (_RAW_READ_OPTIONAL_VENDOR_IMPORTS) is exempt from resolution, handled by the vendored code's
 # own ImportError fallback; and (4) git's own metadata reads and NON-PYTHON programs (bash,
-# gitleaks) are outside the walk. The D-400 special-file precheck
+# gitleaks) are outside the walk. The special-file precheck
 # walk (tools/_gen_common.py, opf/tools/_containment.py), which now DESCENDS into git-ignored
 # directories and refuses any special file inside the root by name before any gate runs, is the
 # independent layer that certifies the tree those residual readers meet; neither layer alone
@@ -987,8 +987,8 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
       "named LIMITS residue")),
     (("opf/tools/check_opf_homes.py", "subprocess.run:check_opf_homes.py"),
-     (1, "relaunches a scratch copytree copy of itself over a FIFO-spec fixture; the original is this "
-      "enumerated module")),
+     (1, "relaunches a scratch copytree copy of itself over a FIFO fixture (a FIFO at an unread path, "
+      "or at the spec); the original is this enumerated module")),
     (("opf/tools/check_opf_init.py", "spec_from_file_location:"),
      (2, "the two sites load mutant copies this self-test wrote under its tempfile scratch")),
     (("opf/tools/check_opf_init.py", "subprocess.run:<no-py-literal>"),
@@ -1123,6 +1123,10 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
       "_run_runner_copy runs bash over a scratch copy of the local runner whose tool commands "
       "are stubs, and the required-status vector runs bash -c over the pinned aggregate body "
       "and over its two-line options control")),
+    (("tools/check_clauses.py", "subprocess.run:<no-py-literal>"),
+     (1, "one direct call with no .py literal: the text-coverage self-test runs python3 -I -B -c with "
+      "a literal program that imports this enumerated module from its own directory and calls "
+      "check_text_coverage on a FIFO rule source under a 30-second deadline")),
     (("tools/check_derived_command_parameters.py", "subprocess.run:<no-py-literal>"),
      (2, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
@@ -1240,10 +1244,10 @@ _RAW_READ_DYNAMIC_SHAPES = dict((
     (("tools/check_python_launcher_isolation.py", "subprocess.run:probe.py"),
      (2, "both sites launch probe.py files this self-test wrote under its scratch mechanism directory")),
     (("tools/check_record_drift.py", "subprocess.run:<no-py-literal>"),
-     (6, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
-      "launcher call, the pristine import name included, so a new launch site drifts this count and "
-      "stays reviewable at this row; an argv built at runtime that names an in-tree module is the "
-      "named LIMITS residue")),
+     (7, "seven direct calls with no .py literal: six git calls (the first-parent log and the "
+      "self-test's fixture inits, add and commits) and one python3 -I -B -c child whose literal "
+      "program imports this enumerated module from its own directory and calls run() on a FIFO "
+      "fixture under a 30-second deadline")),
     (("tools/check_record_sections.py", "subprocess.run:<no-py-literal>"),
      (3, "a direct launcher call with no .py literal in its argv: round 9 tokenizes EVERY direct "
       "launcher call, the pristine import name included, so a new launch site drifts this count and "
@@ -4672,7 +4676,7 @@ RAW_READ_SITE_REASONS = dict((
      "and tracked by this pin"),
     (".preview/record-remove-check.py::vendor_blocks::open",
      "reads the preview module's own committed file (__file__) to verify its vendored block, an "
-     "in-root path the D-400 walk certifies; the standalone script cannot import the shared "
+     "in-root path the special-file precheck walk certifies; the standalone script cannot import the shared "
      "readers; conversion to a local non-blocking reader is pending and tracked by this pin"),
     (".preview/rerun-pass-check.py::_emit_line::os.open",
      "(c) opens os.devnull write-only, a character device the platform supplies, never an in-tree "
@@ -4921,7 +4925,7 @@ RAW_READ_SITE_REASONS = dict((
      "and tracked by this pin"),
     (".preview/unbounded-wait.py::vendor_blocks::open",
      "reads the preview module's own committed file (__file__) to verify its vendored block, an "
-     "in-root path the D-400 walk certifies; the standalone script cannot import the shared "
+     "in-root path the special-file precheck walk certifies; the standalone script cannot import the shared "
      "readers; conversion to a local non-blocking reader is pending and tracked by this pin"),
     (".preview/ungated-record.py::_read_payload::os.read",
      "(c) reads the dispatcher-supplied stdin descriptor only after select reports it "
@@ -4952,7 +4956,7 @@ RAW_READ_SITE_REASONS = dict((
      "and tracked by this pin"),
     (".preview/ungated-record.py::vendor_blocks::open",
      "reads the preview module's own committed file (__file__) to verify its vendored block, an "
-     "in-root path the D-400 walk certifies; the standalone script cannot import the shared "
+     "in-root path the special-file precheck walk certifies; the standalone script cannot import the shared "
      "readers; conversion to a local non-blocking reader is pending and tracked by this pin"),
     ("opf/enforcement/claude/pretooluse_deny.py::_read_roster_toml::os.open",
      "(c) already a non-blocking, S_ISREG-checked reader: the flags carry getattr(os, "
@@ -4964,7 +4968,7 @@ RAW_READ_SITE_REASONS = dict((
      "the descriptor read is counted since round 11 (decided 2: read and pread left the inert "
      "table because a held descriptor of unknown type can block)"),
     ("opf/tools/_containment.py::_gitfile_target::os.open",
-     "(c) the D-400 precheck's nested-gitfile screen (QA round 12): the entry was already "
+     "(c) the special-file precheck's nested-gitfile screen: the entry was already "
      "classified a regular file by lstat and stat, the open is O_NONBLOCK, the opened descriptor "
      "is fstat-checked S_ISREG before any read, the read stops past 1 MiB, and the descriptor is "
      "closed in a finally"),
@@ -5256,7 +5260,7 @@ RAW_READ_SITE_REASONS = dict((
      "tempfile scratch (a fixture clone's installed hook or traced file, or an installer's "
      "captured stderr); the other two read the committed pack files "
      "opf/enforcement/precommit/pre-commit and install.sh, which the suite first requires "
-     "is_file() and the D-400 precheck walk certifies in-root; this standalone opf module cannot "
+     "is_file() and the special-file precheck walk certifies in-root; this standalone opf module cannot "
      "import the tools/ shared readers, so their conversion to a local non-blocking reader is "
      "pending and tracked by this pin"),
     ("opf/tools/check_opf_doctor.py::_stub::read_text",
@@ -5496,7 +5500,7 @@ RAW_READ_SITE_REASONS = dict((
      "is outside the registered gate roster; conversion to a local non-blocking reader is pending "
      "and tracked by this pin"),
     ("tools/_gen_common.py::_gitfile_target::os.open",
-     "(c) the D-400 precheck's nested-gitfile screen (QA round 12): the entry was already "
+     "(c) the special-file precheck's nested-gitfile screen: the entry was already "
      "classified a regular file by lstat and stat, the open is O_NONBLOCK, the opened descriptor "
      "is fstat-checked S_ISREG before any read, the read stops past 1 MiB, and the descriptor is "
      "closed in a finally"),
@@ -5625,7 +5629,7 @@ RAW_READ_SITE_REASONS = dict((
      "chain proves no O_NONBLOCK"),
     ("tools/gen_renderers.py::_parse_module::read_bytes",
      "every caller first resolves the path to a regular file (os.stat plus S_ISREG in "
-     "RENDERER_DECL discovery, Path.is_file in the import-closure walk) and the D-400 precheck "
+     "RENDERER_DECL discovery, Path.is_file in the import-closure walk) and the special-file precheck "
      "walk refuses a special file in the tree before the generator runs; conversion is NOT "
      "behaviour-neutral (read_source_bytes refuses the symlinked tools module that discovery "
      "deliberately accepts, and read_text_nonblocking decodes, losing the raw-bytes BOM and "

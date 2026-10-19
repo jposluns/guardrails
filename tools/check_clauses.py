@@ -137,9 +137,10 @@ gen_manifest.py at build time).
                                 sentence or clause, or a run of them, found exactly once in the rule body
     reason    = "..."           why the text needs no clause row (a definition, a cross-reference, a
                                 rationale, an example, a scope note); never empty
-  The file is required, at the default path as when named with --exemptions, and must hold the `exempt`
-  key: an absent file (a dangling symlink included), an unreadable one, and one with no `exempt` key (an
-  empty file, a comment-only file, a symlink to /dev/null) are malformed input (exit 2), never read as no
+  The file is required, at the default path as when named with --exemptions, is read without following a
+  symlink, and must hold the `exempt` key: an absent file, an unreadable one, a symlink (to /dev/null, to a
+  regular file, or dangling: each is refused as not openable as a regular non-symlink file), and one with
+  no `exempt` key (an empty file, a comment-only file) are malformed input (exit 2), never read as no
   exemption, because the file carries findings of its own (a stale, repeated, redundant or reasonless
   exemption) that reading it as empty would hide. An intentionally empty register is the explicit
   `exempt = []`. A file that is not TOML, a top-level key other than `exempt`, and a row whose keys are not
@@ -1208,11 +1209,13 @@ def rule_units(source, where):
 
 
 def load_exemptions(path):
-    """Parse the clause exemptions into their list of row tables. The file is required and must hold the
-    `exempt` key: an absent file (a dangling symlink included) and a file with no `exempt` key (an empty
-    file, a comment-only file, a symlink to /dev/null) are a GateError (exit 2), never read as no exemption,
-    because the file carries findings of its own (a stale, repeated, redundant or reasonless exemption) that
-    reading it as empty would hide; an intentionally empty register is the explicit `exempt = []`. Every
+    """Parse the clause exemptions into their list of row tables. The file is required, is read without
+    following a symlink (load_toml reads through read_source_bytes), and must hold the `exempt` key: an
+    absent file and a file with no `exempt` key (an empty file, a comment-only file) are a GateError (exit
+    2), never read as no exemption, because the file carries findings of its own (a stale, repeated,
+    redundant or reasonless exemption) that reading it as empty would hide; an intentionally empty register
+    is the explicit `exempt = []`. A symlink (to /dev/null, to a regular file, or dangling) is refused as
+    not openable as a regular non-symlink file, a GateError (exit 2) too, never reported as absent. Every
     other unreadable or malformed input is a GateError (exit 2) too: not readable, not TOML, a top-level key
     other than `exempt`, an `exempt` that is not an array of tables, a row whose keys are not exactly
     corpus-id, text and reason, a value that is not a string, or a corpus-id that is not a well-formed
@@ -3137,6 +3140,52 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                     failures.append("text coverage: an unreadable rule source ({}) must raise GateError".format(name))
                 except GateError:
                     pass
+
+            # The leg reads each rule through the shared no-follow, non-blocking reader (read_source_bytes),
+            # so a SYMLINKED rule source, even one that reaches a well-formed rule, and a FIFO rule source are
+            # each that reader's named refusal (GateError), never a read through the link or a blocking read.
+            # MUTATION: reverting _read_rule_text to Path(src).read_bytes() reads the symlinked rule as a rule
+            # (no GateError) and blocks on the FIFO; the FIFO case runs in a child with a deadline, so that
+            # hang is a recorded failure, never a self-test that hangs.
+            (unreadable / "link-target.md").write_text("---\ncorpus-id: clink1\n---\n\nAlpha holds the lease.\n",
+                                                       encoding="utf-8")
+            (unreadable / "link.md").symlink_to(unreadable / "link-target.md")
+            link_needle = "refused, cannot open as a regular non-symlink file"
+            try:
+                check_text_coverage({"clink1": unreadable / "link.md"}, {}, [])
+                failures.append("text coverage: a symlinked rule source must be refused by the no-follow "
+                                "reader (GateError naming {!r}), but it was read through the link".format(link_needle))
+            except GateError as exc:
+                if link_needle not in str(exc):
+                    failures.append("text coverage: a symlinked rule source must be refused naming {!r}, got: "
+                                    "{}".format(link_needle, exc))
+            fifo_rule = unreadable / "fifo.md"
+            try:
+                os.mkfifo(fifo_rule)
+            except AttributeError:  # no os.mkfifo on this platform
+                fifo_rule = None
+            if fifo_rule is not None:
+                import subprocess
+                code = ("import sys\nfrom pathlib import Path\nsys.path.insert(0, sys.argv[1])\n"
+                        "import check_clauses as m\n"
+                        "try:\n    m.check_text_coverage({'cfifo1': Path(sys.argv[2])}, {}, [])\n"
+                        "except m.GateError as exc:\n    print(exc)\n    sys.exit(2)\n"
+                        "sys.exit(0)\n")
+                fifo_needle = "{}: refused, not a regular file".format(fifo_rule)
+                try:
+                    proc = subprocess.run([sys.executable, "-I", "-B", "-c", code,
+                                           str(Path(__file__).resolve().parent), str(fifo_rule)],
+                                          capture_output=True, text=True, timeout=30)
+                except subprocess.TimeoutExpired:
+                    failures.append("text coverage: a FIFO rule source gave no exit within 30s (a blocking "
+                                    "read), not the no-follow reader's refusal")
+                else:
+                    if proc.returncode != 2 or fifo_needle not in proc.stdout:
+                        failures.append("text coverage: a FIFO rule source must be a GateError naming {!r}, got "
+                                        "exit {}: {}".format(fifo_needle, proc.returncode,
+                                                             (proc.stdout + proc.stderr).strip()[-300:]))
+            else:
+                failures.append("NOT RUN: the FIFO rule-source vector (os.mkfifo unavailable); failing closed")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -3202,7 +3251,7 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
           "definition whose label spans lines are refused, a carriage return is a cannot-evaluate, a GFM "
           "table delimiter row with no leading pipe is refused, an exemptions file with no exempt key "
           "(empty, comment-only) is a cannot-evaluate, one that is a symlink to the null device is "
-          "refused as a non-regular file (cannot-evaluate), and an explicit "
+          "refused as not openable as a regular non-symlink file (cannot-evaluate), and an explicit "
           "exempt = [] reads as no exemption; and the round-4 reproductions hold: a form feed and a carriage "
           "return, each a line ending to the vendored renderer, are a cannot-evaluate inside a line, at a "
           "line start, in the title and in the frontmatter, while a vertical tab, U+0085, U+2028 and U+2029 "

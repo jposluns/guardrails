@@ -1114,7 +1114,7 @@ def _self_test_main_isolated():
                 failures.append("{}: a NUL root must be git-cannot-answer (None), got {!r} and {!r}"
                                 .format(_label, got, got_ignored))
 
-        # D-400 fixture env, QA round 2 (MINOR-3), both precheck copies: the ownership branch of
+        # Pinned git environment, both precheck copies: the ownership branch of
         # _git_lines, driven directly with subprocess.run patched to record the child environment.
         # OWNED (a scratch root this user owns): the caller's global and system configuration are
         # pinned away (HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM at os.devnull,
@@ -1155,18 +1155,18 @@ def _self_test_main_isolated():
                         want = (b"answer\n" if _rc == 0
                                 else ("exit 2" if _branch == "owned" else None))
                         if _branch == "owned" and not pinned:
-                            failures.append("D-400 fixture env, {}: on an owned root the caller's "
+                            failures.append("pinned git environment, {}: on an owned root the caller's "
                                             "global and system git configuration must be pinned "
                                             "away, got env {}".format(_label, shown))
                         if _branch == "not-owned" and not kept:
-                            failures.append("D-400 fixture env, {}: on a root another uid owns the "
+                            failures.append("pinned git environment, {}: on a root another uid owns the "
                                             "caller's git configuration must stand unpinned, got "
                                             "env {}".format(_label, shown))
                         if got != want:
-                            failures.append("D-400 fixture env, {}: {} root, git rc {}: expected {!r}, "
+                            failures.append("pinned git environment, {}: {} root, git rc {}: expected {!r}, "
                                             "got {!r}".format(_label, _branch, _rc, want, got))
                         if got == "exit 2" and "dubious ownership" not in _errs.getvalue():
-                            failures.append("D-400 fixture env, {}: the owned-root dubious-ownership "
+                            failures.append("pinned git environment, {}: the owned-root dubious-ownership "
                                             "refusal must name its cause, got {!r} on stderr"
                                             .format(_label, _errs.getvalue()))
 

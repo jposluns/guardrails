@@ -133,13 +133,13 @@ def _git_lines(root, args):
     # certifies (a nested or decoy repository above all), which would exempt a planted special
     # file from the walk or blind the tracked-path layer.
     env = dict((key, value) for key, value in os.environ.items() if not key.startswith("GIT_"))
-    # D-400 fixture env: ONLY on a root the effective user owns are the caller's global and system
+    # Pinned git environment: ONLY on a root the effective user owns are the caller's global and system
     # configuration pinned away (HOME and XDG_CONFIG_HOME at os.devnull, GIT_CONFIG_GLOBAL and
     # GIT_CONFIG_SYSTEM at os.devnull, GIT_CONFIG_NOSYSTEM=1; LC_ALL=C keeps git's refusal text
     # untranslated for the ownership test below). On such a root a caller's global ignore file cannot
     # hide a path from the walk (fewer ignored paths, so more refusals, never fewer); and on EVERY
     # query core.fsmonitor is pinned false in option position, so a repository-local fsmonitor
-    # hook never runs here either (#400 re-cut round 3: the env pinning left it runnable, which
+    # hook never runs here either (the environment pinning alone left it runnable, which
     # the check_release_delta R7 genesis vector catches). On a root another uid owns, or whose
     # owner cannot be read, the caller's configuration still applies, its global ignore file
     # included; the fixture-env observer reports that exposure. This stays a disclosed residual
@@ -184,7 +184,7 @@ def _git_lines(root, args):
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
-        # D-400 fixture env, QA round 2 (MINOR-1): on an owned root whose git dir another uid owns,
+        # Dubious ownership on an owned root: on an owned root whose git dir another uid owns,
         # the pinned git refuses as dubious ownership (a caller's safe.directory is pinned away
         # here), while the gates' own git reads may still answer under the caller's configuration.
         # Reading that refusal as git-absent would silently skip the root cross-check, so it is
@@ -461,9 +461,12 @@ def precheck_special_files(root):
     refusals, never fewer.
 
     ENTRY POINTS. This module is invoked directly (--precheck) as the FIRST post-checkout run step of
-    every job in every CI workflow (tools/check_ci_parity.py holds every job to that order) and ahead
-    of every gate in each runner, which stops on refusal (exit 2), so every gate and self-test after
-    it acts on a checked tree. The root comes from _derive_precheck_root (a fixed location, never an
+    every job in every CI workflow except the two host-patch jobs of .github/workflows/quality.yml
+    (opf-host-patch and git-fixture-env-host-patch, which tools/check_python_host_pin.py holds whole,
+    refusing any inserted step; tools/check_ci_parity.py holds every other job to that order and
+    names that exemption as its residual) and ahead of every gate in each runner, which stops on
+    refusal (exit 2), so every gate and self-test after it, outside those two jobs, acts on a checked
+    tree. The root comes from _derive_precheck_root (a fixed location, never an
     upward .git search); the INVOKED location (os.path.abspath, no link resolution) and the RESOLVED
     module file must derive the same real root, so a tools/ or opf/tools/ directory replaced by a
     symlink cannot move the walk out of the invoked tree; and the root must be confirmed by
@@ -475,8 +478,9 @@ def precheck_special_files(root):
     run); a DIRECT tool invocation that did not run this precheck first (the interpreter imports
     the tool's modules, their __pycache__/<module>.pyc above all, before any in-process precheck
     call can run, so a FIFO already planted there hangs a direct invocation at import time; the
-    runners and CI run this precheck first as a separate process whose own imports are stdlib
-    only); the unwalked set and the ignored paths, both as above; a special file CREATED, or a
+    runners and every CI job but the two host-patch jobs run this precheck first as a separate
+    process whose own imports are stdlib only); the two host-patch jobs above, whose gates and
+    suites run on a tree no workflow precheck step walked; the unwalked set and the ignored paths, both as above; a special file CREATED, or a
     symlink RETARGETED, after this walk (one walk cannot close a race against a hostile co-writer of
     the tree); a vanished entry (skipped); and the per-tool residuals the tools' own docstrings
     carry. The shared reader (read_source_bytes) stays on the corpus and manifest paths as defence in
@@ -815,15 +819,15 @@ def precheck_special_files(root):
                     if stat.S_ISDIR(mode):
                         stack.append((path, rel, skipped))
                     continue
-                # QA round 7 (claude B1): the INTERPRETER itself reads __pycache__/<module>.pyc
+                # The INTERPRETER itself reads __pycache__/<module>.pyc
                 # with a plain blocking open when a gate imports an in-tree module (-B stops only
                 # the WRITES), and that read sits outside every gate reader, so a SYMLINK named
                 # __pycache__ is refused by NAME, ignored or not, wherever it sits and whatever it
                 # resolves to (a real __pycache__ directory stays walked like any directory, and a
                 # special file inside it is already refused by name; a FIFO planted AFTER this
                 # walk at an existing __pycache__/<module>.pyc stays the disclosed race residual).
-                # #400 re-cut (claude MEDIUM 2): this walk protects only runs that EXECUTE IT
-                # FIRST as a separate process (the runners and every CI job do). A DIRECTLY
+                # This walk protects only runs that EXECUTE IT FIRST as a separate process (the
+                # runners and every CI job but the two host-patch jobs of quality.yml do). A DIRECTLY
                 # invoked gate imports its modules before any in-process precheck call can run,
                 # so a FIFO already planted at that gate's own __pycache__/<module>.pyc hangs
                 # the direct invocation at import time; run the precheck first, or remove the

@@ -217,7 +217,7 @@ def load_manifests(std_dir):
     for path in sorted(std_dir.glob("*.toml")):
         _check_stem(path)
         # read_source_bytes, never a plain open(): this glob picks up WHATEVER *.toml sits in the
-        # directory, including a drop-in created after the D-400 precheck walk, which that walk
+        # directory, including a drop-in created after the special-file precheck walk, which that walk
         # cannot see, so a FIFO (or a symlinked, device, or otherwise non-regular) manifest must be the
         # named refusal here (SourceReadRefused, an OSError the callers' fail-closed arm already
         # maps to exit 2), never a blocking read that parks the gate (F-CORPUS-FIFO-HANG class).

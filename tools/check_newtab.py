@@ -191,7 +191,7 @@ def _run_one(root, subdir):
         name = str(f.relative_to(root))
         try:
             # read_text_nonblocking, not read_text: this walk reads WHATEVER .html it meets, a
-            # git-ignored page the D-400 special-file precheck deliberately does not walk included,
+            # git-ignored page the special-file precheck deliberately does not walk included,
             # so a FIFO page must be the named refusal (OSError, exit 2 below), never a blocking read.
             findings += page_findings(name, read_text_nonblocking(f))
         except (OSError, UnicodeDecodeError) as exc:
@@ -575,8 +575,8 @@ def _self_test():
         (r / "opf/site/index.html").write_text(unsafe, encoding="utf-8")
         expect("missing input followed by finding", r, 2, "opf/site/index.html")
 
-    # F-CORPUS-FIFO-HANG (QA round 4): a FIFO at an .html page (the shape a git-ignored plant takes,
-    # which the D-400 precheck deliberately does not walk) must be the NAMED refusal (exit 2, "not a
+    # F-CORPUS-FIFO-HANG: a FIFO at an .html page (the shape a git-ignored plant takes,
+    # which the special-file precheck deliberately does not walk) must be the NAMED refusal (exit 2, "not a
     # regular file"), never a blocking read. MUTATION: reverting the page read to Path.read_text
     # blocks here; the alarm turns that into a recorded failure. POSIX only (os.mkfifo, SIGALRM).
     import signal

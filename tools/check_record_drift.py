@@ -140,9 +140,9 @@ def run(root):
     path = Path(declared) if os.path.isabs(declared) else root / declared
     try:
         # read_source_text: the registry may DECLARE a findings path outside the tree (an absolute
-        # path, a path through an ignored link), which the D-400 precheck walk can never certify;
-        # the fstat-checked reader refuses a non-regular file by name instead of blocking on it
-        # (QA round 6, codex B1).
+        # path, a path through an ignored link), which the special-file precheck walk can never
+        # certify; the fstat-checked reader refuses a non-regular file by name instead of blocking
+        # on it.
         text = read_source_text(path)
     except OSError as exc:
         print("error: the DECLARED findings register is unreadable ({}); a declared input "
@@ -244,30 +244,48 @@ def self_test():
         register.write_text("- F-2 :: OPEN :: merge_pending :: refs=decision:GD-110 :: title\n",
                             encoding="utf-8")
         _case("recorded-decision-detected", run(repo), 1)
-        # QA round 6 (codex B1): a DECLARED findings path that is a FIFO -- outside the tree
-        # (an absolute path the precheck walk can never certify) or inside it -- is refused by
-        # the fstat-checked reader, exit 2, never a blocking read. Fails without the
-        # read_source_text conversion (the raw read hangs; the timeout alarm is not needed
-        # because the open itself is non-blocking).
+        # A DECLARED findings path that is a FIFO -- outside the tree (an absolute path the
+        # precheck walk can never certify) or inside it -- is refused by the fstat-checked
+        # reader, exit 2 with its special-file refusal naming the path, never a blocking read.
+        # Each case runs run(repo) in a CHILD with a deadline, so a reverted blocking read of
+        # the FIFO is a recorded failure (no exit within the deadline), never a self-test that
+        # hangs. MUTATION: reverting the findings read to path.read_text makes both cases time
+        # out, each a named failure.
+        def _fifo_case(name, fifo):
+            code = ("import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+                    "import check_record_drift as m; sys.exit(m.run(Path(sys.argv[2])))")
+            try:
+                proc = subprocess.run([sys.executable, "-I", "-B", "-c", code,
+                                       str(Path(__file__).resolve().parent), str(repo)],
+                                      capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                failures.append("{}: no exit within 30s (a blocking read of the declared FIFO "
+                                "{})".format(name, fifo))
+                return
+            needle = "{}: refused, not a regular file".format(fifo)
+            if proc.returncode != 2 or needle not in proc.stdout:
+                failures.append("{}: expected exit 2 naming {!r}, got exit {}: {}".format(
+                    name, needle, proc.returncode, (proc.stdout + proc.stderr).strip()[-300:]))
+
         if hasattr(os, "mkfifo"):
             outside = tmp / "outside-findings.md"
             os.mkfifo(outside)
             (repo / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
                 {"version": 1, "record": {"findings": str(outside)},
                  "truth": {"changelog": "truth/releases.toml"}}), encoding="utf-8")
-            _case("declared-external-fifo-refused", run(repo), 2)
+            _fifo_case("declared-external-fifo-refused", outside)
             inside = repo / "findings-fifo.md"
             os.mkfifo(inside)
             (repo / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
                 {"version": 1, "record": {"findings": "findings-fifo.md"},
                  "truth": {"changelog": "truth/releases.toml"}}), encoding="utf-8")
-            _case("declared-in-root-fifo-refused", run(repo), 2)
+            _fifo_case("declared-in-root-fifo-refused", inside)
             inside.unlink()
             (repo / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
                 {"version": 1, "record": {"findings": str(register)},
                  "truth": {"changelog": "truth/releases.toml"}}), encoding="utf-8")
         else:
-            # #400 re-cut (codex MEDIUM 4, claude MINOR 11): a capability-gated vector is an
+            # A capability-gated vector is an
             # explicit NOT RUN and a recorded failure, never a silent pass.
             print("NOT RUN: the declared-external-fifo-refused and declared-in-root-fifo-refused "
                   "vectors (os.mkfifo unavailable); failing closed")

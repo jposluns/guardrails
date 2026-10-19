@@ -4459,13 +4459,13 @@ _SCAN_ALLOWED_UNPINNED = (
      "production precheck root/ignore funnel over the real checkout (rev-parse, ls-files, ls-tree,"
      " symbolic-ref and for-each-ref reads), bounded with stdin closed; read-only by design, so no"
      " maintenance pin applies; on a root the effective user owns it runs git with the caller's"
-     " global and system configuration pinned away (D-400 fixture env), while on a root another"
+     " global and system configuration pinned away (the pinned git environment), while on a root another"
      " uid owns the caller's configuration still applies and the config observer reports it"),
     ("opf/tools/_containment.py", "_git_lines", ("git",),
      "the OPF copy of the production precheck root/ignore funnel (rev-parse, ls-files, ls-tree,"
      " symbolic-ref and for-each-ref reads), bounded with stdin closed; read-only by design, so no"
      " maintenance pin applies; on a root the effective user owns it runs git with the caller's"
-     " global and system configuration pinned away (D-400 fixture env), while on a root another"
+     " global and system configuration pinned away (the pinned git environment), while on a root another"
      " uid owns the caller's configuration still applies and the config observer reports it"),
     ("tools/aiqt_corpus.py", "git", ("git",),
      "production read-only helper over the real repository (rev-parse/show/ls-files style"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The shared fail-closed namespace-mutation predicate, the ONE source for two gates.
 
-tools/check_manifest.py holds the D-400 special-file precheck copies (tools/_gen_common.py and
+tools/check_manifest.py holds the special-file precheck copies (tools/_gen_common.py and
 opf/tools/_containment.py) to this predicate as DEFENCE IN DEPTH ONLY: a module NAME whose value a
 syntactic scan wants to trust is trusted only while the module holds NO reference through which a
 binding could change invisibly to that scan, and no spelling list makes that trust COMPLETE (the

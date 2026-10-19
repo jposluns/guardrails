@@ -132,8 +132,8 @@ SCRIPT_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_]+\.py$")  # opf/ accepted t
 ROSTER_RE = re.compile(
     r"python3 -I -B (?:-X pycache_prefix=/dev/null/aiqt-pycache )?"
     r"((?:opf/)?tools/[A-Za-z0-9_]+\.py)")  # opf/ accepted toward OPF-SELF-CONTAIN; the
-# optional -X pair is the reviewed QA round-7 bytecode-read redirection; NO current launch in
-# tools/run_all_checks.sh or the workflows carries it (the D-400 special-file precheck
+# optional -X pair is the reviewed bytecode-read redirection; NO current launch in
+# tools/run_all_checks.sh or the workflows carries it (the special-file precheck
 # replaced it), and the alternation keeps an older or reintroduced spelling parseable; inert
 # until an opf/tools path exists
 

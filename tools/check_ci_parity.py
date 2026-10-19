@@ -144,8 +144,9 @@ job-set, step-shell, result-masking and aggregator rules above apply to each
 file on its own, so the one-job msg-leaks.yml is its own status; that branch
 protection requires it beside Quality gates is not checked here. msg-leaks.yml
 may run only that scan, its self-test and the special-file precheck that every
-job of every workflow runs first (MSG_LEAKS_WORKFLOW_MEMBERS; the precheck-order
-pass holds each quality.yml job to it as well): any other member there is a
+job of every workflow runs first, the two host-patch jobs of quality.yml aside
+(MSG_LEAKS_WORKFLOW_MEMBERS; the precheck-order pass holds every other
+quality.yml job to it as well): any other member there is a
 relocation finding (exit 1), because a gate moved from quality.yml into
 msg-leaks.yml leaves the aggregated Quality gates status silently and re-runs
 on every PR metadata edit.
@@ -546,7 +547,8 @@ PRECHECK_ABORT_LINES = dict((
 # matches AFTER adapt_standalone_runner rebases "$here/ to "opf/tools/); the value is the tools path
 # the shadow scan must see accounted for on that line. The line registers NO roster member: the member
 # is the precheck invocation itself, which the runners and the workflow carry right after it, and the
-# precheck-ORDER pass below holds every workflow job to the full two-line canonical step.
+# precheck-ORDER pass below holds every workflow job but the two exempt host-patch jobs of
+# quality.yml (PRECHECK_ORDER_EXEMPT_JOBS) to the full two-line canonical step.
 # SPELLING: the tools line negates with "! [ -h ... ]", never "[ ! -h ... ]": this line runs in
 # quality.yml jobs that tools/check_python_host_pin.py reads with a line model refusing "[ !" as a
 # YAML anchor, alias or tag opener, so the "[ !" form would make that gate unable to evaluate the
@@ -558,9 +560,10 @@ PRECHECK_BOOTSTRAP_LINES = dict((
      "opf/tools/_containment.py"),
 ))
 
-# SPECIAL-FILE-PRECHECK order: the canonical precheck step body every workflow job must run
-# before any other post-checkout run step, exactly and in order: the bootstrap test-and-abort line,
-# then the precheck invocation.
+# SPECIAL-FILE-PRECHECK order: the canonical precheck step body every workflow job (the two
+# host-patch jobs of quality.yml aside, PRECHECK_ORDER_EXEMPT_JOBS) must run before any other
+# post-checkout run step, exactly and in order: the bootstrap test-and-abort line, then the
+# precheck invocation.
 PRECHECK_STEP_RUN_LINES = (
     '[ -f tools/_gen_common.py ] && ! [ -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
     "python3 -I -B tools/_gen_common.py --precheck",
@@ -587,9 +590,10 @@ PRE_CHECKOUT_RUN_LINES = frozenset({
 })
 
 MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
-# The special-file precheck invocation as a member: every job of every workflow runs it first (the
-# precheck-order pass holds each quality.yml job to it too), so in msg-leaks.yml it is never a gate
-# moved out of the aggregated Quality gates status.
+# The special-file precheck invocation as a member: every job of every workflow runs it first except
+# the two host-patch jobs of quality.yml (PRECHECK_ORDER_EXEMPT_JOBS; the precheck-order pass holds
+# every other quality.yml job to it too), so in msg-leaks.yml it is never a gate moved out of the
+# aggregated Quality gates status.
 PRECHECK_MEMBER = "tools/_gen_common.py --precheck"
 # The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan, that
 # scan's self-test and the special-file precheck. Any other member there is a relocation finding,
@@ -911,7 +915,7 @@ def _operator(token):
 # import time (-B stops only the writes), so a hostile pyc behind an accepted ignored link
 # could park a gate; this option redirects that read to a path under /dev/null, where NOTHING
 # can exist (ENOTDIR on every lookup, no privilege can create it), so the interpreter always
-# compiles from source. NO current runner or workflow launch carries the pair (the D-400
+# compiles from source. NO current runner or workflow launch carries the pair (the
 # special-file precheck, which refuses a planted special file by name before any gate runs,
 # replaced it); the normalizer keeps accepting it so an older or reintroduced spelling stays
 # parseable. The value is byte-pinned: any other -X spelling stays cannot-evaluate.
@@ -2656,8 +2660,9 @@ def _trigger_findings(lines, members, source, diagnostics):
 
 def _relocation_findings(members, source):
     """msg-leaks.yml may run only the message/metadata leak scan, its
-    self-test and the special-file precheck every job runs first (module
-    docstring, TWO WORKFLOWS): its status is separate from the aggregated
+    self-test and the special-file precheck every job but the two
+    host-patch jobs of quality.yml runs first (module docstring, TWO
+    WORKFLOWS): its status is separate from the aggregated
     Quality gates, so any other member there is a gate the aggregated
     required check silently lost."""
     if source != MSG_LEAKS_CI_SOURCE:
@@ -6676,8 +6681,9 @@ def self_test():
     # files, so set parity alone would stay green while the aggregated
     # Quality gates status silently lost the gate); the scan itself and its
     # self-test are the allowed members, which 35a already holds green, and
-    # the special-file precheck every job runs first is the third, which the
-    # 35q control holds green (it fails if PRECHECK_MEMBER leaves the set).
+    # the special-file precheck every job runs first (the two host-patch jobs
+    # of quality.yml aside) is the third, which the 35q control holds green
+    # (it fails if PRECHECK_MEMBER leaves the set).
     moved = "python3 -I -B tools/check_git_option_table.py"
     scan_case("35q a gate moved from quality.yml into msg-leaks.yml is a "
               "relocation finding",
@@ -8895,8 +8901,9 @@ def precheck_order_report(workflows_dir=None):
     sorted), each read through read_runner_text, the one byte-level reader. An unreadable directory
     or an empty listing is a diagnostic (cannot-evaluate), never a clean pass: this is the check that
     holds every CI job in every workflow file, not just quality.yml, to the precheck-first order
-    (SPECIAL-FILE-PRECHECK), so a job added in a NEW workflow file cannot run a gate on an
-    unchecked tree."""
+    (SPECIAL-FILE-PRECHECK), except the two host-patch jobs of quality.yml
+    (PRECHECK_ORDER_EXEMPT_JOBS, the residual workflow_precheck_order_problems names), so a job
+    added in a NEW workflow file cannot run a gate on an unchecked tree."""
     import os
     directory = Path(workflows_dir) if workflows_dir is not None else ROOT / ".github" / "workflows"
     problems, diagnostics = [], []
@@ -8963,7 +8970,8 @@ def main(argv=None):
     else:
         print("STANDALONE RUNNER: opf/tools/run_all_checks.sh carries the bootstrap and precheck "
               "and extracts cleanly under the shared grammar.")
-    # SPECIAL-FILE-PRECHECK order: every job in every workflow file, precheck first.
+    # SPECIAL-FILE-PRECHECK order: every job in every workflow file, precheck first, except the two
+    # host-patch jobs of quality.yml (PRECHECK_ORDER_EXEMPT_JOBS).
     order_problems, order_diagnostics = precheck_order_report()
     if order_diagnostics:
         code = 2

@@ -413,7 +413,7 @@ def scan_file(root, path, binding, telemetry):
     so run() can reconcile the config's selectors against the real source."""
     try:
         # read_source_bytes, never a plain read: the surface walk picks up WHATEVER sits under the
-        # declared prefix (the D-400 precheck walks ignored directories too, but it certifies only
+        # declared prefix (the special-file precheck walks ignored directories too, but it certifies only
         # what stood at walk time, never a later drop-in), so a FIFO here is the named refusal
         # (SourceReadRefused -> GateError, exit 2), never a blocking read (F-CORPUS-FIFO-HANG class).
         raw = read_source_bytes(path)

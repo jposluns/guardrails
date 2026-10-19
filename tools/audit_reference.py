@@ -310,7 +310,7 @@ def _self_test():
             #    exit 0 before the self-test runs, so no marker appears. The child carries the sentinel so it
             #    skips this (and the other subprocess) case rather than recursing.
             # The copies live under <fixture>/tools/ so the copy's main() resolves its repository
-            # root (parents[1] of the script) to the FIXTURE root and its D-400 special-file precheck
+            # root (parents[1] of the script) to the FIXTURE root and its special-file precheck
             # walks only that hermetic tree, never the system temp directory; _gen_common.py rides
             # along because the gate imports precheck_special_files from it.
             sib = Path(tempfile.mkdtemp(prefix="aiqt-audit-reference-sibling-")) / "tools"

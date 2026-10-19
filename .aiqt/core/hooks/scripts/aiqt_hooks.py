@@ -11290,7 +11290,7 @@ _ORCH_WALK_BOUND = 4096  # ancestor-chain safety bound; a deeper chain is a walk
 # walk; where O_PATH is unavailable the O_RDONLY fallback additionally requires read permission on each
 # ancestor, an over-DENY in the fail direction (never an allow) on such platforms. Every walk open also
 # passes O_NONBLOCK, a no-op on the directories it opens (O_PATH ignores it; a directory open never blocks),
-# so each open carries the non-blocking flag the D-400 raw-read lint reads at the call site.
+# so each open carries the non-blocking flag the release-cut raw-read lint reads at the call site.
 _ORCH_O_WALK = getattr(os, "O_PATH", os.O_RDONLY)
 
 

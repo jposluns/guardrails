@@ -323,7 +323,7 @@ RUNNER_PATH_PIN = "readonly PATH\n"
 # run_gate registration (SPECIAL-FILE-PRECHECK).
 PRECHECK_LINE = 'python3 -I -B "$here/_containment.py" --precheck || exit 2'
 
-# The D-400 BOOTSTRAP line ahead of the precheck: a pure shell test-and-abort that refuses a
+# The precheck BOOTSTRAP line ahead of the precheck: a pure shell test-and-abort that refuses a
 # non-regular or symlinked precheck script by name BEFORE python3 could block loading it. It
 # calls no python3, so it adds no roster entry; any other spelling that names the precheck
 # module is refused below.
@@ -397,7 +397,7 @@ def runner_check(expected, text=None, *, fail_own=0):
                                      "--precheck")))
                 continue
             if line.strip() == PRECHECK_BOOTSTRAP_LINE:
-                # D-400 bootstrap: shell-only, calls no python3, so no roster entry.
+                # The precheck bootstrap: shell-only, calls no python3, so no roster entry.
                 continue
             if line.strip().startswith("python3 "):
                 # Any OTHER bare python3 line (including a mutated precheck

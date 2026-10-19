@@ -45,7 +45,7 @@ def read_bytes_nonblocking(path):
     """path.read_bytes(), through ONE O_NONBLOCK descriptor: the open of a FIFO with no
     writer returns at once instead of blocking, and a descriptor that fstat says is not a regular file
     is refused as OSError, so a scanner that reads WHATEVER its walk meets (including a special file
-    created after the D-400 precheck walk, which that walk cannot see) can never block forever on
+    created after the special-file precheck walk, which that walk cannot see) can never block forever on
     a special file; it fails closed loudly instead. A symlink is followed exactly as read_bytes follows
     it, and on a regular file O_NONBLOCK is a no-op, so the result is byte-identical to
     path.read_bytes()."""

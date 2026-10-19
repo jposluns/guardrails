@@ -265,7 +265,7 @@ DISCLOSURE = SPEC.parents[1] / "site" / "disclosure.html"
 
 def _spec_text(path):
     """SPEC (and each _SURFACE file) read through ONE O_NONBLOCK descriptor, fstat-checked S_ISREG:
-    defence in depth behind the D-400 special-file precheck, so a special file reached at such a path (for example through a
+    defence in depth behind the special-file precheck, so a special file reached at such a path (for example through a
     directory link the walk's git-ignored exemptions leave uncertified) is the named OSError refusal
     (main() maps it to exit 2), never a blocking read. On a regular file the bytes and strict-UTF-8
     universal-newline decode equal path.read_text(encoding="utf-8")."""
@@ -6177,37 +6177,63 @@ def _self_test_vectors():
                   not any(f.startswith("spec " + s + " missing contract") for f in contract_findings(m)))
         check("keyword-revert-spec-" + section + "-" + old, lambda p=pin, m=mutated, s=section:
               len(p) == 1 and "spec {} missing contract: {}".format(s, p[0]) in contract_findings(m))
-    # SPECIAL-FILE-PRECHECK: a copy of the opf/ subtree whose spec is a FIFO with no writer makes the
-    # default entry exit 2 naming it, bounded by the subprocess timeout (the alarm on a child). MUTATION:
-    # dropping the _containment.precheck_special_files call leaves SPEC.read_text blocked until the timeout.
+    # SPECIAL-FILE-PRECHECK: a copy of the opf/ subtree, its spec left regular, with a FIFO (no writer)
+    # planted at a path main() never reads makes the default entry exit 2 with the precheck's OWN
+    # refusal naming that FIFO, bounded by the subprocess timeout. Only the precheck walk can see that
+    # path, so this vector holds the precheck alone. MUTATION: dropping the
+    # _containment.precheck_special_files call from main() leaves nothing that looks at the planted
+    # path; the copy then exits 0 and this vector is red.
     if hasattr(os, "mkfifo"):
         import shutil
         import subprocess
 
-        def fifo_spec_refused():
+        def _opf_copy_run(plant):
+            """Run the default entry of a fresh copy of the opf/ subtree after plant(tree) has made its
+            change; (proc, tree) on exit, (None, tree) when no exit came within the timeout."""
             with tempfile.TemporaryDirectory() as scratch:
-                tree = Path(scratch) / "opf"
+                # The real path: the child names what it walks from its own resolved SPEC.
+                tree = Path(os.path.realpath(scratch)) / "opf"
                 shutil.copytree(SPEC.parents[1], tree, symlinks=True,
                                 ignore=shutil.ignore_patterns("__pycache__"))
-                spec = tree / SPEC.relative_to(SPEC.parents[1])
-                spec.unlink()
-                os.mkfifo(spec)
+                plant(tree)
                 try:
                     proc = subprocess.run([sys.executable, "-I", "-B", str(tree / "tools" / "check_opf_homes.py")],
                                           cwd=scratch, capture_output=True, text=True, timeout=30)
                 except subprocess.TimeoutExpired:
-                    return False
-                return proc.returncode == 2 and str(spec) in proc.stderr
+                    return None, tree
+                return proc, tree
+
+        def fifo_unread_path_refused():
+            proc, tree = _opf_copy_run(lambda tree: os.mkfifo(tree / "precheck-probe.fifo"))
+            needle = "error: {}: refused, a FIFO in the repository tree".format(tree / "precheck-probe.fifo")
+            return proc is not None and proc.returncode == 2 and needle in proc.stderr
+        check("special-file-precheck-fifo-unread-path", fifo_unread_path_refused)
+
+        # End to end, a FIFO AT the spec path: the default entry exits 2 naming it within the timeout.
+        # The precheck refuses it first, and the reader below refuses it on its own, so this vector
+        # holds the pair, not either layer alone (the vector above holds the precheck, the next one
+        # the reader).
+        def _spec_to_fifo(tree):
+            spec = tree / SPEC.relative_to(SPEC.parents[1])
+            spec.unlink()
+            os.mkfifo(spec)
+
+        def fifo_spec_refused():
+            proc, tree = _opf_copy_run(_spec_to_fifo)
+            spec = tree / SPEC.relative_to(SPEC.parents[1])
+            return proc is not None and proc.returncode == 2 and str(spec) in proc.stderr
         check("special-file-precheck-fifo-spec", fifo_spec_refused)
 
         # The reader itself (defence in depth behind the precheck): _spec_text on a FIFO must be the
-        # named OSError refusal within the alarm, never a blocking read. MUTATION: reverting main()'s
-        # read (or this helper) to a plain read_text blocks; the alarm records the hang.
+        # named OSError refusal within the alarm, never a blocking read. MUTATION: reverting this
+        # helper to a plain read_text blocks; the alarm records the hang. A main() that read SPEC
+        # with a plain read_text instead of _spec_text would still pass the pair vector above,
+        # behind the precheck; the release-cut raw-read lint, not a vector here, holds that site.
         import signal
 
         def fifo_spec_read_refused():
             if not hasattr(signal, "SIGALRM"):
-                # #400 re-cut (codex MEDIUM 4): a missing capability is an explicit NOT RUN
+                # A missing capability is an explicit NOT RUN
                 # and a FAILURE, never a silent pass claiming the FIFO read was refused.
                 print("NOT RUN: special-file-nonblocking-spec-read (signal.SIGALRM "
                       "unavailable); failing closed")
@@ -6237,10 +6263,10 @@ def _self_test_vectors():
                     signal.signal(signal.SIGALRM, previous)
         check("special-file-nonblocking-spec-read", fifo_spec_read_refused)
     else:
-        # #400 re-cut (codex MEDIUM 4, claude MINOR 11): without os.mkfifo neither FIFO
-        # vector can run; say so by name and fail closed rather than passing silently.
-        print("NOT RUN: special-file-precheck-fifo-spec and special-file-nonblocking-spec-read "
-              "(os.mkfifo unavailable); failing closed")
+        # Without os.mkfifo no FIFO vector can run; say so by name and fail closed rather than
+        # passing silently.
+        print("NOT RUN: special-file-precheck-fifo-unread-path, special-file-precheck-fifo-spec and "
+              "special-file-nonblocking-spec-read (os.mkfifo unavailable); failing closed")
         check("special-file-fifo-vectors-not-run", lambda: False)
     for failure in failures:
         print("FAIL: " + failure)
