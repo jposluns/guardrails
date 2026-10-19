@@ -66,6 +66,7 @@ else
 fi
 echo
 run_gate "leaks"     python3 -I -B tools/check_leaks.py
+run_gate "leaks-selftest" python3 -I -B tools/check_leaks.py --self-test
 run_gate "msg-leaks-selftest" python3 -I -B tools/check_msg_leaks.py --self-test  # real scan needs CI event context
 run_gate "portability-selftest" python3 -I -B tools/check_portability.py --self-test
 run_gate "portability" python3 -I -B tools/check_portability.py
@@ -109,7 +110,10 @@ run_gate "opf-upgrade" python3 -I -B opf/tools/check_opf_upgrade.py
 run_gate "opf-record-selftest" python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
+run_gate "opf-adopt-state-selftest" python3 -I -B opf/tools/_opf_adopt_state.py --self-test
 run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
+run_gate "opf-adopt-complete-selftest" python3 -I -B opf/tools/_opf_adopt_complete.py --self-test
+run_gate "opf-import-batch-selftest" python3 -I -B opf/tools/_opf_import_batch.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
 run_gate "opf-adopt-discover-selftest" python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
@@ -158,6 +162,7 @@ run_gate "rules-selftest"  python3 -I -B tools/gen_rules.py --self-test
 run_gate "artifact-checksums-selftest" python3 -I -B tools/check_artifact_checksums.py --self-test
 run_gate "artifact-checksums"          python3 -I -B tools/check_artifact_checksums.py
 run_gate "rules-drift"     python3 -I -B tools/gen_rules.py --check
+run_gate "agents-selftest" python3 -I -B tools/gen_agents.py --self-test
 run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
 run_gate "first-pin-demo-selftest" python3 -I -B tools/gen_first_pin_demo.py --self-test
 run_gate "first-pin-demo-drift"    python3 -I -B tools/gen_first_pin_demo.py --check
@@ -201,6 +206,7 @@ run_gate "git-fixture-env-config-malformed" python3 -I -B tools/check_selftest_e
 run_gate "git-fixture-env-config-system" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
 run_gate "instruction-budget-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
 run_gate "brief-capability-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
+run_gate "hook-latency-selftest" python3 -I -B tools/check_selftest_execution.py --suite hook-latency-selftest
 run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
 run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
@@ -208,6 +214,7 @@ run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test
 run_gate "mistakes-register-selftest" python3 -I -B tools/check_mistakes_register.py --self-test
 run_gate "mistakes-register"          python3 -I -B tools/check_mistakes_register.py
+run_gate "mistakes-register-append-selftest" python3 -I -B tools/orch_register.py --self-test
 run_gate "aei-enumerator-selftest" python3 -I -B tools/aei_backlog_md.py --self-test
 run_gate "skill-selftest"  python3 -I -B tools/gen_skill.py --self-test
 run_gate "skill-drift"     python3 -I -B tools/gen_skill.py --check
@@ -223,6 +230,15 @@ run_gate "launcher-isolation-selftest" python3 -I -B tools/check_python_launcher
 run_gate "launcher-isolation" python3 -I -B tools/check_python_launcher_isolation.py
 run_gate "python-floor-selftest" python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest
 run_gate "python-floor" python3 -I -B tools/check_python_floor.py
+# The host-patch pin: the CI host-patch jobs run their suites on the release .aiqt/python-host.toml
+# names, and the live leg FAILS this run when this interpreter is another patch release (a run there does
+# not predict those required CI legs); when the host interpreter changes, update that file and both
+# host-job pins in .github/workflows/quality.yml together.
+run_gate "python-host-pin-selftest" python3 -I -B tools/check_python_host_pin.py --self-test
+run_gate "python-host-pin" python3 -I -B tools/check_python_host_pin.py
+# The jobs-leg-only member mirrors the registry job's CI step, which judges the host-patch jobs from
+# outside them (roster symmetry; ci-parity reconciles it).
+run_gate "python-host-pin-jobs" python3 -I -B tools/check_python_host_pin.py --jobs-only
 run_gate "renderers-selftest"    python3 -I -B tools/gen_renderers.py --self-test
 run_gate "renderers-drift"       python3 -I -B tools/gen_renderers.py --check
 run_gate "manifest-gen-selftest" python3 -I -B tools/gen_manifest.py --self-test
@@ -262,6 +278,12 @@ run_gate "ci-parity"          python3 -I -B tools/check_ci_parity.py
 # and an independently maintained role catalog, failing on membership or write-role drift.
 run_gate "git-option-table-selftest" python3 -I -B tools/check_git_option_table.py --self-test
 run_gate "git-option-table" python3 -I -B tools/check_git_option_table.py
+
+# Dangerous-API AST lint (plan item 6): unsafe deserialization, disabled TLS verification, and
+# shell or code execution sinks in the repo's own Python, with a reviewed in-gate allowlist; an
+# unreadable or unparseable file is cannot-evaluate.
+run_gate "dangerous-api-selftest" python3 -I -B tools/check_dangerous_api.py --self-test
+run_gate "dangerous-api" python3 -I -B tools/check_dangerous_api.py
 
 # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit that
 # proves the harness end to end, and the internal-name leak gate. Their self-tests are gating (a broken

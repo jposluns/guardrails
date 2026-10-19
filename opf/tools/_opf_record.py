@@ -118,9 +118,20 @@ run (re-run), never a duplicate. The homes-2 publication boundary itself (_publi
 open a transaction unless the canonical reservation of the run id it publishes under stands with this
 plan's claims. An unreadable, malformed or conflicting reservation refuses (exit 2),
 never a silent fallback to the homes-1 counters path; a run killed after reserving and before
-publishing leaves its reservation standing, its numbers conservatively still reserved (the final doctor
-does not yet read reservations, so a store carrying such an orphan grades the orphan's numbers as
-missing records until that later change). A legacy
+publishing leaves its reservation standing, its numbers conservatively still reserved, and the next run
+derives above them. The final doctor reads the reservations (a read that awaits the homes-2 revision of
+spec 4.2) and does not report a reserved number missing where the prior commit held no record with that
+id, so a reservation's [claims] number grades as issued and that next run records. A reservation keeps
+only its run's new high-water per key, so where an orphaned run claimed several numbers under one key,
+its lower numbers are still reported missing and the next run is held at the post-publication gate
+(conservative). A deletion already committed in HEAD is visible only to a doctor run before that commit:
+a published record whose number a reservation records and whose deletion is committed is then graded as
+an orphaned reservation's number and not reported missing, unlike homes 1, where the counters high-water
+keeps that deletion a C-NO-DELETION finding. The homes-2 revision of spec 4.2 must settle this before
+homes 2 is activated. This homes-2 path is reached only once activation sets
+_opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
+SUPPORTED_HOMES is 1, every subcommand refuses a store declaring homes 2 before any reconciliation or
+write (_probe_homes), so the shipped verb claims through homes 1 only. A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
 migration to carry it (spec 4.2). The refusal names the path and the operator's remedy (reconcile it
 with the homes-1 tooling that wrote it, then remove it by hand); this tooling only probes, no-follow,
@@ -517,12 +528,28 @@ def _require_canonical(operand):
     serialized and comment-free, so a whole-document regeneration loses nothing. A file carrying comments
     or non-canonical serialization refuses and is left untouched. It proves SERIALIZATION only: a hand edit
     or hand merge that leaves canonical bytes is not detectable here, so spec 5.7's integration-base merge
-    policy remains a separate requirement this check does not enforce."""
-    if _emit_bytes(operand.model) != operand.raw:
+    policy remains a separate requirement this check does not enforce. A file an earlier emitter wrote with
+    a literal U+2028 or U+2029 inside a basic string still passes, and only when that is its sole difference
+    (_opf_emit.matches_store_bytes); this operation's write re-spells it with the escapes."""
+    if not _opf_emit.matches_store_bytes(operand.raw, _emit_bytes(operand.model)):
         raise RecordError("{} is not in canonical new-document form (it carries comments or non-canonical "
                           "serialization); refusing a whole-document rewrite that could lose content. "
                           "Restore it from the integration base and redo the operation there (spec 5.7); "
                           "nothing written (fail-closed)".format(operand.rel))
+
+
+def _require_within_read_cap(rel, data):
+    """PRECONDITION (store-read cap, applied to every file this operation publishes): the emitted bytes
+    must stay readable by the store reader, which refuses any store file LARGER than
+    _opf_store.MAX_STORE_READ_BYTES (a file of exactly that size still reads, so only a larger emission
+    refuses here). The appended rows, and the re-spelling of a literal U+2028/U+2029 as its six-byte
+    escape, both grow the emission, so a file near the cap could otherwise be rewritten into one the
+    resolver and doctor then refuse. Refusing before publication leaves the store byte-for-byte
+    unchanged."""
+    if len(data) > _opf_store.MAX_STORE_READ_BYTES:
+        raise RecordError("{} would be {} bytes after this write, over the {}-byte store-read cap its "
+                          "reader enforces; nothing written (fail-closed)".format(
+                              rel, len(data), _opf_store.MAX_STORE_READ_BYTES))
 
 
 # --- the store context ------------------------------------------------------------------------------
@@ -1432,8 +1459,8 @@ def _plan_done_with_receipt(req, ctx, operand, now):
     row = _locate(operand, rid)
     current = row.get("status")
     if row.get("type") != BACKLOG or current not in ("active", "done/proposed"):
-        raise RecordError("done-with-receipt moves an active or done/proposed backlog item to done; {} is {!r} "
-                          "(fail-closed)".format(rid, current))
+        raise RecordError("done-with-receipt moves an active or done/proposed backlog item to done; {} is {} "
+                          "(fail-closed)".format(rid, _opf_store._safe_display(current)))
     _require_valid_current(row, BACKLOG, ctx, rid, operand.rel)
     tc = _opf_schema.validate_transition(BACKLOG, current, "done", req.actor["kind"])
     if tc.status != _opf_store.VALID:
@@ -1732,7 +1759,8 @@ def _record_journal_rel(homes):
         return JOURNAL_REL
     if type(homes) is int and homes == 2:
         return _opf_store.journal_root("record")
-    raise RecordError("unknown homes generation {!r} for the record journal; fail-closed".format(homes))
+    raise RecordError("unknown homes generation {} for the record journal; fail-closed".format(
+        _opf_store._safe_display(homes)))
 
 
 def _probe_homes(ctx):
@@ -1770,11 +1798,12 @@ def _probe_homes(ctx):
     base = model.get(_opf_store.STANDARD_TOKEN) if isinstance(model, dict) else None
     declared = base.get("homes", 1) if isinstance(base, dict) else 1
     if type(declared) is not int or declared != generation:
-        raise RecordError("the store manifest declares homes generation {!r}, which this tooling does not "
+        raise RecordError("the store manifest declares homes generation {}, which this tooling does not "
                           "activate (it activates homes {} at most, and homes 2 only with spec_version {}), "
                           "so the record journal home cannot be told and reconciling a legacy journal could "
                           "write under .aiqt/ on a homes-2 store. Nothing written (fail-closed)".format(
-                              declared, _opf_store.SUPPORTED_HOMES, _opf_store.HOMES2_SPEC_VERSION))
+                              _opf_store._safe_display(declared), _opf_store.SUPPORTED_HOMES,
+                              _opf_store.HOMES2_SPEC_VERSION))
     return generation
 
 
@@ -1933,11 +1962,12 @@ def _leftover_lock_outcome(owner, states):
 def _with_recovery_lease(ctx, pending, recover):
     """Run `recover` holding the single-writer lease, claimed for RECOVERY through
     _opf_write_guard.acquire_lease_for_recovery: the atomic claim publication uses, with the spec 5.7
-    live-holder rule applied to exactly the present-lease refusal. A leftover lease whose complete
-    well-formed payload names a holder on THIS host confirmed dead (positive evidence only) is released
-    through this reconciliation and the claim retried once; a lease held by a live or possibly-live
-    holder, a cross-host holder, or one with a malformed payload refuses before any recovery write and is
-    never seized, and releasing any such lease stays the operator's explicit reconciliation step. A
+    never-seize and dead-run release clauses applied to exactly the present-lease refusal. A leftover
+    lease whose complete well-formed payload names a holder on THIS host confirmed dead (positive
+    evidence only) is released through this reconciliation and the claim retried once; a lease held by a
+    live or possibly-live holder, a cross-host holder, or one with a malformed payload refuses before any
+    recovery write and is never seized, and releasing any such lease stays the operator's explicit
+    reconciliation step. A
     released leftover is REPORTED whatever follows it: it heads the outcome lines `recover` returns, a
     RecordError that `recover` raises carries it appended, a WriteGuardError from the release after a
     clean recovery carries it appended, and any other failure surfaces it on stderr (best-effort, never
@@ -2377,7 +2407,8 @@ def _removal_parts(recovered, operation, staging_removed, created_removed=()):
     if recovered:
         parts.append("the stale operation capability {} of a holder its recovery gate confirmed dead "
                      "({})".format(" and ".join(recovered), "its recorded operation not reported"
-                                   if operation is None else "its recorded operation {!r}".format(operation)))
+                                   if operation is None else "its recorded operation {}".format(
+                                       _opf_store._safe_display(operation))))
     parts.extend(created_removed)
     return parts
 
@@ -2430,7 +2461,7 @@ def _reclaimed_outcome(cap, pending):
     line = ("recovery cleared the operation capability's {}, left by an interrupted {} run whose holder "
             "its recovery gate confirmed dead, under the held capability".format(
                 " and ".join(cap.recovered), "(recorded operation not reported)" if operation is None
-                else repr(operation)))
+                else _opf_store._safe_display(operation)))
     if not pending:
         line += (" with no record journal work pending (read under the held capability: no "
                  "transaction open, every terminal one in the homes record grammar having an entry at its "
@@ -2439,8 +2470,8 @@ def _reclaimed_outcome(cap, pending):
     if cap.staging_removed:
         line += "; the acquisition also removed {}".format("; ".join(cap.staging_removed))
     if operation is not None and operation != VERB:
-        line += ("; this run reconciles only the opf record journal, so any journal work of the {!r} "
-                 "operation is not examined here".format(operation))
+        line += ("; this run reconciles only the opf record journal, so any journal work of the {} "
+                 "operation is not examined here".format(_opf_store._safe_display(operation)))
     if pending:
         return line
     return line + (". A COMPLETE transaction's publication was applied when it committed; its "
@@ -2761,7 +2792,9 @@ def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
     held capability, before the transaction opens, _require_reservation re-reads that run's
     canonical reservation and requires its claims to be this plan's. A call naming no run id, or one
     whose reservation is absent, unreadable, non-canonical or claims other numbers, refuses with no
-    transaction opened."""
+    transaction opened. _run_operation reaches this only once activation sets
+    _opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
+    SUPPORTED_HOMES is 1, _probe_homes refuses a store declaring homes 2 first."""
     try:
         _journal.require_containment()
     except (_journal.JournalError, OSError) as exc:
@@ -3094,6 +3127,7 @@ def _run_operation(req):
         plan = _PLANNERS[req.subcommand](req, ctx, operand, now)
         for op in plan.operands:
             op.new_raw = _emit_bytes(op.new_model)
+            _require_within_read_cap(op.rel, op.new_raw)
         _postcondition(plan, request, ctx, now)
         # 6. the planned-destination cleanliness gate, then the single-writer lease.
         scope = _opf_write_guard.plan_write_scope(ctx.machine_rel, ctx.manifest,
@@ -3331,6 +3365,23 @@ def _self_test_units(check):
     for bad in (0, 3, None, "2", True):
         check("an unknown homes generation refuses the journal home ({!r})".format(bad),
               _refuses(lambda bad=bad: _record_journal_rel(bad), "unknown homes generation"))
+    # Deep values: a homes declaration nested 100,000 levels deep (what tomllib builds from
+    # a dotted [opf.homes.a.a ...] header) still refuses as a RecordError with a bounded message; pre-fix its
+    # {!r} render raised RecursionError out of the refusal.
+    _deep_homes = _deep_cur = {}
+    for _ in range(100000):
+        _deep_cur["a"] = {}
+        _deep_cur = _deep_cur["a"]
+    _deep_refusal = None
+    try:
+        _record_journal_rel(_deep_homes)
+    except RecordError as exc:
+        _deep_refusal = str(exc)
+    except RecursionError:
+        pass                 # the pre-fix escape: the check below then fails rather than aborting the suite
+    check("a deeply nested homes generation refuses the journal home with a bounded message",
+          _deep_refusal is not None and "unknown homes generation" in _deep_refusal
+          and "nested deeper than" in _deep_refusal and len(_deep_refusal) <= 2048)
     token = os.urandom(16).hex()
     rid = _record_run_id(token)
     check("the minted run id is the homes record- grammar bound to the lock token",
@@ -3354,6 +3405,40 @@ def _self_test_units(check):
     finally:
         os.close(empty_fd)
         os.rmdir(empty)
+    # The manifest route: _probe_homes reads the manifest through
+    # _read_operand, and tomllib builds a dotted [opf.homes.a.a ...] header of 100,000 parts into a
+    # 100,000-level nested table. The refusal naming that declaration renders it bounded; pre-fix its {!r}
+    # render raised RecursionError out of the probe. CPython 3.14.8 and later refuse a TOML key of more than
+    # 1,000 dotted parts, so the table is built directly and iteratively, in the shape tomllib gives that
+    # header (compared below with tomllib's own parse of the header at 999 parts, under that cap), and
+    # _read_operand is replaced for the probe by one that returns it, so the check runs on every supported
+    # interpreter and parses no longer key.
+    from types import SimpleNamespace
+    deep_homes = {"b": 1}
+    for _ in range(100000):
+        deep_homes = {"a": deep_homes}
+    deep_model = {_opf_store.STANDARD_TOKEN: {"homes": deep_homes}}
+    shape_homes = {"b": 1}
+    for _ in range(997):
+        shape_homes = {"a": shape_homes}
+    deep_shape = (tomllib.loads("[{}.homes".format(_opf_store.STANDARD_TOKEN) + ".a" * 997 + "]\nb = 1\n")
+                  == {_opf_store.STANDARD_TOKEN: {"homes": shape_homes}})
+    deep_globals = globals()
+    deep_read = deep_globals["_read_operand"]
+    deep_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, deep_model)
+    deep_probe = None
+    try:
+        _probe_homes(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+    except RecordError as exc:
+        deep_probe = str(exc)
+    except RecursionError:
+        pass                 # the pre-fix escape: the check below then fails rather than aborting the suite
+    finally:
+        deep_globals["_read_operand"] = deep_read
+    check("a deeply nested manifest homes declaration refuses the homes probe with a bounded message",
+          deep_shape and deep_probe is not None and "declares homes generation" in deep_probe
+          and "nested deeper than" in deep_probe
+          and len(deep_probe) <= 512 + _opf_store._DISPLAY_MAX_CHARS + _opf_store._DISPLAY_MARKER_MAX)
 
 
 def _self_test_contexts(check, root_fd, now):
@@ -3468,6 +3553,17 @@ def _self_test_planners(check, ctx_of, full, now):
           _require_canonical(Operand("x", canonical, 0o644, {"schema": 1, "record": []})) is None)
     check("a comment-bearing operand refuses", _refuses(lambda: _require_canonical(Operand(
         "x", b"# note\n" + canonical, 0o644, {"schema": 1, "record": []})), "canonical"))
+    # An earlier emitter wrote U+2028 and U+2029 literally inside a basic string: that spelling passes, and
+    # only when it is the sole difference (a literal one in a comment or a literal string still refuses).
+    sep_model = {"schema": 1, "record": [{"id": "BI-1", "summary": "a\u2028b\u2029c"}]}
+    sep_prior = _emit_bytes(sep_model).replace(b"\\u2028", "\u2028".encode("utf-8")).replace(
+        b"\\u2029", "\u2029".encode("utf-8"))
+    check("an operand in the earlier separator spelling passes",
+          b"\\u2028" not in sep_prior and _require_canonical(Operand("x", sep_prior, 0o644, sep_model)) is None)
+    for label, raw in (("a comment", "# n\u2028\n".encode("utf-8") + sep_prior),
+                       ("a literal string", sep_prior.replace(b'"a', b"'a").replace(b'c"', b"c'"))):
+        check("a literal separator in {} refuses".format(label),
+              _refuses(lambda raw=raw: _require_canonical(Operand("x", raw, 0o644, sep_model)), "canonical"))
     base_rows = [{"id": "BI-1", "title": "kept"}]
     argv = ["create", "--type", "backlog_item", "--title", "b", "--actor", "maintainer"]
     p, c, op = plan(argv, rows=base_rows, counters=dict(full, BI=1))
