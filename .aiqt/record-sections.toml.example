@@ -11,12 +11,17 @@
 # [[table]]: append-only tables whose rows are keyed on the declared columns. Every row key present at the
 # post-merge commit's first parent (R1) or newly introduced on the branch (R2) must survive the merge, and
 # with edit = "frozen" a surviving row must keep its parsed cell values unchanged (R3), compared cell for
-# cell after trimming surrounding whitespace (Markdown) or by typed TOML value, against the first parent
+# cell after trimming surrounding ASCII spaces and tabs (Markdown) or by typed TOML value (an integer
+# never equals a boolean or a float, and floats and datetimes compare by exact repr, so -0.0 for 0.0 or a
+# re-offset instant is an edit), against the first parent
 # and, for rows the branch introduced, against the branch tip; edit = "key-stable" allows in-place
-# corrections of non-key cells. Reordering, mid-table insertion, re-padding (the header line included) and
-# TOML reformatting are allowed; a duplicate key in any snapshot, and a carriage return in a table line or
-# in a header-matching line of any compared snapshot (a CRLF table), fail closed. Rows have no deletion
-# opt-out: supersede a row with a new row, or correct it in place under key-stable.
+# corrections of non-key cells. A Markdown row is a |-prefixed line that must also END with an unescaped
+# pipe: a GFM-style row without the trailing pipe is refused. Reordering, mid-table insertion, re-padding
+# (the header line included) and
+# TOML reformatting are allowed; a duplicate key in any snapshot, a carriage return in a table line or
+# in a header-matching line of any compared snapshot (a CRLF table), and a declared table that cannot be
+# located in a file that exists at a compared snapshot whose config declared it, fail closed. Rows have no
+# deletion opt-out: supersede a row with a new row, or correct it in place under key-stable.
 schema-version = 2
 opt-out-marker = "<!-- aiqt-record-section: superseded -->"
 
