@@ -139,7 +139,10 @@ PLUGIN_OPTIONAL_KEYS = ("claude-code-min-version", "on-failure-render")
 PLATFORMS = {"claude-code"}
 DEFAULTS = {"block", "warn"}  # no-ask posture: "ask" is not a permitted default
 CLASSES = {"a", "b", "c", "d"}
-SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# Strict MAJOR.MINOR.PATCH, matched with .match so the string must hold the version and nothing else:
+# [0-9] (never \d, which also matches other scripts' digits), no leading zero in a component, and \Z
+# (never $, which also matches just before a trailing newline).
+SEMVER_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")     # a stable kebab-case control id
 CID_RE = re.compile(r"^[a-z0-9]{6,}$")        # a corpus-id (matches gen_rules' own shape)
 HANDLER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -431,7 +434,9 @@ def render_project_settings(hooks, ids=PROJECT_HOOK_IDS):
     settings form carries a shell-string command, not command + args, so the launcher is spelled
     `python3 -I <script> <handler>` (isolated, as check_python_launcher_isolation requires). Raises
     ValueError when an id names no manifest control, so a renamed control fails closed (exit 2) instead of
-    silently dropping the project wiring."""
+    silently dropping the project wiring. This render is OUTSIDE the [plugin] on-failure-render switch:
+    every launcher carries the default TIMEOUT and never an onFailure key, whatever the switch or an
+    authored per-hook timeout says (both apply only to the plugin hooks.json render)."""
     known = {hook["id"]: hook for hook in hooks}
     missing = [hid for hid in ids if hid not in known]
     if missing:
@@ -673,16 +678,32 @@ def main():
 #      just outside either end. It runs in a nested suite too (outside the `if not _nested` block),
 #  31. the optional per-hook `timeout` validates fail-closed: accepted only as an integer from
 #      TIMEOUT_MIN to TIMEOUT_MAX (each end tested just inside, exactly at, and just outside), with a
-#      bool, a string and a float each refused (exit 2); a non-boolean [plugin] on-failure-render and a
-#      non-SemVer claude-code-min-version are refused too,
-#  32. with on-failure-render false or absent, an authored per-hook timeout and the optional [plugin]
-#      keys change NOTHING: hooks.json renders byte-identical to a tree authoring none of them, with no
-#      onFailure key anywhere,
-#  33. with on-failure-render true, exactly the enforce-stage PreToolUse block hooks render
-#      "onFailure": "block" plus their configured timeout, while a PreToolUse warn (bake) hook, a Stop
-#      block hook and a TeammateIdle block hook render neither; a mutant output that drops the
-#      onFailure key, and one that resets the configured timeout, each fail the contract
-#      (discrimination).
+#      bool, a string and a float each refused (exit 2); a non-boolean [plugin] on-failure-render is
+#      refused, and the version strings are strict MAJOR.MINOR.PATCH: a claude-code-min-version that is
+#      a non-string, misses a component, carries a trailing newline, a leading zero or non-ASCII digits
+#      is refused while "0.0.0" is accepted, and a leading-zero `version` is refused through the same
+#      regex,
+#  32. with on-failure-render false, and separately with the key ABSENT (its own tree, so a regression
+#      that treats only an explicit false as off is caught), an authored per-hook timeout and the
+#      optional [plugin] keys change NOTHING: hooks.json renders byte-identical to a tree authoring
+#      none of them, with no onFailure key anywhere, and that baseline render is itself pinned to
+#      spelled-out expected bytes, so a shared rendering regression cannot hide in a both-sides
+#      comparison,
+#  33. with on-failure-render true, EVERY launcher renders its configured timeout (the authored value,
+#      or TIMEOUT where none is authored) and exactly the enforce-stage PreToolUse block hooks also
+#      render "onFailure": "block": an implicit-enforce and an explicit-enforce block hook carry it,
+#      while a bake-stage PreToolUse block hook, a PreToolUse warn (bake) hook, a Stop block hook and a
+#      TeammateIdle block hook each render their authored timeout WITHOUT it (so the stage clause is
+#      discriminated independently of the default clause); the contract records key PRESENCE, never
+#      get(), so an explicit JSON null cannot pass as an absent key, and it is shown discriminating
+#      against a mutant output that drops the key, one that resets every timeout and one that writes
+#      the explicit null; each clause of the render predicate (event, default, stage) is also
+#      discriminated by direct render-level vectors, including PreToolUse warn + enforce, the
+#      combination load_manifest refuses end-to-end,
+#  34. the project .claude/settings.json render is OUTSIDE the switch: with on-failure-render true and
+#      authored per-hook timeouts it stays byte-identical to a project tree authoring neither (always
+#      the default timeout, never an onFailure key), while the same tree's hooks.json shows the switch
+#      applied, so the case cannot pass with a switch that silently failed to apply.
 # Every vector that removes the entries its own faults caused (cases 20b, 21b, 27 and 28)
 # does so by PROVENANCE, never by message text: each named entry from the staged cleanup,
 # the removal and absence helpers and the launch diagnostic carries its stage and the
@@ -3273,20 +3294,42 @@ def self_test_main(_nested=False):
                                         ("above-max", TIMEOUT_MAX + 1, 2),
                                         ("bool", "true", 2), ("string", '"10"', 2), ("float", 1.5, 2)):
             timeout_case(label, toml_value, want)
-        # The optional [plugin] keys validate fail-closed too.
+        # The optional [plugin] keys validate fail-closed too. The version strings are STRICT
+        # MAJOR.MINOR.PATCH: a non-string, a missing component, a trailing newline (which a $-anchored
+        # regex accepts), a leading zero and non-ASCII digits (which \d accepts) are each refused,
+        # while "0.0.0" is legal (zero itself is not a leading zero).
         plug_anchor = 'homepage = "https://example.invalid"'
-        for label, addition in (("switch-nonbool", 'on-failure-render = "yes"'),
-                                ("minver-shape", 'claude-code-min-version = "2.1"')):
+        for label, addition, want in (
+                ("switch-nonbool", 'on-failure-render = "yes"', 2),
+                ("minver-shape", 'claude-code-min-version = "2.1"', 2),
+                ("minver-nonstring", "claude-code-min-version = 2", 2),
+                ("minver-trailing-newline", 'claude-code-min-version = "2.1.295\\n"', 2),
+                ("minver-leading-zero", 'claude-code-min-version = "02.1.295"', 2),
+                ("minver-nonascii-digits",
+                 'claude-code-min-version = "\u0662.\u0661.\u0662\u0669\u0665"', 2),
+                ("minver-zeros", 'claude-code-min-version = "0.0.0"', 0)):
             tree = tmp / ("plugkey-" + label)
             tree.mkdir()
             _build_tree(tree)
             _mutate(tree, plug_anchor, plug_anchor + "\n" + addition)
-            if run_quiet(tree, check=True) != 2:
-                failures.append("[plugin] {}: expected exit 2 (fail-closed)".format(label))
+            rc = run_quiet(tree, check=(want != 0))
+            if rc != want:
+                failures.append("[plugin] {}: expected exit {}, got {}".format(label, want, rc))
+        # The [plugin] version goes through the same regex; one strictness vector rides along.
+        vzero = tmp / "plugkey-version-leading-zero"
+        vzero.mkdir()
+        _build_tree(vzero)
+        _mutate(vzero, 'version = "0.1.0"', 'version = "01.1.0"')
+        if run_quiet(vzero, check=True) != 2:
+            failures.append("[plugin] version-leading-zero: expected exit 2 (fail-closed)")
 
-        # 32. OFF is byte-identity: with on-failure-render false (or absent), an authored per-hook
-        #     timeout and the optional [plugin] keys change NOTHING in the rendered hooks.json, which
-        #     stays byte-identical to a tree authoring none of them, with no onFailure key anywhere.
+        # 32. OFF is byte-identity, for an explicitly false switch AND for an ABSENT one (each its own
+        #     tree, so a regression that treats only an explicit false as off is caught): an authored
+        #     per-hook timeout and the optional [plugin] keys change NOTHING in the rendered hooks.json,
+        #     which stays byte-identical to a tree authoring none of them, with no onFailure key
+        #     anywhere. The baseline render itself is pinned to spelled-out expected bytes (the case-16
+        #     idiom: never built from the module constants), so a rendering regression shared by both
+        #     sides of the byte comparison cannot hide.
         ofr_base = tmp / "ofr-base"
         ofr_base.mkdir()
         _build_tree(ofr_base)
@@ -3296,22 +3339,62 @@ def self_test_main(_nested=False):
         _mutate(ofr_off, plug_anchor,
                 plug_anchor + '\nclaude-code-min-version = "2.1.295"\non-failure-render = false')
         _mutate(ofr_off, 'default = "block"', 'default = "block"\ntimeout = 45')
-        if run_quiet(ofr_base, check=False) != 0 or run_quiet(ofr_off, check=False) != 0:
-            failures.append("off-switch byte-identity setup: both trees expected a clean generate")
+        ofr_absent = tmp / "ofr-absent"
+        ofr_absent.mkdir()
+        _build_tree(ofr_absent)
+        _mutate(ofr_absent, plug_anchor, plug_anchor + '\nclaude-code-min-version = "2.1.295"')
+        _mutate(ofr_absent, 'default = "block"', 'default = "block"\ntimeout = 45')
+        if (run_quiet(ofr_base, check=False) != 0 or run_quiet(ofr_off, check=False) != 0
+                or run_quiet(ofr_absent, check=False) != 0):
+            failures.append("off-switch byte-identity setup: all three trees expected a clean generate")
         else:
             base_json = (ofr_base / HOOKS_JSON_REL).read_text(encoding="utf-8")
-            off_json = (ofr_off / HOOKS_JSON_REL).read_text(encoding="utf-8")
-            if base_json != off_json:
-                failures.append("with on-failure-render false, an authored timeout and the optional "
-                                "[plugin] keys must render byte-identical hooks.json")
-            if "onFailure" in off_json:
-                failures.append("with on-failure-render false, no onFailure key may render")
+            want_base = (
+                '{\n'
+                '  "description": "AIQT Guardrails mechanical-enforcement hooks, generated from'
+                ' .aiqt/core/hooks/manifest.toml by tools/gen_hooks.py; do not hand-edit.",\n'
+                '  "hooks": {\n'
+                '    "PreToolUse": [\n'
+                '      {\n'
+                '        "matcher": "Bash",\n'
+                '        "hooks": [\n'
+                '          {\n'
+                '            "type": "command",\n'
+                '            "command": "python3",\n'
+                '            "args": [\n'
+                '              "-I",\n'
+                '              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",\n'
+                '              "test_handler"\n'
+                '            ],\n'
+                '            "timeout": 10\n'
+                '          }\n'
+                '        ]\n'
+                '      }\n'
+                '    ]\n'
+                '  }\n'
+                '}\n')
+            if base_json != want_base:
+                failures.append("the baseline hooks.json must match the spelled-out expected bytes")
+            for label, tree in (("false", ofr_off), ("absent", ofr_absent)):
+                other_json = (tree / HOOKS_JSON_REL).read_text(encoding="utf-8")
+                if base_json != other_json:
+                    failures.append("with on-failure-render {}, an authored timeout and the optional "
+                                    "[plugin] keys must render byte-identical hooks.json".format(label))
+                if "onFailure" in other_json:
+                    failures.append("with on-failure-render {}, no onFailure key may render"
+                                    .format(label))
 
-        # 33. ON renders exactly the enforce-stage PreToolUse block hooks with onFailure "block" and
-        #     their configured timeout; a PreToolUse warn (bake) hook, a Stop block hook and a
-        #     TeammateIdle block hook carry neither. The contract is then shown DISCRIMINATING against
-        #     two mutant outputs, one dropping every onFailure key and one resetting every timeout to
-        #     the default, each of which it must catch.
+        # 33. ON renders EVERY launcher with its configured timeout (the authored value, or TIMEOUT
+        #     where none is authored), and exactly the enforce-stage PreToolUse block hooks also carry
+        #     onFailure "block": an implicit-enforce and an explicit-enforce block hook carry it, while
+        #     a bake-stage PreToolUse block hook, a PreToolUse warn (bake) hook, a Stop block hook and
+        #     a TeammateIdle block hook each render their authored timeout WITHOUT it. The bake-stage
+        #     BLOCK hook discriminates the stage clause on its own (the warn hook is excluded by its
+        #     default already), and every excluded hook authors a distinct timeout, so "no onFailure"
+        #     never collapses into "no authored timeout". The contract is then shown DISCRIMINATING
+        #     against three mutant outputs: one dropping every onFailure key, one resetting every
+        #     timeout to the default, and one writing an explicit JSON null where the key must be
+        #     absent, each of which it must catch.
         ofr_on = tmp / "ofr-on"
         ofr_on.mkdir()
         _build_tree(ofr_on)
@@ -3320,24 +3403,36 @@ def self_test_main(_nested=False):
         _mutate(ofr_on, 'default = "block"', 'default = "block"\ntimeout = 45')
         on_script = ofr_on / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
         on_script.write_text(on_script.read_text(encoding="utf-8")
-                             + "def warn_handler(data):\n    return (0, None, None)\n"
+                             + "def enforce_handler(data):\n    return (0, None, None)\n"
+                               "def bake_handler(data):\n    return (0, None, None)\n"
+                               "def warn_handler(data):\n    return (0, None, None)\n"
                                "def stop_handler(data):\n    return (0, None, None)\n"
                                "def idle_handler(data):\n    return (0, None, None)\n", encoding="utf-8")
         on_manifest = ofr_on / ".aiqt" / "core" / "hooks" / "manifest.toml"
         on_manifest.write_text(on_manifest.read_text(encoding="utf-8") + (
+            '\n[[hook]]\nid = "selftest-enforce-block"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+            'event = "PreToolUse"\nmatcher = "Bash"\nhandler = "enforce_handler"\ndefault = "block"\n'
+            'stage = "enforce"\ntimeout = 20\nclass = "b"\n'
+            'residue = "An explicit-enforce block self-test control."\n'
+            '\n[[hook]]\nid = "selftest-bake-block"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+            'event = "PreToolUse"\nmatcher = "Bash"\nhandler = "bake_handler"\ndefault = "block"\n'
+            'stage = "bake"\ntimeout = 25\nclass = "b"\n'
+            'residue = "A bake block self-test control."\n'
             '\n[[hook]]\nid = "selftest-warn-bake"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
             'event = "PreToolUse"\nmatcher = "Bash"\nhandler = "warn_handler"\ndefault = "warn"\n'
-            'stage = "bake"\nclass = "b"\nresidue = "A warn bake self-test control."\n'
+            'stage = "bake"\ntimeout = 15\nclass = "b"\nresidue = "A warn bake self-test control."\n'
             '\n[[hook]]\nid = "selftest-stop-block"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
-            'event = "Stop"\nhandler = "stop_handler"\ndefault = "block"\nclass = "b"\n'
+            'event = "Stop"\nhandler = "stop_handler"\ndefault = "block"\ntimeout = 30\nclass = "b"\n'
             'residue = "A Stop self-test control."\n'
             '\n[[hook]]\nid = "selftest-idle-block"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
-            'event = "TeammateIdle"\nhandler = "idle_handler"\ndefault = "block"\nclass = "b"\n'
-            'residue = "A TeammateIdle self-test control."\n'), encoding="utf-8")
+            'event = "TeammateIdle"\nhandler = "idle_handler"\ndefault = "block"\ntimeout = 35\n'
+            'class = "b"\nresidue = "A TeammateIdle self-test control."\n'), encoding="utf-8")
 
         def onfailure_findings(text):
-            """The case-33 contract over one rendered hooks.json: per (event, handler), the exact
-            onFailure value (None where absent) and timeout, compared as a whole map."""
+            """The case-33 contract over one rendered hooks.json: per (event, handler), the onFailure
+            key's PRESENCE, its value (None where absent, so a rendered JSON null is distinguished from
+            an absent key by the presence flag, never conflated by get()) and the timeout, compared as
+            a whole map."""
             try:
                 rendered = json.loads(text)
             except ValueError as exc:
@@ -3346,11 +3441,14 @@ def self_test_main(_nested=False):
             for event, entries in rendered.get("hooks", {}).items():
                 for e in entries:
                     for h in e.get("hooks", ()):
-                        got[(event, h["args"][-1])] = (h.get("onFailure"), h.get("timeout"))
-            want = {("PreToolUse", "test_handler"): ("block", 45),
-                    ("PreToolUse", "warn_handler"): (None, TIMEOUT),
-                    ("Stop", "stop_handler"): (None, TIMEOUT),
-                    ("TeammateIdle", "idle_handler"): (None, TIMEOUT)}
+                        got[(event, h["args"][-1])] = ("onFailure" in h, h.get("onFailure"),
+                                                       h.get("timeout"))
+            want = {("PreToolUse", "test_handler"): (True, "block", 45),
+                    ("PreToolUse", "enforce_handler"): (True, "block", 20),
+                    ("PreToolUse", "bake_handler"): (False, None, 25),
+                    ("PreToolUse", "warn_handler"): (False, None, 15),
+                    ("Stop", "stop_handler"): (False, None, 30),
+                    ("TeammateIdle", "idle_handler"): (False, None, 35)}
             if got != want:
                 return ["rendered onFailure/timeout map {} does not equal the expected {}"
                         .format(got, want)]
@@ -3377,6 +3475,67 @@ def self_test_main(_nested=False):
             if not onfailure_findings(json.dumps(mutant, indent=2) + "\n"):
                 failures.append("a mutant output resetting the configured timeout must fail the "
                                 "case-33 contract")
+            mutant = json.loads(on_json)
+            for entries in mutant["hooks"].values():
+                for e in entries:
+                    for h in e["hooks"]:
+                        if "onFailure" not in h:
+                            h["onFailure"] = None
+            if not onfailure_findings(json.dumps(mutant, indent=2) + "\n"):
+                failures.append("a mutant output writing an explicit null onFailure where the key "
+                                "must be absent must fail the case-33 contract")
+
+        # The onFailure render predicate itself, one clause at a time, with direct render_hooks_json
+        # calls: the event, default and stage clauses are each discriminated, including the PreToolUse
+        # warn + enforce combination, which load_manifest refuses end-to-end (the default clause is
+        # defence in depth behind that refusal, so only a render-level vector can reach it).
+        def rendered_onfailure(hook):
+            launcher = json.loads(render_hooks_json([hook], on_failure_render=True))[
+                "hooks"][hook["event"]][0]["hooks"][0]
+            return "onFailure" in launcher
+        for label, tweaks, want_key in (("enforce-block", {"stage": "enforce"}, True),
+                                        ("implicit-enforce-block", {}, True),
+                                        ("bake-block", {"stage": "bake"}, False),
+                                        ("enforce-warn", {"default": "warn"}, False),
+                                        ("stop-block", {"event": "Stop"}, False)):
+            hook = {"id": "selftest-direct", "event": "PreToolUse", "matcher": "Bash",
+                    "handler": "direct_handler", "default": "block"}
+            hook.update(tweaks)
+            if hook["event"] != "PreToolUse":
+                del hook["matcher"]
+            if rendered_onfailure(hook) != want_key:
+                failures.append("render-level onFailure predicate ({}): the key was expected to be "
+                                "{}".format(label, "present" if want_key else "absent"))
+
+        # 34. The project settings render is OUTSIDE the switch: with on-failure-render true and
+        #     authored per-hook timeouts, .claude/settings.json stays byte-identical to a project tree
+        #     authoring neither (always the default timeout, never an onFailure key), while the same
+        #     tree's hooks.json must show the switch applied to the SAME control, so this case cannot
+        #     pass with a switch that silently failed to apply.
+        proj_plain = tmp / "ofr-proj-plain"
+        proj_plain.mkdir()
+        _build_project_tree(proj_plain)
+        proj_on = tmp / "ofr-proj-on"
+        proj_on.mkdir()
+        _build_project_tree(proj_on)
+        _mutate(proj_on, plug_anchor,
+                plug_anchor + '\nclaude-code-min-version = "2.1.295"\non-failure-render = true')
+        _mutate(proj_on, 'default = "block"', 'default = "block"\ntimeout = 45')
+        if run_project(proj_plain, check=False) != 0 or run_project(proj_on, check=False) != 0:
+            failures.append("project-settings switch case: both trees expected a clean generate")
+        else:
+            plain_settings = (proj_plain / PROJECT_SETTINGS_REL).read_text(encoding="utf-8")
+            on_settings = (proj_on / PROJECT_SETTINGS_REL).read_text(encoding="utf-8")
+            if on_settings != plain_settings:
+                failures.append("with on-failure-render true, .claude/settings.json must stay "
+                                "byte-identical to a project tree authoring no optional keys")
+            if "onFailure" in on_settings or '"timeout": 45' in on_settings:
+                failures.append("the project settings must never render an onFailure key or an "
+                                "authored timeout")
+            on_hooks = (proj_on / HOOKS_JSON_REL).read_text(encoding="utf-8")
+            if '"onFailure": "block"' not in on_hooks or '"timeout": 45' not in on_hooks:
+                failures.append("project-settings switch case: hooks.json must show the switch "
+                                "applied (the authored timeout and onFailure on the project control)")
     finally:
         try:
             _rmtree_verified(tmp, "suite temp cleanup")
@@ -3487,10 +3646,18 @@ def self_test_main(_nested=False):
           "FIFO case is time-bounded so a blocking regression is a reported failure, never a hang; an "
           "authored per-hook timeout is accepted only as an integer from TIMEOUT_MIN to TIMEOUT_MAX "
           "(each end refused just outside it, bool/string/float refused), with the optional [plugin] "
-          "keys validated fail-closed; with on-failure-render false nothing new renders (hooks.json "
-          "stays byte-identical, no onFailure anywhere); and with it true exactly the enforce-stage "
-          "PreToolUse block hooks carry onFailure 'block' plus their configured timeout, a contract "
-          "shown discriminating against a mutant that drops the key and one that resets the timeout"
+          "keys validated fail-closed and the version strings strict MAJOR.MINOR.PATCH (a non-string, "
+          "a missing component, a trailing newline, a leading zero and non-ASCII digits each refused); "
+          "with on-failure-render false, and separately with the key absent, nothing new renders "
+          "(hooks.json stays byte-identical to a baseline pinned as spelled-out bytes, no onFailure "
+          "anywhere); with it true every launcher carries its configured timeout and exactly the "
+          "enforce-stage PreToolUse block hooks carry onFailure 'block' (a bake-stage block hook "
+          "renders its authored timeout without it, so the stage clause is discriminated on its own), "
+          "a presence-aware contract shown discriminating against a mutant that drops the key, one "
+          "that resets the timeout and one that writes an explicit null, with each render-predicate "
+          "clause (event, default, stage) also discriminated by direct render vectors; and the "
+          "project .claude/settings.json stays byte-identical whatever the switch, while the same "
+          "tree's hooks.json shows the switch applied"
           + note)
     return 0
 
