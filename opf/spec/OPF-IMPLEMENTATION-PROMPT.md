@@ -1058,7 +1058,15 @@ Build the primitives every later step relies on.
 - A TOML reader, and a canonical TOML emitter whose output for an unchanged parsed model
   reproduces the file's bytes exactly. The writers refuse any file that fails this
   byte-reproduction test, such as one carrying comments (section 8.8, Authoring operations, item 2;
-  section 9.2, Store schema upgrades). The serialization itself is yours to fix (open point 18).
+  section 9.2, Store schema upgrades), with the one exception section 5.7 states: the canonical
+  serialization writes U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR inside a string as
+  six-character backslash-u escapes, and "a file that differs from it only by holding either
+  character literally inside a basic string, as files written by earlier tooling do, still
+  passes, reads back as the same values, and is re-spelled with the escapes by its next write".
+  Section 5.7 also rules that a write that would grow a store file past the store reader's size
+  cap "refuses instead, before anything is written", so an upgrade or record operation never
+  rewrites a readable store into one the reader refuses. The serialization itself is yours to fix
+  (open point 18).
 - A clock reader. Every `created_at`, `updated_at`, `date`, `decided_at`, `sent_at`,
   `receipted_at`, lease acquisition time and release date is read from the clock at the event, in
   RFC 3339 UTC (sections 5.7, 6.1, 8.3, 8.8). Never compose or guess a timestamp.
@@ -1204,7 +1212,11 @@ Build the primitives every later step relies on.
 Acceptance checks:
 
 - Re-emitting a parsed canonical file gives identical bytes; a file with a comment or a
-  non-canonical layout is detected as non-canonical.
+  non-canonical layout is detected as non-canonical. A file that differs from the canonical
+  serialization only by holding U+2028 literally inside a basic string, and one only by holding
+  U+2029, each passes, reads back as the same values, and is re-spelled with the escapes by its
+  next write (section 5.7). A write that would grow a store file past the store reader's size cap
+  refuses before anything is written.
 - An unreadable or malformed input produces cannot-evaluate in a unit test, never a pass.
 - A path with a `..` component, a backslash or an absolute form is refused.
 - The class declaration check yields cannot-evaluate for each of these declarations: absent,
@@ -1291,9 +1303,9 @@ Implement resolution exactly as sections 4.3 (The pointer), 4.4 (The machine sto
   report an override that is untracked and matched by no ignore rule, though section 4.3 says the
   file is "ignored by version control". Step 14 discloses both limits as residuals. No OPF operation
   writes the ignore rule. Section 4.2 has init and upgrade render one ignore file,
-  `.working/.gitignore`, and only at homes 2 ("Homes-2 init and upgrade MUST render this managed
-  block into `.working/.gitignore`"); at homes 1, this prompt's target, they render none, and that
-  file would not cover the product root in any case.
+  `.working/.gitignore`, and only at homes 2 ("Homes-2 init, and any upgrade of a store already at
+  homes 2, MUST render this managed block into `.working/.gitignore`"); at homes 1, this prompt's
+  target, they render none, and that file would not cover the product root in any case.
 
 Acceptance checks:
 
@@ -1997,9 +2009,10 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
     reason it counts every other entry under `.working/staging/`: the check cannot show that such an
     entry holds no import state. Section 4.2's "Journals are machine-local even after completion"
     sits in the paragraph after the managed ignore block that lists `/journals/` and that "Homes-2
-    init and upgrade MUST render"; this prompt reads it as a homes-2 rule, though section 4.2 does
-    not limit that paragraph to homes 2, and the same paragraph opens with "Durable `imported/` and
-    `archive/` evidence MUST stay tracked", which is not tied to homes 2. Whichever generation it
+    init, and any upgrade of a store already at homes 2, MUST render"; this prompt reads it as a
+    homes-2 rule, though section 4.2 does not limit that paragraph to homes 2, and the same
+    paragraph opens with "Durable `imported/` and `archive/` evidence MUST stay tracked", which is
+    not tied to homes 2. Whichever generation it
     binds, section 4.2 says of a store under pre-1.3.0 tooling, as every origin store of this
     upgrade was, that "the homes-2 names are ordinary store paths there, graded, detected, and
     dispositioned exactly as before", and section 5.1 makes "An untracked or ignored `.working/`

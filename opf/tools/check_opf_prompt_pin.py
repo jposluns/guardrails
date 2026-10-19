@@ -12,32 +12,51 @@ and in the isolated opf/ copy of the standalone-closure gate.
 Checks, each a named guard:
   prompt-read     the prompt is a readable regular file within the size bound (else CANNOT-EVALUATE)
   pin-shape       the prompt names at least three 40-lowercase-hex commits and they are identical
-  table-shape     the pin table lists exactly the seven pinned paths, each once, each digest 64
-                  lowercase hex
+  pin-section     the prompt carries the pin section between its two fixed headings
+  pin-location    the pin sentence, the raw-URL template and the example URL each name the pinned
+                  commit exactly once, so a movable name (a branch) in one of those places cannot
+                  hide behind the spelling count elsewhere
+  table-shape     every pipe-led line of the pin section other than the fixed header and the
+                  separator is a well-formed table row, and the rows list exactly the seven pinned
+                  paths, each once, each digest 64 lowercase hex; a malformed row is a finding,
+                  never silently dropped
   table-drift     each table digest equals the SHA-256 of that file's bytes in the checked tree
-  pin-history     where the checked tree is a non-shallow git repository: the pinned commit must be
-                  present (absent is CANNOT-EVALUATE) and each pinned blob at that commit must hash
-                  to the table value; a shallow clone or a tree that is no git repository skips
-                  this leg, so the byte comparison above still binds the table
+  pin-history     where the checked tree is a git repository with full history: the pinned commit
+                  must be present (absent is CANNOT-EVALUATE) and each pinned blob at that commit
+                  must hash to the table value, with replacement objects disabled so a replace ref
+                  cannot substitute other bytes for the pinned ones; a shallow repository, or git's
+                  own answer that there is no repository, skips this leg (the byte comparison above
+                  still binds the table), and any other git failure is CANNOT-EVALUATE, never a
+                  silent skip
   pack-facts      the format and version the prompt states match opf/prompt-pack/pack.toml
-  quotation       every quotation the prompt introduces as source text (with says, states,
-                  requires, continues, rules, adds, quotes, allows, fixes or bounds) appears word
-                  for word, whitespace-insensitively, in one of the seven pinned files
+  quotation       every double-quoted span of MIN_QUOTE_CHARS or more normalized characters whose
+                  nearby context (same paragraph, within _QUOTE_CONTEXT_CHARS before the opening
+                  quote) attributes it to a pinned source appears word for word,
+                  whitespace-insensitively, in one of the seven pinned files; the only allowed
+                  non-matches are the named spans in QUOTE_EXEMPTIONS (the prompt quoting its own
+                  headings and its own worked examples), and a paragraph with an unpaired double
+                  quote is a finding because pairing cannot be trusted there
   required-rule   a fixed list of section 16.1 and section 9.2 sentences appears verbatim
                   (whitespace-insensitively) in both the specification and the prompt
 
-  check_opf_prompt_pin.py              verify the shipped prompt beside this tool (../spec)
-  check_opf_prompt_pin.py --self-test  synthetic trees assert each guard's exact status and name,
-                                       and that each red fixture turns green when the one check it
-                                       covers is disabled, so no other guard also fires on it
+  check_opf_prompt_pin.py                    verify the shipped prompt beside this tool (../spec)
+  check_opf_prompt_pin.py --self-test        synthetic trees assert each guard's exact status and
+                                             name, that each result is stable across two runs, and
+                                             that each red fixture covered by one module-level
+                                             check turns green when exactly that check is disabled
+  check_opf_prompt_pin.py --list-quotations  re-runnable probe: print every attributed quotation
+                                             with its line and status (MATCH, EXEMPT with the
+                                             exemption's name, or NO-MATCH) and any unpaired-quote
+                                             paragraph; exit 0 only when nothing is NO-MATCH
 
 Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such as pin drift),
 2 CANNOT-EVALUATE (unreadable input, a missing pinned commit under full history, a harness error).
 
-The quotation leg checks only quotations introduced with the listed words; a quotation introduced
-any other way is not checked, and an exact quotation does not prove the prose around it reads the
-source correctly. The history leg authenticates nothing: it reads whatever object store the checked
-tree carries.
+The quotation leg checks only spans whose nearby context names a pinned source; a quotation
+attributed to a document outside the pin (the git man pages the prompt also quotes) or quoted
+without nearby attribution is not checked, and an exact quotation does not prove the prose around
+it reads the source correctly. The history leg authenticates nothing: it reads whatever object
+store the checked tree carries, with replacement-object resolution disabled.
 """
 import sys
 
@@ -83,11 +102,17 @@ TABLE_PATHS = (
 SPEC_TABLE_PATH = "opf/spec/OPF-SPEC.md"
 MAX_FILE_BYTES = 16 * 1024 * 1024
 MIN_PIN_OCCURRENCES = 3
-MIN_QUOTE_CHARS = 40
+# A normalized double-quoted span shorter than this is a token, not a quotation. 16 keeps every
+# quotation-shaped span checked while leaving quoted tokens (IDs, verdict words) out.
+MIN_QUOTE_CHARS = 16
+# How far back, inside one paragraph, the attribution context may sit before an opening quote.
+_QUOTE_CONTEXT_CHARS = 250
 _COMMIT_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-f]{40}(?![0-9a-fA-F])")
-_TABLE_ROW_RE = re.compile(r"^\|\s*`([^`|]+)`\s*\|[^|]*\|\s*`([0-9a-f]{64})`\s*\|\s*$", re.MULTILINE)
-_INTRODUCER_RE = re.compile(
-    r"\b(?:says|say|states|requires|continues|rules|adds|quotes|allows|fixes|bounds)\b")
+_TABLE_HEADER = "| File | Role | SHA-256 at the pinned commit |"
+_TABLE_SEPARATOR_RE = re.compile(r"\|(?:\s*:?-+:?\s*\|)+")
+_TABLE_ROW_RE = re.compile(r"\|\s*`([^`|]+)`\s*\|[^|]*\|\s*`([0-9a-f]{64})`\s*\|")
+_PIN_SENTENCE_RE = re.compile(r"pinned commit\s+`([0-9a-f]{40})`")
+_URL_TEMPLATE_RE = re.compile(r"(?m)^https://\S+?/([0-9a-f]{40})/<path>$")
 # A quotation is checked only where its context attributes it to a pinned source; the prompt also
 # quotes documents outside the pin (git man pages), which this gate cannot pin.
 _SOURCE_CONTEXT_RE = re.compile(
@@ -129,6 +154,20 @@ REQUIRED_RULES = (
      "`imported:<NS>-<n>` IDs."),
 )
 
+# The named allowed non-matches of the quotation sweep, each an exact normalized span. The prompt
+# quotes its own headings when it refers to itself, and it shows worked examples of forms it asks
+# the implementer to write; neither is source text, so neither can appear in a pinned file. An
+# entry here exempts exactly one span text, so any other non-matching attributed span stays a
+# finding.
+QUOTE_EXEMPTIONS = (
+    ("own-heading-silence", "Where the specification is silent or open"),
+    ("own-heading-choices", "Choices to make before you start"),
+    ("citation-form-example", "OPF-SPEC.md, section 8.2 (ID namespaces and counters)"),
+    ("conformance-statement-example",
+     "`conformant_for_declared_scope` (OPFiles base, spec 1.3.0 on homes 1; self-asserted; "
+     "profiles: none declared)"),
+)
+
 
 class _Refusal(Exception):
     def __init__(self, status, guard, detail):
@@ -149,18 +188,40 @@ def _normalize(text):
     return " ".join(text.split())
 
 
+def _close_fd_exc_safe(fd):
+    """A failing close never replaces an exception in flight in the CALLING frame, and still
+    propagates fail-closed when none is, including under an exception a caller is merely handling.
+    One os.close either way: a raising close has released the number (close(2)), which is never
+    probed or closed again."""
+    tb = sys.exc_info()[2]
+    in_flight = tb is not None and tb.tb_frame is sys._getframe(1)
+    try:
+        os.close(fd)
+    except OSError:
+        if not in_flight:
+            raise
+
+
 def _read_regular(path, what):
-    """Exact bytes of a regular file, bounded, never following a final symlink."""
+    """Exact bytes of a regular file, bounded, never following a final symlink: the no-follow open
+    yields the descriptor, fstat classifies and bounds that same open file (not a path a race could
+    swap), and the read is capped at the bound plus one byte, so an oversize file is never read
+    whole. The file object is made with closefd=False, so the finally's close is the one close of
+    fd on every path."""
     try:
-        mode = os.lstat(path).st_mode
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except OSError as exc:
         raise _Refusal(CANNOT_EVALUATE, what + "-read", "{} unreadable: {}".format(what, exc))
-    _require(stat.S_ISREG(mode), what + "-read",
-             "{} {!s} is not a regular file".format(what, path), CANNOT_EVALUATE)
     try:
-        data = Path(path).read_bytes()
-    except OSError as exc:
-        raise _Refusal(CANNOT_EVALUATE, what + "-read", "{} unreadable: {}".format(what, exc))
+        st = os.fstat(fd)
+        _require(stat.S_ISREG(st.st_mode), what + "-read",
+                 "{} {!s} is not a regular file".format(what, path), CANNOT_EVALUATE)
+        _require(st.st_size <= MAX_FILE_BYTES, what + "-bound",
+                 "{} exceeds the size bound".format(what), CANNOT_EVALUATE)
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            data = handle.read(MAX_FILE_BYTES + 1)
+    finally:
+        _close_fd_exc_safe(fd)
     _require(len(data) <= MAX_FILE_BYTES, what + "-bound",
              "{} exceeds the size bound".format(what), CANNOT_EVALUATE)
     return data
@@ -175,9 +236,57 @@ def _check_pin_shape(commits):
              "the prompt's pinned-commit spellings disagree: {}".format(sorted(set(commits))))
 
 
-def _parse_table(prompt_text):
-    """The pin table as {path: digest}: exactly TABLE_PATHS, each once."""
-    rows = _TABLE_ROW_RE.findall(prompt_text)
+def _pin_section(prompt_text):
+    head = prompt_text.find(_PIN_SECTION_HEAD)
+    tail = prompt_text.find(_PIN_SECTION_TAIL)
+    _require(0 <= head < tail, "pin-section",
+             "the prompt lacks the pin section between {!r} and {!r}".format(
+                 _PIN_SECTION_HEAD, _PIN_SECTION_TAIL))
+    return prompt_text[head:tail]
+
+
+def _check_pin_locations(section, pin):
+    """The three places that must each name the pinned commit: the pin sentence, the raw-URL
+    template and the example URL. Counting identical spellings alone is not enough: one of these
+    places could name a branch while the spelling count stays satisfied by text elsewhere."""
+    sentence = _PIN_SENTENCE_RE.findall(section)
+    _require(sentence == [pin], "pin-location",
+             "the pin sentence must name the pinned commit exactly once; found {}".format(
+                 sentence))
+    template = _URL_TEMPLATE_RE.findall(section)
+    _require(template == [pin], "pin-location",
+             "the raw-URL template must name the pinned commit exactly once; found {}".format(
+                 template))
+    example = re.findall(r"https://\S+?/([0-9a-f]{40})/" + re.escape(SPEC_TABLE_PATH), section)
+    _require(example == [pin], "pin-location",
+             "the example URL must name the pinned commit exactly once; found {}".format(example))
+
+
+def _parse_table(section):
+    """The pin table as {path: digest}, parsed structurally: every pipe-led line of the pin
+    section other than the fixed header and the separator must be a well-formed row, so a
+    malformed row is a finding rather than a line the row pattern silently drops."""
+    rows = []
+    malformed = []
+    for raw in section.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            continue
+        if line == _TABLE_HEADER or _TABLE_SEPARATOR_RE.fullmatch(line):
+            continue
+        match = _TABLE_ROW_RE.fullmatch(line)
+        if match:
+            rows.append(match.groups())
+        else:
+            malformed.append(line)
+    _check_table_shape(rows, malformed)
+    return dict(rows)
+
+
+def _check_table_shape(rows, malformed):
+    _require(not malformed, "table-shape",
+             "the pin section carries {} pipe-led line(s) that are not well-formed table rows, "
+             "first: {!r}".format(len(malformed), malformed[0] if malformed else None))
     found = [path for path, _ in rows]
     _require(sorted(found) == sorted(set(found)), "table-shape",
              "a pin-table path is listed twice: {}".format(
@@ -185,7 +294,6 @@ def _parse_table(prompt_text):
     _require(set(found) == set(TABLE_PATHS), "table-shape",
              "pin-table paths differ from the pinned set: missing {}, extra {}".format(
                  sorted(set(TABLE_PATHS) - set(found)), sorted(set(found) - set(TABLE_PATHS))))
-    return dict(rows)
 
 
 def _check_drift(root, table):
@@ -199,22 +307,34 @@ def _check_drift(root, table):
 
 def _git(root, args, env):
     # F-367: no detached auto-gc or auto-maintenance may outlive a call and churn .git while a
-    # later read or a fixture teardown traverses it.
-    return subprocess.run(["git", "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
-                           "-c", "maintenance.auto=false"] + list(args), stdout=subprocess.PIPE,
+    # later read or a fixture teardown traverses it. --no-replace-objects: a replace ref would
+    # resolve the pinned commit or its blobs to substituted objects, so every read here resolves
+    # the real objects only.
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(root), "-c", "gc.auto=0",
+                           "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+                          + list(args), stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, timeout=_GIT_TIMEOUT_S, env=env)
 
 
 def _check_history(root, pin, table):
     """Where full history is present, the blobs at the pinned commit must match the table. Returns
-    a one-line description of what ran, for the VALID detail."""
+    a one-line description of what ran, for the VALID detail. Only git's own answer that there is
+    no repository skips the leg: any other discovery failure (dubious ownership, a bad config, a
+    permission error) is CANNOT-EVALUATE, because treating an error as a skip would silently drop
+    the leg on exactly the trees where git misbehaves."""
     if shutil.which("git") is None:
         return "history: skipped (no git)"
     env = _scrubbed_env()
     try:
         inside = _git(root, ["rev-parse", "--is-inside-work-tree"], env)
-        if inside.returncode != 0 or inside.stdout.strip() != b"true":
-            return "history: skipped (not a git work tree)"
+        if inside.returncode != 0:
+            err = inside.stderr.decode(errors="backslashreplace").strip()
+            if "not a git repository" in err:
+                return "history: skipped (not a git repository)"
+            raise _Refusal(CANNOT_EVALUATE, "pin-history",
+                           "git repository discovery failed: {}".format(err))
+        if inside.stdout.strip() != b"true":
+            return "history: skipped (not inside a git work tree)"
         shallow = _git(root, ["rev-parse", "--is-shallow-repository"], env)
         if shallow.returncode != 0:
             raise _Refusal(CANNOT_EVALUATE, "pin-history",
@@ -240,18 +360,8 @@ def _check_history(root, pin, table):
         raise _Refusal(CANNOT_EVALUATE, "pin-history", "git could not be run: {}".format(exc))
 
 
-def _pin_section(prompt_text):
-    head = prompt_text.find(_PIN_SECTION_HEAD)
-    tail = prompt_text.find(_PIN_SECTION_TAIL)
-    _require(0 <= head < tail, "pin-section",
-             "the prompt lacks the pin section between {!r} and {!r}".format(
-                 _PIN_SECTION_HEAD, _PIN_SECTION_TAIL))
-    return prompt_text[head:tail]
-
-
-def _check_pack_facts(root, prompt_text):
+def _check_pack_facts(root, section):
     """The format and version the pin section states match opf/prompt-pack/pack.toml."""
-    section = _pin_section(prompt_text)
     stated_fmt = re.findall(r"`format = \"([^\"`]+)\"`", section)
     stated_ver = re.findall(r"`version = \"([^\"`]+)\"`", section)
     _require(len(stated_fmt) == 1 and len(stated_ver) == 1, "pack-facts",
@@ -270,33 +380,32 @@ def _check_pack_facts(root, prompt_text):
                      key, stated, actual))
 
 
-def _introduced_quotes(prompt_text):
-    """Quotations the prompt introduces as source text: for each introducer word, the first
-    double-quoted span whose opening quote lies within 160 characters, with no blank line between
-    the introducer and that quote. Spans shorter than MIN_QUOTE_CHARS after normalization are
-    tokens, not quotations, and are skipped."""
+def _attributed_quotes(prompt_text):
+    """Every double-quoted span the prompt attributes to a pinned source. Double quotes pair up
+    sequentially inside each blank-line-separated paragraph. A span joins the result where its
+    normalized length is at least MIN_QUOTE_CHARS (shorter spans are tokens, not quotations) and
+    the text before its opening quote, in the same paragraph and within _QUOTE_CONTEXT_CHARS,
+    names a pinned source. Returns (quotes, unpaired): quotes as (line, normalized span) pairs,
+    and unpaired as the starting line of each paragraph whose double-quote count is odd, because
+    one unpaired quote shifts every later pairing in that paragraph."""
     quotes = []
-    last_end = 0
-    for match in _INTRODUCER_RE.finditer(prompt_text):
-        if match.start() < last_end:
-            # An introducer word inside a quotation already captured introduces nothing.
-            continue
-        window_start = match.end()
-        opening = prompt_text.find('"', window_start)
-        if opening < 0 or opening - window_start > 160:
-            continue
-        if "\n\n" in prompt_text[window_start:opening]:
-            continue
-        if not _SOURCE_CONTEXT_RE.search(prompt_text[max(0, match.start() - 200):opening]):
-            continue
-        closing = prompt_text.find('"', opening + 1)
-        if closing < 0:
-            continue
-        last_end = closing + 1
-        quote = _normalize(prompt_text[opening + 1:closing])
-        if len(quote) >= MIN_QUOTE_CHARS:
-            quotes.append(quote)
-    return quotes
+    unpaired = []
+    offset = 0
+    for para in prompt_text.split("\n\n"):
+        positions = [i for i, ch in enumerate(para) if ch == '"']
+        if len(positions) % 2:
+            unpaired.append(prompt_text.count("\n", 0, offset) + 1)
+        for k in range(0, len(positions) - 1, 2):
+            opening, closing = positions[k], positions[k + 1]
+            quote = _normalize(para[opening + 1:closing])
+            if len(quote) < MIN_QUOTE_CHARS:
+                continue
+            context = para[max(0, opening - _QUOTE_CONTEXT_CHARS):opening]
+            if not _SOURCE_CONTEXT_RE.search(context):
+                continue
+            quotes.append((prompt_text.count("\n", 0, offset + opening) + 1, quote))
+        offset += len(para) + 2
+    return quotes, unpaired
 
 
 def _strip_comment_leaders(text):
@@ -305,11 +414,27 @@ def _strip_comment_leaders(text):
     return "\n".join(re.sub(r"^\s*#+\s?", "", line) for line in text.splitlines())
 
 
+def _sources_norm(root):
+    """The normalized quotation corpus: each pinned file, plus a comment-leader-stripped copy."""
+    source_texts = [_read_regular(root / rel, "pinned-source").decode(
+        "utf-8", errors="backslashreplace") for rel in TABLE_PATHS]
+    return "\n".join(
+        [_normalize(text) for text in source_texts]
+        + [_normalize(_strip_comment_leaders(text)) for text in source_texts])
+
+
 def _check_quotations(prompt_text, sources_norm):
-    for quote in _introduced_quotes(prompt_text):
+    quotes, unpaired = _attributed_quotes(prompt_text)
+    _require(not unpaired, "quotation",
+             "a paragraph carries an unpaired double quote (line {}): quote pairing cannot be "
+             "trusted there".format(", ".join(str(line) for line in unpaired)))
+    exempt = {text: name for name, text in QUOTE_EXEMPTIONS}
+    for line, quote in quotes:
+        if quote in exempt:
+            continue
         _require(quote in sources_norm, "quotation",
-                 "a quotation the prompt introduces as source text appears in no pinned "
-                 "source: {!r}".format(quote[:160]))
+                 "the quotation at line {} is attributed to a pinned source but appears in no "
+                 "pinned source: {!r}".format(line, quote[:160]))
 
 
 def _check_required_rules(spec_norm, prompt_norm):
@@ -328,15 +453,13 @@ def _validate(root):
     commits = _COMMIT_RE.findall(prompt_text)
     _check_pin_shape(commits)
     pin = commits[0] if commits else None
-    table = _parse_table(prompt_text)
+    section = _pin_section(prompt_text)
+    _check_pin_locations(section, pin)
+    table = _parse_table(section)
     _check_drift(root, table)
     history = _check_history(root, pin, table) if pin else "history: skipped (no pin found)"
-    _check_pack_facts(root, prompt_text)
-    source_texts = [_read_regular(root / rel, "pinned-source").decode(
-        "utf-8", errors="backslashreplace") for rel in TABLE_PATHS]
-    sources_norm = "\n".join(
-        [_normalize(text) for text in source_texts]
-        + [_normalize(_strip_comment_leaders(text)) for text in source_texts])
+    _check_pack_facts(root, section)
+    sources_norm = _sources_norm(root)
     spec_norm = _normalize(_read_regular(root / SPEC_TABLE_PATH, "pinned-source").decode(
         "utf-8", errors="backslashreplace"))
     _check_quotations(prompt_text, sources_norm)
@@ -351,6 +474,38 @@ def validate_tree(root):
     except _Refusal as refusal:
         return refusal.status, refusal.guard, str(refusal)
     return VALID, None, detail
+
+
+def list_quotations(root=DEFAULT_ROOT):
+    """Re-runnable review probe: print every attributed quotation with its line and status, plus
+    any unpaired-quote paragraph. 0 nothing is NO-MATCH, 1 at least one NO-MATCH or unpaired
+    paragraph, 2 an input cannot be read."""
+    try:
+        root = Path(root)
+        prompt_text = _read_regular(root / "opf" / PROMPT_REL, "prompt").decode(
+            "utf-8", errors="backslashreplace")
+        sources = _sources_norm(root)
+    except _Refusal as refusal:
+        print("check_opf_prompt_pin: {} [{}] {}".format(
+            refusal.status, refusal.guard, refusal), file=sys.stderr)
+        return EXIT_CODES[refusal.status]
+    quotes, unpaired = _attributed_quotes(prompt_text)
+    exempt = {text: name for name, text in QUOTE_EXEMPTIONS}
+    findings = 0
+    for line in unpaired:
+        print("UNPAIRED line {}: this paragraph's double quotes do not pair up".format(line))
+        findings += 1
+    for line, quote in quotes:
+        if quote in exempt:
+            print("EXEMPT({}) line {}: {}".format(exempt[quote], line, quote[:120]))
+        elif quote in sources:
+            print("MATCH line {}: {}".format(line, quote[:80]))
+        else:
+            print("NO-MATCH line {}: {}".format(line, quote[:160]))
+            findings += 1
+    print("{} attributed quotation(s), {} finding(s), floor {} characters, {} named "
+          "exemption(s)".format(len(quotes), findings, MIN_QUOTE_CHARS, len(QUOTE_EXEMPTIONS)))
+    return 1 if findings else 0
 
 
 # ---- self-test ------------------------------------------------------------------------------------
@@ -377,7 +532,7 @@ def _fixture_spec():
 
 def _fixture_prompt(root, pin=_FIXTURE_PIN,
                     quote="The emitter writes canonical bytes for every view it renders.",
-                    pack_version="0.5.1", drop_rule=None, digest_overrides=None):
+                    pack_version="0.5.1", drop_rule=None, digest_overrides=None, extra_text=None):
     digests = {}
     for rel in TABLE_PATHS:
         digests[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
@@ -389,23 +544,27 @@ def _fixture_prompt(root, pin=_FIXTURE_PIN,
         if name != drop_rule:
             rules.append('The specification says "{}"'.format(sentence))
     return (_PIN_SECTION_HEAD + "\n\nRead these files at the pinned commit `" + pin +
-            "` of the repository.\n\n| File | Role | SHA-256 at the pinned commit |\n|---|---|---|\n" +
+            "` of the repository.\n\n" + _TABLE_HEADER + "\n|---|---|---|\n" +
             table + "\n\nEach raw URL names the commit:\n\n```text\nhttps://example.invalid/" + pin +
             "/<path>\n```\n\nFor example, https://example.invalid/" + pin + "/opf/spec/OPF-SPEC.md.\n\n" +
             'The pack manifest (`format = "opf.prompt-pack/v1"`, `version = "' + pack_version +
             '"`) lists no members.\n\n' + _PIN_SECTION_TAIL + "\n\n" +
-            'The specification says "' + quote + '"\n\n' + "\n\n".join(rules) + "\n")
+            'The specification says "' + quote + '"\n\n' + "\n\n".join(rules) + "\n" +
+            ("\n" + extra_text + "\n" if extra_text else ""))
 
 
-def _build_tree(base, **prompt_kwargs):
+def _build_tree(base, pack_text=_FIXTURE_PACK, source_overrides=None, **prompt_kwargs):
     root = Path(base)
-    for rel, text in _FIXTURE_SOURCES.items():
+    sources = dict(_FIXTURE_SOURCES)
+    if source_overrides:
+        sources.update(source_overrides)
+    for rel, text in sources.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(text, encoding="utf-8")
     (root / SPEC_TABLE_PATH).parent.mkdir(parents=True, exist_ok=True)
     (root / SPEC_TABLE_PATH).write_text(_fixture_spec(), encoding="utf-8")
     (root / "opf" / PACK_REL).parent.mkdir(parents=True, exist_ok=True)
-    (root / "opf" / PACK_REL).write_text(_FIXTURE_PACK, encoding="utf-8")
+    (root / "opf" / PACK_REL).write_text(pack_text, encoding="utf-8")
     prompt = root / "opf" / PROMPT_REL
     prompt.parent.mkdir(parents=True, exist_ok=True)
     prompt.write_text(_fixture_prompt(root, **prompt_kwargs), encoding="utf-8")
@@ -420,10 +579,22 @@ def _spec_edit(root):
         "regenerate cleanly", "regenerate Cleanly", 1), encoding="utf-8")
 
 
+def _edit_prompt(root, old, new):
+    """One textual fixture edit; the old text must be present, so a stale fixture fails loudly."""
+    prompt = root / "opf" / PROMPT_REL
+    text = prompt.read_text(encoding="utf-8")
+    if old not in text:
+        raise RuntimeError("fixture edit target not found: {!r}".format(old[:80]))
+    prompt.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
 def _vectors():
     """(name, expected status, expected guard, covering check, builder(base)). The covering check
-    is the module function whose removal must turn the fixture green."""
+    is the module function whose removal must turn the fixture green; None where the refusal has
+    no single module-level check to disable (a read refusal, or a parse shape the later checks
+    cannot survive without)."""
     bad = "d" * 64
+    spare_pin = "The pinned commit `" + _FIXTURE_PIN + "` is named once more here."
 
     def valid(base):
         _build_tree(base)
@@ -435,12 +606,9 @@ def _vectors():
         _build_tree(base, digest_overrides={SPEC_TABLE_PATH: bad})
 
     def pins_disagree(base):
-        root = _build_tree(base)
-        prompt = root / "opf" / PROMPT_REL
-        text = prompt.read_text(encoding="utf-8")
-        prompt.write_text(text.replace("https://example.invalid/" + _FIXTURE_PIN + "/<path>",
-                                       "https://example.invalid/" + "e" * 40 + "/<path>", 1),
-                          encoding="utf-8")
+        # The three structural locations stay intact; a fourth spelling disagrees, so only the
+        # identical-spellings comparison can catch it.
+        _build_tree(base, extra_text="A stray spelling `" + "e" * 40 + "` also appears here.")
 
     def pack_bumped(base):
         # The prompt's stated version drifts from pack.toml; the pack bytes themselves stay
@@ -461,9 +629,98 @@ def _vectors():
         # One character under the floor: a token, never a quotation, so it is not checked.
         _build_tree(base, quote="z" * (MIN_QUOTE_CHARS - 1))
 
+    def quote_no_introducer(base):
+        # Attributed by nearby context alone, with no verb introducing it: still checked.
+        _build_tree(base, extra_text='Open point 1 notes that section 3 of the specification '
+                    'covers rendering ("The emitter renders stale views at homes nine").')
+
+    def quote_short_stale(base):
+        # Nineteen normalized characters: above the floor, below the old 40-character cut.
+        _build_tree(base, extra_text='Section 2 says "Stores erase weekly" about retention.')
+
+    def quote_unpaired(base):
+        _build_tree(base, extra_text='Section 6 text has a stray " character in this paragraph.')
+
+    def quote_exempt(base):
+        # A named exemption: the prompt quoting one of its own headings is not source text.
+        _build_tree(base, extra_text='The specification heading convention mirrors "Choices to '
+                    'make before you start" in this prompt.')
+
+    def quote_unattributed(base):
+        # No pinned source named nearby, so the sweep does not check the span.
+        _build_tree(base, extra_text='Your working notes could read "no store writes happened '
+                    'during this probing run today".')
+
     def prompt_absent(base):
         root = _build_tree(base)
         (root / "opf" / PROMPT_REL).unlink()
+
+    def table_row_malformed(base):
+        # The malformed row sits inside the table block; it must be a finding, not a dropped line.
+        root = _build_tree(base)
+        _edit_prompt(root, "\n\nEach raw URL names the commit:",
+                     "\n| `opf/spec/OPF-SPEC.md` | pinned | `INVALID-DIGEST` |"
+                     "\n\nEach raw URL names the commit:")
+
+    def table_row_duplicate(base):
+        root = _build_tree(base)
+        text = (root / "opf" / PROMPT_REL).read_text(encoding="utf-8")
+        row = re.search(r"(?m)^\| `{}` \| pinned \| `[0-9a-f]{{64}}` \|$".format(
+            re.escape(SPEC_TABLE_PATH)), text).group(0)
+        _edit_prompt(root, row, row + "\n" + row)
+
+    def table_row_missing(base):
+        root = _build_tree(base)
+        text = (root / "opf" / PROMPT_REL).read_text(encoding="utf-8")
+        row = re.search(r"(?m)^\| `opf/prompt-pack/pack\.toml` \| pinned \| `[0-9a-f]{64}` \|$",
+                        text).group(0)
+        _edit_prompt(root, row + "\n", "")
+
+    def section_missing(base):
+        root = _build_tree(base)
+        _edit_prompt(root, _PIN_SECTION_HEAD, "## Read these files first")
+
+    def sentence_missing(base):
+        root = _build_tree(base, extra_text=spare_pin)
+        _edit_prompt(root, "at the pinned commit `" + _FIXTURE_PIN + "` of the repository.",
+                     "at the commit named below.")
+
+    def template_names_branch(base):
+        root = _build_tree(base, extra_text=spare_pin)
+        _edit_prompt(root, "https://example.invalid/" + _FIXTURE_PIN + "/<path>",
+                     "https://example.invalid/main/<path>")
+
+    def example_url_missing(base):
+        root = _build_tree(base, extra_text=spare_pin)
+        _edit_prompt(root, "For example, https://example.invalid/" + _FIXTURE_PIN +
+                     "/opf/spec/OPF-SPEC.md.\n\n", "")
+
+    def source_missing(base):
+        root = _build_tree(base)
+        (root / "opf/spec/OPF-QUICKSTART.md").unlink()
+
+    def source_symlink(base):
+        root = _build_tree(base)
+        quickstart = root / "opf/spec/OPF-QUICKSTART.md"
+        target = root / "quickstart-real.md"
+        target.write_text(quickstart.read_text(encoding="utf-8"), encoding="utf-8")
+        quickstart.unlink()
+        quickstart.symlink_to(target)
+
+    def source_at_bound(base):
+        # Exactly MAX_FILE_BYTES: the largest pinned source the gate still reads.
+        text = _FIXTURE_SOURCES["opf/spec/OPF-QUICKSTART.md"]
+        _build_tree(base, source_overrides={
+            "opf/spec/OPF-QUICKSTART.md": text + "z" * (MAX_FILE_BYTES - len(text))})
+
+    def source_oversize(base):
+        # One byte over the bound: refused before the bytes are read whole.
+        text = _FIXTURE_SOURCES["opf/spec/OPF-QUICKSTART.md"]
+        _build_tree(base, source_overrides={
+            "opf/spec/OPF-QUICKSTART.md": text + "z" * (MAX_FILE_BYTES - len(text) + 1)})
+
+    def pack_unparseable(base):
+        _build_tree(base, pack_text='format = "opf.prompt-pack/v1"\nmembers = [\n')
 
     return [
         ("valid-tree", VALID, None, None, valid),
@@ -475,7 +732,31 @@ def _vectors():
         ("quotation-reworded", INVALID, "quotation", "_check_quotations", quote_reworded),
         ("quotation-at-floor", INVALID, "quotation", "_check_quotations", quote_at_floor),
         ("quotation-below-floor", VALID, None, None, quote_below_floor),
+        ("quotation-attributed-no-introducer", INVALID, "quotation", "_check_quotations",
+         quote_no_introducer),
+        ("quotation-short-stale", INVALID, "quotation", "_check_quotations", quote_short_stale),
+        ("quotation-unpaired", INVALID, "quotation", "_check_quotations", quote_unpaired),
+        ("quotation-exempt-span", VALID, None, None, quote_exempt),
+        ("quotation-unattributed-span", VALID, None, None, quote_unattributed),
         ("prompt-absent", CANNOT_EVALUATE, "prompt-read", None, prompt_absent),
+        ("table-row-malformed", INVALID, "table-shape", "_check_table_shape",
+         table_row_malformed),
+        ("table-row-duplicate", INVALID, "table-shape", "_check_table_shape",
+         table_row_duplicate),
+        ("table-row-missing", INVALID, "table-shape", None, table_row_missing),
+        ("pin-section-missing", INVALID, "pin-section", None, section_missing),
+        ("pin-sentence-missing", INVALID, "pin-location", "_check_pin_locations",
+         sentence_missing),
+        ("url-template-names-branch", INVALID, "pin-location", "_check_pin_locations",
+         template_names_branch),
+        ("example-url-missing", INVALID, "pin-location", "_check_pin_locations",
+         example_url_missing),
+        ("pinned-source-missing", CANNOT_EVALUATE, "pinned-source-read", None, source_missing),
+        ("pinned-source-symlink", CANNOT_EVALUATE, "pinned-source-read", None, source_symlink),
+        ("pinned-source-at-bound", VALID, None, None, source_at_bound),
+        ("pinned-source-oversize", CANNOT_EVALUATE, "pinned-source-bound", None, source_oversize),
+        ("pack-manifest-unparseable", CANNOT_EVALUATE, "pack-manifest-parse",
+         "_check_pack_facts", pack_unparseable),
     ]
 
 
@@ -498,20 +779,33 @@ def _history_vectors(tmp, check):
         return 0
     env = _scrubbed_env()
 
+    def run_git(root, args):
+        proc = _git(root, args, env)
+        if proc.returncode != 0:
+            raise RuntimeError("fixture git failed: {}".format(
+                proc.stderr.decode(errors="backslashreplace")))
+        return proc
+
     def repo(base):
         root = _build_tree(base)
         for args in (["init", "-q"], ["add", "-A"],
                      ["-c", "user.name=t", "-c", "user.email=t@example.invalid",
                       "commit", "-q", "-m", "fixture"]):
-            proc = _git(root, args, env)
-            if proc.returncode != 0:
-                raise RuntimeError("fixture git failed: {}".format(
-                    proc.stderr.decode(errors="backslashreplace")))
-        head = _git(root, ["rev-parse", "HEAD"], env).stdout.decode().strip()
+            run_git(root, args)
+        head = run_git(root, ["rev-parse", "HEAD"]).stdout.decode().strip()
         prompt = root / "opf" / PROMPT_REL
         prompt.write_text(prompt.read_text(encoding="utf-8").replace(_FIXTURE_PIN, head),
                           encoding="utf-8")
         return root, head
+
+    def repoint_spec_digest(root):
+        _spec_edit(root)
+        prompt = root / "opf" / PROMPT_REL
+        new_digest = hashlib.sha256((root / SPEC_TABLE_PATH).read_bytes()).hexdigest()
+        text = prompt.read_text(encoding="utf-8")
+        old_row = re.search(r"\| `{}` \| pinned \| `([0-9a-f]{{64}})` \|".format(
+            re.escape(SPEC_TABLE_PATH)), text).group(1)
+        prompt.write_text(text.replace(old_row, new_digest), encoding="utf-8")
 
     ran = 0
     root, _ = repo(Path(tmp) / "history-valid")
@@ -520,13 +814,7 @@ def _history_vectors(tmp, check):
     check("history-valid", got, (VALID, None))
 
     root, _ = repo(Path(tmp) / "history-drifted")
-    _spec_edit(root)
-    prompt = root / "opf" / PROMPT_REL
-    new_digest = hashlib.sha256((root / SPEC_TABLE_PATH).read_bytes()).hexdigest()
-    text = prompt.read_text(encoding="utf-8")
-    old_row = re.search(r"\| `{}` \| pinned \| `([0-9a-f]{{64}})` \|".format(
-        re.escape(SPEC_TABLE_PATH)), text).group(1)
-    prompt.write_text(text.replace(old_row, new_digest), encoding="utf-8")
+    repoint_spec_digest(root)
     got = validate_tree(root)
     ran += 1
     check("history-blob-mismatch", got, (INVALID, "pin-history"))
@@ -545,6 +833,32 @@ def _history_vectors(tmp, check):
     got = validate_tree(root)
     ran += 1
     check("history-commit-missing", got, (CANNOT_EVALUATE, "pin-history"))
+
+    # A git failure that is not "no repository" must fail closed, never read as a skip.
+    root, _ = repo(Path(tmp) / "history-discovery-error")
+    (root / ".git" / "config").write_text("[\n", encoding="utf-8")
+    got = validate_tree(root)
+    ran += 1
+    check("history-discovery-error", got, (CANNOT_EVALUATE, "pin-history"))
+
+    # A replace ref must not substitute another commit's blobs for the pinned commit's.
+    root, head = repo(Path(tmp) / "history-replaced")
+    repoint_spec_digest(root)
+    run_git(root, ["add", "-A"])
+    run_git(root, ["-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                   "commit", "-q", "-m", "edit"])
+    second = run_git(root, ["rev-parse", "HEAD"]).stdout.decode().strip()
+    run_git(root, ["replace", head, second])
+    got = validate_tree(root)
+    ran += 1
+    check("history-replaced-commit", got, (INVALID, "pin-history"))
+    restore = _with_check_disabled("_check_history")
+    try:
+        disabled = validate_tree(root)
+    finally:
+        restore()
+    ran += 1
+    check("history-replaced-commit-disabled", disabled, (VALID, None))
     return ran
 
 
@@ -561,8 +875,9 @@ def self_test():
 
 
 def _self_test_isolated():
-    """0 every vector returned its exact status and guard (and turned green with its covering check
-    disabled), 1 a discriminator failed, 2 harness error."""
+    """0 every vector returned its exact status and guard, repeated it on a second run, and turned
+    green with its covering check disabled where it names one; 1 a discriminator failed, 2 harness
+    error."""
     failures = []
     count = 0
 
@@ -582,8 +897,14 @@ def _self_test_isolated():
                 got = validate_tree(base)
                 again = validate_tree(base)
                 count += 1
-                check(name, got if again == got else (got[0], got[1], "unstable: " + str(again)),
-                      (status, guard))
+                check(name, got, (status, guard))
+                # The second run must repeat the first exactly; a tuple that differs in any
+                # element, the detail included, is its own failure, never a passed detail.
+                count += 1
+                check(name + "-stable",
+                      ("stable", None) if again == got
+                      else ("unstable", None, "first {!r}, second {!r}".format(got, again)),
+                      ("stable", None))
                 if covering is not None:
                     restore = _with_check_disabled(covering)
                     try:
@@ -609,8 +930,11 @@ def main(argv=None):
         args = list(sys.argv[1:] if argv is None else argv)
         if args == ["--self-test"]:
             return self_test()
+        if args == ["--list-quotations"]:
+            return list_quotations()
         if args:
-            print("usage: check_opf_prompt_pin.py [--self-test]", file=sys.stderr)
+            print("usage: check_opf_prompt_pin.py [--self-test | --list-quotations]",
+                  file=sys.stderr)
             return 2
         status, guard, detail = validate_tree(DEFAULT_ROOT)
         if status == VALID:
@@ -625,6 +949,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--self-test"]:
-        sys.exit(self_test())
     sys.exit(main())
