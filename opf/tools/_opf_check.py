@@ -748,6 +748,20 @@ def _record_digest(body):
     return "sha256:" + hashlib.sha256(_opf_emit.emit(body).encode("utf-8")).hexdigest()
 
 
+def _record_digest_matches(body, recorded):
+    """True iff `recorded` is the per-record digest of `body` (_record_digest), or the digest of the same
+    canonical serialization as an emitter before the U+2028/U+2029 escape spelled it (the escape of each
+    written as the literal character, _opf_emit.prior_separator_spelling), so a digest recorded over a body
+    holding one of those characters before that escape still reconciles. Either spelling is a function of
+    the parsed body alone, so a changed body matches neither. Raises `_opf_emit.EmitError` as _record_digest
+    does."""
+    text = _opf_emit.emit(body)
+    if recorded == "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest():
+        return True
+    prior = _opf_emit.prior_separator_spelling(text)
+    return prior != text and recorded == "sha256:" + hashlib.sha256(prior.encode("utf-8")).hexdigest()
+
+
 def _under_any(p, prefixes):
     """True when path `p` equals, or lies beneath, any store-relative prefix in `prefixes`."""
     for u in prefixes:
@@ -1181,11 +1195,11 @@ def _gather_perrecord(root_fd, machine_rel, tname, namespace, rows, where, regis
             recon.append(("finding", "{}: registry row state {} does not match record status {} (spec "
                           "9/13)".format(rw, _safe_display(row_state), _safe_display(body_status))))
         try:
-            want = _record_digest(body)
+            matched = _record_digest_matches(body, row.get("digest"))
         except _opf_emit.EmitError as exc:
             recon.append(("cant", "{}: cannot compute the per-record digest ({})".format(body_rel, exc)))
-            want = None
-        if want is not None and row.get("digest") != want:
+            matched = None
+        if matched is False:
             recon.append(("finding", "{}: per-record digest mismatch for {!r} (the index row and the record "
                           "file disagree; spec 13:999-1001)".format(rw, rid)))
         recs.append(_make_rec(body, tname, "active"))
@@ -2228,12 +2242,12 @@ def _verify_immutable_body(rid, cur, prior_digests, rep):
                  "prior digest".format(rid))
         return
     try:
-        cur_dig = _record_digest(body)
+        preserved = _record_digest_matches(body, pdig)
     except _opf_emit.EmitError as exc:
         rep.cant("C-HISTORY-RESURRECTION: cannot canonicalize the current body of immutable record {!r} to "
                  "compare against the prior digest ({})".format(rid, exc))
         return
-    if cur_dig != pdig:
+    if not preserved:
         rep.finding("C-HISTORY-RESURRECTION: immutable record {!r} body changed since the prior committed "
                     "snapshot (a created-terminal record does not change; spec 8.5)".format(rid))
 
@@ -4329,6 +4343,42 @@ def self_test():
         check("per-record-digest-flip-invalid", r.status == INVALID)
         check("per-record-digest-flip-named",
               any("C-PERRECORD-RECONCILE" in f or "digest mismatch" in f for f in r.findings))
+        # A registry digest taken over the earlier spelling (U+2028 and U+2029 written literally, as the
+        # emitter wrote them before it escaped both) still reconciles. A digest over a naive text replacement,
+        # which also rewrites the text after an escaped backslash, is no emitter's spelling: a mismatch.
+        def _sha_text(text):
+            return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+        sep_fn = envelope("FN-1", "finding", "open", summary="a" + chr(0x2028) + "b" + chr(0x2029) + "c")
+        sep_prior = _opf_emit.emit(sep_fn).replace("\\u2028", chr(0x2028)).replace("\\u2029", chr(0x2029))
+        prl = copy.deepcopy(pr_machine)
+        prl["finding/FN-1.toml"] = sep_fn
+        prl["finding.index.toml"]["record"][0]["digest"] = _sha_text(sep_prior)
+        check("per-record-prior-separator-digest-valid",
+              sep_prior != _opf_emit.emit(sep_fn) and run(prl, product=pr_product, obs=pr_obs).status == VALID)
+        slash_fn = envelope("FN-1", "finding", "open", summary="x\\u2028y")
+        prn = copy.deepcopy(pr_machine)
+        prn["finding/FN-1.toml"] = slash_fn
+        prn["finding.index.toml"]["record"][0]["digest"] = _sha_text(
+            _opf_emit.emit(slash_fn).replace("\\u2028", chr(0x2028)))
+        prn_r = run(prn, product=pr_product, obs=pr_obs)
+        check("per-record-naive-separator-digest-invalid",
+              prn_r.status == INVALID and any("digest mismatch" in f for f in prn_r.findings))
+        # C-HISTORY-RESURRECTION: a prior body digest taken over the earlier spelling still proves the
+        # immutable body unchanged; the same digest against a changed body is still a finding.
+        sep_dn = dict(dn(1, "BI-1"), summary="done" + chr(0x2028) + "now")
+        hist = clean_machine()
+        hist["done.index.toml"] = idx([sep_dn])
+        hist_obs = copy.deepcopy(clean_prior())
+        hist_obs["prior"]["digests"]["DN-1"] = _sha_text(
+            _opf_emit.emit(sep_dn).replace("\\u2028", chr(0x2028)))
+        hist_r = run(hist, obs=hist_obs)
+        check("history-immutable-body-prior-separator-digest-valid",
+              hist_r is not None and hist_r.status == VALID)
+        hist["done.index.toml"] = idx([dict(sep_dn, summary="done" + chr(0x2028) + "later")])
+        hist_r = run(hist, obs=hist_obs)
+        check("history-immutable-body-prior-separator-digest-changed-invalid",
+              hist_r is not None and any("C-HISTORY-RESURRECTION" in f and "body changed" in f
+                                         for f in hist_r.findings))
         # two-field row (missing state, path) -> INVALID
         prk = copy.deepcopy(pr_machine)
         prk["finding.index.toml"]["record"][0] = {"id": "FN-1", "digest": d1}

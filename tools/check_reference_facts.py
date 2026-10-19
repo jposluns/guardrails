@@ -68,7 +68,13 @@ generator alone cannot assert:
     subset framework must not carry an ids_total edition denominator). The gen_mappings branch is the
     primary control; this is defence in depth against a hand-edited page or export;
   - the landing-page counts (rules, gates, hooks with their blocking/warning split, frameworks, and
-    the enforced-rules figure): each recomputed from the rule corpus, the gates and hooks manifests
+    the enforced-rules figure): the committed text is RENDERED by tools/gen_reference_facts.py (which
+    calls this module's expected_counts, so the renderer and this gate share one set of predicates)
+    and drift-gated there; this leg recomputes the same figures through that one shared function, so
+    it is defence in depth against a hand edit of the rendered text (the gen_mappings/subset-denominator
+    pattern: the generator branch is the primary control), never against a wrong predicate inside
+    expected_counts itself; the figures are each
+    recomputed from the rule corpus, the gates and hooks manifests
     (structure-validated, filtered to the platforms the page names: "ci" gates, "claude-code" hooks,
     and with the hook total checked against its blocking/warning split, so the page cannot print a
     split that does not sum to the total beside it), the standards manifests, and the enforcement
@@ -772,7 +778,12 @@ def expected_counts(root, manifests):
 
 
 def check_readme_counts(root, manifests, findings):
-    """The landing page's count claims against the manifests they summarize. Anchored, not fuzzy: each
+    """The landing page's count claims against the manifests they summarize. The committed counts are
+    rendered between managed markers by tools/gen_reference_facts.py from this module's own
+    expected_counts, and that generator's --check is the primary drift control; this leg stays as
+    defence in depth (a hand edit of the rendered text, a figure stated outside the generated blocks
+    on a designated line, and a wording desync between the renderer's templates and
+    README_COUNT_FACTS each still fail loud here). Anchored, not fuzzy: each
     README_COUNT_FACTS wording must be present ON ITS DESIGNATED LINE (mode "proof": the first line its
     anchor matches, with the wording opening the line at the anchor's end; mode "row": every line its
     anchor names), every occurrence of the wording on a designated line is read (finditer bounded to
