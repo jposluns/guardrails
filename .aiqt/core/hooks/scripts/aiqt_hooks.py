@@ -485,7 +485,9 @@ _Segment = collections.namedtuple(
 # '${ cmd; }' forms) or as word text (an assignment's '$(...)' or '(...)', an ordinary '${...}', a regex or
 # extglob group). So the lexer judges such a command under both readings of each uncertain '#'
 # (_lex_readings), each reading a normal lex, while the command holds at most _HASH_READING_LIMIT of them
-# (four, so at most sixteen readings and thirty-one lexes per _lex_readings call, a bound on how many lexes a
+# (four, so at most sixteen readings of the uncertain '#' characters, plus one main-compatibility reading
+# where a reading read a substitution body main's skip reads otherwise, seventeen returned in all, and
+# thirty-one lexes before that extra reading per _lex_readings call, a bound on how many lexes a
 # call makes; COST below bounds the time of each); _lex_command hands its
 # caller the segments of every reading in turn, and the poll-loop classifier and the gate-weakening deny
 # tier, whose answers are not monotone in the segments they read, judge each reading on its own and keep the
@@ -2009,13 +2011,14 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
     False (word text), and each is a normal lex of the whole command, with locale passed to every word read
     (_read_word) and skip_empty to every pass (_lex_command). The readings are enumerated
     depth first, the comment reading of a '#' before its word-text reading, and stop at
-    _HASH_READING_LIMIT uncertain '#' characters per reading, so at most sixteen readings and thirty-one
-    lexes per call. That bounds how many lexes a call makes, not how long they take: each lex makes at most
-    two passes, each taking time linear in the length of the command (COST in the comment above
-    _nest_track), so a call takes at most sixty-two linear passes, and a caller that calls this, or
+    _HASH_READING_LIMIT uncertain '#' characters per reading, so at most sixteen readings of those '#'
+    characters and thirty-one lexes per call. That bounds how many lexes a call makes, not how long they take:
+    each lex makes at most two passes, each taking time linear in the length of the command (COST in the
+    comment above _nest_track), so a call takes at most sixty-two linear passes, and a caller that calls this, or
     _lex_command, more than once makes up to that many lexes each time. Where a reading read a body in a
     substitution that main's skip reads otherwise, main's reading follows (_beside_main_reading): one more
-    pass per call, made only where such a reading made one pass, so the bound holds. Inside
+    reading and one more pass per call, made only where such a reading made one pass, so seventeen readings may
+    be returned and the pass bound holds. Inside
     _SubstHeredocFloor the list is main's reading alone (_main_reading), one pass.
 
     A lex stopped at an uncertain '#' its reading does not map at a word boundary, or at the start of a
@@ -10798,10 +10801,14 @@ _RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
 _RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
 # A pipe and then, in the same stage (after any wrapper), a sink word the gatdis deny tier lists
 # (_truncating_sink_kind): gate_weakening's deny test when a '#' whose comment reading the lexer cannot judge
-# under both readings stops it (read over _hash_doubt_scan). The whitespace right after the pipe may hold
-# newlines, since bash continues the pipeline past a newline after '|' or '|&'; the rest of the match stays
-# on one line, since a newline anywhere else ends the pipeline.
-_GATE_DOUBT_SINK_RE = re.compile(r"\|&?\s*[^|;&\n]*\b(?:head|tail|grep|egrep|fgrep|rg)\b")
+# under both readings stops it (read over _hash_doubt_scan). After '|' or '|&' bash continues the pipeline
+# across the blank and comment lines that stand before the next stage, so the probe crosses them too: zero or
+# more continuation lines, each horizontal whitespace then an optional '#' comment to the end of the line then
+# the newline. The sink stage itself stays on one line (the final [^|;&\n]* run before the sink word), since a
+# newline there, outside such a continuation, ends the pipeline. Crossing the comment widens the deny only;
+# a '#' comment that itself holds a sink word on the pipe's own line already matched under the old probe.
+_GATE_DOUBT_SINK_RE = re.compile(
+    r"\|&?(?:[^\S\n]*(?:#[^\n]*)?\n)*[^|;&\n]*\b(?:head|tail|grep|egrep|fgrep|rg)\b")
 _RAW_COMMIT_MSG_GIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
@@ -11599,8 +11606,9 @@ def gate_weakening(data):
                                            "a truncating sink", _GATE_ALTS)
         # Behind a '#' the lexer could not judge under both readings, a pipe into a sink the deny tier
         # lists (head, tail, grep, egrep, fgrep, rg) may carry a verification run's output past that '#',
-        # so it denies; the raw fallback also reads the text with its backslash-newlines, quote characters
-        # and backslashes removed (_hash_doubt_scan).
+        # so it denies, including where blank or '#' comment continuation lines stand between the pipe and
+        # the sink (bash reads the stage after '|' or '|&' past them); the raw fallback also reads the text
+        # with its backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan).
         scan = _hash_doubt_scan(command)
         if _GATE_DOUBT_SINK_RE.search(scan):
             return _deny(

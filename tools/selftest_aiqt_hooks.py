@@ -2734,9 +2734,11 @@ def _lex_skip_floor_failures():
     wrapped, so dl-lex-skip-taken sees a floor reading that builds a record with no word and no redirect."""
     out = []
     main_reading = aiqt_hooks._main_reading
+    floor_callers = 0
     for label, call, command in _lex_skip_callers():
         if command != _LEX_SKIP_FLOOR:
             continue
+        floor_callers += 1
         calls = []
 
         def counted(*args, **kwargs):
@@ -2751,6 +2753,9 @@ def _lex_skip_floor_failures():
         if True not in calls:
             out.append("(dl-lex-skip-floor) {} on {!r} made main's floor reading with skip_empty {!r}; it must "
                        "make it at least once with skip_empty True".format(label, command, calls))
+    if floor_callers < 2:
+        out.append("(dl-lex-skip-floor-callers) only {} caller(s) run on the floor input; _lex_skip_callers "
+                   "must keep at least two so the skip_empty floor reading stays covered".format(floor_callers))
     return out
 
 
@@ -11896,8 +11901,9 @@ def _main_isolated(monitor):
         # '(' in _nest_track) fits every row above: the spaced-deep-nesting row separates each '(' with a
         # blank, which breaks every run, so each '(' takes the per-character path. With such a copy added to
         # _nest_track that row took 12.5 s in gate_weakening and 12.2 s in bash_absolute_paths (one run each)
-        # while every row above fit that code, and unchanged it takes at most 0.18 s (max of five runs,
-        # gate_weakening), a margin of about five times against the same 1 s bound.
+        # while every row above fit that code, and unchanged it takes a fraction of a second (on one host at
+        # most 0.18 s as the max of five runs in gate_weakening), a margin of about five times against the same
+        # 1 s bound; the figure is host-specific, the 1 s bound and the margin are what the row enforces.
         _cost_form = "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\n"
         _cost_inputs = (("long-comment-line", 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
                         ("deep-nesting", "(" * 56000 + " `a`" * (56000 // 3)),
@@ -13523,11 +13529,41 @@ def _main_isolated(monitor):
                 "sink allows",
                 "ls ${x# #} <<<x", "allow")
 
+        # (gw-rfail-pin) The reading_failed branch of _gate_recovered_sink is pinned directly here. The raw
+        # _GATE_DOUBT_SINK_RE fallback also denies a pipe into a listed sink across continuation newlines and
+        # comment lines, so it shadows the rfail vectors above at the decision level and no gexpect vector can
+        # isolate the branch (reverting it leaves the regex to deny). So this check exercises the branch
+        # itself: on a reading_failed command the full partial lex of the WHOLE command recovers the sink past
+        # the first uncertain '#', while resuming from the first reading's fork (the behaviour before the fix)
+        # drops the readings that lex whole and misses it.
+        for _rf_label, _rf_cmd in (("sink-nl", "pytest |\nhead 3</dev/null${x# #} 4<<<x"),
+                                   ("sink-redir", "pytest |\nhead 2>${x:- #} 3> >(cat)")):
+            try:
+                aiqt_hooks._lex_readings(_rf_cmd)
+                failures.append("(gw-rfail-pin-doubt) {}: _lex_readings judged the readings; expected a "
+                                "reading_failed doubt".format(_rf_label))
+            except aiqt_hooks._UncertainHashError as _rf_exc:
+                if not getattr(_rf_exc, "reading_failed", False):
+                    failures.append("(gw-rfail-pin-flag) {}: the doubt is not a reading_failed doubt"
+                                    .format(_rf_label))
+                if aiqt_hooks._gate_recovered_sink(_rf_cmd, _rf_exc) is None:
+                    failures.append("(gw-rfail-pin-recover) {}: the reading_failed branch did not recover the "
+                                    "sink from the full partial lex".format(_rf_label))
+                _rf_rec, _rf_done, _rf_open = aiqt_hooks._lex_resume_partial(_rf_cmd, _rf_exc)
+                if _rf_open:
+                    _rf_rec = _rf_rec[:-1]
+                if aiqt_hooks._verification_sink(_rf_rec) is not None:
+                    failures.append("(gw-rfail-pin-resume) {}: resuming from the fork already finds the sink, so "
+                                    "the branch would not discriminate".format(_rf_label))
+            except ValueError as _rf_exc:
+                failures.append("(gw-rfail-pin-error) {}: unexpected ValueError {!r}".format(_rf_label, _rf_exc))
+
         # Behind a '#' the lexer cannot judge under both readings, the raw fallback's sink probe reads a pipe
-        # into a listed sink across the newline that continues the pipeline (bash reads the stage after '|'
-        # or '|&' past any newlines). Here the '#' sits inside an open '(' and its word-text reading fails on
-        # the quote it opens, while the comment reading leaves the pipeline after a subshell prefix the deny
-        # tier does not read past (_gate_benign_prefix), so the raw probe is the deciding layer.
+        # into a listed sink across the newlines AND the blank or '#' comment lines that continue the pipeline
+        # (bash reads the stage after '|' or '|&' past them). Here the '#' sits inside an open '(' and its
+        # word-text reading fails on the quote it opens, while the comment reading leaves the pipeline after a
+        # subshell prefix the deny tier does not read past (_gate_benign_prefix), so the raw probe is the
+        # deciding layer.
         gexpect("(gw-dbt-sink-nl) the doubt fallback reads the sink stage after a pipeline-continuation "
                 "newline, denies",
                 "(true #'\n)\npytest |\nhead", "deny")
@@ -13539,6 +13575,19 @@ def _main_isolated(monitor):
                 "(true #'\n)\npytest |\ncat |\nhead", "deny")
         gexpect("(gw-dbt-sink-wc) control: a stage off the sink list after the continuation newline allows",
                 "(true #'\n)\nls |\nwc", "allow")
+        # A '#' comment line between the pipe and the sink continues the pipeline in bash just as a blank line
+        # does, so the doubt probe crosses it too. These denied only after the probe was taught to skip comment
+        # continuation lines; before, the comment stopped the scan short of the sink and the command allowed.
+        gexpect("(gw-dbt-sink-cmt) a comment after the pipe on its own line, then the sink, denies",
+                "(true #'\n)\npytest | # run the checks\nhead", "deny")
+        gexpect("(gw-dbt-sink-cmtamp) a '|&' pipe then a comment then the sink denies too",
+                "(true #'\n)\npytest |& # run the checks\nhead", "deny")
+        gexpect("(gw-dbt-sink-cmtline) a comment on its own line between the pipe and the sink denies",
+                "(true #'\n)\npytest |\n# run the checks\nhead", "deny")
+        gexpect("(gw-dbt-sink-cmtwc) control: a comment line then a stage off the sink list allows",
+                "(true #'\n)\nls | # just a note\nwc", "allow")
+        gexpect("(gw-dbt-sink-cmtlinewc) control: a comment line then an off-list stage on its own line allows",
+                "(true #'\n)\nls |\n# just a note\nwc", "allow")
 
         # === gatdis deny tier: a VERIFICATION RUN whose output reaches a truncating sink =====================
         # Two tiers: the narrow verification-run predicate piped into a truncating sink DENIES; everything else
