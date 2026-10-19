@@ -39,6 +39,17 @@ gen_changelog.render_md and check_versions, both of which read neither). Behavio
     T3 the tagged commit's changelog has that version as its latest release;
     T4 the maximum recorded tag version is not above the head latest version.
 
+Layers C and D (release-order and id-history append-only) are full-row prefix checks over
+.aiqt/core/releases.toml and .aiqt/core/id-history.toml (see layer_c and layer_d). Layer D carries ONE
+disclosed, self-expiring exception: before the first recorded release (the release-order record present
+with ZERO rows at base AND head), the [[born]] rows may change their born-release once, every changed
+row moving from one shared never-released version to the version being cut (the newly appended head
+changelog version, equal to the declared next-version when .aiqt/release-cut.toml is present), with the
+id, every other field, every other row, and the tombstone/successor sections unchanged. Every condition
+is read from the single-source files, never from git tags; a condition that cannot be read fails closed
+(exit 2), a condition that reads false leaves the plain append-only findings in force, and the exception
+ends permanently once releases.toml records a row (see layer_d).
+
 Baseline resolution (Layer A), in precedence order:
   1. an explicit --base REF flag (what CI passes);
   2. with no flag, `git merge-base HEAD origin/main`;
@@ -301,6 +312,20 @@ def _parse_base_releases(text):
 
 # --- the two layers ---------------------------------------------------------------------------------
 
+def _validated_ledger_rows(data, where):
+    """The [[release]] rows of a parsed releases.toml whose TOP-LEVEL keys and format-version are
+    valid. Anything else is malformed input (GateError, fail-closed): a misspelled section key or an
+    unsupported format-version must never read as a zero-row (genesis or relabel-window) ledger."""
+    unknown = set(data) - {"format-version", "release"}
+    if unknown:
+        raise GateError("{} has unknown top-level key(s): {}; expected a subset of "
+                        "'format-version', 'release'".format(where, ", ".join(sorted(unknown))))
+    fmt = data.get("format-version")
+    if not (type(fmt) is int and fmt == 1):
+        raise GateError("{} has an unsupported format-version {!r}; expected 1".format(where, fmt))
+    return _rows_of(data, "release", where)
+
+
 def _base_is_genesis(root, base_commit, base_releases):
     """True when no shipment SIGNAL is recorded in the base files: no changelog release carries a tag AND
     a present releases.toml has zero rows. Reads the BASE snapshot only. An absent base releases.toml is
@@ -324,15 +349,7 @@ def _base_is_genesis(root, base_commit, base_releases):
         # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
         except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
             raise GateError("baseline {} does not parse: {}".format(RELEASES_REL, exc))
-        unknown = set(base_rel) - {"format-version", "release"}
-        if unknown:
-            raise GateError("baseline {} has unknown top-level key(s): {}; expected a subset of "
-                            "'format-version', 'release'".format(RELEASES_REL, ", ".join(sorted(unknown))))
-        fmt = base_rel.get("format-version")
-        if not (type(fmt) is int and fmt == 1):
-            raise GateError("baseline {} has an unsupported format-version {!r}; expected 1".format(
-                RELEASES_REL, fmt))
-        rows = _rows_of(base_rel, "release", "baseline " + RELEASES_REL)
+        rows = _validated_ledger_rows(base_rel, "baseline " + RELEASES_REL)
     return _genesis_from_signals([r.get("tag") for r in base_releases], present, rows)
 
 
@@ -398,6 +415,7 @@ def layer_b(root, head_releases):
 
 RELEASES_REL = ".aiqt/core/releases.toml"
 IDHISTORY_REL = ".aiqt/core/id-history.toml"
+RELEASE_CUT_REL = ".aiqt/release-cut.toml"
 REGISTER_SECTIONS = ("born", "tombstone", "successor")
 
 
@@ -474,13 +492,135 @@ def layer_c(root, base_commit, head_data):
     return findings
 
 
-def layer_d(root, base_commit, head_data):
+def _born_relabel_shape(base_data, head_data):
+    """The row-level SHAPE of the one-time born-release relabel (see layer_d): every difference between
+    the base and head id-history registers is confined to [[born]] rows that changed ONLY their
+    born-release value, every changed row moving from ONE shared old version string to ONE shared new
+    version string, with the same keys and values otherwise (the id included), no row removed, and the
+    [[tombstone]] and [[successor]] prefixes strictly unchanged. Returns (old_version, new_version,
+    changed_row_count) when that shape holds with at least one changed row, else None. Pure row logic
+    over already-parsed data; whether the relabel is PERMITTED is _relabel_window_reason's question."""
+    for section in ("tombstone", "successor"):
+        if _prefix_findings(_rows_of(base_data, section, "baseline " + IDHISTORY_REL),
+                            _rows_of(head_data, section, IDHISTORY_REL), section):
+            return None
+    base_rows = _rows_of(base_data, "born", "baseline " + IDHISTORY_REL)
+    head_rows = _rows_of(head_data, "born", IDHISTORY_REL)
+    if len(base_rows) > len(head_rows):
+        return None
+    old_versions, new_versions, changed = set(), set(), 0
+    for base_row, head_row in zip(base_rows, head_rows):
+        if base_row == head_row:
+            continue
+        if set(base_row) != set(head_row):
+            return None
+        if any(base_row[key] != head_row[key] for key in base_row if key != "born-release"):
+            return None
+        old, new = base_row.get("born-release"), head_row.get("born-release")
+        if not isinstance(old, str) or not isinstance(new, str):
+            return None
+        old_versions.add(old)
+        new_versions.add(new)
+        changed += 1
+    if changed == 0 or len(old_versions) != 1 or len(new_versions) != 1:
+        return None
+    return old_versions.pop(), new_versions.pop(), changed
+
+
+def _relabel_window_reason(root, base_commit, head_releases, old_version, new_version):
+    """Every file-sourced condition of the one-time born-release relabel (see layer_d), checked from
+    the single-source files only, never from git tags (guard-input-soundness, as _base_is_genesis).
+    Returns None when every condition holds, else a short reason naming the FIRST condition that reads
+    false (the caller then keeps the plain append-only findings). Raises GateError (exit 2) when a
+    condition CANNOT be read: an unparseable or schema-invalid release-order record on either side, an
+    unparseable base changelog, or a present release-cut declaration without a readable string
+    next-version; an unreadable condition is never a pass."""
+    # The pre-first-release window: the release-order record exists on BOTH sides with ZERO rows (the
+    # relabel self-expires once releases.toml records a row; rows are append-only under layer_c, so
+    # the window can never reopen). An ABSENT record cannot confirm zero shipped and refuses the
+    # relabel (the same stance _genesis_from_signals takes); a present-but-invalid one is fail-closed.
+    if not _path_in_commit(root, base_commit, RELEASES_REL):
+        return "{} is absent at base, so zero shipped releases cannot be confirmed".format(RELEASES_REL)
+    try:
+        base_ledger = tomllib.loads(_show_file(root, base_commit, RELEASES_REL))
+    # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply
+    # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise GateError("baseline {} does not parse: {}".format(RELEASES_REL, exc))
+    if _validated_ledger_rows(base_ledger, "baseline " + RELEASES_REL):
+        return "the base {} already records a release row".format(RELEASES_REL)
+    try:
+        head_ledger = load_toml(root / RELEASES_REL)
+    except FileNotFoundError:
+        return "{} is absent at HEAD, so zero shipped releases cannot be confirmed".format(RELEASES_REL)
+    except (OSError, ValueError) as exc:
+        raise GateError("cannot read {} at HEAD: {}".format(RELEASES_REL, exc))
+    if _validated_ledger_rows(head_ledger, RELEASES_REL):
+        return "the head {} already records a release row".format(RELEASES_REL)
+    # The old version must be well-formed and NEVER RELEASED: recorded as no base changelog release
+    # version and as no base changelog tag version.
+    if _parse(old_version) is None:
+        return "the old born-release value {!r} is not a bare SemVer version".format(old_version)
+    if not _path_in_commit(root, base_commit, "changelog.toml"):
+        return "changelog.toml is absent at base, so the appended target version cannot be confirmed"
+    base_releases = _parse_base_releases(_show_file(root, base_commit, "changelog.toml"))
+    base_versions = [r["version"] for r in base_releases]
+    base_tag_versions = [_tag_version(r["tag"]) for r in base_releases if r.get("tag") is not None]
+    if old_version in base_versions:
+        return "the old version {} is a recorded base changelog release".format(old_version)
+    if old_version in base_tag_versions:
+        return "the old version {} is a recorded base changelog tag version".format(old_version)
+    # The new version must be THE VERSION BEING CUT: the head changelog appends at least one release
+    # to the base changelog, the new version is the appended head latest, and it is strictly above
+    # the base latest (a relabel may never accompany a rewrite, a no-op cut, or a non-increase).
+    head_versions = [r["version"] for r in head_releases]
+    if (len(head_versions) <= len(base_versions)
+            or head_versions[:len(base_versions)] != base_versions):
+        return "the head changelog does not append a new release to the base changelog"
+    if new_version != head_versions[-1]:
+        return "the new version {} is not the newly appended head changelog version {}".format(
+            new_version, head_versions[-1])
+    if base_versions and _parse(new_version) <= _parse(base_versions[-1]):
+        return "the new version {} is not above the latest base changelog version {}".format(
+            new_version, base_versions[-1])
+    # A present release-cut declaration must name the same target; an absent one is simply not
+    # consulted (the declaration is optional, see check_release_cut.py).
+    try:
+        declaration = load_toml(root / RELEASE_CUT_REL)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise GateError("cannot read {}: {}".format(RELEASE_CUT_REL, exc))
+    declared = declaration.get("next-version") if isinstance(declaration, dict) else None
+    if not isinstance(declared, str):
+        raise GateError("{} is present without a string next-version, so the relabel target cannot "
+                        "be checked against the declaration".format(RELEASE_CUT_REL))
+    if declared != new_version:
+        return "the new version {} differs from the declared next-version {}".format(
+            new_version, declared)
+    return None
+
+
+def layer_d(root, base_commit, head_data, head_releases):
     """Id-history append-only (7.3): per section (born, tombstone, successor), base register rows are an
     exact full-row prefix of head register rows. NOT APPLICABLE while HEAD has no baseline, the register
     is absent at HEAD, or the file is absent at base. head_data is the parsed HEAD id-history.toml, or
     None when absent at HEAD. As with layer_c, the absent-at-HEAD case is a sound delegation, not a
     fail-open: id-history.toml is a manifest-covered SOURCES member, so DELETING it makes check_manifest
-    fail closed (exit 2) on the missing SOURCES member (VC-4 QA #10, verified)."""
+    fail closed (exit 2) on the missing SOURCES member (VC-4 QA #10, verified).
+    ONE-TIME RELABEL EXCEPTION (self-expiring). Before the first recorded release ONLY, the [[born]]
+    rows may change their born-release once, so identifiers drafted under a version that will never
+    ship can be relabelled to the version actually being cut. Granted only when EVERY condition holds,
+    each read from its single-source file (never from git tags): the release-order record is present
+    with ZERO rows at base AND at head; every changed row differs ONLY in born-release, all moving from
+    ONE shared old version to ONE shared new version, with no row removed and the tombstone/successor
+    sections strictly unchanged; the old version is well-formed and recorded as no base changelog
+    release or tag version; the new version is the newly appended head changelog latest, strictly above
+    the base latest; and a present release-cut declaration names that same next-version. A condition
+    that cannot be read is fail-closed (GateError, exit 2); one that reads false leaves the plain
+    append-only findings (exit 1) exactly as without the exception. head_releases is the validated HEAD
+    changelog release list run() already loaded. The exception ends permanently once releases.toml
+    records a row: the window keys on ledger rows, which are themselves append-only under layer_c."""
     if head_data is None:
         print("id-history-append-only: NOT APPLICABLE ({} is absent at HEAD)".format(IDHISTORY_REL))
         return []
@@ -502,6 +642,17 @@ def layer_d(root, base_commit, head_data):
         base_rows = _rows_of(base_data, section, "baseline " + IDHISTORY_REL)
         head_rows = _rows_of(head_data, section, IDHISTORY_REL)
         findings += _prefix_findings(base_rows, head_rows, "id-history [[{}]]".format(section))
+    if findings:
+        relabel = _born_relabel_shape(base_data, head_data)
+        if relabel is not None:
+            old_version, new_version, changed = relabel
+            if _relabel_window_reason(root, base_commit, head_releases,
+                                      old_version, new_version) is None:
+                print("id-history-append-only: PASS (one-time pre-release born-release relabel "
+                      "{} -> {} on {} [[born]] row(s), every other row and section prefix-preserved; "
+                      "this exception ends once {} records a release row)".format(
+                          old_version, new_version, changed, RELEASES_REL))
+                return []
     if not findings:
         print("id-history-append-only: PASS (born/tombstone/successor sections prefix-preserved)")
     return findings
@@ -528,7 +679,7 @@ def run(root, base):
         findings = layer_a(root, base, head_releases) + layer_b(root, head_releases)
         base_commit = _resolve_base_commit(root, base)
         findings += layer_c(root, base_commit, _load_head_toml(root, RELEASES_REL))
-        findings += layer_d(root, base_commit, _load_head_toml(root, IDHISTORY_REL))
+        findings += layer_d(root, base_commit, _load_head_toml(root, IDHISTORY_REL), head_releases)
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -562,6 +713,14 @@ def _changelog_text(versions, tag_on=None):
 def _run_quiet(root, base):
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         return run(root, base)
+
+
+def _run_capture(root, base):
+    """As _run_quiet, but returns (exit_code, stdout_text) so a case can assert a status line."""
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+        rc = run(root, base)
+    return rc, out.getvalue()
 
 
 def _not_run(failures, case, cause):
@@ -2593,6 +2752,255 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             if _run_quiet(g10, "HEAD") != 2:
                 failures.append("git case G10: a base ledger with format-version = 999 expected "
                                 "fail-closed exit 2 (FIX 1)")
+
+            # R cases: the ONE-TIME pre-release born-release relabel exception (layer_d). Shared
+            # shape: the base commit carries changelog [1.0.0] untagged, a header-only ledger, and an
+            # id-history of two [[born]] rows at born-release 1.1.0 plus one [[tombstone]] row; the
+            # head working tree relabels both born rows to 1.1.1 and appends changelog 1.1.1. Each
+            # negative case then breaks exactly ONE condition, so the exception's narrowness is pinned
+            # per condition, and the findings outside the window stay exactly the pin's.
+            reg_rows = ('[[born]]\nid = "aaa1"\nborn-release = "1.1.0"\n\n'
+                        '[[born]]\nid = "aaa2"\nborn-release = "1.1.0"\n\n'
+                        '[[tombstone]]\nid = "zzz9"\nretired-release = "1.0.0"\n')
+            reg_relabelled = reg_rows.replace('born-release = "1.1.0"', 'born-release = "1.1.1"')
+
+            def _write_register(path, text):
+                core_dir = path / ".aiqt" / "core"
+                core_dir.mkdir(parents=True, exist_ok=True)
+                (core_dir / "id-history.toml").write_text(text, encoding="utf-8")
+
+            def _relabel_repo(name, base_register=reg_rows, ledger_body=""):
+                repo = base_tmp / name
+                _init(repo)
+                _root(repo)
+                _write(repo, _changelog_text(["1.0.0"]))
+                _write_ledger(repo, ledger_body)
+                _write_register(repo, base_register)
+                _commit(repo, "base: pre-release register")
+                return repo
+
+            # R1 inside the window the relabel passes, with the DISTINCT status line naming the old
+            # and new version and the row count.
+            rr1 = _relabel_repo("relabel-pass")
+            rr1_base = subprocess.run(["git", "-C", str(rr1), "rev-parse", "HEAD"],
+                                      check=True, capture_output=True, text=True).stdout.strip()
+            _write(rr1, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_register(rr1, reg_relabelled)
+            rc, out = _run_capture(rr1, "HEAD")
+            if rc != 0:
+                failures.append("git case R1: the in-window born-release relabel expected exit 0")
+            elif "relabel 1.1.0 -> 1.1.1 on 2 [[born]] row(s)" not in out:
+                failures.append("git case R1: the relabel PASS line must name the old version, the "
+                                "new version and the row count (got {!r})".format(out))
+
+            # R2 the same transition through the two CI baselines: push mode (--base HEAD^) and PR
+            # mode (--base origin/BRANCH, a remote-tracking ref), after committing the head state.
+            _commit(rr1, "relabel the born rows and append 1.1.1")
+            if _run_quiet(rr1, "HEAD^") != 0:
+                failures.append("git case R2a: the relabel in push mode (--base HEAD^) expected exit 0")
+            subprocess.run(["git", "-C", str(rr1), "update-ref", "refs/remotes/origin/main", rr1_base],
+                           check=True, capture_output=True, text=True)
+            if _run_quiet(rr1, "origin/main") != 0:
+                failures.append("git case R2b: the relabel in PR mode (--base origin/main) expected "
+                                "exit 0")
+
+            # R3 the window has ENDED at base: the base ledger records a row, so the identical relabel
+            # fails (exit 1, the plain append-only findings).
+            rr3 = _relabel_repo("relabel-base-ledger-row",
+                                ledger_body='\n[[release]]\nversion = "1.0.0"\ncommit_sha = "aaa"\n')
+            _write(rr3, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_register(rr3, reg_relabelled)
+            if _run_quiet(rr3, "HEAD") != 1:
+                failures.append("git case R3: relabel once the base ledger records a row expected "
+                                "exit 1")
+
+            # R4 the window ENDS at head too: the head ledger gains a row (a valid layer_c append) in
+            # the same change as the relabel, so the relabel fails.
+            rr4 = _relabel_repo("relabel-head-ledger-row")
+            _write(rr4, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_ledger(rr4, '\n[[release]]\nversion = "1.1.1"\ncommit_sha = "bbb"\n')
+            _write_register(rr4, reg_relabelled)
+            if _run_quiet(rr4, "HEAD") != 1:
+                failures.append("git case R4: relabel while the head ledger records a row expected "
+                                "exit 1")
+
+            # R5 the new version is NOT the appended head changelog version (rows move to 1.2.0 while
+            # the changelog appends 1.1.1).
+            rr5 = _relabel_repo("relabel-wrong-target")
+            _write(rr5, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_register(rr5, reg_rows.replace('born-release = "1.1.0"',
+                                                  'born-release = "1.2.0"'))
+            if _run_quiet(rr5, "HEAD") != 1:
+                failures.append("git case R5: relabel to a version other than the appended head "
+                                "changelog version expected exit 1")
+
+            # R6 the changelog is UNCHANGED (no version is being cut), so the relabel fails, and the
+            # findings are exactly the pin's full-row prefix findings (one per edited row).
+            rr6 = _relabel_repo("relabel-no-cut")
+            _write_register(rr6, reg_relabelled)
+            rc, out = _run_capture(rr6, "HEAD")
+            if rc != 1:
+                failures.append("git case R6: relabel with the changelog unchanged expected exit 1")
+            elif ("FAIL: 2 version-monotonicity finding(s)" not in out
+                  or "an existing row was edited or reordered" not in out):
+                failures.append("git case R6: outside the window the relabel must keep the plain "
+                                "append-only findings, one per edited row (got {!r})".format(out))
+
+            # R7 the old version was RELEASED (it is a recorded base changelog release version).
+            rr7 = _relabel_repo("relabel-from-released",
+                                base_register=reg_rows.replace('born-release = "1.1.0"',
+                                                               'born-release = "1.0.0"'))
+            _write(rr7, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_register(rr7, reg_relabelled)
+            if _run_quiet(rr7, "HEAD") != 1:
+                failures.append("git case R7: relabel from a released (base changelog) version "
+                                "expected exit 1")
+
+            # R8 a row changes its id BESIDE born-release: not a relabel shape.
+            rr8 = _relabel_repo("relabel-id-edit")
+            _write(rr8, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_register(rr8, reg_relabelled.replace('id = "aaa2"', 'id = "aaa2x"'))
+            if _run_quiet(rr8, "HEAD") != 1:
+                failures.append("git case R8: relabel with an id edit expected exit 1")
+
+            # R9 a [[tombstone]] row changes: the relabel never covers the other sections.
+            rr9 = _relabel_repo("relabel-tombstone-edit")
+            _write(rr9, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_register(rr9, reg_relabelled.replace('retired-release = "1.0.0"',
+                                                        'retired-release = "1.0.1"'))
+            if _run_quiet(rr9, "HEAD") != 1:
+                failures.append("git case R9: relabel with a tombstone edit expected exit 1")
+
+            # R10 TWO distinct old versions move in one transition: refused (one shared old version
+            # per transition).
+            reg_two_old = ('[[born]]\nid = "aaa1"\nborn-release = "1.1.0"\n\n'
+                           '[[born]]\nid = "aaa2"\nborn-release = "1.0.9"\n')
+            rr10 = _relabel_repo("relabel-two-old-versions", base_register=reg_two_old)
+            _write(rr10, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_register(rr10, reg_two_old.replace('born-release = "1.1.0"',
+                                                      'born-release = "1.1.1"')
+                            .replace('born-release = "1.0.9"', 'born-release = "1.1.1"'))
+            if _run_quiet(rr10, "HEAD") != 1:
+                failures.append("git case R10: relabel from two distinct old versions expected exit 1")
+
+            # R11 the old version is not a bare SemVer version.
+            rr11 = _relabel_repo("relabel-malformed-old",
+                                 base_register='[[born]]\nid = "aaa1"\nborn-release = "garbage"\n')
+            _write(rr11, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_register(rr11, '[[born]]\nid = "aaa1"\nborn-release = "1.1.1"\n')
+            if _run_quiet(rr11, "HEAD") != 1:
+                failures.append("git case R11: relabel from a malformed old version expected exit 1")
+
+            # R12 the optional release-cut declaration: a mismatched next-version refuses (exit 1), the
+            # matching one passes (exit 0), and an unreadable next-version is fail-closed (exit 2).
+            rr12 = _relabel_repo("relabel-cut-declaration")
+            _write(rr12, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_register(rr12, reg_relabelled)
+            cut12 = rr12 / ".aiqt" / "release-cut.toml"
+            cut_text = ('schema = 1\noperation = "append"\nprevious-version = "1.0.0"\n'
+                        'next-version = "{}"\nbase-changelog-sha256 = "0"\n')
+            cut12.write_text(cut_text.format("1.2.0"), encoding="utf-8")
+            if _run_quiet(rr12, "HEAD") != 1:
+                failures.append("git case R12a: relabel against a mismatched declared next-version "
+                                "expected exit 1")
+            cut12.write_text(cut_text.format("1.1.1"), encoding="utf-8")
+            if _run_quiet(rr12, "HEAD") != 0:
+                failures.append("git case R12b: relabel matching the declared next-version expected "
+                                "exit 0")
+            cut12.write_text("next-version = 7\n", encoding="utf-8")
+            if _run_quiet(rr12, "HEAD") != 2:
+                failures.append("git case R12c: relabel with an unreadable declared next-version "
+                                "expected fail-closed exit 2")
+
+            # R13 the strictly-above bound on the new version, tested just below, exactly at, and just
+            # above the base changelog latest (1.0.0).
+            rr13 = _relabel_repo("relabel-target-bounds")
+            for bound_version, bound_rc in (("0.9.9", 1), ("1.0.0", 1), ("1.0.1", 0)):
+                _write(rr13, _changelog_text(["1.0.0", bound_version]))
+                _write_register(rr13, reg_rows.replace('born-release = "1.1.0"',
+                                                       'born-release = "{}"'.format(bound_version)))
+                if _run_quiet(rr13, "HEAD") != bound_rc:
+                    failures.append("git case R13: relabel to {} against base latest 1.0.0 expected "
+                                    "exit {}".format(bound_version, bound_rc))
+
+            # R14 (unit level, over a real base commit) the old version recorded only as a base
+            # changelog TAG version still reads as released. The run()-level route cannot isolate this
+            # (a base tag whose version mismatches its entry trips layer_b/tag-preservation first).
+            rr14 = base_tmp / "relabel-from-tagged"
+            _init(rr14)
+            _root(rr14)
+            _write(rr14, _changelog_text(["1.0.0"], tag_on={"1.0.0": "v1.0.2"}))
+            _write_ledger(rr14)
+            _commit(rr14, "base with a mismatched recorded tag")
+            rr14_sha = subprocess.run(["git", "-C", str(rr14), "rev-parse", "HEAD"],
+                                      check=True, capture_output=True, text=True).stdout.strip()
+            head14 = [{"version": "1.0.0", "tag": "v1.0.2"}, {"version": "1.1.1", "tag": None}]
+            reason14 = _relabel_window_reason(rr14, rr14_sha, head14, "1.0.2", "1.1.1")
+            if reason14 is None or "tag" not in reason14:
+                failures.append("unit case R14: an old version recorded as a base changelog tag "
+                                "version must refuse the relabel (got {!r})".format(reason14))
+
+            # R15 the head changelog REWRITES the base instead of appending: refused even though the
+            # new version equals the head latest and is above the base latest (the base here is
+            # genesis, so layer_a is NOT APPLICABLE and only this condition refuses).
+            rr15 = _relabel_repo("relabel-changelog-rewrite")
+            _write(rr15, _changelog_text(["1.1.1"]))
+            _write_register(rr15, reg_relabelled)
+            if _run_quiet(rr15, "HEAD") != 1:
+                failures.append("git case R15: relabel beside a changelog rewrite expected exit 1")
+
+            # R16 a base row is REMOVED beside the relabel: never a relabel shape.
+            rr16 = _relabel_repo("relabel-row-removed")
+            _write(rr16, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_register(rr16, '[[born]]\nid = "aaa1"\nborn-release = "1.1.1"\n')
+            if _run_quiet(rr16, "HEAD") != 1:
+                failures.append("git case R16: relabel beside a removed row expected exit 1")
+
+            # R17 the relabel beside APPENDED rows passes: appended rows were never covered by the
+            # prefix and stay allowed in the same transition.
+            rr17 = _relabel_repo("relabel-with-append")
+            _write(rr17, _changelog_text(["1.0.0", "1.1.1"]))
+            _write_register(rr17, reg_relabelled + '\n[[born]]\nid = "aaa3"\n'
+                                                   'born-release = "1.1.1"\n')
+            if _run_quiet(rr17, "HEAD") != 0:
+                failures.append("git case R17: relabel beside appended born rows expected exit 0")
+
+            # R18 the released-history shape: the base carries a TAGGED prior release (layer_a active,
+            # layer_b armed with a real tag) and a zero-row ledger; appending the next version and
+            # relabelling the born rows to it passes.
+            rr18 = base_tmp / "relabel-shipped-tag-base"
+            _init(rr18)
+            _root(rr18)
+            _write(rr18, _changelog_text(["1.0.5"], tag_on={"1.0.5": "v1.0.5"}))
+            _write_ledger(rr18)
+            _write_register(rr18, reg_rows)
+            _commit(rr18, "base: tagged 1.0.5 history, zero-row ledger")
+            subprocess.run(["git", "-C", str(rr18), "tag", "v1.0.5", "HEAD"],
+                           check=True, capture_output=True, text=True)
+            _write(rr18, _changelog_text(["1.0.5", "1.1.1"], tag_on={"1.0.5": "v1.0.5"}))
+            _write_register(rr18, reg_relabelled)
+            if _run_quiet(rr18, "HEAD") != 0:
+                failures.append("git case R18: the relabel beside a tagged prior release and an "
+                                "appended next version expected exit 0")
+
+            # R19 (unit level, over a real base commit) the BASE-side zero-row condition in isolation.
+            # At run() level a base ledger row always implies a head ledger row too (rows are
+            # append-only under layer_c), so the head-side condition masks this one there; the direct
+            # call reads a header-only working-tree ledger against a base that records a row.
+            rr19 = base_tmp / "relabel-base-row-isolated"
+            _init(rr19)
+            _root(rr19)
+            _write(rr19, _changelog_text(["1.0.0"]))
+            _write_ledger(rr19, '\n[[release]]\nversion = "1.0.0"\ncommit_sha = "aaa"\n')
+            _commit(rr19, "base ledger with one row")
+            rr19_sha = subprocess.run(["git", "-C", str(rr19), "rev-parse", "HEAD"],
+                                      check=True, capture_output=True, text=True).stdout.strip()
+            _write_ledger(rr19)
+            head19 = [{"version": "1.0.0", "tag": None}, {"version": "1.1.1", "tag": None}]
+            reason19 = _relabel_window_reason(rr19, rr19_sha, head19, "1.1.0", "1.1.1")
+            if reason19 is None or "base" not in reason19 or "row" not in reason19:
+                failures.append("unit case R19: a base ledger that records a row must refuse the "
+                                "relabel on the base side alone (got {!r})".format(reason19))
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -2625,8 +3033,9 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
     print("{} prefix identity (M1), no-decrease (M2), tag name/ceiling logic, the "
           "genesis predicate and tag-preservation logic, the _parse fullmatch regression (4e), the "
           "full-row register prefix logic (append/edit/delete/empty/identical), and the git-level "
-          "history, tag, release-order/id-history append-only, genesis-exemption, and "
-          "tag-preservation cases all hold; an unavailable git or temp directory is a NOT RUN failure "
+          "history, tag, release-order/id-history append-only, genesis-exemption, "
+          "tag-preservation, and one-time born-release relabel cases all hold; an unavailable git or "
+          "temp directory is a NOT RUN failure "
           "(nonzero exit), never a PASS (PARTIAL)".format(pass_head))
     return 0
 
