@@ -2389,7 +2389,14 @@ def _test_shell_string_reading(failures, hooks):
         # every level placed right after the one holding it: bash -c <level n-1>, ..., bash -c 'git status'
         return [["bash", "-c", nest(level)] for level in range(levels - 1, -1, -1)] + [["git", "status"]]
 
-    bound = hooks._SHELL_STRING_DEPTH
+    # The depth bound is contractual, not read from the implementation: four levels cover the nesting a
+    # command line plausibly needs (the module documents exactly this), so the boundary cases below test
+    # literal depths 3, 4 and 5, and a narrowed or widened implementation bound fails here rather than
+    # moving the expectations with it.
+    bound = 4
+    if hooks._SHELL_STRING_DEPTH != bound:
+        failures.append("(shellr-depth-bound) _SHELL_STRING_DEPTH must be the contractual {}, got {}"
+                        .format(bound, hooks._SHELL_STRING_DEPTH))
     for label, command, want in (
             ("(shellr-place) the string's segments follow the shell segment, which ends with ';'",
              "bash -c 'git status; git log' | cat",
@@ -2466,6 +2473,18 @@ def _test_shell_string_reading(failures, hooks):
              [["time", "-p", "--", "eval", "git status"], ["git", "status"]]),
             ("(shellr-wrap-time-f-eval) time with another option runs that option as its command",
              "time -f x eval 'git status'", [["time", "-f", "x", "eval", "git status"]]),
+            # trap is a builtin like eval: it is read where command, builtin or keyword time reaches it, and
+            # nowhere a wrapper launches a program (env trap runs a program named trap, not the builtin).
+            ("(shellr-wrap-command-trap) command runs the trap builtin", "command trap 'git status' EXIT",
+             [["command", "trap", "git status", "EXIT"], ["git", "status"]]),
+            ("(shellr-wrap-builtin-trap) builtin runs the trap builtin", "builtin trap 'git status' EXIT",
+             [["builtin", "trap", "git status", "EXIT"], ["git", "status"]]),
+            ("(shellr-wrap-time-trap) time runs the trap builtin", "time trap 'git status' EXIT",
+             [["time", "trap", "git status", "EXIT"], ["git", "status"]]),
+            ("(shellr-wrap-command-trap-p) command trap -p prints and sets no handler", "command trap -p",
+             [["command", "trap", "-p"]]),
+            ("(shellr-wrap-env-trap) env launches a program, and trap is none", "env trap 'git status' EXIT",
+             [["env", "trap", "git status", "EXIT"]]),
             # A wrapper word with no launch grammar (script) leaves what it launches unknown: every later shell word
             # is read.
             ("(shellr-wrap-script) a wrapper with no grammar over-reads the later shell words",
@@ -2524,6 +2543,13 @@ def _test_shell_string_reading(failures, hooks):
     if not any("git status" in text for text in texts):
         failures.append("(shellr-heredoc-pipe) the pipeline text holds the here-document body; got {!r}"
                         .format(texts))
+    # Redirections apply left to right: with two here-documents on one command, the later one replaces the
+    # earlier as its standard input, so the segment records only the LAST body (the earlier body is data no
+    # command reads, and a hazard in it must not deny: the gap-allow override row).
+    two = hooks._lex_flat("cat <<'A' <<'B'\nfirst\nA\nsecond\nB\n")
+    if two[0].stdin_script != "second\nB\n":
+        failures.append("(shellr-heredoc-override) the segment records only its LAST here-document body; "
+                        "got {!r}".format(two[0].stdin_script))
     # Child scopes: a child shell's -c string and a trap action set only on EXIT (also written 0) run apart (a scope
     # of their own); an eval string, and a trap action on a signal or on DEBUG, ERR or RETURN, which the current shell
     # runs, share the scope of the segment holding them.
@@ -2552,7 +2578,12 @@ def _test_shell_string_reading(failures, hooks):
         command = "bash -c " + shlex.quote("a;" * segment_count) + " >x" * redirect_count
         segments = hooks._lex_command(command)
         return len(segments) > 1, bool(segments[0].shell_uncertain)
-    budget = hooks._SHELL_PLACE_BUDGET
+    # The placement budget is contractual too (the module documents 100,000 redirect copies), so the
+    # boundary cases test the literal bound, and a narrowed or widened implementation budget fails here.
+    budget = 100000
+    if hooks._SHELL_PLACE_BUDGET != budget:
+        failures.append("(shellr-place-bound) _SHELL_PLACE_BUDGET must be the contractual {}, got {}"
+                        .format(budget, hooks._SHELL_PLACE_BUDGET))
     got = [placement(budget // 100 + delta, 100) for delta in (-2, -1, 0)]
     if got != [(True, False), (True, False), (False, True)]:
         failures.append("(shellr-place-budget) just inside and exactly at the budget the string is placed, just "
@@ -2577,6 +2608,8 @@ _SCOPE_ROWS = (
     ("branch_root", "trap 'cd /tmp' USR1; kill -USR1 $$; git checkout -b newb", "deny"),
     ("branch_root", "trap 'cd /tmp' HUP; kill -HUP $$; git checkout -b newb", "deny"),
     ("branch_root", "trap 'cd /tmp' EXIT INT; git checkout -b newb", "deny"),
+    ("branch_root", "command trap 'cd /tmp' EXIT; git switch -c topic", "allow"),
+    ("branch_root", "builtin trap 'cd /tmp' DEBUG; git checkout -b topic", "deny"),
     ("branch_root", "bash -c 'cd /tmp && git checkout -b topic'", "deny"),
     ("branch_root", "bash -c \"cd /tmp; sh -c 'git checkout -b topic'\"", "deny"),
     ("branch_root", "bash -c 'cd /tmp'; eval \"bash -c 'git checkout -b topic'\"", "allow"),
@@ -2859,7 +2892,25 @@ def _test_shell_runners(failures, hooks, cwd):
             ("(runner-interp-text-node-shell-option) a node shell option is read whole",
              "node -e \"spawn('echo', ['x'], {shell: true})\"", ["'echo', ['x'], {shell: true}"]),
             ("(runner-interp-text-node-options) node options with no shell option run no shell",
-             "node -e \"execFileSync('echo', ['x'], {stdio: 'inherit'})\"", [])):
+             "node -e \"execFileSync('echo', ['x'], {stdio: 'inherit'})\"", []),
+            # An invocation's repeated -e fragments are joined into the one program perl and ruby run (a line
+            # per fragment), so a form split across fragments is scanned as one form; a form name inside a
+            # string that spans fragments stays data.
+            ("(runner-interp-text-split-e) repeated perl -e fragments are one program",
+             "perl -e 'system(' -e '1)'", ["\n1"]),
+            ("(runner-interp-text-split-e-ruby) repeated ruby -e fragments are one program",
+             "ruby -e 'system(' -e '1)'", ["\n1"]),
+            ("(runner-interp-text-split-e-string) a string spanning fragments is data",
+             "perl -e 'print(' -e '\"a b\")'", []),
+            # A call evaluates each argument expression before it runs, so a form inside an argument is read
+            # even where the outer call resolves to a harmless program; a plain string value stays data.
+            ("(runner-interp-text-arg-nested) a form inside a harmless argv call's argument is read",
+             "python3 -c \"import subprocess; subprocess.run(['echo', 'x'], "
+             "input=__import__('os').system('a b'))\"", ["'a b'"]),
+            ("(runner-interp-text-arg-string) a keyword value that is a plain string is data",
+             "python3 -c \"import subprocess; subprocess.run(['echo', 'x'], input='a b')\"", []),
+            ("(runner-interp-text-node-opts-nested) a form inside a node options object is read",
+             "node -e \"execFileSync('echo', ['x'], {env: execSync('a b')})\"", ["'a b'"])):
         got = hooks._interp_exec_forms(hooks._lex_command(command))
         if got != want:
             failures.append("{}: expected {!r}, got {!r} for {!r}".format(label, want, got, command))
@@ -3076,11 +3127,35 @@ _GAP_DENY_ROWS = (
     "node -e \"require('child_process').execFileSync('git', ['commit', '--no-verify', '-m', 'y'])\"",
     "printf x | xargs -I {} sh -c 'git commit --no-verify -m y'",
     "find . -maxdepth 0 -exec env A=1 sh -c 'git commit --no-verify -m y' \\;",
+    # A later here-document replaces an earlier one: the hazard in the EFFECTIVE (last) body denies.
+    "bash <<'DATA' <<'SCRIPT'\nprintf harmless\nDATA\ngit commit --no-verify -m y\nSCRIPT",
+    # Repeated -e fragments are one program: a form split across two fragments is still a form.
+    "perl -e 'system(' -e '\"git commit --no-verify -m y\")'",
+    "ruby -e 'system(' -e '\"git commit --no-verify -m y\")'",
+    # A call evaluates its argument expressions before it runs: an execution form inside an argument of a
+    # harmless argv call is still read.
+    "python3 -c \"import subprocess; subprocess.run(['echo', 'safe'], "
+    "input=__import__('os').system('git commit --no-verify -m y'))\"",
+    # trap reached through the wrappers that run a builtin in the current shell still sets its action.
+    "command trap 'git commit --no-verify -m y' EXIT",
+    "builtin trap 'git commit --no-verify -m y' EXIT",
+    "time trap 'git commit --no-verify -m y' EXIT",
 )
 _GAP_ALLOW_ROWS = (
     "cat <<'A'; cat <<'B'\ngit commit --no-verify -m y\nA\nhello\nB",
     "echo 'git status' | sudo bash",
     "python3 -Ic \"import os; os.system('git status')\"",
+    # An overridden here-document body is data no command reads: the hazard in the replaced (first) body
+    # must not deny (the deny pair above holds the hazard in the effective body).
+    "bash <<'DATA' <<'SCRIPT'\ngit commit --no-verify -m y\nDATA\nprintf harmless\nSCRIPT",
+    # The fragments of one invocation are joined before the scan: a spelling inside a string that spans
+    # fragments is data, as it is in one fragment.
+    "perl -e 'print(' -e '\"git commit --no-verify is denied here\")'",
+    # A keyword value that is a plain string stays data (the deny pair above holds a call there).
+    "python3 -c \"import subprocess; subprocess.run(['echo', 'safe'], input='git commit --no-verify -m y')\"",
+    # A wrapped trap with a harmless action, and a wrapped lookup that sets no handler.
+    "command trap 'echo done' EXIT",
+    "command trap -p",
 )
 
 
@@ -3142,6 +3217,11 @@ _CLOSED_GRAMMAR_ROWS = (
      "\\\"git commit --no-verify -m x\\\")'])\"", "deny"),
     ("gate_weakening", "time -f x eval 'git commit --no-verify -m x'", "allow"),
     ("gate_weakening", "python3 -c 'subprocess.run(\"git commit --no-verify -m y\")'", "allow"),
+    # A perl '#' after a division '/' on its line: the line-clear predicate cannot prove it a comment (a '/'
+    # may open a regex literal), so the rest of the line is read as code, a DISCLOSED over-read that denies a
+    # spelling written in such a comment (a python '#' outside a string stays a comment, '/' before it or
+    # not: the harmless rows pin that allow).
+    ("gate_weakening", "perl -e '$x = 4 / 2; # system(\"git commit --no-verify -m x\")'", "deny"),
 )
 
 
@@ -4218,8 +4298,11 @@ def _lex_once_failures():
     completely: the commit-syntax reading takes it, the push loop reuses its records, and the broad-fallback
     gate and the deny-message causes read its recorded flat argvs instead of lexing the command again. Each
     case pins the exact texts _lex_flat reads (_lex_flat_texts), in order, with the decision beside them:
-    the raw command exactly once, a placed shell string once (its placement), and the JOINED text once where
-    a line continuation exists (the continuation comparison reads that different text). A reading that lexes
+    the raw command exactly once, a placed shell string once (its placement), the JOINED text once where
+    a line continuation exists (the continuation comparison reads that different text), and an uncertain
+    segment's posture text once (the uncertain-text loop shares ONE _commit_command_syntax reading per text
+    between its predicate and its fallback, so that text and its own placed string are each lexed once, not
+    once per call). A reading that lexes
     the raw command again fails the text rows, and one that stops lexing it at all fails them too, with the
     decision row keeping the guard's outcome pinned.
     (dl-lex-once-red) The recorder discriminates: a reading that lexes the command twice must be seen as two
@@ -4233,6 +4316,14 @@ def _lex_once_failures():
         ("git push --force origin feature", "allow", ["git push --force origin feature"]),
         ("bash -c 'git push --force origin feature'", "deny",
          ["bash -c 'git push --force origin feature'", "git push --force origin feature"]),
+        # An eval string with an unquoted '#': its segment is uncertain, so the uncertain-text loop runs.
+        # The four texts are the raw command and its placed eval string (the commit-syntax reading), then
+        # the uncertain segment's text (here the same raw text) and ITS placed eval string, read once for
+        # the loop's predicate and fallback together: a loop that reads the text separately for each lexes
+        # six texts, not four, and fails this row.
+        ("eval 'git push -f origin feature #x'", "deny",
+         ["eval 'git push -f origin feature #x'", "git push -f origin feature #x",
+          "eval 'git push -f origin feature #x'", "git push -f origin feature #x"]),
     )
     for command, want, want_texts in cases:
         data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},

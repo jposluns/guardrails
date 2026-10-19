@@ -466,9 +466,10 @@ _Redirect = collections.namedtuple(
 _Segment = collections.namedtuple(
     "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
                  "argv_leading_tilde", "stdin_script", "shell_uncertain", "shell_scope"))
-# stdin_script is the text of the QUOTED here-document bodies the segment's command reads on standard input
-# (each body with its closing delimiter line), which _lex_flat skips as data, or None when it opens none; only
-# a shell that reads its script from standard input consults it (_shell_reading). shell_uncertain is None, or
+# stdin_script is the text of the QUOTED here-document body the segment's command reads on standard input
+# (the body of the LAST heredoc the segment opened, since a later stdin redirection replaces an earlier one,
+# with its closing delimiter line), which _lex_flat skips as data, or None when it opens none or the effective
+# body is empty; only a shell that reads its script from standard input consults it (_shell_reading). shell_uncertain is None, or
 # the (kind, text) pairs a guard's uncertain-segment posture reads for a segment holding a shell string the
 # shared reading could not read, or a shell reading its script from standard input (_expand_shell_strings,
 # _shell_uncertain_texts). shell_scope is the child-shell scope a segment runs in: () for the command's own
@@ -1350,8 +1351,8 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
     string, and the default False keeps the reading every other caller relies on.
 
     skip_empty True leaves out every segment with no word and no redirect, whose record would be
-    _Segment([], sep, [], raw, False, [], []) (with, as its stdin_script, the body of any quoted here-document
-    it opened, which is left out with it), so a long run of separators ('((((', ';;;;') builds no record,
+    _Segment([], sep, [], raw, False, [], []) (with, as its stdin_script, the effective body of the quoted
+    here-documents it opened, which is left out with it), so a long run of separators ('((((', ';;;;') builds no record,
     list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only a
     caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
     list) passes it; the default False keeps every record."""
@@ -1416,16 +1417,22 @@ def _lex_flat(command, partial=False, locale=False, skip_empty=False):
                 i += 1
                 if pending_heredocs:
                     # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
-                    # literal data (finding 17), then resume lexing after the closing delimiter line(s). Each
-                    # body, in the order the '<<' operators appeared, is recorded on the segment that OPENED
-                    # it (stdin_script): a shell there reads that body as its script (_shell_reading); a
-                    # cat/prose consumer carries it harmlessly.
+                    # literal data (finding 17), then resume lexing after the closing delimiter line(s). The
+                    # bodies are read in the order the '<<' operators appeared, and the segment that OPENED a
+                    # heredoc records only its LAST body (stdin_script): the shell applies redirections left
+                    # to right, so a later stdin here-document replaces an earlier one on the same command and
+                    # only the last body is that command's standard input (a shell there reads that body as
+                    # its script, _shell_reading; a cat/prose consumer carries it harmlessly; an overridden
+                    # body is data no command reads).
+                    effective = {}  # owner -> the body of its LAST heredoc, the one the shell applies
                     for heredoc, owner in zip(pending_heredocs, heredoc_owners):
                         body_start = i
                         i = _skip_heredoc_bodies(command, i, n, [heredoc])
-                        if command[body_start:i] and owner is not None and owner < len(segments):
-                            segments[owner] = segments[owner]._replace(
-                                stdin_script=(segments[owner].stdin_script or "") + command[body_start:i])
+                        if owner is not None and owner < len(segments):
+                            effective[owner] = command[body_start:i]
+                    for owner, body in effective.items():
+                        if body:
+                            segments[owner] = segments[owner]._replace(stdin_script=body)
                     del pending_heredocs[:]
                     del heredoc_owners[:]
                     seg_start[0] = i
@@ -1631,10 +1638,11 @@ _LAUNCH_GRAMMARS = {
                   long_flags=("--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty",
                               "--show-limits", "--replace", "--eof"), operands=0),
 }
-# The wrappers that run a shell builtin in the current shell: eval is read under these alone, since every other
-# wrapper launches a program, and eval is not one. time is bash's reserved word here only when its words before the
-# program are -p or '--' (_LAUNCH_TIME_KEYWORD_WORDS): bash reads any other option as the command it times (time -f
-# x eval ... runs '-f'), so eval is read under time -p and a bare time, never under time with another option.
+# The wrappers that run a shell builtin in the current shell: eval and trap are read under these alone, since
+# every other wrapper launches a program, and neither is one. time is bash's reserved word here only when its
+# words before the program are -p or '--' (_LAUNCH_TIME_KEYWORD_WORDS): bash reads any other option as the command
+# it times (time -f x eval ... runs '-f'), so eval is read under time -p and a bare time, never under time with
+# another option.
 _LAUNCH_BUILTIN_WRAPPERS = frozenset(("command", "builtin", "time"))
 _LAUNCH_TIME_KEYWORD_WORDS = frozenset(("-p", "--"))
 # The trap conditions whose action runs apart from the commands after the trap: EXIT (also written 0) runs its
@@ -1917,9 +1925,9 @@ def _shell_reading(seg):
     from that file, so a pipe or a here-document feeding it is data). The command word is found after leading
     reserved words and VAR=value words (_command_start), and the programs it runs are resolved through the
     wrappers that launch them (_launched_programs): a shell -c string is read only where that program is a shell
-    (_SHELL_C_SHELLS), eval only where it is eval reached directly or through command, builtin or keyword time
-    (time or time -p), and trap only as the command word; a shell under xargs never reads a script from standard
-    input. Each word is scanned once (_shell_option_walk shares one memo per word range, and each string operand
+    (_SHELL_C_SHELLS), and eval and trap only where each is reached directly or through command, builtin or
+    keyword time (time or time -p), the wrappers that run a shell builtin in the current shell; a shell under
+    xargs never reads a script from standard input. Each word is scanned once (_shell_option_walk shares one memo per word range, and each string operand
     is read once)."""
     argv = seg.argv
     opaque = seg.argv_opaque
@@ -1937,7 +1945,7 @@ def _shell_reading(seg):
             shells.append((k, end, not xargs))
         elif name == "eval" and builtin_ok:
             evals.append(k)
-        elif name == "trap" and k == i:
+        elif name == "trap" and builtin_ok:
             trap = k
     if overread is not None:
         later_eval = False
@@ -2033,11 +2041,12 @@ def _expand_shell_strings(segments, locale, depth, scopes):
     (_shell_reading), a string past the depth bound, a string that does not lex, a string whose own reading
     _lex_uncertain_causes reports uncertain (its segments are still placed), or a string whose placement would
     pass _SHELL_PLACE_BUDGET; the text is the segment's own raw text ('segment'). A shell that reads its script
-    from standard input is marked too: fed by a here-document, with its raw text and the here-document bodies
+    from standard input is marked too: fed by a here-document, with its raw text and its effective
+    here-document body
     (stdin_script, 'segment'); fed by a pipe (not under xargs), with its own raw text ('stage'), and the last
     such shell of a pipeline also with the raw text of the pipeline up to and including it, each stage followed
-    by the here-document bodies it reads ('pipeline'), built once per pipeline from one list of its stages so
-    the texts cost memory linear in the command's length. Every other segment is left as lexed.
+    by the effective here-document body it reads ('pipeline'), built once per pipeline from one list of its
+    stages so the texts cost memory linear in the command's length. Every other segment is left as lexed.
 
     While no segment holds a word that could make _shell_reading report anything (_shell_reading_may_report,
     one cheap pass over the words), there is no string to place, no segment to mark and no pipeline text to
@@ -2142,11 +2151,14 @@ def _scope_moved(moved, scope):
 # the execution forms in the code (_interp_exec_forms: os.system, subprocess calls, the os.exec and spawn
 # families, perl and ruby system/exec/backquotes/qx/%x and a pipe open, node child_process calls), judges each
 # form's own command text ALONE (never a join of several forms), and denies when that text names a spelling the
-# guard denies; a spelling in a comment, or in printed or quoted text outside an execution form, is never read,
-# so it is never denied. The reading turns a form into no form only where a closed grammar settles it: a comment
-# is skipped only where nothing before it on its line can open a construct the reading does not parse
-# (_interp_line_clear), and anything else the reading cannot classify is read as code, as the earlier reading
-# read it. This structured reading is separate from the raw-text scans that read interpreter code
+# guard denies; a spelling in printed or quoted text outside an execution form, or in a comment this reading
+# proves one (a python '#' outside a string literal, or a perl, ruby or node opener with nothing before it on its
+# line that may open a construct the reading does not parse), is never read, so it is never denied. The reading
+# turns a form into no form only where a closed grammar settles it: a comment is skipped only where nothing
+# before it on its line can open such a construct (_interp_line_clear), so a perl, ruby or node comment the
+# predicate cannot prove (a division '/' earlier on its line among the guards) is read as code, a DISCLOSED
+# over-read that can deny a spelling written in such a comment; anything else the reading cannot classify is
+# read as code, as the earlier reading read it. This structured reading is separate from the raw-text scans that read interpreter code
 # only as raw text, as they did before it: protected_line's backstop scans the whole raw command text for a push
 # or commit spelling when no git command was lexed, and git_discard's scope scan reads the raw text of every
 # command. No other guard reads the execution forms of interpreter code.
@@ -2340,8 +2352,10 @@ def _interp_skip_comment(code, i, family, lines):
     line in python (outside a string literal, which the scan has already skipped); in perl and ruby '#' to the end
     of its line, and in node '//' to the end of its line and '/*' to its '*/', each only where nothing before it on
     its line may open a construct the reading does not parse (_interp_line_clear), so with one there the rest of
-    the line is read as code; and never perl's '$#' ($#array). A comment is not code, so no execution form is read
-    inside it. lines is the memo _interp_line_clear keeps."""
+    the line is read as code; and never perl's '$#' ($#array). A comment skipped here is not code, so no execution
+    form is read inside it; a perl, ruby or node opener this reading cannot prove a comment (one with such a
+    construct before it on its line, a division slash among them) is NOT skipped, so a spelling in a real comment
+    there can still be read and denied, the safe direction. lines is the memo _interp_line_clear keeps."""
     c = code[i]
     if c == "#" and family in ("python", "ruby", "perl"):
         if family == "perl" and code[i - 1:i] == "$":
@@ -2636,9 +2650,12 @@ def _interp_exec_regions(code, family):
     comments (_interp_skip_comment) are not read, since a string is data until an execution form runs it and a
     comment is not code; a python run or call is a form only when bound to subprocess (_INTERP_PY_QUALIFIED,
     _interp_python_bound), checked before its arguments are scanned; a form whose text names nothing (an argv
-    form running another program) is left out. A call whose arguments prove it no form (a perl or ruby open that
-    opens no pipe) has them read on as code; once those rescans pass _INTERP_RESCAN_FACTOR times the code's length,
-    the whole code is returned as one text, the earlier reading's safe direction, so the scan stays linear."""
+    form running another program) is left out. Every parenthesized call's argument text is read on as code,
+    form or no form (the call evaluates each argument expression before it runs, so an execution form inside
+    an argument is read even where the outer call resolves to a harmless program, or proves to be no form, a
+    perl or ruby open that opens no pipe among them); once those rescans pass _INTERP_RESCAN_FACTOR times the
+    code's length, the whole code is returned as one text, the earlier reading's safe direction, so the scan
+    stays linear."""
     names = _INTERP_EXEC_NAMES[family]
     bare = _INTERP_BARE_CALLS.get(family, frozenset())
     bindings = None
@@ -2695,15 +2712,16 @@ def _interp_exec_regions(code, family):
                 continue
             end = _interp_region_end(code, k + 1, family, ")", lines)
             text = _interp_form_text(family, name, code[k + 1:end], lines)
-            if text is None:
-                rescanned += end - k
-                if rescanned > _INTERP_RESCAN_FACTOR * n:
-                    return [code]
-                i = j  # no execution form: its arguments are read on, as any other code
-                continue
             if text:
                 regions.append(text)
-            i = end + 1
+            rescanned += end - k
+            if rescanned > _INTERP_RESCAN_FACTOR * n:
+                return [code]
+            # The arguments are read on as code, form or no form: the call evaluates each argument
+            # expression before it runs, so an execution form inside one (a keyword value, a node
+            # options object, an argument of a call that is no form) is read even where the outer
+            # call itself resolves to a harmless program or to no form.
+            i = j
             continue
         if name in bare and k > j and k < n:
             end = _interp_region_end(code, k, family, None, lines)
@@ -2723,8 +2741,10 @@ def _interp_exec_forms(records):
     wrappers that launch it, _launched_programs) whose _gate_word names an interpreter family (_interp_family);
     after a wrapper option outside its grammar, or a wrapper with no grammar (script), every later word naming an
     interpreter is read as one (the earlier safe-direction over-read). Its inline code is read with the family's
-    option grammar (_interp_codes), and only the execution forms in that code are returned
-    (_interp_exec_regions). Disclosed residuals: a command the code holds in a variable or builds at run time
+    option grammar (_interp_codes), an invocation's repeated code fragments joined into the one program the
+    interpreter runs (a line per fragment, as perl and ruby join them), and only the execution forms in that
+    program are returned (_interp_exec_regions). Disclosed residuals: a command the code holds in a variable or
+    builds at run time
     (cmd = '...'; os.system(cmd)), an execution form the lists do not name, a run or call reached through a name
     the code does not bind to subprocess (subprocess.run with no import of subprocess, which python refuses, is no
     form, as with no interpreter reading), a form inside a string the code interpolates (an f-string, ruby's
@@ -2751,8 +2771,12 @@ def _interp_exec_forms(records):
                 continue
             codes = []
             _interp_codes(argv, opaque, k + 1, family, visited, codes, end)
-            for code in codes:
-                texts.extend(_interp_exec_regions(code, family))
+            if codes:
+                # perl and ruby join an invocation's repeated -e/-E fragments into one program, a
+                # line per fragment, so the fragments are scanned as that one program, never one at
+                # a time: a form split across two fragments is still a form. python and node take
+                # one code per invocation, for which the join is that code itself.
+                texts.extend(_interp_exec_regions("\n".join(codes), family))
     return texts
 
 
