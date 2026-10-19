@@ -1963,12 +1963,32 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
             if _run_quiet(**_paths(base, genesis=True)) != 1:
                 failures.append("corpus-id missing from inventory: expected exit 1")
 
-            # (4) span out of range -> per-row FAIL.
+            # (4) span out of range -> per-row FAIL, and the output must carry the span diagnostic
+            # itself: the invalid span also leaves its text uncovered, so the text-coverage leg exits 1
+            # on this fixture too and an exit-only assertion would stay green with the span diagnostic
+            # suppressed.
             rules, rows, born = _good_genesis()
             rows[0]["end-line"] = 9999
             base = _fresh(rules, rows, born)
-            if _run_quiet(**_paths(base, genesis=True)) != 1:
-                failures.append("span out of range: expected exit 1")
+            code, out = _run_capture(**_paths(base, genesis=True))
+            if code != 1 or "does not resolve inside" not in out:
+                failures.append("span out of range: expected exit 1 with the span diagnostic")
+
+            # (4b) an invalid-span row BESIDE a valid covering row: every unit is covered, so no
+            # coverage finding can stand in for the span diagnostic; only the per-row span check can
+            # refuse this corpus, and it must (exit 1 with the span diagnostic). This is the case where
+            # a suppressed span diagnostic would wave an invalid redundant row through.
+            rules, rows, born = _good_genesis()
+            extra = copy.deepcopy(rows[0])
+            extra["clause-id"] = "calpha.3"
+            extra["end-line"] = 9999
+            rows.append(extra)
+            born.append(("calpha.3", "1.1.0"))
+            base = _fresh(rules, rows, born)
+            code, out = _run_capture(**_paths(base, genesis=True))
+            if code != 1 or "does not resolve inside" not in out:
+                failures.append("invalid-span row beside a valid covering row: expected exit 1 with "
+                                "the span diagnostic")
 
             # (5) text mismatch -> per-row FAIL.
             rules, rows, born = _good_genesis()
@@ -3131,7 +3151,8 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
             "resurrection and completeness set logic")
     print("SELF-TEST PASS: {}; and the end-to-end fixtures hold (passing genesis, deferred/armed "
           "manifest leg, padded-ordinal fail-closed, duplicate id, missing corpus-id, span out of "
-          "range, text mismatch, digest mismatch, missing born row, resurrected id, cumulative-max "
+          "range (the span diagnostic itself, alone and beside a valid covering row), text mismatch, "
+          "digest mismatch, missing born row, resurrected id, cumulative-max "
           "fail, lexicographic-trap pass, unexplained disappearance, the fail-closed register cases, "
           "the Model C sub-line pass, multi-line embedded-LF pass, absent-text fail, twice-in-window "
           "fail, untight-window fail, and empty-canonical-text fail; and the round-2 fixes: "

@@ -1,8 +1,10 @@
 # Rule text that carries no clause row on purpose: the TEXT COVERAGE leg of tools/check_clauses.py.
-# Every sentence or clause of every rule under .aiqt/core/rules/ lies inside a clause row's
+# Every sentence or clause of every rule body under .aiqt/core/rules/ lies inside a clause row's
 # canonical-text in .aiqt/core/clauses.toml or is named here, byte-exact, with the reason it needs
-# no row. An entry with no reason, an entry whose text no longer occurs in its rule (stale), and an
-# entry whose text a clause row already covers (redundant) each fail the gate. The file is required
+# no row. The body is the text after the frontmatter and after the first-line title heading; the
+# title is never checked, so an obligation written only as the title passes. An entry with no
+# reason, an entry whose text no longer occurs in its rule (stale), and an entry whose text a
+# clause row already covers (redundant) each fail the gate. The file is required
 # and must hold the exempt key: the gate refuses (exit 2) when it is absent, unreadable, or has no
 # exempt key (an empty or comment-only file), so deleting or emptying it is never read as no
 # exemption. An intentionally empty register is the explicit `exempt = []`. The gate cannot detect a

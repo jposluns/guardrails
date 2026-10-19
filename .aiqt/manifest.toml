@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c90cc57d7f3017ecd903c3a517dbeab9e23961194fe7c8366e21a6b6a0bf7aa6"
+tree-sha256 = "bf79905a8aa1ae93e2e3e2e49c5997665fba2e7785175a71fb66613c8f18ba49"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -36,8 +36,8 @@ sha256 = "a2188250b031d6168937b6857d01fe48bdc7f5ed5e93fbc682908b0415a1453f"
 
 [[sources]]
 path = ".aiqt/core/clause-exemptions.toml"
-bytes = 25761
-sha256 = "0a22181bdb27d1a343617816a3c96e5a84213772e3d09b44bae69195728b8be7"
+bytes = 25932
+sha256 = "bc2aac115628df24047c3a561f26c52250ec88fb1c283d53d62328d85dc8ab6b"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 354370
-sha256 = "535bc4143957d74aac9bd654f5b8376359da0959d964c52a5aca70b1c710643f"
+bytes = 354528
+sha256 = "4ec568d460ebd8905bb68ec91e0adfcc183009395258fa7ef690c360d1a25748"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3336,8 +3336,8 @@ sha256 = "b16e64e5e6f7c454bae6bd1a1b774be1ff0a8b7471825ba4a6aaca3c26f8e607"
 
 [[sources]]
 path = "tools/check_clauses.py"
-bytes = 227859
-sha256 = "8fbd5c5657c21c119e6283a4063ee320622813040a2a7cbf40e42eabcab01fe5"
+bytes = 229291
+sha256 = "1e2a372431a7ae2e44fd5e3542be2c38c9bf6c4b966cfec9f446a24c76e0c9bb"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
