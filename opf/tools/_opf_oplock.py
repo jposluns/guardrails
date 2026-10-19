@@ -989,7 +989,13 @@ def _validate_ctl_dir_fd(fd, label):
 
 
 def _open_dir_at(parent_fd, name, label):
-    """Open a directory component beneath an already-trusted dir fd, no-follow."""
+    """Open a directory component beneath an already-trusted dir fd, no-follow. The descriptor is
+    READABLE (_DIR_OPEN_FLAGS, O_RDONLY) on purpose, not the shared walk's traverse mode: every
+    _DIR_OPEN_FLAGS open (this one, the staging-leftover listing in _remove_staging_garbage, and
+    _opf_init_substrate._list_dir_fresh) runs beneath a root already trusted (the store, product,
+    control or git root) on a directory that is then listed, read or written beneath, validated as
+    a control directory, or confirmed by the open itself (the store root's .git directory), never an
+    out-of-store ancestor that is only traversed."""
     try:
         return os.open(name, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
     except OSError as exc:
@@ -1006,6 +1012,19 @@ def _open_path_dir_nofollow(path, what):
     an OSError refuses, naming `what` and the path."""
     try:
         return _opf_store._open_dir_nofollow(path)
+    except OSError as exc:
+        raise OpLockError("cannot open {} {} no-follow ({})".format(what, path, exc))
+
+
+def _open_path_dir_traverse(path, what):
+    """_open_path_dir_nofollow in the shared walk's TRAVERSE mode: the final component too is opened
+    with search permission only (O_PATH where it exists; _opf_store._open_dir_nofollow traverse_only),
+    for a directory this acquisition only PROBES (fstat, dir_fd-relative no-follow lookups) and never
+    reads: an ancestor of the store, which the store's owner may not control and which may carry
+    search-but-no-read permission (mode 0711). The symlink refusal is identical; an OSError refuses,
+    naming `what` and the path."""
+    try:
+        return _opf_store._open_dir_nofollow(path, traverse_only=True)
     except OSError as exc:
         raise OpLockError("cannot open {} {} no-follow ({})".format(what, path, exc))
 
@@ -1065,7 +1084,7 @@ def _control_payload(document, closed_keys, label):
         reparsed = tomllib.loads(text)
     # Defensive: emit_checked already reparsed. RecursionError too: tomllib raises it (not a
     # ValueError) on deep nesting (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise OpLockError("emitted {} did not reparse ({})".format(label, exc))
     if set(reparsed) != set(closed_keys):
         raise OpLockError("{} top-level keys {} do not equal the closed set {}".format(
@@ -1110,7 +1129,7 @@ def _read_control_record(dir_fd, name, label):
         doc = tomllib.loads(bytes(data).decode("utf-8", errors="strict"))
     # RecursionError too: tomllib raises it (not a ValueError) on deep nesting
     # (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError, MemoryError) as exc:
         raise OpLockError("{} is not decodable UTF-8 TOML; refusing recovery ({})".format(label, exc))
     if not isinstance(doc, dict):
         raise OpLockError("{} is not a TOML table; refusing recovery".format(label))
@@ -1182,10 +1201,13 @@ def _git_rev_parse_output(store_root, *options):
 def _enclosing_git_toplevel(store_root):
     """The NEAREST proper ancestor of `store_root` carrying a .git entry, as (its path, its
     (st_dev, st_ino) identity), or None when every ancestor up to the filesystem root GENUINELY
-    lacks one. Each ancestor is opened by the shared no-follow walk and its .git classified by the
-    same three-way no-follow classification the store root gets, nearest first, so a symlinked,
-    FIFO, or unreadable .git at ANY ancestor refuses: it is never skipped past to a higher
-    ancestor and never read as absence."""
+    lacks one. Each ancestor is opened by the shared no-follow walk in its TRAVERSE mode
+    (_open_path_dir_traverse: search permission only where O_PATH exists, since the ancestor is only
+    probed with dir_fd-relative no-follow lookups and an fstat, never read), so a search-only (0711)
+    ancestor such as a root-owned scratch root or /home/<user> is classified rather than refused
+    EACCES; its .git is classified by the same three-way no-follow classification the store root
+    gets, nearest first, so a symlinked, FIFO, or unreadable .git at ANY ancestor refuses: it is
+    never skipped past to a higher ancestor and never read as absence."""
     path = store_root
     while True:
         parent = os.path.dirname(path)
@@ -1193,7 +1215,7 @@ def _enclosing_git_toplevel(store_root):
             return None
         path = parent
         with _FdOwner() as owner:
-            fd = owner.adopt(_open_path_dir_nofollow(path, "store-root ancestor"))
+            fd = owner.adopt(_open_path_dir_traverse(path, "store-root ancestor"))
             if _classify_git_entry(fd, path) == "present":
                 st = _fstat_or_refuse(fd, "store-root ancestor {}".format(path))
                 return path, (st.st_dev, st.st_ino)
@@ -1337,7 +1359,10 @@ def _bind_repository_view(toplevel, ident, rel, store_ident):
     or normalization-insensitive filesystem a store addressed by any other spelling of that path
     refuses rather than keying a second home, whatever spelling getcwd gives git; and the
     components, opened no-follow beneath the toplevel, must lead to `store_ident`, the store root's
-    own identity."""
+    own identity. Residual (disclosed): a search-only directory BETWEEN the git toplevel and the
+    store refuses at the readable _open_dir_at in _bind_repository_view (listing it needs read
+    permission, so it is inherent); a directory above the toplevel and an own-repository store
+    below one both work."""
     with _FdOwner() as owner:
         fd = owner.adopt(_open_path_dir_nofollow(toplevel, "git toplevel"))
         st = _fstat_or_refuse(fd, "git toplevel {}".format(toplevel))
@@ -1849,8 +1874,10 @@ def _validate_recovery_lease(doc, active_doc):
 
 def _recorded_machine_store_present(machine):
     """D4: whether the machine store a stale active record names still exists. The recorded path is
-    walked no-follow from the filesystem root to its parent (_opf_store._open_dir_nofollow) and its
-    final component is stat'ed no-follow beneath that parent. Returns True when the recorded path
+    walked no-follow from the filesystem root to its parent (_opf_store._open_dir_nofollow in its
+    traverse mode: search permission only on every component where O_PATH exists, since the parent
+    is never read here) and its final component is stat'ed no-follow beneath that parent. Returns
+    True when the recorded path
     binds an object with the RECORDED (st_dev, st_ino): the paired lease may live there, so recovery
     from any other checkout must refuse. Returns False when the path is absent (ENOENT at any
     component) or binds an object with a different identity: the recorded machine store, and with it
@@ -1866,7 +1893,9 @@ def _recorded_machine_store_present(machine):
                           "absolute path, so whether its paired lease still exists cannot be "
                           "confirmed; refusing recovery (manual intervention required)".format(path))
     try:
-        parent_fd = _opf_store._open_dir_nofollow(parent)
+        # The parent is only TRAVERSED (one dir_fd-relative no-follow stat below), never read, so the
+        # shared walk's traverse mode applies: a search-only (0711) parent is probed, not EACCES-refused.
+        parent_fd = _opf_store._open_dir_nofollow(parent, traverse_only=True)
     except FileNotFoundError:
         return False
     except OSError as exc:
@@ -4985,6 +5014,40 @@ def _t_e3_enclosing_git_unreadable(d, env):
         os.chmod(pointer, 0o600)
     assert not os.path.exists(os.path.join(store, CONTROL_DIRNAME)), \
         "an unreadable enclosing .git must never fall back to the store root"
+
+
+def _t_travanc_search_only_ancestor(d, env):
+    """T-travanc: a store with NO .git beneath a SEARCH-ONLY ancestor (execute permission, no read;
+    the owner-bound spelling of the root-owned 0711 scratch shape is 0111) acquires and releases:
+    the ancestor sweep (_enclosing_git_toplevel) and the D4 recorded-machine-store probe open such
+    a directory in the shared walk's TRAVERSE mode (O_PATH, search permission only) instead of
+    refusing EACCES. FAILS WITHOUT THE FIX (the mutant: either walker reverted to the readable-final
+    walk raises EACCES at the shielded ancestor and the acquisition refuses). Needs a uid the mode
+    bits bind and os.O_PATH, so under uid 0 or without O_PATH it is SKIPPED (reported, and the run
+    ends INCOMPLETE, never a pass), as T-e3. The traverse mode's own symlink refusal is pinned by
+    the _opf_store self-test (the travanc-symlinked-* checks)."""
+    if os.geteuid() == 0:
+        raise _StSkip("uid 0 is not bound by a 0111 ancestor's mode bits, so the search-only "
+                      "vector cannot be built")
+    if not hasattr(os, "O_PATH"):
+        raise _StSkip("no os.O_PATH: the walk keeps the O_RDONLY-per-component fallback by design "
+                      "(disclosed residual), so a search-only ancestor still refuses EACCES")
+    shield = os.path.join(d, "shield")
+    store = os.path.join(shield, "store")
+    os.makedirs(store)
+    _st_store_tree(store)
+    os.chmod(shield, 0o111)
+    try:
+        cap = acquire_operation(store, "op")
+        release_operation(cap)
+        # The D4 probe: a recorded machine store directly beneath the search-only ancestor is still
+        # confirmed PRESENT (its parent is only traversed), never refused as unconfirmable.
+        st = os.stat(store)
+        assert _recorded_machine_store_present(
+            {"path": store, "dev": str(st.st_dev), "ino": str(st.st_ino)}) is True, \
+            "a recorded machine store beneath a search-only ancestor must be confirmed present"
+    finally:
+        os.chmod(shield, 0o755)
 
 
 def _t_e4_distinct_nested_stores(d, env):
@@ -9750,6 +9813,8 @@ def self_test_isolated():
          _t_e2_enclosing_git_refusals),
         ("T-e3 an unreadable enclosing .git refuses, no store-root fallback",
          _t_e3_enclosing_git_unreadable),
+        ("T-travanc a search-only (0111) ancestor is traversed, not EACCES-refused (sweep and D4)",
+         _t_travanc_search_only_ancestor),
         ("T-e4 distinct stores nested in one repository hold distinct anchors",
          _t_e4_distinct_nested_stores),
         ("T-e5 a store nested in a submodule refuses, naming the submodule",

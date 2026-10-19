@@ -128,7 +128,7 @@ def _toml(data, rel):
     """Parse bytes read through _read_live as TOML, or raise AdoptApplyError naming the path."""
     try:
         return tomllib.loads(data.decode("utf-8"))
-    except (ValueError, RecursionError) as exc:   # UnicodeDecodeError and TOMLDecodeError included
+    except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError and TOMLDecodeError included
         raise apply.AdoptApplyError("{!r} is unreadable or malformed TOML ({})".format(rel, exc))
 
 
@@ -633,6 +633,20 @@ def _self_test_checks():
         if not cond:
             failures.append(name)
 
+    # The tomllib parse-site floor (tools/check_python_floor.py, tomllib leg): the production parse
+    # _toml disposes of RecursionError, MemoryError and the ValueError family itself, refusing as
+    # AdoptApplyError, never an escaping parse error. Deep nesting feeds a real RecursionError;
+    # MemoryError shares the handler (the static floor scan is its per-site guard). Regression
+    # guard: RecursionError was already in _toml's handler before the floor change, which added only
+    # MemoryError, so this case guards behaviour that already held.
+    try:
+        reader._toml(("x = " + "[" * 6000 + "]" * 6000).encode("utf-8"), "probe.toml")
+        deep_why = None
+    except apply.AdoptApplyError as exc:
+        deep_why = str(exc)
+    check("toml-floor-deep-nesting-refused",
+          deep_why is not None and "unreadable or malformed TOML" in deep_why)
+
     now = datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc)
     mrel = ".working/toml"
     old, note, mig, keep = ".working/OLD.md", ".working/notes/old.md", ".working/MIG.md", ".working/KEEP.md"
@@ -669,7 +683,9 @@ def _self_test_checks():
                 dict(op="render-views", store_root=".",
                      members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views]),
                 schema.enforcement_install_op(bindings["enforcement"])]
-        sheet = dict(sources=sorted(srcs), targets=[".opf/hooks/pre-commit"] + sorted(dests.values()),
+        # The opf/ mirror the pack row plants lies outside every walked root, so its absence is a declared
+        # target beside each explicit move destination.
+        sheet = dict(sources=sorted(srcs), targets=[schema.PACK_MIRROR_ROOT] + sorted(dests.values()),
                      product="opf",
                      decisions=[dict(path=p, disposition=d, actor="fixture",
                                      **(dict(destination=dests[p]) if p in dests else {}))

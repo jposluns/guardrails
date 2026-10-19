@@ -307,14 +307,95 @@ def _commit_tree(root, tree, parents, message):
     return _fixture_git(root, *args, identity=True, input_text=message + "\n")
 
 
-def self_test():
+def _non_utf8_dir(parent):
+    """The V10 fixture: make and return a directory under parent whose name carries a non-UTF-8 byte.
+    Raises OSError or UnicodeError where the filesystem rejects such a name."""
+    raw = os.fsencode(str(parent)) + b"/v10-non-utf8-\xff-repo"
+    os.mkdir(raw)
+    return Path(os.fsdecode(raw))
+
+
+def _shallow_clone(parent, source, dest):
+    """The V11 fixture: a depth-1 file:// clone of source at dest (a plain local-path clone ignores
+    --depth). Raises OSError, SubprocessError or CannotEvaluate where a shallow clone cannot be built."""
+    _fixture_git(parent, "clone", "--depth", "1", "-q", "file://{}".format(source), str(dest),
+                 "-b", "protected")
+    if not _is_shallow(dest):
+        raise CannotEvaluate("the depth-1 file:// clone is not shallow")
+    return dest
+
+
+def _not_run(failures, case, cause):
+    """Record a self-test case that could not run as a NAMED failure (a counted cannot-evaluate that
+    fails the run), never a printed note beside a PASS: coverage that did not run is not coverage."""
+    failures.append("NOT RUN: {}: {}; coverage that did not run FAILS the self-test, never a silent "
+                    "PASS".format(case, cause))
+
+
+_V10_CASE = "V10 non-UTF-8-git-output"
+_V11_CASE = "V11 shallow-clone"
+
+
+def _recorded(output, entry):
+    """True when entry heads a bullet on the SELF-TEST FAIL list in output: a recorded failure prints as
+    "  - <entry>" after that header, so a NOT RUN line that was only printed (never recorded) does not
+    count."""
+    _head, header, listed = output.partition("SELF-TEST FAIL:\n")
+    return bool(header) and "\n  - " + entry in "\n" + listed
+
+
+def _not_run_vector(failures):
+    """Red-on-revert vector for the V10/V11 skips that printed SELF-TEST PASS (PARTIAL) and exited 0. Nested
+    self-test runs replace the V10 builder alone, the V11 builder alone (the other fixture left real), and
+    then both, with builders that raise; two more runs replace each builder alone with one that returns None
+    instead of a fixture. Each run must exit nonzero AND carry every replaced case's NOT RUN bullet on its
+    failure list. The single-case runs matter: in the combined run the sibling's recorded failure alone makes
+    the exit nonzero, so a call site that only printed its NOT RUN line would pass there."""
+    def _rejects_name(_parent):
+        raise OSError("injected: a non-UTF-8 directory name is rejected")
+
+    def _no_shallow(_parent, _source, _dest):
+        raise CannotEvaluate("injected: a shallow file:// clone cannot be built")
+
+    def _no_dir(_parent):
+        return None
+
+    def _no_clone(_parent, _source, _dest):
+        return None
+
+    for run_label, injected, labels in (
+            ("V10 only unbuildable", {"_non_utf8_dir": _rejects_name}, (_V10_CASE,)),
+            ("V11 only unbuildable", {"_shallow_clone": _no_shallow}, (_V11_CASE,)),
+            ("V10 and V11 unbuildable",
+             {"_non_utf8_dir": _rejects_name, "_shallow_clone": _no_shallow}, (_V10_CASE, _V11_CASE)),
+            ("V10 builder returns None", {"_non_utf8_dir": _no_dir}, (_V10_CASE,)),
+            ("V11 builder returns None", {"_shallow_clone": _no_clone}, (_V11_CASE,))):
+        saved = {name: value for name, value in globals().items() if name in injected}
+        missing = sorted(name for name in injected if name not in saved)
+        if missing:
+            raise KeyError(", ".join(missing))
+        globals().update(injected)
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = self_test(_vectors=False)
+        finally:
+            globals().update(saved)
+        for label in labels:
+            if rc == 0 or not _recorded(out.getvalue(), "NOT RUN: {}: ".format(label)):
+                failures.append("(NOT RUN vector, {}) an unavailable {} fixture must exit nonzero AND record "
+                                "a NOT RUN failure naming it on the failure list, never a PASS (PARTIAL) "
+                                "exit 0, a silent skip or a bare printed line (got exit {})"
+                                .format(run_label, label, rc))
+
+
+def self_test(_vectors=True):
     try:
         temp = Path(tempfile.mkdtemp(prefix="aiqt-branchroot-selftest-"))
     except OSError as exc:
         print("SELF-TEST ERROR: cannot create fixture root: {}".format(exc), file=sys.stderr)
         return 2
     failures = []
-    skipped = []
     old_home = os.environ.get("HOME")
     old_xdg = os.environ.get("XDG_CONFIG_HOME")
     fixture_home = temp / "home"
@@ -414,43 +495,38 @@ def self_test():
 
         # V10: non-UTF-8 git output (a repository whose path carries a non-UTF-8 byte, so
         # `git rev-parse --show-toplevel` emits bytes strict UTF-8 cannot decode) is a cannot-evaluate
-        # (exit 2), never an uncaught decode crash to exit 1.
+        # (exit 2), never an uncaught decode crash to exit 1. A filesystem that rejects the name is a
+        # NOT RUN failure (the fixture needs a byte-transparent filesystem such as the Linux CI runner).
         try:
-            v10_bytes = os.fsencode(str(temp)) + b"/v10-non-utf8-\xff-repo"
-            os.mkdir(v10_bytes)
-        except (OSError, UnicodeError):
-            v10_bytes = None
-            skipped.append(
-                "V10 non-UTF-8-git-output (this filesystem rejects a non-UTF-8 directory name, so the "
-                "fixture cannot be built here; it runs on a byte-transparent filesystem such as the "
-                "Linux CI runner)"
-            )
-        if v10_bytes is not None:
-            v10 = Path(os.fsdecode(v10_bytes))
+            v10 = _non_utf8_dir(temp)
+        except (OSError, UnicodeError) as exc:
+            v10 = None
+            _not_run(failures, _V10_CASE, "this filesystem rejects a non-UTF-8 directory name, so the "
+                     "fixture cannot be built ({})".format(exc))
+        else:
+            if v10 is None:
+                _not_run(failures, _V10_CASE, "the fixture builder returned no directory")
+        if v10 is not None:
             _fixture_git(v10, "init", "-q", "-b", "protected")
             case("V10 non-utf8 git output is cannot-evaluate", 2, v10,
                  "refs/heads/protected", "HEAD")
 
         # V11: a shallow clone cannot tell a missing merge base from unfetched history, so a merge-base
         # exit 1 in a shallow repository is cannot-evaluate (exit 2), never a false ORPHANED deny. A
-        # file:// clone with --depth is genuinely shallow (a plain local-path clone ignores --depth). The
-        # case is skipped with a printed note (never a false pass) where a shallow file:// clone cannot be
-        # built here; it runs on the CI runner.
+        # file:// clone with --depth is genuinely shallow (a plain local-path clone ignores --depth). Where
+        # a shallow file:// clone cannot be built the case is a NOT RUN failure, never a skip beside a PASS.
         v11_src = _fixture_repo(temp, "v11-shallow-src")
         _fixture_commit(v11_src, "c2")  # depth >= 2 so a depth-1 clone actually truncates
         v11 = temp / "v11-shallow-clone"
         try:
-            _fixture_git(temp, "clone", "--depth", "1", "-q",
-                         "file://{}".format(v11_src), str(v11), "-b", "protected")
-            shallow_ready = _is_shallow(v11)
-        except (OSError, subprocess.SubprocessError, CannotEvaluate):
+            shallow_ready = _shallow_clone(temp, v11_src, v11) is not None
+        except (OSError, subprocess.SubprocessError, CannotEvaluate) as exc:
             shallow_ready = False
-        if not shallow_ready:
-            skipped.append(
-                "V11 shallow-clone (a shallow file:// clone could not be built here; the shallow "
-                "branch-root path runs where file:// clones are constructible, such as the CI runner)"
-            )
+            _not_run(failures, _V11_CASE, "a shallow file:// clone could not be built ({})".format(exc))
         else:
+            if not shallow_ready:
+                _not_run(failures, _V11_CASE, "the shallow-clone builder returned no clone")
+        if shallow_ready:
             v11_tree = _fixture_git(v11, "rev-parse", "HEAD^{tree}")
             v11_orphan = _commit_tree(v11, v11_tree, (), "orphan in shallow")
             _fixture_git(v11, "update-ref", "refs/heads/orphan", v11_orphan)
@@ -498,6 +574,9 @@ def self_test():
         except _ap.ArgumentTypeError:
             failures.append("V13 --max-lag {!r}: rejected a valid value".format(_good))
 
+    if _vectors:
+        _not_run_vector(failures)
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
@@ -506,15 +585,9 @@ def self_test():
     covered = ("rooted, orphaned, configured/report-only stale, partial rewrite, underivable protected "
                "ref, missing head, malformed/negative threshold, two-base criss-cross, non-repository, and "
                "default-root/cwd-unavailable")
-    if skipped:
-        # A declared case whose fixture could not be built in THIS environment is disclosed explicitly and
-        # is NOT counted as covered, so the pass can never falsely claim coverage it did not exercise.
-        print("SELF-TEST PASS (PARTIAL): verified " + covered + "; verdicts are asserted by exit code. "
-              "NOT VERIFIED HERE (declared cases whose fixtures could not be built in this environment): "
-              + "; ".join(skipped))
-    else:
-        print("SELF-TEST PASS: V1-V13 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
-              "(both cannot-evaluate) outcomes; verdicts are asserted by exit code")
+    print("SELF-TEST PASS: V1-V13 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
+          "(both cannot-evaluate) outcomes; verdicts are asserted by exit code; an unbuildable V10 or V11 "
+          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL)")
     return 0
 
 

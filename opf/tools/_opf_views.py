@@ -108,7 +108,12 @@ EXIT_CANNOT_EVALUATE = 2
 
 # The generated-header identity (spec 10.3). The generator version is this view generator's own contract
 # version, independent of the store schema version; a change to the rendered shape bumps it so a stale
-# hand-copy reads as drift.
+# hand-copy reads as drift. The rendered shape is the structure of a view: its sections, its line layout,
+# and its header's form and field set. It is not the value text: a change to how a value's characters
+# are rendered is not a shape change and keeps the version, because a stale hand-copy of a view that
+# change affects already reads as drift by its bytes (the drift check compares every byte of a view,
+# header included). A store holding none of the characters such a change touches renders byte-identical
+# views; the self-test pins this for the U+0085, U+2028 and U+2029 collapse.
 GENERATOR_NAME = "opf-views"
 GENERATOR_VERSION = "2"
 SCHEMA_VERSION = _opf_schema.SUPPORTED_SCHEMA
@@ -205,7 +210,7 @@ def _read_raw_and_parsed(store_root_fd, relpath):
         raise ViewsError("cannot read {} ({})".format(relpath, exc))
     try:
         return raw, tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError, ValueError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError, MemoryError, ValueError) as exc:
         # RecursionError: deeply nested TOML (e.g. hundreds of nested arrays) trips tomllib's recursive
         # descent; it is NOT a TOMLDecodeError, so catch it (and defensively ValueError) here and map it to
         # a cannot-evaluate rather than letting an uncontrolled traceback escape. This is U4's OWN tomllib
@@ -642,6 +647,15 @@ def _lines(title, body_lines):
 
 _MD_CTRL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
+# The Unicode line boundaries beyond LF and CR that str.splitlines() (and any reader following Unicode
+# line breaking) splits on: U+0085 NEXT LINE, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR.
+# _md_text collapses each to a single space, exactly as it collapses LF and CR, in a step of its own so
+# the frozen C0/DEL class above stays unchanged. The two header sinks, _html_comment_safe and
+# _toml_comment_safe, apply the same step, so a discovered source path cannot split a header line either.
+# The remaining splitlines() boundaries (VT, FF and U+001C..U+001E) are C0 controls that _MD_CTRL_RE
+# already drops.
+_MD_LINESEP_RE = re.compile("[\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
+
 # CommonMark 2.4 backslash-escapable ASCII punctuation that is structurally ACTIVE for a free-text value
 # in this sink's position. A view value is a single line (newlines are collapsed below) always emitted
 # behind a structural prefix (`- `, `## `, `<col>: `), never at column 0. In that position the active
@@ -732,8 +746,11 @@ def _md_text(value):
     ref.kind), so the free-text fields (title, locator, note, summary) always render mid-line.
 
     Newlines/carriage returns collapse to a single space (a view field is one line) and other C0/DEL
-    control characters are dropped (U+0009 TAB is preserved as inline whitespace, inert mid-line); then
-    the value is split on the GFM extended-autolink triggers. Each
+    control characters are dropped (U+0009 TAB is preserved as inline whitespace, inert mid-line).
+    U+0085 NEXT LINE, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR collapse to a single space
+    too, one space per character as for a lone LF (only CR LF pairs into one space), so no character
+    str.splitlines() treats as a line boundary survives into a view line; the store keeps the owner's
+    text as written. Then the value is split on the GFM extended-autolink triggers. Each
     autolink token (a bare URL, `www.` domain, or email) is wrapped in a CODE SPAN, which a GFM renderer
     never autolinks and never treats as raw HTML, so the address renders as inert monospace text with
     every character preserved. Every non-token segment is escaped by `_md_escape_inline`. A value with no
@@ -757,6 +774,7 @@ def _md_text(value):
     _render_resolved)."""
     s = str(value)
     s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    s = _MD_LINESEP_RE.sub(" ", s)
     s = _MD_CTRL_RE.sub("", s)
     # Coalesce CONTIGUOUS autolink matches (no text between them) into ONE code span over the original
     # substring: two abutting code spans would sit fence-to-fence, forming a two-backtick run CommonMark
@@ -795,10 +813,13 @@ def _html_comment_safe(value):
     """Encode a value for the HTML-comment sink of the generated header (spec 10.3), so no interpolated
     value (a discovered source path or machine-dir component especially) can close the comment early. See
     the note above _MD_COMMENT_DASHES_RE for the mechanism and its disclosed residual. Newlines/CR collapse
-    to a space and other C0/DEL controls are dropped (U+0009 TAB is preserved as inert whitespace inside the
-    comment), so a value cannot inject a fake header field line or an early closer."""
+    to a space, as do U+0085, U+2028 and U+2029 (one space per character, as in _md_text), and other C0/DEL
+    controls are dropped (U+0009 TAB is preserved as inert whitespace inside the comment), so a value cannot
+    inject a fake header field line or an early closer, or split a header line for a str.splitlines()
+    reader."""
     s = str(value)
     s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    s = _MD_LINESEP_RE.sub(" ", s)
     s = _MD_CTRL_RE.sub("", s)
     return _MD_COMMENT_DASHES_RE.sub("- ", s)
 
@@ -809,10 +830,11 @@ def _toml_comment_safe(value):
     newline/CR (collapsed to a space) or a C0/DEL control (dropped, TAB preserved) forging a header field
     line. Unlike the HTML-comment sink, a `--` run is INERT inside a `#` comment, so the dash-run break is
     NOT applied here: it would corrupt a legitimate value such as the `opf render --write` regenerate command
-    into a non-runnable `opf render - -write`. Same newline/control neutralization as _html_comment_safe,
-    without the dash break."""
+    into a non-runnable `opf render - -write`. Same newline/control neutralization as _html_comment_safe
+    (U+0085, U+2028 and U+2029 collapse to a space too), without the dash break."""
     s = str(value)
     s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    s = _MD_LINESEP_RE.sub(" ", s)
     return _MD_CTRL_RE.sub("", s)
 
 
@@ -2732,9 +2754,12 @@ def self_test():
         check("md-text-collapses-lf", _md_text("a\nb") == "a b")
         check("md-text-lf-no-forged-list", _md_text("a\n- FORGED") == "a - FORGED")
         _nl_markers = ["- ", "+ ", "* ", "# ", "> ", "1. ", "`", "|", "    "]
-        _nl_vectors = [nl + mk + "x" for nl in ("\n", "\r", "\r\n") for mk in _nl_markers]
+        _nl_vectors = [nl + mk + "x" for nl in ("\n", "\r", "\r\n", "\x85", "\N{LINE SEPARATOR}",
+                                                "\N{PARAGRAPH SEPARATOR}")
+                       for mk in _nl_markers]
         check("md-text-output-single-line",
-              all("\n" not in _md_text("v)" + s) and "\r" not in _md_text("v)" + s) for s in _nl_vectors))
+              all("\n" not in _md_text("v)" + s) and "\r" not in _md_text("v)" + s)
+                  and len(_md_text("v)" + s).splitlines()) == 1 for s in _nl_vectors))
         # round-12 (codex round-11 BLOCKER+2 MAJOR, each confirmed via a real CommonMark parser): the
         # round-10/11 pins exercised only SINGLE-occurrence inputs, so a bounded-count regression
         # (.replace(...,1) / sub(...,count=1) / first-backtick-run only) left a LATER occurrence to break out
@@ -2838,6 +2863,47 @@ def self_test():
               "\n" not in _md_text(("x\n- F") * _N) and "\r" not in _md_text(("a\r") * _N))
         check("md-text-hi-count-crlf-single-space", _md_text("a\r\n" * _N) == "a " * _N)
         check("md-text-hi-count-control-stripped", _MD_CTRL_RE.search(_md_text("a\x07" * _N)) is None)
+        # U+0085 NEL, U+2028 and U+2029 are line boundaries for str.splitlines(), so a stored value holding
+        # one would split a view line for such a reader. Each collapses to one space as a lone LF does:
+        # alone, beside an LF or a CR (a CR LF pair still collapses to one space), at either end of the
+        # value, and repeated (three in a row, and at the high count). The class is frozen, and the
+        # codepoints just outside it on each side (U+0084, U+0086, U+2027, U+202A) pass through untouched,
+        # so a widened class flips a boundary pin.
+        check("md-linesep-re-frozen",
+              _MD_LINESEP_RE.pattern == "[\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
+        for _ls_name, _ls in (("nel", "\x85"), ("u2028", "\N{LINE SEPARATOR}"),
+                              ("u2029", "\N{PARAGRAPH SEPARATOR}")):
+            check("md-text-collapses-" + _ls_name, _md_text("a" + _ls + "b") == "a b")
+            check("md-text-" + _ls_name + "-beside-lf",
+                  _md_text("a" + _ls + "\nb") == "a  b" and _md_text("a\n" + _ls + "b") == "a  b")
+            check("md-text-" + _ls_name + "-beside-cr",
+                  _md_text("a" + _ls + "\rb") == "a  b" and _md_text("a\r" + _ls + "b") == "a  b"
+                  and _md_text("a\r\n" + _ls + "b") == "a  b" and _md_text("a" + _ls + "\r\nb") == "a  b")
+            check("md-text-" + _ls_name + "-at-ends", _md_text(_ls + "ab" + _ls) == " ab ")
+            check("md-text-" + _ls_name + "-repeated", _md_text("a" + _ls * 3 + "b") == "a   b")
+            check("md-text-" + _ls_name + "-hi-count", _md_text(("a" + _ls) * _N) == "a " * _N)
+            check("md-text-" + _ls_name + "-no-forged-list", _md_text("a" + _ls + "- FORGED") == "a - FORGED")
+        for _ob_name, _ob in (("u0084", "\x84"), ("u0086", "\x86"), ("u2027", "\N{HYPHENATION POINT}"),
+                              ("u202a", "\N{LEFT-TO-RIGHT EMBEDDING}")):
+            check("md-text-" + _ob_name + "-untouched", _md_text("a" + _ob + "b") == "a" + _ob + "b")
+        # The two header sinks collapse the same three characters, so a discovered source path holding one
+        # cannot split a header line for a str.splitlines() reader: each sink alone, beside CR LF, and at the
+        # high count, then a whole header in both forms (HTML comment and TOML `#` lines) over a machine-dir
+        # name holding all three.
+        for _ls_name, _ls in (("nel", "\x85"), ("u2028", "\N{LINE SEPARATOR}"),
+                              ("u2029", "\N{PARAGRAPH SEPARATOR}")):
+            for _hs_name, _hs in (("html-comment", _html_comment_safe), ("toml-comment", _toml_comment_safe)):
+                check(_hs_name + "-collapses-" + _ls_name,
+                      _hs("a" + _ls + "b") == "a b" and _hs("a" + _ls + "\r\nb") == "a  b"
+                      and _hs("a\r\n" + _ls + "b") == "a  b")
+                check(_hs_name + "-" + _ls_name + "-hi-count", _hs(("a" + _ls) * _N) == "a " * _N)
+        _ls_hdr_src = {".working/t\x85o\N{LINE SEPARATOR}m\N{PARAGRAPH SEPARATOR}l/block.index.toml": b"d"}
+        _ls_hdrs = (_header(_ls_hdr_src), _toml_header(_ls_hdr_src))
+        check("header-linesep-path-collapsed",
+              "\nsources: .working/t o m l/block.index.toml\n" in _ls_hdrs[0]
+              and "\n# sources: .working/t o m l/block.index.toml\n" in _ls_hdrs[1])
+        check("header-linesep-path-splitlines-equals-lf",
+              all(len(_h.splitlines()) == _h.count("\n") for _h in _ls_hdrs))
         # soup carries EVERY _MD_ESCAPE_RE metacharacter (incl. backslash -- round-18 QA: an omitted char let a
         # per-char bound on it, e.g. backslash, escape the escape-completeness check) plus & < >.
         _md_soup = _md_text("\\`*_{}[]()#+!|~&<>" * _N)
@@ -3319,6 +3385,42 @@ def self_test():
         check("mirror-title", "# BACKLOG_ITEM index" in mirror and mirror.startswith("<!-- GENERATED"))
         check("mirror-projects-record", "## BI-2" in mirror and "- status: active" in mirror)
 
+        # A change to how a value's characters render is not a change to the rendered shape, so it keeps
+        # GENERATOR_VERSION. This store holds none of U+0085, U+2028 and U+2029, and rendering it again with
+        # their collapse turned off (in _md_text and both header sinks) writes every view and the VERSION
+        # deliverable byte-identical, header included.
+        _gv_seps = ("\x85", "\N{LINE SEPARATOR}", "\N{PARAGRAPH SEPARATOR}")
+
+        def _view_bytes(vroot):
+            vb = {}
+            for _dp, _dn, _fn in os.walk(str(vroot / WORKING_DIRNAME)):
+                _dn[:] = [d for d in _dn if d != "toml"]
+                for _f in _fn:
+                    vb[_f] = (Path(_dp) / _f).read_bytes()
+            if (vroot / "VERSION").is_file():
+                vb["VERSION"] = (vroot / "VERSION").read_bytes()
+            return vb
+
+        def _render_without_linesep(vroot):
+            _saved_linesep = globals()["_MD_LINESEP_RE"]
+            try:
+                globals()["_MD_LINESEP_RE"] = re.compile("(?!)")
+                return render_write(vroot)
+            finally:
+                globals()["_MD_LINESEP_RE"] = _saved_linesep
+
+        _gv_root = new_root()
+        _gv_clean = True
+        for _gv_p in sorted((root / WORKING_DIRNAME / "toml").iterdir()):
+            _gv_text = _gv_p.read_text(encoding="utf-8")
+            _gv_clean = _gv_clean and all(ch not in _gv_text for ch in _gv_seps)
+            write_toml(_gv_root, _gv_p.name, _gv_text)
+        _gv_on = _view_bytes(root)
+        check("linesep-free-store-views-byte-identical",
+              _gv_clean and _render_without_linesep(_gv_root) == EXIT_OK
+              and all(_v in _gv_on for _v in ("TODO.md", "DECISIONS.toml", "CONTRIBUTIONS.md", "VERSION"))
+              and _view_bytes(_gv_root) == _gv_on)
+
         # drift: hand-edit a rendered view; --check must report exit 1 with a drift line.
         (root / WORKING_DIRNAME / "TODO.md").write_text("hand edited\n", encoding="utf-8")
         check("drift-detected", render(["--root", str(root), "--check"]) == EXIT_DRIFT)
@@ -3645,6 +3747,80 @@ def self_test():
         forged_view = (forgeroot / WORKING_DIRNAME / "REFERENCES.md").read_text(encoding="utf-8")
         check("forged-heading-neutralized", "\n# Forged heading" not in body_of(forged_view))
         check("forged-comment-neutralized", "<!-- injected -->" not in forged_view)
+
+        # --- A stored U+2028/U+2029/U+0085 never reaches a rendered view. The store holds them (written as
+        # TOML escapes below) in a reference's summary, locator and note, and in a sent contribution's
+        # recipient, dedup_class and delivery channel and ref. REFERENCES.md renders the locator,
+        # CONTRIBUTIONS.md the delivery channel and ref, and the declared CONTRIBUTION-INDEX.md mirror the
+        # recipient, dedup_class and delivery (a scalar column and a table column); no view renders summary
+        # or note, so the whole-view assertion covers a future sink for either. Every written view then
+        # carries none of the characters, so str.splitlines() finds exactly as many lines as there are LFs.
+        lsroot = new_root()
+        ls_manifest = manifest + "\n" + _view("CONTRIBUTION-INDEX.md", "deterministic", ["contribution"])
+        write_toml(lsroot, "manifest.toml", ls_manifest)
+        empty_indexes(lsroot)
+        write_toml(lsroot, "reference.index.toml", "\n".join([
+            "schema = 1", "", "[[record]]",
+            'id = "RF-1"', 'type = "reference"', 'status = "recorded"', 'title = "a source"',
+            'created_at = "2026-01-01T00:00:00Z"', 'updated_at = "2026-01-02T00:00:00Z"',
+            'actor = { kind = "maintainer" }',
+            'summary = "sum\\u2028mary\\u2029text\\u0085end"',
+            'refs = [{ kind = "doc", locator = "loc\\u2028a\\u2029b\\u0085c", note = "n\\u2028o\\u2029te" }]',
+        ]) + "\n")
+        write_toml(lsroot, "contribution.index.toml", "\n".join([
+            "schema = 1",
+            _rec("CN-1", "contribution", "sent", "sent contribution",
+                 recipient="peer\\u2028one", dedup_class="dc\\u2029one", content_digest="sha256:aaa",
+                 delivery={"channel": "e\\u2028mail", "ref": "m\\u2029x\\u0085y",
+                           "sent_at": "2026-09-01T00:00:00Z"}),
+        ]) + "\n")
+        # The fixture preconditions (escaped in the source, the render succeeds, the views are written) are
+        # folded into each assertion below, so a vacuous pass on a failed or empty render is impossible.
+        ls_srcs = [(lsroot / WORKING_DIRNAME / "toml" / _n).read_text(encoding="utf-8")
+                   for _n in ("reference.index.toml", "contribution.index.toml")]
+        ls_seps = ("\x85", "\N{LINE SEPARATOR}", "\N{PARAGRAPH SEPARATOR}")
+        ls_pre = (all(ch not in _s for _s in ls_srcs for ch in ls_seps)
+                  and all("\\u2028" in _s for _s in ls_srcs)
+                  and render_write(lsroot) == EXIT_OK)
+        ls_views = {}
+        for _dirpath, _dirnames, _filenames in os.walk(str(lsroot / WORKING_DIRNAME)):
+            _dirnames[:] = [d for d in _dirnames if d != "toml"]
+            for _fn in _filenames:
+                with open(os.path.join(_dirpath, _fn), encoding="utf-8") as _vf:
+                    ls_views[_fn] = _vf.read()
+        if (lsroot / "VERSION").is_file():
+            with open(str(lsroot / "VERSION"), encoding="utf-8") as _vf:
+                ls_views["VERSION"] = _vf.read()
+        ls_pre = ls_pre and all(_v in ls_views for _v in (
+            "REFERENCES.md", "CONTRIBUTIONS.md", "CONTRIBUTION-INDEX.md", "BLOCK-INDEX.md", "VERSION"))
+        check("linesep-references-locator-collapsed",
+              ls_pre
+              and body_of(ls_views["REFERENCES.md"]) == "\n# REFERENCES\n\n- RF-1 a source\n  - doc: loc a b c\n")
+        check("linesep-views-no-separator",
+              ls_pre and all(ch not in text for text in ls_views.values() for ch in ls_seps))
+        check("linesep-views-splitlines-equals-lf",
+              ls_pre and all(len(text.splitlines()) == text.count("\n") for text in ls_views.values()))
+        check("linesep-contributions-delivery-collapsed",
+              ls_pre and "\n- CN-1 sent contribution [e mail, m x y, 2026-09-01T00:00:00Z]\n"
+              in body_of(ls_views["CONTRIBUTIONS.md"]))
+        check("linesep-mirror-fields-collapsed",
+              ls_pre and body_of(ls_views["CONTRIBUTION-INDEX.md"]) == (
+                  "\n# CONTRIBUTION index\n\n## CN-1\n- type: contribution\n- status: sent\n"
+                  "- title: sent contribution\n- created_at: 2026-01-01T00:00:00Z\n"
+                  "- updated_at: 2026-01-02T00:00:00Z\n- recipient: peer one\n- dedup_class: dc one\n"
+                  "- content_digest: sha256:aaa\n"
+                  "- delivery: channel=e mail, ref=m x y, sent\\_at=2026-09-01T00:00:00Z\n"
+                  "- actor: maintainer\n"))
+        # With the collapse turned off, the same store renders the characters into its views (each of the
+        # three reaches REFERENCES.md through the locator), so turning the collapse off is visible where
+        # they occur and the byte-identical check over the separator-free store above is not vacuous.
+        _ls_off = new_root()
+        for _ls_p in sorted((lsroot / WORKING_DIRNAME / "toml").iterdir()):
+            write_toml(_ls_off, _ls_p.name, _ls_p.read_text(encoding="utf-8"))
+        _ls_off_rc = _render_without_linesep(_ls_off)
+        _ls_off_refs = _view_bytes(_ls_off).get("REFERENCES.md", b"").decode("utf-8")
+        check("linesep-collapse-off-reaches-views",
+              ls_pre and _ls_off_rc == EXIT_OK and all(ch in _ls_off_refs for ch in ls_seps))
 
         # --- F-05: a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --
         prroot = new_root()
@@ -4119,6 +4295,59 @@ def self_test():
                   _fs_todo.read_text(encoding="utf-8") == _fs_before)
         finally:
             globals()["_WRITE_GATE_COMPOSED"] = _saved_flag
+
+        # --- one-time re-spelling of the DECISIONS.toml projection (spec 5.7/10.5): the emitter now writes
+        # U+2028/U+2029 as escapes, with NO generator-version bump, so a projection an EARLIER tool rendered
+        # from a record holding either character differs from the current render in exactly that spelling.
+        # The byte-level drift gate is NOT loosened: the old-spelled view reads as C-VIEW-DRIFT until one
+        # re-render re-spells it, and a projection over records holding neither character is byte-identical
+        # across a re-render, so a store without these characters sees no drift.
+        import _opf_check as _sep_check
+        _sep_decision = {"id": "MD-1", "type": "maintainer_decision", "status": "recorded",
+                         "title": "a ruling",
+                         "decision": "do" + chr(0x2028) + "this" + chr(0x2029) + "that",
+                         "created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z",
+                         "actor": {"kind": "maintainer"}}
+
+        def _add_sep_decision(root, bi):
+            import _opf_emit
+            mdir = root / WORKING_DIRNAME / "toml"
+            (mdir / "maintainer_decision.index.toml").write_text(
+                _opf_emit.emit({"schema": 1, "record": [_sep_decision]}), encoding="utf-8")
+            (mdir / "counters.toml").write_text(
+                _opf_emit.emit({"schema": 1, "counters": {
+                    "BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0,
+                    "BL": 0, "HO": 1, "RF": 0, "CN": 0, "MD": 1, "PP": 0}}), encoding="utf-8")
+
+        _sep_root, _sep_obs = _gate_store(mutate=_add_sep_decision)
+        _sep_view = _sep_root / WORKING_DIRNAME / "DECISIONS.toml"
+        check("sep-respell-write-ok",
+              render(["--root", str(_sep_root), "--write"], observations=_sep_obs) == EXIT_OK)
+        _sep_now = _sep_view.read_bytes()
+        check("sep-respell-current-render-escapes",
+              b"\\u2028" in _sep_now and b"\\u2029" in _sep_now
+              and not any(ch.encode("utf-8") in _sep_now for ch in (chr(0x2028), chr(0x2029))))
+        _sep_old = _opf_emit.prior_separator_spelling(_sep_now.decode("utf-8")).encode("utf-8")
+        check("sep-respell-prior-spelling-differs", _sep_old != _sep_now)
+        _sep_view.write_bytes(_sep_old)
+        _sep_post = _sep_check.validate_store(
+            _opf_store.resolve_store(Path(str(_sep_root))), observations=_sep_obs)
+        check("sep-respell-old-view-is-view-drift",
+              _sep_post.checks.get("C-VIEW-DRIFT") == "FINDING"
+              and any("DECISIONS.toml" in m for m in _sep_post.by_check.get("C-VIEW-DRIFT", [])))
+        check("sep-respell-old-view-check-reports-drift",
+              render(["--root", str(_sep_root), "--check"]) == EXIT_DRIFT)
+        check("sep-respell-one-rerender-clears",
+              render(["--root", str(_sep_root), "--write"], observations=_sep_obs) == EXIT_OK
+              and _sep_view.read_bytes() == _sep_now)
+        check("sep-respell-check-clean-after-rerender",
+              render(["--root", str(_sep_root), "--check"]) == EXIT_OK)
+        # Control: a projection over records holding neither character is byte-identical across a re-render.
+        _plain_view = gvroot / WORKING_DIRNAME / "DECISIONS.toml"
+        _plain_before = _plain_view.read_bytes()
+        check("sep-plain-rerender-byte-identical",
+              render(["--root", str(gvroot), "--write"], observations=gvobs) == EXIT_OK
+              and _plain_view.read_bytes() == _plain_before)
 
         # --- VECTOR A (change-carries-check): EXERCISE the Phase-C owned-miss ROLLBACK + corrected diagnostic.
         # The natural PR-C vectors above never reach owned-miss (a source-sound store regenerates cleanly and

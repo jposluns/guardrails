@@ -53,6 +53,16 @@ Legs, in order:
                  quote or a flow indicator and does not close on its own line is cannot-evaluate. A
                  plain (unquoted) pin of a floor whose text ends in 0 is a finding, since YAML reads
                  a plain 3.20 as the number 3.2.
+                 Inside a HOST_JOBS job of HOST_WORKFLOW_REL (.github/workflows/quality.yml), and
+                 nowhere else, a pin that is a patch release of the floor (MAJOR.MINOR.PATCH, each
+                 component at most four digits, HOST_PATCH_RE) passes only when it equals the
+                 python-host-patch that HOST_SOURCE_REL names (the host-patch CI jobs, which
+                 tools/check_python_host_pin.py also holds to it); that source is read only for such a
+                 pin, and a missing, unreadable or malformed one is cannot-evaluate. The job is the
+                 nearest job id at indent 2 above the pin under the top-level jobs: key. Every other
+                 pin in any workflow, a PIN_FILES entry or a local action file must equal the floor
+                 exactly, so a patch-release pin in another job or file is a finding, as is any other
+                 release.
                  The key is found without regard to case, since the runner reads an input by its
                  upper-cased name: a strict pin whose key is in any other case is cannot-evaluate,
                  and so is any line, script text included, that names INPUT_PYTHON-VERSION
@@ -179,6 +189,48 @@ Legs, in order:
                  statement runs and is scanned, as are a def's decorators and a def's or lambda's
                  default values; a function or lambda body (a method's included) runs only when
                  called and is not scanned.
+  tomllib        always ON: every tomllib.load and tomllib.loads call in every .py file of the tree (.github
+                 and the vendored tree included; a directory in SKIPPED_DIR_NAMES is not walked), under
+                 every spelling the scan resolves (import tomllib, import tomllib as X, from tomllib import
+                 load or loads [as Y], the tomllib._parser submodule, and a module re-export such as
+                 _opf_store.tomllib or from M import tomllib), is HANDLED or is classified by one row of
+                 the recorded table TOMLLIB_TABLE_REL. HANDLED is decided per class, for each of
+                 RecursionError, MemoryError and ValueError, by the FIRST handler that would catch that
+                 class at runtime, scanning the innermost enclosing try's clauses in source order and then
+                 outward (the try statements holding the call in their body, never a handler, else or
+                 finally, inside its own function, lambda or generator expression): a bare except, or a
+                 readable class the caught class is a subclass of, alone or in a tuple literal. Readable
+                 means a builtin exception name the file never rebinds, or tomllib.TOMLDecodeError spelled
+                 through a recognized module (it catches none of the three, so a narrower handler before
+                 the covering one is honoured). The deciding handler covers only when the scan can
+                 establish it disposes of what it caught: its body is not one pass statement alone and
+                 holds no bare raise and no raise of its bound name anywhere, a conditional one included.
+                 A handler the scan cannot read (an attribute other than tomllib.TOMLDecodeError, a call,
+                 a rebound or unknown name) is never skipped and never covers. Table rows: CALLER names a
+                 function in the same file that holds a HANDLED call of it, matched by the spelled call
+                 name against the full qualified function name, never its last part alone; EXEMPT gives
+                 test-code, self-emitted-bytes, already-validated or valueerror-passthrough. A
+                 valueerror-passthrough row records call forms only and is verified: every re-raise in the
+                 deciding handler must be exactly the single statement of `if isinstance(<bound name>,
+                 ValueError): raise` with no else, so only the ValueError family can escape to the callers
+                 the site's own docstring binds, and RecursionError and MemoryError are disposed in the
+                 handler body. A form the scan cannot follow (a parser or the module saved, passed or read
+                 through getattr, an attribute of a recognized module other than load, loads and
+                 TOMLDecodeError, such as tomllib.__dict__, tomllib.__getattribute__ or
+                 tomllib._parser.parse_key, from tomllib import *, the module named by a string to
+                 import_module, __import__ or find_spec or as a key of sys.modules, globals(), vars() or
+                 locals()) is a finding unless an EXEMPT row records it. A row whose count differs from
+                 the scan, whose CALLER no longer handles the call, whose valueerror-passthrough shape no
+                 longer verifies, or whose function holds nothing unhandled is a finding; a table that
+                 does not parse or breaks its schema (a non-string class included) is cannot-evaluate.
+                 The scan is static. Residuals, disclosed: a parser re-exported through another module
+                 under a name the scan does not resolve (from helper import loads; helper.loads; a module
+                 re-exported under an attribute name other than tomllib, as in helper.toml.loads) is not
+                 seen; a CALLER row is checked only against its named caller, and a call replaced by
+                 another call with the same spelling in the same caller is not detected; like the
+                 completeness leg, it walks the working tree, so an untracked .py file is scanned too; and
+                 at handler sites with no per-site runtime MemoryError vector (listed in the residue of
+                 the commits that added them) this static probe is the only MemoryError guard.
   completeness   ON when the source sets completeness-check = true, as it does since the unit that
                  guarded tools/check_entry_guard.py, the last shipped entrypoint, switched it on (off,
                  an unlisted entrypoint is not a finding). The core-hook, preview-hook, adopter-tool
@@ -281,6 +333,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import ast
+import builtins
 import importlib.util
 import json
 import os
@@ -306,6 +359,17 @@ SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "nonblockin
 WORKFLOWS_REL = ".github/workflows"
 PIN_FILES = ("opf/enforcement/ci/github-actions.yml", "opf/tools/check_opf_doctor.py")
 PIN_KEY = "python-version"
+# The host-patch CI jobs: inside a HOST_JOBS job of HOST_WORKFLOW_REL, and nowhere else, a pin that is a patch
+# release of the floor passes only when it equals the python-host-patch this repository-local source names
+# (_host_patch_pin). These names are those of tools/check_python_host_pin.py, whose self-test holds them
+# equal (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE there).
+HOST_WORKFLOW_REL = WORKFLOWS_REL + "/quality.yml"
+HOST_JOBS = ("opf-host-patch", "git-fixture-env-host-patch")
+HOST_SOURCE_REL = ".aiqt/python-host.toml"
+HOST_SOURCE_KEYS = {"format-version", "python-host-patch"}
+HOST_PATCH_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
+# A job id under the top-level jobs: key, a plain key at indent 2, then nothing but an optional comment.
+HOST_JOB_RE = re.compile(r"  (?P<id>[A-Za-z_][A-Za-z0-9_-]*) *:(?:[ \t]+#.*|[ \t]*)")
 # The step environment variable the Actions toolkit reads the input from ("INPUT_" plus the upper-cased
 # name). A line naming it can set the input outside a pin.
 INPUT_ENV = "INPUT_" + PIN_KEY.upper()
@@ -567,7 +631,10 @@ def load_source(root):
     """Parse and schema-check the single source; return its normalized fields."""
     try:
         data = tomllib.loads(_read_text(root / SOURCE_REL))
-    except tomllib.TOMLDecodeError as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # tomllib raises a bare ValueError on an over-long integer literal, RecursionError on deep nesting or
+        # (CPython 3.14.8 on) a key of more than 1000 dotted parts, and MemoryError on a many-part key under a
+        # memory limit: each is exit 2.
         raise CannotEvaluate("{}: does not parse: {}".format(SOURCE_REL, exc))
     if set(data) != SOURCE_KEYS:
         raise CannotEvaluate("{}: keys {} (want exactly {})".format(
@@ -625,6 +692,62 @@ def switch_findings(source):
     return []
 
 
+def load_host_patch(root):
+    """The python-host-patch that HOST_SOURCE_REL names, schema-checked: a missing, unreadable or malformed
+    source is cannot-evaluate, never a pass."""
+    try:
+        data = tomllib.loads(_read_text(root / HOST_SOURCE_REL))
+    except tomllib.TOMLDecodeError as exc:
+        raise CannotEvaluate("{}: does not parse: {}".format(HOST_SOURCE_REL, exc))
+    # tomllib also raises a BARE ValueError on an integer literal past CPython's int-string limit, a
+    # RecursionError on a deeply nested array or inline table or, in a release that bounds key depth, on a
+    # key of more than 1000 dotted parts, and a MemoryError on a source too large for the memory left:
+    # each is cannot-evaluate, never a traceback.
+    except (ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{}: does not parse ({}): {}".format(HOST_SOURCE_REL, type(exc).__name__,
+                                                                     exc))
+    patch = data.get("python-host-patch")
+    if set(data) != HOST_SOURCE_KEYS or type(data["format-version"]) is not int \
+            or data["format-version"] != 1 or not isinstance(patch, str) \
+            or HOST_PATCH_RE.fullmatch(patch) is None:
+        raise CannotEvaluate("{}: want exactly format-version = 1 and python-host-patch = "
+                             "\"MAJOR.MINOR.PATCH\"".format(HOST_SOURCE_REL))
+    return patch
+
+
+def _workflow_job(lines):
+    """The id of the job the last of lines sits in: the nearest earlier job id at indent 2 (HOST_JOB_RE)
+    under a top-level jobs: line, or None when the line sits elsewhere or an indent-2 line above it is not a
+    plain job id."""
+    job = None
+    for text in reversed(lines[:-1]):
+        stripped = text.strip(" \t")
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = _indent(text)
+        if indent == 0:
+            return job if text.split("#", 1)[0].rstrip(" \t") == "jobs:" else None
+        if indent == 2 and job is None:
+            header = HOST_JOB_RE.fullmatch(text)
+            if header is None:
+                return None
+            job = header.group("id")
+    return None
+
+
+def _host_patch_pin(root, rel, lines, value, want, host):
+    """Whether a pin that differs from the floor is the host patch: rel is HOST_WORKFLOW_REL, the pin, the
+    last of lines, sits in a HOST_JOBS job, value is a patch release of the floor, and it equals the
+    python-host-patch HOST_SOURCE_REL names. The source is read only here, once per run (cached in host), so
+    it is cannot-evaluate only when such a pin needs it."""
+    if rel != HOST_WORKFLOW_REL or _workflow_job(lines) not in HOST_JOBS \
+            or not value.startswith(want + ".") or HOST_PATCH_RE.fullmatch(value) is None:
+        return False
+    if "patch" not in host:
+        host["patch"] = load_host_patch(root)
+    return value == host["patch"]
+
+
 def pin_findings(root, floor):
     want = "%d.%d" % floor
     try:
@@ -636,7 +759,7 @@ def pin_findings(root, floor):
     targets += [(rel, True) for rel in PIN_FILES]
     if "action-files" in RULES:
         targets += [(rel, False) for rel in _action_files(root)]
-    findings, seen = [], set()
+    findings, seen, host = [], set(), {}
     while targets:
         rel, required = targets.pop(0)
         if rel in seen:
@@ -683,10 +806,10 @@ def pin_findings(root, floor):
             plain = match.group("plain")
             value = next(group for group in match.group("plain", "single", "double")
                          if group is not None)
-            if value != want:
+            if value != want and not _host_patch_pin(root, rel, lines, value, want, host):
                 findings.append("{}:{}: python-version {!r} differs from the floor {!r}".format(
                     rel, number, value, want))
-            elif plain is not None and want.endswith("0"):
+            elif value == want and plain is not None and want.endswith("0"):
                 findings.append("{}:{}: python-version {} is unquoted; YAML reads it as a number, so "
                                 "quote it as '{}'".format(rel, number, value, want))
         if required and not pins:
@@ -1365,9 +1488,9 @@ def _has_main_block(tree):
     return False
 
 
-def _python_files(root):
-    """Every repo-relative .py path outside EXCLUDED_TREES, directory by directory in sorted order
-    (a directory in SKIPPED_DIR_NAMES is not walked)."""
+def _python_files(root, every=False):
+    """Every repo-relative .py path outside EXCLUDED_TREES (inside them too when every is true),
+    directory by directory in sorted order (a directory in SKIPPED_DIR_NAMES is not walked)."""
     def _fail(exc):
         raise CannotEvaluate("cannot walk the tree: {}".format(exc))
 
@@ -1375,10 +1498,10 @@ def _python_files(root):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
         prefix = "" if rel_dir == "." else rel_dir + "/"
         dirnames[:] = sorted(name for name in dirnames if name not in SKIPPED_DIR_NAMES
-                             and not _excluded(prefix + name + "/"))
+                             and (every or not _excluded(prefix + name + "/")))
         for name in sorted(filenames):
             rel = prefix + name
-            if name.endswith(".py") and not _excluded(rel):
+            if name.endswith(".py") and (every or not _excluded(rel)):
                 yield rel
 
 
@@ -1390,6 +1513,356 @@ def completeness_findings(root, surfaces):
     listed = set(surfaces)
     return ["{}: a shipped entrypoint missing from guarded-surfaces in {}".format(rel, SOURCE_REL)
             for rel in shipped_entrypoints(root) if rel not in listed]
+
+
+# The tomllib leg (see the module docstring): every tomllib.load and tomllib.loads call is HANDLED in its own
+# function or classified by one row of TOMLLIB_TABLE_REL, the one recorded table.
+TOMLLIB_TABLE_REL = "tools/tomllib_parse_sites.toml"
+TOMLLIB_PARSERS = frozenset(("load", "loads"))
+TOMLLIB_COVERED = (RecursionError, MemoryError, ValueError)
+TOMLLIB_EXEMPT_REASONS = frozenset(("test-code", "self-emitted-bytes", "already-validated",
+                                    "valueerror-passthrough"))
+TOMLLIB_ROW_KEYS = {"CALLER": frozenset(("path", "function", "form", "count", "class", "caller")),
+                    "EXEMPT": frozenset(("path", "function", "form", "count", "class", "reason"))}
+TOMLLIB_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.GeneratorExp)
+
+
+def _tomllib_module_name(name):
+    """True for the module name tomllib or a dotted submodule name under it (tomllib._parser)."""
+    return re.fullmatch(r"tomllib(?:\.[A-Za-z_][A-Za-z0-9_]*)*", name) is not None
+
+
+def _tomllib_bindings(tree):
+    """(module names, parser names, unresolved forms) a file binds anywhere in it: the bare name tomllib
+    always, `import tomllib [as X]` (a submodule such as tomllib._parser included), `from tomllib import
+    load, loads [as Y]`, `from tomllib import _parser [as Z]` and `from M import tomllib [as X]` (a module
+    re-export). `from tomllib import *` is an unresolved form."""
+    modules, parsers, unresolved = {"tomllib"}, set(), []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.asname or "tomllib" for alias in node.names
+                           if _tomllib_module_name(alias.name))
+        elif isinstance(node, ast.ImportFrom):
+            from_tomllib = node.level == 0 and _tomllib_module_name(node.module or "")
+            for alias in node.names:
+                if from_tomllib and alias.name == "*":
+                    unresolved.append((node, "from {} import *".format(node.module)))
+                elif from_tomllib and alias.name in TOMLLIB_PARSERS:
+                    parsers.add(alias.asname or alias.name)
+                elif alias.name == "tomllib" or (from_tomllib and alias.name == "_parser"):
+                    modules.add(alias.asname or alias.name)
+    return modules, parsers, unresolved
+
+
+def _tomllib_module_expr(expr, modules):
+    """True when expr names the tomllib module: a bound module name, any `<expr>.tomllib` (a module
+    re-export such as _opf_store.tomllib), or the _parser submodule of either."""
+    if isinstance(expr, ast.Name):
+        return expr.id in modules
+    if isinstance(expr, ast.Attribute):
+        return expr.attr == "tomllib" or (expr.attr == "_parser" and _tomllib_module_expr(expr.value, modules))
+    return False
+
+
+def _tomllib_namespace(expr):
+    """True when expr is a module or name table: X.modules (sys.modules) or a globals(), vars() or locals()
+    call."""
+    return (isinstance(expr, ast.Attribute) and expr.attr == "modules") or (
+        isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id in ("globals", "vars", "locals"))
+
+
+def _tomllib_by_name(node, parent):
+    """True when the string node names the module to a loader or a module or name table: an argument of
+    import_module, __import__ or find_spec, a key passed to a method of such a table (sys.modules.get), or
+    a subscript of one (sys.modules["tomllib"], globals()["tomllib"])."""
+    if isinstance(parent, ast.Subscript):
+        return parent.slice is node and _tomllib_namespace(parent.value)
+    if not isinstance(parent, ast.Call) or node not in parent.args:
+        return False
+    func = parent.func
+    name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+    return name in ("import_module", "__import__", "find_spec") or (isinstance(func, ast.Attribute)
+                                                                   and _tomllib_namespace(func.value))
+
+
+def _tomllib_rebound(tree):
+    """Every name the file binds anywhere: an assignment or deletion target, an import alias, a def,
+    class, handler or match-capture name, or a function parameter. A handler clause spelling one of
+    these is not readable as the builtin it names, so it never establishes coverage and never resolves
+    a first catcher."""
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.alias):
+            bound.add(node.asname or node.name.split(".")[0])
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound.add(node.rest)
+    return frozenset(bound)
+
+
+def _tomllib_catches(handler, kind, modules, rebound):
+    """Whether handler would catch kind at runtime: True (a bare except, or a readable class that kind
+    is a subclass of, alone or in a tuple literal), False (every class is readable and none catches),
+    or None (a class the scan cannot read leaves it unresolved). Readable: a builtin exception name the
+    file never rebinds, or tomllib.TOMLDecodeError spelled through a recognized tomllib module, which
+    catches none of the three covered classes, so a narrower handler before the covering one is
+    honoured, never refused."""
+    if handler.type is None:
+        return True
+    unknown = False
+    for name in handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]:
+        named = None
+        if isinstance(name, ast.Name) and name.id not in rebound:
+            named = getattr(builtins, name.id, None)
+        elif isinstance(name, ast.Attribute) and name.attr == "TOMLDecodeError" \
+                and _tomllib_module_expr(name.value, modules):
+            named = tomllib.TOMLDecodeError
+        if not (isinstance(named, type) and issubclass(named, BaseException)):
+            unknown = True
+        elif issubclass(kind, named):
+            return True
+    return None if unknown else False
+
+
+def _tomllib_reraises(handler):
+    """Every bare `raise` and every raise of the handler's bound name anywhere in its body, a
+    conditional one included."""
+    return [node for stmt in handler.body for node in ast.walk(stmt)
+            if isinstance(node, ast.Raise) and (node.exc is None or (
+                isinstance(node.exc, ast.Name) and node.exc.id == handler.name))]
+
+
+def _tomllib_covers(handler):
+    """True when the scan can establish that handler disposes of what it caught: its body is not one
+    pass statement alone (an effect this scan does not read as disposal) and holds no bare `raise` and
+    no raise of its bound name anywhere, a conditional one included."""
+    if len(handler.body) == 1 and isinstance(handler.body[0], ast.Pass):
+        return False
+    return not _tomllib_reraises(handler)
+
+
+def _tomllib_guarded_passthrough(handler, rebound):
+    """True when every re-raise in handler is exactly the single statement of an
+    `if isinstance(<bound name>, ValueError):` with no else (isinstance and ValueError never rebound in
+    the file), so only the ValueError family can leave the handler and every other caught class is
+    disposed in its body: the shape a valueerror-passthrough row records."""
+    if handler.name is None or "isinstance" in rebound or "ValueError" in rebound:
+        return False
+    if len(handler.body) == 1 and isinstance(handler.body[0], ast.Pass):
+        return False
+    guarded = set()
+    for stmt in handler.body:
+        for node in ast.walk(stmt):
+            if (isinstance(node, ast.If) and not node.orelse and len(node.body) == 1
+                    and isinstance(node.body[0], ast.Raise) and node.body[0].exc is None
+                    and isinstance(node.test, ast.Call) and isinstance(node.test.func, ast.Name)
+                    and node.test.func.id == "isinstance" and len(node.test.args) == 2
+                    and not node.test.keywords
+                    and isinstance(node.test.args[0], ast.Name) and node.test.args[0].id == handler.name
+                    and isinstance(node.test.args[1], ast.Name) and node.test.args[1].id == "ValueError"):
+                guarded.add(node.body[0])
+    return all(node in guarded for node in _tomllib_reraises(handler))
+
+
+def _tomllib_handled(tries, kind, modules, rebound, passthrough=False):
+    """Whether the enclosing handlers dispose of kind: the FIRST handler that would catch it, scanning
+    the innermost try's clauses in source order and then outward, decides, and it must cover
+    (_tomllib_covers). A handler the scan cannot read is never skipped and never covers. With
+    passthrough, a deciding handler whose only re-raises are guarded by `if isinstance(<bound name>,
+    ValueError): raise` also counts: the valueerror-passthrough row shape."""
+    for handlers in tries:
+        for handler in handlers:
+            catches = _tomllib_catches(handler, kind, modules, rebound)
+            if catches is None:
+                return False
+            if catches:
+                return _tomllib_covers(handler) or (passthrough
+                                                    and _tomllib_guarded_passthrough(handler, rebound))
+    return False
+
+
+def _tomllib_site(node, parents, modules, rebound):
+    """(function, handled, passthrough) for a node: the enclosing def, class, lambda and
+    generator-expression names joined by dots (<module> at module level); whether the handlers of the
+    try statements that hold the node in their body (never a handler, else or finally), inside the same
+    function, lambda or generator expression, dispose of RecursionError, MemoryError and ValueError
+    (_tomllib_handled, first-catcher order); and whether RecursionError and MemoryError are disposed
+    when ValueError-guarded re-raises are honoured (the shape a valueerror-passthrough row records)."""
+    names, tries, scoped, child, cur = [], [], False, node, parents.get(node)
+    while cur is not None:
+        if not scoped and isinstance(cur, (ast.Try, ast.TryStar)) and child in cur.body:
+            tries.append(cur.handlers)
+        scoped = scoped or isinstance(cur, TOMLLIB_SCOPES)
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(cur.name)
+        elif isinstance(cur, ast.Lambda):
+            names.append("<lambda>")
+        elif isinstance(cur, ast.GeneratorExp):
+            names.append("<genexpr>")
+        child, cur = cur, parents.get(cur)
+    return (".".join(reversed(names)) or "<module>",
+            all(_tomllib_handled(tries, kind, modules, rebound) for kind in TOMLLIB_COVERED),
+            all(_tomllib_handled(tries, kind, modules, rebound, passthrough=True)
+                for kind in (RecursionError, MemoryError)))
+
+
+def tomllib_sites(tree):
+    """(sites, parents) for a parsed file. Each site is (line, function, form, text, handled,
+    passthrough): form "call" is a direct call of tomllib.load or tomllib.loads under any spelling
+    _tomllib_bindings and _tomllib_module_expr resolve; form "alias" is a form the scan cannot follow,
+    never handled: a parser or the module used other than as a direct call (saved, passed, returned,
+    read through getattr), any attribute of a recognized module other than load, loads and
+    TOMLDecodeError (tomllib.__dict__, tomllib.__getattribute__, tomllib._parser.parse_key),
+    `from tomllib import *`, or a string naming the module to a loader or a module or name table
+    (_tomllib_by_name: importlib.import_module("tomllib"), sys.modules["tomllib"],
+    globals()["tomllib"])."""
+    modules, parsers, unresolved = _tomllib_bindings(tree)
+    rebound = _tomllib_rebound(tree)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    found = [(node, "alias", text) for node, text in unresolved]
+    for node in ast.walk(tree):
+        parent = parents.get(node)
+        load = isinstance(getattr(node, "ctx", None), ast.Load)
+        if (isinstance(node, ast.Attribute) and node.attr in TOMLLIB_PARSERS
+                and _tomllib_module_expr(node.value, modules)) or (isinstance(node, ast.Name)
+                                                                    and node.id in parsers):
+            if isinstance(parent, ast.Call) and parent.func is node:
+                found.append((parent, "call", ast.unparse(node)))
+            elif load:
+                found.append((node, "alias", ast.unparse(node) + " used other than as a direct call"))
+        elif load and _tomllib_module_expr(node, modules):
+            if isinstance(parent, ast.Attribute) and parent.value is node:
+                if not (parent.attr in TOMLLIB_PARSERS or parent.attr == "TOMLDecodeError"
+                        or _tomllib_module_expr(parent, modules)):
+                    found.append((node, "alias", "the attribute {} of the module {} (only load, loads and "
+                                  "TOMLDecodeError are followed)".format(parent.attr, ast.unparse(node))))
+            else:
+                found.append((node, "alias", "the module " + ast.unparse(node) + " used as a value"))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                and _tomllib_module_name(node.value) and _tomllib_by_name(node, parent):
+            found.append((node, "alias", "the module named by the string {!r}".format(node.value)))
+    sites = []
+    for node, form, text in found:
+        function, handled, passthrough = _tomllib_site(node, parents, modules, rebound)
+        sites.append((node.lineno, function, form, text, handled and form == "call",
+                      passthrough and form == "call"))
+    return sorted(sites), parents
+
+
+def _tomllib_caller_handles(tree, parents, caller, function):
+    """True when the function named caller holds a HANDLED call of function, matched by its full
+    qualified name as spelled at the call: a plain name call matches an undotted (module-level)
+    function, and an attribute call matches only when its dotted spelling equals the qualified name.
+    Residual (disclosed in the module docstring): a swap to another call with the same spelling inside
+    the same caller is not detected."""
+    modules, _parsers, _unresolved = _tomllib_bindings(tree)
+    rebound = _tomllib_rebound(tree)
+    for node in ast.walk(tree):
+        func = node.func if isinstance(node, ast.Call) else None
+        if func is None:
+            continue
+        spelled = func.id if isinstance(func, ast.Name) else (
+            ast.unparse(func) if isinstance(func, ast.Attribute) else None)
+        if spelled == function and _tomllib_site(node, parents, modules, rebound)[:2] == (caller, True):
+            return True
+    return False
+
+
+def _tomllib_table(root):
+    """The rows of TOMLLIB_TABLE_REL under root, keyed by (path, function, form). An absent table is an
+    empty one, so every unhandled call then fails; a table that does not parse or breaks the schema is
+    cannot-evaluate."""
+    path = root / TOMLLIB_TABLE_REL
+    if not os.path.lexists(path):
+        return {}
+    try:
+        data = tomllib.loads(_read_text(path))
+    except (ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{}: does not parse: {}".format(TOMLLIB_TABLE_REL, exc))
+    if set(data) - {"site"} != {"format-version"} or type(data["format-version"]) is not int \
+            or data["format-version"] != 1 or not isinstance(data.get("site", []), list):
+        raise CannotEvaluate("{}: want format-version = 1 and [[site]] rows only".format(TOMLLIB_TABLE_REL))
+    table = {}
+    for index, row in enumerate(data.get("site", []), 1):
+        where = "{}: site {}".format(TOMLLIB_TABLE_REL, index)
+        kind = row.get("class") if isinstance(row, dict) else None
+        if not isinstance(kind, str) or kind not in TOMLLIB_ROW_KEYS or set(row) != TOMLLIB_ROW_KEYS[kind]:
+            raise CannotEvaluate("{}: want class CALLER with keys {} or class EXEMPT with keys {}".format(
+                where, sorted(TOMLLIB_ROW_KEYS["CALLER"]), sorted(TOMLLIB_ROW_KEYS["EXEMPT"])))
+        if type(row["count"]) is not int or row["count"] < 1 or not all(
+                isinstance(row[key], str) and row[key] for key in row if key != "count"):
+            raise CannotEvaluate("{}: count must be a positive integer and every other field a non-empty "
+                                 "string".format(where))
+        if row["form"] not in ("call", "alias"):
+            raise CannotEvaluate("{}: form must be call or alias".format(where))
+        if kind == "EXEMPT" and row["reason"] not in TOMLLIB_EXEMPT_REASONS:
+            raise CannotEvaluate("{}: reason {!r} is not one of {}".format(
+                where, row["reason"], ", ".join(sorted(TOMLLIB_EXEMPT_REASONS))))
+        if kind == "CALLER" and row["form"] != "call":
+            raise CannotEvaluate("{}: an alias form cannot be CALLER (the scan cannot follow it to a caller); "
+                                 "record it EXEMPT or remove it".format(where))
+        if kind == "EXEMPT" and row["reason"] == "valueerror-passthrough" and row["form"] != "call":
+            raise CannotEvaluate("{}: an alias form cannot be valueerror-passthrough (the scan verifies the "
+                                 "handler shape of a call); give another reason or remove it".format(where))
+        key = (row["path"], row["function"], row["form"])
+        if key in table:
+            raise CannotEvaluate("{}: repeats the row for {} {} {}".format(where, *key))
+        table[key] = row
+    return table
+
+
+def tomllib_findings(root):
+    """The tomllib leg: each unhandled parse call has a CALLER or EXEMPT row, each unresolved form an
+    EXEMPT row, each row the count the scan finds (and, for CALLER, a caller that still handles the
+    call), and no row names a function in which the scan finds nothing unhandled."""
+    table, findings, seen = _tomllib_table(root), [], set()
+    for rel in _python_files(root, every=True):
+        tree = _parse(root, rel)
+        try:
+            sites, parents = tomllib_sites(tree)
+            groups = {}
+            for line, function, form, text, handled, passthrough in sites:
+                if not handled:
+                    groups.setdefault((rel, function, form), []).append((line, text, passthrough))
+            for key, found in sorted(groups.items()):
+                seen.add(key)
+                row, (line, text, _passthrough) = table.get(key), found[0]
+                if row is None and key[2] == "call":
+                    findings.append("{}:{}: {} in {} is not HANDLED (for each of RecursionError, MemoryError "
+                                    "and ValueError, the first enclosing handler that would catch it must be "
+                                    "readable and unable to re-raise it) and no row of {} classifies it "
+                                    "CALLER or EXEMPT".format(rel, line, text, key[1], TOMLLIB_TABLE_REL))
+                elif row is None:
+                    findings.append("{}:{}: {} in {}: a tomllib form the scan cannot resolve, and no EXEMPT "
+                                    "row of {} records it".format(rel, line, text, key[1], TOMLLIB_TABLE_REL))
+                elif row["count"] != len(found):
+                    findings.append("{}: the row for {} {} {} records {}, but the scan finds {} (lines {})".format(
+                        TOMLLIB_TABLE_REL, rel, key[1], key[2], row["count"], len(found),
+                        ", ".join(str(item[0]) for item in found)))
+                elif row["class"] == "CALLER" and not _tomllib_caller_handles(tree, parents, row["caller"],
+                                                                               key[1]):
+                    findings.append("{}: the CALLER row for {} {} names {}, which holds no HANDLED call of "
+                                    "it".format(TOMLLIB_TABLE_REL, rel, key[1], row["caller"]))
+                elif row["class"] == "EXEMPT" and row["reason"] == "valueerror-passthrough" \
+                        and not all(item[2] for item in found):
+                    findings.append("{}: the valueerror-passthrough row for {} {}: a handler shape there "
+                                    "could let RecursionError or MemoryError escape (only an `if "
+                                    "isinstance(<name>, ValueError): raise` re-raise is honoured)".format(
+                                        TOMLLIB_TABLE_REL, rel, key[1]))
+        except (MemoryError, RecursionError) as exc:
+            raise _too_complex(rel, exc)
+    findings.extend("{}: the row for {} {} {} names a call that no longer exists or is now HANDLED; remove "
+                    "it".format(TOMLLIB_TABLE_REL, *key) for key in sorted(set(table) - seen))
+    return findings
 
 
 # The fallback leg's refusal guidance, shared by its findings.
@@ -1723,6 +2196,7 @@ def evaluate(root):
         findings.extend(guard_findings(root, source["surfaces"], floor, source["nonblocking"]))
         findings.extend(dynamic_findings(root, source["surfaces"], floor, source["nonblocking"]))
         findings.extend(fallback_findings(root))
+        findings.extend(tomllib_findings(root))
         if source["completeness"]:
             findings.extend(completeness_findings(root, source["surfaces"]))
         if source["documentation"]:
@@ -1732,7 +2206,7 @@ def evaluate(root):
         return 2, ["CANNOT EVALUATE: {}".format(exc)]
     if findings:
         return 1, ["FAIL: " + finding for finding in findings]
-    return 0, ["PASS: python floor {}.{} ({}): source, pins, guard, dynamic and fallback legs over {} "
+    return 0, ["PASS: python floor {}.{} ({}): source, pins, guard, dynamic, fallback and tomllib legs over {} "
                "guarded surface(s); completeness check {}, documentation and claims checks {}".format(
                    floor[0], floor[1], SOURCE_REL, len(source["surfaces"]),
                    "ON" if source["completeness"] else "OFF (completeness-check = false)",
@@ -1754,6 +2228,7 @@ REVERT_CALLS = (
     ("guard", "guard_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
     ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
     ("fallback", "fallback_findings(root)"),
+    ("tomllib", "tomllib_findings(root)"),
     ("completeness", "completeness_findings(root, source[\"surfaces\"])"),
     ("documentation", "documentation_findings(root, floor)"),
     ("claims", "documentation_claim_findings(root, floor)"),
@@ -1791,18 +2266,18 @@ def _declared(floor_text="3.14"):
 
 
 def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'",
-             declarations=True):
-    """A clean tree; workflow_pin is the version on quality.yml line 6, or with pin_quote="" the whole
-    text after that line's indentation. Every declaration file states the floor unless declarations
-    is false; files are written after them."""
+             declarations=True, job="q"):
+    """A clean tree; workflow_pin is the version on quality.yml line 6, in the job named job, or with
+    pin_quote="" the whole text after that line's indentation. Every declaration file states the floor
+    unless declarations is false; files are written after them."""
     root = Path(tempfile.mkdtemp(prefix="tree-", dir=base))
     for rel, text in (_declared() if declarations else {}).items():
         _write(root, rel, text)
     _write(root, SOURCE_REL, _source_text() if source is None else source)
     pin = "python-version: {0}{1}{0}".format(pin_quote, workflow_pin) if pin_quote else workflow_pin
     _write(root, WORKFLOWS_REL + "/quality.yml",
-           "jobs:\n  q:\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
-           "          {}\n".format(pin))
+           "jobs:\n  {}:\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
+           "          {}\n".format(job, pin))
     _write(root, PIN_FILES[0], "      - uses: actions/setup-python@v5\n        with:\n"
            "          python-version: '{}'\n".format(template_pin))
     _write(root, PIN_FILES[1], "TEMPLATE = \"\"\"\n          python-version: '{}'\n\"\"\"\n".format(
@@ -1818,6 +2293,364 @@ def _entry(guard, before="", after="open(\"RAN\", \"w\").close()\n"):
 
 def _has(lines, marker):
     return any(marker in line for line in lines)
+
+
+# Inputs tomllib refuses without a TOMLDecodeError: RecursionError on a value nested past the recursion
+# limit and, from CPython 3.14.8, on a key of more than 1000 dotted parts (emulated by _key_part_capped
+# on an interpreter without that cap), and a bare ValueError on an integer past the 4300-digit limit.
+DEEP_TOML = "deep = " + "[" * 5000 + "]" * 5000 + "\n"
+LONG_KEY_TOML = "k" + ".k" * 1000 + " = 1\n"
+LONG_INT_TOML = "long = 1" + "0" * 5000 + "\n"
+
+
+def _key_part_capped(thunk, kind=RecursionError, fired=None):
+    """thunk() with tomllib refusing a key of more than 1000 parts by RecursionError, as CPython 3.14.8
+    does (or by kind, MemoryError to emulate a many-part key under a memory limit). The requested class
+    is injected even when the underlying parse_key refuses the key first (an interpreter with its own
+    cap raises RecursionError inside it), so the class a vector asserts never depends on the host.
+    fired, when given, is a list the wrapper appends each class it raises to, so a vector asserts what
+    it injected. Self-test only: tomllib._parser.parse_key is rebound for the call and then restored; a
+    vector asserts the class and the caller's own refusal text, never this message."""
+    real = tomllib._parser.parse_key
+
+    def capped(src, pos):
+        try:
+            pos, key = real(src, pos)
+        except (RecursionError, MemoryError):
+            if fired is not None:
+                fired.append(kind)
+            raise kind("emulated key-part cap") from None
+        if len(key) > 1000:
+            if fired is not None:
+                fired.append(kind)
+            raise kind("emulated key-part cap")
+        return pos, key
+    tomllib._parser.parse_key = capped
+    try:
+        return thunk()
+    finally:
+        tomllib._parser.parse_key = real
+
+
+def _raises(text, kind, capped=False):
+    """True when tomllib refuses text with exactly the class kind (under the emulated key-part refusal of
+    that class when capped), so the vector is live here."""
+    def parse():
+        try:
+            tomllib.loads(text)
+        except Exception as exc:  # noqa: BLE001  the class raised is the observation
+            return type(exc) is kind
+        return False
+    return _key_part_capped(parse, kind) if capped else parse()
+
+
+def _manifest_refusal(base, text, capped=False):
+    """(result, stderr) of _expected_check_ids over a manifest holding text; CHECKS_MANIFEST is restored."""
+    import contextlib
+    import io
+    global CHECKS_MANIFEST
+    path = Path(tempfile.mkdtemp(prefix="manifest-", dir=base)) / "selftest_checks.toml"
+    path.write_text(text, encoding="utf-8")
+    saved, CHECKS_MANIFEST = CHECKS_MANIFEST, path
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            got = (_key_part_capped(_expected_check_ids, RecursionError if capped is True else capped) if capped
+                   else _expected_check_ids())
+    finally:
+        CHECKS_MANIFEST = saved
+    return got, err.getvalue()
+
+
+# Fixture modules for the tomllib leg: {head} is one line, so the parse call is on line 4; TOMLLIB_HANDLED_TEXT
+# wraps it in a try whose handler clause and body are given.
+TOMLLIB_SITE_TEXT = "{head}\n\ndef read(text):\n    return {call}(text)\n"
+TOMLLIB_HANDLED_TEXT = ("{head}\n\ndef read(text):\n    try:\n        return {call}(text)\n    except{handler}:\n"
+                        "        {body}\n")
+def _tomllib_row(function, form="call", count=1, caller=None, reason="test-code", path="tools/site.py"):
+    """One [[site]] row of the recorded table, CALLER when caller is given and EXEMPT otherwise."""
+    tail = "caller = {}\n".format(json.dumps(caller)) if caller else "reason = {}\n".format(json.dumps(reason))
+    return "[[site]]\npath = {}\nfunction = {}\nform = \"{}\"\ncount = {}\nclass = \"{}\"\n{}".format(
+        json.dumps(path), json.dumps(function), form, count, "CALLER" if caller else "EXEMPT", tail)
+
+
+def _tomllib_leg(base, text, *rows, table=None):
+    """(code, lines) of evaluate() over a clean fixture holding tools/site.py and, when rows or table
+    are given, a recorded table."""
+    files = {"tools/site.py": text}
+    if rows or table is not None:
+        files[TOMLLIB_TABLE_REL] = table if table is not None else "format-version = 1\n" + "".join(rows)
+    return evaluate(_fixture(base, files=files))
+
+
+def _load_path(name, path):
+    """A module loaded from path through importlib under name, never run as a script."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _tomllib_cases(base):
+    """The tomllib leg: each spelling unhandled fails and handled passes; each handler shape that is
+    not the three classes or broader fails; each unresolved form fails unless an EXEMPT row records it;
+    each table rule; and the production sites this leg found, each under deep nesting and both
+    emulated key-part refusals (RecursionError, MemoryError), each asserting the class and the site's own
+    refusal text, never a parser message."""
+    covered = " (ValueError, RecursionError, MemoryError) as exc"
+    for unhandled_id, handled_id, head, call in (
+            ("tomllib/spelling-import-unhandled-fails", "tomllib/spelling-import-handled-passes",
+             "import tomllib", "tomllib.loads"),
+            ("tomllib/spelling-import-load-unhandled-fails", "tomllib/spelling-import-load-handled-passes",
+             "import tomllib", "tomllib.load"),
+            ("tomllib/spelling-import-as-unhandled-fails", "tomllib/spelling-import-as-handled-passes",
+             "import tomllib as t", "t.loads"),
+            ("tomllib/spelling-from-import-unhandled-fails", "tomllib/spelling-from-import-handled-passes",
+             "from tomllib import loads", "loads"),
+            ("tomllib/spelling-from-import-as-unhandled-fails", "tomllib/spelling-from-import-as-handled-passes",
+             "from tomllib import loads as parse", "parse"),
+            ("tomllib/spelling-from-import-load-as-unhandled-fails", "tomllib/spelling-from-import-load-as-handled-passes",
+             "from tomllib import load as read_toml", "read_toml"),
+            ("tomllib/spelling-parser-submodule-unhandled-fails", "tomllib/spelling-parser-submodule-handled-passes",
+             "import tomllib._parser as p", "p.loads"),
+            ("tomllib/spelling-re-export-attribute-unhandled-fails", "tomllib/spelling-re-export-attribute-handled-passes",
+             "import helper", "helper.tomllib.loads"),
+            ("tomllib/spelling-re-export-from-unhandled-fails", "tomllib/spelling-re-export-from-handled-passes",
+             "from helper import tomllib as reexported", "reexported.loads")):
+        code, lines = _tomllib_leg(base, TOMLLIB_SITE_TEXT.format(head=head, call=call))
+        check(unhandled_id,
+              (code, _has(lines, "tools/site.py:4: {} in read is not HANDLED".format(call))), (1, True))
+        code, lines = _tomllib_leg(base, TOMLLIB_HANDLED_TEXT.format(head=head, call=call, handler=covered,
+                                                                    body="raise SystemExit(2)"))
+        check(handled_id, code, 0)
+    for check_id, handler, want in (("tomllib/handler-tuple", covered, 0), ("tomllib/handler-exception", " Exception", 0),
+                                ("tomllib/handler-base-exception", " BaseException", 0), ("tomllib/handler-bare", "", 0),
+                                ("tomllib/handler-runtime-error-base", " (ValueError, RuntimeError, MemoryError)", 0),
+                                ("tomllib/handler-no-memory-error", " (ValueError, RecursionError)", 1),
+                                ("tomllib/handler-no-recursion-error", " (ValueError, MemoryError)", 1),
+                                ("tomllib/handler-decode-error-not-value-error",
+                                 " (tomllib.TOMLDecodeError, RecursionError, MemoryError)", 1),
+                                ("tomllib/handler-unreadable-class", " ERRORS", 1)):
+        code, _lines = _tomllib_leg(base, TOMLLIB_HANDLED_TEXT.format(
+            head="import tomllib", call="tomllib.loads", handler=handler, body="raise SystemExit(2)"))
+        check(check_id, code, want)
+    code, _lines = _tomllib_leg(base, TOMLLIB_HANDLED_TEXT.format(
+        head="import tomllib", call="tomllib.loads", handler=" Exception", body="raise"))
+    check("tomllib/handler-bare-reraise-fails", code, 1)
+    code, _lines = _tomllib_leg(base, "import tomllib\n\n\ndef read(text):\n    try:\n        try:\n"
+                                "            return tomllib.loads(text)\n        except ValueError:\n"
+                                "            return None\n    except (RecursionError, MemoryError):\n"
+                                "        return None\n")
+    check("tomllib/handler-nested-union-passes", code, 0)
+    code, lines = _tomllib_leg(base, "import tomllib\n\n\ndef read(text):\n    try:\n"
+                                     "        return (lambda: tomllib.loads(text))()\n    except Exception:\n"
+                                     "        return None\n")
+    check("tomllib/lambda-inside-try-fails", (code, _has(lines, "in read.<lambda> is not HANDLED")), (1, True))
+    nested = ("import tomllib\n\n\ndef suite():\n    class Tests:\n        def store_manifest(self, text):\n"
+              "            return tomllib.loads(text)\n    return Tests\n")
+    code, lines = _tomllib_leg(base, nested)
+    check("tomllib/nested-class-method-unclassified-fails",
+          (code, _has(lines, "in suite.Tests.store_manifest is not HANDLED")), (1, True))
+    check("tomllib/nested-class-method-recorded-exempt-passes",
+          _tomllib_leg(base, nested, _tomllib_row("suite.Tests.store_manifest"))[0], 0)
+    code, _lines = _tomllib_leg(base, "import tomllib\n\n\ndef read(text):\n    try:\n        return 1\n"
+                                      "    except Exception:\n        return tomllib.loads(text)\n")
+    check("tomllib/call-in-handler-fails", code, 1)
+    unresolved = "a tomllib form the scan cannot resolve"
+    for fail_id, exempt_id, text, function in (
+            ("tomllib/alias-saved-parser-fails", "tomllib/alias-saved-parser-recorded-exempt-passes",
+             "import tomllib\n\nparse = tomllib.loads\n", "<module>"),
+            ("tomllib/alias-getattr-module-fails", "tomllib/alias-getattr-module-recorded-exempt-passes",
+             "import tomllib\n\n\ndef read(text):\n    return getattr(tomllib, \"loads\")(text)\n",
+             "read"),
+            ("tomllib/alias-module-dict-subscript-fails",
+             "tomllib/alias-module-dict-subscript-recorded-exempt-passes",
+             "import tomllib\n\n\ndef read(text):\n    return tomllib.__dict__[\"loads\"](text)\n",
+             "read"),
+            ("tomllib/alias-module-getattribute-fails",
+             "tomllib/alias-module-getattribute-recorded-exempt-passes",
+             "import tomllib\n\n\ndef read(text):\n    return tomllib.__getattribute__(\"loads\")(text)\n",
+             "read"),
+            ("tomllib/alias-import-module-string-fails", "tomllib/alias-import-module-string-recorded-exempt-passes",
+             "import importlib\n\n\ndef read(text):\n"
+             "    return importlib.import_module(\"tomllib\").loads(text)\n", "read"),
+            ("tomllib/alias-star-import-fails", "tomllib/alias-star-import-recorded-exempt-passes",
+             "from tomllib import *\n", "<module>")):
+        code, lines = _tomllib_leg(base, text)
+        check(fail_id, (code, _has(lines, unresolved)), (1, True))
+        check(exempt_id,
+              _tomllib_leg(base, text, _tomllib_row(function, form="alias"))[0], 0)
+    helper = ("import tomllib\n\n\ndef parse(text):\n    return tomllib.loads(text)\n\n\ndef main(text):\n"
+              "    try:\n        return parse(text)\n    except{}:\n        return None\n")
+    check("tomllib/table-caller-handled-passes",
+          _tomllib_leg(base, helper.format(covered), _tomllib_row("parse", caller="main"))[0], 0)
+    code, lines = _tomllib_leg(base, helper.format(" ValueError"), _tomllib_row("parse", caller="main"))
+    check("tomllib/table-caller-unhandled-fails", (code, _has(lines, "which holds no HANDLED call")), (1, True))
+    code, lines = _tomllib_leg(base, helper.format(covered), _tomllib_row("parse", caller="absent"))
+    check("tomllib/table-caller-missing-fails", (code, _has(lines, "which holds no HANDLED call")), (1, True))
+    plain = TOMLLIB_SITE_TEXT.format(head="import tomllib", call="tomllib.loads")
+    check("tomllib/table-exempt-passes", _tomllib_leg(base, plain, _tomllib_row("read"))[0], 0)
+    code, lines = _tomllib_leg(base, plain, _tomllib_row("read"), _tomllib_row("gone"))
+    check("tomllib/table-stale-row-fails", (code, _has(lines, "names a call that no longer exists")), (1, True))
+    code, lines = _tomllib_leg(base, TOMLLIB_HANDLED_TEXT.format(
+        head="import tomllib", call="tomllib.loads", handler=covered, body="return None"), _tomllib_row("read"))
+    check("tomllib/table-row-for-handled-call-fails",
+          (code, _has(lines, "names a call that no longer exists or is now HANDLED")), (1, True))
+    code, lines = _tomllib_leg(base, plain, _tomllib_row("read", count=2))
+    check("tomllib/table-count-mismatch-fails", (code, _has(lines, "records 2, but the scan finds 1")), (1, True))
+    for check_id, rows, table in (
+            ("tomllib/table-unknown-reason-cannot-evaluate", (_tomllib_row("read", reason="trusted"),), None),
+            ("tomllib/table-caller-alias-cannot-evaluate", (_tomllib_row("read", form="alias", caller="main"),), None),
+            ("tomllib/table-duplicate-row-cannot-evaluate", (_tomllib_row("read"), _tomllib_row("read")), None),
+            ("tomllib/table-unknown-key-cannot-evaluate", ("[[site]]\npath = \"tools/site.py\"\nfunction = \"read\"\nform = \"call\"\n"
+                             "count = 1\nclass = \"EXEMPT\"\nreason = \"test-code\"\nnote = \"x\"\n",), None),
+            ("tomllib/table-deep-nesting-cannot-evaluate", (), DEEP_TOML), ("tomllib/table-overlong-integer-cannot-evaluate", (), LONG_INT_TOML)):
+        code, lines = _tomllib_leg(base, plain, *rows, table=table)
+        check(check_id, (code, _has(lines, TOMLLIB_TABLE_REL)), (2, True))
+    for check_id, kind in (("tomllib/table-key-1001-parts-RecursionError-cannot-evaluate", RecursionError),
+                           ("tomllib/table-key-1001-parts-MemoryError-cannot-evaluate", MemoryError)):
+        code, lines = _key_part_capped(lambda: _tomllib_leg(base, plain, table=LONG_KEY_TOML), kind)
+        check(check_id,
+              (code, _has(lines, TOMLLIB_TABLE_REL + ": does not parse")), (2, True))
+    # First-catcher coverage (per class, source order, innermost try first): a handler that can
+    # re-raise what it caught, a pass-only body, or a class name the scan cannot read never covers.
+    code, lines = _tomllib_leg(base, "import tomllib\n\n\ndef read(text):\n    try:\n"
+                               "        return tomllib.loads(text)\n    except RecursionError:\n"
+                               "        raise\n    except Exception:\n        return None\n")
+    check("tomllib/handler-reraise-before-exception-fails", (code, _has(lines, "is not HANDLED")), (1, True))
+    code, _lines = _tomllib_leg(base, TOMLLIB_HANDLED_TEXT.format(
+        head="import tomllib", call="tomllib.loads", handler=" Exception as exc",
+        body="if isinstance(exc, RecursionError):\n            raise\n        return None"))
+    check("tomllib/handler-conditional-reraise-fails", code, 1)
+    code, _lines = _tomllib_leg(base, TOMLLIB_HANDLED_TEXT.format(
+        head="import tomllib", call="tomllib.loads", handler=" Exception as exc", body="raise exc"))
+    check("tomllib/handler-raise-bound-name-fails", code, 1)
+    code, _lines = _tomllib_leg(base, TOMLLIB_HANDLED_TEXT.format(
+        head="import tomllib", call="tomllib.loads", handler=covered, body="pass"))
+    check("tomllib/handler-pass-only-fails", code, 1)
+    code, _lines = _tomllib_leg(base, "import tomllib\n\nRecursionError = OSError\n\n\ndef read(text):\n"
+                                "    try:\n        return tomllib.loads(text)\n"
+                                "    except (ValueError, RecursionError, MemoryError):\n        return None\n")
+    check("tomllib/handler-rebound-class-name-fails", code, 1)
+    code, _lines = _tomllib_leg(base, "import tomllib\n\n\ndef read(text):\n    try:\n"
+                                "        return tomllib.loads(text)\n"
+                                "    except tomllib.TOMLDecodeError:\n        return None\n"
+                                "    except (ValueError, RecursionError, MemoryError):\n        return None\n")
+    check("tomllib/handler-decode-error-first-then-covered-passes", code, 0)
+    # The valueerror-passthrough row: verified against the one shape whose only re-raise is the single
+    # statement of `if isinstance(<bound name>, ValueError): raise`.
+    passthrough = ("import tomllib\n\n\ndef read(text):\n    try:\n        return tomllib.loads(text)\n"
+                   "    except (ValueError, RecursionError, MemoryError) as exc:\n"
+                   "        if isinstance(exc, ValueError):\n            raise\n"
+                   "        raise ValueError(str(exc)) from exc\n")
+    code, lines = _tomllib_leg(base, passthrough)
+    check("tomllib/handler-valueerror-passthrough-unrecorded-fails",
+          (code, _has(lines, "is not HANDLED")), (1, True))
+    check("tomllib/table-valueerror-passthrough-passes",
+          _tomllib_leg(base, passthrough, _tomllib_row("read", reason="valueerror-passthrough"))[0], 0)
+    code, lines = _tomllib_leg(base, passthrough.replace("isinstance(exc, ValueError)", "text"),
+                               _tomllib_row("read", reason="valueerror-passthrough"))
+    check("tomllib/table-valueerror-passthrough-unguarded-fails",
+          (code, _has(lines, "could let RecursionError or MemoryError escape")), (1, True))
+    code, lines = _tomllib_leg(base, "import tomllib\n\nparse = tomllib.loads\n",
+                               _tomllib_row("<module>", form="alias", reason="valueerror-passthrough"))
+    check("tomllib/table-valueerror-passthrough-alias-cannot-evaluate",
+          (code, _has(lines, TOMLLIB_TABLE_REL)), (2, True))
+    # A non-string class is a named cannot-evaluate, never a TypeError out of the gate.
+    for check_id, bad in (("tomllib/table-class-list-cannot-evaluate", "class = []\n"),
+                          ("tomllib/table-class-dict-cannot-evaluate", "class = {}\n")):
+        code, lines = _tomllib_leg(base, plain, table="format-version = 1\n[[site]]\n" + bad)
+        check(check_id, (code, _has(lines, TOMLLIB_TABLE_REL)), (2, True))
+    # A CALLER row's callee is matched by its full qualified name: a different function whose last name
+    # part is the same never satisfies it.
+    same_name = ("import tomllib\n\n\ndef helper(text):\n    def parse(value):\n"
+                 "        return tomllib.loads(value)\n    return parse(text)\n\n\ndef parse(text):\n"
+                 "    return None\n\n\ndef main(text):\n    try:\n        return parse(helper(text))\n"
+                 "    except (ValueError, RecursionError, MemoryError):\n        return None\n")
+    code, lines = _tomllib_leg(base, same_name, _tomllib_row("helper.parse", caller="main"))
+    check("tomllib/table-caller-same-name-different-function-fails",
+          (code, _has(lines, "which holds no HANDLED call")), (1, True))
+    # The emulated key-part cap injects the class it is given even when an underlying cap (here the
+    # emulation itself, standing in for CPython 3.14.8's own RecursionError cap) refuses the key first.
+    check("tomllib/key-cap-emulation-independent-of-underlying-cap",
+          _key_part_capped(lambda: _raises(LONG_KEY_TOML, MemoryError, capped=True), RecursionError), True)
+    _tomllib_production_cases(base)
+    _gen_resource_cases(base)
+
+
+def _tomllib_production_cases(base):
+    """The production sites the tomllib leg found unhandled, each refusing deep nesting and both
+    emulated key-part refusals with its own documented result: the NEWTAB contract script exits 2
+    with its cannot-read diagnostic, never a traceback, and the deny hook's roster reader returns its
+    unparseable reason, so a machine-store manifest it cannot parse is "not a store". Each case also
+    asserts the class: natively observed through _raises (deep nesting and the over-long integer, and
+    the emulated cap re-run on its own), and, for an emulated cap, the class the production call's own
+    emulation injected (fired)."""
+    newtab = _fixture(base, files={".github/check_newtab_contract.py":
+                                   _read_text(ROOT / ".github" / "check_newtab_contract.py")})
+    contract = _load_path("newtab_contract_floor_probe", newtab / ".github" / "check_newtab_contract.py")
+    hook = _load_path("pretooluse_deny_floor_probe", ROOT / "opf" / "enforcement" / "claude" / "pretooluse_deny.py")
+    import contextlib
+    import io
+    for newtab_id, deny_id, text, kind, native in (
+            ("tomllib/newtab-contract-deep-exit-2", "tomllib/deny-roster-deep-unparseable-not-a-store",
+             DEEP_TOML, None, RecursionError),
+            ("tomllib/newtab-contract-key-1001-recursion-exit-2", "tomllib/deny-roster-key-1001-recursion-unparseable-not-a-store",
+             LONG_KEY_TOML, RecursionError, RecursionError),
+            ("tomllib/newtab-contract-key-1001-memory-exit-2", "tomllib/deny-roster-key-1001-memory-unparseable-not-a-store",
+             LONG_KEY_TOML, MemoryError, MemoryError),
+            ("tomllib/newtab-contract-overlong-integer-exit-2", "tomllib/deny-roster-overlong-integer-unparseable-not-a-store",
+             LONG_INT_TOML, None, ValueError)):
+        observed = _raises(text, native, capped=bool(kind))
+        expected_fired = [kind.__name__] if kind else []
+        _write(newtab, ".aiqt/newtab.toml", text)
+        err, fired = io.StringIO(), []
+        with contextlib.redirect_stderr(err):
+            try:
+                code = _key_part_capped(contract.main, kind, fired) if kind else contract.main()
+            except Exception as exc:  # noqa: BLE001  an escape is the failure under test
+                code = "escaped " + type(exc).__name__
+        check(newtab_id,
+              (code, "error: cannot read NEWTAB repository declaration" in err.getvalue(), observed,
+               sorted({k.__name__ for k in fired})), (2, True, True, expected_fired))
+        store = Path(tempfile.mkdtemp(prefix="deny-", dir=base))
+        _write(store, "m/manifest.toml", text)
+        fired = []
+        try:
+            doc, reason = _key_part_capped(lambda: hook._read_roster_toml(
+                str(store / "m" / "manifest.toml"), "the machine-store manifest"), kind, fired) if kind else \
+                hook._read_roster_toml(str(store / "m" / "manifest.toml"), "the machine-store manifest")
+            not_store = (_key_part_capped(lambda: hook._is_machine_store(str(store), "m"), kind, fired) if kind
+                         else hook._is_machine_store(str(store), "m"))
+        except Exception as exc:  # noqa: BLE001  an escape is the failure under test
+            doc, reason, not_store = "escaped " + type(exc).__name__, "", None
+        check(deny_id,
+              (doc, "is unreadable or unparseable" in (reason or ""), not_store, observed,
+               sorted({k.__name__ for k in fired})), (None, True, False, True, expected_fired))
+
+
+def _gen_resource_cases(base):
+    """_gen_common.load_toml names a MemoryError at the parse (a many-part key under a memory limit) a
+    memory failure inside the ValueError family it maps into, never nesting, and keeps the nesting
+    wording for RecursionError; each vector asserts the refusal text, the cause class and the class the
+    emulation injected."""
+    gen_common = _load_path("_gen_common_floor_probe", ROOT / "tools" / "_gen_common.py")
+    toml_path = Path(tempfile.mkdtemp(prefix="genc-", dir=base)) / "input.toml"
+    toml_path.write_text(LONG_KEY_TOML, encoding="utf-8")
+    for check_id, kind, marker in (
+            ("tomllib/gen-common-load-toml-memory-resource-not-nesting", MemoryError,
+             "out of memory parsing TOML"),
+            ("tomllib/gen-common-load-toml-recursion-nesting-message", RecursionError,
+             "TOML nesting is too deep to parse")):
+        fired = []
+        try:
+            _key_part_capped(lambda: gen_common.load_toml(toml_path), kind, fired)
+            got = "parsed"
+        except ValueError as exc:
+            got = (marker in str(exc), type(exc.__cause__).__name__, sorted({k.__name__ for k in fired}))
+        except Exception as exc:  # noqa: BLE001  an escape is the failure under test
+            got = "escaped " + type(exc).__name__
+        check(check_id, got, (True, kind.__name__, [kind.__name__]))
 
 
 def _noflush_guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
@@ -1863,6 +2696,118 @@ def _old_guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
     return "\n".join(out)
 
 
+class _ParserMismatch(Exception):
+    """tomllib's private key parser does not fit the parse_key(src, pos) -> (pos, key) the injection
+    wraps."""
+
+
+def _key_depth_bounded(real, calls, kind=RecursionError):
+    """tomllib's key parser, made to raise RecursionError on a key of more than 1000 dotted parts, as a
+    release that bounds key depth does, or kind (MemoryError or ValueError, to inject that class at the
+    parse: real memory exhaustion cannot be provoked safely). A RecursionError or MemoryError that the
+    real parser raises itself (a release whose own parser bounds key depth refuses such a key inside
+    it) is raised as kind too, as _key_part_capped does, so the class a vector asserts never depends on
+    the patch release that runs the self-test. calls records each call; a call or a result that does
+    not fit parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of str, raises
+    _ParserMismatch."""
+    def parse_key(*args, **kwargs):
+        calls.append(len(args))
+        try:
+            result = real(*args, **kwargs)
+        except TypeError as exc:
+            raise _ParserMismatch("calling it raised TypeError: {}".format(exc))
+        except (RecursionError, MemoryError):
+            raise kind("injected: the key parser itself refused a key") from None
+        src = args[0] if args else kwargs.get("src")
+        if not (isinstance(result, tuple) and len(result) == 2):
+            raise _ParserMismatch("it returned {} rather than (pos, key)".format(type(result).__name__))
+        if not (isinstance(src, str) and type(result[0]) is int and 0 <= result[0] <= len(src)):
+            raise _ParserMismatch("it returned the position {!r:.40}, not an int within the source".format(
+                result[0]))
+        if not (isinstance(result[1], tuple) and all(isinstance(part, str) for part in result[1])):
+            raise _ParserMismatch("it returned the key {!r:.60}, not a tuple of str".format(result[1]))
+        if len(result[1]) > 1000:
+            raise kind("injected: a key of more than 1000 dotted parts")
+        return result
+    return parse_key
+
+
+def _capped_parser(real):
+    """real, tomllib's key parser, as a release whose own parser bounds key depth runs it: a key of more
+    than 1000 dotted parts is refused by a RecursionError from inside the parser (emulated here once the
+    real parser returns such a key), so a vector shows what the injection does on such a release
+    whatever patch release runs the self-test."""
+    def parse_key(*args, **kwargs):
+        result = real(*args, **kwargs)
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], tuple) \
+                and len(result[1]) > 1000:
+            raise RecursionError("emulated: a key parser that bounds key depth")
+        return result
+    return parse_key
+
+
+def _host_parse_refusal(root, bound, kind=RecursionError, evaluate_tree=None, capped=False):
+    """(exit code, whether the report says HOST_SOURCE_REL does not parse) for evaluate_tree (evaluate when
+    None) over root, with tomllib's key parser bounded when bound is true (raising kind,
+    _key_depth_bounded) and, when capped is true, the parser under that bound refusing such a key itself
+    (_capped_parser); "raised NAME" when the exception escapes. The bound
+    patches a private tomllib function: on a release where it is missing, has another shape or is never
+    called, the result is a text naming that cause, so the case fails cleanly rather than crashing."""
+    parser = getattr(tomllib, "_parser", None)
+    real = getattr(parser, "parse_key", None)
+    if bound and not callable(real):
+        return ("tomllib._parser.parse_key is missing or not callable on this release, so the injected "
+                "key-depth case cannot run")
+    calls = []
+    if bound:
+        parser.parse_key = _key_depth_bounded(_capped_parser(real) if capped else real, calls, kind)
+    try:
+        code, lines = (evaluate if evaluate_tree is None else evaluate_tree)(root)
+    except (RecursionError, ValueError, MemoryError) as exc:
+        return "raised " + type(exc).__name__
+    except _ParserMismatch as exc:
+        return "tomllib._parser.parse_key does not fit the injection on this release: {}".format(exc)
+    finally:
+        if bound:
+            parser.parse_key = real
+    if bound and not calls:
+        return "tomllib._parser.parse_key was never called, so the injected key-depth case did not run"
+    return code, _has(lines, HOST_SOURCE_REL + ": does not parse")
+
+
+# A key parser whose (pos, key) result is malformed, each with the words of the mismatch it must raise: the
+# bounded parser names each as a mismatch, never a traceback, never the expected refusal.
+MALFORMED_RESULTS = {
+    "none-position": (lambda src, pos, key: (None, key), "not an int within the source"),
+    "negative-position": (lambda src, pos, key: (-1, key), "not an int within the source"),
+    "past-end-position": (lambda src, pos, key: (len(src) + 1, key), "not an int within the source"),
+    "bool-position": (lambda src, pos, key: (True, key), "not an int within the source"),
+    "non-str-key-part": (lambda src, pos, key: (pos, key + (1,)), "not a tuple of str"),
+}
+
+
+def _malformed_host_refusal(root, damage, marker):
+    """True when _host_parse_refusal(root, True), run with tomllib's key parser replaced by one whose result
+    damage(src, pos, key) rewrites, returns a text naming the mismatch marker words; otherwise what it
+    returned or raised."""
+    parser = getattr(tomllib, "_parser", None)
+    real = getattr(parser, "parse_key", None)
+    if not callable(real):
+        return "tomllib._parser.parse_key is missing or not callable on this release"
+
+    def parse_key(src, pos):
+        pos, key = real(src, pos)
+        return damage(src, pos, key)
+    parser.parse_key = parse_key
+    try:
+        got = _host_parse_refusal(root, True)
+    except Exception as exc:
+        got = "raised " + type(exc).__name__
+    finally:
+        parser.parse_key = real
+    return True if isinstance(got, str) and "does not fit the injection" in got and marker in got else got
+
+
 def _self_test_cases(base):
     floor = FLOOR
     good = guard_text("demo.py", floor)
@@ -1877,6 +2822,33 @@ def _self_test_cases(base):
     check("source/missing-cannot-evaluate", evaluate(root)[0], 2)
     check("source/unparseable-cannot-evaluate",
           evaluate(_fixture(base, source="python-floor = \n"))[0], 2)
+    code, lines = evaluate(_fixture(base, source=_source_text(extra=DEEP_TOML)))
+    check("source/deep-nesting-cannot-evaluate",
+          (_raises(DEEP_TOML, RecursionError), code, _has(lines, "does not parse")), (True, 2, True))
+    code, lines = _key_part_capped(lambda: evaluate(_fixture(base, source=_source_text(extra=LONG_KEY_TOML))))
+    check("source/key-1001-parts-cannot-evaluate",
+          (_raises(LONG_KEY_TOML, RecursionError, capped=True), code, _has(lines, "does not parse")),
+          (True, 2, True))
+    code, lines = evaluate(_fixture(base, source=_source_text(extra=LONG_INT_TOML)))
+    check("source/overlong-integer-cannot-evaluate",
+          (_raises(LONG_INT_TOML, ValueError), code, _has(lines, "does not parse")), (True, 2, True))
+    got, err = _manifest_refusal(base, DEEP_TOML)
+    check("harness/manifest-deep-nesting-harness-error",
+          (got, "SELF-TEST HARNESS ERROR: cannot read" in err), (None, True))
+    got, err = _manifest_refusal(base, LONG_KEY_TOML, capped=True)
+    check("harness/manifest-key-1001-parts-harness-error",
+          (got, "SELF-TEST HARNESS ERROR: cannot read" in err), (None, True))
+    got, err = _manifest_refusal(base, LONG_INT_TOML)
+    check("harness/manifest-overlong-integer-harness-error",
+          (got, "SELF-TEST HARNESS ERROR: cannot read" in err), (None, True))
+    code, lines = _key_part_capped(lambda: evaluate(_fixture(base, source=_source_text(extra=LONG_KEY_TOML))),
+                                   MemoryError)
+    check("source/key-1001-parts-memory-cannot-evaluate",
+          (_raises(LONG_KEY_TOML, MemoryError, capped=True), code, _has(lines, "does not parse")), (True, 2, True))
+    got, err = _manifest_refusal(base, LONG_KEY_TOML, capped=MemoryError)
+    check("harness/manifest-key-1001-parts-memory-harness-error",
+          (got, "SELF-TEST HARNESS ERROR: cannot read" in err), (None, True))
+    _tomllib_cases(base)
     check("source/unknown-key-cannot-evaluate",
           evaluate(_fixture(base, source=_source_text(extra="floor-note = \"x\"\n")))[0], 2)
     check("source/bool-format-version-cannot-evaluate", evaluate(_fixture(
@@ -2026,6 +2998,142 @@ def _self_test_cases(base):
         "      - run: echo done"), pin_quote=""))
     check("pins/block-scalar-pin-finding",
           (code, _has(lines, "quality.yml:8: python-version '3.12' differs")), (1, True))
+    # The host-patch jobs: a pin that is a patch release of the floor passes only inside a HOST_JOBS job of
+    # HOST_WORKFLOW_REL, and only when it equals the python-host-patch HOST_SOURCE_REL names; every other pin
+    # in any workflow must equal the floor exactly.
+    host = {HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"3.14.4\"\n"}
+    opf = HOST_JOBS[0]
+    check("pins/host-patch-host-job-passes",
+          tuple(evaluate(_fixture(base, workflow_pin="3.14.4", files=host, job=job))[0] for job in HOST_JOBS),
+          (0,) * len(HOST_JOBS))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.4", files=host))
+    check("pins/host-patch-other-job-finding",
+          (code, _has(lines, "quality.yml:6: python-version '3.14.4' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, files={**host, WORKFLOWS_REL + "/other.yml": (
+        "jobs:\n  " + opf + ":\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
+        "          python-version: '3.14.4'\n")}))
+    check("pins/host-patch-other-workflow-finding",
+          (code, _has(lines, "other.yml:6: python-version '3.14.4' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, files={**host, HOST_WORKFLOW_REL: (
+        "on:\n  " + opf + ":\n    python-version: '3.14.4'\njobs:\n  q:\n    steps:\n"
+        "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n")}))
+    check("pins/host-patch-outside-jobs-finding",
+          (code, _has(lines, "quality.yml:3: python-version '3.14.4' differs")), (1, True))
+    # A job whose id the grammar reads but HOST_JOB_RE does not (digit-led), below a host-patch job: the pin
+    # sits in no known job, so it is a finding, never read as the host-patch job above.
+    code, lines = evaluate(_fixture(base, files={**host, HOST_WORKFLOW_REL: (
+        "jobs:\n  " + opf + ":\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
+        "          python-version: '3.14.4'\n  1lint:\n    steps:\n      - uses: actions/setup-python@v5\n"
+        "        with:\n          python-version: '3.14.4'\n")}))
+    check("pins/host-patch-unplain-job-id-finding",
+          (code, _has(lines, "quality.yml:11: python-version '3.14.4' differs"),
+           _has(lines, "quality.yml:6: python-version")), (1, True, False))
+    # The real workflows with every '3.14' pin moved to the host patch. Only the host-patch jobs' pins
+    # pass; each pin that was '3.14' is a finding.
+    real = {WORKFLOWS_REL + "/" + name: _read_text(ROOT / WORKFLOWS_REL / name)
+            for name in sorted(os.listdir(ROOT / WORKFLOWS_REL)) if _yaml_name(name)}
+    floor_pin = "python-version: '3.14'"
+    expected = {"{}:{}".format(rel, number) for rel, text in real.items()
+                for number, line in enumerate(text.split("\n"), 1) if line.strip(" ") == floor_pin}
+    code, lines = evaluate(_fixture(base, files={**host, **{
+        rel: text.replace(floor_pin + "\n", "python-version: '3.14.4'\n") for rel, text in real.items()}}))
+    found = {line[len("FAIL: "):].split(": python-version", 1)[0] for line in lines
+             if line.startswith("FAIL: ") and "differs from the floor" in line}
+    check("pins/newest-legs-at-host-patch-finding", (code, found == expected, len(expected) > 0),
+          (1, True, True))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.8", files=host, job=opf))
+    check("pins/other-patch-workflow-finding",
+          (code, _has(lines, "quality.yml:6: python-version '3.14.8' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, template_pin="3.14.4", files=host))
+    check("pins/host-patch-template-finding",
+          (code, _has(lines, PIN_FILES[0] + ":3: python-version '3.14.4' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.4", job=opf))
+    check("pins/host-patch-source-missing-cannot-evaluate",
+          (code, _has(lines, HOST_SOURCE_REL + ": cannot stat")), (2, True))
+    for check_id, patch in (("pins/host-patch-source-malformed-cannot-evaluate", "3.14"),
+                            ("pins/host-patch-source-long-component-cannot-evaluate", "3.14." + "1" * 5000)):
+        code, lines = evaluate(_fixture(base, workflow_pin="3.14.4", job=opf, files={
+            HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"{}\"\n".format(patch)}))
+        check(check_id, (code, _has(lines, HOST_SOURCE_REL + ": want exactly")), (2, True))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.13.4", job=opf, files={
+        HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"3.13.4\"\n"}))
+    check("pins/off-floor-host-patch-finding",
+          (code, _has(lines, "quality.yml:6: python-version '3.13.4' differs")), (1, True))
+    # tomllib refuses some host sources outside TOMLDecodeError: a RecursionError on deep nesting (a real
+    # payload, far past any default recursion limit) and on a key of more than 1000 dotted parts
+    # (INJECTED: the running release may not bound key depth, so its key parser is patched to raise as one
+    # that does), and a bare ValueError on an over-long integer literal. Each is cannot-evaluate; an
+    # exception that escapes evaluate() is recorded as raised, so each case is red when its mapping is
+    # removed.
+    for check_id, extra, bound in (
+            ("pins/host-patch-source-deep-nesting-cannot-evaluate",
+             "x = " + "[" * 10000 + "]" * 10000 + "\n", False),
+            ("pins/host-patch-source-long-dotted-key-cannot-evaluate", ".".join(["k"] * 1001) + " = 1\n",
+             True),
+            ("pins/host-patch-source-long-integer-cannot-evaluate", "x = " + "1" * 5000 + "\n", False)):
+        root = _fixture(base, workflow_pin="3.14.4", job=opf,
+                        files={HOST_SOURCE_REL: host[HOST_SOURCE_REL] + extra})
+        check(check_id, _host_parse_refusal(root, bound), (2, True))
+    # Each class load_host_patch maps (RecursionError, MemoryError and ValueError), INJECTED at tomllib's
+    # key parser on a key of more than 1000 dotted parts (real memory exhaustion cannot be provoked
+    # safely), is cannot-evaluate, never a traceback, and escapes the copy whose load_host_patch no
+    # longer maps that class (red on revert).
+    root = _fixture(base, workflow_pin="3.14.4", job=opf,
+                    files={HOST_SOURCE_REL: host[HOST_SOURCE_REL] + ".".join(["k"] * 1001) + " = 1\n"})
+    mapping = ("except (ValueError, RecursionError, " + "MemoryError) as exc:\n"
+               "        raise CannotEvaluate(\"{}: does not parse ({}): {}\".format(HOST_SOURCE_REL")
+    gate = _read_text(Path(__file__).resolve())
+    if gate.count(mapping) != 1:
+        raise CannotEvaluate("the load_host_patch mapping anchor occurs {} times".format(gate.count(mapping)))
+    for check_id, kind, kept in (
+            ("pins/host-patch-source-injected-recursion-error-cannot-evaluate", RecursionError,
+             "ValueError, MemoryError"),
+            ("pins/host-patch-source-injected-memory-error-cannot-evaluate", MemoryError,
+             "ValueError, RecursionError"),
+            ("pins/host-patch-source-injected-value-error-cannot-evaluate", ValueError,
+             "RecursionError, MemoryError")):
+        name = "python_floor_without_" + kind.__name__.lower()
+        _write(base, name + ".py", gate.replace(mapping, mapping.replace(
+            "ValueError, RecursionError, " + "MemoryError", kept)))
+        unmapped = _load_path(name, base / (name + ".py"))
+        check(check_id, (_host_parse_refusal(root, True, kind),
+                         _host_parse_refusal(root, True, kind, unmapped.evaluate)),
+              ((2, True), "raised " + kind.__name__))
+    # The same injection over a key parser that refuses the key itself first, by RecursionError, as a
+    # release that bounds key depth does (_capped_parser emulates one, so these vectors do not depend on
+    # the patch release that runs the self-test): MemoryError and ValueError still escape the copy that
+    # no longer maps them. Each is red in the copy whose _key_depth_bounded lets the parser's own
+    # RecursionError through: the copy that maps RecursionError then reports cannot-evaluate instead of
+    # letting the injected class escape.
+    passthrough = 'raise kind("injected: the key parser itself ' + 'refused a key") from None'
+    if gate.count(passthrough) != 1:
+        raise CannotEvaluate("the _key_depth_bounded conversion anchor occurs {} times".format(
+            gate.count(passthrough)))
+    _write(base, "python_floor_parser_class_passthrough.py", gate.replace(passthrough, "raise"))
+    passthrough_copy = _load_path("python_floor_parser_class_passthrough",
+                                  base / "python_floor_parser_class_passthrough.py")
+    for check_id, kind, kept in (
+            ("pins/host-patch-source-capped-parser-injected-memory-error-cannot-evaluate", MemoryError,
+             "ValueError, RecursionError"),
+            ("pins/host-patch-source-capped-parser-injected-value-error-cannot-evaluate", ValueError,
+             "RecursionError, MemoryError")):
+        name = "python_floor_capped_without_" + kind.__name__.lower()
+        _write(base, name + ".py", gate.replace(mapping, mapping.replace(
+            "ValueError, RecursionError, " + "MemoryError", kept)))
+        unmapped = _load_path(name, base / (name + ".py"))
+        check(check_id, (_host_parse_refusal(root, True, kind, capped=True),
+                         _host_parse_refusal(root, True, kind, unmapped.evaluate, capped=True),
+                         passthrough_copy._host_parse_refusal(root, True, kind, unmapped.evaluate, capped=True)),
+              ((2, True), "raised " + kind.__name__, (2, True)))
+    # A key parser whose result breaks the (pos, key) contract: the bounded parser names the mismatch.
+    root = _fixture(base, workflow_pin="3.14.4", job=opf, files=host)
+    for check_id, name in (
+            ("pins/host-patch-parser-none-position-named-failure", "none-position"),
+            ("pins/host-patch-parser-negative-position-named-failure", "negative-position"),
+            ("pins/host-patch-parser-past-end-position-named-failure", "past-end-position"),
+            ("pins/host-patch-parser-bool-position-named-failure", "bool-position"),
+            ("pins/host-patch-parser-non-str-key-part-named-failure", "non-str-key-part")):
+        check(check_id, _malformed_host_refusal(root, *MALFORMED_RESULTS[name]), True)
     # An explicit-key entry whose value is a quoted scalar over several lines is outside the grammar.
     code, lines = evaluate(_fixture(base, files={WORKFLOWS_REL + "/attack.yml": (
         "name: attack\non: push\njobs:\n  q:\n    runs-on: ubuntu-latest\n    steps:\n"
@@ -2175,8 +3283,8 @@ def _self_test_cases(base):
            "as '3.10'".format(WORKFLOWS_REL)])
 
     check("guard/canonical-passes", evaluate(_fixture(base, source=listed, files=demo)), (0, [
-        "PASS: python floor 3.14 ({}): source, pins, guard, dynamic and fallback legs over 1 guarded "
-        "surface(s); completeness check OFF (completeness-check = false), documentation and claims "
+        "PASS: python floor 3.14 ({}): source, pins, guard, dynamic, fallback and tomllib legs over 1 "
+        "guarded surface(s); completeness check OFF (completeness-check = false), documentation and claims "
         "checks ON".format(SOURCE_REL)]))
     guard_marker = "canonical floor guard"
     for check_id, text in (
@@ -2518,8 +3626,8 @@ def _self_test_cases(base):
             (fallback_head + "    @staticmethod\n    def load():\n        return 1\n", 7),
             (fallback_head + "    class Fallback(dict):\n        pass\n", 6))], [(1, True)] * 2)
     # The canonical grammar, rule by rule. Each case breaks one rule, so it passes when that rule alone
-    # is removed from the matcher. The round-3 QA forms first: a message that execs a clean exit 0 or
-    # closes the stream, and a version test that raises (exit 1).
+    # is removed from the matcher. First a message that execs a clean exit 0 or closes the stream, and
+    # a version test that raises (exit 1).
     check("fallback/message-call-findings", [fallback_case(fallback_refusal(write=write), 7) for write in (
         "sys.stderr.write(os.execl(sys.executable, sys.executable, \"-I\", \"-B\", \"-c\", "
         "\"raise SystemExit(0)\"))",
@@ -2542,8 +3650,7 @@ def _self_test_cases(base):
             ("TOOL = str(1)", "TOOL"), ("TOOL = 1", "TOOL"), ("sys = \"error\\n\"", "sys"),
             ("TOOL = sys.stderr = \"error\\n\"", "TOOL"), ("sys.stderr = \"error\\n\"", "\"error\\n\""),
             ("TOOL: str = \"error\\n\"", "TOOL"))], [(1, True)] * 6)
-    # The round-3 QA MINOR 3: `import os` is required and must bind os (an unbound os is a NameError,
-    # exit 1).
+    # `import os` is required and must bind os (an unbound os is a NameError, exit 1).
     check("fallback/import-os-findings", [fallback_case(fallback_refusal(before=before), 6) for before in (
         "", "    import os as _os\n", "    import posix as os\n", "    import os, sys\n")], [(1, True)] * 4)
     check("fallback/version-split-findings", [fallback_case(source, 7) for source in (
@@ -2579,8 +3686,8 @@ def _self_test_cases(base):
         "    os._exit(2, os._exit(0))\n", "    os._exit(2, flag=os._exit(0))\n", "    sys._exit(2)\n",
         "    os.umask(2)\n", "    _exit(2)\n", "    os.path._exit(2)\n", "    CODE = os._exit(2)\n",
         "    os._exit\n")], [(1, True)] * 12)
-    # The round-3 QA MINOR 2 first: a re-raise naming another module re-raises the guarded module's
-    # own import error (exit 1). A dotted or from-import can fail on a module the re-raise does not name.
+    # A re-raise naming another module re-raises the guarded module's own import error (exit 1). A
+    # dotted or from-import can fail on a module the re-raise does not name.
     check("fallback/reraise-findings", [fallback_case(source, line) for source, line in (
         (fallback_reraise(reraise="    if exc.name != \"tomli\":\n        raise\n"), 6),
         (fallback_reraise(reraise="    if True:\n        raise\n"), 6),
@@ -2599,7 +3706,7 @@ def _self_test_cases(base):
         (fallback_reraise(guarded="    from tomllib import loads\n",
                           reraise="    if exc.name != \"loads\":\n        raise\n"), 6),
         (fallback_reraise(guarded="    import tomllib\n    import json\n"), 7))], [(1, True)] * 14)
-    # The round-4 QA MEDIUM: a re-raise in an unnamed handler reads None.name, one after a from-import
+    # A re-raise in an unnamed handler reads None.name, one after a from-import
     # compares exc.name with None (every import error is re-raised), and one under except* reads the
     # .name an ExceptionGroup lacks; each exits 1 without the diagnostic.
     check("fallback/reraise-binding-findings", [fallback_case(source, 6) for source in (
@@ -2614,7 +3721,7 @@ def _self_test_cases(base):
         prefix."""
         return prefix + "try:\n    import tomllib\nexcept ModuleNotFoundError" + name + ":\n"
 
-    # The round-4 QA MINOR 2: the handler's `as` clause rebinds a name the grammar reads (as sys the
+    # The handler's `as` clause rebinds a name the grammar reads (as sys the
     # diagnostic is never written, or the version split exits 1; as tuple the split exits 1; as
     # BaseException the wrapping try catches nothing). An `as os` is refused with them, though the
     # handler's `import os` rebinds os.
@@ -2623,7 +3730,7 @@ def _self_test_cases(base):
         fallback_split(head=fallback_named(" as tuple")),
         fallback_refusal(head=fallback_named(" as BaseException")),
         fallback_refusal(head=fallback_named(" as os")))], [(1, True)] * 5)
-    # The round-4 QA MINOR 3: sys is bound by a module-level `import sys` before the try. With none,
+    # The fallback needs sys bound by a module-level `import sys` before the try. With none,
     # with one after the try, an aliased one or one in a function body, the plain diagnostic's
     # NameError is swallowed (the diagnostic is lost) and the version split's exits 1.
     check("fallback/sys-binding-findings", [fallback_case(source, 5) for source in (
@@ -2680,11 +3787,11 @@ def _self_test_cases(base):
     check("fallback/function-body-not-scanned-passes", fallback_case(
         "import sys\n\n\ndef load():\n    try:\n        import tomllib\n"
         "    except ModuleNotFoundError:\n        sys.stderr.write(\"x\\n\")\n"
-        "        raise SystemExit(2)\n    return tomllib\n"), (0, False))
+        "        raise SystemExit(2)\n    return tomllib.TOMLDecodeError\n"), (0, False))
     check("fallback/method-body-not-scanned-passes", fallback_case(
         "import sys\n\n\nclass Loader:\n    def load(self):\n        try:\n            import tomllib\n"
         "        except ModuleNotFoundError:\n            sys.stderr.write(\"x\\n\")\n"
-        "            raise SystemExit(2)\n        return tomllib\n"), (0, False))
+        "            raise SystemExit(2)\n        return tomllib.TOMLDecodeError\n"), (0, False))
 
     code, lines = evaluate(_fixture(base, source=_source_text(documentation=False), declarations=False))
     check("switch/off-finding", (code, [line for line in lines if "documentation-check is" in line]),
@@ -2758,6 +3865,17 @@ def _self_test_cases(base):
 
 def _gate_run(root, gate_source):
     _write(root, "tools/check_python_floor.py", gate_source)
+    # The copy scans itself: record its own self-test seams (the tomllib._parser rebinding in
+    # _key_part_capped) in the fixture's table, computed from the copy's source so the rows never go
+    # stale, unless the case under test supplies its own table.
+    if not os.path.lexists(root / TOMLLIB_TABLE_REL):
+        groups = {}
+        for line, function, form, _text, handled, _passthrough in tomllib_sites(ast.parse(gate_source))[0]:
+            if not handled:
+                groups.setdefault((function, form), []).append(line)
+        _write(root, TOMLLIB_TABLE_REL, "format-version = 1\n" + "".join(
+            _tomllib_row(function, form=form, count=len(found), path="tools/check_python_floor.py")
+            for (function, form), found in sorted(groups.items())))
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-B", str(root / "tools" / "check_python_floor.py")], cwd=root,
@@ -2794,6 +3912,9 @@ def _red_on_revert(base, good):
             "import sys\n\ntry:\n    import tomllib\nexcept ModuleNotFoundError:\n"
             "    sys.stderr.write(\"error: no tomllib\\n\")\n    raise SystemExit(2)\n"))])),
          "departs here from the canonical write-flush-exit refusal"),
+        ("tomllib", dict(files={"tools/site.py": TOMLLIB_SITE_TEXT.format(head="import tomllib",
+                                                                          call="tomllib.loads")}),
+         "tools/site.py:4: tomllib.loads in read is not HANDLED"),
         ("completeness", dict(source=_source_text(completeness=True),
                               files={"tools/demo.py": _entry("import sys\n")}),
          "tools/demo.py: a shipped entrypoint"),
@@ -2814,14 +3935,15 @@ def _red_on_revert(base, good):
     check("revert/guard-leg", results["guard"], (1, True, 0))
     check("revert/dynamic-leg", results["dynamic"], (1, True, 0))
     check("revert/fallback-leg", results["fallback"], (1, True, 0))
+    check("revert/tomllib-leg", results["tomllib"], (1, True, 0))
     check("revert/completeness-leg", results["completeness"], (1, True, 0))
     check("revert/documentation-leg", results["documentation"], (1, True, 0))
     check("revert/claims-leg", results["claims"], (1, True, 0))
 
 
 def _rule_reverts(base):
-    """Red-on-revert for each rule of the line model: a reviewer reproduction judged by evaluate() of this
-    gate and of a copy loaded through importlib with that one rule removed from RULES."""
+    """Red-on-revert for each rule of the line model: a fixture that breaks that rule, judged by evaluate()
+    of this gate and of a copy loaded through importlib with that one rule removed from RULES."""
     copy = base / "python_floor_copy.py"
     _write(base, copy.name, _read_text(Path(__file__).resolve()))
     spec = importlib.util.spec_from_file_location("python_floor_copy", copy)
@@ -2914,7 +4036,7 @@ def _rule_reverts(base):
 def _expected_check_ids():
     try:
         manifest = tomllib.loads(_read_text(CHECKS_MANIFEST))
-    except (CannotEvaluate, tomllib.TOMLDecodeError) as exc:
+    except (CannotEvaluate, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
               file=sys.stderr)
         return None

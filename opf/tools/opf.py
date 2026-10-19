@@ -993,8 +993,35 @@ def _aggregator_self_test():
     return EXIT_OK
 
 
-def _watchdog_timer_case(label, mode):
-    """Private subprocess fixture: its timers belong to this process alone."""
+def _watchdog_window_verdict(result, elapsed, timeout_s):
+    """Classify the window exercise's run_bounded result: "pass" for the
+    subject's own return, whatever `elapsed` reads; "unestablished" for the
+    TIMEOUT sentinel ONLY once the caller's measured monotonic `elapsed`
+    reached `timeout_s` (run_bounded computes its deadline AFTER that
+    measurement begins and arms the child timer later still, so a correct
+    run's bound, which host starvation can reach on a correct 2 s subject,
+    cannot trip before then: no verdict, never a definite failure); "fail"
+    for a TIMEOUT measured BEFORE the bound could have elapsed (an early
+    trip is a run_bounded regression, never starvation) and for every other
+    sentinel (OOM, CHILD-DIED, ERROR and SETUP-ERROR stay definite: fail
+    closed, whatever `elapsed` reads)."""
+    if result == "RETURNED":
+        return "pass"
+    if result == "TIMEOUT" and elapsed >= timeout_s:
+        return "unestablished"
+    return "fail"
+
+
+def _watchdog_timer_case(label, mode, bounded=None, clock=None):
+    """Private subprocess fixture: its timers belong to this process alone.
+    When every check holds but the window exercise's subject run was never
+    established on this host (_watchdog_window_verdict), the exact
+    _WATCHDOG_CANNOT_EVALUATE marker is printed on the clean exit, which
+    the launching runner maps to the distinct CANNOT-EVALUATE outcome,
+    never a pass and never a definite failure. `bounded` and `clock` exist
+    for the regression runner's scripted window vectors, which drive this
+    real fixture without a live bounded run; the defaults are the real
+    _opf_emit.run_bounded and time.monotonic."""
     import contextlib
     import io
     import os
@@ -1004,12 +1031,35 @@ def _watchdog_timer_case(label, mode):
 
     if _bootstrap() != EXIT_OK:
         return EXIT_MALFORMED
+    bounded = _opf_emit.run_bounded if bounded is None else bounded
+    clock = time.monotonic if clock is None else clock
+    unestablished = []
+
+    def window_case():
+        # The 2 s subject under run_bounded's 10 s bound: its own return is
+        # the exercise. run_bounded computes its deadline only AFTER this
+        # measurement begins (and arms the child timer later still), so on a
+        # correct subject only a bound that genuinely elapsed here is host
+        # starvation (recorded apart: no verdict), while a TIMEOUT measured
+        # earlier is an early trip of the bound, a run_bounded regression (a
+        # definite failure), and every other sentinel stays one.
+        begin = clock()
+        result = bounded(lambda: (time.sleep(2), "RETURNED")[1], timeout_s=10)
+        elapsed = clock() - begin
+        verdict = _watchdog_window_verdict(result, elapsed, 10)
+        if verdict == "unestablished":
+            unestablished.append("run_bounded's own 10 s bound, not the subject's "
+                                 "return, ended the window exercise")
+        elif result == "TIMEOUT":
+            print("run_bounded returned TIMEOUT after %.2f s, before its 10 s "
+                  "bound could have elapsed: an early trip of the bound is a "
+                  "run_bounded regression, never host starvation" % elapsed)
+        return 0 if verdict in ("pass", "unestablished") else 1
     functions = {
         "changelog": _opf_changelog.self_test, "views": _opf_views.self_test,
         "store": _opf_store.self_test, "check": _opf_check.self_test,
         "emit": _opf_emit.self_test,
-        "window": lambda: 0 if _opf_emit.run_bounded(
-            lambda: (time.sleep(2), "RETURNED")[1], timeout_s=10) == "RETURNED" else 1}
+        "window": window_case}
     which = {"virtual": signal.ITIMER_VIRTUAL, "prof": signal.ITIMER_PROF}.get(
         mode, signal.ITIMER_REAL)
     signum = {signal.ITIMER_REAL: signal.SIGALRM,
@@ -1086,12 +1136,44 @@ def _watchdog_timer_case(label, mode):
         ok = ok and signal.SIGALRM in pending and signal.SIGALRM in signal.sigpending()
     if not ok:
         print(label, mode, rc, before, after, mutations, fired, output.getvalue())
+        # No save/restore or teardown mutation: the subprocess exits with its timer.
+        return EXIT_FINDING
+    if unestablished:
+        # Every check held, but the window subject's run was never
+        # established: the exact marker on this clean exit, never a pass
+        # (the runner maps it to the distinct CANNOT-EVALUATE) and never a
+        # definite failure; a failed check above stays one (fail closed:
+        # the marker is honored only on a clean exit).
+        print(_WATCHDOG_CANNOT_EVALUATE + " (timer/" + label + "/" + mode + ": "
+              + "; ".join(unestablished) + ")")
     # No save/restore or teardown mutation: the subprocess exits with its timer.
-    return EXIT_OK if ok else EXIT_FINDING
+    return EXIT_OK
 
 
-def _watchdog_isolation_self_test():
-    """Exercise actual callers in fresh processes, without borrowing our timer."""
+# The watchdog isolation self-test's per-case process bound: each of its
+# timer cases is one fixture call with this timeout.
+_WATCHDOG_ISOLATION_TIMEOUT = 180
+
+
+def _watchdog_isolation_cases():
+    """The watchdog isolation self-test's timer cases, one fixture call each."""
+    cases = [(label, mode) for label in ("changelog", "views", "store", "check", "emit")
+             for mode in ("inactive", "single", "periodic", "virtual", "prof", "pending")]
+    cases.append(("window", "expiry"))
+    return cases
+
+
+def _watchdog_isolation_self_test(launch=None):
+    """Exercise actual callers in fresh processes, without borrowing our
+    timer. A fixture killed at its own process bound, and one whose clean
+    exit carries the exact _WATCHDOG_CANNOT_EVALUATE marker (its window
+    exercise was never established on this host), is no verdict on its
+    case (a starved host can reach any bound): the distinct CANNOT-EVALUATE
+    (EXIT_MALFORMED), never a pass and never a definite failure, while the
+    marker on a nonzero exit stays a failure (_watchdog_completion_verdict);
+    the regression runner's scripted-launch vectors pin both mappings.
+    `launch` (label, mode, code) exists for those vectors; the default
+    launches the real fixture."""
     import subprocess
     import signal
     from _opf_emit import run_status_owned
@@ -1105,25 +1187,44 @@ def _watchdog_isolation_self_test():
     if not hasattr(os, "fork") or not all(hasattr(signal, name) for name in required):
         print("opf watchdog isolation: FAIL (required POSIX facilities unavailable)")
         return EXIT_FINDING
-    cases = [(label, mode) for label in ("changelog", "views", "store", "check", "emit")
-             for mode in ("inactive", "single", "periodic", "virtual", "prof", "pending")]
-    cases.append(("window", "expiry"))
+    def real_launch(label, mode, code):
+        return run_status_owned([sys.executable, "-I", "-B", "-c", code],
+                                fixture_id="timer/" + label + "/" + mode,
+                                capture_output=True, text=True,
+                                timeout=_WATCHDOG_ISOLATION_TIMEOUT)
+
+    launch = real_launch if launch is None else launch
     failed = False
-    for label, mode in cases:
+    unevaluated = []
+    for label, mode in _watchdog_isolation_cases():
         code = ("import sys; sys.path.insert(0, " + repr(str(Path(__file__).resolve().parent))
                 + "); import opf; return opf._watchdog_timer_case("
                 + repr(label) + ", " + repr(mode) + ")")
         try:
-            result = run_status_owned([sys.executable, "-I", "-B", "-c", code],
-                                    fixture_id="timer/" + label + "/" + mode,
-                                    capture_output=True, text=True, timeout=180)
-            ok = result.returncode == EXIT_OK
+            result = launch(label, mode, code)
+            verdict = _watchdog_completion_verdict(result.returncode, result.stdout)
             detail = result.stdout + result.stderr
         except (RuntimeError, subprocess.CalledProcessError) as exc:
-            ok, detail = False, str(exc)
+            verdict, detail = "fail", str(exc)
         except subprocess.TimeoutExpired:
-            ok, detail = False, "fixture exceeded its 180s process bound"
-        if not ok:
+            # A kill at the fixture's own process bound establishes nothing
+            # about the case: recorded apart as the distinct CANNOT-EVALUATE,
+            # never a pass and never a definite failure.
+            unevaluated.append(label + "/" + mode)
+            print("opf watchdog isolation: CANNOT EVALUATE", label, mode,
+                  "fixture reached its %ss process bound (no verdict)"
+                  % _WATCHDOG_ISOLATION_TIMEOUT, file=sys.stderr)
+            continue
+        if verdict == "cannot-evaluate":
+            # The fixture exited clean with the exact marker: its exercise
+            # was never established on this host. Recorded apart, never a
+            # pass and never a definite failure; the marker on a nonzero
+            # exit is not honored (that run stays a failure below).
+            unevaluated.append(label + "/" + mode)
+            print("opf watchdog isolation: CANNOT EVALUATE", label, mode, detail,
+                  file=sys.stderr)
+            continue
+        if verdict != "pass":
             failed = True
             print("opf watchdog isolation: FAIL", label, mode, detail, file=sys.stderr)
     for name in ("_fixture_setpgid", "_fixture_owned_fds", "release_fd"):
@@ -1134,8 +1235,15 @@ def _watchdog_isolation_self_test():
     if hasattr(_opf_store, "snapshot_caller_alarm") or hasattr(_opf_store, "restore_caller_alarm"):
         failed = True
         print("opf watchdog isolation: FAIL (borrow helper still present)", file=sys.stderr)
-    if not failed:
+    if not failed and not unevaluated:
         print("opf watchdog isolation: PASS (caller timers and signal state untouched)")
+    if unevaluated:
+        # At least one case issued no verdict: the distinct CANNOT-EVALUATE
+        # (the worst outcome, per the runner's 2 > 1 > 0 ordering; any
+        # failures above are already printed), never a pass.
+        print("opf watchdog isolation: CANNOT EVALUATE (no verdict from: "
+              + ", ".join(unevaluated) + ")")
+        return EXIT_MALFORMED
     return EXIT_FINDING if failed else EXIT_OK
 
 
@@ -1161,6 +1269,49 @@ _DEADLINE_RECEIPT_ALLOWANCE = 1.0
 _WATCHDOG_LAUNCH_MARGIN = 30
 # The per-launch timeout of _watchdog_completion_case's launch() helper.
 _COMPLETION_LAUNCH_TIMEOUT = 10
+# The tree legs' startup liveness backstop (nested-timeout/nested-cancel).
+# It is NOT the stimulus deadline: the stimulus (the guardian's expiry or
+# the cancel) is EVENT-ORDERED, mounted only at the first wait poll that
+# parsed both nested markers, so the leg's verdict never races subject
+# startup. This bound only keeps the leg live when the nested chain (one
+# supervisor interpreter start, two forks, one exec, two marker writes) is
+# not scheduled at all, or when the stimulus is not acted on. Sized per
+# the kill-timeout rule from measurement, not as a stimulus: the whole leg
+# (chain included) measured 0.09-0.2 s end to end on a 16-CPU host at
+# loadavg ~6-13 (2026-10-10), so 60 s is >=300x that measured base (the
+# 2026-10-10 lane failures overran the old flat 2 s stimulus deadline at
+# loadavg ~21). Whenever this backstop, not the stimulus, ended
+# supervision, the leg reports the _WATCHDOG_CANNOT_EVALUATE outcome below
+# with what it observed, never a pass (_watchdog_tree_case).
+_TREE_STARTUP_BACKSTOP = 60
+# The nested-orders vectors' short backstop, used only by the nine vectors
+# whose schedule needs a REAL backstop expiry (a subject that never
+# publishes or publishes a malformed marker; an uninstalled or blind
+# observer; an unshifted guardian clock; a guardian held asleep or busy
+# before READY; a guardian that publishes READY only after the caller's
+# first READY check; a guardian held stopped across its deadline): there
+# it is the stimulus, so each pays this wait instead of
+# _TREE_STARTUP_BACKSTOP.
+_TREE_VECTOR_BACKSTOP = 5
+# A guardian's startup does only bounded work before READY (fork, one sweep
+# of its inherited descriptors, subreaper setup and the READY write:
+# millisecond-scale CPU for the descriptor tables these legs hold), far
+# under this floor, so a guardian sampled runnable (state R) at the startup
+# backstop, placed before READY by an empty channel at both READY checks,
+# that has already CONSUMED this much CPU time is busy-looping before READY,
+# a code regression. The judgment is by CPU time, never wall time: a merely
+# starved guardian is granted little CPU however much wall time passes, so
+# host starvation stays below this floor and remains no verdict, while the
+# busy loop is established by the CPU it burned, whatever the host's
+# scheduling.
+_STARTUP_BUSY_CPU_SECONDS = 1.0
+# The exact stdout marker a watchdog fixture prints (with its cause) when a
+# backstop or bound, not the leg's stimulus or its subject's own return,
+# ended the exercise, or the stimulus was observed only after cleanup: no
+# verdict exists, so the launching runner maps this marker (only on a
+# clean fixture exit) to the distinct CANNOT-EVALUATE aggregate
+# (EXIT_MALFORMED), never a pass and never a finding.
+_WATCHDOG_CANNOT_EVALUATE = "opf watchdog completion: CANNOT EVALUATE"
 
 
 def _deadline_case_budget(timeout_s=_DEADLINE_CASE_TIMEOUT):
@@ -1172,6 +1323,636 @@ def _deadline_case_budget(timeout_s=_DEADLINE_CASE_TIMEOUT):
     import _opf_emit
     return (max(timeout_s, _DEADLINE_EXECUTION_BOUND) + _opf_emit._FIXTURE_CLEANUP_GRACE
             + _DEADLINE_RECEIPT_ALLOWANCE)
+
+
+# Two literals of _opf_emit's close-out code, named here for the close-out
+# derivation and checked against that code by _watchdog_closeout_vectors:
+# the sleep between polls of each close-out polling loop (the startup READY
+# poll waits the same 5 ms), and _FixtureProcess._recv_subject's poll for
+# the subject receipt.
+_FIXTURE_POLL_SLEEP = 0.005
+_FIXTURE_RECEIPT_WAIT = 0.5
+
+
+def _watchdog_closeout_paths():
+    """The close-out paths one regression leg's launch (run_status_owned,
+    through _opf_emit._run_fixture_process) can take AFTER its process
+    bound expires, each as the timed waits the caller makes on it, in
+    order: (wait, limit in seconds, polling sleeps it can overrun). Each
+    path's total is a TIMED-WAIT allowance: the time the caller spends
+    inside those waits, each charged its limit plus one _FIXTURE_POLL_SLEEP
+    for each sleep it can overrun (a polling loop checks its deadline
+    before each sleep, so its sleeps end at most one _FIXTURE_POLL_SLEEP
+    past its limit; a poll or an Event wait ends at its limit). It is not
+    an end-to-end wall-clock ceiling: the caller's own work between and
+    inside those waits is charged nothing (see the exclusions below). G
+    below is _opf_emit._FIXTURE_CLEANUP_GRACE.
+
+    armed (start() succeeded): the run loop's last poll; close() reads the
+    subject receipt (_recv_subject, up to _FIXTURE_RECEIPT_WAIT), waits 2G
+    to collect the guardian, escalates (_fixture_group_pinned confirms the
+    frozen guardian within G, then _fixture_verify_group_kill watches the
+    group within G), waits G more to collect, and proves the subject's exit
+    on its pidfd within G. armed-interrupted: the same, except that an
+    exception escaping that last collection hands the still uncollected
+    guardian to _interrupt_collect TWICE (from _finish_close, then from
+    _close_masked), and each reap waits G. ownership-lost: the same,
+    except that the guardian is reaped elsewhere during that collection and
+    _ownership_lost_refusal proves the subject's exit within G.
+    poll-collected: the run loop's poll collects a failed guardian and
+    reads the receipt, then close() proves the subject's exit within G.
+    armed-cleaned, ownership-lost-cleaned and poll-collected-cleaned: the
+    same waits as armed, ownership-lost and poll-collected, but the
+    subject's exit is proven at the end of its proof wait, so the close-out
+    reaches its cleaned state and then refuses with that proof.
+    armed-tree: armed-cleaned whose verification census comes back clean
+    twice in a row at once (the killed subject and member are zombies
+    under the frozen guardian), so the escalation reaches its "tree"
+    observation without waiting in that census, and close() refuses with
+    that observation.
+    completed (a clean guardian collected by the run loop's last poll
+    before the deadline: the call returns its result) and
+    completed-overdue (that collection first observed at the deadline's
+    expiry: the call times out): the run loop's last poll, then close()
+    reads the subject receipt, and no other wait. startup-collected:
+    startup-timeout whose killed guardian is collected inside the first
+    close()'s 2G wait, so neither close() escalates.
+    startup-timeout (no READY by the deadline) and launch-timeout (no
+    completed launch by then): start() raises, so close() runs TWICE, once
+    in start() and once in _run_fixture_process's finally, and each run
+    that cannot collect the killed guardian waits 2G, escalates, then waits
+    G. launch-timeout adds start()'s launch wait, which lasts at least G
+    (so it ends up to G after the deadline when start() begins less than G
+    before it), and close()'s 2G wait for the launcher. launch-interrupted:
+    launch-timeout with an exception escaping each close()'s last
+    collection, so each close() adds two interrupt-owner reaps, as in
+    armed-interrupted. startup-cancelled: startup-timeout with a
+    cancellation raised as the first close() releases the launcher (where a
+    signal whose handler flag tripped before close() masked SIGINT and
+    SIGTERM can surface), so that close() also runs _interrupt_collect once,
+    whose reap waits G.
+
+    Not counted, so outside the allowance: the caller's own compute
+    between and inside those waits (the /proc censuses of the group pin
+    and the verification census, the receipt and report reads, the signal
+    sends: each charged no time), time in which the host does not run the
+    caller (no wait), the untimed reap in _start() of a guardian that ended
+    its READY channel, a cancellation raised at any other point, and
+    exceptions another thread raises into the caller (the regression
+    runner starts none)."""
+    import _opf_emit
+    grace, receipt = _opf_emit._FIXTURE_CLEANUP_GRACE, _FIXTURE_RECEIPT_WAIT
+    run_loop = ("the run loop's last poll", 0.0, 1)
+    collection = ("guardian collection", 2 * grace, 1)
+    escalated = ("post-escalation collection", grace, 1)
+    pinned = (run_loop, ("subject receipt", receipt, 0), collection, ("group pin", grace, 1))
+    armed = pinned + (("verification census", grace, 1), escalated)
+    unarmed = (collection, escalated)
+    startup = (("the startup READY poll", 0.0, 1),)
+    reap = ("interrupt-owner reap", grace, 1)
+    launch = (("start()'s launch wait past the deadline", grace, 0),
+              ("close()'s launcher wait", 2 * grace, 0))
+    exit_proof = ("subject exit proof", grace, 0)
+    lost_proof = ("ownership-lost exit proof", grace, 0)
+    polled = (run_loop, ("subject receipt", receipt, 0))
+    return dict([
+        ("armed", armed + (exit_proof,)),
+        ("armed-cleaned", armed + (exit_proof,)),
+        ("armed-tree", pinned + (escalated, exit_proof)),
+        ("armed-interrupted", armed + (reap, reap)),
+        ("ownership-lost", armed + (lost_proof,)),
+        ("ownership-lost-cleaned", armed + (lost_proof,)),
+        ("poll-collected", polled + (exit_proof,)),
+        ("poll-collected-cleaned", polled + (exit_proof,)),
+        ("completed", polled),
+        ("completed-overdue", polled),
+        ("startup-timeout", startup + unarmed + unarmed),
+        ("startup-collected", startup + (collection,)),
+        ("startup-cancelled", startup + unarmed + (reap,) + unarmed),
+        ("launch-timeout", launch + unarmed + unarmed),
+        ("launch-interrupted", launch + 2 * (unarmed + (reap, reap))),
+    ])
+
+
+def _watchdog_path_seconds(path):
+    """One close-out path's total: each wait's limit plus one
+    _FIXTURE_POLL_SLEEP for each sleep it can overrun."""
+    return sum(limit + sleeps * _FIXTURE_POLL_SLEEP for _wait, limit, sleeps in path)
+
+
+def _watchdog_leg_closeout_seconds():
+    """The derived close-out ceiling: the LONGEST total among
+    _watchdog_closeout_paths, bounding the timed waits one regression leg's
+    launch can make after its process bound. It is a maximum over those
+    derived paths, not a sum over every wait in close(), and nothing grants
+    it at runtime: its only consumer is _watchdog_closeout_vectors, which
+    runs the real close-out code along each path and refuses a path whose
+    waits outrun its total or this ceiling."""
+    return max(_watchdog_path_seconds(path) for path in _watchdog_closeout_paths().values())
+
+
+def _watchdog_closeout_vectors(source=None):
+    """The close-out derivation's red-on-revert check: runs the REAL
+    close-out code (_run_fixture_process, _FixtureProcess's start, poll and
+    close, and every helper they reach, in a private copy of _opf_emit
+    loaded from its file, or from `source`) once along each
+    path of _watchdog_closeout_paths, under a virtual clock, each schedule
+    holding that path's waits to (nearly) their limits. The schedules
+    include the refusals, the cleaned refusals (the subject's exit proven,
+    reaching both of the copy's cleaned states), an escalation whose
+    verification census comes back clean twice in a row (its "tree"
+    observation and the refusal that reports it), and the clean collections
+    before and at the deadline's expiry. Only boundaries are
+    scripted, and only for the calling thread: time.monotonic and
+    time.sleep, select.poll, socket.recv_fds, signal.pidfd_send_signal, and
+    os.waitpid, waitid, getpgid, kill and listdir, plus os.read, write and
+    close on the vector's own descriptor numbers (process and descriptor
+    numbers above any pid_max and any descriptor a host issues), and the
+    copy's /proc stat read, pidfd open and _FixtureProcess construction
+    (its launcher thread is never started). Nothing is forked,
+    and a real process or descriptor reaching a scripted signal, wait or
+    stat boundary is refused, never passed through. These other blocking
+    calls are refused outright on the calling thread while a schedule runs:
+    threading.Event.wait, Condition.wait and Thread.join, queue.Queue.get,
+    the get of a queue.SimpleQueue made while the schedule runs,
+    select.select and select.epoll, the select of every selectors class
+    that defines one (so of every selector class the selectors module
+    offers), signal.sigtimedwait, sigwaitinfo and pause, and os.wait,
+    wait3 and wait4. So a wait added to the close-out is caught when a
+    schedule reaches it and it is one of the scripted or refused calls.
+    Outside that coverage: a wait on a path no schedule takes; a blocking
+    read, write or accept on a real descriptor; a lock acquired with a
+    timeout; a get on a queue.SimpleQueue made before the schedule ran or
+    reached through _queue directly; a wait timed by an unscripted clock
+    (time.time, time.perf_counter, time.monotonic_ns and the other clocks
+    besides time.monotonic), which runs in real time and advances no
+    virtual time; any other blocking call not named here; and compute,
+    which advances no virtual time either (a busy loop that ends by itself
+    or by an unscripted clock costs real time unnoticed, and one that spins
+    on the scripted time.monotonic without a scripted sleep never ends,
+    since the virtual clock stands still). Returns the faults: a
+    schedule that did not end as its path does; one whose virtual time
+    after the deadline exceeds its path's total or the allowance
+    (_watchdog_leg_closeout_seconds) (a wait left out of the derivation, or
+    a limit raised in _opf_emit); one that would still fit
+    with any single nonzero wait removed from its path (the schedule fell
+    short of that wait, so it could not expose the wait's removal); a
+    path without a schedule or a schedule without a path; and, for the
+    real emitter only, a mutant this check does not refuse
+    (_watchdog_closeout_mutant_faults)."""
+    import errno
+    import importlib.util
+    import io
+    import queue
+    import select
+    import selectors
+    import signal
+    import socket
+    import subprocess
+    import threading
+    import time
+    from contextlib import ExitStack
+    from unittest.mock import patch
+    # A private copy of _opf_emit, loaded from its file and never registered
+    # in sys.modules (as _opf_emit loads its own close harness): a caller
+    # that replaced the shared module's launcher or helpers (the launcher
+    # matrix's exit-37 injection) never reaches the code this runs, and only
+    # the copy's own attributes are scripted.
+    spec = importlib.util.spec_from_file_location(
+        "_opf_emit_closeout_vector",
+        Path(__file__).resolve().parent / "_opf_emit.py" if source is None else source)
+    emit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emit)
+
+    grace, tick = emit._FIXTURE_CLEANUP_GRACE, _FIXTURE_POLL_SLEEP
+    owner = threading.get_ident()
+    base_pid, base_fd = 1 << 23, 1 << 30  # above any pid_max (2**22) and any descriptor
+    guardian, subject, member = base_pid + 1, base_pid + 2, base_pid + 3
+    control_fd, peer_fd = base_fd, base_fd + 1
+    real_process, real_listdir = emit._FixtureProcess, os.listdir
+    world = {}
+
+    class Refused(AssertionError):
+        """A scripted boundary reached with a real process or descriptor."""
+
+    def refuse(what):
+        world.setdefault("refused", []).append(what)
+        raise Refused(what)
+
+    def fd_of(pid):
+        return base_fd + 16 + pid - base_pid
+
+    def pid_of(fd):
+        pid = fd - base_fd - 16 + base_pid
+        if pid not in (guardian, subject, member):
+            refuse("a signal through descriptor %r" % (fd,))
+        return pid
+
+    def advance(seconds):
+        world["now"] += seconds
+        if world["now"] > world["origin"] + 600:
+            refuse("the virtual clock ran away")
+
+    def last_poll_of(name, flag=None):
+        # True at the last polls before the deadline of the _opf_emit loop
+        # `name` that made this call, read from that loop's own state, so a
+        # schedule follows the limit the code itself sets.
+        frame = sys._getframe(2)
+        while frame is not None and frame.f_globals.get("__name__") != emit.__name__:
+            frame = frame.f_back
+        return (frame is not None and frame.f_code.co_name == name
+                and (flag is None or frame.f_locals.get(flag) is True)
+                and world["now"] >= frame.f_locals["deadline"] - 2 * tick)
+
+    class Endpoint:
+        """The control socket or its peer: a descriptor number only."""
+
+        def __init__(self, fd):
+            self.fd = fd
+
+        def fileno(self):
+            return self.fd
+
+        def close(self):
+            self.fd = -1
+
+        def setblocking(self, flag):
+            pass
+
+    class Gate:
+        """threading.Event for _go and _launched on the virtual clock: a
+        timed wait on a closed gate runs to its limit and opens the gate as
+        it ends when the next entry of `opens` says so (the launcher has
+        then recorded the guardian); set() raises the scripted cancellation
+        on call number `raise_on`."""
+
+        def __init__(self, opened, opens=(), raise_on=None):
+            self.opened, self.opens, self.raise_on, self.calls = opened, list(opens), raise_on, 0
+
+        def is_set(self):
+            return self.opened
+
+        def set(self):
+            self.calls += 1
+            if self.calls == self.raise_on:
+                world["cancelled"] = KeyboardInterrupt("close-out vector cancellation")
+                raise world["cancelled"]
+            self.opened = True
+
+        def wait(self, timeout=None):
+            if not self.opened:
+                if timeout is None:
+                    refuse("an untimed Event wait")
+                advance(timeout)
+                if self.opens.pop(0):
+                    self.opened = True
+                    world["child"].pid, world["child"].pidfd = guardian, fd_of(guardian)
+            return self.opened
+
+    def readiness(fd):
+        # "now", "end" (at the poll's limit) or None (never).
+        if fd == control_fd and not world["child"].armed:
+            return "now" if world["ready"] == "pending" else None
+        if fd == control_fd:
+            return "end" if world["receipt"] == "end" else None
+        # The subject's pidfd: its exit is proven only at the proof's limit.
+        return "end" if world["spec"].get("exits") else None
+
+    class Poller:
+        def __init__(self):
+            self.fds = []
+
+        def register(self, target, mask=None):
+            fd = target if isinstance(target, int) else target.fileno()
+            if fd < 0:
+                raise ValueError("file descriptor cannot be a negative integer (%d)" % fd)
+            self.fds.append(fd)
+
+        def poll(self, timeout=None):
+            if timeout is None or timeout < 0:
+                refuse("an untimed poll")
+            ready = [fd for fd in self.fds if readiness(fd) == "now"]
+            if not ready:
+                advance(timeout / 1000)
+                ready = [fd for fd in self.fds if readiness(fd) == "end"]
+            return [(fd, select.POLLIN) for fd in ready]
+
+    def recv_fds(sock, bufsize, maxfds, flags=0):
+        if sock.fileno() != control_fd or world["receipt"] != "end":
+            refuse("an unscripted receipt read")
+        world["receipt"] = "taken"
+        return str(subject).encode(), [fd_of(subject)], 0, None
+
+    def record(pid, sig):
+        if pid == guardian and sig == signal.SIGSTOP:
+            world["stopped"] = world["now"]
+        if sig == signal.SIGKILL:
+            world.setdefault("killed", set()).add(pid)
+
+    def pidfd_send_signal(fd, sig, *rest):
+        record(pid_of(fd), sig)
+
+    def kill(pid, sig):
+        if pid not in (guardian, subject, member):
+            refuse("os.kill(%r)" % (pid,))
+        record(pid, sig)
+
+    def waitpid(pid, options):
+        if pid != guardian:
+            refuse("os.waitpid(%r)" % (pid,))
+        if world["reaped"]:
+            raise ChildProcessError(errno.ECHILD, "No child processes")
+        mode, now = world["collect"], world["now"]
+        if mode == "failed-early" and now >= world["deadline"] - tick:
+            world["reaped"] = True
+            return guardian, 1 << 8  # exit status 1: a failed guardian
+        # A clean guardian (exit 0, its receipt in the report), collected by
+        # the run loop's last poll before the deadline or by its first poll
+        # at the deadline's expiry.
+        if ((mode == "clean" and world["deadline"] - 2 * tick <= now < world["deadline"])
+                or (mode == "clean-overdue" and now >= world["deadline"])):
+            world["reaped"] = True
+            return guardian, 0
+        # The killed, never armed guardian, collected at the last polls of
+        # the first close()'s collection wait.
+        if mode == "killed" and last_poll_of("_finish_close"):
+            world["reaped"] = True
+            return guardian, int(signal.SIGKILL)
+        if mode in ("late", "raise", "echild") and last_poll_of("_finish_close", "escalated"):
+            if mode == "raise":
+                raise OSError(errno.EINVAL, "close-out vector: injected collection failure")
+            world["reaped"] = True
+            if mode == "echild":
+                raise ChildProcessError(errno.ECHILD, "close-out vector: reaped elsewhere")
+            return guardian, int(signal.SIGKILL)  # raw status: killed by SIGKILL
+        return 0, 0
+
+    def waitid(idtype, ident, options):
+        if ident != guardian:
+            refuse("os.waitid(%r)" % (ident,))
+        if world["reaped"]:
+            raise ChildProcessError(errno.ECHILD, "No child processes")
+        return None
+
+    def getpgid(pid):
+        if pid not in (guardian, subject, member):
+            refuse("os.getpgid(%r)" % (pid,))
+        return guardian if pid == guardian else subject
+
+    def read(fd, length):
+        if fd != control_fd:
+            refuse("os.read(%r)" % (fd,))
+        if world["ready"] == "pending":
+            world["ready"] = "read"
+            return b"R"
+        return b""
+
+    def listdir(path="."):
+        if path != "/proc":
+            return real_listdir(path)
+        return [str(pid) for pid in (guardian, subject, member)
+                if pid != guardian or not world["reaped"]]
+
+    def stat_fields(target):
+        pid = int(target)
+        if pid == guardian:
+            if world["reaped"]:
+                return None
+            # Frozen, but its stop confirmed only at the group pin's last polls.
+            frozen = world.get("stopped") is not None and last_poll_of("_fixture_group_pinned")
+            return [b"T" if frozen else b"R", str(os.getpid()).encode(), str(guardian).encode()]
+        if pid in (subject, member):
+            # Under a schedule whose census comes back clean, a killed subject
+            # or member is a zombie the frozen guardian cannot reap.
+            dead = world["spec"].get("quiesces") and pid in world.get("killed", ())
+            return [b"Z" if dead else b"S", str(guardian).encode(), str(subject).encode()]
+        refuse("a /proc read of %r" % (target,))
+
+    def pidfd_open(pid):
+        if pid not in (guardian, subject, member):
+            refuse("a pidfd for %r" % (pid,))
+        return fd_of(pid)
+
+    def construct(deadline, keep_fds=(), subject=None):
+        # The attributes _FixtureProcess.__init__ sets, without its socket
+        # pair, receipt file or launcher thread.
+        opens = world["spec"].get("launched", ())
+        child = object.__new__(real_process)
+        vars(child).update(
+            deadline=deadline, pid=None, pidfd=None, status=None, subject_pid=None,
+            subject_pidfd=None, armed=False, collected=False, timed_out=False,
+            unresolved=False, cleaned=False, _subject_kill=None, _subject_skipped=None,
+            keep_fds=tuple(keep_fds), subject=subject, _launcher="close-out vector",
+            _launch_error=None, _failure=None, _launch_lock=threading.Lock(),
+            _go=Gate(False, raise_on=2 if world["spec"].get("cancel") else None),
+            _launched=Gate(not opens, opens), _cancelled=False, _abandoned=False,
+            control=Endpoint(control_fd), peer=Endpoint(peer_fd),
+            report=io.BytesIO(world["spec"].get("report", b"")),
+            _launch_masked=set())
+        if not opens:
+            child.pid, child.pidfd = guardian, fd_of(guardian)
+        world["child"], world["deadline"] = child, deadline
+        return child
+
+    def scoped(real, fake, ours=None):
+        def call(*args, **kwargs):
+            if (threading.get_ident() == owner and "now" in world
+                    and (ours is None or (type(args[0]) is int and args[0] >= base_fd))):
+                return fake(*args, **kwargs)
+            return real(*args, **kwargs)
+        return call
+
+    def blocked(name):
+        def call(*args, **kwargs):
+            refuse("an unscripted blocking call: " + name)
+        return call
+
+    class SimpleQueue(queue.SimpleQueue):
+        """queue.SimpleQueue (a C type whose get cannot be patched) for the
+        queues made while a schedule runs: get is refused on the calling
+        thread while a schedule runs, and is the real get anywhere else."""
+
+        def get(self, *args, **kwargs):
+            if threading.get_ident() == owner and "now" in world:
+                refuse("an unscripted blocking call: queue.SimpleQueue.get")
+            return super().get(*args, **kwargs)
+
+    # Every selectors class that defines select (the others inherit one of
+    # these; DefaultSelector is an alias), so the select of any selector is
+    # refused, including one whose class kept the real select.epoll from
+    # import time.
+    selector_classes = []
+    for cls in vars(selectors).values():
+        if (isinstance(cls, type) and issubclass(cls, selectors.BaseSelector)
+                and cls is not selectors.BaseSelector and "select" in vars(cls)
+                and cls not in selector_classes):
+            selector_classes.append(cls)
+
+    boundaries = (
+        (time, "monotonic", lambda: world["now"], None), (time, "sleep", advance, None),
+        (select, "poll", Poller, None), (socket, "recv_fds", recv_fds, None),
+        (signal, "pidfd_send_signal", pidfd_send_signal, None), (os, "waitpid", waitpid, None),
+        (os, "waitid", waitid, None), (os, "getpgid", getpgid, None), (os, "kill", kill, None),
+        (os, "listdir", listdir, None), (emit, "_fixture_stat_fields", stat_fields, None),
+        (emit, "_fixture_pidfd", pidfd_open, None), (emit, "_FixtureProcess", construct, None),
+        (os, "read", read, True), (os, "write", lambda fd, data: len(data), True),
+        (os, "close", lambda fd: None, True)) + tuple(
+            (target, name, blocked(label), None) for target, name, label in (
+                (threading.Event, "wait", "threading.Event.wait"),
+                (threading.Condition, "wait", "threading.Condition.wait"),
+                (threading.Thread, "join", "threading.Thread.join"),
+                (queue.Queue, "get", "queue.Queue.get"), (select, "select", "select.select"),
+                (select, "epoll", "select.epoll"), (signal, "sigtimedwait", "signal.sigtimedwait"),
+                (signal, "sigwaitinfo", "signal.sigwaitinfo"), (signal, "pause", "signal.pause"),
+                (os, "wait", "os.wait"), (os, "wait3", "os.wait3"), (os, "wait4", "os.wait4"))
+            ) + tuple((cls, "select", blocked("selectors.%s.select" % cls.__name__), None)
+                      for cls in selector_classes)
+    unreaped = (emit.ChildStatusUnavailable, "not collected after escalation")
+    clean = b"[0, false]"  # the guardian's receipt: subject status 0, not timed out
+    schedules = dict([
+        ("armed", dict(ready=True, receipt="end", collect="late",
+                       end=(emit.ChildStatusUnavailable,
+                            "escalation could not confirm subject exit"))),
+        ("armed-cleaned", dict(ready=True, receipt="end", collect="late", exits=True,
+                               end=(emit.ChildStatusUnavailable,
+                                    "after bounded-close escalation"))),
+        ("armed-tree", dict(ready=True, receipt="end", collect="late", exits=True,
+                            quiesces=True, end=(emit.ChildStatusUnavailable,
+                                                "subject tree killed: every observed member"))),
+        ("ownership-lost-cleaned", dict(ready=True, receipt="end", collect="echild", exits=True,
+                                        end=(emit.ChildStatusUnavailable,
+                                             "receipt subject killed on its held pidfd and "
+                                             "exit proven"))),
+        ("poll-collected-cleaned", dict(ready=True, receipt="end", collect="failed-early",
+                                        exits=True,
+                                        end=(emit.ChildStatusUnavailable,
+                                             "subject exit proven on its pidfd (subject-only"))),
+        ("completed", dict(ready=True, receipt="end", collect="clean", report=clean,
+                           end=(subprocess.CompletedProcess, "returncode=0"))),
+        ("completed-overdue", dict(ready=True, receipt="end", collect="clean-overdue",
+                                   report=clean, end=(subprocess.TimeoutExpired, "timed out"))),
+        ("startup-collected", dict(collect="killed",
+                                   end=(subprocess.TimeoutExpired, "timed out"))),
+        ("armed-interrupted", dict(ready=True, receipt="end", collect="raise",
+                                   end=(OSError, "injected collection failure"))),
+        ("ownership-lost", dict(ready=True, receipt="end", collect="echild",
+                                end=(emit.ChildStatusUnavailable, "exit not confirmed"))),
+        ("poll-collected", dict(ready=True, receipt="end", collect="failed-early",
+                                end=(emit.ChildStatusUnavailable,
+                                     "guardian failure could not confirm subject exit"))),
+        ("startup-timeout", dict(end=unreaped)),
+        ("startup-cancelled", dict(cancel=True, end=unreaped)),
+        # start() begins just before its deadline, so the launch wait's
+        # floor (G) runs past it; the launcher finishes only as close()'s
+        # own launcher wait ends.
+        ("launch-timeout", dict(launched=(False, True), timeout=0.001, end=unreaped)),
+        ("launch-interrupted", dict(launched=(False, True), timeout=0.001, collect="raise",
+                                    end=(OSError, "injected collection failure"))),
+    ])
+    paths, allowance = _watchdog_closeout_paths(), _watchdog_leg_closeout_seconds()
+    faults = ["close-out vector %s: a path without a schedule, or a schedule without a path"
+              % label for label in sorted(set(paths) ^ set(schedules))]
+    with ExitStack() as stack:
+        for target, name, fake, ours in boundaries:
+            stack.enter_context(patch.object(target, name,
+                                             scoped(getattr(target, name), fake, ours)))
+        stack.enter_context(patch.object(queue, "SimpleQueue", SimpleQueue))
+        for label in [label for label in paths if label in schedules]:
+            spec = schedules[label]
+            world.clear()
+            world.update(origin=1000.0, ready="pending" if spec.get("ready") else None,
+                         receipt=spec.get("receipt"), collect=spec.get("collect", "never"),
+                         reaped=False, spec=spec, deadline=None)
+            world["now"] = world["origin"]
+            try:
+                end = emit._run_fixture_process(["close-out-vector"],
+                                                timeout=spec.get("timeout", 1.0))
+            except BaseException as exc:  # noqa: BLE001 - the scripted cancellation is one
+                if (isinstance(exc, (KeyboardInterrupt, SystemExit))
+                        and exc is not world.get("cancelled")):
+                    raise
+                end = exc
+            now = world.pop("now")  # the boundaries are inert from here
+            kind, fragment = spec["end"]
+            total = _watchdog_path_seconds(paths[label])
+            if world.get("refused"):
+                faults.append("close-out vector %s: refused boundary use: %s"
+                              % (label, "; ".join(world["refused"])))
+                continue
+            if not (isinstance(end, kind) and fragment in str(end)):
+                faults.append("close-out vector %s: ended in %r, not the path's %s (%s)"
+                              % (label, end, kind.__name__, fragment))
+                continue
+            if spec.get("cancel") and world.get("cancelled") is None:
+                faults.append("close-out vector %s: the scripted cancellation never ran" % label)
+                continue
+            elapsed = now - world["deadline"]
+            if elapsed > min(total, allowance) + 1e-6:
+                faults.append("close-out vector %s: %.3f s after the deadline, above the path's "
+                              "derived %.3f s or the allowance %.3f s"
+                              % (label, elapsed, total, allowance))
+                continue
+            faults.extend(
+                "close-out vector %s: %.3f s after the deadline would still fit the path without "
+                "its %s (%.3f s): the schedule fell short of that wait"
+                % (label, elapsed, wait, total - limit - sleeps * tick)
+                for wait, limit, sleeps in paths[label]
+                if limit and elapsed <= total - limit - sleeps * tick)
+    if source is None:
+        faults.extend(_watchdog_closeout_mutant_faults())
+    return faults
+
+
+def _watchdog_closeout_mutant_faults():
+    """The close-out vector's own red-on-revert check: each mutant adds one
+    wait to a copy of _opf_emit at one anchor line, and
+    _watchdog_closeout_vectors must refuse that copy. Just before
+    _finish_close records its cleaned state (a line only the cleaned and
+    clean-collection schedules reach): a 70 s time.sleep (past every path's
+    total), and, each refused outright, a 1 s threading.Event wait, a 1 s
+    select.select, a 1 s get on a new queue.SimpleQueue (its queue.Empty
+    caught, so only the refusal exposes it) and a 1 s select on a new
+    selectors.DefaultSelector. Just before _fixture_verify_group_kill
+    returns its "tree" observation (a line only the armed-tree schedule
+    reaches): a 70 s time.sleep. Returns a fault for each mutant the vector
+    does not refuse, and one for each anchor not found exactly once."""
+    import tempfile
+    text = (Path(__file__).resolve().parent / "_opf_emit.py").read_text(encoding="utf-8")
+    indent = " " * 16
+    cleaned = "_finish_close's cleaned state"
+    tree = "_fixture_verify_group_kill's \"tree\" return"
+    anchors = dict([
+        (cleaned, ('                            "survive".format(self.subject_pid))\n'
+                   + indent + "self.cleaned = True\n", indent + "self.cleaned = True")),
+        (tree, ("            if clean >= 2:\n" + indent + 'return ("tree", [])\n',
+                indent + 'return ("tree", [])')),
+    ])
+    faults = ["close-out mutant: %s anchor found %d times, not once" % (name, text.count(anchor))
+              for name, (anchor, _line) in anchors.items() if text.count(anchor) != 1]
+    if faults:
+        return faults
+    with tempfile.TemporaryDirectory(prefix="opf-closeout-mutant-") as directory:
+        for index, (label, where, lines) in enumerate((
+                ("a 70 s time.sleep", cleaned, ("time.sleep(70)",)),
+                ("a 1 s threading.Event wait", cleaned,
+                 ("import threading", "threading.Event().wait(1.0)")),
+                ("a 1 s select.select", cleaned, ("select.select([], [], [], 1.0)",)),
+                ("a 1 s queue.SimpleQueue get", cleaned,
+                 ("import queue", "try:", "    queue.SimpleQueue().get(timeout=1.0)",
+                  "except queue.Empty:", "    pass")),
+                ("a 1 s selectors.DefaultSelector select", cleaned,
+                 ("import selectors", "with selectors.DefaultSelector() as chosen:",
+                  "    chosen.select(1.0)")),
+                ("a 70 s time.sleep", tree, ("time.sleep(70)",)))):
+            # One file per mutant: no copy can load another's cached code.
+            mutant = Path(directory, "_opf_emit_mutant_%d.py" % index)
+            anchor, line = anchors[where]
+            added = "".join(indent + piece + "\n" for piece in lines)
+            mutant.write_text(text.replace(anchor, anchor.replace(line, added + line)),
+                              encoding="utf-8")
+            if not _watchdog_closeout_vectors(source=mutant):
+                faults.append("close-out mutant not refused: %s before %s" % (label, where))
+    return faults
 
 
 def _watchdog_finite_seconds(value):
@@ -1843,8 +2624,9 @@ def _watchdog_ledger_case(mode, budget):
     """Private subprocess: one concurrency vector of the runtime ledger, in its
     own independently bounded fixture process (claude round-6 MEDIUM-2, codex
     round-7 MEDIUM 6): a regression that hangs a vector is killed at that
-    vector's own process bound and reported as that vector's failure, never a
-    hung suite and never a false pass. Returns the vector leg's own verdict
+    vector's own process bound, which the runner records as that vector's own
+    no-verdict CANNOT-EVALUATE (EXIT_MALFORMED), never a
+    hung suite and never a pass. Returns the vector leg's own verdict
     int for the launching fixture to compare (3 marks a fixture that never
     exercised its path); the two bool-return control modes
     deliberately return a bool the launching fixture must REJECT
@@ -3352,8 +4134,962 @@ def _fixture_fd_census_pins():
                                                               probe, got[0])
 
 
-def _watchdog_completion_case(mode):
-    """Run each irreversible audit-hook/disposition experiment in its own fixture process."""
+def _tree_publish_seconds(path):
+    """When this tree marker was PUBLISHED, as epoch seconds: its inode
+    change time, which the atomic rename into the final name refreshes. The
+    modification time records the earlier write into the scratch name and
+    SURVIVES the rename, so a subject preempted between its write and its
+    rename would read as published at the write. The reported no-verdict
+    causes name this time so they describe the publication, not the earlier
+    write; no verdict is decided by it (the never-parsed-markers check is
+    ordered by each poll's own observations, never by this stamp)."""
+    return path.stat().st_ctime
+
+
+def _tree_never_parsed(unparsed_polls, publish_seconds, last_poll_wall):
+    """Decide the tree legs' never-parsed harness defect: True exactly when
+    unparsed_polls records a poll at which the leg's own look, taken at that
+    same poll, parsed both published markers while the observer parsed
+    nothing. The other two arguments are the rest of the evidence the
+    decision site holds, for the reported causes only: the decision must
+    NEVER read the publish stamps (publish_seconds) or the last poll's
+    recorded wall time (last_poll_wall), because a realtime clock stepped
+    between the last poll and a later publication leaves the stamps reading
+    older than that poll, and deciding by them would turn that correct run
+    into this failure (the regression runner's clock-step rows pin the
+    decision against every stamp ordering)."""
+    return bool(unparsed_polls)
+
+
+def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKSTOP,
+                        publish=True, observe_waits=True, observe_parse=True,
+                        clock_shift=True, startup_stall=None, stall_guardian=False,
+                        facts=None):
+    """One nested-tree cleanup exercise (nested-timeout or nested-cancel).
+    Returns ("pass", "") or ("cannot-evaluate", cause) and raises
+    AssertionError on a definite failure.
+
+    The subject forks a setsid descendant; both publish a PID marker and
+    sleep. The stimulus is EVENT-ORDERED: it is mounted only at the first
+    wait poll that parsed both markers. nested-timeout makes the GUARDIAN's
+    own expiry branch fire (its supervision loop's monotonic clock, and only
+    that process's clock, jumps to its deadline once the `expire` file
+    exists, and the guardian records that it applied the shift in the
+    `shifted` file), so the leg drives guardian-side expiry, its tree
+    cleanup and the timed_out receipt exactly as a flat deadline did,
+    without racing subject startup. nested-cancel raises Cancelled in the
+    caller; close() then requests cleanup over the control channel (the
+    caller-side drain).
+
+    PASS requires a proof that the stimulus PRECEDED cleanup, not just that
+    both happened: (1) at the poll that parsed both markers, BEFORE the
+    stimulus, the guardian is unexited and both nested PIDs are running
+    (not stopped, zombie or gone), so cleanup had not begun; (2) the
+    guardian's receipt names the trigger: nested-timeout needs timed_out
+    True AND collection by a poll strictly before the caller's backstop
+    deadline (an expiry seen only at or after it may be the backstop's),
+    nested-cancel needs timed_out False (it left supervision on the
+    cleanup request, not on its own expiry); (3) the subject's recorded
+    status is SIGKILL (cleanup killed a still-running subject, not one that
+    exited by itself); (4) both nested PIDs are gone. The backstop is a
+    liveness bound only: when it, not the stimulus, ended supervision, or
+    when the stimulus was observed only after cleanup, there is no
+    tree-cleanup verdict, and the cause names what was observed. A cause
+    that is deterministic is a definite failure whose message says it is a
+    code regression, never reported as host scheduling: the observer never
+    ran, or parsed nothing at a poll where the leg's own look, taken at
+    that same poll, parsed both PUBLISHED markers (ordered by that poll's
+    observations, never by any clock); a malformed marker; a timed_out=False receipt from a
+    guardian a poll COLLECTED before the caller's deadline (one not
+    collected by then may have left on the EOF of the caller's own backstop
+    close, ordered by those observed events, so that is no verdict, never a
+    failure); a guardian asleep before READY (no READY byte in its channel
+    before or after its state sample: one published between them is the
+    host's scheduling, not a startup hang); a guardian runnable before
+    READY, placed there by that same empty channel at both checks, that
+    already consumed the busy-loop CPU floor
+    (_STARTUP_BUSY_CPU_SECONDS: judged by CPU time, which starvation
+    cannot accrue, never by wall time); and a guardian that ran its expiry
+    after a stimulus mounted before the caller's deadline without ever
+    applying the clock shift.
+
+    Vector parameters (the nested-orders leg; the real legs use the
+    defaults): order "cleanup-first" lets the backstop arrive on both sides
+    and waits for the guardian's cleanup to finish BEFORE the poll records
+    its observation (the late-observer schedule); order
+    "backstop-after-snapshot" records a clean observation, then lets the
+    backstop arrive and the guardian's cleanup finish BEFORE the stimulus
+    is mounted (the stimulus-lost-the-race schedule); order "no-stimulus"
+    records the observation, mounts no stimulus and lets the backstop
+    arrive instead (the stimulus-removed schedule); order
+    "self-exit-after-snapshot" records the observation, then lets the
+    nested processes exit BY THEMSELVES and the guardian collect them
+    before the cancel (the subject-ended-first schedule); order
+    "killed-after-snapshot" records the observation, kills the subject tree
+    from outside the guardian, mounts no stimulus, and lets the caller's
+    deadline pass between the guardian's collection and the caller's
+    overdue check (the left-without-expiry schedule); order
+    "eof-after-snapshot" records the observation, then lets the CALLER's
+    deadline pass with no stimulus mounted and no outside kill, so the
+    close()'s EOF, not an expiry, ends supervision and the guardian is
+    never collected by a poll (the caller-backstop-first schedule, which a
+    slow host can produce on a correct run); publish=False runs a
+    subject that never publishes, publish="malformed" one that publishes a
+    non-PID marker; observe_waits=False leaves the wait observer
+    uninstalled and observe_parse=False installs one that never parses the
+    markers (harness defects); clock_shift=False disables the guardian's
+    clock shift (a code regression); startup_stall "blocked" or "runnable"
+    holds the guardian before READY, asleep or busy, and "ready-late" holds
+    it until the caller's first READY check is done, then lets it publish
+    READY and block reading GO before the caller samples its state (the
+    READY-publication interleaving); stall_guardian=True, with order
+    "killed-after-snapshot", stops the guardian (SIGSTOP) before the
+    outside kill and resumes it only once its deadline has passed (a host
+    stall across its deadline). `facts`, when given,
+    records what the exercise observed, so each vector can tell a schedule
+    that was established from one this host never produced."""
+    import select
+    import signal
+    import socket
+    import subprocess
+    import tempfile
+    import time
+    from contextlib import nullcontext
+    from unittest.mock import patch
+    import _opf_emit as emit
+
+    class Cancelled(RuntimeError):
+        """The nested-cancel stimulus; no other error may stand in for it."""
+
+    if facts is None:
+        facts = {}
+    real_wait, real_process, real_clock = emit._fixture_wait, emit._FixtureProcess, time.monotonic
+    real_subreaper = emit._fixture_subreaper
+    leg = os.getpid()
+    with tempfile.TemporaryDirectory(prefix="opf-tree-") as directory:
+        markers = [Path(directory, name) for name in ("subject", "descendant")]
+        expire, shifted = Path(directory, "expire"), Path(directory, "shifted")
+        release, stalled = Path(directory, "release"), Path(directory, "stalled")
+        checked = Path(directory, "checked")
+        # Deliberate fork/session escape is a tree-cleanup stimulus, not a verdict.
+        subject = ("import os, time; from pathlib import Path; "
+                   "pid = os.fork(); "
+                   "os.setsid() if pid == 0 else None; "
+                   "name = 'descendant' if pid == 0 else 'subject'; "
+                   "scratch = Path(" + repr(directory) + ", name + '.tmp'); "
+                   "scratch.write_text(str(os.getpid()), encoding='ascii'); "
+                   "scratch.rename(Path(" + repr(directory) + ", name)); "  # atomic: never a partial PID
+                   "time.sleep(3600)")  # never exits on its own: the stimulus ends it
+        # Writer half: a tripwire against an accidental edit of the marker
+        # lines above, not a proof of atomic publication. It requires the
+        # name + '.tmp' scratch path, the prefix scratch.write_text( and the
+        # scratch.rename to the final name once each and in that order, and
+        # no other occurrence of the text write_text( or Path(directory, name)
+        # anywhere in the subject; it does not otherwise check the write's
+        # arguments. It matches exact text only, so anything spelled
+        # differently is outside it: another spelling of a call, the final
+        # path or a binding (spacing, an alias, a rebinding of scratch), a
+        # write by any method other than write_text, an os-level call, exec
+        # or a shell.
+        text = subject.replace(repr(directory), "directory")  # TMPDIR-blind
+        steps = ["scratch = Path(directory, name + '.tmp'); ",
+                 "scratch.write_text(", "scratch.rename(Path(directory, name)); "]
+        found = [text.find(step) for step in steps]
+        if not (all(text.count(step) == 1 for step in steps)
+                and -1 < found[0] < found[1] < found[2]
+                and text.count("write_text(") == 1
+                and text.count("Path(directory, name)") == 1):
+            raise AssertionError("marker write lines changed: " + text)
+        if publish == "malformed":
+            # Vector: a marker that exists but never holds a PID.
+            subject = ("from pathlib import Path; Path(" + repr(directory) + ", 'subject')"
+                       ".write_text('not-a-pid', encoding='ascii'); import time; time.sleep(3600)")
+        elif not publish:
+            subject = "import time; time.sleep(3600)"  # vector: never publishes a marker
+        if order == "self-exit-after-snapshot":
+            # Vector: both nested processes exit by themselves once `release` exists.
+            parked = "time.sleep(3600)"
+            if subject.count(parked) != 1:
+                raise AssertionError("self-exit vector: subject park changed: " + subject)
+            subject = subject.replace(parked, "[time.sleep(0.005) for _ in iter(lambda: "
+                                      "os.path.exists(" + repr(str(release)) + "), True)]")
+        launched, observed, snapshot, collected, shift = [], [], [], [], []
+        stimulus, startup, unparsed = [], [], []
+        polls = [0, 0.0]  # observer calls, and the wall time of the last one
+
+        def parse():
+            try:  # a marker counts only once its pid parses; empty is not ready yet
+                return [int(path.read_text(encoding="ascii")) for path in markers]
+            except (FileNotFoundError, ValueError):
+                return []
+
+        def ready_check(child):
+            # One look at the control socket that consumes nothing: "ready"
+            # when the READY byte waits there unread, "empty" when nothing
+            # does, "other" when something else does or the look fails. The
+            # caller reads no more once its startup deadline passes, so a
+            # READY byte, once written, stays until close().
+            try:
+                readable = select.poll()
+                readable.register(child.control, select.POLLIN)
+                if not readable.poll(0):
+                    return "empty"
+                pending = child.control.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+            except (OSError, ValueError):
+                return "other"
+            return "ready" if pending == b"R" else "other"
+
+        def proc_state(pid):
+            try:
+                return Path("/proc", str(pid), "stat").read_text(
+                    encoding="ascii").rpartition(")")[2].split()[0]
+            except (OSError, IndexError):
+                return None
+
+        def proc_cpu(pid):
+            # The CPU time this process has actually been granted (utime +
+            # stime), the measure that tells a busy startup loop (CPU
+            # accrues) from host starvation (it does not), where a wall
+            # clock cannot.
+            try:
+                fields = Path("/proc", str(pid), "stat").read_text(
+                    encoding="ascii").rpartition(")")[2].split()
+                return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+            except (OSError, IndexError, ValueError):
+                return None
+
+        def startup_state(child):
+            # Sampled when the leg's guardian missed READY, BEFORE close()
+            # kills it. The READY check and the state sample are separate
+            # observations, and between them the guardian can publish READY
+            # and then block, normally, reading GO. So READY is checked
+            # again AFTER the sample: still absent then, the guardian had not
+            # published it when sampled, and only a guardian asleep (state
+            # S) in that window is blocked in its startup, which makes no
+            # blocking call before READY.
+            if child.pid is None or not child.timed_out:
+                return "unlaunched", ("the guardian launch itself had not completed (no code "
+                                      "regression established)")
+            before = ready_check(child)
+            if before == "ready":
+                return _watchdog_startup_diagnosis(before, None, None)
+            if startup_stall == "ready-late":
+                # Vector only: the guardian publishes READY only once this
+                # first check is done; wait (bounded) until it has and is
+                # asleep reading GO, so the state sample below falls between.
+                checked.touch()
+                facts["published-late"] = hold(
+                    lambda: ready_check(child) == "ready" and proc_state(child.pid) == "S")
+            state = proc_state(child.pid)
+            return _watchdog_startup_diagnosis(before, state, ready_check(child),
+                                               proc_cpu(child.pid))
+
+        def capture(deadline, **kwargs):
+            # Record the leg's own launch; construction is otherwise real.
+            child = real_process(deadline, **kwargs)
+            launched.append(child)
+            real_start = child._start
+
+            def sampled_start():
+                try:
+                    return real_start()
+                except TimeoutError:
+                    startup.append(startup_state(child))
+                    raise
+            child._start = sampled_start
+            return child
+
+        def clock():
+            # The guardian's clock (any process but the leg's own): once the
+            # `expire` file exists it jumps to the guardian's own deadline
+            # and runs on from there, so the guardian's expiry branch fires
+            # at its next poll and its cleanup keeps the full grace (the
+            # cleanup deadline is computed from this same shifted clock).
+            # The guardian records the shift in `shifted` BEFORE returning a
+            # shifted value. The caller's clock is never shifted.
+            now = real_clock()
+            if os.getpid() == leg or not launched or not clock_shift:
+                return now
+            if not shift and os.path.exists(expire):
+                shifted.touch()
+                shift.append(max(0.0, launched[-1].deadline - now))
+            return now + (shift[0] if shift else 0.0)
+
+        def stalled_subreaper():
+            # Vector only (startup_stall): the guardian, before READY, holds
+            # asleep or busy past the backstop ("blocked", "runnable"), or
+            # until the caller's first READY check is done ("ready-late");
+            # close() then kills it.
+            if os.getpid() != leg:
+                stalled.touch()
+                until = real_clock() + backstop + _WATCHDOG_LAUNCH_MARGIN
+                if startup_stall == "ready-late":
+                    while not checked.exists() and real_clock() < until:
+                        select.poll().poll(5)
+                    return real_subreaper()
+                if startup_stall == "blocked":
+                    select.poll().poll(int((until - real_clock()) * 1000))
+                while real_clock() < until:
+                    pass
+            return real_subreaper()
+
+        def guardian_running(pid):
+            try:
+                return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None
+            except ChildProcessError:
+                return False
+
+        def tree_running(pids):
+            for pid in pids:
+                try:
+                    stat = Path("/proc", str(pid), "stat").read_text(encoding="ascii")
+                except OSError:
+                    return False
+                if stat.rpartition(")")[2].split()[:1] not in (["R"], ["S"], ["D"]):
+                    return False
+            return True
+
+        def gone(pids):
+            return not any(Path("/proc", str(pid)).exists() for pid in pids)
+
+        def children(parent):
+            found = []
+            for name in os.listdir("/proc"):
+                if name.isdigit():
+                    try:
+                        fields = Path("/proc", name, "stat").read_text(
+                            encoding="ascii").rpartition(")")[2].split()
+                    except OSError:
+                        continue
+                    if fields[1:2] == [str(parent)]:
+                        found.append(int(name))
+            return found
+
+        def hold(done):
+            # Vector only: wait, bounded by the backstop, for the forced
+            # event; whether it happened is recorded, never assumed.
+            until = real_clock() + backstop
+            while not done() and real_clock() < until:
+                time.sleep(0.005)
+            return done()
+
+        def backstop_now():
+            # Vector only: the backstop arrives on BOTH sides at once, as a
+            # real expiry does (the caller's deadline is this same moment).
+            launched[-1].deadline = real_clock()
+            expire.touch()
+
+        def observe(pid, flags):
+            polls[0] += 1
+            polls[1] = time.time()
+            if not observed:
+                # The leg's own look at the markers, taken at this same
+                # poll: both published and parseable here while the
+                # observer parsed nothing is ordered by this one poll's
+                # observations, never by any clock.
+                seen_now = parse()
+                if seen_now:
+                    # Recorded APART from the unparsed bookkeeping below,
+                    # which the never-parsed decision itself reads: the
+                    # blind-observer vector establishes its schedule from
+                    # this record, so losing that bookkeeping cannot also
+                    # silence the vector.
+                    facts["parsed-at-poll"] = True
+                pids = seen_now if observe_parse else []
+                if seen_now and not pids:
+                    unparsed.append(polls[0])
+                if pids and order == "cleanup-first":
+                    backstop_now()
+                    facts["held"] = hold(lambda: not guardian_running(pid))
+                if pids:
+                    observed.extend(pids)
+                    # The ordering proof's first half, taken BEFORE the stimulus.
+                    snapshot.append((real_clock(), guardian_running(pid), tree_running(pids)))
+                    facts["snapshot"] = snapshot[0][1] and snapshot[0][2]
+                    if order == "backstop-after-snapshot":
+                        backstop_now()
+                        facts["held"] = hold(lambda: not guardian_running(pid))
+                    elif order == "self-exit-after-snapshot":
+                        release.touch()
+                        facts["held"] = hold(lambda: not guardian_running(pid) and gone(pids))
+                    elif order == "killed-after-snapshot":
+                        if stall_guardian:
+                            # Vector only: the guardian is held stopped from
+                            # before the outside kill until its deadline has
+                            # passed, as a host stall would hold it.
+                            os.kill(pid, signal.SIGSTOP)
+                            facts["stopped"] = hold(lambda: proc_state(pid) == "T")
+                        for victim in children(pid) + pids:
+                            try:
+                                os.kill(victim, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        if stall_guardian:
+                            facts["stalled-past"] = hold(
+                                lambda: real_clock() > launched[-1].deadline)
+                            os.kill(pid, signal.SIGCONT)
+                        facts["held"] = hold(lambda: not guardian_running(pid) and gone(pids))
+                    if order in ("self-exit-after-snapshot", "killed-after-snapshot"):
+                        # Seen gone BEFORE its deadline, the guardian left
+                        # supervision before it: its unshifted clock (these
+                        # orders mount no `expire`) never reached the
+                        # deadline, so it cannot have taken its expiry
+                        # branch, whatever the host's scheduling.
+                        facts["held-early"] = (facts["held"]
+                                               and real_clock() < launched[-1].deadline)
+                    if order == "no-stimulus":
+                        backstop_now()
+                    elif order == "killed-after-snapshot":
+                        pass  # no stimulus: the subject tree was killed from outside
+                    elif order == "eof-after-snapshot":
+                        # No stimulus and no expire file: only the CALLER's
+                        # deadline passes, so its close()'s EOF ends
+                        # supervision while the guardian's own unshifted
+                        # clock never reaches its deadline.
+                        launched[-1].deadline = real_clock()
+                    elif mode == "nested-cancel":
+                        raise Cancelled("cancel with nested subject running")
+                    else:
+                        # THE nested-timeout stimulus. Removing this line
+                        # leaves only the backstop to end supervision, and
+                        # the leg then reports CANNOT-EVALUATE, never a pass
+                        # (the nested-orders no-stimulus vector pins that).
+                        # Its time is taken AFTER the file exists.
+                        expire.touch()
+                        stimulus.append(real_clock())
+            waited, raw = real_wait(pid, flags)
+            if waited:
+                collected.append(real_clock())
+                if order == "killed-after-snapshot":
+                    # The caller's deadline passes between this collection
+                    # and its overdue check (the window a timed_out=False
+                    # receipt would otherwise pass through).
+                    launched[-1].deadline = real_clock()
+            return waited, raw
+
+        # Marker-race control: a marker that exists but is still empty (created,
+        # pid not yet written) is no started subject; the observer keeps waiting.
+        markers[0].write_text(str(os.getpid()), encoding="ascii")
+        markers[1].touch()
+        try:
+            observe(os.getpid(), os.WNOHANG)
+        except emit.ChildStatusUnavailable:
+            pass
+        else:
+            raise AssertionError("fixture was accepted: " + mode)
+        assert not observed, "an empty marker was read as a started subject"
+        for path in markers:
+            path.unlink()
+        polls[:] = [0, 0.0]
+        del unparsed[:]
+        started, launch_at, outcome = time.time(), real_clock(), None
+        with patch.object(time, "monotonic", clock), \
+                patch.object(emit, "_FixtureProcess", capture), \
+                (patch.object(emit, "_fixture_wait", observe) if observe_waits
+                 else nullcontext()), \
+                (patch.object(emit, "_fixture_subreaper", stalled_subreaper) if startup_stall
+                 else nullcontext()):
+            try:
+                emit.run_status_owned(
+                    [sys.executable, "-I", "-B", "-c", subject], fixture_id="tree/" + mode,
+                    process_fixture=True, timeout=backstop)
+            except (Cancelled, subprocess.TimeoutExpired) as exc:
+                outcome = exc
+        facts["ready"] = bool(launched) and launched[-1].armed is True
+        facts["polls"] = polls[0]
+        facts["stalled"] = stalled.exists()
+        facts["startup"] = startup[0][0] if startup else None
+        facts["stimulus-early"] = bool(stimulus and stimulus[0] < launched[-1].deadline)
+        # The receipt's trigger and the collection order, recorded apart from
+        # the verdict's own checks so each vector can tell its forced
+        # schedule from one the host never produced.
+        facts["receipt-timed-out"] = launched[-1].timed_out if launched else None
+        facts["collected-early"] = bool(collected and launched
+                                        and collected[0] < launched[-1].deadline)
+        # What was published, recorded apart from the verdict's own checks.
+        facts["markers"] = [path.read_text(encoding="ascii") if path.exists() else None
+                            for path in markers]
+        if outcome is None:
+            raise AssertionError("fixture was accepted: " + mode)
+        if not observed:
+            # No stimulus was ever mounted. Name what was observed.
+            if isinstance(outcome.__cause__, TimeoutError):
+                state, seen = startup[0] if startup else ("unsampled", "it was not sampled")
+                if state == "S":
+                    raise AssertionError(
+                        "the leg's fixture guardian was alive and BLOCKED (state S) at the {} s "
+                        "startup backstop, with no READY byte in its channel either before or "
+                        "after that sample, so it had not signalled READY; its startup makes no "
+                        "blocking call before READY, so this is a code regression (a guardian "
+                        "startup hang), not host scheduling: {}".format(backstop, mode))
+                if state == "R-busy":
+                    raise AssertionError(
+                        "the leg's fixture guardian was RUNNABLE at the {} s startup backstop "
+                        "and had not signalled READY, yet {}; its bounded pre-READY work (a "
+                        "descriptor sweep and a few setup calls) cannot account for that CPU, "
+                        "so this is a code regression (a busy startup loop), judged by "
+                        "the CPU time it was granted, which host starvation cannot accrue, "
+                        "never by the wall clock: {}".format(backstop, seen, mode))
+                return ("cannot-evaluate", "the leg's fixture guardian never signalled READY "
+                        "within the {} s startup backstop ({}; at the backstop {}), so the "
+                        "nested subject never started".format(backstop, outcome.__cause__, seen))
+            if not polls[0]:
+                raise AssertionError("the wait observer never ran although the guardian "
+                                     "started: a code regression (harness defect), not host "
+                                     "scheduling: " + mode)
+            seen = []
+            published = []
+            for path in markers:
+                try:
+                    raw_text = path.read_text(encoding="ascii")
+                except FileNotFoundError:
+                    seen.append(path.name + " marker absent")
+                    continue
+                try:
+                    int(raw_text)
+                except ValueError:
+                    raise AssertionError("marker writer defect: the {} marker holds {!r} after "
+                                         "the backstop: a code regression, not host "
+                                         "scheduling".format(path.name, raw_text[:64])) from None
+                published.append(_tree_publish_seconds(path))
+                seen.append("{} marker published at +{:.2f} s".format(
+                    path.name, published[-1] - started))
+            if _tree_never_parsed(unparsed, published, polls[1]):
+                # Decided by the polls' own observations, never by the
+                # publish stamps or any clock (a stepped realtime clock
+                # must never turn a correct run into this harness-defect
+                # failure; the regression runner's clock-step rows pin
+                # the decision).
+                raise AssertionError(
+                    "both markers were published and parseable at {} of the observer's {} "
+                    "polls (the first at poll {}), yet the observer never parsed them: a "
+                    "code regression (harness defect), not host scheduling: {}".format(
+                        len(unparsed), polls[0], unparsed[0], mode))
+            return ("cannot-evaluate", "within the {} s startup backstop the observer polled {} "
+                    "times (the last at +{:.2f} s) and saw: {}; no stimulus was mounted".format(
+                        backstop, polls[0], max(0.0, polls[1] - started), ", ".join(seen)))
+        child = launched[-1]
+        if child.status is None:
+            raise AssertionError("no tree-cleanup receipt was recorded: " + mode)
+        at, guardian_live, tree_live = snapshot[0]
+        when = "+{:.2f} s".format(at - launch_at)
+        if not (guardian_live and tree_live):
+            if child.timed_out:
+                return ("cannot-evaluate", "stimulus observed only after cleanup: the guardian's "
+                        "own {} s backstop ended supervision (receipt timed_out=True), and when "
+                        "the first poll parsed both markers ({}) the guardian {} and the nested "
+                        "tree was {}".format(
+                            backstop, when, "was still running" if guardian_live else "had exited",
+                            "running" if tree_live else "stopped or gone"))
+            raise AssertionError(
+                "tree cleanup began before the stimulus with no backstop expiry (receipt "
+                "timed_out=False; guardian running={}, nested tree running={} at {}): {}".format(
+                    guardian_live, tree_live, when, mode))
+        if mode == "nested-cancel":
+            if not isinstance(outcome, Cancelled):
+                raise AssertionError("timeout stood in for the cancel stimulus: " + mode)
+            if child.timed_out:
+                return ("cannot-evaluate", "the guardian's own {} s backstop expired before the "
+                        "cancel's cleanup request reached it (receipt timed_out=True; cancel "
+                        "mounted at {})".format(backstop, when))
+        else:
+            if not child.timed_out:
+                # Ordered by the OBSERVED events, never by the wall clock: a
+                # poll that collected the guardian before the caller's
+                # deadline proves it left supervision while only the stimulus
+                # could have ended it (a code regression). Without such a
+                # collection, the caller's own backstop close may have ended
+                # supervision first (its EOF requests tree cleanup, and that
+                # close collects outside the polls), which a slow host can
+                # produce on a correct run: no verdict, never a failure.
+                if collected and collected[0] < child.deadline:
+                    raise AssertionError(
+                        "the guardian left supervision without its own expiry (receipt "
+                        "timed_out=False) and a poll collected it at +{:.2f} s, before the "
+                        "caller's backstop deadline (+{:.2f} s): {}".format(
+                            collected[0] - launch_at, child.deadline - launch_at, mode))
+                return ("cannot-evaluate", "the guardian left supervision without its own "
+                        "expiry (receipt timed_out=False) and no poll collected it before the "
+                        "caller's backstop deadline (+{:.2f} s), so the caller's own backstop "
+                        "close (EOF), not the stimulus, may have ended supervision".format(
+                            child.deadline - launch_at))
+            if not collected or collected[0] >= child.deadline:
+                # The guardian ran its expiry (timed_out=True). Had it taken
+                # any clock sample AFTER the stimulus file existed, it would
+                # have recorded the shift; a sample BEFORE it could not have
+                # reached a deadline later than the stimulus. So a stimulus
+                # mounted before the deadline with no shift record is a code
+                # regression, whatever the host's scheduling.
+                if stimulus and stimulus[0] < child.deadline and not shifted.exists():
+                    raise AssertionError(
+                        "the stimulus was mounted at +{:.2f} s, before the caller's backstop "
+                        "deadline (+{:.2f} s), and the guardian then ran its own expiry "
+                        "(receipt timed_out=True), yet its clock never applied the stimulus "
+                        "shift: a code regression (the guardian clock shift is absent), not "
+                        "host scheduling: {}".format(
+                            stimulus[0] - launch_at, child.deadline - launch_at, mode))
+                return ("cannot-evaluate", "both markers were parsed at {} (the stimulus is "
+                        "mounted at that poll) but the guardian was {} the caller's backstop deadline (+{:.2f} s), so its expiry may be the "
+                        "backstop's, not the stimulus's".format(
+                            when, ("collected only at +{:.2f} s, not before".format(
+                                collected[0] - launch_at)) if collected
+                            else "not collected by any poll before", child.deadline - launch_at))
+        if not (os.WIFSIGNALED(child.status) and os.WTERMSIG(child.status) == signal.SIGKILL):
+            raise AssertionError("tree cleanup did not kill a running subject (raw status {}): "
+                                 "{}".format(child.status, mode))
+        assert len(observed) == 2, "nested subject never started"
+        for pid in observed:
+            assert not Path("/proc", str(pid)).exists(), "descendant survived/unreaped"
+        return ("pass", "")
+
+
+def _watchdog_startup_diagnosis(before, state, after, cpu=None):
+    """Classify a tree leg's guardian that missed READY at its startup
+    backstop, from the READY check before its state sample (`before`), the
+    sampled /proc state (None when unreadable), the READY check after it
+    (`after`; each check is "ready", "empty" or "other") and the CPU time
+    the guardian has been granted (`cpu`, seconds, None when unreadable).
+    Returns (label, cause). Only two labels are the startup code
+    regressions the leg raises, and BOTH require an empty channel at BOTH
+    checks, which places the sample before READY (a check that found
+    something else, or that failed, leaves open that READY was already
+    published, so the sample does not place the guardian in its startup):
+    "S" (asleep: a startup hang) and "R-busy" (runnable with at least
+    _STARTUP_BUSY_CPU_SECONDS of CPU time consumed: a busy startup loop,
+    established by the CPU it burned, which host starvation cannot accrue
+    however much wall time passes); every other label, the unplaced ones
+    included, is no verdict."""
+    if before == "ready":
+        return "late-caller", ("it HAD signalled READY, but the caller did not read "
+                               "it in time: host scheduling")
+    if after == "ready":
+        return "late-ready", ("it published READY after the caller's first READY check "
+                              "(it was in state {} at the sample taken between the "
+                              "two checks), so the sample does not place it in its "
+                              "startup: host scheduling".format(state))
+    if state is None:
+        return "unreadable", "its state was unreadable (no code regression established)"
+    if state == "S" and (before, after) != ("empty", "empty"):
+        return "S-unplaced", ("it was asleep (state S), but the READY checks around that "
+                              "sample found {} and {}, not an empty channel, so its "
+                              "startup location is not established (no code regression "
+                              "established)".format(before, after))
+    if state == "R":
+        if (before, after) != ("empty", "empty"):
+            return "R-unplaced", ("it was runnable (state R), but the READY checks around "
+                                  "that sample found {} and {}, not an empty channel, so "
+                                  "the sample does not place it before READY and the CPU "
+                                  "it consumed may be legitimate work after READY (no "
+                                  "code regression established)".format(before, after))
+        if cpu is not None and cpu >= _STARTUP_BUSY_CPU_SECONDS:
+            return "R-busy", ("it had already consumed {:.2f} s of CPU time, at or above "
+                              "the {} s floor, far above the bounded pre-READY work its "
+                              "startup does (a sweep of its inherited descriptors and a "
+                              "few setup calls); a starved guardian is granted "
+                              "little CPU, so this CPU time, unlike wall time, "
+                              "establishes a busy startup loop".format(
+                                  cpu, _STARTUP_BUSY_CPU_SECONDS))
+        return state, ("it was runnable (state R) with {} of CPU time consumed, under the "
+                       "{} s busy-loop floor: host scheduling, or a busy startup loop too "
+                       "young for its granted CPU to establish, which stays no "
+                       "verdict".format("an unreadable amount" if cpu is None
+                                        else "{:.2f} s".format(cpu),
+                                        _STARTUP_BUSY_CPU_SECONDS))
+    return state, ("it was in state {}, not blocked in its startup (no code regression "
+                   "established)".format(state))
+
+
+def _watchdog_startup_vectors():
+    """Red-on-revert table for _watchdog_startup_diagnosis: returns each
+    ((before, state, after, cpu), got label, want label) that differs. A
+    channel holding something other than READY, or a failed look at it,
+    leaves a sleeping OR runnable guardian unplaced (no verdict), never a
+    startup code regression, whatever CPU it consumed; only an empty
+    channel at both checks makes state S the startup hang and lets state R
+    be judged by CPU time at _STARTUP_BUSY_CPU_SECONDS, each end of that
+    boundary pinned: just under it (and an unreadable CPU) stays the
+    no-verdict "R", exactly at it and just over it are the busy loop."""
+    floor = _STARTUP_BUSY_CPU_SECONDS
+    table = (
+        (("empty", "S", "empty", None), "S"), (("other", "S", "empty", None), "S-unplaced"),
+        (("empty", "S", "other", None), "S-unplaced"),
+        (("other", "S", "other", None), "S-unplaced"),
+        (("other", "R", "empty", floor), "R-unplaced"),
+        (("empty", "R", "other", floor), "R-unplaced"),
+        (("other", "R", "other", floor), "R-unplaced"),
+        (("other", "R", "other", None), "R-unplaced"),
+        (("empty", "R", "empty", None), "R"),
+        (("empty", "R", "empty", floor - 0.01), "R"),
+        (("empty", "R", "empty", floor), "R-busy"),
+        (("empty", "R", "empty", floor + 0.01), "R-busy"),
+        (("empty", "S", "empty", floor + 0.01), "S"),
+        (("empty", "D", "empty", None), "D"),
+        (("empty", None, "empty", None), "unreadable"),
+        (("empty", "S", "ready", None), "late-ready"),
+        (("ready", None, None, None), "late-caller"))
+    misses = []
+    for checks, want in table:
+        got = _watchdog_startup_diagnosis(*checks)[0]
+        if got != want:
+            misses.append((checks, got, want))
+    return misses
+
+
+def _watchdog_tree_vectors():
+    """The nested-orders leg: deterministic schedules the tree legs must
+    NEVER pass, each run through the real completion case and the runner's
+    own verdict mapping. Each vector names a predicate over the facts the
+    exercise recorded that says whether its forced schedule was ESTABLISHED
+    on this host. Raises AssertionError when a schedule was accepted or
+    refused for the wrong reason, and when a schedule that WAS established
+    drew another cause (a code regression, never read as host scheduling).
+    Returns False (after printing the _WATCHDOG_CANNOT_EVALUATE marker)
+    only when a vector's schedule was not established on this host."""
+    import io
+    import tempfile
+    from contextlib import redirect_stdout
+    unestablished = []
+
+    # The publish-time reading, pinned deterministically: a marker whose
+    # write is back-dated and then renamed into place must read as published
+    # at the inode change (which the rename refreshes), never at the
+    # back-dated write stamp, or the reported causes would describe a
+    # subject preempted between its write and its rename as having
+    # published at the write. os.utime itself refreshes the inode change
+    # time, so this discriminates WHICH stamp is read, not that the rename
+    # refreshed it (that is the platform's rename contract); no verdict is
+    # decided by the stamp (_tree_publish_seconds).
+    with tempfile.TemporaryDirectory(prefix="opf-tree-") as directory:
+        scratch = Path(directory, "marker.tmp")
+        scratch.write_text("1", encoding="ascii")
+        os.utime(scratch, (1.0, 1.0))
+        published = scratch.rename(Path(directory, "marker"))
+        if not _tree_publish_seconds(published) > published.stat().st_mtime + 1.0:
+            raise AssertionError(
+                "tree marker publish time read from the write, not the rename: publish "
+                "stamp %r against the back-dated write stamp %r"
+                % (_tree_publish_seconds(published), published.stat().st_mtime))
+
+    def run(mode, tree, facts):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            rc = _watchdog_completion_case(mode, tree=dict(tree, facts=facts))
+        return _watchdog_completion_verdict(rc, buffer.getvalue()), buffer.getvalue()
+
+    def unexplained(label, established, facts, got):
+        if established(facts):
+            raise AssertionError("tree vector %s: its schedule was established (recorded %r), "
+                                 "yet the leg reported %s: a code regression, not host "
+                                 "scheduling" % (label, facts, got))
+        unestablished.append("%s: schedule not established on this host (recorded %r; the "
+                             "leg reported %s)" % (label, facts, got))
+
+    def expect_unevaluated(label, phrase, established, mode, **tree):
+        facts = {}
+        verdict, out = run(mode, tree, facts)
+        if verdict != "cannot-evaluate":
+            raise AssertionError("tree vector %s: %s, not CANNOT-EVALUATE: %r" % (label, verdict, out))
+        if phrase not in out:
+            unexplained(label, established, facts, repr(out.strip()))
+
+    def expect_failure(label, phrase, established, mode, **tree):
+        # A pass or a CANNOT-EVALUATE is a code regression only when the
+        # vector's schedule was established; otherwise the host never
+        # produced it, and the vector holds no verdict.
+        facts = {}
+        try:
+            verdict, out = run(mode, tree, facts)
+        except AssertionError as exc:
+            if phrase not in str(exc):
+                raise AssertionError("tree vector %s refused for another reason: %s"
+                                     % (label, exc)) from exc
+            return
+        if verdict != "cannot-evaluate":
+            out = "%s, not refused: %s" % (verdict, out)
+        unexplained(label, established, facts, repr(out.strip()))
+
+    def held(facts):
+        return facts.get("held") is True
+
+    def live(facts):
+        return facts.get("snapshot") is True
+
+    def live_then_held(facts):
+        return live(facts) and held(facts)
+
+    def live_then_held_early(facts):
+        # The guardian was seen gone before its own deadline (see
+        # _watchdog_tree_case): a ~backstop host stall that let it expire
+        # first does not establish the schedule.
+        return live(facts) and held(facts) and facts.get("held-early") is True
+
+    # Both scheduling orders: event-first is the real nested-timeout and
+    # nested-cancel legs; cleanup-first (the guardian's backstop and its
+    # cleanup finish before the observation) must never pass. Once that
+    # schedule is established its cause is deterministic, so a removed
+    # snapshot guard is a definite failure here, not a stall.
+    expect_unevaluated("cleanup-first/timeout", "stimulus observed only after cleanup", held,
+                       "nested-timeout", order="cleanup-first")
+    expect_unevaluated("cleanup-first/cancel", "stimulus observed only after cleanup", held,
+                       "nested-cancel", order="cleanup-first")
+    # A clean observation whose stimulus loses the race to the backstop.
+    expect_unevaluated("backstop-after-snapshot/timeout", "may be the backstop's",
+                       live_then_held, "nested-timeout", order="backstop-after-snapshot")
+    expect_unevaluated("backstop-after-snapshot/cancel", "expired before the cancel's",
+                       live_then_held, "nested-cancel", order="backstop-after-snapshot")
+    # The stimulus removed: the backstop alone ends supervision. The
+    # schedule needs the guardian's own expiry on the receipt: a receipt
+    # with timed_out=False is the caller-backstop-first schedule (the
+    # caller's close()'s EOF won the race, which a slow host can produce
+    # on a correct run; the eof-after-snapshot vector below holds it to
+    # no verdict), not this one. Named so the paired receipt records
+    # below check the predicate this call uses.
+    def no_stimulus_established(facts):
+        return live(facts) and facts.get("receipt-timed-out") is True
+
+    expect_unevaluated("no-stimulus/timeout", "may be the backstop's",
+                       no_stimulus_established, "nested-timeout", order="no-stimulus")
+    expect_failure("no-stimulus/cancel", "timeout stood in for the cancel stimulus", live,
+                   "nested-cancel", order="no-stimulus")
+    # Pass condition (3): a subject that exits BY ITSELF between the
+    # snapshot and the cancel's cleanup was not killed by cleanup; only the
+    # SIGKILL status check refuses it.
+    expect_failure("self-exit/cancel", "tree cleanup did not kill a running subject",
+                   live_then_held_early, "nested-cancel", order="self-exit-after-snapshot")
+    # Pass condition (2), nested-timeout: a guardian that left supervision
+    # without its own expiry (its subject tree killed from outside) while
+    # the caller's deadline passed between collection and its overdue
+    # check; only the timed_out check refuses it. Its predicate and
+    # schedule are bound once here and shared with the stall vector below,
+    # so the predicate the call uses is the one that vector checks.
+    killed_timeout = dict(label="killed/timeout",
+                          phrase="left supervision without its own expiry",
+                          established=live_then_held_early, mode="nested-timeout",
+                          order="killed-after-snapshot")
+    expect_failure(**killed_timeout)
+    # The held-early rule: the same outside kill, but the guardian held
+    # stopped across its own deadline (a host stall) first expires, so the
+    # leg passes on a genuine expiry. That schedule is NOT killed/timeout's
+    # (a guardian that left supervision before its deadline): killed/timeout's
+    # own predicate must not hold on its facts, or this stall would be
+    # reported as a code regression by the killed/timeout vector above.
+    facts = {}
+    try:
+        verdict, out = run(killed_timeout["mode"], dict(order=killed_timeout["order"],
+                                                        backstop=_TREE_VECTOR_BACKSTOP,
+                                                        stall_guardian=True), facts)
+    except AssertionError as exc:
+        verdict, out = "refused", str(exc)
+    if not (live_then_held(facts) and facts.get("stopped") is True
+            and facts.get("stalled-past") is True):
+        unestablished.append("stalled-past-deadline/timeout: schedule not established on this "
+                             "host (recorded %r; the leg reported %s)" % (facts, verdict))
+    elif killed_timeout["established"](facts) or verdict == "refused":
+        raise AssertionError("tree vector stalled-past-deadline/timeout: a guardian held stopped "
+                             "past its deadline was read as leaving supervision before it "
+                             "(recorded %r; the leg reported %s: %r)" % (facts, verdict, out))
+    # The caller-backstop-first schedule a slow host can produce on a
+    # CORRECT run: only the caller's deadline passes, close()'s EOF ends
+    # supervision (receipt timed_out=False) and no poll ever collects the
+    # guardian. Ordered by the observed events, that is no verdict, never
+    # the left-without-expiry failure (which needs a collection observed
+    # before the caller's deadline; the killed/timeout vector above holds
+    # that failure red when the collection WAS observed).
+    expect_unevaluated("eof-after-snapshot/timeout",
+                       "the caller's own backstop close (EOF)",
+                       lambda facts: (live(facts)
+                                      and facts.get("receipt-timed-out") is False
+                                      and facts.get("collected-early") is False),
+                       "nested-timeout", order="eof-after-snapshot")
+    # A guardian clock that never applies the shift expires only at the
+    # real deadline, after a stimulus mounted well before it. The schedule
+    # needs that expiry on the receipt (timed_out=True): the caller and
+    # the guardian share this one deadline, so the caller's close()'s EOF
+    # can end supervision first on a slow host (receipt timed_out=False),
+    # which establishes nothing about the shift. Named so the paired
+    # receipt records below check the predicate this call uses.
+    def shift_absent_established(facts):
+        return (live(facts) and facts.get("stimulus-early") is True
+                and facts.get("receipt-timed-out") is True)
+
+    expect_failure("shift-absent/timeout", "the guardian clock shift is absent",
+                   shift_absent_established,
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, clock_shift=False)
+    # The guardian-expiry requirement of both predicates above, pinned on
+    # paired receipt records that differ ONLY in the receipt field, so the
+    # requirement holds whichever side of the shared-deadline expiry race
+    # this host produced: the record carrying the guardian's own expiry is
+    # the established schedule, and neither its caller-close-first pair
+    # (the caller's close()'s EOF won the race: receipt timed_out False)
+    # nor a record with no receipt at all may ever read as established.
+    for name, established, record in (
+            ("no-stimulus/timeout", no_stimulus_established, {"snapshot": True}),
+            ("shift-absent/timeout", shift_absent_established,
+             {"snapshot": True, "stimulus-early": True})):
+        expired = dict(record, **{"receipt-timed-out": True})
+        closed = dict(record, **{"receipt-timed-out": False})
+        if not established(expired) or established(closed) or established(record):
+            raise AssertionError(
+                "tree vector %s: its schedule predicate must require the guardian's own "
+                "expiry on the receipt: expiry record read %r, caller-close-first record "
+                "%r, missing-receipt record %r" % (name, established(expired),
+                                                   established(closed), established(record)))
+    # The leg's backstop return (no marker ever published), and the
+    # deterministic causes that must be definite failures, not stalls.
+    expect_unevaluated("backstop/no-markers", "subject marker absent",
+                       lambda facts: facts.get("ready") is True and facts.get("polls", 0) > 0,
+                       "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, publish=False)
+    expect_failure("inert-observer", "the wait observer never ran",
+                   lambda facts: facts.get("ready") is True,
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, observe_waits=False)
+    expect_failure("malformed-marker", "marker writer defect",
+                   lambda facts: facts.get("ready") is True
+                   and (facts.get("markers") or [None])[0] == "not-a-pid",
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, publish="malformed")
+    # The blind observer's schedule is established from the leg's own look
+    # (parsed-at-poll, recorded in the observer apart from the unparsed
+    # bookkeeping the never-parsed decision reads), so losing that
+    # bookkeeping cannot also turn this vector silently unestablished: the
+    # schedule stays established and the missing refusal is raised as a
+    # code regression.
+    expect_failure("blind-observer", "never parsed them",
+                   lambda facts: facts.get("ready") is True
+                   and facts.get("parsed-at-poll") is True,
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, observe_parse=False)
+    # A guardian that never signals READY: asleep before READY is a code
+    # regression (a definite failure), and so is a runnable one once the
+    # CPU time it was granted establishes the busy loop
+    # (_STARTUP_BUSY_CPU_SECONDS: the stall here IS a busy loop, so on a
+    # host that granted it that CPU the leg must raise); runnable without
+    # that CPU is indistinguishable from the host's scheduling and stays
+    # CANNOT-EVALUATE (the diagnosis table above pins both ends of the CPU
+    # boundary).
+    expect_failure("startup-blocked", "BLOCKED (state S)",
+                   lambda facts: facts.get("startup") == "S",
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, startup_stall="blocked")
+    expect_failure("startup-runnable", "busy startup loop",
+                   lambda facts: facts.get("startup") == "R-busy",
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, startup_stall="runnable")
+    # The READY-publication interleaving: the caller's first READY check
+    # finds nothing, the guardian then publishes READY and blocks reading
+    # GO, and only then is its state (S) sampled. Host scheduling, never a
+    # startup hang: without the READY re-check after the sample, this is
+    # the "BLOCKED (state S)" failure, raised out of this leg.
+    expect_unevaluated("startup-ready-late",
+                       "published READY after the caller's first READY check",
+                       lambda facts: facts.get("published-late") is True,
+                       "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, startup_stall="ready-late")
+    if unestablished:
+        print(_WATCHDOG_CANNOT_EVALUATE + " (tree vectors: schedule not established: "
+              + "; ".join(unestablished) + ")")
+        return False
+    return True
+
+
+def _watchdog_completion_case(mode, tree=None):
+    """Run each irreversible audit-hook/disposition experiment in its own fixture process.
+    `tree` carries the nested-orders vectors' parameters into the tree legs
+    (see _watchdog_tree_case); the registered legs pass none."""
     import json
     import signal
     import subprocess
@@ -3660,72 +5396,17 @@ def _watchdog_completion_case(mode):
         # CLI exit-status subjects have an explicit, separately supervised path.
         launch("raise SystemExit(2)", process_fixture=True, expected_returncode=2)
     elif mode in ("nested-timeout", "nested-cancel"):
-        import time
-        with tempfile.TemporaryDirectory(prefix="opf-tree-") as directory:
-            markers = [Path(directory, name) for name in ("subject", "descendant")]
-            # Deliberate fork/session escape is a tree-cleanup stimulus, not a verdict.
-            subject = ("import os, time; from pathlib import Path; "
-                       "pid = os.fork(); "
-                       "os.setsid() if pid == 0 else None; "
-                       "name = 'descendant' if pid == 0 else 'subject'; "
-                       "scratch = Path(" + repr(directory) + ", name + '.tmp'); "
-                       "scratch.write_text(str(os.getpid()), encoding='ascii'); "
-                       "scratch.rename(Path(" + repr(directory) + ", name)); "  # atomic: never a partial PID
-                       "time.sleep(60)")
-            # Writer half: a tripwire against an accidental edit of the marker
-            # lines above, not a proof of atomic publication. It requires the
-            # name + '.tmp' scratch path, the prefix scratch.write_text( and the
-            # scratch.rename to the final name once each and in that order, and
-            # no other occurrence of the text write_text( or Path(directory, name)
-            # anywhere in the subject; it does not otherwise check the write's
-            # arguments. It matches exact text only, so anything spelled
-            # differently is outside it: another spelling of a call, the final
-            # path or a binding (spacing, an alias, a rebinding of scratch), a
-            # write by any method other than write_text, an os-level call, exec
-            # or a shell.
-            text = subject.replace(repr(directory), "directory")  # TMPDIR-blind
-            steps = ["scratch = Path(directory, name + '.tmp'); ",
-                     "scratch.write_text(", "scratch.rename(Path(directory, name)); "]
-            found = [text.find(step) for step in steps]
-            if not (all(text.count(step) == 1 for step in steps)
-                    and -1 < found[0] < found[1] < found[2]
-                    and text.count("write_text(") == 1
-                    and text.count("Path(directory, name)") == 1):
-                raise AssertionError("marker write lines changed: " + text)
-
-            class Cancelled(RuntimeError):
-                """The nested-cancel stimulus; no other error may stand in for it."""
-
-            real_wait = emit._fixture_wait
-            observed = []
-
-            def observe(pid, flags):
-                if not observed:
-                    try:  # a marker counts only once its pid parses; empty is not ready yet
-                        pids = [int(path.read_text(encoding="ascii")) for path in markers]
-                    except (FileNotFoundError, ValueError):
-                        pids = []
-                    observed.extend(pids)
-                    if pids and mode == "nested-cancel":
-                        raise Cancelled("cancel with nested subject running")
-                return real_wait(pid, flags)
-
-            # Marker-race control: a marker that exists but is still empty (created,
-            # pid not yet written) is no started subject; the observer keeps waiting.
-            markers[0].write_text(str(os.getpid()), encoding="ascii")
-            markers[1].touch()
-            refuses(emit.ChildStatusUnavailable, lambda: observe(os.getpid(), os.WNOHANG))
-            assert not observed, "an empty marker was read as a started subject"
-            for path in markers:
-                path.unlink()
-            with patch.object(emit, "_fixture_wait", observe):
-                refuses(subprocess.TimeoutExpired if mode == "nested-timeout" else Cancelled,
-                        lambda: emit.run_status_owned(
-                            [*command[:4], subject], fixture_id="tree/" + mode,
-                            process_fixture=True, timeout=2))
-            assert len(observed) == 2, "nested subject never started"
-            for pid in observed:
-                assert not Path("/proc", str(pid)).exists(), "descendant survived/unreaped"
+        verdict, cause = _watchdog_tree_case(mode, **(tree or {}))
+        if verdict != "pass":
+            # No tree-cleanup verdict exists (the cause names what was
+            # observed): the distinct CANNOT-EVALUATE, never a definite
+            # failure and never a pass (the regression runner maps the
+            # marker to EXIT_MALFORMED).
+            print(_WATCHDOG_CANNOT_EVALUATE + " (tree/" + mode + ": " + cause + ")")
+            return EXIT_OK  # the marker above makes this CANNOT-EVALUATE, not a pass
+    elif mode == "nested-orders":
+        if not _watchdog_tree_vectors():
+            return EXIT_OK  # it printed the CANNOT-EVALUATE marker: not a pass
     elif mode == "no-signal-echild":
         import time
         # The immediately-exiting subject leaves the exited guardian as the raw
@@ -4468,7 +6149,10 @@ def _watchdog_completion_case(mode):
                 assert failures, "the flip close was read as clean"
                 await_state(subject, (None, "Z"), "the flip cleanup did not complete")
     elif mode == "subject-orphan":
+        import dis
         import time
+        import types
+        import warnings
         # QA18 codex F3: pdeathsig is not retroactive, so a subject first scheduled
         # after its guardian died arms too late; it must detect the reparenting and
         # refuse to run. Independently, close() must kill and prove a
@@ -4482,7 +6166,23 @@ def _watchdog_completion_case(mode):
             waiting = Path(directory, "waiting")
             release = Path(directory, "release")
             marker = Path(directory, "marker")
+            acked = Path(directory, "acked")
+            refused = Path(directory, "refused")
+            stalled = Path(directory, "stalled")
+            diag = Path(directory, "diag")
+            guard = Path(directory, "guard")
             real_pdeathsig = emit._fixture_pdeathsig
+            # The authoritative exit status below (reap_subject) needs the
+            # subject of a dead guardian to reparent HERE: arm
+            # PR_SET_CHILD_SUBREAPER for this leg process (verified, loud
+            # where unsupported), so such a subject lingers as a zombie
+            # child of this process until a leg reaps it -- under the
+            # regression runner and standalone alike, where before only the
+            # runner made the zombie observable. Disarmed on the orderly
+            # path at the end of this case; a failing leg never reaches the
+            # disarm, and the self-test runs each leg in its own fixture
+            # process, which exits.
+            emit._fixture_subreaper()
 
             def hold(arm):
                 # Subject-side: publish the pid, wait for the release gate BEFORE
@@ -4517,26 +6217,319 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
-            def launch_held(arm=True):
+            # The warning block the fork of this process can write: os.fork,
+            # called by _launch_fork on the launcher thread of this
+            # multi-threaded process, raises the CPython DeprecationWarning
+            # naming THIS pid, attributed to the file and line of that
+            # call, and the warnings module prints it as a header line
+            # (file:line: category: message) followed by the stripped
+            # source text of the call, indented. fork_block is that block,
+            # formatted by the warnings module itself from the same call.
+            launch_fork = emit._FixtureProcess._launch_fork
+            fork_line = next(
+                instruction.positions.lineno
+                for instruction in dis.get_instructions(launch_fork)
+                if instruction.argval == "fork")
+            fork_block = warnings.formatwarning(
+                "This process (pid=%d) is multi-threaded, use of fork() may "
+                "lead to deadlocks in the child." % os.getpid(),
+                DeprecationWarning, launch_fork.__code__.co_filename,
+                fork_line).splitlines()
+
+            def subject_lines(capture):
+                # The per-launch fd 2 redirect window covers the fork this
+                # process makes, so the warning block of the leg process
+                # itself (fork_block above) can land in the capture
+                # alongside subject output; tolerate exactly that block --
+                # a line equal to its full header and, directly after it,
+                # its one source-text continuation -- and keep every other
+                # line, a subject line that merely names this pid and an
+                # indented line after the block included (without this
+                # tolerance, a run with warnings made visible wrote the
+                # leg's own block into the capture and Leg 2 failed
+                # falsely). A block this filter does not recognise stays
+                # in the capture, so Leg 2 fails red, never green.
+                header = fork_block[0]
+                continuation = fork_block[1] if len(fork_block) > 1 else None
+                kept = []
+                after_header = False
+                for line in capture.splitlines():
+                    if line == header:
+                        after_header = True
+                        continue
+                    if not (after_header and line == continuation):
+                        kept.append(line)
+                    after_header = False
+                return kept
+
+            def reap_subject(target):
+                # The authoritative waitpid status: the subreaper flag
+                # armed above makes a subject whose guardian died a child
+                # of THIS process, so the leg both reaps it and records
+                # the status that close() cannot return. A target that is
+                # not (or is no longer) a child here has no authoritative
+                # status left: that is a cannot-evaluate failure, never
+                # acceptance (the /proc reader this replaces read an
+                # already-reaped child as None and the legs accepted None,
+                # so a silent hold-gate exit 96 could satisfy Leg 2).
+                bound = _watchdog_deadline(30)
+                while True:
+                    try:
+                        pid, status = os.waitpid(target, os.WNOHANG)
+                    except ChildProcessError:
+                        raise AssertionError(
+                            "the subject exit status is unavailable: cannot "
+                            "evaluate the death cause of %d" % target)
+                    if pid == target:
+                        return status
+                    assert time.monotonic() < bound, (
+                        "the dead subject never became reapable")
+                    time.sleep(0.005)
+
+            def require_cause(status, expected, note):
+                # The death-cause rule every vector applies to an
+                # authoritative wait status, the expected cause given as
+                # an exit code (-SIGKILL for a kill, None where no death
+                # is expected at all). The exit 96 of the hold gate fails
+                # as the gate EXPIRING, by name, whatever the vector
+                # expected: never read as a clean death, and never left
+                # to a bare status mismatch.
+                code = os.waitstatus_to_exitcode(status)
+                if code == 96:
+                    raise AssertionError(
+                        "the hold gate of the subject expired (exit 96): the "
+                        "leg neither released nor killed it within 120 s",
+                        note, status)
+                assert code == expected, (note, status)
+
+            def require_sigkill(target, note=(
+                    "the subject died otherwise than by the close kill")):
+                # The Leg 2 death-cause rule, authoritative on every path:
+                # the subject died by the SIGKILL close() sends (in Flip B,
+                # by the hygiene kill) -- never by the exit 96 of the 120 s
+                # hold gate (named as its expiry), by the exit 125 of a
+                # setup error, or with an unavailable status read as
+                # acceptance (reap_subject refuses that loudly).
+                require_cause(reap_subject(target), -signal.SIGKILL, note)
+
+            def require_alive(target, note):
+                # A subject a vector still needs alive: one already dead
+                # fails with the note AND its cause, reaped here (an exit
+                # 96 as the hold gate expiring), never a bare "died".
+                if state(target) in (None, "Z"):
+                    require_cause(reap_subject(target), None, note)
+
+            def require_drained(fixture, target, note):
+                # A guardian that stayed ALIVE reaps its own subject in its
+                # drain and reports the wait status it saw, which close()
+                # reads into fixture.status: the authoritative status of
+                # that subject, which must be the drain's SIGKILL, and the
+                # reaped subject must then be gone. Where close() escalated
+                # instead (a drain slower than its bounded collection), the
+                # killed guardian reported nothing and its subject
+                # reparented HERE: the leg reaps it (require_sigkill).
+                # A subject that guardian reaped before it was killed has
+                # no status left, which reap_subject refuses loudly. That
+                # refusal is a load-dependent red, never a pass: cancel
+                # sets the cleanup grace to 1 s and close() escalates a
+                # guardian not collected within twice that grace, so on a
+                # loaded host a guardian that reaped its subject but had
+                # not yet reported the status by then fails this verdict
+                # as cannot-evaluate, whatever the subject died of.
+                # Either branch charges one 30 s bound and leaves no
+                # zombie.
+                if fixture.status is None:
+                    require_sigkill(target, note)
+                    return
+                require_cause(fixture.status, -signal.SIGKILL, note)
+                await_state(target, (None,), "the drained subject is still present")
+
+            # Every close fault the launch failure path below keeps beneath
+            # its launch failure: a vector that accepts the launch failure
+            # would otherwise drop it with the outcome, so a diagnostic
+            # check after the last such vector names any that is left here.
+            close_faults = []
+
+            def launch_held(arm=True, ack_bound=30, capture_open=os.open,
+                            restore=os.dup2):
+                # capture_open and restore are fault seams for the two
+                # committed launch-cleanup vectors below; every production
+                # leg runs the real primitives, bound here at definition
+                # time.
                 import select
                 waiting.unlink(missing_ok=True)
                 release.unlink(missing_ok=True)
+                acked.unlink(missing_ok=True)
+                refused.unlink(missing_ok=True)
+                stalled.unlink(missing_ok=True)
+                guard.unlink(missing_ok=True)
+                diag.unlink(missing_ok=True)
                 marker.unlink(missing_ok=True)
                 child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                              subject=subject_body)
-                with patch.object(emit, "_fixture_pdeathsig", lambda: hold(arm)):
-                    child.start()
-                bound = _watchdog_deadline(30)
-                while not waiting.exists():
-                    assert time.monotonic() < bound, "the subject never reached its gate"
-                    time.sleep(0.005)
-                subject = int(waiting.read_text(encoding="ascii"))
-                # The gated subject publishes its pid BEFORE the guardian sends the
-                # receipt: wait for the receipt to be buffered on the control socket
-                # before any leg kills the guardian, so every leg exercises a
-                # DELIVERED receipt (the no-receipt path is subject-receipt's leg).
-                assert select.select([child.control], [], [], 30)[0], \
-                    "the subject receipt never arrived"
+                real_ack = emit._fixture_ack_subject
+
+                def publish_ack(fd):
+                    # Guardian-side (the patch below is live at fork time):
+                    # record this guardian pid first (the refused-write
+                    # vector asserts the failure path COLLECTED the
+                    # guardian -- only close() reaps it -- not merely that
+                    # the subject disappeared, which the drain of a live
+                    # guardian also causes), then publish the ack marker
+                    # only on an OBSERVED successful acknowledgment write
+                    # (the helper reports True only when os.write wrote the
+                    # one byte), so a marker always means the ack byte is
+                    # buffered for the gated subject; a failed write
+                    # publishes the refusal instead, which the wait below
+                    # turns into a named launch failure, never a marker.
+                    scratch = Path(directory, "guard.tmp")
+                    scratch.write_text(str(os.getpid()), encoding="ascii")
+                    scratch.rename(guard)  # atomic: never a partial PID
+                    outcome = acked if real_ack(fd) else refused
+                    scratch = Path(directory, outcome.name + ".tmp")
+                    scratch.write_text(outcome.name, encoding="ascii")
+                    scratch.rename(outcome)  # atomic: never a partial publication
+
+                # ONE ownership-cleanup scope from construction: the
+                # fixture above already owns a parked launcher, two sockets
+                # and a report file, so the capture setup, the start, the
+                # stderr restoration and the acknowledgment wait below all
+                # run inside this try, whose failure path collects the
+                # fixture. A scope opened later would let a fault in the
+                # capture setup or in the post-start restoration route
+                # around that cleanup.
+                try:
+                    # The refusal evidence of the subject lands on its
+                    # inherited fd 2 (the traceback, then exit 125): route
+                    # fd 2 to a per-launch capture for the window of the
+                    # fork, so the legs below can assert WHY their subject
+                    # died, never only that it died. Restored right after
+                    # start() returns; the window still covers the fork
+                    # this process makes, so Leg 2 tolerates the warning
+                    # lines of the leg itself explicitly (subject_lines
+                    # above). The restoring finally pairs the dup2 with the
+                    # close, so a failed restoration still disposes the
+                    # saved descriptor.
+                    saved_stderr = os.dup(2)
+                    try:
+                        capture = capture_open(
+                            diag, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        try:
+                            os.dup2(capture, 2)
+                        finally:
+                            os.close(capture)
+                        with (patch.object(emit, "_fixture_pdeathsig",
+                                           lambda: hold(arm)),
+                              patch.object(emit, "_fixture_ack_subject",
+                                           publish_ack)):
+                            child.start()
+                    finally:
+                        try:
+                            restore(saved_stderr, 2)
+                        finally:
+                            os.close(saved_stderr)
+                    bound = _watchdog_deadline(30)
+                    while not waiting.exists():
+                        assert time.monotonic() < bound, (
+                            "the subject never reached its gate")
+                        time.sleep(0.005)
+                    subject = int(waiting.read_text(encoding="ascii"))
+                    # The gated subject publishes its pid BEFORE the guardian
+                    # sends the receipt: wait for the receipt to be buffered on
+                    # the control socket before any leg kills the guardian, so
+                    # every leg exercises a DELIVERED receipt (the no-receipt
+                    # path is the leg of subject-receipt).
+                    assert select.select([child.control], [], [], 30)[0], (
+                        "the subject receipt never arrived")
+                    # A buffered receipt does not order a kill against the
+                    # ownership acknowledgment: the guardian writes the ack
+                    # byte strictly AFTER the receipt send, so a SIGKILL
+                    # landing in between (seen under host load as an
+                    # intermittent subject-orphan failure) hands the gated
+                    # subject an acknowledgment EOF once released, and a
+                    # released subject that reaches the ack read -- Leg 1
+                    # refuses EARLIER, at _fixture_check_parent -- then
+                    # refuses at _fixture_await_ack (which no leg here
+                    # patches out) instead of exercising the stimulus under
+                    # test: Flip A fails as "the flip orphan never ran", and
+                    # before this wait existed the same window let Leg 1
+                    # pass FALSELY, its subject refusing at the ack read
+                    # with the parent check removed. Wait for the marker the
+                    # guardian publishes only on an observed successful ack
+                    # write, so every kill below lands only after the ack
+                    # byte is buffered and a released subject that reaches
+                    # the ack read always reads it. The
+                    # ORDERING no longer depends on host speed; the finite
+                    # bounds still do: this backstop and the 120 s hold gate
+                    # of the subject bound the leg either way. At most 90 s
+                    # of BOUNDED waits sit between the waiting publication of
+                    # the subject and its release (or kill) by a leg, 30 s
+                    # under that gate, and those figures are no host-load
+                    # bound: they count only the bounded waits, while
+                    # scheduling delay of the leg outside them runs against
+                    # the gate too, so a host that stalls the leg past that
+                    # headroom can still expire it. The gate stays (it ends
+                    # a gated subject that is never released, such as one
+                    # whose leg died after killing its guardian, before any
+                    # pdeathsig is armed), and its expiry is never read as
+                    # a clean death: wherever a vector reads the death cause
+                    # of its subject, require_cause reports the exit 96 as
+                    # the gate expiring, by name. An expiry inside this
+                    # launch is the stated exception: the waits here report
+                    # their own bound or refusal (the receipt, the
+                    # acknowledgment marker, or the wait of a fault seam),
+                    # and the failure path below discards the
+                    # cannot-evaluate refusals of its cancel and reads no
+                    # subject status, so such a launch fails red, but not
+                    # by the gate's name. No expiry can happen during
+                    # child.start(): the guardian forks the subject only
+                    # after it reads the GO byte, which start() writes as
+                    # its last step before it returns, and the subject
+                    # starts its 120 s gate after that fork, so the gate
+                    # can expire only in the waits after start().
+                    bound = _watchdog_deadline(ack_bound)
+                    while not acked.exists():
+                        assert not refused.exists(), (
+                            "the ownership acknowledgment write failed: the launch is refused")
+                        assert time.monotonic() < bound, (
+                            "the ownership acknowledgment was never published")
+                        if not stalled.exists():
+                            # This wait, observably ENTERED: the gate the
+                            # barrier vector guardian, held, releases its
+                            # acknowledgment on, so removing this ordering
+                            # wait starves that barrier and turns the vector
+                            # red.
+                            scratch = Path(directory, "stalled.tmp")
+                            scratch.write_text("stalled", encoding="ascii")
+                            scratch.rename(stalled)  # atomic: never partial
+                        time.sleep(0.005)
+                except BaseException as launch_failure:
+                    # The failure path DISPOSES the fixture and surfaces the
+                    # LAUNCH failure, never a failure of the close: cancel
+                    # collects the guardian (dead, alive or never started)
+                    # through close(), which kills and proves the
+                    # receipt-identified subject where it has one; its
+                    # cannot-evaluate refusals land in a list this path
+                    # deliberately discards, and any OTHER fault of the
+                    # close stays reachable BENEATH the launch failure
+                    # (emit._attach_beneath: its cause slot, else the tail
+                    # of its chain), never in its place (the close-fault
+                    # vector below). What this guarantees is
+                    # bounded by close() itself: proof of collection is
+                    # only what the fault and publication vectors below
+                    # assert, and a leg assertion that fails AFTER a launch
+                    # returned still cleans up nothing, the pre-existing
+                    # pattern of these legs, left unchanged here.
+                    close_fault = None
+                    try:
+                        cancel(child, [])
+                    except BaseException as fault:
+                        close_fault = fault
+                    if close_fault is not None:
+                        close_faults.append(close_fault)
+                        emit._attach_beneath(launch_failure, close_fault,
+                                             "launch failure-path close")
+                    raise
                 return child, subject
 
             def cancel(child, failures):
@@ -4548,12 +6541,29 @@ def _watchdog_completion_case(mode):
 
             # Leg 1: the guardian dies while the subject is still gated pre-arm;
             # the released subject arms, sees a changed parent, and refuses.
+            # Before the acknowledgment-marker wait above existed this leg
+            # shared the kill-before-acknowledgment race as a FALSE-PASS
+            # window: with the parent check removed, an early kill let the
+            # subject refuse at the ack read instead, and the leg passed
+            # without the protection it guards. The refusal exit status and
+            # the refusal REASON are asserted -- the status first and
+            # authoritatively, reaped by this process (the subreaper arm
+            # above keeps the zombie observable on every path), so a
+            # subject dead by the 120 s hold gate (exit 96, a silent
+            # capture) fails as that gate expiring, and one dead by an
+            # unrelated setup error (a different traceback) cannot satisfy
+            # this leg either.
             child, subject = launch_held()
             os.kill(child.pid, signal.SIGKILL)
             await_state(child.pid, ("Z",), "the killed guardian did not exit")
             release.write_text("go", encoding="ascii")
             await_state(subject, (None, "Z"), "the orphaned subject kept running")
+            require_cause(reap_subject(subject), 125,
+                          "the released subject died otherwise than its refusal exit")
             assert not marker.exists(), "an orphaned subject ran its callable"
+            refusal = diag.read_text(encoding="ascii")
+            assert "subject orphaned before supervision" in refusal, (
+                "the released subject died without its refusal", refusal)
             failures = []
             cancel(child, failures)
             assert child.subject_pid == subject, (child.subject_pid, subject)
@@ -4561,7 +6571,13 @@ def _watchdog_completion_case(mode):
 
             # Leg 2: same stimulus, subject NEVER released: the guardian failure is
             # collected without an escalation, and close() itself must kill the
-            # receipt-identified subject and prove its exit.
+            # receipt-identified subject and prove its exit. The gated subject
+            # writes no refusal (it never left its hold gate: a capture with
+            # no subject lines) and the authoritative reaped status proves it
+            # died by the SIGKILL close() sends -- never by the exit 96 of
+            # the 120 s gate (which fails as that gate expiring), by the
+            # exit 125 of a setup error, or with an unavailable status read
+            # as acceptance.
             child, subject = launch_held()
             os.kill(child.pid, signal.SIGKILL)
             failures = []
@@ -4570,6 +6586,157 @@ def _watchdog_completion_case(mode):
             await_state(subject, (None, "Z"),
                         "close() left the live subject on a guardian failure")
             assert not marker.exists(), "the gated subject ran its callable"
+            foreign = subject_lines(diag.read_text(encoding="ascii"))
+            assert foreign == [], ("the gated subject left its hold gate", foreign)
+            require_sigkill(subject)
+
+            # Cause vectors: the SAME verdict helpers the legs rely on, fed
+            # each committed counter-cause, must reject it, never accept it,
+            # and a hold-gate exit 96 must fail as that gate expiring, by
+            # name. A probe child stands in for the dead subject: it exits
+            # the given code silently, like the hold gate or a setup
+            # refusal does, and is awaited to its zombie before the verdict
+            # reads it. A stand-in fixture carries the status a live
+            # guardian would report for its drained subject: the real
+            # status of a probe, reaped here by an untimed wait.
+            def dead_probe(code):
+                probe = os.fork()
+                if probe == 0:
+                    os._exit(code)
+                await_state(probe, ("Z",), "the cause probe never exited")
+                return probe
+
+            def reported(code):
+                probe = os.fork()
+                if probe == 0:
+                    os._exit(code)
+                return types.SimpleNamespace(status=os.waitpid(probe, 0)[1])
+
+            def rejected(cause, verdict, note):
+                try:
+                    verdict()
+                except AssertionError as exc:
+                    assert cause in str(exc), (cause, str(exc))
+                else:
+                    raise AssertionError(note)
+
+            expired = "the hold gate of the subject expired (exit 96)"
+            probe = dead_probe(96)
+            rejected(expired, lambda: require_sigkill(probe),
+                     "a silent hold-gate exit 96 satisfied the close-kill verdict")
+            probe = dead_probe(125)
+            rejected("died otherwise than by the close kill",
+                     lambda: require_sigkill(probe),
+                     "a setup-error exit satisfied the close-kill verdict")
+            probe = dead_probe(96)
+            os.waitpid(probe, 0)  # already reaped elsewhere: no status is left
+            rejected("the subject exit status is unavailable",
+                     lambda: require_sigkill(probe),
+                     "an already-reaped exit 96 was accepted instead of a "
+                     "cannot-evaluate failure")
+            drained = "the drained subject died otherwise than by its kill"
+            rejected(expired, lambda: require_drained(reported(96), None, drained),
+                     "a reported hold-gate exit 96 satisfied the drain verdict")
+            rejected(drained, lambda: require_drained(reported(125), None, drained),
+                     "a reported setup-error exit satisfied the drain verdict")
+
+            # Capture-filter vector: subject_lines drops ONLY the warning
+            # block of this process (fork_block: its header line and the
+            # one source-text continuation after it) and keeps every
+            # other line. The block alone comes out empty, so a filter
+            # that dropped nothing fails; around it, a subject line that
+            # merely names this pid, an indented line right after the
+            # block and the indented traceback lines all survive, so a
+            # filter keyed on the pid alone, one dropping every indented
+            # line after the block, and one that dropped everything
+            # (which would leave the empty-capture check of Leg 2 green)
+            # fail here.
+            assert subject_lines("\n".join(fork_block)) == [], (
+                "the capture filter kept the warning block of the leg",
+                fork_block)
+            capture = "\n".join((
+                "Traceback (most recent call last):",
+                '  File "<subject>", line 1, in <module>',
+                *fork_block,
+                "  an indented subject line after the warning block",
+                "a subject line naming this process (pid=%d)" % os.getpid(),
+                "  an indented subject line after it"))
+            kept = subject_lines(capture)
+            assert kept == [
+                "Traceback (most recent call last):",
+                '  File "<subject>", line 1, in <module>',
+                "  an indented subject line after the warning block",
+                "a subject line naming this process (pid=%d)" % os.getpid(),
+                "  an indented subject line after it"], (
+                "the capture filter did not keep exactly the subject lines",
+                kept)
+            # A line naming this pid, plain or indented, is a subject line
+            # wherever it sits around the block: between the header and
+            # the continuation, directly before the header, and indented
+            # directly after the block. A filter that drops an indented
+            # line after the header, a pid line after the header, or a
+            # pid line before the header fails one of these layouts.
+            header, continuation = fork_block[0], fork_block[1]
+            named = "x (pid=%d)" % os.getpid()
+            for layout, expected in (
+                    ((header, "  " + named, continuation),
+                     ["  " + named, continuation]),
+                    ((named, header, continuation), [named]),
+                    ((header, continuation, "  " + named), ["  " + named])):
+                kept = subject_lines("\n".join(layout))
+                assert kept == expected, (
+                    "the capture filter did not keep exactly the subject lines",
+                    layout, kept)
+
+            # Real-warning check: fork_block is derived from the call site
+            # dis finds and the message this leg expects, and both sides
+            # of the vector above are built from it, so an error in either
+            # would pass there. Under the default filters the warning is
+            # ignored (it is attributed to _opf_emit, not __main__), so no
+            # other leg sees it. Fork once through _launch_fork itself, on
+            # a second thread as the launch does, with warnings forced on
+            # and fd 2 routed to a capture, and require that capture to be
+            # exactly fork_block: a wrong call line or a changed CPython
+            # wording fails here, red. The stand-in guardian exits at
+            # once, and the leg reaps it.
+            warned = Path(directory, "warned")
+            stand_in = types.SimpleNamespace(
+                _guardian=lambda: os._exit(0), pid=None, pidfd=None)
+            fork_errors = []
+
+            def fork_warned():
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("always")
+                        launch_fork(stand_in)
+                except BaseException as exc:
+                    fork_errors.append(exc)
+
+            forker = threading.Thread(target=fork_warned)
+            saved_stderr = os.dup(2)
+            try:
+                capture = os.open(warned, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    os.dup2(capture, 2)
+                finally:
+                    os.close(capture)
+                forker.start()
+                forker.join(30)
+            finally:
+                try:
+                    os.dup2(saved_stderr, 2)
+                finally:
+                    os.close(saved_stderr)
+            assert not forker.is_alive(), "the warned fork never returned"
+            if stand_in.pidfd is not None:
+                os.close(stand_in.pidfd)
+            if stand_in.pid is not None:
+                os.waitpid(stand_in.pid, 0)  # exits at once: an untimed reap
+            assert fork_errors == [], ("the warned fork failed", fork_errors)
+            observed = warned.read_text(encoding="ascii").splitlines()
+            assert observed == fork_block, (
+                "the real fork warning is not the block the filter drops",
+                observed, fork_block)
 
             # Flip A: without the parent check (and with pdeathsig disarmed, which
             # a post-death arm cannot help anyway) the released orphan runs its
@@ -4581,12 +6748,14 @@ def _watchdog_completion_case(mode):
                 release.write_text("go", encoding="ascii")
                 bound = _watchdog_deadline(30)
                 while not marker.exists():
+                    require_alive(subject, "the flip orphan died before it ran")
                     assert time.monotonic() < bound, "the flip orphan never ran"
                     time.sleep(0.005)
                 failures = []
                 cancel(child, failures)  # close() still kills the receipt subject
                 assert failures, "the flip close was read as clean"
                 await_state(subject, (None, "Z"), "the flip cleanup did not complete")
+                require_sigkill(subject)  # dead by the close kill, proven
 
             # Flip B: without the close-side subject kill, a live subject survives
             # a guardian failure and close() names the surviving pid.
@@ -4596,11 +6765,270 @@ def _watchdog_completion_case(mode):
             with patch.object(emit, "_fixture_escalate_subject",
                               lambda subject, fd: None):
                 cancel(child, failures)
+            # The live check comes BEFORE the failure text: a subject
+            # already dead before the close leaves its pidfd readable, so
+            # close() never reports "could not confirm subject exit" for
+            # it, and a text check first would fail without the cause.
+            # require_alive reaps such a subject and names its cause (an
+            # exit 96 as the hold gate expiring); a live subject passes
+            # it and reaches the text check unchanged.
+            require_alive(subject, "flip: the subject died without its kill")
             assert failures and "could not confirm subject exit" in failures[0], failures
-            assert state(subject) not in (None, "Z"), \
-                "flip: the subject died without its kill"
             os.kill(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
+            # The hygiene zombie is reaped AND its cause asserted: a subject
+            # that left its gate by exit 96 between the live check above and
+            # the kill fails as the gate expiring, never as this kill.
+            require_sigkill(subject,
+                            "the flip subject died otherwise than by the hygiene kill")
+
+            # Barrier: the guardian HOLDS its acknowledgment until this launch
+            # observably reaches the marker wait (the stalled gate that wait
+            # itself publishes), a controlled, file-gated stand-in for the
+            # scheduling delay of the kill-before-acknowledgment race -- no
+            # sleep and no host timing. Under Flip A's configuration the
+            # released orphan must RUN its callable, which is only possible
+            # when the kill below landed after the ack byte was buffered;
+            # with the ordering wait removed the gate is never published,
+            # the held guardian never acknowledges, and the launch returns
+            # without the marker: this vector is red.
+            real_ack_subject = emit._fixture_ack_subject
+
+            def held_ack(fd):
+                # Guardian-side: wait, bounded, for the launch path's stalled
+                # gate before the real acknowledgment; a broken gate exits
+                # this guardian loudly rather than wedging the launch.
+                import time as clock
+                bound = _watchdog_deadline(30)
+                while not stalled.exists():
+                    if clock.monotonic() >= bound:
+                        os._exit(97)  # the gate never opened: fail loudly
+                    clock.sleep(0.005)
+                return real_ack_subject(fd)
+
+            with patch.object(emit, "_fixture_check_parent", lambda expected: None), \
+                    patch.object(emit, "_fixture_ack_subject", held_ack):
+                child, subject = launch_held(arm=False)
+                assert acked.exists(), "the barrier launch returned without the marker"
+                os.kill(child.pid, signal.SIGKILL)
+                await_state(child.pid, ("Z",), "the killed guardian did not exit")
+                release.write_text("go", encoding="ascii")
+                bound = _watchdog_deadline(30)
+                while not marker.exists():
+                    require_alive(subject, "the barrier orphan died before it ran")
+                    assert time.monotonic() < bound, "the barrier orphan never ran"
+                    time.sleep(0.005)
+                failures = []
+                cancel(child, failures)
+                assert failures, "the barrier close was read as clean"
+                await_state(subject, (None, "Z"), "the barrier cleanup did not complete")
+                require_sigkill(subject)  # dead by the close kill, proven
+
+            # Refused write: an acknowledgment write that fails with OSError
+            # (EIO in the recorded failure class; /dev/full injects the same
+            # handler deterministically) must surface as the NAMED launch
+            # failure and never as a marker. Red at commit 0734fe9560e8 (the
+            # commit that added the marker wait), where the helper swallowed
+            # the failure and the marker was published anyway.
+            def eio_ack(fd):
+                # Guardian-side: the REAL helper, its write routed at a
+                # descriptor that refuses every write, so its own OSError
+                # path -- not a simulation of it -- reports the failure; the
+                # subject's write end still closes, an EOF as in production.
+                sink = os.open("/dev/full", os.O_WRONLY)
+                try:
+                    return real_ack_subject(sink)
+                finally:
+                    os.close(fd)
+
+            # Collection is observed through the close call itself,
+            # recorded by the patch below: the refused-write vector reads
+            # the report of the collected guardian, and the launch-cleanup
+            # fault vectors further down read the collection itself.
+            collected = []
+            real_close = emit._FixtureProcess.close
+
+            def recording_close(fixture):
+                collected.append(fixture)
+                return real_close(fixture)
+
+            with patch.object(emit._FixtureProcess, "close", recording_close), \
+                    patch.object(emit, "_fixture_ack_subject", eio_ack):
+                try:
+                    launch_held()
+                except AssertionError as exc:
+                    outcome = str(exc)
+                else:
+                    outcome = None
+            assert outcome == ("the ownership acknowledgment write failed: "
+                               "the launch is refused"), \
+                ("a failed ack write was not the named launch failure", outcome)
+            assert not acked.exists(), \
+                "a failed acknowledgment write published the marker"
+            assert not marker.exists(), "the refused launch ran its callable"
+            leaked = int(waiting.read_text(encoding="ascii"))
+            # The disappearance of the subject is not discriminating on its
+            # own: a LIVE guardian drains the gated subject itself once the
+            # control socket of the dropped fixture closes, cancel or no
+            # cancel. Only close() reaps the guardian, so with the
+            # failure-path cancel removed the guardian stays a lingering
+            # zombie child here and this check goes red.
+            collected_guardian = int(guard.read_text(encoding="ascii"))
+            await_state(collected_guardian, (None,),
+                        "the refused launch did not collect its guardian")
+            # The death cause of the subject, authoritatively: the status
+            # its live guardian reported for the drain (the leg's own reap
+            # after an escalated close), never a hold-gate exit 96.
+            assert collected, "the refused launch did not close its fixture"
+            require_drained(collected[0], leaked,
+                            "the refused launch subject died otherwise than "
+                            "by its drain kill")
+
+            # Missing publication: a guardian that dies between the receipt
+            # send and its acknowledgment (the recorded race's own window)
+            # publishes neither outcome, so the marker wait must end in ITS
+            # named failure within its bound and the launch must still clean
+            # up its fixture: never a wedged launch or a leaked gated subject.
+            def dying_ack(fd):
+                # Guardian-side: die unsupervised, exactly where the recorded
+                # SIGKILL landed; nothing can publish after this.
+                os.close(fd)
+                os._exit(98)
+
+            with patch.object(emit, "_fixture_ack_subject", dying_ack):
+                try:
+                    launch_held(ack_bound=5)
+                except AssertionError as exc:
+                    outcome = str(exc)
+                else:
+                    outcome = None
+            assert outcome == "the ownership acknowledgment was never published", \
+                ("a missing publication was not the named launch failure", outcome)
+            assert not acked.exists() and not refused.exists(), \
+                "a dead guardian published an acknowledgment outcome"
+            leaked = int(waiting.read_text(encoding="ascii"))
+            await_state(leaked, (None, "Z"), "the unpublished launch leaked its subject")
+            require_sigkill(leaked)  # dead by the cleanup kill, proven
+
+            # Launch-cleanup fault vectors: the ownership scope opens at
+            # construction, so a fault during the capture setup (before any
+            # start) and one during the post-start stderr restoration must
+            # each surface as the injected error AND still collect the
+            # fixture; with the scope opened later, both faults would route
+            # around the failure-path cancel. Collection is observed through
+            # the close call itself (recording_close, above).
+            def refusing_capture(path, flags, mode):
+                # The real primitive against a genuinely occupied path: the
+                # O_EXCL refusal class itself, never a simulation of it.
+                occupied = Path(directory, "occupied")
+                occupied.write_text("occupied", encoding="ascii")
+                return os.open(occupied, flags, mode)
+
+            del collected[:]
+            with patch.object(emit._FixtureProcess, "close", recording_close):
+                try:
+                    launch_held(capture_open=refusing_capture)
+                except FileExistsError:
+                    outcome = "capture refused"
+                else:
+                    outcome = None
+            assert outcome == "capture refused", (
+                "the pre-start fault was not the injected refusal", outcome)
+            assert collected, "the pre-start fault did not collect the fixture"
+            assert collected[0].pid is None, (
+                "the pre-start fault launched a guardian anyway")
+
+            def broken_restore(fd, target):
+                # The REAL restoration first (the leg keeps its stderr),
+                # then a deterministic failure exactly where a failed dup2
+                # would surface -- held until the guardian has PUBLISHED an
+                # acknowledgment outcome, which it writes strictly after
+                # the receipt send, so the collection below always finds
+                # the buffered receipt: no scheduling race.
+                os.dup2(fd, target)
+                bound = _watchdog_deadline(30)
+                while not acked.exists():
+                    assert time.monotonic() < bound, (
+                        "the faulted launch was never acknowledged")
+                    time.sleep(0.005)
+                raise OSError(5, "injected restoration failure")
+
+            del collected[:]
+            with patch.object(emit._FixtureProcess, "close", recording_close):
+                try:
+                    launch_held(restore=broken_restore)
+                except OSError as exc:
+                    outcome = str(exc)
+                else:
+                    outcome = None
+            assert outcome == "[Errno 5] injected restoration failure", (
+                "the restoration fault was not the injected error", outcome)
+            assert collected, "the restoration fault did not collect the fixture"
+            started = collected[0].subject_pid
+            assert started is not None, (
+                "the restoration fault collection had no subject receipt")
+            require_drained(collected[0], started,
+                            "the restoration fault subject died otherwise "
+                            "than by its drain kill")
+
+            # Diagnostic: a launch failure some vector above accepted must
+            # not carry a close fault of its failure path, and this check
+            # names any such fault right after the vectors that could
+            # leave one. It is not an independent check: the close-fault
+            # vector below requires close_faults to equal its one
+            # injected fault, so a fault left by an earlier vector turns
+            # that vector red as well; this check only reports it first,
+            # with the faults listed.
+            assert not close_faults, (
+                "a failure-path close fault was accepted with its launch "
+                "failure", close_faults)
+
+            # Close-fault vector: a failure-path close() that raises
+            # anything but ChildStatusUnavailable must leave the LAUNCH
+            # failure the reported one, with the close fault reachable on
+            # its chain; a close fault raised in its place turns this
+            # vector red. The launch failure is the pre-start fault, so no
+            # guardian is started.
+            injected = RuntimeError("injected close fault")
+
+            def faulting_close(fixture):
+                recording_close(fixture)
+                raise injected
+
+            del collected[:]
+            with patch.object(emit._FixtureProcess, "close", faulting_close):
+                try:
+                    launch_held(capture_open=refusing_capture)
+                except (FileExistsError, RuntimeError) as exc:
+                    outcome = exc
+                else:
+                    outcome = None
+            assert isinstance(outcome, FileExistsError), (
+                "a close fault replaced the launch failure", outcome)
+            assert id(injected) in emit._chain_ids(outcome), (
+                "the close fault was lost from the launch failure", outcome)
+            assert collected and collected[0].pid is None, (
+                "the close-fault launch was not closed before any guardian")
+            assert close_faults == [injected], close_faults
+            del close_faults[:]
+
+            # Orderly-path disarm of the subreaper flag armed above. Every
+            # subject this case started has been reaped here, each with its
+            # death cause asserted: the legs and their vectors reaped those
+            # that reparented to this process (reap_subject), and a guardian
+            # that stayed alive reaped its own subject and reported the
+            # status it saw (require_drained, which reaps the subject here
+            # instead when close() escalated and killed that guardian).
+            # Every guardian is reaped by its close(), except one that
+            # close() itself refuses as not collected after escalation (a
+            # dead guardian the kernel left unreapable through its bounded
+            # wait), a refusal the legs that accept any close() refusal do
+            # not tell apart. A failing leg never reaches this disarm; its
+            # fixture process exits instead.
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.prctl(36, 0, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
     elif mode == "escalation-subject":
         import time
         # QA16 MINOR-2 + QA17 F1: cancelling a wedged guardian is bounded AND kills
@@ -13030,6 +15458,64 @@ def _watchdog_overlap_case(mode):
     return EXIT_OK
 
 
+def _watchdog_completion_verdict(returncode, stdout):
+    """Map one launched watchdog leg's outcome. The exact
+    _WATCHDOG_CANNOT_EVALUATE marker in the fixture's stdout, on a CLEAN exit
+    only, means the leg holds no verdict (a backstop, not its stimulus, ended
+    the exercise, or the stimulus was observed only after cleanup; the
+    printed cause follows the marker): the distinct
+    CANNOT-EVALUATE outcome, never a pass (the runner's aggregate becomes
+    EXIT_MALFORMED) and never a finding. On any nonzero exit the marker is NOT
+    honored (fail closed: a leg that also failed stays a failure)."""
+    if returncode == EXIT_OK and _WATCHDOG_CANNOT_EVALUATE in stdout:
+        return "cannot-evaluate"
+    return "pass" if returncode == EXIT_OK else "fail"
+
+
+def _watchdog_run_legs(cases, launch):
+    """Launch each (label, code, timeout) leg in order through
+    launch(label, code, timeout) and print one line per leg. The aggregate
+    is the WORST outcome: EXIT_MALFORMED when any leg issued no verdict
+    (_watchdog_completion_verdict's cannot-evaluate, or a leg killed at its
+    own independent process bound, which a starved host can reach on a
+    correct leg and which therefore establishes nothing), else EXIT_FINDING
+    when any leg failed, else EXIT_OK."""
+    import subprocess
+    failed = False
+    unevaluated = []
+    for label, code, timeout in cases:
+        try:
+            result = launch(label, code, timeout)
+            verdict = _watchdog_completion_verdict(result.returncode, result.stdout)
+            detail = result.stdout + result.stderr
+        except (RuntimeError, subprocess.CalledProcessError) as exc:
+            verdict, detail = "fail", str(exc)
+        except subprocess.TimeoutExpired:
+            # A kill at the leg's process bound is no verdict on the leg:
+            # the distinct CANNOT-EVALUATE below, never a pass and never a
+            # definite failure (the scripted-launch aggregate vectors pin a
+            # lone bound kill to EXIT_MALFORMED).
+            verdict = "cannot-evaluate"
+            detail = "(fixture reached its independent process bound: no verdict)"
+        if verdict == "cannot-evaluate":
+            # The leg's own printed cause is in `detail`. Distinct outcome:
+            # recorded for the EXIT_MALFORMED aggregate below, never counted
+            # as a failure and never as a pass.
+            print("opf watchdog regression:", label, "CANNOT EVALUATE", detail)
+            unevaluated.append(label)
+            continue
+        print("opf watchdog regression:", label, "PASS" if verdict == "pass" else "FAIL", detail)
+        failed = failed or verdict != "pass"
+    if unevaluated:
+        # At least one leg issued no verdict: the distinct CANNOT-EVALUATE
+        # (the worst outcome, per run_self_tests_isolated's 2 > 1 > 0
+        # ordering; any leg failures above are already printed), never a pass.
+        print("opf watchdog regressions: CANNOT EVALUATE (no verdict from: "
+              + ", ".join(unevaluated) + ")")
+        return EXIT_MALFORMED
+    return EXIT_FINDING if failed else EXIT_OK
+
+
 def _watchdog_regression_self_test():
     """R10: startup/collection/exit bounds and the registered runner under hostile inherited state."""
     import ast
@@ -13062,8 +15548,9 @@ def _watchdog_regression_self_test():
     launcher_dispositions = ("ignored", "handler")
     # The runtime ledger's concurrency vectors (claude round-6 MEDIUM-2,
     # codex round-7 MEDIUM 6): each runs in its own independently bounded
-    # fixture process, so a regression that hangs one is killed at that
-    # vector's bound and reported as THAT vector's failure, never a hung
+    # fixture process, so a regression that hangs one is killed at THAT
+    # vector's bound, which the runner records as that vector's own
+    # no-verdict CANNOT-EVALUATE (never a pass), never a hung
     # suite. Each row is (mode, the vector leg's own declared budget,
     # which the fixture passes through to _watchdog_ledger_case, expected
     # verdict). The budgets are term-exact at the vectors' definitions;
@@ -13139,7 +15626,8 @@ def _watchdog_regression_self_test():
     )
     completion_modes = ("audit-ignore", "reaper", "nonce", "fixture-id", "status",
                         "early-exit", "cleanup-reaped", "cleanup-cancel", "premature-exit",
-                        "nested-timeout", "nested-cancel", "no-signal-echild",
+                        "nested-timeout", "nested-cancel", "nested-orders",
+                        "no-signal-echild",
                         "guardian-error", "empty-children", "bounded-diagnostics",
                         "cleanup-budget", "deadline-flips", "subject-setup",
                         "overdue-success", "launch-ownership", "launch-cancel",
@@ -13214,13 +15702,61 @@ def _watchdog_regression_self_test():
     budgets.update(("completion-" + mode, seconds) for mode, seconds in (
         ("audit-ignore", 16), ("reaper", 42), ("nonce", 32), ("fixture-id", 32),
         ("status", 32), ("early-exit", 48), ("cleanup-reaped", 15), ("cleanup-cancel", 16),
-        ("premature-exit", 80), ("nested-timeout", 11), ("nested-cancel", 11),
+        ("premature-exit", 80),
+        # The tree legs charge exactly one fixture launch at the startup
+        # backstop (their stimulus is event-ordered; the backstop is the
+        # only declared wait), so each budget IS that call's allowance,
+        # derived, never a flat constant under the sanctioned wait.
+        ("nested-timeout", _deadline_case_budget(_TREE_STARTUP_BACKSTOP)),
+        ("nested-cancel", _deadline_case_budget(_TREE_STARTUP_BACKSTOP)),
+        # nested-orders runs eighteen tree exercises, one fixture launch
+        # each: nine at the startup backstop and the nine real-expiry
+        # vectors at their short backstop, each launch charged its
+        # allowance. On top of the launch allowances, the forced-schedule
+        # holds those exercises make INSIDE their launches are real waits,
+        # each bounded by its exercise's backstop and each extending that
+        # launch past its own timeout; the ledger charges the launch only
+        # (a wait inside a registered call is never charged twice), so the
+        # budget declares each hold term by term instead: one hold at the
+        # startup backstop in each of the two cleanup-first orders, the
+        # two backstop-after-snapshot orders, the self-exit order and the
+        # outside-kill order (six), and at the vector backstop the stall
+        # vector's three holds and the late-READY wait (four). Nothing
+        # here is a blended margin: every term is a declared bound.
+        ("nested-orders", 9 * _deadline_case_budget(_TREE_STARTUP_BACKSTOP)
+         + 9 * _deadline_case_budget(_TREE_VECTOR_BACKSTOP)
+         + 6 * _TREE_STARTUP_BACKSTOP + 4 * _TREE_VECTOR_BACKSTOP),
         ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
         ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
-        ("subject-receipt", 784), ("subject-ack", 814), ("subject-orphan", 1658),
+        ("subject-receipt", 784), ("subject-ack", 814),
+        # subject-orphan: term by term at each code site. The four
+        # production legs: Leg 1 482 (launch 300 + 30 + 30 + 30 with the
+        # acknowledgment-published wait each launch makes before any leg
+        # kills the guardian, against the kill-before-acknowledgment race;
+        # guardian zombie 30, subject exit 30, authoritative reap 30,
+        # close 2), Leg 2 452
+        # (launch 390, close 2, subject exit 30, reap 30), Flip A 512
+        # (launch 390, guardian zombie 30, orphan marker 30, close 2,
+        # cleanup 30, reap 30) and Flip B 452 (launch 390, close 2, hygiene
+        # 30, cause reap 30). The committed vectors: the cause probes 180
+        # (three 30 s zombie waits, three 30 s reap bounds; the two
+        # reported-status probes and the capture-filter vector charge
+        # nothing), the real-warning check 30 (one 30 s join of its
+        # forking thread; its reap is untimed), the barrier flip 512 (as
+        # Flip A), the refused write
+        # 452 (launch 390, guardian collection 30, drain verdict 30: the
+        # gone check after a reported status, or the reap after an
+        # escalated close, one 30 s bound either way, close 2), the
+        # missing publication 427 (its launch charges a 5 s marker bound:
+        # 365, leak check 30, reap 30, close 2), the pre-start fault 2 (its
+        # launch fails before any charged wait: close 2), the restoration
+        # fault 362 (start 300, held acknowledgment 30, close 2, drain
+        # verdict 30) and the close fault 2 (as the pre-start fault).
+        ("subject-orphan", 482 + 452 + 180 + 30 + 512 + 452 + 512 + 452
+         + 427 + 2 + 362 + 2),
         # escalation-subject: 884 is the UPPER bound on the leg's declared
         # timeouts, not an exact base (two of its charges are fixture holds
         # charged at what REMAINS of their 300 s hold when start() runs, so
@@ -13235,8 +15771,14 @@ def _watchdog_regression_self_test():
         ("poll-collected", 1266), ("close-cancel", 1014), ("escalate-degraded", 784),
         ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
         ("census-exception", 780), ("receipt-high-fd", 10)))
-    # The isolation matrix: 31 timer cases, each one 180 s fixture call.
-    budgets["blocked-isolation"] = 31 * _deadline_case_budget(180)
+    # The isolation matrix in this leg: 31 timer cases, each one 180 s
+    # fixture call, charged its allowance by the leg's ledger. A call that
+    # overruns that allowance overruns the leg, which its process bound then
+    # ends; the top-level run of the same matrix has no such bound (each of
+    # its calls is bounded on its own, and a call killed at that bound is
+    # the distinct CANNOT-EVALUATE there).
+    budgets["blocked-isolation"] = (len(_watchdog_isolation_cases())
+                                    * _deadline_case_budget(_WATCHDOG_ISOLATION_TIMEOUT))
     # The ledger concurrency vectors: the declared budget IS the vector
     # leg's own (the fixture passes it through), so the kill-bound rule
     # (budget + launch margin) prices each vector exactly.
@@ -13268,15 +15810,24 @@ def _watchdog_regression_self_test():
                   + "import signal; signal.signal(signal.SIGALRM, signal.SIG_IGN); "
                   + "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}); "
                   + "rc = opf._bootstrap(); "
-                  + "return rc if rc else opf._watchdog_leg_entry("
+                  + "rc = rc if rc else opf._watchdog_leg_entry("
                   + repr(budgets.get("blocked-isolation"))
-                  + ", dict(opf._self_tests())['opf-watchdog-isolation'])",
+                  + ", dict(opf._self_tests())['opf-watchdog-isolation']); "
+                  # Exit 2 from the nested run is NO VERDICT (a timer fixture
+                  # killed at its own bound, or an unlanded ledger charge),
+                  # never this leg's own failure: the marker on a clean exit
+                  # maps it to the distinct CANNOT-EVALUATE.
+                  + "print(opf._WATCHDOG_CANNOT_EVALUATE"
+                  + " + ' (blocked-isolation: the nested run issued no verdict (exit 2))')"
+                  + " if rc == opf.EXIT_MALFORMED else None; "
+                  + "return opf.EXIT_OK if rc == opf.EXIT_MALFORMED else rc",
                   bound("blocked-isolation")))
     # One fixture per ledger concurrency vector: the expected verdict is
-    # compared INSIDE the fixture (0 on a match, 3 otherwise), so a hang,
-    # crash or wrong verdict is a nonzero fixture status, and a hung
-    # vector is killed at its own independent bound and reported as that
-    # vector's failure, never a hung suite.
+    # compared INSIDE the fixture (0 on a match, 3 otherwise), so a crash
+    # or wrong verdict is a nonzero fixture status, and a hung vector is
+    # killed at its own independent bound, which the runner records as
+    # that vector's own no-verdict CANNOT-EVALUATE (never a pass), never
+    # a hung suite.
     def ledger_fixture(mode, seconds, want, control=False):
         # ONE comparison fragment serves the real vectors and the
         # boolean-return controls (codex round-8 MEDIUM): only an
@@ -13795,26 +16346,173 @@ def _watchdog_regression_self_test():
         if (not _watchdog_bound_faults(dict(probe=bad), dict(probe=10))
                 or not _watchdog_bound_faults(dict(probe=10 ** 6), dict(probe=bad))):
             flip_missed.append("non-finite floor input %r" % (bad,))
+    # The cannot-evaluate marker mapping (red-on-revert): only the exact
+    # marker on a CLEAN exit maps to the distinct cannot-evaluate outcome; a
+    # clean unmarked run passes; any nonzero exit stays a failure even WITH
+    # the marker (fail closed).
+    for got, want in (
+            (_watchdog_completion_verdict(EXIT_OK, "opf completion: x PASS\n"), "pass"),
+            (_watchdog_completion_verdict(EXIT_FINDING, ""), "fail"),
+            (_watchdog_completion_verdict(
+                EXIT_OK, _WATCHDOG_CANNOT_EVALUATE + " (tree/t: cause)\n"),
+             "cannot-evaluate"),
+            (_watchdog_completion_verdict(
+                EXIT_FINDING, _WATCHDOG_CANNOT_EVALUATE + " (tree/t: cause)\n"),
+             "fail"),
+    ):
+        if got != want:
+            flip_missed.append("completion verdict %r != %r" % (got, want))
+    # The aggregate itself (red-on-revert): _watchdog_run_legs over scripted
+    # launches, its per-leg lines captured. A cannot-evaluate leg makes the
+    # aggregate EXIT_MALFORMED, even beside a failure; a leg killed at its
+    # own process bound is cannot-evaluate ON ITS OWN (the lone-bound-kill
+    # row below is red when such a kill is read as a definite failure
+    # again, and the kill beside a failure stays EXIT_MALFORMED, the worst
+    # outcome); failures alone make it EXIT_FINDING; the marker on a
+    # nonzero exit stays a failure.
+    def scripted(outcomes):
+        def launch(label, code, timeout):
+            outcome = outcomes[label]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return subprocess.CompletedProcess([label], outcome[0], outcome[1], "")
+        return launch
+
+    marked = _WATCHDOG_CANNOT_EVALUATE + " (tree/t: cause)\n"
+    for outcomes, want in (
+            (dict(a=(EXIT_OK, "ok\n")), EXIT_OK),
+            (dict(a=(EXIT_OK, "ok\n"), b=(EXIT_OK, marked)), EXIT_MALFORMED),
+            (dict(a=subprocess.TimeoutExpired("a", 1)), EXIT_MALFORMED),
+            (dict(a=subprocess.TimeoutExpired("a", 1),
+                  b=subprocess.CalledProcessError(1, "b")), EXIT_MALFORMED),
+            (dict(a=subprocess.TimeoutExpired("a", 1), b=(EXIT_OK, marked)), EXIT_MALFORMED),
+            (dict(a=(EXIT_OK, marked), b=subprocess.CalledProcessError(1, "b")), EXIT_MALFORMED),
+            (dict(a=subprocess.CalledProcessError(1, "a"), b=(EXIT_OK, "ok\n")), EXIT_FINDING),
+            (dict(a=(EXIT_FINDING, marked)), EXIT_FINDING),
+            (dict(a=RuntimeError("cannot launch")), EXIT_FINDING)):
+        with contextlib.redirect_stdout(io.StringIO()):
+            got = _watchdog_run_legs([(label, "", 1) for label in outcomes], scripted(outcomes))
+        if got != want:
+            flip_missed.append("leg aggregate %r -> %r, want %r" % (sorted(outcomes), got, want))
+    # The window exercise's own classification (red-on-revert): only the
+    # subject's return passes; run_bounded's TIMEOUT sentinel is no verdict
+    # ONLY once the measured elapsed time reached the bound (run_bounded
+    # computes its deadline after the caller's measurement begins, so a
+    # correct run cannot trip it earlier, while host starvation can reach
+    # it on a correct subject), each end of that boundary pinned: just
+    # under the bound is the early trip, a definite run_bounded failure,
+    # exactly at it and just over it are no verdict; every other sentinel
+    # stays a definite failure whatever the elapsed time (fail closed).
+    for result, elapsed, want in (
+            ("RETURNED", 2.0, "pass"), ("RETURNED", 10.01, "pass"),
+            ("TIMEOUT", 10.0, "unestablished"), ("TIMEOUT", 10.01, "unestablished"),
+            ("TIMEOUT", 9.99, "fail"), ("TIMEOUT", 0.0, "fail"),
+            ("OOM", 10.01, "fail"), ("CHILD-DIED", 2.0, "fail"),
+            ("ERROR:ValueError", 2.0, "fail"), ("SETUP-ERROR:NoFork", 2.0, "fail")):
+        if _watchdog_window_verdict(result, elapsed, 10) != want:
+            flip_missed.append("window verdict %r at %s s -> %r, want %r"
+                               % (result, elapsed,
+                                  _watchdog_window_verdict(result, elapsed, 10), want))
+    # The tree legs' never-parsed decision (red-on-revert): ordered by the
+    # polls' own observations, never by the publish stamps or the last
+    # poll's recorded wall time. The clock-step row: no poll ever parsed
+    # the markers (they were published only after the last poll), while a
+    # realtime clock step between that poll and the publication left the
+    # stamps reading 31 s older than the poll's recorded wall time, which
+    # must stay no verdict (a stamp-against-poll comparison falsely fails
+    # it); a poll that DID parse both markers is the harness defect
+    # whatever the stamps read, older or newer than that poll.
+    for unparsed_polls, published, last_wall, want in (
+            ([], [1000.0, 1000.0], 1031.0, False),
+            ([], [1000.0, 1000.0], 1000.5, False),
+            ([], [], 1031.0, False),
+            ([7], [1000.0, 1000.0], 970.0, True),
+            ([7], [1000.0, 1000.0], 1031.0, True)):
+        if _tree_never_parsed(unparsed_polls, published, last_wall) is not want:
+            flip_missed.append("never-parsed decision (%r, %r, %r) -> %r, want %r"
+                               % (unparsed_polls, published, last_wall,
+                                  _tree_never_parsed(unparsed_polls, published,
+                                                     last_wall), want))
+    # The isolation self-test's own no-verdict mappings (red-on-revert), over
+    # scripted launches: a timer fixture killed at its process bound, and a
+    # clean exit carrying the exact cannot-evaluate marker (a fixture whose
+    # window exercise was never established), make that run the distinct
+    # EXIT_MALFORMED (no verdict), never a definite failure; clean unmarked
+    # launches keep EXIT_OK, failing ones EXIT_FINDING, and the marker on a
+    # failing exit is not honored (fail closed).
+    def isolation_scripted(outcome):
+        def launch(label, mode, code):
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return subprocess.CompletedProcess([label], outcome[0], outcome[1], "")
+        return launch
+
+    for outcome, want in ((subprocess.TimeoutExpired("timer", 1), EXIT_MALFORMED),
+                          ((EXIT_OK, ""), EXIT_OK), ((EXIT_FINDING, ""), EXIT_FINDING),
+                          ((EXIT_OK, marked), EXIT_MALFORMED),
+                          ((EXIT_FINDING, marked), EXIT_FINDING)):
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            got = _watchdog_isolation_self_test(launch=isolation_scripted(outcome))
+        if got != want:
+            flip_missed.append("isolation no-verdict aggregate for %r: %r, want %r"
+                               % (outcome, got, want))
+    # The TIMEOUT-to-marker connection inside the REAL timer fixture
+    # (red-on-revert): _watchdog_timer_case itself runs here with its
+    # bounded window run and its clock scripted (the "inactive" mode arms
+    # no timer; the SIGALRM disposition and the real itimer are restored
+    # around each call), and its exit and stdout feed the same completion
+    # mapping the launching runner applies, which the scripted rows above
+    # pin. The subject's own return is an unmarked pass; a TIMEOUT whose
+    # measured time reached the bound is a CLEAN exit that carries the
+    # exact marker (dropping that print would turn the starved window case
+    # into a silent pass); a TIMEOUT measured before the bound could have
+    # elapsed, and every other sentinel, is a definite failure carrying no
+    # honored marker.
+    def window_fixture(result, elapsed):
+        ticks = iter((0.0, elapsed))
+        sigalrm = signal.getsignal(signal.SIGALRM)
+        timer = signal.getitimer(signal.ITIMER_REAL)
+        buffer = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buffer):
+                rc = _watchdog_timer_case("window", "inactive",
+                                          bounded=lambda thunk, timeout_s: result,
+                                          clock=lambda: next(ticks))
+        finally:
+            signal.signal(signal.SIGALRM, sigalrm)
+            signal.setitimer(signal.ITIMER_REAL, *timer)
+        out = buffer.getvalue()
+        return (_watchdog_completion_verdict(rc, out), _WATCHDOG_CANNOT_EVALUATE in out)
+
+    for result, elapsed, want in (("RETURNED", 2.0, ("pass", False)),
+                                  ("TIMEOUT", 10.0, ("cannot-evaluate", True)),
+                                  ("TIMEOUT", 10.01, ("cannot-evaluate", True)),
+                                  ("TIMEOUT", 9.99, ("fail", False)),
+                                  ("OOM", 2.0, ("fail", False))):
+        got = window_fixture(result, elapsed)
+        if got != want:
+            flip_missed.append("window fixture %s at %s s -> %r, want %r"
+                               % (result, elapsed, got, want))
+    # The close-out allowance derivation: the real close-out code, run along
+    # each derived path under a virtual clock, must fit that path's total
+    # and reach each of its waits.
+    flip_missed.extend(_watchdog_closeout_vectors())
+    flip_missed.extend("startup diagnosis %r -> %r, want %r" % miss
+                       for miss in _watchdog_startup_vectors())
     floor = _watchdog_bound_faults(live, budgets)
     if floor or flip_missed:
         print("opf watchdog regressions: FAIL (process bound below a leg's own budget: %s; "
               "floor vectors not refused: %s)" % (
                   "; ".join(floor) or "none", ", ".join(flip_missed) or "none"))
         return EXIT_FINDING
-    failed = False
-    for label, code, timeout in cases:
-        try:
-            result = run_status_owned([sys.executable, "-I", "-B", "-c", code],
-                                    fixture_id="watchdog/" + label,
-                                    capture_output=True, text=True, timeout=timeout)
-            ok, detail = result.returncode == EXIT_OK, result.stdout + result.stderr
-        except (RuntimeError, subprocess.CalledProcessError) as exc:
-            ok, detail = False, str(exc)
-        except subprocess.TimeoutExpired:
-            ok, detail = False, "fixture exceeded its independent process bound"
-        print("opf watchdog regression:", label, "PASS" if ok else "FAIL", detail)
-        failed = failed or not ok
-    return EXIT_FINDING if failed else EXIT_OK
+
+    def launch(label, code, timeout):
+        return run_status_owned([sys.executable, "-I", "-B", "-c", code],
+                                fixture_id="watchdog/" + label,
+                                capture_output=True, text=True, timeout=timeout)
+
+    return _watchdog_run_legs(cases, launch)
 
 
 def _cmd_render(rest):
@@ -14161,7 +16859,12 @@ def _init_repo(root):
     repo = Path(os.path.abspath(os.fsdecode(lines[2])))
     if root != repo and repo not in root.parents:
         raise RuntimeError("git preflight: reported repository does not contain root")
-    repo_fd = _opf_store._open_dir_nofollow(repo)
+    # A no-follow probe only, closed unread: traverse_only. Where os.O_PATH exists the probe needs search
+    # permission only, so an enclosing repository with search but no read permission (0111) above a nested
+    # product root is confirmed rather than refused EACCES (#516). Without os.O_PATH the walk opens every
+    # component O_RDONLY, so such a repository still refuses EACCES (fail-closed), first at _init_main's
+    # readable root walk through it; see _opf_store._open_dir_nofollow.
+    repo_fd = _opf_store._open_dir_nofollow(repo, traverse_only=True)
     _opf_store._journal._close_fd_propagating(repo_fd)
     if _init_git(git, repo, args) != raw:
         raise RuntimeError("git preflight: repository identity changed during confirmation")
@@ -14403,7 +17106,7 @@ def _init_echo(line, err=False):
     sys.displayhook, an alias to an out-of-graph helper, an import alias such as
     from os import writev as ascii, or a spelled callback such as
     sorted(..., key=os.system)) is therefore refused because the reference is not
-    allowed where it appears. RESIDUAL (D-STATIC-PIN-RESIDUAL, stated exactly): a
+    allowed where it appears. RESIDUAL (what the static pin cannot see, stated exactly): a
     static reference check cannot see what an ALLOWED reference does at runtime
     with hostile VALUES (an allowed method spelling invoked on a rebound object),
     code in ANOTHER MODULE (the sibling _opf_* modules the init path calls into,
@@ -14640,7 +17343,7 @@ def _init_refusal_message(exc):
     the handler formats those characters and nothing a subclass chooses.
     Deliberate in-process forgery of the private attribute around raw text,
     and in-process rebinding of these functions, are hostile code already
-    running in this interpreter, the stated D-STATIC-PIN-RESIDUAL."""
+    running in this interpreter, the residual _init_echo's docstring states."""
     text = _init_exact_str(exc)
     try:
         proven = exc._opf_rendered_message
@@ -15478,7 +18181,11 @@ def _init_no_prior_store(git, repo, root):
 
 
 def _init_same_root(root, root_fd):
-    check_fd = _opf_store._open_dir_nofollow(root)
+    # fstat only, never listed or read: traverse_only. Where os.O_PATH exists the identity check needs search
+    # permission only, so a search-only (0111) root binds. Without os.O_PATH the walk opens every component
+    # O_RDONLY, so the check needs read permission on the root and each ancestor, and a search-only root
+    # still refuses EACCES (fail-closed); see _opf_store._open_dir_nofollow.
+    check_fd = _opf_store._open_dir_nofollow(root, traverse_only=True)
     try:
         current = os.fstat(check_fd)
         opened = os.fstat(root_fd)
@@ -15900,7 +18607,7 @@ def _cmd_init(rest):
     traceback shows the dispatcher's source lines and the interrupt type; by
     then no exception is being handled, so it interpolates no init value: this
     qualifier holds for this post-return window only). What a static scan
-    still cannot prove is stated in _init_echo's docstring (D-STATIC-PIN-RESIDUAL)."""
+    still cannot prove is stated in _init_echo's docstring (its RESIDUAL paragraph)."""
     try:
         return _init_main(rest)
     except BaseException as exc:  # noqa: BLE001  the last-resort rendering boundary
@@ -16539,7 +19246,10 @@ def _upgrade_run(root):
         try:
             manifest_model = tomllib.loads(manifest_bytes.decode("utf-8"))
             counters_model = tomllib.loads(counters_bytes.decode("utf-8"))
-        except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+        except (ValueError, RecursionError, MemoryError) as exc:
+            # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
+            # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part
+            # key under a memory limit.
             raise _UpgradeError("store manifest or counters does not parse as TOML ({})".format(exc))
 
         # spec_version triage: current is an idempotent byte no-op; above-tooling fails closed; only the
@@ -16577,16 +19287,21 @@ def _upgrade_run(root):
         except ValueError:
             sv_tuple = None
         if sv_tuple is not None and sv_tuple > tuple(int(p) for p in _UPGRADE_TO.split(".")):
-            raise _UpgradeError("store declares spec_version {!r} ABOVE the {} this tooling implements; "
-                                "a newer store is never downgraded (fail-closed)".format(sv, _UPGRADE_TO))
+            raise _UpgradeError("store declares spec_version {!r} ABOVE the {} upgrade target; opf upgrade "
+                                "never downgrades a store and performs no homes migration (fail-closed)".format(
+                                    sv, _UPGRADE_TO))
         minor = sv == _UPGRADE_MID
 
         # PRECONDITION (spec 9.2): re-emitting the UNCHANGED parsed model reproduces the on-disk bytes
-        # exactly, proving the file is canonical and comment-free so the bounded rewrite loses nothing.
-        if _opf_emit.emit_checked(manifest_model).encode("utf-8") != manifest_bytes:
+        # exactly, proving the file is canonical and comment-free so the bounded rewrite loses nothing. A file
+        # an earlier emitter wrote with a literal U+2028 or U+2029 inside a basic string still passes when
+        # that is its only difference (_opf_emit.matches_store_bytes); the rewrite re-spells it.
+        if not _opf_emit.matches_store_bytes(
+                manifest_bytes, _opf_emit.emit_checked(manifest_model).encode("utf-8")):
             raise _UpgradeError("manifest is not in canonical new-document form (hand-edited or comment-"
                                 "bearing); refusing a model rewrite that could lose content (fail-closed)")
-        if _opf_emit.emit_checked(counters_model).encode("utf-8") != counters_bytes:
+        if not _opf_emit.matches_store_bytes(
+                counters_bytes, _opf_emit.emit_checked(counters_model).encode("utf-8")):
             raise _UpgradeError("counters.toml is not in canonical new-document form; refusing (fail-closed)")
 
         new_manifest, new_counters, added_ns, origin = (
@@ -16594,6 +19309,24 @@ def _upgrade_run(root):
         origin_version = _UPGRADE_MID if minor else _UPGRADE_FROM
         new_manifest_bytes = _opf_emit.emit_checked(new_manifest).encode("utf-8")
         new_counters_bytes = _opf_emit.emit_checked(new_counters).encode("utf-8")
+        empty_index = _opf_emit.emit_checked(
+            {"schema": _opf_schema.SUPPORTED_SCHEMA, "record": []}).encode("utf-8")
+
+        # PRECONDITION (store-read cap): every store file this upgrade would publish must stay readable
+        # by the store reader, which refuses any store file LARGER than _opf_store.MAX_STORE_READ_BYTES
+        # (a file of exactly that size still reads, so only a larger emission refuses here). Re-spelling
+        # a literal U+2028/U+2029 as its six-byte escape, like the schema delta itself, grows the
+        # emission, so a legacy file near the cap could otherwise be rewritten into one the reader then
+        # refuses, leaving a store that no longer resolves. Refuse BEFORE the cleanliness probes, the
+        # lease, and any write, so the store is left byte-for-byte unchanged (fail-closed).
+        for publish_rel, publish_bytes in ((manifest_rel, new_manifest_bytes),
+                                           (counters_rel, new_counters_bytes),
+                                           ("an upgrade-created empty index", empty_index)):
+            if len(publish_bytes) > _opf_store.MAX_STORE_READ_BYTES:
+                raise _UpgradeError(
+                    "upgraded {} would be {} bytes, over the {}-byte store-read cap its reader "
+                    "enforces; refusing before any write, the store is unchanged (fail-closed)".format(
+                        publish_rel, len(publish_bytes), _opf_store.MAX_STORE_READ_BYTES))
 
         # STEP 3: derive the scope from this delta and its POST-delta render declarations. The same
         # destinations drive the cleanliness gate, index creation, recovery, and staging advice.
@@ -16641,8 +19374,6 @@ def _upgrade_run(root):
             _upgrade_replace(root_fd, manifest_rel, new_manifest_bytes)
             if new_counters_bytes != counters_bytes:
                 _upgrade_replace(root_fd, counters_rel, new_counters_bytes)
-            empty_index = _opf_emit.emit_checked(
-                {"schema": _opf_schema.SUPPORTED_SCHEMA, "record": []}).encode("utf-8")
             created_indexes = []
             for idx_rel in write_scope["indexes"]:
                 if _upgrade_create_index(root_fd, idx_rel, empty_index):
@@ -17119,14 +19850,16 @@ def _adopt_read_bounded(path, label, cap):
     naming `label` (the caller maps it to a cannot-evaluate exit 2, never a silent nothing-to-do). The read
     is the planner's own read discipline: a no-follow, nonblocking open (every component is walked from the
     filesystem root with O_NOFOLLOW, the store root's _opf_store._open_dir_nofollow walk, so a symlinked
-    parent, ancestor or final component refuses; and a FIFO returns at once rather than blocking), a
-    SINGLY-LINKED (st_nlink == 1) regular file only (a hardlinked input is a second name for another inode,
-    refused class-consistent with the engine's own single-link control reads), and the byte bound `cap`
-    checked on the opened fd and again by the journal's capped reader, so a FIFO, device, directory,
-    symlink, multiply-linked or oversized input refuses."""
+    parent, ancestor or final component refuses; and a FIFO returns at once rather than blocking; the
+    parent is opened traverse_only, since it is only the dir_fd of the input open and never listed, so an
+    input in a search-only directory reads as a plain open of it does), a SINGLY-LINKED (st_nlink == 1)
+    regular file only (a hardlinked input is a second name for another inode, refused class-consistent
+    with the engine's own single-link control reads), and the byte bound `cap` checked on the opened fd
+    and again by the journal's capped reader, so a FIFO, device, directory, symlink, multiply-linked or
+    oversized input refuses."""
     try:
         parent, name = os.path.split(path if os.path.isabs(path) else os.path.join(os.getcwd(), path))
-        pfd = _opf_store._open_dir_nofollow(parent)
+        pfd = _opf_store._open_dir_nofollow(parent, traverse_only=True)   # a dir_fd only, never read
         fd = None
         try:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
@@ -17183,7 +19916,7 @@ def _adopt_read_inputs(path):
     raw = _adopt_read_bounded(path, "--inputs worksheet", _opf_adopt_plan.MAX_FILE_BYTES)
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
-    except (ValueError, RecursionError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
+    except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
         raise ValueError("--inputs worksheet unreadable or malformed ({}): {}".format(path, exc))
     if not (isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 1):
         raise ValueError("--inputs worksheet must be a TOML table carrying `schema = 1` (an integer 1, "
@@ -18844,6 +21577,43 @@ def _cli_self_test():
                         failures.append("adopt plan with {} worksheet: rc={!r} (expected 2 + {!r})".format(
                             label, rc, needle))
 
+                # The worksheet's PARENT is only the dir_fd of the worksheet open, never listed, so it is opened
+                # traverse_only: a worksheet in a search-only (0111) directory reads as a plain open of it does.
+                # Red without traverse_only (the readable parent open refuses EACCES). Mode bits do not bind
+                # uid 0, so that run discloses a skip; without os.O_PATH the walk keeps its documented O_RDONLY
+                # fallback, so the EACCES refusal is asserted there instead (fail-closed, never relaxed).
+                _so_dir = os.path.join(abase, "searchonly")
+                _so_ws = os.path.join(_so_dir, "inputs.toml")
+                try:
+                    os.mkdir(_so_dir)
+                    with open(_so_ws, "w", encoding="utf-8") as fh:
+                        fh.write('schema = 1\nproduct = "opf"\n'
+                                 'expected_observation_digest = "sha256:' + "0" * 64 + '"\n' + bindings_toml)
+                except OSError as exc:
+                    print("opf cli self-test: harness error: could not build the adopt --inputs search-only "
+                          "fixture ({})".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+                if hasattr(os, "geteuid") and os.geteuid() == 0:
+                    print("opf cli self-test: DISCLOSED SKIP: adopt --inputs search-only parent vector not run "
+                          "(uid 0 is not bound by mode bits)", file=sys.stderr)
+                else:
+                    os.chmod(_so_dir, 0o111)
+                    try:
+                        try:
+                            _so_out = sorted(_adopt_read_inputs(_so_ws))
+                        except ValueError as exc:
+                            _so_out = str(exc)
+                    finally:
+                        os.chmod(_so_dir, 0o755)
+                    if hasattr(os, "O_PATH"):
+                        if not isinstance(_so_out, list) or "bindings" not in _so_out:
+                            failures.append("adopt --inputs worksheet in a search-only (0111) directory: "
+                                            "expected it read as a plain open reads it, got {!r}".format(_so_out))
+                    elif not isinstance(_so_out, str) or "[Errno 13]" not in _so_out:
+                        failures.append("adopt --inputs worksheet in a search-only (0111) directory without "
+                                        "os.O_PATH: expected the documented EACCES refusal, got {!r}".format(
+                                            _so_out))
+
                 # Round-5 defect 2 (K9a fix 5): a parent-directory close that reports an error inside
                 # the --inputs open must not leak the just-opened worksheet fd. Inject the failure at
                 # the REAL close (the number is still released, as on Linux); the read still fails
@@ -18854,8 +21624,8 @@ def _cli_self_test():
                 _wl_real_close = os.close
                 _wl_seen = {}
 
-                def _wl_walk(path):
-                    fd = _wl_real_walk(path)
+                def _wl_walk(path, **kwargs):
+                    fd = _wl_real_walk(path, **kwargs)
                     _wl_seen["pfd"] = fd
                     return fd
 
@@ -18968,8 +21738,10 @@ def _cli_self_test():
                 bindings = _opf_adopt.canonical_plan_bindings()   # its revision is the fixture's HEAD, below
                 manifest = _opf_init.build_manifest()
                 views = sorted(v["target"] for v in tomllib.loads(manifest)["views"].values())
+                # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry
+                # point) lies outside every walked root, so its absence is a declared target.
                 sheet = dict(schema=1, product="opf", sources=["keep.md", "legacy.md"],
-                             targets=[".opf/hooks/pre-commit"],
+                             targets=[_opf_adopt.PACK_MIRROR_ROOT],
                              decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),
                                         dict(path="legacy.md", disposition="retire", actor="fixture")],
                              ops=[dict(op="init-store", store_root=".", members=[dict(
@@ -20225,8 +22997,8 @@ def _close_exc_safe_vectors_self_test():
         def call():
             real_nofollow = _opf_store._open_dir_nofollow
 
-            def nofollow(path):
-                fd = real_nofollow(path)
+            def nofollow(path, **kwargs):
+                fd = real_nofollow(path, **kwargs)   # the real walk, with _init_repo's traverse_only
                 arm(fd)                       # only the repository-root probe's close is injected
                 return fd
             with mock.patch.object(_opf_store, "_open_dir_nofollow", nofollow):
@@ -20577,6 +23349,7 @@ def _self_tests():
     ("opf-observe", _opf_observe.self_test),
     ("opf-absorb", _opf_absorb.self_test),
     ("opf-record", _opf_record.self_test),
+    ("opf-write-guard", _opf_write_guard.self_test),
     ("opf-adopt-apply", _opf_adopt_apply.self_test),
     ("opf-adopt-state", _opf_adopt_state.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),

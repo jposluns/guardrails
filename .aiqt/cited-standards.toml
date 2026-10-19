@@ -1,0 +1,23 @@
+# .aiqt/cited-standards.toml: this repository's reviewed corpus for tools/check_cited_standards.py.
+# Repository-local: tracked, not shipped (an [[exclusion]] in .aiqt/core/ownership.toml). This repository's
+# CI (.github/workflows/quality.yml) and tools/run_all_checks.sh pass it with --config, and
+# .github/check_cited_standards_contract.py fails if the corpus below stops naming the rule-file glob or
+# covering a member pack.toml lists (pack.toml is validated by its owning validator,
+# opf/tools/check_opf_prompt_pack.py), or if either runner's gate line is not exactly
+# --config .aiqt/cited-standards.toml and nothing else (an appended --root is a finding). Run without
+# --config, the gate keeps its built-in default corpus, the rule files alone; the shipped
+# tools/run_all_checks.sh in a tree without this file exits 2 (cannot evaluate) at its cited-standards gate
+# and that run then ends RESULT: FAIL (the newtab-repo-contract and cited-standards-repo-contract gate lines
+# fail in such a tree too, their .github scripts not being shipped).
+#
+# The corpus is the rule files plus the OPF prompt-pack members, the adopter-facing skills that
+# opf/prompt-pack/pack.toml lists. The members sit one directory down (adopt/, flow/), so the glob is
+# recursive. Each glob must match at least one file, so an emptied directory fails closed (exit 2). The glob
+# reads Markdown only: every member pack.toml lists is a .md file, and pack.toml itself (member paths and
+# digests, not prose) is not scanned. A member added with another extension is not scanned until a glob
+# names it.
+#
+# No exclusion is recorded: when the prompt-pack glob was added, the wider scan found no numbered standard
+# designator in any member (nor in pack.toml).
+format-version = 1
+corpus = [".aiqt/core/rules/*.md", "opf/prompt-pack/**/*.md"]

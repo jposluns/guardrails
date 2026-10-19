@@ -3367,9 +3367,9 @@ Import and the imported-series writer (section 8.8, `import --batch`; section 14
 import), adoption of pre-existing files (section 14), migrating an existing release pipeline
 (section 14.3), store relocation (sections 5.4 to 5.6) and `opf sync` (section 5.7), schema upgrades
 other than those of step 8 (section 9.2; the upgrades to 1.3.0 and the staged upgrade to 1.2.0 of
-open point 21), the homes-2 generation and its homes
-migration (sections 4.2 and 9.2), the modules (section 8.5) beyond what the step 8 upgrade fixtures
-need, profiles (section 9.1), and the fresh-only implementation class with its admission check
+open point 21), the homes-2 generation (sections 4.2 and 9.2), the modules (section 8.5) beyond
+what the step 8 upgrade fixtures need, profiles (section 9.1), and the fresh-only implementation
+class with its admission check
 (section 16.1). If your project needs any of these, read those sections at the same pinned commit
 and extend the plan, under the same rules. Leaving one out of your implementation does not waive a
 base requirement it carries (section 16.1); open point 32 asks the maintainer which of the

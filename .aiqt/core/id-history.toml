@@ -3077,3 +3077,55 @@ born-release = "1.1.0"
 [[born]]
 id = "cntdef.11"
 born-release = "1.1.0"
+
+[[born]]
+id = "secprv.5"
+born-release = "1.1.0"
+
+[[born]]
+id = "secprv.6"
+born-release = "1.1.0"
+
+[[born]]
+id = "secprv.7"
+born-release = "1.1.0"
+
+[[born]]
+id = "secprv.8"
+born-release = "1.1.0"
+
+[[born]]
+id = "secprv.9"
+born-release = "1.1.0"
+
+[[born]]
+id = "secprv.10"
+born-release = "1.1.0"
+
+[[born]]
+id = "secprv.11"
+born-release = "1.1.0"
+
+[[born]]
+id = "evgcmp.15"
+born-release = "1.1.0"
+
+[[born]]
+id = "setcmp.9"
+born-release = "1.1.0"
+
+[[born]]
+id = "setcmp.10"
+born-release = "1.1.0"
+
+[[born]]
+id = "citint.4"
+born-release = "1.1.0"
+
+[[born]]
+id = "rdbchr.2"
+born-release = "1.1.0"
+
+[[born]]
+id = "secsup.7"
+born-release = "1.1.0"

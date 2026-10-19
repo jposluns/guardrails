@@ -22,7 +22,7 @@ existing `.working` exactly as before, pinned by the seam self-tests. A resume i
 recorded plan: the adoption kind, the ancestral evidence commit, the admitted inventory and a
 caller-named operation id must each match, else it refuses (_resume_binding_or_refuse).
 
-The Architect's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
+The maintainer's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
 
   1. Bootstrap capability. The shared mutex is taken first (_opf_oplock.acquire_init_operation, a
      pre-store InitHolder: no control record, no lease); the plan and the directory journal are
@@ -451,7 +451,7 @@ def validate_bootstrap_provenance(raw, *, expected_basis=None, expected_source_d
         model = tomllib.loads(raw.decode("utf-8", errors="strict"))
     except UnicodeDecodeError:
         return _pv(INVALID, "ENCODING", "raw", "invalid UTF-8")
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         return _pv(INVALID, "PARSE", "raw", "not TOML ({})".format(exc))
     if type(model) is not dict:
         return _pv(INVALID, "TYPE", "root", "must be a table")
@@ -593,7 +593,7 @@ def read_ancestral_counter_seed(store_root, *, pinned_head, evidence_commit, pre
         parsed = tomllib.loads(blob.decode("utf-8", errors="strict"))
     except UnicodeDecodeError:
         raise InitOperationError("ancestral counters blob is not decodable UTF-8; refusing")
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise InitOperationError("ancestral counters blob is not valid TOML ({}); refusing".format(exc))
 
     baseline, importer, module = _roster_namespaces()
@@ -1087,7 +1087,10 @@ def build_view_roster(operation_id, manifest_payload, source_paths):
     InitOperationError."""
     try:
         manifest = tomllib.loads(manifest_payload.decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, AttributeError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, AttributeError, RecursionError,
+            MemoryError):
+        # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part key
+        # under a memory limit; ValueError: an over-long integer literal too.
         raise InitOperationError("the planned manifest payload is not TOML; the view roster cannot "
                                  "be derived")
     views = manifest.get("views")
@@ -1382,7 +1385,9 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
             _plan_bad("S entry {} is not this generator's exact bytes".format(path))
     try:
         counters = tomllib.loads(payloads[COUNTERS_RELPATH].decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part key
+        # under a memory limit; ValueError: an over-long integer literal too.
         _plan_bad("the counters payload is not TOML")
     if type(counters_basis) is not dict:
         _plan_bad("the counters basis must be a table")
@@ -2087,7 +2092,9 @@ def _health_check(root, root_fd, plan, binding):
     baseline, importer, _module = _roster_namespaces()
     try:
         counters = tomllib.loads(raw.decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key;
+        # MemoryError: a many-part key under a memory limit.
         raise InitOperationError("the completed adoption's counters are not TOML")
     _hw, findings = validate_counters(counters, known_namespaces=baseline,
                                       optional_namespaces=importer)
@@ -2357,6 +2364,16 @@ def _select(run, binding):
     return "fresh", None
 
 
+def _planned_view_targets():
+    """The default manifest declares the initial view destinations; its re-parse here disposes of
+    RecursionError, MemoryError and the ValueError family itself (the tomllib parse-site floor,
+    tools/check_python_floor.py), refusing as InitOperationError, never an escaping parse error."""
+    try:
+        return {v["target"] for v in tomllib.loads(_opf_init.build_manifest())["views"].values()}
+    except (ValueError, RecursionError, MemoryError) as exc:   # TOMLDecodeError included
+        raise InitOperationError("the default manifest does not parse as TOML ({}); refused".format(exc))
+
+
 def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=None,
                 admitted_dirs=()):
     """Preflight a FRESH adoption under the mutex and produce its immutable plan: no pointer, no
@@ -2429,7 +2446,7 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
                                          "mode, size and digest; foreign content is never adopted "
                                          "by init".format(path))
         planned = set(BOOTSTRAP_SOURCE_ROSTER) | {PROVENANCE_RELPATH, CHANGELOG_RELPATH}
-        planned |= {v["target"] for v in tomllib.loads(_opf_init.build_manifest())["views"].values()}
+        planned |= _planned_view_targets()
         clash = sorted(set(want_files) & planned)
         if clash:
             raise InitOperationError("admitted .working file(s) {} occupy planned destinations; an "
@@ -2778,7 +2795,11 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
         if "preserved and refused" in str(exc):
             result.conflicts.append(str(exc).split(" ", 1)[0])
     except (_opf_oplock.OpLockError, _opf_init_substrate.InitSubstrateError,
-            _journal.JournalError, OSError, ValueError) as exc:
+            _journal.JournalError, OSError, ValueError, RecursionError, MemoryError) as exc:
+        # RecursionError and MemoryError: this maps ANY unmapped one raised inside this protected region (from
+        # the mutex acquisition to the views-ready record), a tomllib parse refusal (deep nesting, a 1001-part
+        # key, a many-part key under a memory limit) at a site with no local mapping included, to
+        # CANNOT-EVALUATE. The preflight before this try and the cleanup in its finally are outside it.
         primary = {"code": CANNOT_EVALUATE, "detail": "{}: {}".format(type(exc).__name__, exc)}
     finally:
         if primary is not None:
@@ -2887,9 +2908,29 @@ def _git(args, cwd, env, allow_fail=False, input_bytes=None):
 
 
 def _write(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    """Fixture bytes at path, hermetic against ANY ambient process umask: every missing
+    directory is created one level at a time, parent-first, and pinned to DIR_MODE before
+    the next level is created beneath it (a bare makedirs under an owner-restrictive umask
+    such as 0o700 leaves a fresh parent untraversable, so nothing deeper could be built),
+    and a freshly created file is pinned to 0o644 (a fixture needing another mode chmods
+    after writing), while a pre-existing file keeps its mode and only its bytes change. A
+    path that is a dangling symlink is NOT handled: the write would follow the link and
+    create its target with a umask-derived mode (the R5 symlink fixtures call os.symlink
+    directly and never pass one here). A fixture verdict comes from the code under test,
+    never from the umask the harness happened to inherit."""
+    missing = []
+    parent = os.path.dirname(path)
+    while parent and not os.path.lexists(parent):
+        missing.append(parent)
+        parent = os.path.dirname(parent)
+    for made in reversed(missing):
+        os.mkdir(made)
+        os.chmod(made, DIR_MODE)
+    fresh = not os.path.lexists(path)
     with open(path, "wb") as fh:
         fh.write(data)
+    if fresh:
+        os.chmod(path, 0o644)
 
 
 def _counters_toml(values):
@@ -3145,6 +3186,20 @@ def _run_self_test_isolated():
     manual = "sha256:" + hashlib.sha256((json.dumps(pairs, separators=(",", ":"))
                                          + "\n").encode("ascii")).hexdigest()
     ok("D-basis-independent-fixture", manual == source_digest)
+
+    # The tomllib parse-site floor (tools/check_python_floor.py, tomllib leg): the planned-view-target
+    # parse disposes of RecursionError, MemoryError and the ValueError family in its own function,
+    # refusing as InitOperationError. Deep nesting feeds a real RecursionError and an over-long integer
+    # literal a real bare ValueError; MemoryError shares the handler (the static floor scan is its
+    # per-site guard).
+    real_build_manifest = _opf_init.build_manifest
+    try:
+        for label, text in (("deep-nesting", "x = " + "[" * 6000 + "]" * 6000),
+                            ("long-integer", "x = " + "9" * 5000)):
+            _opf_init.build_manifest = lambda: text
+            refuses("D-planned-views-" + label, _planned_view_targets, needle="does not parse as TOML")
+    finally:
+        _opf_init.build_manifest = real_build_manifest
 
     # --- pure: provenance build + validate --------------------------------------------------------
     text = build_bootstrap_provenance(_mk_basis(), payloads)
@@ -3500,6 +3555,104 @@ def _seam_tests(base, env, ok):
        and "writable" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
 
+    # The fixture writer itself is hermetic against ANY ambient umask, including an
+    # owner-restrictive one: under umask 0o700 a bare makedirs leaves each fresh parent
+    # untraversable before any later chmod could run, so _write creates and pins one
+    # level at a time, parent-first. Every created directory is asserted at DIR_MODE and
+    # the created file at 0o644, each independently (red when its own chmod is removed),
+    # and a rewrite keeps an explicitly pinned non-default file mode (red when the
+    # fresh-only guard on the file chmod is removed).
+    def _mode(p):
+        return stat.S_IMODE(os.lstat(p).st_mode) if os.path.lexists(p) else None
+
+    def _bytes(p):
+        try:
+            with open(p, "rb") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
+    wp = os.path.join(d, "writeprobe")
+    nested = os.path.join(wp, "a", "b", "c", "leaf.md")
+    built, why = False, ""
+    saved_umask = os.umask(0o700)
+    try:
+        try:
+            _write(nested, b"nested fixture bytes")
+            built = True
+        except OSError as exc:
+            why = str(exc)
+    finally:
+        os.umask(saved_umask)
+    ok("FIXTURE-write-nested-under-umask-0700", built
+       and _bytes(nested) == b"nested fixture bytes", why)
+    for level in (wp, os.path.join(wp, "a"), os.path.join(wp, "a", "b"),
+                  os.path.join(wp, "a", "b", "c")):
+        ok("FIXTURE-write-dir-mode-" + os.path.relpath(level, d).replace(os.sep, "-"),
+           _mode(level) == DIR_MODE, "mode {}".format(_mode(level)))
+    ok("FIXTURE-write-file-mode-0644", _mode(nested) == 0o644,
+       "mode {}".format(_mode(nested)))
+    if built:
+        os.chmod(nested, 0o640)
+        saved_umask = os.umask(0o700)
+        try:
+            _write(nested, b"rewritten fixture bytes")
+        finally:
+            os.umask(saved_umask)
+    ok("FIXTURE-write-rewrite-preserves-mode", built and _mode(nested) == 0o640
+       and _bytes(nested) == b"rewritten fixture bytes", "mode {}".format(_mode(nested)))
+
+    # The accepting fixture is hermetic against the ambient umask: built while the
+    # process umask is pinned to the group-permissive 0o002, the admitted tree is still
+    # accepted (red when a fixture directory takes its mode from the process umask
+    # instead of an explicit one). A sentinel ambient mask around both builds proves the
+    # pinned block restores whatever mask it found, on the successful and on the raising
+    # path alike; the outer finally restores the real ambient mask.
+    real_umask = os.umask(0o027)
+    try:
+        saved_umask = os.umask(0o002)
+        try:
+            root, adm, payload = admit_fixture("umask002")
+        finally:
+            os.umask(saved_umask)
+        mask_after_build = os.umask(0o027)
+        probe = os.path.join(d, "maskprobe")
+        _write(os.path.join(probe, "plain.md"), b"plain fixture bytes")
+        raised = False
+        saved_umask = os.umask(0o002)
+        try:
+            try:
+                _write(os.path.join(probe, "plain.md", "never.md"), b"never written")
+            except OSError:
+                raised = True
+        finally:
+            os.umask(saved_umask)
+        mask_after_raise = os.umask(0o027)
+    finally:
+        os.umask(real_umask)
+    ok("SEAM-fixture-build-restores-umask", mask_after_build == 0o027
+       and mask_after_raise == 0o027 and raised,
+       "after build {:o}; after raise {:o}; raised {}".format(
+           mask_after_build, mask_after_raise, raised))
+    res = run_init_operation(root, admitted=adm, operation_id=oid(11))
+    with open(os.path.join(root, ".working/notes/frozen.md"), "rb") as fh:
+        live = fh.read()
+    ok("SEAM-admitted-accepted-under-umask-0002", res.status == VIEWS_READY
+       and live == payload and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
+       and len(sub_ops(root)) == 1, str(res.primary_failure))
+
+    # An admitted .working KEEPS its observed owner-restrictive mode end to end: the plan
+    # records the observed 0o750 and validation accepts it, so the run reaches VIEWS_READY
+    # with the mode preserved (red when the keeps-its-observed-mode branch of
+    # validate_init_plan is removed and the plan falls back to DIR_MODE).
+    root, adm, payload = admit_fixture("keepmode")
+    os.chmod(os.path.join(root, ".working"), 0o750)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(12))
+    kept = _mode(os.path.join(root, ".working"))
+    ok("SEAM-admitted-working-keeps-observed-mode", res.status == VIEWS_READY
+       and kept == 0o750 and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
+       and len(sub_ops(root)) == 1, "mode {}; {}".format(kept, res.primary_failure))
+
     # The seam's second leg: a pre-existing EMPTY machine home (what archival of an occupying
     # machine-store file leaves behind) is admitted ONLY through admitted_dirs, at exactly its
     # planned mode; plain init still refuses the same tree (the no-weakening pin).
@@ -3678,6 +3831,11 @@ def _expected_views(root):
         os.close(fd)
 
 
+def _result_detail(got):
+    """A failed check detail: the InitResult status and primary failure, or the raised exception."""
+    return "{} {}".format(getattr(got, "status", repr(got)), getattr(got, "primary_failure", ""))
+
+
 def _read_or_none(path):
     try:
         with open(path, "rb") as fh:
@@ -3794,6 +3952,50 @@ def _physical_tests(base, env, ok, signal):
     rc, res, err = _child(root, env)
     ok("R2b-edited-completed-is-healthy", res and res["status"] == ALREADY_INITIALIZED
        and _snapshot_all(root) == before, str(res) + err[-400:])
+
+    # R2c completed-adoption counters that tomllib refuses with RecursionError (a deeply nested value, and a
+    # 1001-part key under the emulated cap) refuse through the public seam as not TOML, the worktree
+    # untouched; a RecursionError no site maps is CANNOT-EVALUATE from run_init_operation, never raised,
+    # and the mutex is released (the restored adoption re-runs ALREADY-INITIALIZED).
+    root = _plain_repo(os.path.join(base, "recursion-counters"), env)
+    rc, res, err = _child(root, env)
+    ok("R2c-fixture-ready", res and res["status"] == VIEWS_READY, str(res) + err[-400:])
+    counters_path = os.path.join(root, COUNTERS_RELPATH)
+    good_counters = _read_or_none(counters_path)
+
+    def seam(capped=False):
+        try:
+            if not capped:
+                return init_operation(root)
+            with _opf_store._StKeyPartCap():
+                return init_operation(root)
+        except Exception as exc:  # noqa: BLE001  an escape from the seam is the failure under test
+            return exc
+    for label, text, capped in (("deep", _opf_store._ST_DEEP_TOML, False),
+                                ("key-1001", _opf_store._ST_LONG_KEY_TOML, True)):
+        _write(counters_path, text.encode("utf-8"))
+        before = _snapshot_all(root)
+        got = seam(capped)
+        ok("R2c-{}-counters-refused-not-toml".format(label), isinstance(got, InitResult)
+           and got.status == REFUSED and _snapshot_all(root) == before
+           and "counters are not TOML" in (got.primary_failure or {}).get("detail", ""), _result_detail(got))
+    _write(counters_path, good_counters)
+    this = sys.modules[__name__]
+    real_select = this._select
+
+    def overflowing_select(*_a):
+        raise RecursionError("injected parser overflow")
+    this._select = overflowing_select
+    try:
+        got = seam()
+    finally:
+        this._select = real_select
+    ok("R2c-unmapped-recursion-cannot-evaluate", isinstance(got, InitResult)
+       and got.status == CANNOT_EVALUATE
+       and "RecursionError" in (got.primary_failure or {}).get("detail", ""), _result_detail(got))
+    got = seam()
+    ok("R2c-mutex-released", isinstance(got, InitResult) and got.status == ALREADY_INITIALIZED,
+       _result_detail(got))
 
     # R3 an existing CHANGELOG.md is preserved byte for byte, recorded in E, never created.
     root = _plain_repo(os.path.join(base, "changelog"), env)

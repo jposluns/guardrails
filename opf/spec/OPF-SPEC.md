@@ -106,10 +106,12 @@ the section 16.1 admission check and its refusal evidence. Homes 2 is a separate
 The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
 The current reference tooling reserves these names and implements their homes-2 boundary checks. It still
 supports `1.2.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
-legacy paths until homes 2 is activated, which requires the homes migration (`opf upgrade`) to be
-available. The section 9 manifest example
-describes the 1.3.0 target on legacy homes. The homes-2 requirements in sections 4.2, 9.2, 12,
-14.1, 14.2, and 15 describe the target contract, not an activated runtime guarantee.
+legacy paths until homes 2 is activated. Homes 2 has no homes migration: a store is at homes 2 only
+when it is created there, no homes-1 store is migrated to homes 2, and once homes 2 is activated
+`opf upgrade` MUST refuse a homes-1 store by name rather than migrate it. The section 9 manifest example
+describes the 1.3.0 target on legacy homes. The homes-2 requirements in sections 4.2, 12, 14.1,
+14.2, and 15, and the section 9.2 refusal of a homes-1 store, describe the target contract, not an
+activated runtime guarantee.
 
 ```
 <product repository root>/
@@ -206,8 +208,9 @@ journal home, `journals/record/`, never a staging or imported home. Here
 validity or filesystem safety. File operands MUST use canonical contained relative paths: no empty,
 dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.
 
-Homes-2 init and upgrade MUST render this managed block into `.working/.gitignore` from the topology
-constants; the reference tooling provides the renderer and drift gate but installs no block:
+Homes-2 init, and any upgrade of a store already at homes 2, MUST render this managed block into
+`.working/.gitignore` from the topology constants; the reference tooling provides the renderer and
+drift gate but installs no block:
 
 ```gitignore
 # >>> opf-managed >>>
@@ -317,8 +320,8 @@ carries a `plan_digest` that does not re-seal its own bytes, so an inventory cop
 run or phase never evaluates as this run's record. C-EVIDENCE-ENUM MUST check that `plan.toml`'s
 inventory row against the same bytes its seal was proven from, so a plan swapped between two
 reads never combines into a clean result.
-The owning writer or migration MUST derive each inventory from the run's transaction record or
-receipt and MUST publish it exclusively with the retained bytes. An inventory MUST NOT be rewritten,
+The owning writer MUST derive each inventory from the run's transaction record or receipt and
+MUST publish it exclusively with the retained bytes. An inventory MUST NOT be rewritten,
 so a bundle stays immutable and an evidence commit changes only its bundle folder. An inventory is
 not a journal projection and remains available in a clone without journals.
 A phase inventory MAY be published in the same transaction as the base inventory to claim the
@@ -351,7 +354,10 @@ a staged plan has a recoverable transaction. In homes 2, ordinary transaction op
 those of an open transaction being recovered, MUST NOT equal, descend from, or contain `journals/`;
 a legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer
 targets that home. Capability-bound journal APIs MUST derive their destinations from kind and run
-identity. Legacy journal transport MUST preserve bytes through the migration's receipt binding.
+identity. An ID reservation under `allocations/` MUST be created exclusively and create-only,
+made durable before it is relied on and never rewritten, so an interrupted publication leaves
+no reservation or the complete one (section 8.2). Homes 2 has no legacy journal transport: no homes-1 journal is carried into `journals/`,
+and a homes-2 store is never recovered from one (section 15).
 These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently
 cased or composed spelling can alias a reserved home and is not caught. Discovery precedes the
 manifest, so it cannot know the generation: it MUST examine `manifest.toml` in every immediate
@@ -663,7 +669,18 @@ hand-merged: after a merge conflict on a store path, take the integration base's
 conflicted store files and redo the authoring operation on that base, which claims the next ID
 afresh (section 8.8). The byte-reproduction precondition of `opf record` and `opf upgrade` refuses
 only a store file whose bytes are not the canonical serialization of its content, such as one
-carrying comments or non-canonical formatting. A hand edit or hand merge that leaves canonical bytes
+carrying comments or non-canonical formatting. The canonical serialization writes U+2028 LINE
+SEPARATOR and U+2029 PARAGRAPH SEPARATOR inside a string as the escapes `\u2028` and `\u2029`; a
+file that differs from it only by holding either character literally inside a basic string, as files
+written by earlier tooling do, still passes, reads back as the same values, and is re-spelled with
+the escapes by its next write. A write that would grow a store file past the store reader's size cap
+refuses instead, before anything is written, so an upgrade or record operation never rewrites a
+readable store into one the reader refuses. The `DECISIONS.toml` machine projection (section 10.5)
+takes the same re-spelling without a generator-version bump: a projection an earlier tool rendered
+from a record holding either character differs from the current render in exactly that spelling, and
+the byte-level view-drift gate reports it as drifted until one re-render re-spells it. A projection
+over records holding neither character renders byte-identically, so a store without these characters
+sees no drift. A hand edit or hand merge that leaves canonical bytes
 passes it undetected, so this integration-base rule is a separate requirement that the precondition
 does not enforce. A merge that resolves without a conflict yet duplicates an ID is caught by `opf
 doctor`, which checks store-wide ID uniqueness and that every ID lies within its counter (section
@@ -931,6 +948,21 @@ MUST NOT be reused, even when a record is superseded, refuted, or its work rever
 rewrites, and store relocation MUST NOT touch `counters.toml`. Re-adoption MUST seed both series
 from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed
 prior ancestry. Only a genuinely first adoption MAY start its counters at zero.
+
+At homes 2 the claim additionally begins with one irrevocable reservation,
+`journals/<kind>/allocations/<run-id>.toml` (sections 4.2 and 8.8), which MUST hold exactly
+`format = "opf.journal.allocation/v1"`, the run's `kind`, `run_id` and `operation_id`, and a
+non-empty `[claims]` table mapping each claimed counter key, a record namespace or, for a run of
+the import engine, a quoted imported-series `"imported:<NS>"` key, to that run's new high-water
+value, an integer of at least 1 and at most `2**63 - 1` so every conforming TOML reader can parse
+it. A reservation MUST NOT be rewritten, and a reservation request finding an existing entry for
+the same run MUST be refused unless the entry reads back byte-identical to the exact payload the
+request would publish, in which case the request MUST re-establish the entry's durability before
+relying on it; a refusal is not evidence that the run holds its numbers. The next-ID derivation
+applies per series key: at homes 2 the next ID under a counter key, the clean `<NS>` and quoted
+`"imported:<NS>"` number lines independently, is one more than the maximum of the `counters.toml`
+high-water and every reservation's `[claims]` value for that counter key, so recovery MUST treat
+a reserved number as issued even where no published record carries it.
 
 ### 8.3 The record envelope
 
@@ -1277,12 +1309,14 @@ guarantees:
 
 1. Resolve the store, then any interrupted authoring transaction MUST be reconciled first.
    Reconciliation writes the store, so it MUST run only under the single-writer lease that
-   publication uses: a lease held by a live or possibly-live holder MUST refuse before any recovery
-   write and MUST NOT be seized, and a leftover lease from a confirmed-dead run of the same verb
-   MAY be released through this reconciliation itself, as the section 5.7 live-holder rule grants.
-   Any other present lease, a confirmed-dead leftover of another verb included, MUST refuse before
-   any recovery write and MUST NOT be released by this reconciliation. An operand changed since the
-   interruption, to bytes that are neither its journaled prestate nor its
+   publication uses: when a live or possibly-live holder holds that lease, reconciliation MUST
+   refuse before any recovery write and MUST NOT seize the lease, and reconciliation MAY itself
+   release a leftover lease from a confirmed-dead run of the same verb, since that release is the
+   reconciliation on resume, and section 5.7 requires a leftover lease from a dead run to be
+   released only through that reconciliation.
+   When any other lease is present, a confirmed-dead leftover of another verb included,
+   reconciliation MUST refuse before any recovery write and MUST NOT release that lease.
+   An operand changed since the interruption, to bytes that are neither its journaled prestate nor its
    planned poststate nor a write of either torn by the interruption, MUST be reported and refused,
    never overwritten. A reconciled interruption MUST refuse the new operation, so the operator
    inspects it before anything new is written. A fresh-only implementation (section 16.1) performs
@@ -1530,17 +1564,22 @@ implementation's class.
 
 ### 9.2 Store schema upgrades
 
-The homes-generation upgrade targets `spec_version = "2.0.0"` with required integer `[opf].homes = 2`.
-Absent or `1` denotes legacy homes for migration; unknown future generations MUST be refused.
-The homes-generation target does not itself change the runtime supported version or init format.
-The migration MUST refuse a store resolved outside the product root until a multi-root coordinator
-exists. Unproven legacy `.archive/` entries MUST remain in place with a standing finding until
+The homes-2 generation is declared by `spec_version = "2.0.0"` with required integer
+`[opf].homes = 2`, and a store is at homes 2 only when it is created there (section 4.2).
+Absent or `1` denotes legacy homes; unknown future generations MUST be refused.
+The homes-2 declaration does not itself change the runtime supported version or init format.
+This section defines no homes-generation upgrade: no homes-1 store is migrated to homes 2 and no
+OPF control area is relocated for the homes generation, and once homes 2 is activated
+`opf upgrade` MUST refuse a homes-1 store by name rather than migrate it (section 4.2).
+Unproven legacy `.archive/` entries MUST remain in place with a standing finding until
 dispositioned.
 
 A base-schema version bump MUST ship a tested, in-place store-schema upgrade (`opf upgrade`) in at
 least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a
 store below the new version has an upgrade path once that upgrade activates; the path holds only
 within this section's preconditions and refusals and that implementation's disclosed residuals.
+The bump to the homes-2 declaration (`spec_version = "2.0.0"` with `[opf].homes = 2`) is the one
+exception: it ships no upgrade, and a store below it has no upgrade path into homes 2 (section 4.2).
 Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and
 remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of
 them and MUST instead refuse under section 16.1. Every implementation class MUST apply the version
@@ -1548,12 +1587,10 @@ ceiling's refusal at the end of this section, a fresh-only implementation at its
 admission check; a fresh-only implementation that supports a version below the reserved homes-2
 declaration (section 4.2) MUST NOT apply the ceiling's homes-2 recognition and MUST refuse that
 declaration under section 16.1. The
-upgrade MUST be idempotent. A purely schema-level bump MUST be additive, using atomic replacement of
-existing files, create-only writes for new index files, and regeneration of declared views through
-exclusively created temporary files followed by atomic rename. These writes are sequential, with
-recovery scope held in memory, not a durable transaction journal. A homes-generation bump
-MUST additionally relocate OPF control areas as a versioned, journaled, fail-closed relocation.
-Every destination MUST be digest-verified before its source is removed. Both kinds of upgrade MUST
+upgrade MUST be idempotent. A schema-level bump MUST be additive, using atomic
+replacement of existing files, create-only writes for new index files, and regeneration of declared
+views through exclusively created temporary files followed by atomic rename. These writes are
+sequential, with recovery scope held in memory, not a durable transaction journal. The upgrade MUST
 run under the store consistency contract and the single-writer lease (section 5.7).
 It MUST fail closed on an unresolvable store, a declared `spec_version` ABOVE the tooling,
 a divergence, a held lease, or any populated state that contradicts its preconditions; it MUST NOT
@@ -1564,8 +1601,7 @@ the working tree is clean, including ignored files, over the planned schema and 
 restore path for that scope; a held lease or a dirty store refuses, and a dirty store is asked to
 commit its own changes, never restored by the tool. After applying the schema delta, it MUST regenerate
 the declared views and MUST require a full doctor VALID before offering the uncommitted change for
-the adopter's own branch-and-merge. It MUST NOT stage or commit the change. Both upgrade kinds, on
-the schema-level path and the homes-generation relocation path, the homes-2 path included, alike,
+the adopter's own branch-and-merge. It MUST NOT stage or commit the change. The upgrade
 MUST NOT write the adoption archive and MUST NOT overwrite, relocate or remove a plan-enumerated
 frozen source (section 14.2); a frozen source sits outside the planned schema and render
 destinations, so the clean-tree precondition does not read it, and the required doctor VALID grades
@@ -1683,7 +1719,12 @@ generator.
 
 A deterministic render is byte-reproducible: UTF-8, LF line endings, stable ordering, no
 locale-dependent sorting, no wall-clock content in compared bytes, no network access, and no model
-involvement. Every generated file opens with a header stating that it is generated and must not be
+involvement. A record field value rendered into a Markdown view stays on one line: LF, CR, U+0085
+NEXT LINE, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR each collapse to a single space (a
+CR LF pair to one space), and DEL and the other C0 controls except TAB are dropped, so the rendered
+value holds no character that Python's str.splitlines() treats as a line boundary; the store keeps
+the value as written.
+Every generated file opens with a header stating that it is generated and must not be
 hand-edited, naming its source paths, the schema and generator versions, a digest of the source
 set, and the regeneration command; the header carries no timestamp.
 
@@ -2151,8 +2192,9 @@ scope, expiry) with adopter-supplied vocabularies. The location patterns of sect
 described generically; no pattern names a real repository, host account, or internal system. Import
 and adoption provenance, including originals under `imported/` and retired files under `archive/`,
 MUST stay inside the adopter's own repositories. In homes 2, `.aiqt/` is AIQT-owned material, not an
-OPF state home; OPF operates without it. Only homes migration MAY read explicitly inventoried OPF
-artefacts from former `.aiqt/` locations, without touching unrelated AIQT material.
+OPF state home; OPF operates without it. On a homes-2 store, OPF MUST NOT read OPF artefacts from
+former `.aiqt/` locations or touch unrelated AIQT material, since homes 2 has no homes migration
+(section 4.2).
 A no-follow existence probe of a former `.aiqt/` location, used only to refuse an operation, is
 not a read of that material.
 Experimental fields MUST ride registered
@@ -2702,6 +2744,10 @@ The gates in this standard are strong where they are strong and say so where the
   (fail-closed), never to a silent empty store. The token is stable within a base-schema major line;
   a store-breaking rename MUST ship only with the tested `opf upgrade` migration (section 9.2),
   which rewrites the base table and token in place so no existing adopter's manifest is stranded.
+  That in-place rewrite covers only a bump that ships an upgrade. The bump to the homes-2
+  declaration ships none (section 9.2), so no store-breaking rename can ship with it: a homes-2
+  manifest keeps the `[opf]` base table name and the `opf` discovery token, and the bump leaves
+  unchanged the manifest of a homes-1 store, which homes 2 does not migrate (section 4.2).
   The retired 1.0.0 token `devprocess` is recognized by `opf upgrade`, purely to carry a legacy store
   forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.
 - A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not
