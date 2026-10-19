@@ -898,6 +898,10 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_mistakes_register.py
 
+      - name: Mistakes-register append self-test
+        shell: bash
+        run: python3 -I -B tools/orch_register.py --self-test
+
       - name: AEI enumerator self-test
         shell: bash
         run: python3 -I -B tools/aei_backlog_md.py --self-test
