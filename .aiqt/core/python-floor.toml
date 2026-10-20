@@ -123,6 +123,7 @@ guarded-surfaces = [
     "tools/check_mappings.py",
     "tools/check_mistakes_register.py",
     "tools/check_msg_leaks.py",
+    "tools/check_must_deliver.py",
     "tools/check_newtab.py",
     "tools/check_no_dashes.py",
     "tools/check_opf_enforce_platforms.py",
