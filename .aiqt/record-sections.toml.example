@@ -21,10 +21,13 @@
 # end the table with a blank line. Reordering, mid-table insertion, re-padding
 # (the header line included) and
 # TOML reformatting are allowed; a duplicate key in any snapshot, a carriage return in a table line or
-# in a header-matching line of any compared snapshot (a CRLF table), and a declared table that cannot be
+# in a header-matching line of any compared snapshot (a CRLF table), a declared table that cannot be
 # located in a file that exists at the first parent or the branch tip while that snapshot's config
 # declared the same table (at the branch tip the merge-base's config counts too, so a branch that
-# renames or removes a declared table cannot shed its own row obligations), fail closed. For the
+# renames or removes a declared table cannot shed its own row obligations), and a declared table's file
+# absent at the branch tip while it existed at the merge-base and the merge-base's config declared the
+# table (so a branch that moves or deletes the declared file cannot shed them either; a branch forked
+# before the file existed still passes), fail closed. For the
 # merge-base's rows an unlocatable table reads as absent, which can
 # only add branch-owned row obligations, never remove one. Rows have no
 # deletion opt-out: supersede a row with a new row, or correct it in place under key-stable.
