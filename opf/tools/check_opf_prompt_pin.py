@@ -38,12 +38,22 @@ Checks, each a named guard:
                   quote is a finding because pairing cannot be trusted there
   required-rule   a fixed list of section 16.1 and section 9.2 sentences appears verbatim
                   (whitespace-insensitively) in both the specification and the prompt
+  journal-grading the prompt carries the step 8 heading exactly once, and that step carries
+                  exactly one list item on `.working/journals/` (its bullet line and the lines
+                  indented deeper than the bullet, up to a blank line); that item carries every
+                  named clause of JOURNAL_GRADING (whitespace-insensitively) and no clause of
+                  JOURNAL_GRADING_DENIED, so its store-path conclusion stays limited to a store
+                  that has not started an adoption, it keeps what the specification says of a store
+                  that has, and it keeps the rule that the upgrade check counts every journal entry
 
   check_opf_prompt_pin.py                    verify the shipped prompt beside this tool (../spec)
   check_opf_prompt_pin.py --self-test        synthetic trees assert each guard's exact status and
                                              name, that each result is stable across two runs, and
                                              that each red fixture covered by one module-level
-                                             check turns green when exactly that check is disabled
+                                             check turns green when exactly that check is disabled,
+                                             and that each journal-grading fixture that removes or
+                                             adds one clause turns green when exactly that clause
+                                             is dropped
   check_opf_prompt_pin.py --list-quotations  re-runnable probe: print every attributed quotation
                                              with its line and status (MATCH, EXEMPT with the
                                              exemption's name, or NO-MATCH) and any unpaired-quote
@@ -152,6 +162,36 @@ REQUIRED_RULES = (
      "Where imported ancestry exists in a namespace, the imported counter row added for it MUST "
      "hold the highest imported ID number in that namespace, the largest `<n>` of its "
      "`imported:<NS>-<n>` IDs."),
+)
+
+# Section 4.2 gives legacy grading under pre-1.3.0 tooling only to a store that has not started an
+# adoption, so the step 8 journal item may call a journal entry a store path only for such a store,
+# and it states what section 4.2 says of a store that has started one. The quotation leg cannot hold
+# this: the unqualified quotation is a substring of the qualified sentence, so the earlier,
+# unqualified wording of the item still matches the specification. Each clause below is prompt text
+# the item must carry; the denied clause is that earlier, unqualified conclusion. The rule that the
+# upgrade check counts every journal entry is held as a clause too, because the qualification limits
+# only the store-path reading, never the count.
+_STEP8_HEAD = "### Step 8: the store upgrade to 1.3.0 (`opf upgrade`)"
+_JOURNAL_ITEM_LEAD = "- `.working/journals/`"
+JOURNAL_GRADING = (
+    ("non-adopting-grading-quoted",
+     '"a store that has not started an adoption keeps, within that tooling\'s own version ceiling, '
+     "its legacy grading: the homes-2 names are ordinary store paths there, graded, detected, and "
+     'dispositioned exactly as before"'),
+    ("non-adopting-conclusion",
+     "so in a homes-1 origin store that has not started an adoption a journal entry is a store "
+     "path, not machine-local data."),
+    ("adopting-store-distinction",
+     "Of a store whose adoption home `.working/imported/adoption/` exists, section 4.2 says instead "
+     'that it "has started an adoption and receives the adoption grading from the same pre-1.3.0 '
+     'tooling", whose doctor "MUST NOT read the machine-local journal"; the check still counts that '
+     "store's journal entries, as the rule above says of every entry."),
+    ("every-entry-counts",
+     "check counts every entry under `.working/journals/`, which is this prompt's choice"),
+)
+JOURNAL_GRADING_DENIED = (
+    ("unqualified-conclusion", "in a homes-1 origin store a journal entry is a store path"),
 )
 
 # The named allowed non-matches of the quotation sweep, each an exact normalized span. The prompt
@@ -446,6 +486,43 @@ def _check_required_rules(spec_norm, prompt_norm):
                  "required rule {!r} is not restated in the prompt".format(name))
 
 
+def _journal_item(prompt_text):
+    """The normalized step 8 list item on `.working/journals/`. The step runs from its fixed
+    heading to the next heading of level three or above; the item is its bullet line and every
+    following line indented deeper than the bullet, ending before the first blank line or line
+    indented no deeper than the bullet. Exactly one heading and exactly one item, or a finding."""
+    lines = prompt_text.split("\n")
+    heads = [i for i, line in enumerate(lines) if line == _STEP8_HEAD]
+    _require(len(heads) == 1, "journal-grading",
+             "the prompt must carry the heading {!r} exactly once; found {}".format(
+                 _STEP8_HEAD, len(heads)))
+    end = next((i for i in range(heads[0] + 1, len(lines)) if re.match(r"#{1,3} ", lines[i])),
+               len(lines))
+    step = lines[heads[0] + 1:end]
+    starts = [i for i, line in enumerate(step) if line.lstrip(" ").startswith(_JOURNAL_ITEM_LEAD)]
+    _require(len(starts) == 1, "journal-grading",
+             "step 8 must carry exactly one list item opening {!r}; found {}".format(
+                 _JOURNAL_ITEM_LEAD, len(starts)))
+    bullet = step[starts[0]]
+    indent = len(bullet) - len(bullet.lstrip(" "))
+    item = [bullet]
+    for line in step[starts[0] + 1:]:
+        if not line.strip() or len(line) - len(line.lstrip(" ")) <= indent:
+            break
+        item.append(line)
+    return _normalize("\n".join(item))
+
+
+def _check_journal_grading(prompt_text):
+    item = _journal_item(prompt_text)
+    for name, clause in JOURNAL_GRADING:
+        _require(_normalize(clause) in item, "journal-grading",
+                 "the step 8 journal item lacks the required clause {!r}".format(name))
+    for name, clause in JOURNAL_GRADING_DENIED:
+        _require(_normalize(clause) not in item, "journal-grading",
+                 "the step 8 journal item carries the denied clause {!r}".format(name))
+
+
 def _validate(root):
     root = Path(root)
     prompt_text = _read_regular(root / "opf" / PROMPT_REL, "prompt").decode(
@@ -464,6 +541,7 @@ def _validate(root):
         "utf-8", errors="backslashreplace"))
     _check_quotations(prompt_text, sources_norm)
     _check_required_rules(spec_norm, _normalize(prompt_text))
+    _check_journal_grading(prompt_text)
     return "pin {}, {} table row(s), {}".format(pin, len(table), history)
 
 
@@ -521,13 +599,46 @@ _FIXTURE_SOURCES = {
 _FIXTURE_PACK = ('format = "opf.prompt-pack/v1"\nversion = "0.5.1"\n'
                  'digest = "sha256:' + "0" * 64 + '"\nmembers = []\n')
 _FIXTURE_PIN = "c" * 40
+# The fixture's step 8 journal item, one clause per line, written out here rather than built from
+# JOURNAL_GRADING, so the valid tree also checks those clauses against independent text. The base
+# line is the item's earlier, unqualified wording, which also lacked the adopting-store sentence.
+_FIXTURE_JOURNAL_LEAD = "  - `.working/journals/`, the journal home of section 4.2."
+_FIXTURE_JOURNAL_EVERY_ENTRY = (
+    "The check counts every entry under `.working/journals/`, which is this prompt's choice.")
+_FIXTURE_JOURNAL_GRADING = (
+    "Whichever generation it binds, section 4.2 says that under pre-1.3.0 tooling, the tooling of "
+    'every origin store of this upgrade, "a store that has not started an adoption keeps, within '
+    "that tooling's own version ceiling, its legacy grading: the homes-2 names are ordinary store "
+    'paths there, graded, detected, and dispositioned exactly as before", and section 5.1 makes "An '
+    'untracked or ignored `.working/` tree" a hard failure, so in a homes-1 origin store that has '
+    "not started an adoption a journal entry is a store path, not machine-local data.")
+_FIXTURE_JOURNAL_ADOPTING = (
+    "Of a store whose adoption home `.working/imported/adoption/` exists, section 4.2 says instead "
+    'that it "has started an adoption and receives the adoption grading from the same pre-1.3.0 '
+    'tooling", whose doctor "MUST NOT read the machine-local journal"; the check still counts that '
+    "store's journal entries, as the rule above says of every entry.")
+_FIXTURE_JOURNAL_BASE_GRADING = (
+    "Whichever generation it binds, section 4.2 says of a store under pre-1.3.0 tooling, as every "
+    'origin store of this upgrade was, that "the homes-2 names are ordinary store paths there, '
+    'graded, detected, and dispositioned exactly as before", and section 5.1 makes "An untracked or '
+    'ignored `.working/` tree" a hard failure, so in a homes-1 origin store a journal entry is a '
+    "store path, not machine-local data.")
+_FIXTURE_JOURNAL_ITEM = "\n    ".join((_FIXTURE_JOURNAL_LEAD, _FIXTURE_JOURNAL_EVERY_ENTRY,
+                                       _FIXTURE_JOURNAL_GRADING, _FIXTURE_JOURNAL_ADOPTING))
+_FIXTURE_STEP9_HEAD = "### Step 9: fresh initialization"
 
 
 def _fixture_spec():
     rules = "\n\n".join(sentence for _, sentence in REQUIRED_RULES)
     return ("# Specification\n\n" + rules +
             "\n\nViews regenerate cleanly. The emitter writes canonical bytes for every view it "
-            "renders.\n")
+            "renders.\n\nUnder pre-1.3.0 tooling, a store that has not started an adoption keeps, "
+            "within that tooling's own version ceiling, its legacy grading: the homes-2 names are "
+            "ordinary store paths there, graded, detected, and dispositioned exactly as before. A "
+            "store whose adoption home `.working/imported/adoption/` exists has started an "
+            "adoption and receives the adoption grading from the same pre-1.3.0 tooling. The "
+            "doctor MUST NOT read the machine-local journal.\n\nAn untracked or ignored "
+            "`.working/` tree is a hard failure.\n")
 
 
 def _fixture_prompt(root, pin=_FIXTURE_PIN,
@@ -549,7 +660,8 @@ def _fixture_prompt(root, pin=_FIXTURE_PIN,
             "/<path>\n```\n\nFor example, https://example.invalid/" + pin + "/opf/spec/OPF-SPEC.md.\n\n" +
             'The pack manifest (`format = "opf.prompt-pack/v1"`, `version = "' + pack_version +
             '"`) lists no members.\n\n' + _PIN_SECTION_TAIL + "\n\n" +
-            'The specification says "' + quote + '"\n\n' + "\n\n".join(rules) + "\n" +
+            'The specification says "' + quote + '"\n\n' + "\n\n".join(rules) + "\n\n" +
+            _STEP8_HEAD + "\n\n" + _FIXTURE_JOURNAL_ITEM + "\n\n" + _FIXTURE_STEP9_HEAD + "\n" +
             ("\n" + extra_text + "\n" if extra_text else ""))
 
 
@@ -722,6 +834,72 @@ def _vectors():
     def pack_unparseable(base):
         _build_tree(base, pack_text='format = "opf.prompt-pack/v1"\nmembers = [\n')
 
+    def journal_base_restored(base):
+        # The item's earlier wording, whose every quotation still matches the specification.
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_JOURNAL_GRADING + "\n    " + _FIXTURE_JOURNAL_ADOPTING,
+                     _FIXTURE_JOURNAL_BASE_GRADING)
+
+    def journal_quote_unqualified(base):
+        # The shorter quotation is still a substring of the specification's sentence.
+        root = _build_tree(base)
+        _edit_prompt(root, '"a store that has not started an adoption keeps, within that '
+                     "tooling's own version ceiling, its legacy grading: the homes-2", '"the homes-2')
+
+    def journal_conclusion_removed(base):
+        root = _build_tree(base)
+        _edit_prompt(root, " a hard failure, so in a homes-1 origin store that has not started an "
+                     "adoption a journal entry is a store path, not machine-local data.",
+                     " a hard failure.")
+
+    def journal_adopting_removed(base):
+        root = _build_tree(base)
+        _edit_prompt(root, "\n    " + _FIXTURE_JOURNAL_ADOPTING, "")
+
+    def journal_every_entry_removed(base):
+        root = _build_tree(base)
+        _edit_prompt(root, "\n    " + _FIXTURE_JOURNAL_EVERY_ENTRY, "")
+
+    def journal_unqualified_added(base):
+        # Every required clause stays; the earlier, unqualified conclusion is added beside them.
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_JOURNAL_ADOPTING, _FIXTURE_JOURNAL_ADOPTING +
+                     "\n    In short, in a homes-1 origin store a journal entry is a store path.")
+
+    def journal_item_missing(base):
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_JOURNAL_LEAD, "  - `.working/journal/`, the journal home.")
+
+    def journal_item_duplicate(base):
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_JOURNAL_ITEM,
+                     _FIXTURE_JOURNAL_ITEM + "\n" + _FIXTURE_JOURNAL_ITEM)
+
+    def journal_step8_renamed(base):
+        root = _build_tree(base)
+        _edit_prompt(root, _STEP8_HEAD, "### Step 8: the store upgrade")
+
+    def journal_item_after_step8(base):
+        # Just past the step's end: the next level-three heading closes step 8.
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_JOURNAL_ITEM + "\n\n" + _FIXTURE_STEP9_HEAD,
+                     _FIXTURE_STEP9_HEAD + "\n\n" + _FIXTURE_JOURNAL_ITEM)
+
+    def journal_item_under_level_four(base):
+        # Just inside: a level-four heading does not close step 8.
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_JOURNAL_ITEM, "#### Journals\n\n" + _FIXTURE_JOURNAL_ITEM)
+
+    def every_entry_moved(indent, separator="\n"):
+        # The every-entry clause moved to the end of the item at the given indentation (the
+        # bullet sits at 2), after the given separator.
+        def build(base):
+            root = _build_tree(base)
+            _edit_prompt(root, "\n    " + _FIXTURE_JOURNAL_EVERY_ENTRY, "")
+            _edit_prompt(root, _FIXTURE_JOURNAL_ADOPTING, _FIXTURE_JOURNAL_ADOPTING + separator +
+                         " " * indent + _FIXTURE_JOURNAL_EVERY_ENTRY)
+        return build
+
     return [
         ("valid-tree", VALID, None, None, valid),
         ("spec-one-byte-edit", INVALID, "table-drift", "_check_drift", spec_edited),
@@ -757,7 +935,51 @@ def _vectors():
         ("pinned-source-oversize", CANNOT_EVALUATE, "pinned-source-bound", None, source_oversize),
         ("pack-manifest-unparseable", CANNOT_EVALUATE, "pack-manifest-parse",
          "_check_pack_facts", pack_unparseable),
+        ("journal-base-paragraph-restored", INVALID, "journal-grading", "_check_journal_grading",
+         journal_base_restored),
+        ("journal-non-adopting-quote-unqualified", INVALID, "journal-grading",
+         "_check_journal_grading", journal_quote_unqualified),
+        ("journal-non-adopting-conclusion-removed", INVALID, "journal-grading",
+         "_check_journal_grading", journal_conclusion_removed),
+        ("journal-adopting-distinction-removed", INVALID, "journal-grading",
+         "_check_journal_grading", journal_adopting_removed),
+        ("journal-every-entry-rule-removed", INVALID, "journal-grading", "_check_journal_grading",
+         journal_every_entry_removed),
+        ("journal-unqualified-conclusion-added", INVALID, "journal-grading",
+         "_check_journal_grading", journal_unqualified_added),
+        ("journal-item-missing", INVALID, "journal-grading", "_check_journal_grading",
+         journal_item_missing),
+        ("journal-item-duplicate", INVALID, "journal-grading", "_check_journal_grading",
+         journal_item_duplicate),
+        ("journal-step8-heading-renamed", INVALID, "journal-grading", "_check_journal_grading",
+         journal_step8_renamed),
+        ("journal-item-after-step8", INVALID, "journal-grading", "_check_journal_grading",
+         journal_item_after_step8),
+        ("journal-item-under-level-four-heading", VALID, None, None,
+         journal_item_under_level_four),
+        ("journal-clause-indent-deeper", VALID, None, None, every_entry_moved(3)),
+        ("journal-clause-indent-equal", INVALID, "journal-grading", "_check_journal_grading",
+         every_entry_moved(2)),
+        ("journal-clause-indent-shallower", INVALID, "journal-grading", "_check_journal_grading",
+         every_entry_moved(1)),
+        ("journal-clause-after-blank-line", INVALID, "journal-grading", "_check_journal_grading",
+         every_entry_moved(4, "\n\n")),
     ]
+
+
+# Each journal-grading fixture that removes or adds one clause, with that clause's name: the
+# fixture must turn green when exactly that clause is dropped from the gate, so the clause, and no
+# other clause or guard, is what refuses it.
+_JOURNAL_CLAUSE_VECTORS = (
+    ("journal-non-adopting-quote-unqualified", "non-adopting-grading-quoted"),
+    ("journal-non-adopting-conclusion-removed", "non-adopting-conclusion"),
+    ("journal-adopting-distinction-removed", "adopting-store-distinction"),
+    ("journal-every-entry-rule-removed", "every-entry-counts"),
+    ("journal-unqualified-conclusion-added", "unqualified-conclusion"),
+    ("journal-clause-indent-equal", "every-entry-counts"),
+    ("journal-clause-indent-shallower", "every-entry-counts"),
+    ("journal-clause-after-blank-line", "every-entry-counts"),
+)
 
 
 def _with_check_disabled(name):
@@ -769,6 +991,37 @@ def _with_check_disabled(name):
         globals()[name] = real
     globals()[name] = lambda *args, **kwargs: None
     return restore
+
+
+def _without_journal_clause(name):
+    """Drop exactly one named clause from JOURNAL_GRADING or JOURNAL_GRADING_DENIED; returns the
+    restorer. A name that matches no clause is a harness error, never a vacuous green run."""
+    saved = {key: globals()[key] for key in ("JOURNAL_GRADING", "JOURNAL_GRADING_DENIED")}
+    if sum(1 for rows in saved.values() for row in rows if row[0] == name) != 1:
+        raise RuntimeError("no single journal-grading clause is named {!r}".format(name))
+
+    def restore():
+        globals().update(saved)
+    for key, rows in saved.items():
+        globals()[key] = tuple(row for row in rows if row[0] != name)
+    return restore
+
+
+def _journal_clause_mutants(tmp, check):
+    builders = {name: build for name, _, _, _, build in _vectors()}
+    ran = 0
+    for vector, clause in _JOURNAL_CLAUSE_VECTORS:
+        base = Path(tmp) / ("clause-" + vector)
+        base.mkdir()
+        builders[vector](base)
+        restore = _without_journal_clause(clause)
+        try:
+            dropped = validate_tree(base)
+        finally:
+            restore()
+        ran += 1
+        check(vector + "-without-" + clause, dropped, (VALID, None))
+    return ran
 
 
 def _history_vectors(tmp, check):
@@ -943,6 +1196,7 @@ def _self_test_isolated():
                     count += 1
                     check(name + "-disabled-" + covering, disabled, (VALID, None))
             count += _history_vectors(tmp, check)
+            count += _journal_clause_mutants(tmp, check)
             count += 1
             check("direct-entry-harness-error", _direct_entry_harness_error(),
                   (CANNOT_EVALUATE, None))
