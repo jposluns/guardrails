@@ -407,16 +407,22 @@ def _run_subset(opf_root, run_dir, bounds):
 
 
 def _report(results):
-    """Print one line per leg and the verdict, and return the exit code. A leg that exited non-zero is a
-    finding (1). A leg killed at its bound is reported as the bound tripping, never as a failure the leg
-    reported; with no finding beside it the gate cannot evaluate closure (2), and never reads as clean."""
-    failed = [row for row in results if row[1] not in (0, None)]
+    """Print one line per leg and the verdict, and return the exit code. A leg that exited non-zero,
+    other than 2, is a finding (1). A leg that exited 2 said it could not evaluate its own checks (the
+    subset members' convention for a harness error or an expired inner bound), and a leg killed at its
+    bound is reported as the bound tripping, never as a failure the leg reported: for either, closure was
+    not evaluated, so with no finding beside it the gate cannot evaluate closure (2), and never reads as
+    clean. A finding beside either still returns 1, with every unevaluated leg named."""
+    failed = [row for row in results if row[1] not in (0, None, 2)]
+    cannot = [row for row in results if row[1] == 2]
     timed_out = [row for row in results if row[1] is None]
     for name, rc, _tail_text, elapsed, bound in results:
         if rc == 0:
             status = "OK ({:.1f}s of its {}s bound)".format(elapsed, bound)
         elif rc is None:
             status = "TIMED OUT (killed at its {}s bound)".format(bound)
+        elif rc == 2:
+            status = "CANNOT EVALUATE rc=2 ({:.1f}s)".format(elapsed)
         else:
             status = "FAILED rc={} ({:.1f}s)".format(rc, elapsed)
         print("  {:38s} {}".format(name, status))
@@ -425,6 +431,12 @@ def _report(results):
               file=sys.stderr)
         for name, rc, tail, _elapsed, _bound in failed:
             print("  {} (rc={}): {}".format(name, rc, tail.replace("\n", " | ")), file=sys.stderr)
+    if cannot:
+        print("STANDALONE CLOSURE: LEG CANNOT EVALUATE (each leg below exited 2: it could not evaluate "
+              "its own checks, which is not a failure the leg reported, so closure was not evaluated "
+              "for it):", file=sys.stderr)
+        for name, _rc, tail, _elapsed, _bound in cannot:
+            print("  {} (rc=2): {}".format(name, tail.replace("\n", " | ")), file=sys.stderr)
     if timed_out:
         print("STANDALONE CLOSURE: LEG BOUND EXCEEDED (the gate killed each leg below at its wall-clock bound; "
               "the bound tripped, not a failure the leg reported, so closure was not evaluated for it):",
@@ -434,7 +446,7 @@ def _report(results):
                 name, bound, elapsed, tail.replace("\n", " | ") or "(none)"), file=sys.stderr)
     if failed:
         return 1
-    if timed_out:
+    if cannot or timed_out:
         return 2
     print("STANDALONE CLOSURE: OK (opf/ verifies itself with no AIQT tree reachable)")
     return 0
@@ -442,7 +454,8 @@ def _report(results):
 
 def run(root):
     """Materialize opf/ alone and run the subset in isolation. Returns 0 (closure holds), 1 (a subset gate
-    failed: closure broken), or 2 (harness error, opf/ unreadable, or a leg killed at its bound), fail-closed."""
+    failed: closure broken), or 2 (harness error, opf/ unreadable, a leg killed at its bound, or a leg
+    that itself exited 2 and so could not evaluate its own checks), fail-closed."""
     opf_src = Path(root) / "opf"
     if not (opf_src.is_dir() and (opf_src / "tools" / "opf.py").is_file()):
         print("error: opf/ subtree not found under {} (cannot evaluate closure)".format(root),
@@ -553,7 +566,9 @@ _TIME_SCALE = 300  # the bound vectors run the real _run_one and _report at 1/30
 def _timeout_vectors_self_test(required):
     """Time-scaled stub legs through the real runner: the slowest recorded correct opf-adopt-apply run
     (672 s) is killed by the former flat 600 s bound and finishes inside its derived bound, and a genuine
-    hang is still cut off at that bound and reported as the bound tripping, not as a leg failure."""
+    hang is still cut off at that bound and reported as the bound tripping, not as a leg failure. The
+    report vectors then hold the exit mapping: a kill at the bound or a leg's own exit 2 (the leg could
+    not evaluate its checks) is exit 2 alone and exit 1 beside a real failure, never clean."""
     leg = "opf-adopt-apply-selftest"
     bound = required[leg][0]
     scaled = bound / _TIME_SCALE
@@ -576,6 +591,7 @@ def _timeout_vectors_self_test(required):
         rc, tail, elapsed = _run_one(stub_root, "stub_sleep.py", ["3600"], tmp, env, scaled)
         if rc is not None or not scaled <= elapsed < scaled + 30:
             raise AssertionError("closure/hang-not-cut-off (rc={!r}, {:.1f}s)".format(rc, elapsed))
+        cannot_tail = "OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE (1 bound(s) expired)"
         for rows, want_code, want, refused in (
                 ([(leg, None, tail, elapsed, bound)], 2,
                  ("TIMED OUT (killed at its {}s bound)".format(bound), "LEG BOUND EXCEEDED",
@@ -583,6 +599,14 @@ def _timeout_vectors_self_test(required):
                  ("BROKEN", "CLOSURE: OK")),
                 ([(leg, None, tail, elapsed, bound), ("opf-homes-contract", 1, "boom", 1.0, 120)], 1,
                  ("BROKEN", "opf-homes-contract (rc=1): boom", "{}: killed at its {}s bound".format(leg, bound)),
+                 ("CLOSURE: OK",)),
+                ([(leg, 2, cannot_tail, 354.2, bound)], 2,
+                 ("CANNOT EVALUATE rc=2 (354.2s)", "LEG CANNOT EVALUATE",
+                  "{} (rc=2): {}".format(leg, cannot_tail), "closure was not evaluated"),
+                 ("BROKEN", "CLOSURE: OK")),
+                ([(leg, 2, cannot_tail, 354.2, bound), ("opf-homes-contract", 1, "boom", 1.0, 120)], 1,
+                 ("BROKEN", "opf-homes-contract (rc=1): boom", "LEG CANNOT EVALUATE",
+                  "{} (rc=2): {}".format(leg, cannot_tail)),
                  ("CLOSURE: OK",))):
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
@@ -591,7 +615,8 @@ def _timeout_vectors_self_test(required):
             if code != want_code or not all(w in said for w in want) or any(r in said for r in refused):
                 raise AssertionError("closure/timeout-report (exit {}): {!r}".format(code, said))
         print("RED hang -> cut off at its bound and reported as LEG BOUND EXCEEDED (exit 2; exit 1 beside a "
-              "real failure)")
+              "real failure); a leg's own exit 2 -> LEG CANNOT EVALUATE (exit 2; exit 1 beside a real "
+              "failure)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
