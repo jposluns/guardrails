@@ -4320,8 +4320,11 @@ def _self_test_vectors():
                   and "injected unlink failure" in stranded
                   and target.read_bytes() == payload)
             # The same new-capability retry once another run's reservation has advanced the BI
-            # high-water (run2 at BI = 16): the derivation now yields other claims as well (16 + 7),
-            # so it is refused as different bytes for that reason too, the reservation unchanged.
+            # high-water (run2 at BI = 16): it is refused as different bytes, the reservation unchanged.
+            # The fresh operation id alone changes the bytes, so this check cannot show that the
+            # derivation moved as well; reservation-new-capability-after-advance-derived-refused below
+            # judges the same retry with the operation id unbound, so only the derivation (16 + 7) can
+            # refuse it.
             advanced = new_capability_retry()
             check("reservation-new-capability-after-advance-refused", lambda: advanced is not None
                   and "already exists with different content" in advanced
@@ -4334,6 +4337,42 @@ def _self_test_vectors():
             check("reservation-stranded-leftover-retired", lambda: len(stranded_names) == 1
                   and not (target.parent / stranded_names[0]).exists()
                   and os.stat(target).st_nlink == 1)
+            # The same advance retried under the SAME capability with the same demand: the operation
+            # id matches, so only the derivation can tell the bytes apart. Another run's reservation
+            # now holds BI at 16, so the repeat derives BI = 16 + 7 and is refused as different bytes,
+            # the reservation unchanged. The paired mutation, in place: a repeat whose derivation
+            # scans no other reservation once the run's own entry exists derives the published claims
+            # again and answers the retry idempotently, so the check turns red on it. The same
+            # mutation under the unbound-operation payload shows the fresh-capability retry above is
+            # refused by the derivation too, not by its operation id alone.
+            real_derive_claims = home_journal._derive_claims
+
+            def derive_without_scan_on_repeat(root_fd, machine_rel, kind, run_id, demand):
+                if not os.path.lexists(root / store.allocation_record(kind, run_id)):
+                    return real_derive_claims(root_fd, machine_rel, kind, run_id, demand)
+                with _patch.object(home_journal, "reservation_high", lambda root_fd, exclude=None: {}):
+                    return real_derive_claims(root_fd, machine_rel, kind, run_id, demand)
+
+            def same_capability_retry():
+                return reservation_refusal(lambda: home_journal.reserve_allocation(
+                    cap, "record", record_run, {"BI": 7, "WL": 12}))
+            advanced_same = same_capability_retry()
+            check("reservation-same-capability-after-advance-refused", lambda: advanced_same is not None
+                  and "already exists with different content" in advanced_same
+                  and "does not establish that the run holds" in advanced_same
+                  and target.read_bytes() == payload)
+            with _patch.object(home_journal, "_derive_claims", derive_without_scan_on_repeat):
+                check("reservation-same-capability-after-advance-flip-scan-omitted",
+                      lambda: same_capability_retry() is None and target.read_bytes() == payload)
+            with _patch.object(home_journal, "reservation_payload", payload_without_operation):
+                derived_refusal = new_capability_retry()
+                check("reservation-new-capability-after-advance-derived-refused",
+                      lambda: derived_refusal is not None
+                      and "already exists with different content" in derived_refusal
+                      and target.read_bytes() == payload)
+                with _patch.object(home_journal, "_derive_claims", derive_without_scan_on_repeat):
+                    check("reservation-new-capability-after-advance-flip-scan-omitted",
+                          lambda: new_capability_retry() is None and target.read_bytes() == payload)
             # Fix round 2 (claude MINOR-1): a FIFO squatting a reservation name refuses AT ONCE
             # (the read-back open carries O_NONBLOCK, so a writer-less FIFO cannot block it),
             # judged in a BOUNDED child: a blocking mutant turns this check red at the deadline
@@ -4834,6 +4873,58 @@ def _self_test_vectors():
             return first and message is not None and "already exists with different content" in message \
                 and (derive_root / store.allocation_record("record", run_id)).read_bytes() == published
     check("reservation-repeat-after-counter-advance-refused", repeat_after_advance)
+
+    # A repeat under the same capability after changes that leave the demanded key's maximum where it
+    # was derives the published claims again and is answered from the read-back entry. Another run's
+    # reservation holds BI at 5 and this run's at 6 (demand 1); then counters.toml raises BI to a value
+    # just inside or exactly at that reservation (4, 5) and raises WL, a key this run does not demand,
+    # to 9, above that maximum, and a third run reserves WL. Just outside (BI at 6) the maximum moves
+    # and the repeat is refused as different bytes. The reservation stays unchanged in every case. The
+    # paired mutation, in place: a counters base taken over every key the file carries, not the
+    # demanded key's own, derives above WL and refuses the repeat at the unchanged maximum.
+    def repeat_unchanged_maximum(counter):
+        # The repeat's outcome ("answered" when it returns the published payload, else its refusal
+        # text, None when the setup failed) and whether the reservation bytes stayed unchanged.
+        with derivation_store({"BI": 0, "WL": 0}) as (derive_root, held):
+            run_id = derive_run("record", 2)
+            planted = derived(held, "record", derive_run("record", 1), {"BI": 5}, {"BI": 5})
+            first = derived(held, "record", run_id, {"BI": 1}, {"BI": 6})
+            published = (derive_root / store.allocation_record("record", run_id)).read_bytes()
+            set_counters(derive_root, {"BI": counter, "WL": 9})
+            third = derived(held, "record", derive_run("record", 3), {"WL": 1}, {"WL": 10})
+            if not (planted and first and third):
+                return None, False
+            try:
+                outcome = "answered" if home_journal.reserve_allocation(
+                    held, "record", run_id, {"BI": 1}) == published else "other bytes"
+            except native_journal.JournalError as exc:
+                outcome = str(exc)
+            unchanged = (derive_root / store.allocation_record("record", run_id)).read_bytes() == published
+            return outcome, unchanged
+
+    def repeat_answered(counter):
+        outcome, unchanged = repeat_unchanged_maximum(counter)
+        return outcome == "answered" and unchanged
+
+    def counters_any_key():
+        real_counter_high = home_journal._counter_high
+
+        def highest_of_every_key(root_fd, machine_rel, keys):
+            # The fixture's counters.toml carries exactly BI and WL.
+            high = real_counter_high(root_fd, machine_rel, keys)
+            top = max(real_counter_high(root_fd, machine_rel, ["BI", "WL"]).values())
+            return {key: max(value, top) for key, value in high.items()}
+        return _patch.object(home_journal, "_counter_high", highest_of_every_key)
+
+    check("reservation-repeat-unchanged-maximum-inside-answered", lambda: repeat_answered(4))
+    check("reservation-repeat-unchanged-maximum-at-answered", lambda: repeat_answered(5))
+
+    def repeat_refused(counter):
+        outcome, unchanged = repeat_unchanged_maximum(counter)
+        return outcome is not None and "already exists with different content" in outcome and unchanged
+    check("reservation-repeat-moved-maximum-outside-refused", lambda: repeat_refused(6))
+    with counters_any_key():
+        check("reservation-repeat-unchanged-maximum-flip-any-key", lambda: repeat_refused(5))
 
     # PR-3 fix round 1 (codex MAJOR), reworked in fix round 2 (codex MEDIUM-2): ensure_journal_dirs
     # makes each component entry durable on EVERY call. mkdir and fsync are recorded on ONE shared

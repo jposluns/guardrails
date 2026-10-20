@@ -6887,7 +6887,9 @@ def t94_planned_ids_bound_to_claims(fx):
 
 def flip_t94_ids_unchecked():
     """The held reservation step without its planned-id check: only the claims are compared, so a plan
-    whose ids its claims do not imply reserves and goes on to report and publish those ids."""
+    whose ids its claims do not imply reserves. T94 calls this step directly, so nothing else refuses
+    that plan; on the full record path the postcondition's id comparison (_postcondition) would
+    still refuse the run before the lease, so the planned-id check is a second guard behind it."""
     return patch.object(record, "_check_planned_ids", lambda ctx, plan: None)
 
 

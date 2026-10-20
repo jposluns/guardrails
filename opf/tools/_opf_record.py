@@ -2494,7 +2494,9 @@ def _check_planned_ids(ctx, plan):
     planned claim, issued in demand order (claim_ids over the high-water just below each claim). The
     seam compares only the claims, and plan.ids is a separate input the run reports and publishes, so
     a plan whose ids differ (another number, another order, an id missing or extra) refuses here,
-    before anything is reserved."""
+    before anything is reserved. On the record path this is a second guard: _postcondition already
+    refuses such a plan before the lease, and nothing changes plan.ids between the two; this check
+    keeps the reservation step itself from reserving for ids its claims do not imply."""
     counts = collections.Counter(ctx.demand)
     implied = None
     if isinstance(ctx.claims, dict) and set(ctx.claims) == set(counts) and all(
