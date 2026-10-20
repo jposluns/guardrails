@@ -167,7 +167,7 @@ source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 13
 end-line = 14
 canonical-text = "A reported count, size, or population is meaningful only together with the predicate that selected it:\nwhat was counted, over what set, under what filter, and as of when."
-source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+source-digest = "2563a03b33981c517e231da672d197b54ad005507207e00efb3eef3b9f8513b7"
 
 [[clause]]
 clause-id = "cntprd.2"
@@ -176,7 +176,7 @@ source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 14
 end-line = 16
 canonical-text = "Two counts of nominally the same\nthing produced by different predicates are different figures, and they are never quoted interchangeably,\ncompared as though they measured one quantity, or carried forward as a single number."
-source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+source-digest = "2563a03b33981c517e231da672d197b54ad005507207e00efb3eef3b9f8513b7"
 
 [[clause]]
 clause-id = "cntprd.3"
@@ -185,7 +185,7 @@ source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 18
 end-line = 24
 canonical-text = "A count reused across statements is pinned to the recorded\npredicate that produced it and, where a reconcilable basis is available and its retention permitted, to\nthat basis, an authoritative snapshot or revision of the source or the identifiers the reading returned\nwhere that set is complete, so a later statement reconciles against the recorded figure rather than\nsilently re-deriving a different one; where no such basis is available, the statement records that the\nfigure cannot be reconciled and is re-measured under the same predicate rather than carried forward as\nthough it were."
-source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+source-digest = "2563a03b33981c517e231da672d197b54ad005507207e00efb3eef3b9f8513b7"
 
 [[clause]]
 clause-id = "dscres.1"
@@ -491,7 +491,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 14
 end-line = 15
 canonical-text = "A figure obtained by measurement or instrumentation is not summed, averaged, or otherwise blended with an\nestimated, inferred, or self-reported one into a single number presented as a measurement."
-source-digest = "2321618ff2db7ba71f4ae2cb7af4b88ee60e740faad4c51f3f176a8d352ff56a"
+source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
 
 [[clause]]
 clause-id = "estsep.2"
@@ -500,7 +500,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 15
 end-line = 17
 canonical-text = "The two grades of\nfigure are reported in labelled separation, so a reader can see which part was measured and which was\nestimated."
-source-digest = "2321618ff2db7ba71f4ae2cb7af4b88ee60e740faad4c51f3f176a8d352ff56a"
+source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
 
 [[clause]]
 clause-id = "estsep.3"
@@ -509,7 +509,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 17
 end-line = 18
 canonical-text = "A quantity that is not known is reported as unknown, never silently entered as zero, because a\nzero sits in a total as though it were measured."
-source-digest = "2321618ff2db7ba71f4ae2cb7af4b88ee60e740faad4c51f3f176a8d352ff56a"
+source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
 
 [[clause]]
 clause-id = "estsep.4"
@@ -518,7 +518,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 18
 end-line = 19
 canonical-text = "Any figure derived from an estimate, including a ratio, a\npercentage, or a total that an estimated input feeds, is itself an estimate and is labelled as one."
-source-digest = "2321618ff2db7ba71f4ae2cb7af4b88ee60e740faad4c51f3f176a8d352ff56a"
+source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
 
 [[clause]]
 clause-id = "nofabr.1"
@@ -545,7 +545,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 13
 end-line = 14
 canonical-text = "Do not assert what a system shows, renders, prints, outputs, or does in its live state unless you observed\nthat behaviour directly."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.2"
@@ -554,7 +554,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 17
 end-line = 19
 canonical-text = "A claim that a system is launch-ready,\nlive, or working is such a behavioural claim: it rests on having exercised the relevant runtime path and\nobserved the expected result, not on a static check that the configuration or registration looks correct."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.3"
@@ -563,7 +563,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.4"
@@ -572,7 +572,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.5"
@@ -581,7 +581,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.6"
@@ -590,7 +590,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.7"
@@ -599,7 +599,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.8"
@@ -608,7 +608,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.9"
@@ -617,7 +617,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "obsbeh.10"
@@ -625,8 +625,8 @@ corpus-id = "obsbeh"
 source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 30
 end-line = 33
-canonical-text = "You read the resource's own\nstate, the host's available capacity, and your own footprint directly before asserting such a failure or\nreporting it onward, and absent that reading the condition resolves to a local error to investigate while\nwork continues, never a stop or a resource-wide alarm."
-source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
+canonical-text = "You read the\nresource's own state, the host's available capacity, and your own footprint directly before asserting\nsuch a failure or reporting it onward; absent that reading the condition resolves to a local error to\ninvestigate while work continues, never a stop or a resource-wide alarm."
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
 clause-id = "rdbchr.1"
@@ -752,7 +752,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.2"
@@ -761,7 +761,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.3"
@@ -770,7 +770,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.4"
@@ -779,7 +779,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.5"
@@ -788,7 +788,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.6"
@@ -797,7 +797,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires a target or context parameter to be derived from or validated against its authoritative source at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.7"
@@ -806,7 +806,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.8"
@@ -815,7 +815,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality catches a declared path absent from the commit and a committed change absent from the declaration, but it cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.9"
@@ -824,7 +824,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.10"
@@ -833,7 +833,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "vfxcmt.11"
@@ -842,7 +842,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content."
-source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
 
 [[clause]]
 clause-id = "csttir.1"
@@ -5892,7 +5892,7 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 13
 end-line = 14
 canonical-text = "The assistant cites a path and line number only from a file it opened this session at the commit under\nreview, never from memory, a prior report, or an inferred layout."
-source-digest = "8c02d57fd2a9df42d6709f6df4f6432317354f874adfb60262f8db186c66c0e2"
+source-digest = "49d8c44b44270acc12e944f97e708e5651029acfd89f3e746a6dca31e91a32a9"
 
 [[clause]]
 clause-id = "citint.2"
@@ -5901,7 +5901,7 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 14
 end-line = 15
 canonical-text = "Where it is unsure of the line, it\ncites the symbol alone rather than guessing a number."
-source-digest = "8c02d57fd2a9df42d6709f6df4f6432317354f874adfb60262f8db186c66c0e2"
+source-digest = "49d8c44b44270acc12e944f97e708e5651029acfd89f3e746a6dca31e91a32a9"
 
 [[clause]]
 clause-id = "citint.3"
@@ -5910,7 +5910,7 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 15
 end-line = 16
 canonical-text = "Code or document text is quoted only from what\nthe assistant actually read, so a quotation is an excerpt, never a reconstruction presented as one."
-source-digest = "8c02d57fd2a9df42d6709f6df4f6432317354f874adfb60262f8db186c66c0e2"
+source-digest = "49d8c44b44270acc12e944f97e708e5651029acfd89f3e746a6dca31e91a32a9"
 
 [[clause]]
 clause-id = "citint.4"
@@ -5919,7 +5919,7 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 17
 end-line = 18
 canonical-text = "Before delivering, re-open each cited range at its stated lines and confirm that it starts and ends\non lines that carry the cited content, not on a blank line, a comment banner, or a closing delimiter."
-source-digest = "8c02d57fd2a9df42d6709f6df4f6432317354f874adfb60262f8db186c66c0e2"
+source-digest = "49d8c44b44270acc12e944f97e708e5651029acfd89f3e746a6dca31e91a32a9"
 
 [[clause]]
 clause-id = "attint.1"
