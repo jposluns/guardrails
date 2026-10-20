@@ -557,6 +557,13 @@ jobs:
         shell: bash
         run: python3 -I -B tools/gen_first_pin_demo.py --check
 
+      - name: Must-deliver prefix self-test
+        shell: bash
+        run: python3 -I -B tools/check_must_deliver.py --self-test
+      - name: Must-deliver prefix
+        shell: bash
+        run: python3 -I -B tools/check_must_deliver.py
+
       - name: Mappings page drift
         shell: bash
         run: python3 -I -B tools/gen_mappings.py --check
