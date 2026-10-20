@@ -20,9 +20,7 @@ through the prober the caller supplies, as check 4's doctor run does. The one wr
 exercise, which copies archived bytes into a private TemporaryDirectory scratch and digest-verifies the copy
 there; it never restores over the live tree.
 
-Inputs: the product root, the adoption run id, the adopter-held planning inventory bytes
-(`opf.adoption.planning-inventory/v1`, the bytes the plan's inventory_digest seals; apply persists the plan
-and approval in the run's bundle, not the planning inventory), and a doctor callable (product_root to the
+Inputs: the product root, the adoption run id, and a doctor callable (product_root to the
 _opf_check StoreValidation shape: status, findings, cannot_evaluate). The doctor's git observations are a
 process-spawning gather, so the caller supplies the run (store_doctor builds one from caller-supplied inert
 observations); with no doctor, check 4 is CANNOT-EVALUATE, never a pass. Check 5 takes a prober callable
@@ -34,7 +32,10 @@ CANNOT-EVALUATE (an input it cannot read or parse, never a pass). An absent requ
 no receipt, an absent preimage or live file) is a finding; an unreadable or malformed one is
 CANNOT-EVALUATE. A plan that does not re-prove (frozen_plan) leaves every check CANNOT-EVALUATE.
 
-Check ownership, so one mutation flips one check (the canonical single-mutation flips of the self-test).
+Check ownership, so one mutation flips one check (the canonical single-mutation flips of the self-test;
+the one exception is the bundle's planning-inventory copy, whose tamper without a re-emitted inventory row
+moves checks 2 and 3 together, each from its own sentence: check 2 reads the copy, check 3 verifies the
+bundle that lists it, so the canonical check-2 flips re-emit the row).
 Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the division of labour is:
   1 authority-freshness: the frozen plan re-proves and names this run, the bundle's approval binds it
     (approval_findings), the receipt core validates and binds the run, product, plan and inventory digests,
@@ -50,7 +51,10 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     rendered views, CI members and consumer repointings are check 4's; a move-file destination is written
     only by the post-green relocation, so before green it is no live destination; and the receipt is
     compared by content in the receipt leg, because outcome events append to its file.
-  2 discovery-accounting: the planning inventory re-seals to the plan's inventory_digest; every candidate,
+  2 discovery-accounting: the planning inventory (`opf.adoption.planning-inventory/v1`, the bytes the
+    plan's inventory_digest seals), read from the run's evidence bundle where apply persists the copy
+    re-derivation proved (an absent copy is a finding; an unreadable or malformed one is CANNOT-EVALUATE),
+    re-seals to the plan's inventory_digest; every candidate,
     empty directory and inventoried file entry, wherever it lies, has a plan disposition or lies under a
     recorded exclusion (the store control area counts as one, spec 14.2); the whole observation must be the
     one the planner builds, by the planner's OWN build (rebuilt_observation_problem): the entry rows, one per path,
@@ -112,7 +116,8 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
 
 DISCLOSED RESIDUALS: the receipt core schema requires a null after_digest for retire and move rows, which
 TOML cannot spell, so check 1 compares only the receipt rows present and cannot require one row per source;
-check 2 trusts the planning inventory the caller supplies once it re-seals to the plan's bound digest, and
+check 2 trusts the planning inventory the run's evidence bundle supplies (the one copy, persisted by apply
+and digest-checked by check 3's bundle verification too) once it re-seals to the plan's bound digest, and
 takes as recorded what only the store manifest fixes (the exclusions, and the walk table's deliverables,
 resolved flag, manifest path and manifest byte count, the last counted against the total byte bound), since
 the inventory does not carry the manifest bytes; the resolved flag must agree with a recorded resolution,
@@ -205,7 +210,7 @@ class _Report:
 
 
 class _Evaluation:
-    __slots__ = ("product_root", "root_fd", "run_id", "plan", "planning_inventory", "doctor", "prober")
+    __slots__ = ("product_root", "root_fd", "run_id", "plan", "doctor", "prober")
 
 
 def _digest(data):
@@ -407,13 +412,20 @@ def rebuilt_observation_problem(obs):
 def _check_discovery(ev, rep):
     """Spec 14.1 check 2: 'Discovery accounting: every inventory entry has a disposition or recorded
     exclusion.' Every inventoried file, wherever it lies, and every candidate and empty directory needs a
-    plan disposition or a recorded exclusion. First the whole observation must be the one the planner's own
+    plan disposition or a recorded exclusion. The planning inventory is the bundle copy apply persists
+    (apply.planning_inventory_rel), the one source: an absent copy is a finding, like an absent approval
+    (module outcome model); an unreadable or malformed one is CANNOT-EVALUATE. First the whole observation
+    must be the one the planner's own
     build_observation returns over the listing its rows record (rebuilt_observation_problem; module
     docstring, check 2), so an ambiguous, malformed, contradictory or unproducible record is CANNOT-EVALUATE,
     never a pass, and the containment test below only ever sees paths the planner's own walk recorded."""
-    if ev.planning_inventory is None:
-        raise Unevaluable("the planning inventory was not supplied; discovery accounting needs its entries")
-    doc = _canonical(ev.planning_inventory, "the planning inventory")
+    rel = apply.planning_inventory_rel(ev.run_id)
+    data = _read(ev, rel)
+    if data is None:
+        rep.finding("no planning inventory in the run's evidence bundle ({}): apply persists the sealed "
+                    "copy, and discovery accounting needs its entries".format(rel))
+        return
+    doc = _canonical(data, "the planning inventory")
     if doc.get("format") != PLANNING_INVENTORY_FORMAT:
         raise Unevaluable("the planning inventory format {!r} is not {}".format(
             doc.get("format"), PLANNING_INVENTORY_FORMAT))
@@ -895,13 +907,14 @@ def _run_check(name, ev):
     return rep.result()
 
 
-def evaluate(product_root, run_id, *, planning_inventory=None, doctor=None, prober=None):
+def evaluate(product_root, run_id, *, doctor=None, prober=None):
     """The roster verdicts {check name: CheckResult} in the spec's order (spec 14.1). Check 5 is never VALID
     while PR6_DENY_PROBES_SHIPPED is False. Read-only over the live tree; every unreadable input is
-    CANNOT-EVALUATE."""
+    CANNOT-EVALUATE. Every artefact, the planning inventory included, is read from the run's committed
+    evidence bundle: there is no caller-supplied stand-in."""
     ev = _Evaluation()
     ev.product_root, ev.run_id, ev.doctor, ev.prober = str(product_root), run_id, doctor, prober
-    ev.planning_inventory, ev.plan, ev.root_fd = planning_inventory, None, None
+    ev.plan, ev.root_fd = None, None
     try:
         ev.root_fd = apply._open_product_root(product_root)
         if not apply.is_run_id(run_id):
@@ -1039,7 +1052,7 @@ def _fixture(root):
     occupying source at the TODO.md view destination archived and its view rendered, a repointed consumer
     under a recorded exclusion, the store scaffolded, every enforcement member planted (the CI floor is the
     shipped template and recipe unless a vector patches _CI_BYTES or _CI_RECIPE_BYTES), and the run's
-    bundle (plan, approval, receipt, inventory). Returns the planning inventory bytes."""
+    bundle (plan, approval, receipt, planning inventory, inventory). Returns the planning inventory bytes."""
     import _opf_init
     import tomllib
     manifest = _opf_init.build_manifest().encode("utf-8")
@@ -1129,7 +1142,8 @@ def _fixture(root):
     receipt["files"] = [dict(path="notes/old.md", before_digest=_digest(_LIVE["notes/old.md"]),
                              after_digest=_digest(_LIVE["notes/old.md"]), disposition="migrate")]
     bundle = {apply.plan_rel(_RUN): _emit(plan), apply.approval_rel(_RUN): _emit(approval),
-              apply.receipt_rel(_RUN): _emit(receipt)}
+              apply.receipt_rel(_RUN): _emit(receipt),
+              apply.planning_inventory_rel(_RUN): _emit(inventory)}
     for s in sources:
         if s["disposition"] in ("retire", "migrate") or s["occupying"]:
             bundle[s["preservation"]] = _LIVE[s["path"]]
@@ -1153,9 +1167,10 @@ def _fixture(root):
 
 def _case(mutate=None):
     with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
-        kwargs = dict(planning_inventory=_fixture(root), doctor=_Doctor(), prober=_Surface())
+        inv = _fixture(root)
+        kwargs = dict(doctor=_Doctor(), prober=_Surface())
         if mutate is not None:
-            kwargs.update(mutate(root, kwargs["planning_inventory"]) or {})
+            kwargs.update(mutate(root, inv) or {})
         return evaluate(root, _RUN, **kwargs)
 
 
@@ -1451,11 +1466,10 @@ def _retoml(root, rel, mutate):
     _put(root, rel, _emit(doc))
 
 
-def _rereceipt(root, mutate):
-    """Rewrite the run's receipt through `mutate`, then re-seal the bundle inventory over the bundle's
-    current bytes, so the tamper reaches only check 1's receipt leg (check 3's bundle verification holds)."""
+def _reinventory(root):
+    """Re-seal the bundle inventory over the bundle's current bytes, so a rewritten member's row matches
+    again (check 3's bundle verification holds)."""
     import tomllib
-    _retoml(root, apply.receipt_rel(_RUN), mutate)
     with open(os.path.join(root, *apply.inventory_rel(_RUN).split("/")), "rb") as fh:
         doc = tomllib.load(fh)
     fresh = []
@@ -1464,6 +1478,20 @@ def _rereceipt(root, mutate):
             fresh.append(apply.inventory_row(row["path"], fh.read()))
     _put(root, apply.inventory_rel(_RUN), apply.emit_inventory(
         _RUN, fresh, plan_digest=doc["adoption"]["plan_digest"]))
+
+
+def _rereceipt(root, mutate):
+    """Rewrite the run's receipt through `mutate`, then re-seal the bundle inventory over the bundle's
+    current bytes, so the tamper reaches only check 1's receipt leg (check 3's bundle verification holds)."""
+    _retoml(root, apply.receipt_rel(_RUN), mutate)
+    _reinventory(root)
+
+
+def _replant(root, data):
+    """Replace the bundle's planning-inventory copy with `data` and re-seal its inventory row, so the
+    change reaches only check 2 (check 3's bundle verification holds)."""
+    _put(root, apply.planning_inventory_rel(_RUN), data)
+    _reinventory(root)
 
 
 def _toml_file(root, rel):
@@ -1507,7 +1535,7 @@ def _strayed(inv, entries=(), candidates=()):
 
 
 def _flip_2(root, inv):
-    return dict(planning_inventory=_strayed(inv))
+    _replant(root, _strayed(inv))
 
 
 def _flip_3(root, inv):
@@ -1594,6 +1622,10 @@ def self_test():
         mock.patch.object(here, "U25_CI_IDENTITY_ASSERTED", True).start()
         base = _case()
         check("baseline-green-1-4-6", _only(base, {}))
+        # Check 2 reads the bundle's planning-inventory copy, the one source: no caller keyword exists
+        # (red if evaluate reverts to a planning_inventory keyword, or if the bundle read breaks).
+        check("check-2-reads-bundle-inventory", base[DISCOVERY].status == VALID
+              and set(evaluate.__kwdefaults__ or {}) == {"doctor", "prober"})
         check("check-4-u25-switch-on-valid", U25_CI_IDENTITY_ASSERTED and _only(base, {}))
         check("roster-never-green-without-check-5", not roster_green(base))
         greenable = dict(base, **dict([(WIRING, CheckResult(VALID))]))
@@ -1789,7 +1821,7 @@ def self_test():
         check("check-2-excluded-entry-accounted", _says(excluded, DISCOVERY, "'legacy/stray.md' has neither")
               and any(row == dict(path=".working/toml", kind="excluded") for row in _entries(_case_inventory()))
               and not _says(excluded, DISCOVERY, "'.working/toml' has neither"))
-        rekeyed = _case(lambda r, i: dict(planning_inventory=_reseal_inventory(
+        rekeyed = _case(lambda r, i: _replant(r, _reseal_inventory(
             i, exclusions=[dict(path=".working/toml", reason="machine"), dict(path="consumer", reason="other")])))
         check("check-2-unbound-inventory-red", rekeyed[DISCOVERY].status == INVALID
               and _says(rekeyed, DISCOVERY, "not the one the approved plan binds"))
@@ -1800,27 +1832,35 @@ def self_test():
             doc["decisions"] = [dict(note="tampered after sealing")]
             return _emit(doc)
 
-        check("check-2-tampered-seal-red", _says(_case(lambda r, i: dict(planning_inventory=_tamper_seal(i))),
+        check("check-2-tampered-seal-red", _says(_case(lambda r, i: _replant(r, _tamper_seal(i))),
                                                  DISCOVERY, "does not seal its own bytes"))
-        uninv = _case(lambda r, i: dict(planning_inventory=_reseal_inventory(
+        uninv = _case(lambda r, i: _replant(r, _reseal_inventory(
             i, entries=[row for row in _entries(i) if row["path"] != "legacy/RULES.md"],
             candidates=[p for p in sorted(_LIVE) if p != "legacy/RULES.md"], empty_directories=["legacy"])))
         check("check-2-source-not-inventoried-red",
               _says(uninv, DISCOVERY, "'legacy/RULES.md' is not an inventoried file"))
         stray_entry = dict(path=".claude/unaccounted.md", kind="file", size=2, digest="sha256:" + "b" * 64)
-        anywhere = _case(lambda r, i: dict(planning_inventory=_reseal_inventory(
+        anywhere = _case(lambda r, i: _replant(r, _reseal_inventory(
             i, entries=[row for row in _entries(i) if row["path"] != ".claude"]
             + [dict(path=".claude", kind="directory"), stray_entry])))
         check("check-2-inventoried-file-outside-working-red", _only(anywhere, _red(DISCOVERY))
               and _says(anywhere, DISCOVERY, "'.claude/unaccounted.md' has neither"))
         dup_entry = dict(path="legacy/RULES.md", kind="file", size=1, digest="sha256:" + "a" * 64)
-        check("closed-duplicate-entry", _only(_case(lambda r, i: dict(planning_inventory=_reseal_inventory(
+        check("closed-duplicate-entry", _only(_case(lambda r, i: _replant(r, _reseal_inventory(
             i, entries=_entries(i) + [dup_entry]))), _red(DISCOVERY, CANNOT_EVALUATE)))
-        check("closed-malformed-entry", _only(_case(lambda r, i: dict(planning_inventory=_reseal_inventory(
+        check("closed-malformed-entry", _only(_case(lambda r, i: _replant(r, _reseal_inventory(
             i, entries=_entries(i) + [dict(path=123, kind="nonsense")]))), _red(DISCOVERY, CANNOT_EVALUATE)))
-        check("closed-undigested-file-entry", _only(_case(lambda r, i: dict(
-            planning_inventory=_reseal_inventory(i, entries=_entries(i) + [dict(
+        check("closed-undigested-file-entry", _only(_case(lambda r, i: _replant(
+            r, _reseal_inventory(i, entries=_entries(i) + [dict(
                 path="legacy/undigested.md", kind="file")]))), _red(DISCOVERY, CANNOT_EVALUATE)))
+        # The bundle copy tampered WITHOUT its inventory row re-emitted moves checks 2 and 3 together, the
+        # documented exception to one-mutation-one-check (module docstring): check 2 reads the copy and
+        # check 3 verifies the bundle that lists it.
+        unrowed = _case(lambda r, i: _put(r, apply.planning_inventory_rel(_RUN), _strayed(i)))
+        check("check-2-unrowed-tamper-flips-2-and-3",
+              _only(unrowed, dict([(DISCOVERY, INVALID), (PRESERVATION, INVALID)]))
+              and _says(unrowed, DISCOVERY, "'legacy/stray.md' has neither")
+              and _says(unrowed, PRESERVATION, "does not match its recorded size and sha256"))
 
         # Round 12: entries the planner never records, each sealed and bound by the fixture itself
         # (_EXTRA_ENTRIES), so every other check stays VALID: an excluded entry under no recorded exclusion
@@ -2261,10 +2301,19 @@ def self_test():
                                                dict([(AUTHORITY, CANNOT_EVALUATE), (PRESERVATION, INVALID)])))
         check("closed-receipt-garbage", _case(lambda r, i: _put(
             r, apply.receipt_rel(_RUN), b"[["))[AUTHORITY].status == CANNOT_EVALUATE)
-        check("closed-inventory-absent", _only(_case(lambda r, i: dict(planning_inventory=None)),
-                                               _red(DISCOVERY, CANNOT_EVALUATE)))
-        check("closed-inventory-garbage", _only(_case(lambda r, i: dict(planning_inventory=b"x = [")),
-                                                _red(DISCOVERY, CANNOT_EVALUATE)))
+        # The planning-inventory copy: absent (its row removed with it, so check 3 holds) is a check-2
+        # FINDING naming the bundle path, like an absent approval; unreadable or malformed stays
+        # CANNOT-EVALUATE.
+        def _deplant(r):
+            _unclaim(r, apply.planning_inventory_rel(_RUN))
+            _remove(r, apply.planning_inventory_rel(_RUN))
+
+        absent_inv = _case(lambda r, i: _deplant(r))
+        check("check-2-bundle-inventory-absent-finding", _only(absent_inv, _red(DISCOVERY))
+              and _says(absent_inv, DISCOVERY, "no planning inventory in the run's evidence bundle")
+              and _says(absent_inv, DISCOVERY, apply.planning_inventory_rel(_RUN)))
+        check("check-2-bundle-inventory-garbage-cannot", _only(_case(lambda r, i: _replant(r, b"x = [")),
+                                                               _red(DISCOVERY, CANNOT_EVALUATE)))
         check("closed-bundle-inventory-garbage", _case(lambda r, i: _put(
             r, apply.inventory_rel(_RUN), b"x = ["))[PRESERVATION].status == CANNOT_EVALUATE)
         check("closed-symlink-retire-source", _case(_symlinked)[RETIREMENT].status == CANNOT_EVALUATE)
@@ -2288,7 +2337,7 @@ def self_test():
         with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
             inv = _fixture(root)
             before = _tree(root)
-            evaluate(root, _RUN, planning_inventory=inv, doctor=_Doctor(), prober=_Surface())
+            evaluate(root, _RUN, doctor=_Doctor(), prober=_Surface())
             check("read-only-live-tree", _tree(root) == before)
         # Direct-call vectors for legs a VALID frozen plan cannot reach end to end: a foreign preservation
         # destination and a missing CI row (frozen_plan refuses both plans), and check 2's accounting leg
@@ -2296,7 +2345,7 @@ def self_test():
         with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
             inv = _fixture(root)
             ev = _Evaluation()
-            ev.product_root, ev.run_id, ev.doctor, ev.planning_inventory = root, _RUN, _Doctor(), inv
+            ev.product_root, ev.run_id, ev.doctor = root, _RUN, _Doctor()
             ev.root_fd = apply._open_product_root(root)
             try:
                 plan = apply.frozen_plan(_read(ev, apply.plan_rel(_RUN)))
@@ -2359,7 +2408,7 @@ def self_test():
                       any("binds no CI enforcement row" in f for f in direct.findings))
                 import tomllib
                 inv2 = _strayed(inv)
-                ev.planning_inventory = inv2
+                _put(root, apply.planning_inventory_rel(_RUN), inv2)
                 ev.plan = dict(plan, inventory_digest=tomllib.loads(
                     inv2.decode("utf-8"))["inventory_digest"])
                 direct = _Report()
@@ -2370,7 +2419,7 @@ def self_test():
 
                 def _discovery(**changes):
                     resealed = _reseal_inventory(inv, **changes)
-                    ev.planning_inventory = resealed
+                    _put(root, apply.planning_inventory_rel(_RUN), resealed)
                     ev.plan = dict(plan, inventory_digest=tomllib.loads(resealed.decode("utf-8"))["inventory_digest"])
                     report = _Report()
                     try:
@@ -2405,7 +2454,7 @@ def self_test():
                 # roots held to the planner's own _roots; each disagreement is CANNOT-EVALUATE naming it.
                 def _refused(**changes):
                     resealed = _reseal_inventory(inv, **changes)
-                    ev.planning_inventory = resealed
+                    _put(root, apply.planning_inventory_rel(_RUN), resealed)
                     ev.plan = dict(plan, inventory_digest=tomllib.loads(resealed.decode("utf-8"))["inventory_digest"])
                     try:
                         _check_discovery(ev, _Report())
@@ -2440,6 +2489,21 @@ def self_test():
                     entries=_entries(inv) + [ghost], candidates=sorted(sorted(_LIVE) + [ghost["path"]])) == "")
                 check("check-2-r13-empty-directory-recorded-control", _refused(
                     entries=_entries(inv) + [hollow_dir], empty_directories=["legacy/hollow"]) == "")
+                # The per-file read cap at both ends (the journal reader refuses only when total > cap,
+                # inclusive at the cap): the bundle copy read with the cap one over and exactly at its
+                # size grades, and one byte under is CANNOT-EVALUATE naming the cap.
+                _put(root, apply.planning_inventory_rel(_RUN), inv)
+                ev.plan = plan
+                copy_size = os.stat(os.path.join(
+                    root, *apply.planning_inventory_rel(_RUN).split("/"))).st_size
+                capped = {}
+                for offset in (1, 0, -1):
+                    with mock.patch.object(apply._journal, "_MAX_PRODUCT_READ_BYTES", copy_size + offset):
+                        capped[offset] = _run_check(DISCOVERY, ev)
+                check("check-2-read-cap-above-size-reads", capped[1].status == VALID)
+                check("check-2-read-cap-at-size-reads", capped[0].status == VALID)
+                check("check-2-read-cap-one-under-cannot", capped[-1].status == CANNOT_EVALUATE
+                      and any("read cap" in f for f in capped[-1].findings))
                 # Check 1's destination sweep over every op kind it owns (the fixture plants none of these).
                 extra = [dict(op="create-file", path="docs/NEW.md", content_digest="sha256:" + "1" * 64),
                          dict(op="plant-governance", path="CLAUDE.md", content_digest="sha256:" + "2" * 64),
