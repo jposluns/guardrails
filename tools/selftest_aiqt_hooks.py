@@ -12291,11 +12291,13 @@ def _main_isolated(monitor):
         # space/';'/'#' inside '${...}' or a backquote, or leaves ANSI-C-undecoded, is seen whole. On a
         # verb that accepts --no-verify, an option-region word that carries a live '$', '`' or '{' and a
         # '-', or opens an unquoted '$(', DENIES naming the word; a purely literal word that resolves to
-        # the bypass (quoted or ANSI-C '-n'/'--no-verify') DENIES too. Two provably safe shapes are
-        # narrowed to allow: a word led by a literal non-dash character (release-$v) and a word whose
-        # literal prefix is a complete long option up to '=' that is not a no-verify spelling
-        # (--author="$a"). Each deny here ALLOWED before this rule; the allow controls pin the rule's edges
-        # (no '-', single-quoted, escaped-only, post-'--', off-roster verb, and the two narrowings).
+        # the bypass (quoted or ANSI-C '-n'/'--no-verify') DENIES too. A narrowing is sound only when the
+        # word yields EXACTLY ONE argument that cannot begin with '-', which requires the expansion to be
+        # DOUBLE-QUOTED (an unquoted one word-splits): the two narrowed shapes are a quoted expansion behind
+        # a nonempty literal non-dash prefix (release-"$v") and a quoted expansion bound by '--long=' to a
+        # complete long option that is not a no-verify spelling (--author="$a"). Each deny here ALLOWED
+        # before this rule; the allow controls pin the rule's edges (no '-', single-quoted, escaped-only,
+        # post-'--', off-roster verb, and the two narrowings).
         gexpect("(gw-eo-a) ${x}-n on commit denies (an empty expansion leaves a bare -n)",
                 "git commit ${x}-n -m y", "deny")
         gexpect("(gw-eo-b) $x-n on commit denies", "git commit $x-n -m y", "deny")
@@ -12331,10 +12333,10 @@ def _main_isolated(monitor):
                 "git commit -m x -- ${y}-n", "allow")
         gexpect("(gw-eo-r) a dash-free unparseable expansion word allows (raw fallback control)",
                 'git commit -m "$msg x', "allow")
-        # Narrowing 2: a word whose literal prefix is a complete long option name up to '=' binds the
+        # Narrowing 2: a QUOTED expansion whose literal prefix is a long option name up to '=' binds the
         # expansion as that option's value, so it cannot become a separate option and ALLOWS. This was a
         # disclosed over-denial before; it now allows (both the '=' and the separated form pass).
-        gexpect("(gw-eo-s) --author=\"$a\" allows (narrowing: the '=' binds the expansion as the value)",
+        gexpect("(gw-eo-s) --author=\"$a\" allows (narrowing: the '=' binds the quoted expansion as a value)",
                 'git commit --author="$a" -m x', "allow")
         gexpect("(gw-eo-t) -m $(date) denies (an unquoted $( command substitution in the option region)",
                 "git commit -m $(date)", "deny")
@@ -12392,9 +12394,9 @@ def _main_isolated(monitor):
         gexpect("(gw-eo-al) $(printf ...) assembling --no-verify denies beside a here-string (raw fallback)",
                 'git push $(printf "\\55\\55no\\55verify") origin topic <<<x', "deny")
 
-        # Narrowing 1: a word led by a literal non-dash character cannot begin with '-' however its
-        # expansion resolves, so it ALLOWS. This was a disclosed over-denial before; it now allows.
-        gexpect("(gw-eo-am) release-$v is led by a literal non-dash prefix, allows",
+        # Narrowing 1: a QUOTED expansion behind a literal non-dash prefix is one argument that cannot
+        # begin with '-' however it resolves, so it ALLOWS. This was a disclosed over-denial before.
+        gexpect("(gw-eo-am) release-\"$v\" is a quoted expansion behind a literal non-dash prefix, allows",
                 'git merge "release-$v"', "allow")
         # Mutants for narrowing 1: when the word can begin with '-' (a literal dash leads, or the expansion
         # leads) it DENIES.
@@ -12414,6 +12416,57 @@ def _main_isolated(monitor):
         gdeny_names("(gw-eo-ao) the deny reason names the ${x}-n word", "git commit ${x}-n -m y", "${x}-n")
         gdeny_names("(gw-eo-ap) the deny reason names the ANSI-C word", "git commit $'\\x2dn' -m y",
                     "x2dn")
+
+        # A narrowing is sound only when the word yields EXACTLY ONE argument that cannot begin with '-'.
+        # An UNQUOTED expansion word-splits, so even behind a literal prefix or bound by '--long=' it can
+        # hand git a fresh '-n'; only a DOUBLE-QUOTED expansion stays a single argument. Each deny below
+        # ALLOWED on an earlier revision of this rule; the quoted controls pin that the narrowings survive.
+        gexpect("(gw-eo-aq) an unquoted expansion behind a literal prefix word-splits into -n, denies",
+                "git commit -m prefix-$x", "deny")
+        gexpect("(gw-eo-ar) the quoted form is one argument bound as the -m value, allows",
+                'git commit -m prefix-"$x"', "allow")
+        gexpect("(gw-eo-as) an unquoted expansion bound by --message= still word-splits into -n, denies",
+                "git commit --message=$x", "deny")
+        # An EMPTY quoted fragment establishes no non-dash lead, so a following live expansion still denies.
+        gexpect("(gw-eo-at) an empty '' then an unquoted ${x}-n leaves a bare -n, denies",
+                "git commit ''${x}-n -m y", "deny")
+        gexpect("(gw-eo-au) an empty '' then a quoted leading \"${x}\"-n leaves a bare -n, denies",
+                "git commit ''\"${x}\"-n -m y", "deny")
+        gexpect("(gw-eo-av) a literal '.' then unquoted ${IFS} word-splits off a bare -n, denies",
+                "git commit -m msg .${IFS}-n", "deny")
+        # A redirection is removed by bash, so it never hides a following option word, and a backslash-
+        # newline line continuation is removed before the word is read.
+        gexpect("(gw-eo-aw) a redirection before ${x}-n does not hide it, denies",
+                "git commit -m y 2>&1 ${x}-n", "deny")
+        gexpect("(gw-eo-ax) a plain redirect with no trailing option word allows",
+                "git commit -m y >/dev/null", "allow")
+        gexpect("(gw-eo-ay) a backslash-newline is removed, so the trailing -n is a bare option, denies",
+                "git commit -m y \\\n-n", "deny")
+        # A git global option carrying an expansion is skipped as a value, never a reason to leave the
+        # segment unscanned.
+        gexpect("(gw-eo-az) a --git-dir= global option with an expansion is skipped, the -n still denies",
+                'git --git-dir="$d" commit ${x}-n -m y', "deny")
+        gexpect("(gw-eo-ba) the same global option with no bypass word allows",
+                'git --git-dir="$d" commit -m y', "allow")
+        # An ANSI-C NUL truncates the quoted fragment as bash does, so a glued trailing -n leads the word.
+        gexpect("(gw-eo-bb) $'\\0junk' truncates at the NUL, leaving a bare -n, denies",
+                "git commit $'\\0junk'-n -m y", "deny")
+        gexpect("(gw-eo-bc) $'X\\0junk'-n truncates to X, which leads the word, allows",
+                "git commit $'X\\0junk'-n -m y", "allow")
+        # An abbreviated value-taking long option consumes the '--' that follows it, so the trailing -n is
+        # still the bypass; a non-value abbreviation lets '--' terminate and the -n is an operand.
+        gexpect("(gw-eo-bd) --mess resolves to --message and consumes the '--', the -n denies",
+                "git commit --mess -- -n", "deny")
+        gexpect("(gw-eo-be) --ame resolves to --amend (no value), the '--' terminates and -n is an operand",
+                "git commit --ame -- -n", "allow")
+        # A glob is opacity, not a live expansion marker: a word that is a glob and a '-' with no live
+        # expansion allows (a mutant that reads the glob as a live marker turns this red).
+        gexpect("(gw-eo-bf) a glob with a '-' and no live expansion allows (glob opacity only)",
+                "git commit *-n -m y", "allow")
+        # Narrowing 2's no-verify exclusion: on the unparseable fallback (where the raw --no-ver probe does
+        # not fire on the shorter spelling) a '--no-ve=' prefix must NOT be narrowed; it is the bypass.
+        gexpect("(gw-eo-bg) an unparseable --no-ve=\"$x\" is a no-verify prefix, not narrowed, denies",
+                'git commit --no-ve="$x" -m "unbalanced', "deny")
 
         # === L11: the F1/F2 redirect-pollution slips are CLOSED by the shared raw-aware tokenizer =========
         # A redirect anywhere no longer hides the --no-verify bypass or the checker command word.
@@ -18269,8 +18322,9 @@ def _main_isolated(monitor):
           "gatdis (gate_weakening) DENIES a --no-verify bypass (with a value-aware '--' boundary so a '--' "
           "eaten as an option value does not hide a following -n), an option-region word an expansion can "
           "build into an option (a live '$'/'`'/'{' plus a '-', an unquoted '$(', or a quoted/ANSI-C spelling "
-          "that resolves to the bypass, on a verb that accepts --no-verify; a literal-non-dash prefix and a "
-          "complete '--long=' prefix are narrowed to allow), and a known verification run whose output reaches "
+          "that resolves to the bypass, on a verb that accepts --no-verify; only a QUOTED expansion behind a "
+          "literal-non-dash prefix or bound by a '--long=' prefix is narrowed to allow), and a known "
+          "verification run whose output reaches "
           "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
           "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and "
           "ALLOWS-WITH-NOTE every other checker-shaped segment whose failure is swallowed (|| true) or "

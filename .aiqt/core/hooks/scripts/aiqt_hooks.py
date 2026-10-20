@@ -9437,10 +9437,13 @@ _NOVERIFY_SHORT_N_VERBS = frozenset(("commit", "am"))
 # sets are the mandatory-value long options in their SEPARATED form (--message <msg>), whose value
 # token could itself begin with '-n' and must be skipped (their '--opt=value' shape carries the value
 # in the same token and consumes nothing). These sets cover the COMMON value-taking options rather
-# than claiming an exhaustive enumeration: an OMITTED value-taking option is safe-direction (on a
+# than claiming an exhaustive enumeration: an option NOT in these sets is safe-direction (on a
 # contrived input whose value itself spells -n or --no-verify it can only cause an over-ask/over-deny,
 # never a silent allow), so an option is added only once confirmed value-taking (adding a NON-value-
 # taking option would wrongly skip a real operand and could cause a silent allow, so it is never done).
+# The value-aware '--' boundary (_gate_terminator_index) matches a listed long option by UNAMBIGUOUS
+# PREFIX as git does, so an abbreviated value-taking option (--mess for --message) consuming the '--'
+# that follows it does NOT leave the trailing -n a silent allow.
 _GATE_SHORT_VALUE_OPTS = {
     "commit": frozenset(("m", "F", "C", "c", "t")),
     "am": frozenset(()),
@@ -9583,7 +9586,9 @@ def _gate_decode_ansi_c(body):
     """Decode a bash ANSI-C ($'...') body to the literal string bash produces. body is the text between the
     quotes with its backslash escapes intact. Covers the single-character escapes, '\\xHH' hex, '\\nnn'
     octal, '\\uHHHH'/'\\UHHHHHHHH' unicode, and '\\cX' control; an unrecognized escape keeps its backslash,
-    so an undecodable form stays ordinary text (never promoted to an option it is not)."""
+    so an undecodable form stays ordinary text (never promoted to an option it is not). A decoded NUL
+    TRUNCATES the fragment, as bash cannot store one ($'\\0junk'-n is the bare '-n' once the NUL ends the
+    quoted fragment and the outside '-n' concatenates)."""
     out = []
     i = 0
     n = len(body)
@@ -9641,7 +9646,9 @@ def _gate_decode_ansi_c(body):
         out.append("\\")
         out.append(e)
         i += 1
-    return "".join(out)
+    decoded = "".join(out)
+    nul = decoded.find("\x00")  # bash cannot store a NUL: the string ends at the first one it decodes
+    return decoded if nul < 0 else decoded[:nul]
 
 
 # A single option-region word as the gate reads it from the raw command. raw is the verbatim slice; lit is
@@ -9652,9 +9659,13 @@ def _gate_decode_ansi_c(body):
 # first_kind classifies the word's FIRST element ('lit-dash', 'lit-other', 'param', 'cmdsub', 'brace',
 # 'glob', 'tilde'); 'lit-other' means a literal non-dash leads, so the expanded word cannot begin with '-'.
 # lit_prefix is the leading run of literal characters before the first expansion, glob, brace or tilde.
+# has_unquoted_exp is True when the word carries an UNQUOTED expansion, command substitution, backquote or
+# brace (anything bash word-splits or multiplies): such a word can yield MORE than its visible argument,
+# including a fresh word that begins with '-', so it can never be narrowed. A double-quoted expansion does
+# NOT set it (it stays one argument).
 _GateWord = collections.namedtuple(
     "_GateWord", ("raw", "lit", "pure_literal", "live_marker", "unquoted_cmdsub",
-                  "first_kind", "lit_prefix"))
+                  "first_kind", "lit_prefix", "has_unquoted_exp"))
 
 
 def _gate_read_word(command, i, n):
@@ -9670,6 +9681,7 @@ def _gate_read_word(command, i, n):
     pure_literal = [True]
     live_marker = [False]
     unquoted_cmdsub = [False]
+    unquoted_exp = [False]
     first_kind = [None]
 
     def set_first(kind):
@@ -9680,6 +9692,11 @@ def _gate_read_word(command, i, n):
         live_marker[0] = True
         pure_literal[0] = False
         prefix_open[0] = False
+
+    def mark_unquoted_exp():
+        # an unquoted expansion/substitution/backquote (word splitting) or brace (word multiplying)
+        mark_live()
+        unquoted_exp[0] = True
 
     while i < n:
         c = command[i]
@@ -9702,7 +9719,8 @@ def _gate_read_word(command, i, n):
         if c == "'":
             j = command.find("'", i + 1)
             body = command[i + 1:j] if j >= 0 else command[i + 1:n]
-            set_first("lit-dash" if body[:1] == "-" else "lit-other")
+            if body:  # an EMPTY '' fragment establishes no lead: a later element sets first_kind
+                set_first("lit-dash" if body[:1] == "-" else "lit-other")
             if prefix_open[0]:
                 prefix.append(body)
             lit.append(body)
@@ -9718,7 +9736,8 @@ def _gate_read_word(command, i, n):
                     break
                 j += 1
             decoded = _gate_decode_ansi_c(command[i + 2:j])
-            set_first("lit-dash" if decoded[:1] == "-" else "lit-other")
+            if decoded:  # an ANSI-C fragment that decodes to EMPTY (a NUL at its head) establishes no lead
+                set_first("lit-dash" if decoded[:1] == "-" else "lit-other")
             if prefix_open[0]:
                 prefix.append(decoded)
             lit.append(decoded)
@@ -9779,7 +9798,7 @@ def _gate_read_word(command, i, n):
             continue
         if c == "$" and i + 1 < n and command[i + 1] == "(":
             set_first("cmdsub")
-            mark_live()
+            mark_unquoted_exp()
             unquoted_cmdsub[0] = True
             try:
                 i = _skip_quoting(command, i, n)
@@ -9788,7 +9807,7 @@ def _gate_read_word(command, i, n):
             continue
         if c == "$" and i + 1 < n and command[i + 1] == "{":
             set_first("param")
-            mark_live()
+            mark_unquoted_exp()
             try:
                 i = _skip_quoting(command, i, n)
             except ValueError:
@@ -9796,12 +9815,12 @@ def _gate_read_word(command, i, n):
             continue
         if c == "$":
             set_first("param")
-            mark_live()
+            mark_unquoted_exp()
             i += 1
             continue
         if c == "`":
             set_first("cmdsub")
-            mark_live()
+            mark_unquoted_exp()
             try:
                 i = _skip_quoting(command, i, n)
             except ValueError:
@@ -9809,7 +9828,7 @@ def _gate_read_word(command, i, n):
             continue
         if c == "{":
             set_first("brace")
-            mark_live()
+            mark_unquoted_exp()
             lit.append(c)
             i += 1
             continue
@@ -9833,27 +9852,82 @@ def _gate_read_word(command, i, n):
         lit.append(c)
         i += 1
     return _GateWord(command[start:i], "".join(lit), pure_literal[0], live_marker[0],
-                     unquoted_cmdsub[0], first_kind[0] or "lit-other", "".join(prefix)), i
+                     unquoted_cmdsub[0], first_kind[0] or "lit-other", "".join(prefix),
+                     unquoted_exp[0]), i
+
+
+def _gate_skip_redirection(command, i, n):
+    """Skip one redirection (its operator and its target word) starting at command[i], a '<', '>' or the
+    '&' of an '&>'/'&>>'; returns the index after it. bash removes a redirection from the argument list, so
+    it never breaks a simple command in two nor hides a following option word; this mirrors the shared
+    lexer's redirect removal for the raw expansion scan (git commit -m y 2>&1 ${x}-n: the -n is still an
+    option of commit). The target (a filename, fd number, or here-string/here-doc delimiter) is consumed,
+    not scanned."""
+    c = command[i]
+    if c == "&":            # '&>' or '&>>'
+        i += 2
+        if i < n and command[i] == ">":
+            i += 1
+    elif c == ">":
+        i += 1
+        if i < n and command[i] in ">&|":
+            i += 1
+    else:                   # '<'
+        i += 1
+        if i < n and command[i] == "<":
+            i += 1
+            if i < n and command[i] == "<":   # here-string '<<<'
+                i += 1
+        elif i < n and command[i] in "&>":
+            i += 1
+    while i < n and command[i] in " \t":
+        i += 1
+    if i < n and command[i] not in "<>|&;()\n":
+        _target, i = _gate_read_word(command, i, n)  # the redirection target word: skipped, not scanned
+    return i
 
 
 def _gate_raw_segments(command):
-    """The raw command split into simple-command segments, each a list of _GateWord. Splits at an unquoted
-    separator or metacharacter and drops an unquoted '#' comment to end of line; an expansion that contains
-    those characters is kept inside its word by _gate_read_word, so a ';' or space inside '${...}' or a
-    backquote does not start a new segment."""
+    """The raw command split into simple-command segments, each a list of _GateWord. A backslash-newline
+    line continuation is removed first, as bash removes it (so a word split across it rejoins). Splits at an
+    unquoted separator (';', '&&', '&', '|', '(', ')', newline); an expansion that contains those
+    characters is kept inside its word by _gate_read_word, so a ';' or space inside '${...}' or a backquote
+    does not start a new segment, and a REDIRECTION ('>file', '2>&1', '<<<x') is skipped, not a segment
+    break, so a following option word stays in the git segment. An unquoted '#' comment runs to end of
+    line."""
+    command = command.replace("\\\n", "")  # bash removes a backslash-newline line continuation
     segments = []
     words = []
     n = len(command)
     i = 0
+    last_word_end = -1
     while i < n:
         c = command[i]
         if c in " \t":
             i += 1
             continue
-        if c == "\n" or c in _METACHARS:
+        if c == "\n" or c in ";()":
             segments.append(words)
             words = []
             i += 1
+            continue
+        if c == "|":  # '|' or '|&': a pipe, a segment break
+            segments.append(words)
+            words = []
+            i += 2 if (i + 1 < n and command[i + 1] == "&") else 1
+            continue
+        if c == "&":
+            if i + 1 < n and command[i + 1] == ">":  # '&>'/'&>>' redirect: skipped, not a break
+                i = _gate_skip_redirection(command, i, n)
+                continue
+            segments.append(words)  # '&&' or a background '&': a segment break
+            words = []
+            i += 2 if (i + 1 < n and command[i + 1] == "&") else 1
+            continue
+        if c in "<>":
+            if words and last_word_end == i and words[-1].raw.isdigit():
+                words.pop()  # a leading fd number (2>&1) read as a word: part of the redirection
+            i = _gate_skip_redirection(command, i, n)
             continue
         if c == "#":
             nl = command.find("\n", i)
@@ -9862,6 +9936,7 @@ def _gate_raw_segments(command):
         word, i = _gate_read_word(command, i, n)
         if word.raw:
             words.append(word)
+            last_word_end = i
         else:
             i += 1
     segments.append(words)
@@ -9871,9 +9946,14 @@ def _gate_raw_segments(command):
 def _gate_terminator_index(sub, lits):
     """Index of the FIRST '--'/'--end-of-options' that is a real option terminator, or len(lits). A '--'
     CONSUMED as the value of a preceding value-taking option (git commit --message -- ...: the '--' is the
-    message) is NOT a terminator, so a '-n' after it is still an option, not an operand. lits is the
-    per-word literal text, None for a word that is not purely literal (an expansion is never '--' nor a
-    known value-taking option). Value tables exist for commit and am; other verbs keep the plain split."""
+    message) is NOT a terminator, so a '-n' after it is still an option, not an operand. An ABBREVIATED
+    value-taking long option consumes its value the same way (git commit --mess -- -n: git resolves --mess
+    to --message, so the '--' is its value and -n is still the bypass), so a '--<name>' that is a prefix of
+    a value-taking long option also skips the next token; an abbreviation git would reject as ambiguous is
+    skipped too, a safe-direction over-match on a command git itself errors on, never a silent allow. lits
+    is the per-word literal text, None for a word that is not purely literal (an expansion is never '--'
+    nor a known value-taking option). Value tables exist for commit and am; other verbs keep the plain
+    split."""
     value_opts = _GATE_SHORT_VALUE_OPTS.get(sub, frozenset())
     stuck = _GATE_SHORT_STUCK_OPTS.get(sub, frozenset())
     long_val = _GATE_LONG_ARG_OPTS.get(sub, frozenset())
@@ -9887,8 +9967,8 @@ def _gate_terminator_index(sub, lits):
         if lit is None:
             continue
         if lit.startswith("--"):
-            if "=" not in lit and lit in long_val:
-                skip = True
+            if "=" not in lit and any(opt.startswith(lit) for opt in long_val):
+                skip = True  # exact OR an unambiguous abbreviation (--mess for --message) consumes its value
             continue
         if lit.startswith("-") and len(lit) > 1:
             for j, ch in enumerate(lit[1:]):
@@ -9903,23 +9983,27 @@ def _gate_terminator_index(sub, lits):
 
 def _gate_raw_sub_and_args(words, git_idx):
     """(sub, option-words) for the git segment whose command word is at git_idx: the first non-option word
-    after the git global options, and every word after it. A value-consuming global option (-C DIR, -c
-    NAME=VALUE, ...) skips two words. (None, []) when a non-literal word sits where the subcommand or a
-    global-option value is expected (the verb cannot be resolved, so the segment is left alone)."""
+    after the git global options, and every word after it. git does not abbreviate its global options, so a
+    '-'-leading word here is a global option and is SKIPPED, never a reason to abandon the segment: an
+    inline '--opt=value' form (even one whose value is a live expansion, --git-dir="$d") carries its value
+    and skips one word; a separated arg-consuming global option (-C DIR, --git-dir DIR, ...) skips its value
+    word too. (None, []) only when a NON-option word that is not purely literal sits where the SUBCOMMAND is
+    expected (git ${x} ...: the verb cannot be resolved, so the segment is left alone)."""
     i = git_idx + 1
     nwords = len(words)
     while i < nwords:
         w = words[i]
-        if not w.pure_literal:
-            return None, []
-        lit = w.lit
-        if lit.startswith("-") and len(lit) > 0:
-            if "=" not in lit and lit in _GIT_ARG_OPTS:
-                i += 2
+        if w.lit_prefix.startswith("-"):
+            if "=" in w.lit_prefix:
+                i += 1  # an inline '--opt=value' global option carries its value in this word
+            elif w.pure_literal and w.lit in _GIT_ARG_OPTS:
+                i += 2  # a separated arg-consuming global option: skip its value word
             else:
                 i += 1
             continue
-        return lit, words[i + 1:]
+        if not w.pure_literal:
+            return None, []  # an expansion where the subcommand is expected: the verb cannot be resolved
+        return w.lit, words[i + 1:]
     return None, []
 
 
@@ -9961,19 +10045,26 @@ def _gate_literal_bypass(sub, region):
 
 
 def _gate_word_narrowed(w):
-    """True for the two PROVABLY SAFE shapes the expansion scan does NOT deny: (1) the word begins with a
-    literal non-dash character, so however its expansion resolves the word cannot begin with '-' and so
-    cannot be an option (release-$v); (2) the word's literal prefix is a complete long option name up to a
-    literal '=' that is not a no-verify spelling, so the expansion is bound as that option's value and
-    cannot become a separate option (--author="$a"). Every other word that is wholly or partly a live
-    expansion in the option region stays denied (the stricter default pending maintainer review)."""
-    if w.first_kind == "lit-other":
-        return True
+    """True ONLY for a word the reader can prove yields exactly one argument that cannot begin with '-'.
+    Both shapes require that NO expansion in the word is UNQUOTED (has_unquoted_exp): an unquoted
+    expansion, substitution, backquote or brace word-splits or multiplies, and a value such as 'x -n' or
+    an empty one then yields a FRESH word that can begin with '-' (prefix-$x -> prefix-x and -n;
+    .${IFS}-n -> . and -n), so only a DOUBLE-QUOTED expansion stays a single argument. Given that, (1) a
+    nonempty literal non-dash prefix leads the single argument, which therefore cannot begin with '-'
+    (release-"$v"); or (2) the literal prefix is a long option up to a literal '=' whose name is not a
+    no-verify spelling, so the quoted expansion is bound as that option's value and cannot become a
+    separate option (--author="$a"). An EMPTY quoted fragment contributes nothing to the prefix, so it
+    establishes no lead (''"${x}"-n is denied, not narrowed). Every other live-expansion word in the
+    option region stays denied (the stricter default pending maintainer review)."""
+    if w.has_unquoted_exp:
+        return False  # can word-split into a separate '-'-leading argument; never provably safe
     pre = w.lit_prefix
+    if pre and not pre.startswith("-"):
+        return True  # a nonempty literal non-dash lead: the single argument cannot begin with '-'
     if pre.startswith("--") and "=" in pre:
         name = pre.split("=", 1)[0][2:]
         if name and not "no-verify".startswith(name):
-            return True
+            return True  # the quoted expansion is bound as this option's value, not a separate option
     return False
 
 
@@ -9984,8 +10075,11 @@ def _gate_expansion_option_scan(command):
     up to a real '--' terminator (value-aware). A purely literal word that resolves to the bypass denies
     (_gate_literal_bypass, the ANSI-C and quoted spellings); otherwise a word carrying an unquoted '$('
     command substitution, or a live expansion/brace glued to a '-', denies unless narrowed
-    (_gate_word_narrowed). The scan does not model expansion VALUES, so a dash supplied only by the value
-    of a dash-free expansion (git commit $x, with x set to -n) is a disclosed residual it does not catch."""
+    (_gate_word_narrowed, which admits only a QUOTED expansion that stays one non-dash argument). The scan
+    does not model expansion VALUES, so a dash supplied only by the value of a dash-free expansion (git
+    commit $x, with x set to -n) is a disclosed residual it does not catch; so is a '-n'/'--no-verify'
+    supplied through a separate indirection the shell runs (printf ... | xargs git commit), which this
+    per-segment reader does not reconstruct."""
     for words in _gate_raw_segments(command):
         git_idx = None
         for idx, w in enumerate(words):
@@ -10676,17 +10770,23 @@ def gate_weakening(data):
     otherwise an option-region word that carries a LIVE '$', backquote or '{' (unquoted or double-quoted,
     never single-quoted/ANSI-C/escaped) and a '-' ('${x}-n', '$x-n', '`true`-n', '{-n,}', '${x# }-n'), or
     opens an unquoted '$(' command substitution ('$(true)-n', '-m $(date)'), DENIES naming the word; the
-    shell can rewrite any of those into a bare '-n'/'--no-verify' before git parses options. Two PROVABLY
-    SAFE shapes are NARROWED to allow: a word led by a literal non-dash character, which cannot begin with
-    '-' however it expands (release-$v), and a word whose literal prefix is a complete long option up to
-    '=' that is not a no-verify spelling, where the expansion is bound as that option's value
-    (--author="$a"); the separated --author "$a" form allows too. DISCLOSED OVER-DENIAL (the stricter
-    default, pending maintainer review): a word that is wholly an expansion carrying a '-' in the option
-    region still denies even where it is a safe operand (git push origin "$(git branch --show-current)");
-    re-issue the expansion in its own dash-free word. DISCLOSED RESIDUAL: a dash supplied only by the
-    VALUE of a dash-free expansion is not modelled, so git commit $x (with x set to -n) is not caught. A
-    word with no '-' is unaffected (-m "$msg", -m ${msg}), a single-quoted or escaped marker is never
-    live, a post-'--' operand is outside the option region, and a verb off the roster is untouched
+    shell can rewrite any of those into a bare '-n'/'--no-verify' before git parses options. A narrowing is
+    admitted only where the reader proves the word yields EXACTLY ONE argument that cannot begin with '-',
+    which requires the expansion to be DOUBLE-QUOTED (an unquoted one word-splits into a fresh word that can
+    begin with '-'): a quoted expansion behind a nonempty literal non-dash prefix (release-"$v"), and a
+    quoted expansion bound by '--long=' to a complete long option that is not a no-verify spelling
+    (--author="$a"); the separated --author "$a" form allows too because the "$a" word carries no '-'. A
+    redirection is skipped (not a segment break), a backslash-newline is removed, a global option carrying
+    an expansion is skipped as a value, and an ANSI-C NUL truncates its fragment, all as bash does.
+    DISCLOSED OVER-DENIAL (the stricter default, pending maintainer review): a word that is wholly an
+    expansion carrying a '-' in the option region still denies even where it is a safe operand (git push
+    origin "$(git branch --show-current)"), and an unquoted expansion behind a literal prefix or bound by
+    '--long=' denies too; re-issue the expansion double-quoted in its own dash-free word. DISCLOSED
+    RESIDUAL: a dash supplied only by the VALUE of a dash-free expansion is not modelled, so git commit $x
+    (with x set to -n) is not caught; nor is a '-n'/'--no-verify' assembled in a separate stage the shell
+    runs and feeds to git (printf ... | xargs git commit), which this per-segment reader does not
+    reconstruct. A word with no '-' is unaffected (-m "$msg", -m ${msg}), a single-quoted or escaped marker
+    is never live, a post-'--' operand is outside the option region, and a verb off the roster is untouched
     (git log ${x}-n). The unparseable fallback applies the same scan over the raw text. The checker-output
     check has TWO TIERS. DENY tier, held to one canonical shape whose two
     ends are ALLOW-LISTS (_verification_sink): the first simple command of a pipeline is a KNOWN VERIFICATION
