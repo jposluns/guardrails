@@ -7468,13 +7468,15 @@ def _self_test():
             # stores nothing unless the boundary (offset and tail hash) and the counter are still the ones
             # this Stop saved, so it never writes an older boundary or a lower counter back. Between the
             # block's save and the commit a writer ignoring the lock changes ONE compared field (the counter
-            # alone, the boundary alone, or the tail alone at the same offset) or, as before, the offset and
-            # the counter together, keeping every other field, so each half of the comparison is needed on
-            # its own: the intervening state stays exactly as written and no entry is added. The control
-            # (state unchanged) stores the entry
+            # alone, the boundary alone, the tail alone at the same offset, or the offset alone, one byte past
+            # or one byte short of the saved one, with the same tail) or, as before, the offset and the
+            # counter together, keeping every other field, so each part of the comparison is needed on its
+            # own: the intervening state stays exactly as written and no entry is added. The control (state
+            # unchanged) stores the entry
             missing = "[2026-09-23T21:00Z] refused but not yet in the transcript"
             other_tail = _sha("the tail of different transcript bytes")
-            for leg in ("unchanged", "offset and counter", "counter", "boundary", "tail"):
+            for leg in ("unchanged", "offset and counter", "counter", "boundary", "tail", "offset past",
+                        "offset short"):
                 self.write([self.user("go")])
                 self.seed(0)
                 seen = []
@@ -7482,7 +7484,8 @@ def _self_test():
                 def emit(reason):
                     off, tail = load_state(self.sdir, self.tr)[:2]  # as this Stop's save wrote it, counter 1
                     new = {"unchanged": None, "offset and counter": (0, None, 3), "counter": (off, tail, 3),
-                           "boundary": (0, None, 1), "tail": (off, other_tail, 1)}[leg]
+                           "boundary": (0, None, 1), "tail": (off, other_tail, 1), "offset past": (off + 1, tail, 1),
+                           "offset short": (off - 1, tail, 1)}[leg]
                     if new is not None:
                         self.assertTrue(save_state(self.sdir, self.tr, new[0], new[1], [], new[2]))
                     seen.append((off, tail, new))

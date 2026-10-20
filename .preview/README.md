@@ -188,7 +188,7 @@ files are served from this repository's main branch; for a raw download, use
 | `pattern-self-match.py` | `9687140625e12fe271c20a876f01642f5cdd374197ad12850f24078cd0eb9660` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `3f8a97149a6a831118b67ef5c2bf4909018691a82700fe808ce23e20b20c7730` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `5d3b5d716cdbe6255c750aec4bb44f17a583f167c055cdb26a17a27d5ccfc715` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
 
@@ -538,7 +538,9 @@ section of its opening docstring. Read that section before relying on a hook; in
   only when the stop can save its new boundary: where that save fails or the state cannot be locked,
   only the final message can be refused, and only with the field false; older violations found there
   are still counted in that refusal or in the warning of the allow, which names only the first
-  violation, the final message's when it has one; and a stop that finds the lock held
+  violation, the final message's when it has one; a transcript read that fails part-way is not
+  covered: no boundary can be persisted, and the older violations that read found are dropped with no
+  warning, a known gap; and a stop that finds the lock held
   by another evaluation is allowed unchecked); after a failed read of the
   stored state older records are not checked at all, so such a repeat can
   pass; a transient failed read of that stored
