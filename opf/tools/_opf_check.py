@@ -3471,10 +3471,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # SAME predicate, so the leaf registration and the content grading cannot diverge.
     imported = imported_series_active(manifest_data)
     rep.require_homes(homes, imported)
-    # The optional imported release-row flag (spec 6.1, 14.3) is admitted only on an active homes-2 store
-    # (spec_version 2.0.0 with homes = 2), which homes_generation reports only once this tooling activates
-    # homes 2; until then the flag stays a C-VERSION-LEDGER finding and a malformed prior release row.
-    imported_rows = homes >= 2
+    # The optional imported release-row flag (spec 6.1, 14.3) is admitted exactly when the imported
+    # series is active for this store (the graded homes-2 declaration AND this tooling's own
+    # imported-series support): raising SUPPORTED_HOMES alone admits nothing, because the 6.1/14.3
+    # imported-row content belongs to the 1.3.0 contract, not to homes 2 by itself. Until activation
+    # the flag stays a C-VERSION-LEDGER finding and a malformed prior release row.
+    imported_rows = imported
     # The prior is normalized here, under the imported_rows switch C-VERSION-LEDGER applies, so a prior
     # release row may carry the imported flag only where the current ledger may. It is normalized once,
     # before any reader: the reserved-number exemption (_prior_holdings) and the across-time checks read
@@ -3981,7 +3983,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                     _opf_changelog.CHANGELOG_REL, exc))
                 changelog_text = None
             if changelog_text is not None:
-                cr = _opf_changelog.run_gates(version_data, merged_doc, changelog_text, registered_vendors)
+                cr = _opf_changelog.run_gates(version_data, merged_doc, changelog_text, registered_vendors,
+                                              imported_rows=imported_rows)
                 if cr.status == CANNOT_EVALUATE:
                     for f in cr.findings:
                         rep.cant("C-CHANGELOG-GATES: {}".format(f))
@@ -5426,7 +5429,10 @@ def self_test():
                           for f in _h1_run.findings))
             # The pure flag over its arms, the support threshold sampled just below, at, and just
             # above IMPORTED_SPEC_VERSION: True only for the 2.0.0 / homes = 2 pair with both
-            # tooling gates raised (red when either arm, or the threshold, moves).
+            # tooling gates raised (red when either arm, or the threshold, moves). The store-level
+            # twin (_opf_store.imported_series_active), which the ledger readers outside this module
+            # derive the imported-row switch from, is reconciled row by row against this flag so the
+            # two composed predicates cannot drift.
             _pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
             _flag_rows = (
                 (2, "1.3.0", _pair, True), (2, "1.3.1", _pair, True), (2, "1.2.99", _pair, False),
@@ -5438,7 +5444,8 @@ def self_test():
             _flag_got = []
             for _fh, _fv, _fm, _want in _flag_rows:
                 _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _fh, _fv
-                _flag_got.append(imported_series_active(_fm) is _want)
+                _flag_got.append(imported_series_active(_fm) is _want
+                                 and _opf_store.imported_series_active(_fm) is _want)
             _opf_store.SUPPORTED_HOMES = 2
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
             check("imported-series-active-keyed-on-homes2-declaration",
@@ -6369,10 +6376,13 @@ def self_test():
         check("f5-wellformed-prior-rewrite-invalid", rpr is not None and rpr.status == INVALID)
 
         # --- the optional imported release-row flag (spec 6.1, 14.3): C-VERSION-LEDGER and the prior-row
-        # check admit it only on an active homes-2 store, which shipped tooling never reports (SUPPORTED_HOMES
-        # = 1), so each homes-2 leg activates the generation inside the fixture and declares the 2.0.0 pair.
-        # The verdicts read are per check: the composed changelog gates still read the ledger at the default
-        # switch, outside these checks.
+        # check admit it only on a store whose imported series is ACTIVE (the graded homes-2 declaration
+        # AND this tooling's imported-series support), which shipped tooling never reports
+        # (SUPPORTED_HOMES = 1, SUPPORTED_SPEC_VERSION below the imported threshold), so each active leg
+        # raises BOTH tooling gates inside the fixture, declares the 2.0.0 pair, and carries the imported
+        # leaves the activated roster registers. The composed ledger readers (the changelog gates and the
+        # view planner) receive the same switch; the whole-store vector below grades an active store with
+        # an admitted imported row VALID end to end.
         imp_empty = compute_span_digest(full_wl, None)
 
         def imp_row(version, imported=True):
@@ -6382,18 +6392,26 @@ def self_test():
                 r["imported"] = imported
             return r
 
-        def imp_run(rows, prior_rows, active, spec_version=_opf_store.HOMES2_SPEC_VERSION):
+        def imp_run(rows, prior_rows, active, spec_version=_opf_store.HOMES2_SPEC_VERSION,
+                    support=True):
             m = clean_machine()
             m["version.toml"]["release"] = rows + m["version.toml"]["release"]
             m["manifest.toml"]["opf"].update(spec_version=spec_version, homes=2)
+            if active and support and spec_version == _opf_store.HOMES2_SPEC_VERSION:
+                # The declaration activates the imported series, so its leaves are managed and required.
+                for leaf in _opf_store.imported_leaf_names(m["manifest.toml"]["types"]):
+                    m[leaf] = ({"schema": 1, "entry": []} if leaf == _opf_store.IMPORTED_WORKLOG_NAME
+                               else idx([]))
             o = copy.deepcopy(clean_prior())
             o["prior"]["releases"] = prior_rows + o["prior"]["releases"]
-            saved = _opf_store.SUPPORTED_HOMES
+            saved = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
             _opf_store.SUPPORTED_HOMES = 2 if active else 1
+            if active and support:
+                _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
             try:
                 return run(m, obs=o)
             finally:
-                _opf_store.SUPPORTED_HOMES = saved
+                _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = saved
 
         def verdicts(r, *cids):
             return None if r is None else tuple(r.checks.get(c) for c in cids)
@@ -6406,7 +6424,8 @@ def self_test():
         check("prior-imported-row-wellformed", verdicts(_imp2, *hist) == ("PASS",) * 3)
         # The shipped generation: the 2.0.0 pair declared but homes 2 not activated grades as generation 1,
         # so the same rows are refused (a C-VERSION-LEDGER finding and a malformed prior); homes = 2 at the
-        # base spec_version under an activated homes 2 is generation 1 too.
+        # base spec_version under a full activation is generation 1 too. Both refusals pin the per-row
+        # refusal reason and the malformed-prior reason, so a cant from any other cause cannot stand in.
         _imp1 = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")], active=False)
         check("rel-imported-doctor-homes1-refused",
               verdicts(_imp1, "C-VERSION-LEDGER", "C-EVIDENCE-ENUM") == ("FINDING", None)
@@ -6414,11 +6433,23 @@ def self_test():
         check("prior-imported-row-malformed-homes1",
               verdicts(_imp1, *hist) == (CANNOT_EVALUATE,) * 3
               and any("malformed" in m for m in _imp1.cannot_evaluate))
+        # support stays at the shipped constant here: raising it would make the declared base
+        # spec_version a C-MANIFEST migration finding and never reach the ledger.
         _imp12 = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")], active=True,
-                         spec_version=SUPPORTED_SPEC_VERSION)
+                         spec_version=SUPPORTED_SPEC_VERSION, support=False)
         check("rel-imported-doctor-homes2-at-base-version-refused",
               verdicts(_imp12, "C-VERSION-LEDGER", "C-HISTORY-APPEND-ONLY", "C-EVIDENCE-ENUM")
-              == ("FINDING", CANNOT_EVALUATE, None))
+              == ("FINDING", CANNOT_EVALUATE, None)
+              and any("not admitted" in f for f in _imp12.findings)
+              and any("malformed" in m for m in _imp12.cannot_evaluate))
+        # Raising SUPPORTED_HOMES alone admits NOTHING: the switch requires the imported-series support
+        # arm too (the 6.1/14.3 content belongs to the 1.3.0 contract). The leg grades at homes 2
+        # (C-EVIDENCE-ENUM ran) yet the row is still refused and the prior is still malformed.
+        _imph = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")], active=True, support=False)
+        check("rel-imported-doctor-homes-raised-alone-refused",
+              verdicts(_imph, "C-VERSION-LEDGER", "C-EVIDENCE-ENUM") == ("FINDING", "PASS")
+              and any("not admitted" in f for f in _imph.findings)
+              and any("malformed" in m for m in _imph.cannot_evaluate))
         # The prior-row check applies the value and span rules of validate_version at their boundaries.
         check("prior-row-imported-admitted", _wellformed_release_row(imp_row("0.9.0"), True))
         check("prior-row-imported-dormant-refused", not _wellformed_release_row(imp_row("0.9.0")))
@@ -6435,6 +6466,48 @@ def self_test():
             check("history-flag-{}-existing-row-finding".format(_imp_label),
                   verdicts(_impr, "C-VERSION-LEDGER", "C-HISTORY-APPEND-ONLY") == ("PASS", "FINDING")
                   and any("C-HISTORY-APPEND-ONLY" in f and "rewritten" in f for f in _impr.findings))
+        # WHOLE STORE, end to end: a fully ACTIVE store (both tooling gates raised, the 2.0.0 pair, every
+        # imported leaf present and empty, a declared VERSION view) whose ledger and prior carry an
+        # admitted imported row, with the changelog tiling all three releases, grades VALID with no
+        # finding and no cant. Every composed ledger reader is on this path: C-VERSION-LEDGER, the
+        # changelog gates, the view planner behind C-VIEW-DRIFT, and the history checks, so the vector is
+        # red when ANY of them keeps the default switch. The roster is patched to the imported checks
+        # landed so far (the imported-valid-row-reaches-valid idiom), so the pending imported checks do
+        # not mask the readers' verdicts.
+        _e2e_cl = make_changelog(["1.1.0", "1.0.0", "0.9.0"])
+        _e2e_dig = freeze_digests(_e2e_cl, ["1.1.0", "1.0.0", "0.9.0"])
+        _e2e = clean_machine()
+        _e2e["manifest.toml"] = base_manifest(views={"VERSION": {
+            "kind": "deterministic", "sources": ["version"], "target": "VERSION"}})
+        _e2e["manifest.toml"]["opf"].update(spec_version=_opf_store.HOMES2_SPEC_VERSION, homes=2)
+        for _e2e_leaf in _opf_store.imported_leaf_names(_e2e["manifest.toml"]["types"]):
+            _e2e[_e2e_leaf] = ({"schema": 1, "entry": []}
+                               if _e2e_leaf == _opf_store.IMPORTED_WORKLOG_NAME else idx([]))
+        _e2e["version.toml"]["release"] = [imp_row("0.9.0")] + _e2e["version.toml"]["release"]
+        _e2e["version.toml"]["summary"] = [
+            {"covers": "0.9.0", "status": "published", "digest": _e2e_dig["0.9.0"]},
+            {"covers": "1.0.0", "status": "published", "digest": _e2e_dig["1.0.0"]},
+            {"covers": "1.1.0", "status": "published", "digest": _e2e_dig["1.1.0"]},
+            {"covers": "unreleased", "status": "working"}]
+        _e2e_obs = copy.deepcopy(clean_prior())
+        _e2e_obs["prior"]["releases"] = [imp_row("0.9.0")] + _e2e_obs["prior"]["releases"]
+        _e2e_saved = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
+        _e2e_g = globals()
+        _e2e_prev_roster = IMPORTED_CHECKS
+        _opf_store.SUPPORTED_HOMES = 2
+        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+        _e2e_g["IMPORTED_CHECKS"] = ("C-IMPORTED-SCHEMA",)
+        try:
+            _e2e_run = run(_e2e, product={"VERSION": "1.1.0\n", "CHANGELOG.md": _e2e_cl}, obs=_e2e_obs)
+        finally:
+            _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _e2e_saved
+            _e2e_g["IMPORTED_CHECKS"] = _e2e_prev_roster
+        check("rel-imported-doctor-whole-store-valid",
+              _e2e_run is not None and _e2e_run.status == VALID
+              and not _e2e_run.findings and not _e2e_run.cannot_evaluate
+              and _e2e_run.checks.get("C-CHANGELOG-GATES") == "PASS"
+              and _e2e_run.checks.get("C-VIEW-DRIFT") == "PASS"
+              and _e2e_run.checks.get("C-VERSION-LEDGER") == "PASS")
 
         # --- B5: a '..' moved destination is refused (confinement), never an uncaught JournalError ----
         b5 = clean_machine()

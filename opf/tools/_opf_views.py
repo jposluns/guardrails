@@ -301,8 +301,12 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, 
     return raw, list(data.get("entry", []) if isinstance(data.get("entry"), list) else [])
 
 
-def _load_version(store_root_fd, relpath):
+def _load_version(store_root_fd, relpath, *, imported_rows=False):
     """Load and validate version.toml (spec 6.1); return (raw_bytes, releases, summaries) in file order.
+    `imported_rows` is the U3 imported release-row switch (spec 6.1, 14.3), threaded into
+    validate_version so the planner reads a store whose imported release rows are active by the same
+    rule the doctor applies; it stays False (refuse the flag) unless the caller derives it from the
+    store's own imported-series activation.
     Disclosed divergence (disclose-guard-residuals): the version ledger schema marker follows U3
     optional-marker contract, as _load_worklog documents: validate_version type-pins a PRESENT marker
     but permits an absent one, diverging from the index MANDATORY pin. An unsupported-schema-version
@@ -311,7 +315,7 @@ def _load_version(store_root_fd, relpath):
     if got is None:
         raise ViewsError("declared source {} is missing (the version ledger must exist)".format(relpath))
     raw, data = got
-    vv = _opf_release.validate_version(data)
+    vv = _opf_release.validate_version(data, imported_rows=imported_rows)
     if vv.status != _opf_store.VALID:
         raise ViewsError("{} is malformed: {}".format(relpath, "; ".join(vv.findings)))
     releases = data.get("release", []) if isinstance(data.get("release"), list) else []
@@ -1677,6 +1681,10 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
     if not isinstance(views, dict):
         raise ViewsError("[views] is not a table")
     registered_vendors, registered_kinds = _registered_vendors_and_kinds(manifest)
+    # The imported release-row switch (spec 6.1, 14.3), derived from the validated manifest through the
+    # ONE shared activation predicate, so the planner admits the flag exactly where the doctor does and
+    # refuses it everywhere else (fail-closed on every store this tooling validates today).
+    imported_rows = _opf_store.imported_series_active(manifest)
 
     # Validate each view's declared sources against its required set AND collect the union to load. Per view
     # the declared `sources` must EQUAL the required set (no missing, extra, duplicate, or ill-typed entry);
@@ -1701,7 +1709,7 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
                 on_legacy_conflict=on_legacy_conflict, manifest_model=manifest_model)
             rows_by_source[name] = entries
         elif name == "version":
-            raw, releases, summaries = _load_version(store_root_fd, relpath)
+            raw, releases, summaries = _load_version(store_root_fd, relpath, imported_rows=imported_rows)
             rows_by_source[name] = {"releases": releases, "summaries": summaries}
         else:
             raw, records = _load_records(store_root_fd, relpath, name, registered_vendors, registered_kinds)
