@@ -38,13 +38,17 @@ Checks, each a named guard:
                   quote is a finding because pairing cannot be trusted there
   required-rule   a fixed list of section 16.1 and section 9.2 sentences appears verbatim
                   (whitespace-insensitively) in both the specification and the prompt
-  journal-grading the prompt carries the step 8 heading exactly once, and that step carries
-                  exactly one list item on `.working/journals/` (its bullet line and the lines
-                  indented deeper than the bullet, up to a blank line); that item carries every
-                  named clause of JOURNAL_GRADING (whitespace-insensitively) and no clause of
-                  JOURNAL_GRADING_DENIED, so its store-path conclusion stays limited to a store
-                  that has not started an adoption, it keeps what the specification says of a store
-                  that has, and it keeps the rule that the upgrade check counts every journal entry
+  journal-grading the prompt carries the step 8 heading exactly once, outside fenced code, and
+                  that step (the heading to the next column-0 heading of level one to three)
+                  carries exactly one list item on `.working/journals/` (its bullet line and the
+                  lines indented deeper than the bullet, up to a blank or whitespace-only line);
+                  that item carries every named clause of JOURNAL_GRADING
+                  (whitespace-insensitively) and nothing in step 8 carries a clause of
+                  JOURNAL_GRADING_DENIED, so the item's store-path conclusion stays limited to a
+                  store that has not started an adoption, it keeps what the specification says of
+                  a store that has, and it keeps the rule that the upgrade check counts every
+                  journal entry; a fenced-code delimiter or an indented heading inside step 8 is
+                  an unsupported form and a finding, refused rather than read around
 
   check_opf_prompt_pin.py                    verify the shipped prompt beside this tool (../spec)
   check_opf_prompt_pin.py --self-test        synthetic trees assert each guard's exact status and
@@ -169,9 +173,11 @@ REQUIRED_RULES = (
 # and it states what section 4.2 says of a store that has started one. The quotation leg cannot hold
 # this: the unqualified quotation is a substring of the qualified sentence, so the earlier,
 # unqualified wording of the item still matches the specification. Each clause below is prompt text
-# the item must carry; the denied clause is that earlier, unqualified conclusion. The rule that the
-# upgrade check counts every journal entry is held as a clause too, because the qualification limits
-# only the store-path reading, never the count.
+# the item must carry; the denied clause is that earlier, unqualified conclusion, refused anywhere
+# in step 8 (a continuation paragraph of the item sits past the blank line where the item scan
+# stops, but it still renders inside the step). The rule that the upgrade check counts every
+# journal entry is held as a clause too, because the qualification limits only the store-path
+# reading, never the count.
 _STEP8_HEAD = "### Step 8: the store upgrade to 1.3.0 (`opf upgrade`)"
 _JOURNAL_ITEM_LEAD = "- `.working/journals/`"
 JOURNAL_GRADING = (
@@ -486,19 +492,45 @@ def _check_required_rules(spec_norm, prompt_norm):
                  "required rule {!r} is not restated in the prompt".format(name))
 
 
+def _is_fence(line):
+    """A fenced-code delimiter line as this gate reads one: optional leading spaces, then a
+    backtick or tilde run. Deliberately broader than Markdown's three-character minimum, so a
+    malformed near-delimiter is refused rather than read as prose."""
+    return line.lstrip(" ").startswith(("```", "~~~"))
+
+
 def _journal_item(prompt_text):
-    """The normalized step 8 list item on `.working/journals/`. The step runs from its fixed
-    heading to the next heading of level three or above; the item is its bullet line and every
-    following line indented deeper than the bullet, ending before the first blank line or line
-    indented no deeper than the bullet. Exactly one heading and exactly one item, or a finding."""
+    """(normalized step 8 list item on `.working/journals/`, normalized step 8 text). The step
+    runs from its fixed heading to the next column-0 heading of level three or above; the item is
+    its bullet line and every following line indented deeper than the bullet, ending before the
+    first blank or whitespace-only line or line indented no deeper than the bullet. This parser
+    reads neither fenced code nor indented headings, so it refuses what it cannot place instead of
+    reading around it: the heading must sit outside fenced code (an even count of fence delimiters
+    must precede it), and a fence delimiter or an indented heading-shaped line inside the step is
+    a finding, because fenced text is literal and Markdown renders a heading indented by up to
+    three spaces where this scan would read ordinary step text. Exactly one heading and exactly
+    one item, or a finding."""
     lines = prompt_text.split("\n")
     heads = [i for i, line in enumerate(lines) if line == _STEP8_HEAD]
     _require(len(heads) == 1, "journal-grading",
              "the prompt must carry the heading {!r} exactly once; found {}".format(
                  _STEP8_HEAD, len(heads)))
+    _require(sum(1 for line in lines[:heads[0]] if _is_fence(line)) % 2 == 0,
+             "journal-grading",
+             "an odd count of fence delimiters precedes the step 8 heading, so the heading sits "
+             "inside fenced code, where it is literal text, not a heading")
     end = next((i for i in range(heads[0] + 1, len(lines)) if re.match(r"#{1,3} ", lines[i])),
                len(lines))
     step = lines[heads[0] + 1:end]
+    for line in step:
+        stripped = line.lstrip(" ")
+        _require(not _is_fence(line), "journal-grading",
+                 "step 8 carries a fenced-code delimiter, an unsupported form: text inside a "
+                 "fence is literal, so this scan could read an item where none renders")
+        _require(stripped == line or not re.match(r"#{1,6} ", stripped),
+                 "journal-grading",
+                 "step 8 carries an indented heading, an unsupported form: Markdown renders it "
+                 "as a heading, but this scan would read it as ordinary step text")
     starts = [i for i, line in enumerate(step) if line.lstrip(" ").startswith(_JOURNAL_ITEM_LEAD)]
     _require(len(starts) == 1, "journal-grading",
              "step 8 must carry exactly one list item opening {!r}; found {}".format(
@@ -510,17 +542,21 @@ def _journal_item(prompt_text):
         if not line.strip() or len(line) - len(line.lstrip(" ")) <= indent:
             break
         item.append(line)
-    return _normalize("\n".join(item))
+    return _normalize("\n".join(item)), _normalize("\n".join(step))
 
 
 def _check_journal_grading(prompt_text):
-    item = _journal_item(prompt_text)
+    item, step = _journal_item(prompt_text)
     for name, clause in JOURNAL_GRADING:
         _require(_normalize(clause) in item, "journal-grading",
                  "the step 8 journal item lacks the required clause {!r}".format(name))
+    # The denied clause is refused anywhere in step 8, not only in the item's first block: a
+    # continuation paragraph of the item sits past the blank line where the item scan stops, but
+    # it still renders inside the step.
     for name, clause in JOURNAL_GRADING_DENIED:
-        _require(_normalize(clause) not in item, "journal-grading",
-                 "the step 8 journal item carries the denied clause {!r}".format(name))
+        _require(_normalize(clause) not in step,
+                 "journal-grading",
+                 "step 8 carries the denied clause {!r}".format(name))
 
 
 def _validate(root):
@@ -900,6 +936,56 @@ def _vectors():
                          " " * indent + _FIXTURE_JOURNAL_EVERY_ENTRY)
         return build
 
+    def journal_item_in_fence(base):
+        # The whole item inside fenced code, where it is literal text, not a list item.
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_JOURNAL_ITEM, "```text\n" + _FIXTURE_JOURNAL_ITEM + "\n```")
+
+    def journal_step8_head_in_fence(base):
+        # A fence left open just before the heading, so the heading sits inside fenced code.
+        root = _build_tree(base)
+        _edit_prompt(root, _STEP8_HEAD, "```text\n\n" + _STEP8_HEAD)
+
+    def step9_head_indented(spaces):
+        # The item moved after a step 9 heading indented by the given count (one to three):
+        # Markdown still renders that heading, so a scan that only ends the step at column 0
+        # would read past it and find the item inside step 8.
+        def build(base):
+            root = _build_tree(base)
+            _edit_prompt(root, _FIXTURE_JOURNAL_ITEM + "\n\n" + _FIXTURE_STEP9_HEAD,
+                         " " * spaces + _FIXTURE_STEP9_HEAD + "\n\n" + _FIXTURE_JOURNAL_ITEM)
+        return build
+
+    def journal_denied_in_continuation(base):
+        # The denied clause in a continuation paragraph of the item, past the blank line where
+        # the item scan stops; it still renders inside step 8, so it must still be refused.
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_JOURNAL_ADOPTING, _FIXTURE_JOURNAL_ADOPTING +
+                     "\n\n    In short, in a homes-1 origin store a journal entry is a store "
+                     "path.")
+
+    def journal_item_before_step8(base):
+        # Just before the step: text ahead of the heading is outside step 8, so a scan whose
+        # slice started at the document's first line instead of the heading would find it.
+        root = _build_tree(base)
+        _edit_prompt(root, _STEP8_HEAD + "\n\n" + _FIXTURE_JOURNAL_ITEM,
+                     _FIXTURE_JOURNAL_ITEM + "\n\n" + _STEP8_HEAD)
+
+    def journal_step8_duplicated(base):
+        # A second, empty copy of the step 8 heading after step 9: a count rule weakened to
+        # at-least-once would still scan from the first copy and find exactly one item.
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_STEP9_HEAD, _FIXTURE_STEP9_HEAD + "\n\n" + _STEP8_HEAD)
+
+    def item_after_heading(level):
+        # A column-0 heading of the given level (one or two) closes step 8 exactly as a
+        # level-three heading does, so an item after it sits outside the step.
+        def build(base):
+            root = _build_tree(base)
+            _edit_prompt(root, _STEP8_HEAD + "\n\n",
+                         _STEP8_HEAD + "\n\n" + "#" * level + " Later phases\n\n")
+        return build
+
     return [
         ("valid-tree", VALID, None, None, valid),
         ("spec-one-byte-edit", INVALID, "table-drift", "_check_drift", spec_edited),
@@ -964,6 +1050,26 @@ def _vectors():
          every_entry_moved(1)),
         ("journal-clause-after-blank-line", INVALID, "journal-grading", "_check_journal_grading",
          every_entry_moved(4, "\n\n")),
+        ("journal-clause-after-whitespace-line", INVALID, "journal-grading",
+         "_check_journal_grading", every_entry_moved(4, "\n      \n")),
+        ("journal-item-in-fence", INVALID, "journal-grading", "_check_journal_grading",
+         journal_item_in_fence),
+        ("journal-step8-heading-in-fence", INVALID, "journal-grading", "_check_journal_grading",
+         journal_step8_head_in_fence),
+        ("journal-step9-heading-indent-one", INVALID, "journal-grading",
+         "_check_journal_grading", step9_head_indented(1)),
+        ("journal-step9-heading-indent-three", INVALID, "journal-grading",
+         "_check_journal_grading", step9_head_indented(3)),
+        ("journal-denied-clause-after-blank-line", INVALID, "journal-grading",
+         "_check_journal_grading", journal_denied_in_continuation),
+        ("journal-item-before-step8", INVALID, "journal-grading", "_check_journal_grading",
+         journal_item_before_step8),
+        ("journal-step8-heading-duplicated", INVALID, "journal-grading",
+         "_check_journal_grading", journal_step8_duplicated),
+        ("journal-item-after-level-one-heading", INVALID, "journal-grading",
+         "_check_journal_grading", item_after_heading(1)),
+        ("journal-item-after-level-two-heading", INVALID, "journal-grading",
+         "_check_journal_grading", item_after_heading(2)),
     ]
 
 
@@ -979,6 +1085,8 @@ _JOURNAL_CLAUSE_VECTORS = (
     ("journal-clause-indent-equal", "every-entry-counts"),
     ("journal-clause-indent-shallower", "every-entry-counts"),
     ("journal-clause-after-blank-line", "every-entry-counts"),
+    ("journal-clause-after-whitespace-line", "every-entry-counts"),
+    ("journal-denied-clause-after-blank-line", "unqualified-conclusion"),
 )
 
 
