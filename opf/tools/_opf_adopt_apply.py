@@ -8772,11 +8772,13 @@ def _self_test_checks():
                            "component closes after the injection={!r} leaked={!r}".format(
                                None if control is None else (control[0], control[2], control[3]), raised,
                                popped, after, leaked))
-    # The sweep's transport classification, recording, exit mapping, wiring and declared-bound checks are
+    # The sweep's transport classification, recording, exit mapping, wiring, executed reporting slice and
+    # declared-bound checks are
     # pure in-process vectors: they run on every platform. Only the real sweep child and its expiry probe
     # above need the descriptor census, and a platform without one names each of them in the skip report
-    # (_class_sweep_skip_entries).
+    # (_class_sweep_skip_entries). The placement check pins both of these calls to function level.
     _class_sweep_bound_self_test(check)
+    _class_sweep_placement_self_test(check)
     # 6a'''b3e: within ONE list, _close_held re-raises the FIRST exception its close-out met, each later
     # one recorded on it as a note, and still closes every other descriptor. Three closes of a five
     # descriptor list are injected (the patched close-out raises instead of closing): the first is the
@@ -13021,8 +13023,9 @@ _CLASS_SWEEP_FORMAT = "opf.adopt-apply.class-sweep/v1"
 def _run_class_sweep_child(timeout=3000):
     """Run the close-fault class sweep in a fresh interpreter of this module (python -I -B,
     --selftest-class-sweep-child), with a bounded wait: (the rows (check, passed, observed) in
-    _CLASS_SWEEP_CHECKS order, None, False) on exit 0 with a complete result and no stderr; (None, why,
-    False) on a crash, a nonzero exit, stderr beside exit 0 (a shutdown fault after the result was
+    _CLASS_SWEEP_CHECKS order, None, False) on exit 0 with a complete result and no stderr bytes at all;
+    (None, why, False) on a launch failure, a crash, a nonzero exit, any stderr bytes beside exit 0
+    including whitespace-only stderr (a shutdown fault after the result was
     written), or a result that is missing, malformed or names other checks; and (None, why, True) when
     the child is still running at the bound and is killed. That expiry means only that the sweep did not
     finish within its bound: either the host was too slow or the code under test hangs, and this parent
@@ -13045,8 +13048,11 @@ def _run_class_sweep_child(timeout=3000):
         said = proc.stderr.decode("utf-8", "replace").strip()[-800:]
         if proc.returncode != 0:
             return None, "exit " + str(proc.returncode) + " (" + said + ")", False
-        if said:
-            return None, "exit 0 with stderr, a fault after the sweep ran (" + said + ")", False
+        if proc.stderr:
+            # The refusal tests the RAW stderr bytes: whitespace-only stderr beside exit 0 is still a
+            # fault (only the displayed diagnostic is stripped, shown as the raw repr when it strips away).
+            return None, ("exit 0 with stderr, a fault after the sweep ran ("
+                          + (said or repr(proc.stderr[-800:])) + ")"), False
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
@@ -13139,8 +13145,9 @@ def _sweep_wiring(tree):
     outcomes lists the fourth-argument name of each _self_test_outcome call (any other argument form
     reads as "?"), and skips counts the `if not census:` statements whose body builds
     _class_sweep_skip_entries while the opposite branch runs _class_sweep_record. The wiring check
-    requires exactly (["bound_expired"], ["bound_expired"], 1): the list the sweep's expiry is recorded
-    into is the one the run's verdict reads, and the no-census path names the sweep in the skip report."""
+    requires exactly (["bound_expired"], ["bound_expired"], 1). This reads NAMES at the call sites only:
+    it does not establish that the skip entries reach the skip report or that the expiry list keeps its
+    contents to the verdict; _sweep_report_source slices and RUNS those statements for that."""
     import ast
 
     def _arg_name(call, index):
@@ -13171,6 +13178,139 @@ def _sweep_wiring(tree):
     return records, outcomes, skips
 
 
+# The names whose statements make up the sweep's reporting path inside _self_test_checks: the expiry
+# list and its verdict read, the sweep recording, and the no-census skip entries.
+_SWEEP_REPORT_NAMES = ("bound_expired", "_class_sweep_record", "_class_sweep_skip_entries",
+                       "_self_test_outcome")
+
+
+def _sweep_report_source(tree):
+    """The sweep-reporting slice of _self_test_checks in the module tree, as the source of one function
+    `skeleton(census, no_census, check, failures, failure_details, checked, skipped,
+    _class_sweep_record, _class_sweep_skip_entries, _self_test_outcome)`: every statement of the real
+    function body (descending into the branches of each `if`) that names one of _SWEEP_REPORT_NAMES, or
+    that names both `skipped` and `print` (the skip report's emission), kept in order and otherwise
+    verbatim; None when the function is missing or nothing matches. Running the slice executes the REAL
+    recording, skip and verdict statements, so a statement that drops the skip entries on the way to the
+    report, or rebinds the expiry list before the verdict, changes what the slice reports."""
+    import ast
+
+    def _names(stmt):
+        return {node.id for node in ast.walk(stmt) if isinstance(node, ast.Name)}
+
+    def _kept(stmts):
+        kept = []
+        for stmt in stmts:
+            if isinstance(stmt, ast.If):
+                body, orelse = _kept(stmt.body), _kept(stmt.orelse)
+                if body or orelse:
+                    kept.append(ast.If(test=stmt.test, body=body or [ast.Pass()], orelse=orelse))
+            else:
+                got = _names(stmt)
+                if got & set(_SWEEP_REPORT_NAMES) or {"skipped", "print"} <= got:
+                    kept.append(stmt)
+        return kept
+
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_self_test_checks":
+            body = _kept(node.body)
+            if not body:
+                return None
+            text = ast.unparse(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])))
+            header = ("def skeleton(census, no_census, check, failures, failure_details, checked, "
+                      "skipped, _class_sweep_record, _class_sweep_skip_entries, _self_test_outcome):\n")
+            return header + "".join("    " + line + "\n" for line in text.splitlines())
+    return None
+
+
+def _load_sweep_report_slice(slice_source, directory, tag):
+    """The `skeleton` function of the given slice source, written under `directory` and loaded as its own
+    module (importlib over a real file, never an exec of a string)."""
+    import importlib.util
+    path = Path(directory) / ("sweep-report-slice-" + tag + ".py")
+    path.write_text(slice_source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("_opf_sweep_report_slice_" + tag, str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.skeleton
+
+
+def _eventfd_skip_call_sites(tree):
+    """Each _eventfd_skip_reason call in _self_test_checks in the module tree, as the shape of its
+    arguments: "census,hasattr(os.eventfd)" for the live form (the census flag and the real presence of
+    os.eventfd, no keywords), else "?". The call-site check requires exactly one live-form call, so the
+    replaced-eventfd vector's skip reason keeps being derived from the census AND the facility, never
+    from a constant."""
+    import ast
+    sites = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_self_test_checks":
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                        and sub.func.id == "_eventfd_skip_reason"):
+                    shape = "?"
+                    if (len(sub.args) == 2 and not sub.keywords
+                            and isinstance(sub.args[0], ast.Name) and sub.args[0].id == "census"
+                            and isinstance(sub.args[1], ast.Call)
+                            and isinstance(sub.args[1].func, ast.Name)
+                            and sub.args[1].func.id == "hasattr"
+                            and len(sub.args[1].args) == 2
+                            and isinstance(sub.args[1].args[0], ast.Name)
+                            and sub.args[1].args[0].id == "os"
+                            and isinstance(sub.args[1].args[1], ast.Constant)
+                            and sub.args[1].args[1].value == "eventfd"):
+                        shape = "census,hasattr(os.eventfd)"
+                    sites.append(shape)
+    return sites
+
+
+def _function_level_sweep_suite_calls(tree):
+    """The sweep-suite self-tests _self_test_checks in the module tree calls as DIRECT function-level
+    statements (never nested under a branch, so they run on every platform), in order: the calls among
+    _class_sweep_bound_self_test and _class_sweep_placement_self_test."""
+    import ast
+    wanted = ("_class_sweep_bound_self_test", "_class_sweep_placement_self_test")
+    found = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_self_test_checks":
+            for stmt in node.body:
+                if (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+                        and isinstance(stmt.value.func, ast.Name) and stmt.value.func.id in wanted):
+                    found.append(stmt.value.func.id)
+    return found
+
+
+def _class_sweep_placement_self_test(check):
+    """The platform-independent sweep suite is CALLED, at function level: _self_test_checks runs
+    _class_sweep_bound_self_test and this placement check as direct statements, so neither can be moved
+    under a census (or any other) branch without this going red, and deleting one call leaves the other
+    to refuse the roster. Run from inside the suite itself, this cannot catch deleting BOTH calls
+    together; it guards the silent drop of one."""
+    import ast
+    live = _function_level_sweep_suite_calls(
+        ast.parse(Path(os.path.abspath(__file__)).read_text(encoding="utf-8")))
+    good = ("def _self_test_checks():\n"
+            "    _class_sweep_bound_self_test(check)\n"
+            "    _class_sweep_placement_self_test(check)\n")
+    probes = {
+        "good": _function_level_sweep_suite_calls(ast.parse(good)),
+        "moved-under-census": _function_level_sweep_suite_calls(ast.parse(
+            good.replace("    _class_sweep_bound_self_test(check)",
+                         "    if census:\n        _class_sweep_bound_self_test(check)"))),
+        "suite-call-deleted": _function_level_sweep_suite_calls(ast.parse(
+            good.replace("    _class_sweep_bound_self_test(check)\n", ""))),
+        "placement-call-deleted": _function_level_sweep_suite_calls(ast.parse(
+            good.replace("    _class_sweep_placement_self_test(check)\n", ""))),
+    }
+    want = ["_class_sweep_bound_self_test", "_class_sweep_placement_self_test"]
+    check("class-sweep-suite-called-at-function-level",
+          live == want and probes["good"] == want
+          and probes["moved-under-census"] == ["_class_sweep_placement_self_test"]
+          and probes["suite-call-deleted"] == ["_class_sweep_placement_self_test"]
+          and probes["placement-call-deleted"] == ["_class_sweep_bound_self_test"],
+          observed="live={!r} probes={!r}".format(live, probes))
+
+
 def _class_sweep_expiry_probe_self_test(check):
     """The real sweep child, given a 1 s bound it cannot finish in, is killed at that bound and the
     expiry is attributed to the bound with the honest reason: the sweep did not finish within it, which
@@ -13191,9 +13331,13 @@ def _class_sweep_expiry_probe_self_test(check):
 
 def _class_sweep_bound_self_test(check):
     """The class sweep child's transport and reporting: the real runner classifies each controlled child
-    outcome (failing closed on stderr beside exit 0, a fault after the sweep ran), an expiry is reported
+    outcome (failing closed on a launch failure and on any stderr bytes beside exit 0, whitespace-only
+    stderr included), an expiry is reported
     as the bound and never as the sweep's checks failing or passing, the expiry list and the no-census
-    skips are wired into the run's own report, and the bound's size stays the int literal recorded above
+    skips are wired into the run's own report (the reporting statements are also sliced from this
+    module's source and EXECUTED over a controlled expiry, a controlled no-census run and a controlled
+    clean result, asserting the final exit code and the emitted entries), and the bound's size stays the
+    int literal recorded above
     _run_class_sweep_child. Every vector here is in-process and platform-independent."""
     import ast
     import io
@@ -13201,15 +13345,19 @@ def _class_sweep_bound_self_test(check):
     rows = [(name, True, None) for name in _CLASS_SWEEP_CHECKS]
     names = list(_CLASS_SWEEP_CHECKS)
     # The REAL _run_class_sweep_child over a controlled child (subprocess.run replaced for exactly one
-    # call each): its classification of a signal death, an ordinary nonzero exit, exit 0 with no result,
-    # exit 0 with a malformed result, exit 0 with stderr, a kill at the bound, and a clean result. Only
+    # call each): its classification of a launch failure (the interpreter could not start), a signal
+    # death, an ordinary nonzero exit, exit 0 with no result, exit 0 with a malformed result, exit 0 with
+    # stderr text, exit 0 with WHITESPACE-ONLY stderr beside a complete result (the refusal must test the
+    # raw bytes, not the stripped text), a kill at the bound, and a clean result. Only
     # the kill at the bound may read as expired: every child FAILURE must keep the expired flag False
     # (red against a classifier that converts a child failure into a bound expiry).
     payload = json.dumps(dict(format=_CLASS_SWEEP_FORMAT, complete=True,
                               checks=[list(row) for row in rows]))
-    scenarios = {"signal": (-9, b"", None), "nonzero": (2, b"class sweep child: harness error X()", None),
+    scenarios = {"launch": (None, b"", None),
+                 "signal": (-9, b"", None), "nonzero": (2, b"class sweep child: harness error X()", None),
                  "missing": (0, b"", None), "malformed": (0, b"", "{}"),
-                 "stderr": (0, b"Exception ignored in: boom", payload), "killed": (None, b"", None),
+                 "stderr": (0, b"Exception ignored in: boom", payload),
+                 "blank-stderr": (0, b" \t\r\n", payload), "killed": (None, b"", None),
                  "clean": (0, b"", payload)}
     transported, commands = {}, []
 
@@ -13217,18 +13365,24 @@ def _class_sweep_bound_self_test(check):
         def run(cmd, **kwargs):
             commands.append(list(cmd))
             returncode, stderr, body = scenarios[scenario]
+            if scenario == "launch":
+                raise OSError("no interpreter")
             if scenario == "killed":
                 raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
             if body is not None:
                 Path(cmd[-1]).write_text(body, encoding="utf-8")
             return subprocess.CompletedProcess(cmd, returncode, stdout=b"", stderr=stderr)
         return run
-    for scenario in ("signal", "nonzero", "missing", "malformed", "stderr", "killed", "clean"):
+    for scenario in ("launch", "signal", "nonzero", "missing", "malformed", "stderr", "blank-stderr",
+                     "killed", "clean"):
         with mock.patch.object(subprocess, "run", _fake_run(scenario)):
             transported[scenario] = _run_class_sweep_child(timeout=5)
     got = transported
     check("class-sweep-child-transport-classifies-each-outcome",
           all(len(got[s]) == 3 for s in got)
+          and got["launch"][0] is None
+          and str(got["launch"][1]).startswith("could not start: ")
+          and got["launch"][2] is False
           and got["signal"][0] is None and str(got["signal"][1]).startswith("exit -9 (")
           and got["signal"][2] is False
           and got["nonzero"][0] is None
@@ -13244,15 +13398,18 @@ def _class_sweep_bound_self_test(check):
           and "either the host was too slow or the code under test hangs" in str(got["killed"][1])
           and got["killed"][2] is True
           and got["clean"] == ([tuple(row) for row in rows], None, False)
-          and len(commands) == 7
+          and len(commands) == 9
           and all(cmd[-2] == "--selftest-class-sweep-child" and cmd[1:3] == ["-I", "-B"]
                   for cmd in commands),
           observed=repr(got))
     check("class-sweep-child-exit0-stderr-fails-closed",
           got["stderr"][0] is None
           and str(got["stderr"][1]).startswith("exit 0 with stderr, a fault after the sweep ran (")
-          and "boom" in str(got["stderr"][1]) and got["stderr"][2] is False,
-          observed=repr(got["stderr"]))
+          and "boom" in str(got["stderr"][1]) and got["stderr"][2] is False
+          and got["blank-stderr"][0] is None
+          and str(got["blank-stderr"][1]).startswith("exit 0 with stderr, a fault after the sweep ran (")
+          and got["blank-stderr"][2] is False,
+          observed=repr((got["stderr"], got["blank-stderr"])))
     # How each child outcome is recorded: an expiry records no check and one bound entry naming every
     # unevaluated check; a crash, a nonzero exit or a malformed result fails all of them, naming why; a
     # result records each row.
@@ -13324,7 +13481,8 @@ def _class_sweep_bound_self_test(check):
     # The bound is an int literal default equal to the sized figure (3000 s, recorded above
     # _run_class_sweep_child): a name, a call, a float, a bool or another figure is refused, so the closure
     # gate's scan of literal waits keeps covering it and a resize goes through the sizing record.
-    source_tree = ast.parse(Path(os.path.abspath(__file__)).read_text(encoding="utf-8"))
+    source_text = Path(os.path.abspath(__file__)).read_text(encoding="utf-8")
+    source_tree = ast.parse(source_text)
     live = _declared_sweep_bound(source_tree)
     probes = {}
     for default in ("2999", "3000", "3001", "_BOUND", "3000.0", "True", "1500 * 2"):
@@ -13336,9 +13494,11 @@ def _class_sweep_bound_self_test(check):
           and [d for d, v in probes.items() if v == 3000] == ["3000"]
           and _declared_sweep_bound(ast.parse("def other(timeout=3000):\n    pass\n")) is None,
           observed="live={!r} probes={!r}".format(live, probes))
-    # The wiring into the run's report, read from this module's own source: the sweep records its expiry
-    # into the same bound_expired list the run's verdict reads (a fresh list there would let an expiry
-    # exit 0 as PASS), and the no-census branch opposite the sweep run builds the sweep's skip entries.
+    # The wiring into the run's report, read from this module's own source BY NAME: the sweep's recording
+    # call names the same bound_expired list the run's verdict call names (a fresh list there would let an
+    # expiry exit 0 as PASS), and the no-census branch opposite the sweep run calls the skip-entry
+    # builder. Name reading alone does not prove the entries survive to the report; the executed
+    # reporting slice below does.
     live_wiring = _sweep_wiring(source_tree)
     good = ("def _self_test_checks():\n"
             "    if not census:\n"
@@ -13364,6 +13524,99 @@ def _class_sweep_bound_self_test(check):
           and wiring_probes["other-list"] == (["bound_expired"], ["?"], 1)
           and wiring_probes["no-skips"] == (["bound_expired"], ["bound_expired"], 0),
           observed="live={!r} probes={!r}".format(live_wiring, wiring_probes))
+    # The reporting, proved by RUNNING the real statements: the sweep-reporting slice of this module's
+    # own _self_test_checks (_sweep_report_source) is executed with the sweep child controlled, asserting
+    # the final exit code and the emitted entries. A controlled no-census run must put every sweep check
+    # into the skip report and still exit 0; a controlled expiry must exit 2 with the bound entry emitted
+    # and no sweep check recorded; a controlled clean result must record all 13 checks and exit 0.
+
+    def _slice_outcomes(module_text):
+        slice_source = _sweep_report_source(ast.parse(module_text))
+        if slice_source is None:
+            return None
+        import tempfile
+        outcomes = {}
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-report-slice-") as slice_dir:
+            for label, census_flag, child in (("no-census", False, None),
+                                              ("expiry", True, (None, expired_why, True)),
+                                              ("clean", True, (rows, None, False))):
+                skipped_list, recorded_calls = [], []
+
+                def _record(check_fn, expiry_list, child=child):
+                    _class_sweep_record(check_fn, expiry_list, run=lambda: child)
+                skeleton = _load_sweep_report_slice(slice_source, slice_dir, label)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = skeleton(census_flag, "slice probe",
+                                    lambda name, cond, observed=None: recorded_calls.append(
+                                        (name, bool(cond))),
+                                    [], {}, [7], skipped_list, _record,
+                                    _class_sweep_skip_entries, _self_test_outcome)
+                outcomes[label] = (code, list(skipped_list), recorded_calls, out.getvalue())
+        return outcomes
+    live_report = _slice_outcomes(source_text)
+    check("class-sweep-reporting-slice-reports-skips-and-expiry",
+          live_report is not None
+          and live_report["no-census"][0] == 0
+          and [entry[0] for entry in live_report["no-census"][1]] == names
+          + ["class-sweep-child-leaves-this-process-descriptors-unchanged",
+             "class-sweep-bound-expiry-attributed-to-the-bound"]
+          and all(why == "slice probe" for _name, why in live_report["no-census"][1])
+          and all("  SKIPPED: {} (slice probe)".format(entry[0]) in live_report["no-census"][3]
+                  for entry in live_report["no-census"][1])
+          and live_report["no-census"][2] == []
+          and live_report["expiry"][0] == 2 and live_report["expiry"][2] == []
+          and "  BOUND EXPIRED: class sweep child " + expired_why in live_report["expiry"][3]
+          and "CANNOT EVALUATE" in live_report["expiry"][3]
+          and all(name in live_report["expiry"][3] for name in names)
+          and live_report["clean"][0] == 0
+          and live_report["clean"][2] == [(name, True) for name in names]
+          and "SELF-TEST: PASS" in live_report["clean"][3],
+          observed=repr(live_report))
+    # Negative controls: each reporting mutation, applied to this module's source, must change what the
+    # executed slice reports. A bare call that drops the skip entries, an extend into a throwaway list,
+    # and a rebinding of the expiry list to empty just before the verdict each keep the name-reading
+    # wiring check above green; the executed slice refuses all three.
+    extend_stmt = "        skipped.extend(_class_sweep_skip_entries(no_census))"
+    verdict_stmt = "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)"
+    mutated = {
+        "discard": source_text.replace(extend_stmt, "        _class_sweep_skip_entries(no_census)", 1),
+        "throwaway": source_text.replace(
+            extend_stmt, "        [].extend(_class_sweep_skip_entries(no_census))", 1),
+        "rebind": source_text.replace(verdict_stmt, "    bound_expired = []\n" + verdict_stmt, 1),
+    }
+    mutant_reports = {label: _slice_outcomes(text) for label, text in mutated.items()}
+    check("class-sweep-reporting-slice-refuses-dropped-skips-and-rebound-expiry",
+          all(mutated[label] != source_text and mutant_reports[label] is not None for label in mutated)
+          and mutant_reports["discard"]["no-census"][1] == []
+          and "SKIPPED" not in mutant_reports["discard"]["no-census"][3]
+          and mutant_reports["throwaway"]["no-census"][1] == []
+          and "SKIPPED" not in mutant_reports["throwaway"]["no-census"][3]
+          and mutant_reports["rebind"]["expiry"][0] == 0
+          and "BOUND EXPIRED" not in mutant_reports["rebind"]["expiry"][3]
+          and "CANNOT EVALUATE" not in mutant_reports["rebind"]["expiry"][3],
+          observed=repr({label: None if report is None else
+                         (report["no-census"][0], len(report["no-census"][1]), report["expiry"][0])
+                         for label, report in mutant_reports.items()}))
+    # The eventfd skip reason's CALL SITE is pinned, not only the helper: _self_test_checks must derive
+    # the vector's skip reason from the census flag and from the real presence of os.eventfd, exactly
+    # once; a constant second argument or a removed call is refused.
+    efd_good = ('def _self_test_checks():\n'
+                '    efd_skip = _eventfd_skip_reason(census, hasattr(os, "eventfd"))\n')
+    efd_live = _eventfd_skip_call_sites(source_tree)
+    efd_probes = {
+        "good": _eventfd_skip_call_sites(ast.parse(efd_good)),
+        "constant": _eventfd_skip_call_sites(ast.parse(
+            efd_good.replace('hasattr(os, "eventfd")', 'True'))),
+        "absent": _eventfd_skip_call_sites(ast.parse(
+            efd_good.replace('efd_skip = _eventfd_skip_reason(census, hasattr(os, "eventfd"))',
+                             'pass'))),
+    }
+    check("self-test-eventfd-skip-wired-at-the-call-site",
+          efd_live == ["census,hasattr(os.eventfd)"]
+          and efd_probes["good"] == ["census,hasattr(os.eventfd)"]
+          and efd_probes["constant"] == ["?"] and efd_probes["absent"] == [],
+          observed="live={!r} probes={!r}".format(efd_live, efd_probes))
 
 
 def _class_sweep_child_main(args):
