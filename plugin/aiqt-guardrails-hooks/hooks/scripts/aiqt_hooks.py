@@ -307,6 +307,9 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # fail-open PRETOOL_BUDGET_SECONDS, counted from before the payload read, and fails closed with exit 2
 # when its check has not decided by then, so the refusal is written before the platform's own timeout.
 # gen_hooks also refuses a budget that is not at least one second below the timeout or not positive.
+# With the manifest's on-failure-render switch on, a hook may render its own authored timeout instead;
+# gen_hooks refuses (exit 2) one at or below PRETOOL_BUDGET_SECONDS plus the margin the line below
+# reserves, so an authored timeout always exceeds this deadline by more than that margin.
 HOOK_TIMEOUT_SECONDS = 10
 PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0
 

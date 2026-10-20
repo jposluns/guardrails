@@ -23,6 +23,22 @@
 #            SessionStart, or under an explicit bake stage); "ask" is no longer an accepted default
 #            (the generator rejects it); most slice-1 controls are lexical and
 #            zero-intent, so they ship at block
+#   timeout  OPTIONAL: this hook's platform timeout in seconds, an integer from 1 to 600. Rendered into
+#            hooks.json only while the [plugin] on-failure-render switch is true; while it is false
+#            (today's setting) every hook renders the generator's default timeout and no onFailure key,
+#            byte-identical to the pre-switch surface. With the switch on, the generator refuses (exit
+#            2, naming the hook and the minimum) an authored timeout, on a hook of any event, default
+#            or stage, at or below the dispatcher's PreToolUse budget plus the margin its deadline line
+#            reserves (both read from scripts/aiqt_hooks.py; together 10 seconds today, so the minimum
+#            is 11), so a rendered AUTHORED timeout always leaves the dispatcher more time past its
+#            budget than that margin. A hook that authors no timeout is the exception: it renders the
+#            default 10, exactly the budget plus the margin. Refusing 9 and 10 is a chosen stricter
+#            policy, not a mechanical need: the 8-second budget is still below those timeouts, so a
+#            PreToolUse hook can still fail closed at the dispatcher's own deadline.
+#            onFailure itself is never authored: with the switch on, the generator derives
+#            "onFailure": "block" for an enforce-stage PreToolUse hook whose default is "block", never
+#            for a warn hook, and never on Stop or TeammateIdle, whose events the documented onFailure
+#            behaviour does not cover.
 #   class    the EN-5 enforceability letter (a deterministic-gate, b hook-detectable, c partial,
 #            d judgement), carried through so the surface traces to its enforceability claim
 #   residue  REQUIRED, never empty: what this control does NOT catch, so the shipped surface stays
@@ -40,6 +56,17 @@ description = "Mechanical enforcement of AIQT Guardrails rules for Claude Code, 
 author-name = "Jeff Posluns"
 author-email = "jeff@posluns.ca"
 homepage = "https://aiqt.ai"
+# Fail-closed onFailure handling is AUTHORED but NOT RENDERED: on-failure-render stays false because how
+# a client older than 2.1.295 treats the unknown onFailure key in hooks.json is unverified (it could
+# ignore the key, warn, reject that entry, or reject the whole hooks.json; the last would silently
+# disable every hook on that client, a fail-open regression). Until the switch is turned on, the
+# rendered hooks.json is byte-identical to the pre-switch surface: a hook that times out, crashes or
+# exits badly still lets a PreToolUse tool call proceed on EVERY client. The 2.1.295 floor comes from
+# the platform hooks documentation: "an onFailure: block setting (client 2.1.295 and later) turns a
+# timeout, crash, bad exit or invalid JSON into a block"; without it, a timed-out PreToolUse command
+# hook does not block the tool call.
+claude-code-min-version = "2.1.295"
+on-failure-render = false
 
 [[hook]]
 id = "diff-wall-stop"
