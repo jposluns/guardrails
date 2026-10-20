@@ -17,6 +17,10 @@ load); the commonmark selftests exercise the vendored parser and its manifest.
 
   check_opf_standalone_closure.py             materialize opf/ alone and run the subset (also the default)
   check_opf_standalone_closure.py --self-test  the same, PLUS a deliberate flip proving it fails without the move
+  ... --ci-job <job>                          either of the above over that CI job's legs alone (_CI_JOB_LEGS
+                                              partitions the subset between two CI jobs because the whole
+                                              roster's worst case does not fit one job; the flip runs in the
+                                              job that holds opf-tooling-selftest, whose leg it is)
 
 Exit convention (matches the repo's gates):
   0  the isolated opf/ subtree verifies (closure holds)
@@ -130,7 +134,9 @@ _SUBSET = [
     ("opf-upgrade-selftest", "check_opf_upgrade.py", ["--self-test"]),
     ("opf-adopt-selftest", "_opf_adopt.py", ["--self-test"]),
     ("opf-adopt-apply-selftest", "_opf_adopt_apply.py", ["--self-test"]),
+    ("opf-adopt-state-selftest", "_opf_adopt_state.py", ["--self-test"]),
     ("opf-adopt-hook-selftest", "_opf_adopt_hook.py", ["--self-test"]),
+    ("opf-adopt-complete-selftest", "_opf_adopt_complete.py", ["--self-test"]),
     ("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"]),
     ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]),
     ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]),
@@ -165,11 +171,12 @@ _SUBSET = [
 #   * _MIN_LEG_BOUND_S, the floor for the legs that finish in seconds (see below).
 # The legs run one after another, so the worst case of one gate run is the SUM of the bounds plus one
 # bounded post-kill cleanup deadline per leg (_DRAIN_MARGIN_S, which the output drain and the leader
-# reap SHARE, paid only by a leg killed at its bound); the self-test requires the whole opf-closure CI
-# job's worst case (_job_worst_case_s: its self-test step plus its live gate step, cleanup deadlines
-# included) to fit that job's time limit, and refuses BY NAME any single leg bound that exceeds the
-# limit rather than shrinking it. A change that adds or lengthens a leg's wait updates this table in
-# the same change.
+# reap SHARE, paid only by a leg killed at its bound); the closure work is split between two CI jobs
+# (_CI_JOB_LEGS: the whole roster's worst case does not fit one job), and the self-test requires EACH
+# job's worst case (_job_worst_case_s over that job's legs: its self-test step plus its live gate
+# step, cleanup deadlines included) to fit that job's own time limit, and refuses BY NAME any single
+# leg bound that exceeds its job's limit rather than shrinking it. A change that adds or lengthens a
+# leg's wait updates this table in the same change.
 # Every ceiling below is whole seconds, rounded up, from ONE source: a serial isolated run of every leg
 # started 2026-10-15T08:38Z and finished 2026-10-15T09:07Z, at the merge of revision
 # da4b403ab55892cdbac837ba0c51e092ab971ffd into this change, whose opf/ subtree (git tree
@@ -181,7 +188,9 @@ _SUBSET = [
 # until the legs are re-measured at the refreshed tree. Refreshes of this change onto main have changed
 # opf/ since (the first, on 2026-10-16, onto c66fbe560a12b5258c1c2589fdbeba4e82c78afc), so each row's
 # figure is INFERRED for this tree, as for every opf/ tree other than the one named above (compare
-# `git rev-parse HEAD:opf` with it).
+# `git rev-parse HEAD:opf` with it). Two rows come from no run at all: opf-adopt-state-selftest and
+# opf-adopt-complete-selftest, legs main added after that run, carry main's 600 s figure (not
+# measured on 2026-10-11; under the former flat 600 s bound, an inference), never a measurement.
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
 # an INFERENCE, not a measurement, and no observation supports it (one measured run contradicts it, see
 # below): the host carried other work during the run, but a host loaded beyond it adds contention these
@@ -241,7 +250,9 @@ _LEG_CEILING_S = {
     "opf-upgrade-selftest": 96,  # INFERRED here (measured at 7bf8107f: 95.4 s at load5 17.6)
     "opf-adopt-selftest": 152,  # INFERRED here (measured at 7bf8107f: 151.1 s at load5 18.6)
     "opf-adopt-apply-selftest": 9,  # INFERRED here (measured at 7bf8107f: 8.2 s at load5 21.5)
+    "opf-adopt-state-selftest": 600,  # INFERRED (main's row; not measured: 7bf8107f has no such leg)
     "opf-adopt-hook-selftest": 1,  # INFERRED here (measured at 7bf8107f: 1.0 s at load5 21.6)
+    "opf-adopt-complete-selftest": 600,  # INFERRED (main's row; not measured: 7bf8107f has no such leg)
     "opf-import-batch-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.7 s at load5 21.6)
     "opf-pack-manifest-selftest": 17,  # INFERRED here (measured at 7bf8107f: 16.8 s at load5 21.7)
     "opf-adopt-observe-selftest": 284,  # INFERRED here (measured at 7bf8107f: 283.7 s at load5 21.9)
@@ -263,7 +274,7 @@ _LEG_CEILING_S = {
 # added or renamed together with its ceiling row, which leaves the two tables agreeing, is still drift.
 # A deliberate roster change records the new figures here in the same change (the drift line prints
 # them); this pin does not judge whether that change is right.
-_ROSTER_PIN = (26, "f3dc41501aba952fa9dab8f4d3ff344e91c055cde53dc9747b7d9b400606f260")
+_ROSTER_PIN = (28, "6b4178b70fc10b169cc37033057dc7b49be246152fb8d800e08307b89c1f2c19")
 _LOAD_HEADROOM = 3
 _LAUNCH_MARGIN_S = 60
 # The post-kill cleanup deadline (_kill_and_reap): ONE absolute deadline that the output drain and the
@@ -287,7 +298,53 @@ _COPY_PATTERNS = ("__pycache__", "*.pyc")
 _COPY_IGNORE = shutil.ignore_patterns(*_COPY_PATTERNS)
 
 _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
-_CI_JOB = "opf-closure"
+# The closure work is PARTITIONED between two CI jobs, because the whole roster's worst case
+# (_job_worst_case_s over every leg) does not fit one job's time limit with the bound rule above
+# unchanged. Each job runs the --self-test step and then the live gate step over its own legs alone
+# (--ci-job); the self-test's negative leg (the flip, which runs opf.py --self-test under the
+# opf-tooling-selftest bound) runs only in the job that holds that leg. Every subset leg must be in
+# exactly ONE job: a leg in no job would run in no CI job at all, and a leg in both would make the
+# two jobs' worst cases overlap, so _partition_fault names either shape and the fit check and the
+# --ci-job runs refuse on it (fail-closed). A leg moved between jobs updates this table in the same
+# change, under the fit check's per-job arithmetic.
+_CI_JOB_LEGS = {
+    "opf-closure-a": frozenset({
+        "opf-homes-selftest",
+        "opf-tooling-selftest",
+        "opf-doctor-selftest",
+        "opf-adopt-apply-selftest",
+    }),
+    "opf-closure-b": frozenset({
+        "opf-homes-contract",
+        "opf-drift-selftest",
+        "opf-init-selftest",
+        "opf-init-contract-validator-selftest",
+        "opf-init-contract-check-selftest",
+        "opf-upgrade-selftest",
+        "opf-adopt-selftest",
+        "opf-adopt-state-selftest",
+        "opf-adopt-hook-selftest",
+        "opf-adopt-complete-selftest",
+        "opf-import-batch-selftest",
+        "opf-pack-manifest-selftest",
+        "opf-adopt-observe-selftest",
+        "opf-adopt-discover-selftest",
+        "opf-prompt-pack-selftest",
+        "opf-prompt-pack",
+        "opf-oplock-selftest",
+        "opf-init-substrate-selftest",
+        "opf-init-builders-selftest",
+        "opf-init-operation-selftest",
+        "opf-init-p0-selftest",
+        "opf-init-observe-selftest",
+        "commonmark-headings-selftest",
+        "commonmark-conformance",
+    }),
+}
+_CI_JOBS = tuple(sorted(_CI_JOB_LEGS))
+# The leg whose job also runs the self-test's negative leg: the flip runs opf.py --self-test under
+# this leg's bound, so it is this leg's work and budget.
+_FLIP_LEG = "opf-tooling-selftest"
 _CI_DEFAULT_JOB_MINUTES = 360  # the GitHub Actions limit for a hosted-runner job that sets no timeout-minutes
 _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, before the gate steps start
 # _VECTOR_ALLOWANCE_S is the job's work that no leg bound covers: the self-test step's registration,
@@ -475,34 +532,67 @@ def _bound_faults(bounds, needs):
     return faults
 
 
-def _oversize_legs(bounds, limit_s):
-    """Each leg whose own bound exceeds the CI job limit. Such a bound is refused BY NAME (the ceiling
-    table or the leg's declared waits must change under review), never silently shrunk to fit the job."""
+def _job_legs(legs):
+    """The subset leg names in legs, in roster order (every leg when legs is None)."""
+    return [name for name, _script, _args in _SUBSET if legs is None or name in legs]
+
+
+def _partition_fault(jobs=None):
+    """Each fault in the partition of the subset legs across the CI jobs, [] when every subset leg is
+    in exactly one job and every name a job holds is a subset leg. The fit check raises on any fault
+    and a --ci-job run refuses before any leg launches (fail-closed): a leg in no job would run in no
+    CI job at all, and a leg in more than one would make the jobs' worst cases overlap, so neither is
+    ever read as a fitting partition. jobs defaults to _CI_JOB_LEGS (the self-test passes doctored
+    tables to show each fault shape is named)."""
+    jobs = _CI_JOB_LEGS if jobs is None else jobs
+    faults = []
+    for name, _script, _args in _SUBSET:
+        holders = sorted(job for job, members in jobs.items() if name in members)
+        if len(holders) != 1:
+            faults.append("{}: in {} CI jobs ({})".format(
+                name, len(holders), ", ".join(holders) or "none"))
+    known = {name for name, _script, _args in _SUBSET}
+    for job in sorted(jobs):
+        for name in sorted(set(jobs[job]) - known):
+            faults.append("{}: {} is not a subset leg".format(job, name))
+    return faults
+
+
+def _oversize_legs(bounds, limit_s, legs=None):
+    """Each leg (of legs; every leg when None) whose own bound exceeds the CI job limit. Such a bound
+    is refused BY NAME (the ceiling table or the leg's declared waits must change under review), never
+    silently shrunk to fit the job."""
     return ["{}: bound {}s alone exceeds the {}s job limit".format(name, bounds[name], limit_s)
-            for name, _script, _args in _SUBSET if bounds[name] > limit_s]
+            for name in _job_legs(legs) if bounds[name] > limit_s]
 
 
-def _job_worst_case_s(bounds, negative_bound_s):
-    """The opf-closure CI job's worst case in seconds: two subset sweeps (the self-test's positive leg
-    and the live gate step), the self-test's negative leg, ONE cleanup deadline (_DRAIN_MARGIN_S, the
-    drain and the leader reap sharing it) for every leg that can be killed (each leg of both sweeps and
-    the negative leg), the work outside every leg bound (_VECTOR_ALLOWANCE_S: the self-test's vectors
-    and each sweep's copy and bound scan), and the job's setup."""
-    kills = 2 * len(_SUBSET) + 1
-    return (2 * sum(bounds[name] for name, _script, _args in _SUBSET) + negative_bound_s
+def _job_worst_case_s(bounds, negative_bound_s, legs=None):
+    """A closure CI job's worst case in seconds: two sweeps over its legs (the self-test's positive
+    leg and the live gate step; legs None is every leg), the self-test's negative leg
+    (negative_bound_s; 0 for the job that does not run the flip), ONE cleanup deadline
+    (_DRAIN_MARGIN_S, the drain and the leader reap sharing it) for every leg that can be killed
+    (each leg of both sweeps and, when it runs, the negative leg), the work outside every leg bound
+    (_VECTOR_ALLOWANCE_S: the self-test's vectors and each sweep's copy and bound scan), and the
+    job's setup."""
+    names = _job_legs(legs)
+    kills = 2 * len(names) + (1 if negative_bound_s else 0)
+    return (2 * sum(bounds[name] for name in names) + negative_bound_s
             + kills * _DRAIN_MARGIN_S + _VECTOR_ALLOWANCE_S + _CI_SETUP_ALLOWANCE_S)
 
 
-def _fit_fault(bounds, negative_bound_s, limit_s):
-    """None when the job's worst case fits limit_s, else the refusal naming every term of it."""
-    total = _job_worst_case_s(bounds, negative_bound_s)
+def _fit_fault(bounds, negative_bound_s, limit_s, legs=None, job=None):
+    """None when the job's worst case fits limit_s, else the refusal naming every term of it. legs
+    and job are the job's own legs and name (None: every leg, and the limit named unattributed)."""
+    total = _job_worst_case_s(bounds, negative_bound_s, legs)
     if total <= limit_s:
         return None
-    return ("{}s of worst-case job work (2 x subset sweep {}s, negative leg {}s, {} cleanup deadlines of "
-            "{}s, vectors {}s, setup {}s) exceeds the {}s job limit".format(
-                total, sum(bounds[name] for name, _script, _args in _SUBSET), negative_bound_s,
-                2 * len(_SUBSET) + 1, _DRAIN_MARGIN_S, _VECTOR_ALLOWANCE_S, _CI_SETUP_ALLOWANCE_S,
-                limit_s))
+    names = _job_legs(legs)
+    return ("{}s of worst-case job work (2 x subset sweep {}s over {} legs, negative leg {}s, {} "
+            "cleanup deadlines of {}s, vectors {}s, setup {}s) exceeds the {}s job limit{}".format(
+                total, sum(bounds[name] for name in names), len(names), negative_bound_s,
+                2 * len(names) + (1 if negative_bound_s else 0), _DRAIN_MARGIN_S,
+                _VECTOR_ALLOWANCE_S, _CI_SETUP_ALLOWANCE_S, limit_s,
+                " of {}".format(job) if job else ""))
 
 
 _CI_PLAIN_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*:(?=\s|$)")
@@ -534,7 +624,7 @@ def _ci_value(rest):
     return "plain", scalar
 
 
-def _ci_job_limit_s(workflow_text, job=_CI_JOB):
+def _ci_job_limit_s(workflow_text, job):
     """The time limit, in seconds, of `job` in the workflow text, as (seconds, None), or (None, reason)
     naming what could not be evaluated. The limit is the JOB-LEVEL timeout-minutes (a key at the job
     mapping's own indentation), capped at _CI_DEFAULT_JOB_MINUTES, the GitHub Actions limit for a
@@ -1128,13 +1218,16 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, drain_s=_DRAIN_MARGI
     return proc.returncode, shaped(stdout), time.monotonic() - start, True, []
 
 
-def _run_subset(opf_root, run_dir, bounds):
-    """Run every subset member under its own bound. Returns a list of
+def _run_subset(opf_root, run_dir, bounds, legs=None):
+    """Run every subset member under its own bound; legs restricts the run to those leg names (one
+    CI job's part of _CI_JOB_LEGS), None runs them all. Returns a list of
     (name, rc, tail, elapsed_s, launched, bound_s, cleanup). The registration checks have already run
     over the same roster (_run_closure checks them first)."""
     env = _isolated_env()
     results = []
     for name, script, args in _SUBSET:
+        if legs is not None and name not in legs:
+            continue
         bound = bounds[name][0]
         rc, tail, elapsed, launched, cleanup = _run_one(opf_root, script, args, run_dir, env, bound)
         results.append((name, rc, tail, elapsed, launched, bound, cleanup))
@@ -1211,8 +1304,11 @@ def _report(results):
     return 0
 
 
-def run(root, ceilings=None):
-    """Materialize opf/ alone and run the subset in isolation. Returns 0 (closure holds), 1 (a subset gate
+def run(root, ceilings=None, legs=None):
+    """Materialize opf/ alone and run the subset in isolation. legs restricts the sweep to those leg
+    names (one CI job's part of _CI_JOB_LEGS; main() checks the partition before passing one), None
+    runs every leg; the registration checks and the bound scan always cover the whole roster.
+    Returns 0 (closure holds), 1 (a subset gate
     failed: closure broken; or registration drift, named, found before opf/ is copied, any bound is
     derived or any leg runs), or 2 (harness error, no opf/tools/ directory, an opf/tools/ entry that
     cannot be checked, a temporary directory that cannot be created, a copy holding a symlink that
@@ -1222,10 +1318,10 @@ def run(root, ceilings=None):
     _LEG_CEILING_S (the self-test passes a table missing a row); a leg missing from _LEG_CEILING_S
     itself is registration drift (1), since the roster is held to that table and that table to
     _ROSTER_PIN (_check_roster_registration)."""
-    return _run_closure(root, ceilings)[0]
+    return _run_closure(root, ceilings, legs)[0]
 
 
-def _run_closure(root, ceilings=None):
+def _run_closure(root, ceilings=None, legs=None):
     """run(), returning (exit code, results, stopped): results is the per-leg rows _report read, or None
     when the run stopped before any leg result, and stopped is then the text naming why (None when the
     legs ran); the self-test's positive leg names each leg it could not evaluate, or the stop, from
@@ -1282,7 +1378,8 @@ def _run_closure(root, ceilings=None):
             stopped = "cannot derive the per-leg bounds: {}".format(exc)
             print("error: " + stopped, file=sys.stderr)
             return 2, None, stopped
-        results = _run_subset(opf_root, tmp, bounds)
+        results = (_run_subset(opf_root, tmp, bounds) if legs is None
+                   else _run_subset(opf_root, tmp, bounds, legs))
         return _report(results), results, None
     except (Exception, SystemExit) as exc:
         stopped = "harness fault before, around or after the legs ({})".format(_fault_text(exc))
@@ -1305,8 +1402,8 @@ def _bounds_self_test(root):
     def derive(check, func, *args, **kwargs):
         return _under_test(check, func, *args, refuses=(_BoundError,), **kwargs)
 
-    def ci_limit(check, workflow_text):
-        return _under_test(check, _ci_job_limit_s, workflow_text)
+    def ci_limit(check, workflow_text, job):
+        return _under_test(check, _ci_job_limit_s, workflow_text, job)
 
     names = [name for name, _script, _args in _SUBSET]
     if sorted(_LEG_CEILING_S) != sorted(names):
@@ -1483,47 +1580,91 @@ def _bounds_self_test(root):
     print("PASS closure/declared-wait-scan (literal SITES sum: a repeated site counts once and "
           "arithmetic is mis-read in either direction, so the sum is a deliberate deadline, never an "
           "end-to-end budget; an under-read deadline fails closed)")
-    # The worst case of the whole opf-closure CI job must fit its time limit: the job runs the
-    # --self-test step (one full subset sweep in its positive leg, a negative leg bounded by the
-    # opf-tooling bound, and the fast vectors) and then the live gate step (one more subset sweep).
+    # The partition of the legs across the CI jobs, fail-closed BEFORE any per-job fit is read: a
+    # leg in no job, a leg in more than one, and a job entry naming no subset leg are each a named
+    # fault here (and refuse a --ci-job run in main() before any leg launches).
+    partition_faults = _under_test("ci-jobs-partition-the-subset", _partition_fault)
+    if partition_faults:
+        raise _CheckFailure("closure/ci-jobs-partition-the-subset: " + "; ".join(partition_faults))
+    print("PASS closure/ci-jobs-partition-the-subset: every subset leg is in exactly one CI job ({})"
+          .format(", ".join("{} holds {}".format(job, len(_CI_JOB_LEGS[job]))
+                            for job in _CI_JOBS)))
+    # The partition check is discriminating: each fault shape is named on a doctored table (a leg
+    # in 0 holders and in 2, each side of the exactly-one boundary, and a name that is no leg), and
+    # the live table yields none, so a _partition_fault that stops naming a shape is a named fault.
+    first_leg = _SUBSET[0][0]
+    holder = next(job for job in _CI_JOBS if first_leg in _CI_JOB_LEGS[job])
+    for label, table, want in (
+            ("live-table", dict(_CI_JOB_LEGS), []),
+            ("leg-in-no-job",
+             {job: _CI_JOB_LEGS[job] - {first_leg} for job in _CI_JOBS},
+             ["{}: in 0 CI jobs (none)".format(first_leg)]),
+            ("leg-in-both-jobs",
+             {job: _CI_JOB_LEGS[job] | {first_leg} for job in _CI_JOBS},
+             ["{}: in {} CI jobs ({})".format(first_leg, len(_CI_JOBS), ", ".join(_CI_JOBS))]),
+            ("name-that-is-no-leg",
+             {job: (_CI_JOB_LEGS[job] | {"no-such-leg"}) if job == holder else _CI_JOB_LEGS[job]
+              for job in _CI_JOBS},
+             ["{}: no-such-leg is not a subset leg".format(holder)])):
+        got = _under_test("partition-check-discriminates", _partition_fault, table)
+        if got != want:
+            raise _CheckFailure("closure/partition-check-discriminates ({}): {!r}, want {!r}".format(
+                label, got, want))
+    print("RED a leg in no CI job, one in both, and a job entry naming no subset leg -> each a named "
+          "partition fault; the live table -> none")
+    # The worst case of EACH closure CI job must fit that job's own time limit: a job runs the
+    # --self-test step (one sweep over its own legs in the positive leg, the fast vectors, and, only
+    # in the job that holds the flip's leg, a negative leg bounded by the opf-tooling bound) and
+    # then the live gate step (one more sweep over the same legs).
     text = (Path(root) / _CI_WORKFLOW).read_text(encoding="utf-8")
-    limit, reason = ci_limit("ci-job-limit-cannot-evaluate", text)
-    if limit is None:
-        raise _CannotEvaluate("closure/ci-job-limit-cannot-evaluate: " + reason)
-    oversize = _under_test("leg-bound-exceeds-the-ci-job", _oversize_legs, live, limit)
-    if oversize:
-        raise _CheckFailure("closure/leg-bound-exceeds-the-ci-job: " + "; ".join(oversize))
-    # The expectation is recombined here, independently of _job_worst_case_s: every leg of both sweeps
-    # and the negative leg can be killed, and each kill pays ONE cleanup deadline (_DRAIN_MARGIN_S,
-    # shared by the drain and the leader reap in _kill_and_reap), so a model that drops or halves the
-    # cleanup term is a named fault, not a tautology.
-    subset_sum = sum(live.values())
-    negative = required["opf-tooling-selftest"][0]
-    kills = 2 * len(_SUBSET) + 1
-    cleanup_free = 2 * subset_sum + negative + _VECTOR_ALLOWANCE_S + _CI_SETUP_ALLOWANCE_S
-    want_total = cleanup_free + kills * _DRAIN_MARGIN_S
-    total = _under_test("fit-model-counts-one-cleanup-deadline-per-kill", _job_worst_case_s, live,
-                        negative)
-    if total != want_total:
-        raise _CheckFailure("closure/fit-model-counts-one-cleanup-deadline-per-kill: {}s, recombined "
-                            "{}s".format(total, want_total))
-    fault = _under_test("bounds-fit-the-ci-job", _fit_fault, live, negative, limit)
-    if fault is not None:
-        raise _CheckFailure("closure/bounds-fit-the-ci-job: " + fault)
-    print("PASS closure/bounds-fit-the-ci-job: 2 x subset sweep {}s + negative leg {}s + {} cleanup "
-          "deadlines x {}s + vectors {}s + setup {}s = {}s <= {}s ({} job)".format(
-              subset_sum, negative, kills, _DRAIN_MARGIN_S, _VECTOR_ALLOWANCE_S,
-              _CI_SETUP_ALLOWANCE_S, total, limit, _CI_JOB))
-    # The fit check's cleanup term is discriminating: a job limit that covers every bound but not the
-    # cleanup deadlines is refused, as is one second below the worst case; at the worst case it fits.
-    for probe_limit, fits in ((want_total, True), (want_total - 1, False), (cleanup_free, False)):
-        if (_under_test("fit-check-cleanup-term", _fit_fault, live, negative, probe_limit)
-                is None) != fits:
-            raise _CheckFailure("closure/fit-check-cleanup-term (limit {}s, worst case {}s)".format(
-                probe_limit, want_total))
-    print("RED a job limit covering every bound but not the {} cleanup deadlines ({}s) -> refused; one "
-          "second below the {}s worst case -> refused; at it -> fits".format(
-              kills, cleanup_free, want_total))
+    job_totals, job_limits = {}, {}
+    for job in _CI_JOBS:
+        job_set = _CI_JOB_LEGS[job]
+        in_job = [name for name in names if name in job_set]
+        limit, reason = ci_limit("ci-job-limit-cannot-evaluate", text, job)
+        if limit is None:
+            raise _CannotEvaluate("closure/ci-job-limit-cannot-evaluate: " + reason)
+        oversize = _under_test("leg-bound-exceeds-the-ci-job", _oversize_legs, live, limit, job_set)
+        if oversize:
+            raise _CheckFailure("closure/leg-bound-exceeds-the-ci-job ({}): ".format(job)
+                                + "; ".join(oversize))
+        # The expectation is recombined here, independently of _job_worst_case_s: every leg of both
+        # sweeps and (where it runs) the negative leg can be killed, and each kill pays ONE cleanup
+        # deadline (_DRAIN_MARGIN_S, shared by the drain and the leader reap in _kill_and_reap), so
+        # a model that drops or halves the cleanup term is a named fault, not a tautology.
+        subset_sum = sum(live[name] for name in in_job)
+        negative = required[_FLIP_LEG][0] if _FLIP_LEG in job_set else 0
+        kills = 2 * len(in_job) + (1 if _FLIP_LEG in job_set else 0)
+        cleanup_free = 2 * subset_sum + negative + _VECTOR_ALLOWANCE_S + _CI_SETUP_ALLOWANCE_S
+        want_total = cleanup_free + kills * _DRAIN_MARGIN_S
+        total = _under_test("fit-model-counts-one-cleanup-deadline-per-kill", _job_worst_case_s,
+                            live, negative, job_set)
+        if total != want_total:
+            raise _CheckFailure("closure/fit-model-counts-one-cleanup-deadline-per-kill ({}): {}s, "
+                                "recombined {}s".format(job, total, want_total))
+        fault = _under_test("bounds-fit-the-ci-job", _fit_fault, live, negative, limit, job_set, job)
+        if fault is not None:
+            raise _CheckFailure("closure/bounds-fit-the-ci-job: " + fault)
+        print("PASS closure/bounds-fit-the-ci-job: 2 x subset sweep {}s over {} legs + negative leg "
+              "{}s + {} cleanup deadlines x {}s + vectors {}s + setup {}s = {}s <= {}s ({} job)".format(
+                  subset_sum, len(in_job), negative, kills, _DRAIN_MARGIN_S, _VECTOR_ALLOWANCE_S,
+                  _CI_SETUP_ALLOWANCE_S, total, limit, job))
+        # The fit check's cleanup term is discriminating per job: a job limit that covers every bound
+        # but not the cleanup deadlines is refused, as is one second below the worst case; at the
+        # worst case it fits.
+        for probe_limit, fits in ((want_total, True), (want_total - 1, False),
+                                  (cleanup_free, False)):
+            if (_under_test("fit-check-cleanup-term", _fit_fault, live, negative, probe_limit,
+                            job_set, job) is None) != fits:
+                raise _CheckFailure("closure/fit-check-cleanup-term ({}, limit {}s, worst case "
+                                    "{}s)".format(job, probe_limit, want_total))
+        job_totals[job], job_limits[job] = total, limit
+    print("RED for each job: a limit covering every bound but not its cleanup deadlines -> refused; "
+          "one second below its worst case -> refused; at it -> fits")
+    # The parser vectors below exercise one job's header and limit; both jobs run through the same
+    # reader above.
+    limit = job_limits[_CI_JOBS[0]]
+    total = job_totals[_CI_JOBS[0]]
     # A single leg bound over the job limit is refused by name, never shrunk: one second over is named,
     # at and one under the limit are not (each side of its boundary tested).
     for delta, want_named in ((-1, False), (0, False), (1, True)):
@@ -1536,18 +1677,18 @@ def _bounds_self_test(root):
             raise _CheckFailure("closure/oversize-leg-refusal (limit{:+d}): {!r}".format(delta, named))
     print("RED a leg bound one second over the job limit -> refused by name, never shrunk; at and one "
           "under the limit -> not oversize")
-    header = "  {}:\n".format(_CI_JOB)
+    header = "  {}:\n".format(_CI_JOBS[0])
     tight = text.replace(header, header + "    timeout-minutes: 30\n", 1)
-    if (tight == text or ci_limit("ci-job-30-minutes-not-refused", tight) != (1800, None)
+    if (tight == text or ci_limit("ci-job-30-minutes-not-refused", tight, _CI_JOBS[0]) != (1800, None)
             or total <= 1800):
         raise _CheckFailure("closure/ci-job-30-minutes-not-refused")
     absent_limit, absent_reason = ci_limit("ci-job-absent-not-refused-by-name",
-                                           text.replace(header, "  renamed-job:\n", 1))
-    if absent_limit is not None or _CI_JOB not in (absent_reason or ""):
+                                           text.replace(header, "  renamed-job:\n", 1), _CI_JOBS[0])
+    if absent_limit is not None or _CI_JOBS[0] not in (absent_reason or ""):
         raise _CheckFailure("closure/ci-job-absent-not-refused-by-name")
     bad_limit, bad_reason = ci_limit(
         "ci-job-non-integer-not-refused-by-name",
-        text.replace(header, header + "    timeout-minutes: thirty\n", 1))
+        text.replace(header, header + "    timeout-minutes: thirty\n", 1), _CI_JOBS[0])
     if bad_limit is not None or "thirty" not in (bad_reason or ""):
         raise _CheckFailure("closure/ci-job-non-integer-not-refused-by-name")
     # Job and step limits are DISTINCT: a step's own timeout-minutes (first key of its `- ` line or
@@ -1558,31 +1699,33 @@ def _bounds_self_test(root):
     reordered = text.replace(
         step, "      - timeout-minutes: 1\n        name: OPF standalone-closure gate\n", 1)
     if reordered == text or ci_limit("ci-step-timeout-capped-the-job-budget",
-                                     reordered) != (default_s, None):
+                                     reordered, _CI_JOBS[0]) != (default_s, None):
         raise _CheckFailure("closure/ci-step-timeout-capped-the-job-budget (first key)")
     stepwise = text.replace(step, step + "        timeout-minutes: 1\n", 1)
     if stepwise == text or ci_limit("ci-step-timeout-capped-the-job-budget",
-                                    stepwise) != (default_s, None):
+                                    stepwise, _CI_JOBS[0]) != (default_s, None):
         raise _CheckFailure("closure/ci-step-timeout-capped-the-job-budget")
     # The fail-closed line scan: a key or step this parser does not evaluate but the YAML loader
     # GitHub runs would (a quoted key, an escape-carrying key, an alias step) is refused by name,
     # never scanned around to the default; block-scalar CONTENT is data, not keys, and is skipped.
     quoted = text.replace(header, header + '    "timeout-minutes": 1\n', 1)
-    quoted_limit, quoted_reason = ci_limit("ci-quoted-timeout-key-not-refused-by-name", quoted)
+    quoted_limit, quoted_reason = ci_limit("ci-quoted-timeout-key-not-refused-by-name", quoted,
+                                           _CI_JOBS[0])
     if quoted_limit is not None or "timeout-minutes" not in (quoted_reason or ""):
         raise _CheckFailure("closure/ci-quoted-timeout-key-not-refused-by-name")
     escaped = text.replace(header, header + '    "timeout\\u002dminutes": 1\n', 1)
-    escaped_limit, escaped_reason = ci_limit("ci-escaped-timeout-key-not-refused-by-name", escaped)
+    escaped_limit, escaped_reason = ci_limit("ci-escaped-timeout-key-not-refused-by-name", escaped,
+                                             _CI_JOBS[0])
     if escaped_limit is not None or "u002dminutes" not in (escaped_reason or ""):
         raise _CheckFailure("closure/ci-escaped-timeout-key-not-refused-by-name")
     aliased = text.replace(step, "      - *closure_gate\n" + step, 1)
-    alias_limit, alias_reason = ci_limit("ci-alias-step-not-refused-by-name", aliased)
+    alias_limit, alias_reason = ci_limit("ci-alias-step-not-refused-by-name", aliased, _CI_JOBS[0])
     if aliased == text or alias_limit is not None or "*closure_gate" not in (alias_reason or ""):
         raise _CheckFailure("closure/ci-alias-step-not-refused-by-name")
     blocky = text.replace(
         step, "      - run: |\n          echo widen\n          \"timeout-minutes\": 1\n" + step, 1)
     if blocky == text or ci_limit("ci-block-scalar-content-misread-as-a-key",
-                                  blocky) != (default_s, None):
+                                  blocky, _CI_JOBS[0]) != (default_s, None):
         raise _CheckFailure("closure/ci-block-scalar-content-misread-as-a-key")
     # Value forms, on a minimal job: each entry is (check, job body, the limit it must read, or None
     # with the text its refusal must name). A timeout-minutes value is validated before any
@@ -1605,7 +1748,8 @@ def _bounds_self_test(root):
             ("ci-indentless-step-timeout-capped-the-job-budget",
              "    steps:\n    - timeout-minutes: 1\n      run: echo ok\n", default_s, None)):
         got_limit, got_reason = ci_limit(
-            check, "jobs:\n  {}:\n    runs-on: ubuntu-latest\n{}".format(_CI_JOB, body))
+            check, "jobs:\n  {}:\n    runs-on: ubuntu-latest\n{}".format(_CI_JOBS[0], body),
+            _CI_JOBS[0])
         if want_limit is not None:
             if (got_limit, got_reason) != (want_limit, None):
                 raise _CheckFailure("closure/{}: {!r}".format(check, (got_limit, got_reason)))
@@ -2409,12 +2553,16 @@ def _self_test_outcome(verdicts):
     return 2 if found else 0
 
 
-def _closure_legs(root, required, run_closure=None, run_one=None):
+def _closure_legs(root, required, run_closure=None, run_one=None, legs=None):
     """The self-test's positive and negative legs over root's opf/, returning the self-test's exit code
-    (_self_test_outcome). Any exception or SystemExit running the positive leg or judging it (from
+    (_self_test_outcome). legs restricts the positive leg's sweep to those leg names (one CI job's
+    part of _CI_JOB_LEGS), None sweeps every leg; the negative leg (the flip, which runs opf.py
+    --self-test under the opf-tooling-selftest bound) runs only when legs is None or holds that leg,
+    since the flip is that leg's work and budget, so the other job's self-test judges its positive
+    leg alone and says so. Any exception or SystemExit running the positive leg or judging it (from
     run_closure or _positive_verdict) leaves it unevaluated (2), named by its type, and the negative leg
-    still runs, so a flip not caught beside it is still a failure (1). The negative leg's output is
-    compared as raw bytes (run_one with raw True).
+    still runs (where this job runs it), so a flip not caught beside it is still a failure (1). The
+    negative leg's output is compared as raw bytes (run_one with raw True).
     A temporary directory that cannot be created, fixture drift in the flip, any exception or SystemExit
     building the flipped copy (a failed copy, or a store that cannot be read or decoded), any exception
     or SystemExit running or judging the flipped leg, and an incomplete cleanup after the flipped leg's
@@ -2424,12 +2572,18 @@ def _closure_legs(root, required, run_closure=None, run_one=None):
     run_closure = _run_closure if run_closure is None else run_closure
     run_one = _run_one if run_one is None else run_one
 
-    # Positive: the real opf/ subtree verifies itself in isolation.
+    # Positive: the real opf/ subtree verifies itself in isolation (this job's legs).
     try:
-        verdicts = [_positive_verdict(*run_closure(root))]
+        verdicts = [_positive_verdict(*(run_closure(root) if legs is None
+                                        else run_closure(root, None, legs)))]
     except (Exception, SystemExit) as exc:
         verdicts = [(2, "positive: harness fault running or judging the positive leg (closure was not "
                         "evaluated for the real opf/): {}: {}".format(type(exc).__name__, exc))]
+
+    if legs is not None and _FLIP_LEG not in legs:
+        print("NEGATIVE LEG NOT RUN HERE: the deliberate flip runs opf.py --self-test under the {} "
+              "bound, so the CI job whose legs hold that leg runs it".format(_FLIP_LEG))
+        return _self_test_outcome(verdicts)
 
     # Negative (deliberate flip): a surviving upward edge must be caught.
     opf_src = Path(root) / "opf"
@@ -3167,10 +3321,10 @@ def _harness_routing_self_test():
              _raiser(AssertionError("closure/foreign-harness")), (2, None),
              "SELF-TEST CANNOT EVALUATE: AssertionError: closure/foreign-harness"),
             ("cannot-evaluate",
-             _raiser(_CannotEvaluate("closure/ci-job-limit-cannot-evaluate: job opf-closure appears 0 "
-                                     "times in the workflow (need exactly one)")), (2, None),
-             "SELF-TEST CANNOT EVALUATE: closure/ci-job-limit-cannot-evaluate: job opf-closure appears 0 "
-             "times"),
+             _raiser(_CannotEvaluate("closure/ci-job-limit-cannot-evaluate: job opf-closure-a appears "
+                                     "0 times in the workflow (need exactly one)")), (2, None),
+             "SELF-TEST CANNOT EVALUATE: closure/ci-job-limit-cannot-evaluate: job opf-closure-a "
+             "appears 0 times"),
             # A SystemExit raised in the fast phase outside a check's call into the code under test is
             # a harness fault, never the exit 0 it carries.
             ("system-exit", _raiser(SystemExit(0)), (2, None),
@@ -3266,7 +3420,7 @@ def _check_routing_self_test():
     the whole-roster check, _run_one and _kill_and_reap, each under the check that calls it; a
     SystemExit the code under test raises (_negative_verdict, _kill_and_reap) is that check's failure
     too, never the exit 0 it carries. A check that CANNOT EVALUATE what it checks is 2, named: the real
-    bounds check over a throwaway tree whose workflow has no opf-closure job cannot read the CI job
+    bounds check over a throwaway tree whose workflow has no opf-closure-a job cannot read the CI job
     limit. A FAULT IN THE CHECK'S OWN WORK outside its calls into the code under test (its temporary
     directory, as on a full disk) stays a harness fault (2), so the conversion covers those calls and
     nothing more; a check's own assertions, those about its fixtures included (a readiness file that
@@ -3312,7 +3466,7 @@ def _check_routing_self_test():
                  "SELF-TEST FAIL: closure/roster-registration: "
                  + code_under_test.format("_check_roster_registration", "TypeError") + defect),
                 ("runner-crash",
-                 lambda: _timeout_vectors_self_test({"opf-tooling-selftest": (1458, 486, 0)}),
+                 lambda: _timeout_vectors_self_test(dict.fromkeys(_LEG_CEILING_S, (1458, 486, 0))),
                  {"_run_one": crashing("_run_one", RuntimeError(defect))}, None, (1, None),
                  "SELF-TEST FAIL: closure/half-ceiling-bound-did-not-kill-the-ceiling-run: "
                  + code_under_test.format("_run_one", "RuntimeError") + defect),
@@ -3337,7 +3491,7 @@ def _check_routing_self_test():
                  {"_negative_verdict": lambda *_args: None}, None, (1, None),
                  "SELF-TEST FAIL: closure/negative-verdict-not-red: bound-kill"),
                 ("ci-job-limit-cannot-evaluate", lambda: _bounds_self_test(tmp), {}, None, (2, None),
-                 "SELF-TEST CANNOT EVALUATE: closure/ci-job-limit-cannot-evaluate: job opf-closure "
+                 "SELF-TEST CANNOT EVALUATE: closure/ci-job-limit-cannot-evaluate: job opf-closure-a "
                  "appears 0 times in the workflow (need exactly one)"),
                 # REGRESSION COVERAGE: a fault creating the check's own temporary directory read as a
                 # harness fault before; it fails if the conversion were widened past the calls into
@@ -3389,8 +3543,12 @@ def _fast_vectors(root):
     return required
 
 
-def self_test_main():
-    """Prove the gate fails without the self-containment property (change-carries-check). The bound and
+def self_test_main(job=None):
+    """Prove the gate fails without the self-containment property (change-carries-check). job (a
+    _CI_JOB_LEGS key, already validated by main()) restricts the positive leg's sweep to that job's
+    legs and runs the negative leg only in the job that holds opf-tooling-selftest (_closure_legs);
+    None sweeps every leg and runs the flip. The fast phase always covers the whole roster, the
+    partition and every job's fit. The bound and
     verdict legs run first and fast: the per-leg bounds cover each leg's table-derived need (the floor
     term included, shown raising bounds under a launch margin lowered below it) and fit the CI job,
     time-scaled stub legs show a flat bound below the recorded work killing a correct leg while
@@ -3426,22 +3584,45 @@ def self_test_main():
     code, required = _self_test_phase(lambda: _fast_vectors(root))
     if code is not None:
         return code
+    legs = None if job is None else _CI_JOB_LEGS[job]
     try:
-        code = _closure_legs(root, required)
+        code = (_closure_legs(root, required) if legs is None
+                else _closure_legs(root, required, legs=legs))
     except (Exception, SystemExit) as exc:
         print("SELF-TEST CANNOT EVALUATE: {}: {} (a harness fault in the closure legs, never a self-test "
               "failure)".format(type(exc).__name__, exc), file=sys.stderr)
         return 2
     if code == 0:
-        print("SELF-TEST PASS: standalone closure holds for opf/, and a re-introduced upward edge is "
-              "caught.")
+        if legs is None or _FLIP_LEG in legs:
+            print("SELF-TEST PASS: standalone closure holds for opf/, and a re-introduced upward edge "
+                  "is caught.")
+        else:
+            print("SELF-TEST PASS: standalone closure holds for the {} legs (the re-introduced upward "
+                  "edge is exercised by the CI job whose legs hold {}).".format(job, _FLIP_LEG))
     return code
 
 
 def main():
-    if "--self-test" in sys.argv[1:]:
-        return self_test_main()
-    return run(repo_root())
+    argv = sys.argv[1:]
+    job = None
+    if "--ci-job" in argv:
+        where = argv.index("--ci-job")
+        value = argv[where + 1] if where + 1 < len(argv) else None
+        if value not in _CI_JOB_LEGS:
+            print("error: --ci-job must name one of {} (got {!r}); nothing was run (cannot "
+                  "evaluate)".format(", ".join(_CI_JOBS), value), file=sys.stderr)
+            return 2
+        job = value
+    if "--self-test" in argv:
+        return self_test_main(job)
+    if job is None:
+        return run(repo_root())
+    faults = _partition_fault()
+    if faults:
+        print("error: the CI job partition is broken, so the {} legs cannot be trusted (cannot "
+              "evaluate; no leg was run): {}".format(job, "; ".join(faults)), file=sys.stderr)
+        return 2
+    return run(repo_root(), legs=_CI_JOB_LEGS[job])
 
 
 if __name__ == "__main__":

@@ -285,9 +285,17 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
 
+      - name: OPF adoption state self-test (homes-1 adoption control area and bounded adoption state)
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_state.py --self-test
+
       - name: OPF adoption enable-hook merge-core self-test (PR3 slice 1)
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
+
+      - name: OPF adoption completion evaluator self-test, checks 1 to 4 and 6 (PR5 slice 1)
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_complete.py --self-test
 
       - name: OPF import batch parser self-test (inert until the import write mode lands)
         shell: bash
@@ -345,8 +353,12 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
 
-  opf-closure:
-    name: OPF standalone closure
+  # The closure work is split between two jobs because the whole roster's worst case does not fit
+  # one job's time limit; the gate's own self-test checks the partition (every leg in exactly one
+  # job) and each job's worst case against that job's limit, and the flip (negative leg) runs in
+  # the job whose legs hold opf-tooling-selftest.
+  opf-closure-a:
+    name: OPF standalone closure A
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -360,11 +372,32 @@ jobs:
 
       - name: OPF standalone-closure gate self-test
         shell: bash
-        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-a
 
       - name: OPF standalone-closure gate
         shell: bash
-        run: python3 -I -B tools/check_opf_standalone_closure.py
+        run: python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-a
+
+  opf-closure-b:
+    name: OPF standalone closure B
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: OPF standalone-closure gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-b
+
+      - name: OPF standalone-closure gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-b
 
   release:
     name: Corpus, release and versioning
@@ -552,6 +585,13 @@ jobs:
       - name: First-pin demonstration drift
         shell: bash
         run: python3 -I -B tools/gen_first_pin_demo.py --check
+
+      - name: Must-deliver prefix self-test
+        shell: bash
+        run: python3 -I -B tools/check_must_deliver.py --self-test
+      - name: Must-deliver prefix
+        shell: bash
+        run: python3 -I -B tools/check_must_deliver.py
 
       - name: Mappings page drift
         shell: bash
@@ -1068,6 +1108,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_git_option_table.py
 
+      - name: Dangerous-API lint self-test
+        shell: bash
+        run: python3 -I -B tools/check_dangerous_api.py --self-test
+
+      - name: Dangerous-API lint
+        shell: bash
+        run: python3 -I -B tools/check_dangerous_api.py
+
       # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit
       # that proves the harness end to end, and the internal-name leak gate. Mirrors the same legs in
       # tools/run_all_checks.sh (roster symmetry). The advisory digest runs last: audit_reference.py
@@ -1129,7 +1177,8 @@ jobs:
       - secrets
       - site
       - opf
-      - opf-closure
+      - opf-closure-a
+      - opf-closure-b
       - release
       - generated
       - selftest-execution

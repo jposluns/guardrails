@@ -53,11 +53,14 @@ A contribution's `transition ID sent` from `proposed` takes `--channel S --deliv
 delivery bundle; `transition ID acknowledged` from `sent` takes an optional `--receipt-ref S`.
 `adopt` HAS landed (OPF-ADOPT K9a, the read-only half): `opf adopt plan --inputs FILE [--root DIR]`
 freezes and PRINTS the inert adoption proposal through the adoption planner (_opf_adopt_plan), writing
-nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readiness to apply (the approval
-lives in the run's evidence, a later PR) -- and `opf adopt status [--root DIR]` reports the adoption
-state read-only (the adoption evidence bundles and the adoption journal; with neither present it reports
-that no adoption run exists). The mutating subcommands `approve`, `apply`, `complete`, and `reconcile`
-are recognized and refuse (exit 2) until the mutating adoption engine lands in a later PR.
+nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readiness to apply -- and
+`opf adopt status [--root DIR]` reports the adoption state read-only (the adoption evidence bundles and
+the adoption journal; with neither present it reports that no adoption run exists). The stage driver adds
+`opf adopt approve --inputs FILE --plan FILE --actor NAME`, the one approval, printed and writing nothing,
+and `opf adopt apply --inputs FILE --plan FILE --approval FILE`, which admits only the approved plan and
+refuses before any write while a plan op's slice, or the driver's receipt stage, has not landed. `complete`
+and `reconcile` are recognized and refuse (exit 2) until the completion and recovery stages land in a later
+PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -120,6 +123,7 @@ def _bootstrap():
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
+    global _opf_adopt_state
     try:
         import _opf_worklog     # manifest-selected worklog intake + WL reference grammar
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
@@ -134,8 +138,9 @@ def _bootstrap():
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
         import _opf_write_guard  # the in-place writers' shared cleanliness gate and single-writer lease
         import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
-        import _opf_adopt_apply  # OPF-ADOPT U1+U5: the apply shell (the three finish ops execute)
+        import _opf_adopt_apply  # OPF-ADOPT U1+U2+U3+U4+U5+U7: the apply shell (the three file ops, init-store, the registration ops, enable-hook and the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
+        import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(
             _init_inert(exc.name or str(exc))), file=sys.stderr)
@@ -988,8 +993,35 @@ def _aggregator_self_test():
     return EXIT_OK
 
 
-def _watchdog_timer_case(label, mode):
-    """Private subprocess fixture: its timers belong to this process alone."""
+def _watchdog_window_verdict(result, elapsed, timeout_s):
+    """Classify the window exercise's run_bounded result: "pass" for the
+    subject's own return, whatever `elapsed` reads; "unestablished" for the
+    TIMEOUT sentinel ONLY once the caller's measured monotonic `elapsed`
+    reached `timeout_s` (run_bounded computes its deadline AFTER that
+    measurement begins and arms the child timer later still, so a correct
+    run's bound, which host starvation can reach on a correct 2 s subject,
+    cannot trip before then: no verdict, never a definite failure); "fail"
+    for a TIMEOUT measured BEFORE the bound could have elapsed (an early
+    trip is a run_bounded regression, never starvation) and for every other
+    sentinel (OOM, CHILD-DIED, ERROR and SETUP-ERROR stay definite: fail
+    closed, whatever `elapsed` reads)."""
+    if result == "RETURNED":
+        return "pass"
+    if result == "TIMEOUT" and elapsed >= timeout_s:
+        return "unestablished"
+    return "fail"
+
+
+def _watchdog_timer_case(label, mode, bounded=None, clock=None):
+    """Private subprocess fixture: its timers belong to this process alone.
+    When every check holds but the window exercise's subject run was never
+    established on this host (_watchdog_window_verdict), the exact
+    _WATCHDOG_CANNOT_EVALUATE marker is printed on the clean exit, which
+    the launching runner maps to the distinct CANNOT-EVALUATE outcome,
+    never a pass and never a definite failure. `bounded` and `clock` exist
+    for the regression runner's scripted window vectors, which drive this
+    real fixture without a live bounded run; the defaults are the real
+    _opf_emit.run_bounded and time.monotonic."""
     import contextlib
     import io
     import os
@@ -999,12 +1031,35 @@ def _watchdog_timer_case(label, mode):
 
     if _bootstrap() != EXIT_OK:
         return EXIT_MALFORMED
+    bounded = _opf_emit.run_bounded if bounded is None else bounded
+    clock = time.monotonic if clock is None else clock
+    unestablished = []
+
+    def window_case():
+        # The 2 s subject under run_bounded's 10 s bound: its own return is
+        # the exercise. run_bounded computes its deadline only AFTER this
+        # measurement begins (and arms the child timer later still), so on a
+        # correct subject only a bound that genuinely elapsed here is host
+        # starvation (recorded apart: no verdict), while a TIMEOUT measured
+        # earlier is an early trip of the bound, a run_bounded regression (a
+        # definite failure), and every other sentinel stays one.
+        begin = clock()
+        result = bounded(lambda: (time.sleep(2), "RETURNED")[1], timeout_s=10)
+        elapsed = clock() - begin
+        verdict = _watchdog_window_verdict(result, elapsed, 10)
+        if verdict == "unestablished":
+            unestablished.append("run_bounded's own 10 s bound, not the subject's "
+                                 "return, ended the window exercise")
+        elif result == "TIMEOUT":
+            print("run_bounded returned TIMEOUT after %.2f s, before its 10 s "
+                  "bound could have elapsed: an early trip of the bound is a "
+                  "run_bounded regression, never host starvation" % elapsed)
+        return 0 if verdict in ("pass", "unestablished") else 1
     functions = {
         "changelog": _opf_changelog.self_test, "views": _opf_views.self_test,
         "store": _opf_store.self_test, "check": _opf_check.self_test,
         "emit": _opf_emit.self_test,
-        "window": lambda: 0 if _opf_emit.run_bounded(
-            lambda: (time.sleep(2), "RETURNED")[1], timeout_s=10) == "RETURNED" else 1}
+        "window": window_case}
     which = {"virtual": signal.ITIMER_VIRTUAL, "prof": signal.ITIMER_PROF}.get(
         mode, signal.ITIMER_REAL)
     signum = {signal.ITIMER_REAL: signal.SIGALRM,
@@ -1081,12 +1136,44 @@ def _watchdog_timer_case(label, mode):
         ok = ok and signal.SIGALRM in pending and signal.SIGALRM in signal.sigpending()
     if not ok:
         print(label, mode, rc, before, after, mutations, fired, output.getvalue())
+        # No save/restore or teardown mutation: the subprocess exits with its timer.
+        return EXIT_FINDING
+    if unestablished:
+        # Every check held, but the window subject's run was never
+        # established: the exact marker on this clean exit, never a pass
+        # (the runner maps it to the distinct CANNOT-EVALUATE) and never a
+        # definite failure; a failed check above stays one (fail closed:
+        # the marker is honored only on a clean exit).
+        print(_WATCHDOG_CANNOT_EVALUATE + " (timer/" + label + "/" + mode + ": "
+              + "; ".join(unestablished) + ")")
     # No save/restore or teardown mutation: the subprocess exits with its timer.
-    return EXIT_OK if ok else EXIT_FINDING
+    return EXIT_OK
 
 
-def _watchdog_isolation_self_test():
-    """Exercise actual callers in fresh processes, without borrowing our timer."""
+# The watchdog isolation self-test's per-case process bound: each of its
+# timer cases is one fixture call with this timeout.
+_WATCHDOG_ISOLATION_TIMEOUT = 180
+
+
+def _watchdog_isolation_cases():
+    """The watchdog isolation self-test's timer cases, one fixture call each."""
+    cases = [(label, mode) for label in ("changelog", "views", "store", "check", "emit")
+             for mode in ("inactive", "single", "periodic", "virtual", "prof", "pending")]
+    cases.append(("window", "expiry"))
+    return cases
+
+
+def _watchdog_isolation_self_test(launch=None):
+    """Exercise actual callers in fresh processes, without borrowing our
+    timer. A fixture killed at its own process bound, and one whose clean
+    exit carries the exact _WATCHDOG_CANNOT_EVALUATE marker (its window
+    exercise was never established on this host), is no verdict on its
+    case (a starved host can reach any bound): the distinct CANNOT-EVALUATE
+    (EXIT_MALFORMED), never a pass and never a definite failure, while the
+    marker on a nonzero exit stays a failure (_watchdog_completion_verdict);
+    the regression runner's scripted-launch vectors pin both mappings.
+    `launch` (label, mode, code) exists for those vectors; the default
+    launches the real fixture."""
     import subprocess
     import signal
     from _opf_emit import run_status_owned
@@ -1100,25 +1187,44 @@ def _watchdog_isolation_self_test():
     if not hasattr(os, "fork") or not all(hasattr(signal, name) for name in required):
         print("opf watchdog isolation: FAIL (required POSIX facilities unavailable)")
         return EXIT_FINDING
-    cases = [(label, mode) for label in ("changelog", "views", "store", "check", "emit")
-             for mode in ("inactive", "single", "periodic", "virtual", "prof", "pending")]
-    cases.append(("window", "expiry"))
+    def real_launch(label, mode, code):
+        return run_status_owned([sys.executable, "-I", "-B", "-c", code],
+                                fixture_id="timer/" + label + "/" + mode,
+                                capture_output=True, text=True,
+                                timeout=_WATCHDOG_ISOLATION_TIMEOUT)
+
+    launch = real_launch if launch is None else launch
     failed = False
-    for label, mode in cases:
+    unevaluated = []
+    for label, mode in _watchdog_isolation_cases():
         code = ("import sys; sys.path.insert(0, " + repr(str(Path(__file__).resolve().parent))
                 + "); import opf; return opf._watchdog_timer_case("
                 + repr(label) + ", " + repr(mode) + ")")
         try:
-            result = run_status_owned([sys.executable, "-I", "-B", "-c", code],
-                                    fixture_id="timer/" + label + "/" + mode,
-                                    capture_output=True, text=True, timeout=180)
-            ok = result.returncode == EXIT_OK
+            result = launch(label, mode, code)
+            verdict = _watchdog_completion_verdict(result.returncode, result.stdout)
             detail = result.stdout + result.stderr
         except (RuntimeError, subprocess.CalledProcessError) as exc:
-            ok, detail = False, str(exc)
+            verdict, detail = "fail", str(exc)
         except subprocess.TimeoutExpired:
-            ok, detail = False, "fixture exceeded its 180s process bound"
-        if not ok:
+            # A kill at the fixture's own process bound establishes nothing
+            # about the case: recorded apart as the distinct CANNOT-EVALUATE,
+            # never a pass and never a definite failure.
+            unevaluated.append(label + "/" + mode)
+            print("opf watchdog isolation: CANNOT EVALUATE", label, mode,
+                  "fixture reached its %ss process bound (no verdict)"
+                  % _WATCHDOG_ISOLATION_TIMEOUT, file=sys.stderr)
+            continue
+        if verdict == "cannot-evaluate":
+            # The fixture exited clean with the exact marker: its exercise
+            # was never established on this host. Recorded apart, never a
+            # pass and never a definite failure; the marker on a nonzero
+            # exit is not honored (that run stays a failure below).
+            unevaluated.append(label + "/" + mode)
+            print("opf watchdog isolation: CANNOT EVALUATE", label, mode, detail,
+                  file=sys.stderr)
+            continue
+        if verdict != "pass":
             failed = True
             print("opf watchdog isolation: FAIL", label, mode, detail, file=sys.stderr)
     for name in ("_fixture_setpgid", "_fixture_owned_fds", "release_fd"):
@@ -1129,8 +1235,15 @@ def _watchdog_isolation_self_test():
     if hasattr(_opf_store, "snapshot_caller_alarm") or hasattr(_opf_store, "restore_caller_alarm"):
         failed = True
         print("opf watchdog isolation: FAIL (borrow helper still present)", file=sys.stderr)
-    if not failed:
+    if not failed and not unevaluated:
         print("opf watchdog isolation: PASS (caller timers and signal state untouched)")
+    if unevaluated:
+        # At least one case issued no verdict: the distinct CANNOT-EVALUATE
+        # (the worst outcome, per the runner's 2 > 1 > 0 ordering; any
+        # failures above are already printed), never a pass.
+        print("opf watchdog isolation: CANNOT EVALUATE (no verdict from: "
+              + ", ".join(unevaluated) + ")")
+        return EXIT_MALFORMED
     return EXIT_FINDING if failed else EXIT_OK
 
 
@@ -1156,6 +1269,49 @@ _DEADLINE_RECEIPT_ALLOWANCE = 1.0
 _WATCHDOG_LAUNCH_MARGIN = 30
 # The per-launch timeout of _watchdog_completion_case's launch() helper.
 _COMPLETION_LAUNCH_TIMEOUT = 10
+# The tree legs' startup liveness backstop (nested-timeout/nested-cancel).
+# It is NOT the stimulus deadline: the stimulus (the guardian's expiry or
+# the cancel) is EVENT-ORDERED, mounted only at the first wait poll that
+# parsed both nested markers, so the leg's verdict never races subject
+# startup. This bound only keeps the leg live when the nested chain (one
+# supervisor interpreter start, two forks, one exec, two marker writes) is
+# not scheduled at all, or when the stimulus is not acted on. Sized per
+# the kill-timeout rule from measurement, not as a stimulus: the whole leg
+# (chain included) measured 0.09-0.2 s end to end on a 16-CPU host at
+# loadavg ~6-13 (2026-10-10), so 60 s is >=300x that measured base (the
+# 2026-10-10 lane failures overran the old flat 2 s stimulus deadline at
+# loadavg ~21). Whenever this backstop, not the stimulus, ended
+# supervision, the leg reports the _WATCHDOG_CANNOT_EVALUATE outcome below
+# with what it observed, never a pass (_watchdog_tree_case).
+_TREE_STARTUP_BACKSTOP = 60
+# The nested-orders vectors' short backstop, used only by the nine vectors
+# whose schedule needs a REAL backstop expiry (a subject that never
+# publishes or publishes a malformed marker; an uninstalled or blind
+# observer; an unshifted guardian clock; a guardian held asleep or busy
+# before READY; a guardian that publishes READY only after the caller's
+# first READY check; a guardian held stopped across its deadline): there
+# it is the stimulus, so each pays this wait instead of
+# _TREE_STARTUP_BACKSTOP.
+_TREE_VECTOR_BACKSTOP = 5
+# A guardian's startup does only bounded work before READY (fork, one sweep
+# of its inherited descriptors, subreaper setup and the READY write:
+# millisecond-scale CPU for the descriptor tables these legs hold), far
+# under this floor, so a guardian sampled runnable (state R) at the startup
+# backstop, placed before READY by an empty channel at both READY checks,
+# that has already CONSUMED this much CPU time is busy-looping before READY,
+# a code regression. The judgment is by CPU time, never wall time: a merely
+# starved guardian is granted little CPU however much wall time passes, so
+# host starvation stays below this floor and remains no verdict, while the
+# busy loop is established by the CPU it burned, whatever the host's
+# scheduling.
+_STARTUP_BUSY_CPU_SECONDS = 1.0
+# The exact stdout marker a watchdog fixture prints (with its cause) when a
+# backstop or bound, not the leg's stimulus or its subject's own return,
+# ended the exercise, or the stimulus was observed only after cleanup: no
+# verdict exists, so the launching runner maps this marker (only on a
+# clean fixture exit) to the distinct CANNOT-EVALUATE aggregate
+# (EXIT_MALFORMED), never a pass and never a finding.
+_WATCHDOG_CANNOT_EVALUATE = "opf watchdog completion: CANNOT EVALUATE"
 
 
 def _deadline_case_budget(timeout_s=_DEADLINE_CASE_TIMEOUT):
@@ -1167,6 +1323,636 @@ def _deadline_case_budget(timeout_s=_DEADLINE_CASE_TIMEOUT):
     import _opf_emit
     return (max(timeout_s, _DEADLINE_EXECUTION_BOUND) + _opf_emit._FIXTURE_CLEANUP_GRACE
             + _DEADLINE_RECEIPT_ALLOWANCE)
+
+
+# Two literals of _opf_emit's close-out code, named here for the close-out
+# derivation and checked against that code by _watchdog_closeout_vectors:
+# the sleep between polls of each close-out polling loop (the startup READY
+# poll waits the same 5 ms), and _FixtureProcess._recv_subject's poll for
+# the subject receipt.
+_FIXTURE_POLL_SLEEP = 0.005
+_FIXTURE_RECEIPT_WAIT = 0.5
+
+
+def _watchdog_closeout_paths():
+    """The close-out paths one regression leg's launch (run_status_owned,
+    through _opf_emit._run_fixture_process) can take AFTER its process
+    bound expires, each as the timed waits the caller makes on it, in
+    order: (wait, limit in seconds, polling sleeps it can overrun). Each
+    path's total is a TIMED-WAIT allowance: the time the caller spends
+    inside those waits, each charged its limit plus one _FIXTURE_POLL_SLEEP
+    for each sleep it can overrun (a polling loop checks its deadline
+    before each sleep, so its sleeps end at most one _FIXTURE_POLL_SLEEP
+    past its limit; a poll or an Event wait ends at its limit). It is not
+    an end-to-end wall-clock ceiling: the caller's own work between and
+    inside those waits is charged nothing (see the exclusions below). G
+    below is _opf_emit._FIXTURE_CLEANUP_GRACE.
+
+    armed (start() succeeded): the run loop's last poll; close() reads the
+    subject receipt (_recv_subject, up to _FIXTURE_RECEIPT_WAIT), waits 2G
+    to collect the guardian, escalates (_fixture_group_pinned confirms the
+    frozen guardian within G, then _fixture_verify_group_kill watches the
+    group within G), waits G more to collect, and proves the subject's exit
+    on its pidfd within G. armed-interrupted: the same, except that an
+    exception escaping that last collection hands the still uncollected
+    guardian to _interrupt_collect TWICE (from _finish_close, then from
+    _close_masked), and each reap waits G. ownership-lost: the same,
+    except that the guardian is reaped elsewhere during that collection and
+    _ownership_lost_refusal proves the subject's exit within G.
+    poll-collected: the run loop's poll collects a failed guardian and
+    reads the receipt, then close() proves the subject's exit within G.
+    armed-cleaned, ownership-lost-cleaned and poll-collected-cleaned: the
+    same waits as armed, ownership-lost and poll-collected, but the
+    subject's exit is proven at the end of its proof wait, so the close-out
+    reaches its cleaned state and then refuses with that proof.
+    armed-tree: armed-cleaned whose verification census comes back clean
+    twice in a row at once (the killed subject and member are zombies
+    under the frozen guardian), so the escalation reaches its "tree"
+    observation without waiting in that census, and close() refuses with
+    that observation.
+    completed (a clean guardian collected by the run loop's last poll
+    before the deadline: the call returns its result) and
+    completed-overdue (that collection first observed at the deadline's
+    expiry: the call times out): the run loop's last poll, then close()
+    reads the subject receipt, and no other wait. startup-collected:
+    startup-timeout whose killed guardian is collected inside the first
+    close()'s 2G wait, so neither close() escalates.
+    startup-timeout (no READY by the deadline) and launch-timeout (no
+    completed launch by then): start() raises, so close() runs TWICE, once
+    in start() and once in _run_fixture_process's finally, and each run
+    that cannot collect the killed guardian waits 2G, escalates, then waits
+    G. launch-timeout adds start()'s launch wait, which lasts at least G
+    (so it ends up to G after the deadline when start() begins less than G
+    before it), and close()'s 2G wait for the launcher. launch-interrupted:
+    launch-timeout with an exception escaping each close()'s last
+    collection, so each close() adds two interrupt-owner reaps, as in
+    armed-interrupted. startup-cancelled: startup-timeout with a
+    cancellation raised as the first close() releases the launcher (where a
+    signal whose handler flag tripped before close() masked SIGINT and
+    SIGTERM can surface), so that close() also runs _interrupt_collect once,
+    whose reap waits G.
+
+    Not counted, so outside the allowance: the caller's own compute
+    between and inside those waits (the /proc censuses of the group pin
+    and the verification census, the receipt and report reads, the signal
+    sends: each charged no time), time in which the host does not run the
+    caller (no wait), the untimed reap in _start() of a guardian that ended
+    its READY channel, a cancellation raised at any other point, and
+    exceptions another thread raises into the caller (the regression
+    runner starts none)."""
+    import _opf_emit
+    grace, receipt = _opf_emit._FIXTURE_CLEANUP_GRACE, _FIXTURE_RECEIPT_WAIT
+    run_loop = ("the run loop's last poll", 0.0, 1)
+    collection = ("guardian collection", 2 * grace, 1)
+    escalated = ("post-escalation collection", grace, 1)
+    pinned = (run_loop, ("subject receipt", receipt, 0), collection, ("group pin", grace, 1))
+    armed = pinned + (("verification census", grace, 1), escalated)
+    unarmed = (collection, escalated)
+    startup = (("the startup READY poll", 0.0, 1),)
+    reap = ("interrupt-owner reap", grace, 1)
+    launch = (("start()'s launch wait past the deadline", grace, 0),
+              ("close()'s launcher wait", 2 * grace, 0))
+    exit_proof = ("subject exit proof", grace, 0)
+    lost_proof = ("ownership-lost exit proof", grace, 0)
+    polled = (run_loop, ("subject receipt", receipt, 0))
+    return dict([
+        ("armed", armed + (exit_proof,)),
+        ("armed-cleaned", armed + (exit_proof,)),
+        ("armed-tree", pinned + (escalated, exit_proof)),
+        ("armed-interrupted", armed + (reap, reap)),
+        ("ownership-lost", armed + (lost_proof,)),
+        ("ownership-lost-cleaned", armed + (lost_proof,)),
+        ("poll-collected", polled + (exit_proof,)),
+        ("poll-collected-cleaned", polled + (exit_proof,)),
+        ("completed", polled),
+        ("completed-overdue", polled),
+        ("startup-timeout", startup + unarmed + unarmed),
+        ("startup-collected", startup + (collection,)),
+        ("startup-cancelled", startup + unarmed + (reap,) + unarmed),
+        ("launch-timeout", launch + unarmed + unarmed),
+        ("launch-interrupted", launch + 2 * (unarmed + (reap, reap))),
+    ])
+
+
+def _watchdog_path_seconds(path):
+    """One close-out path's total: each wait's limit plus one
+    _FIXTURE_POLL_SLEEP for each sleep it can overrun."""
+    return sum(limit + sleeps * _FIXTURE_POLL_SLEEP for _wait, limit, sleeps in path)
+
+
+def _watchdog_leg_closeout_seconds():
+    """The derived close-out ceiling: the LONGEST total among
+    _watchdog_closeout_paths, bounding the timed waits one regression leg's
+    launch can make after its process bound. It is a maximum over those
+    derived paths, not a sum over every wait in close(), and nothing grants
+    it at runtime: its only consumer is _watchdog_closeout_vectors, which
+    runs the real close-out code along each path and refuses a path whose
+    waits outrun its total or this ceiling."""
+    return max(_watchdog_path_seconds(path) for path in _watchdog_closeout_paths().values())
+
+
+def _watchdog_closeout_vectors(source=None):
+    """The close-out derivation's red-on-revert check: runs the REAL
+    close-out code (_run_fixture_process, _FixtureProcess's start, poll and
+    close, and every helper they reach, in a private copy of _opf_emit
+    loaded from its file, or from `source`) once along each
+    path of _watchdog_closeout_paths, under a virtual clock, each schedule
+    holding that path's waits to (nearly) their limits. The schedules
+    include the refusals, the cleaned refusals (the subject's exit proven,
+    reaching both of the copy's cleaned states), an escalation whose
+    verification census comes back clean twice in a row (its "tree"
+    observation and the refusal that reports it), and the clean collections
+    before and at the deadline's expiry. Only boundaries are
+    scripted, and only for the calling thread: time.monotonic and
+    time.sleep, select.poll, socket.recv_fds, signal.pidfd_send_signal, and
+    os.waitpid, waitid, getpgid, kill and listdir, plus os.read, write and
+    close on the vector's own descriptor numbers (process and descriptor
+    numbers above any pid_max and any descriptor a host issues), and the
+    copy's /proc stat read, pidfd open and _FixtureProcess construction
+    (its launcher thread is never started). Nothing is forked,
+    and a real process or descriptor reaching a scripted signal, wait or
+    stat boundary is refused, never passed through. These other blocking
+    calls are refused outright on the calling thread while a schedule runs:
+    threading.Event.wait, Condition.wait and Thread.join, queue.Queue.get,
+    the get of a queue.SimpleQueue made while the schedule runs,
+    select.select and select.epoll, the select of every selectors class
+    that defines one (so of every selector class the selectors module
+    offers), signal.sigtimedwait, sigwaitinfo and pause, and os.wait,
+    wait3 and wait4. So a wait added to the close-out is caught when a
+    schedule reaches it and it is one of the scripted or refused calls.
+    Outside that coverage: a wait on a path no schedule takes; a blocking
+    read, write or accept on a real descriptor; a lock acquired with a
+    timeout; a get on a queue.SimpleQueue made before the schedule ran or
+    reached through _queue directly; a wait timed by an unscripted clock
+    (time.time, time.perf_counter, time.monotonic_ns and the other clocks
+    besides time.monotonic), which runs in real time and advances no
+    virtual time; any other blocking call not named here; and compute,
+    which advances no virtual time either (a busy loop that ends by itself
+    or by an unscripted clock costs real time unnoticed, and one that spins
+    on the scripted time.monotonic without a scripted sleep never ends,
+    since the virtual clock stands still). Returns the faults: a
+    schedule that did not end as its path does; one whose virtual time
+    after the deadline exceeds its path's total or the allowance
+    (_watchdog_leg_closeout_seconds) (a wait left out of the derivation, or
+    a limit raised in _opf_emit); one that would still fit
+    with any single nonzero wait removed from its path (the schedule fell
+    short of that wait, so it could not expose the wait's removal); a
+    path without a schedule or a schedule without a path; and, for the
+    real emitter only, a mutant this check does not refuse
+    (_watchdog_closeout_mutant_faults)."""
+    import errno
+    import importlib.util
+    import io
+    import queue
+    import select
+    import selectors
+    import signal
+    import socket
+    import subprocess
+    import threading
+    import time
+    from contextlib import ExitStack
+    from unittest.mock import patch
+    # A private copy of _opf_emit, loaded from its file and never registered
+    # in sys.modules (as _opf_emit loads its own close harness): a caller
+    # that replaced the shared module's launcher or helpers (the launcher
+    # matrix's exit-37 injection) never reaches the code this runs, and only
+    # the copy's own attributes are scripted.
+    spec = importlib.util.spec_from_file_location(
+        "_opf_emit_closeout_vector",
+        Path(__file__).resolve().parent / "_opf_emit.py" if source is None else source)
+    emit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emit)
+
+    grace, tick = emit._FIXTURE_CLEANUP_GRACE, _FIXTURE_POLL_SLEEP
+    owner = threading.get_ident()
+    base_pid, base_fd = 1 << 23, 1 << 30  # above any pid_max (2**22) and any descriptor
+    guardian, subject, member = base_pid + 1, base_pid + 2, base_pid + 3
+    control_fd, peer_fd = base_fd, base_fd + 1
+    real_process, real_listdir = emit._FixtureProcess, os.listdir
+    world = {}
+
+    class Refused(AssertionError):
+        """A scripted boundary reached with a real process or descriptor."""
+
+    def refuse(what):
+        world.setdefault("refused", []).append(what)
+        raise Refused(what)
+
+    def fd_of(pid):
+        return base_fd + 16 + pid - base_pid
+
+    def pid_of(fd):
+        pid = fd - base_fd - 16 + base_pid
+        if pid not in (guardian, subject, member):
+            refuse("a signal through descriptor %r" % (fd,))
+        return pid
+
+    def advance(seconds):
+        world["now"] += seconds
+        if world["now"] > world["origin"] + 600:
+            refuse("the virtual clock ran away")
+
+    def last_poll_of(name, flag=None):
+        # True at the last polls before the deadline of the _opf_emit loop
+        # `name` that made this call, read from that loop's own state, so a
+        # schedule follows the limit the code itself sets.
+        frame = sys._getframe(2)
+        while frame is not None and frame.f_globals.get("__name__") != emit.__name__:
+            frame = frame.f_back
+        return (frame is not None and frame.f_code.co_name == name
+                and (flag is None or frame.f_locals.get(flag) is True)
+                and world["now"] >= frame.f_locals["deadline"] - 2 * tick)
+
+    class Endpoint:
+        """The control socket or its peer: a descriptor number only."""
+
+        def __init__(self, fd):
+            self.fd = fd
+
+        def fileno(self):
+            return self.fd
+
+        def close(self):
+            self.fd = -1
+
+        def setblocking(self, flag):
+            pass
+
+    class Gate:
+        """threading.Event for _go and _launched on the virtual clock: a
+        timed wait on a closed gate runs to its limit and opens the gate as
+        it ends when the next entry of `opens` says so (the launcher has
+        then recorded the guardian); set() raises the scripted cancellation
+        on call number `raise_on`."""
+
+        def __init__(self, opened, opens=(), raise_on=None):
+            self.opened, self.opens, self.raise_on, self.calls = opened, list(opens), raise_on, 0
+
+        def is_set(self):
+            return self.opened
+
+        def set(self):
+            self.calls += 1
+            if self.calls == self.raise_on:
+                world["cancelled"] = KeyboardInterrupt("close-out vector cancellation")
+                raise world["cancelled"]
+            self.opened = True
+
+        def wait(self, timeout=None):
+            if not self.opened:
+                if timeout is None:
+                    refuse("an untimed Event wait")
+                advance(timeout)
+                if self.opens.pop(0):
+                    self.opened = True
+                    world["child"].pid, world["child"].pidfd = guardian, fd_of(guardian)
+            return self.opened
+
+    def readiness(fd):
+        # "now", "end" (at the poll's limit) or None (never).
+        if fd == control_fd and not world["child"].armed:
+            return "now" if world["ready"] == "pending" else None
+        if fd == control_fd:
+            return "end" if world["receipt"] == "end" else None
+        # The subject's pidfd: its exit is proven only at the proof's limit.
+        return "end" if world["spec"].get("exits") else None
+
+    class Poller:
+        def __init__(self):
+            self.fds = []
+
+        def register(self, target, mask=None):
+            fd = target if isinstance(target, int) else target.fileno()
+            if fd < 0:
+                raise ValueError("file descriptor cannot be a negative integer (%d)" % fd)
+            self.fds.append(fd)
+
+        def poll(self, timeout=None):
+            if timeout is None or timeout < 0:
+                refuse("an untimed poll")
+            ready = [fd for fd in self.fds if readiness(fd) == "now"]
+            if not ready:
+                advance(timeout / 1000)
+                ready = [fd for fd in self.fds if readiness(fd) == "end"]
+            return [(fd, select.POLLIN) for fd in ready]
+
+    def recv_fds(sock, bufsize, maxfds, flags=0):
+        if sock.fileno() != control_fd or world["receipt"] != "end":
+            refuse("an unscripted receipt read")
+        world["receipt"] = "taken"
+        return str(subject).encode(), [fd_of(subject)], 0, None
+
+    def record(pid, sig):
+        if pid == guardian and sig == signal.SIGSTOP:
+            world["stopped"] = world["now"]
+        if sig == signal.SIGKILL:
+            world.setdefault("killed", set()).add(pid)
+
+    def pidfd_send_signal(fd, sig, *rest):
+        record(pid_of(fd), sig)
+
+    def kill(pid, sig):
+        if pid not in (guardian, subject, member):
+            refuse("os.kill(%r)" % (pid,))
+        record(pid, sig)
+
+    def waitpid(pid, options):
+        if pid != guardian:
+            refuse("os.waitpid(%r)" % (pid,))
+        if world["reaped"]:
+            raise ChildProcessError(errno.ECHILD, "No child processes")
+        mode, now = world["collect"], world["now"]
+        if mode == "failed-early" and now >= world["deadline"] - tick:
+            world["reaped"] = True
+            return guardian, 1 << 8  # exit status 1: a failed guardian
+        # A clean guardian (exit 0, its receipt in the report), collected by
+        # the run loop's last poll before the deadline or by its first poll
+        # at the deadline's expiry.
+        if ((mode == "clean" and world["deadline"] - 2 * tick <= now < world["deadline"])
+                or (mode == "clean-overdue" and now >= world["deadline"])):
+            world["reaped"] = True
+            return guardian, 0
+        # The killed, never armed guardian, collected at the last polls of
+        # the first close()'s collection wait.
+        if mode == "killed" and last_poll_of("_finish_close"):
+            world["reaped"] = True
+            return guardian, int(signal.SIGKILL)
+        if mode in ("late", "raise", "echild") and last_poll_of("_finish_close", "escalated"):
+            if mode == "raise":
+                raise OSError(errno.EINVAL, "close-out vector: injected collection failure")
+            world["reaped"] = True
+            if mode == "echild":
+                raise ChildProcessError(errno.ECHILD, "close-out vector: reaped elsewhere")
+            return guardian, int(signal.SIGKILL)  # raw status: killed by SIGKILL
+        return 0, 0
+
+    def waitid(idtype, ident, options):
+        if ident != guardian:
+            refuse("os.waitid(%r)" % (ident,))
+        if world["reaped"]:
+            raise ChildProcessError(errno.ECHILD, "No child processes")
+        return None
+
+    def getpgid(pid):
+        if pid not in (guardian, subject, member):
+            refuse("os.getpgid(%r)" % (pid,))
+        return guardian if pid == guardian else subject
+
+    def read(fd, length):
+        if fd != control_fd:
+            refuse("os.read(%r)" % (fd,))
+        if world["ready"] == "pending":
+            world["ready"] = "read"
+            return b"R"
+        return b""
+
+    def listdir(path="."):
+        if path != "/proc":
+            return real_listdir(path)
+        return [str(pid) for pid in (guardian, subject, member)
+                if pid != guardian or not world["reaped"]]
+
+    def stat_fields(target):
+        pid = int(target)
+        if pid == guardian:
+            if world["reaped"]:
+                return None
+            # Frozen, but its stop confirmed only at the group pin's last polls.
+            frozen = world.get("stopped") is not None and last_poll_of("_fixture_group_pinned")
+            return [b"T" if frozen else b"R", str(os.getpid()).encode(), str(guardian).encode()]
+        if pid in (subject, member):
+            # Under a schedule whose census comes back clean, a killed subject
+            # or member is a zombie the frozen guardian cannot reap.
+            dead = world["spec"].get("quiesces") and pid in world.get("killed", ())
+            return [b"Z" if dead else b"S", str(guardian).encode(), str(subject).encode()]
+        refuse("a /proc read of %r" % (target,))
+
+    def pidfd_open(pid):
+        if pid not in (guardian, subject, member):
+            refuse("a pidfd for %r" % (pid,))
+        return fd_of(pid)
+
+    def construct(deadline, keep_fds=(), subject=None):
+        # The attributes _FixtureProcess.__init__ sets, without its socket
+        # pair, receipt file or launcher thread.
+        opens = world["spec"].get("launched", ())
+        child = object.__new__(real_process)
+        vars(child).update(
+            deadline=deadline, pid=None, pidfd=None, status=None, subject_pid=None,
+            subject_pidfd=None, armed=False, collected=False, timed_out=False,
+            unresolved=False, cleaned=False, _subject_kill=None, _subject_skipped=None,
+            keep_fds=tuple(keep_fds), subject=subject, _launcher="close-out vector",
+            _launch_error=None, _failure=None, _launch_lock=threading.Lock(),
+            _go=Gate(False, raise_on=2 if world["spec"].get("cancel") else None),
+            _launched=Gate(not opens, opens), _cancelled=False, _abandoned=False,
+            control=Endpoint(control_fd), peer=Endpoint(peer_fd),
+            report=io.BytesIO(world["spec"].get("report", b"")),
+            _launch_masked=set())
+        if not opens:
+            child.pid, child.pidfd = guardian, fd_of(guardian)
+        world["child"], world["deadline"] = child, deadline
+        return child
+
+    def scoped(real, fake, ours=None):
+        def call(*args, **kwargs):
+            if (threading.get_ident() == owner and "now" in world
+                    and (ours is None or (type(args[0]) is int and args[0] >= base_fd))):
+                return fake(*args, **kwargs)
+            return real(*args, **kwargs)
+        return call
+
+    def blocked(name):
+        def call(*args, **kwargs):
+            refuse("an unscripted blocking call: " + name)
+        return call
+
+    class SimpleQueue(queue.SimpleQueue):
+        """queue.SimpleQueue (a C type whose get cannot be patched) for the
+        queues made while a schedule runs: get is refused on the calling
+        thread while a schedule runs, and is the real get anywhere else."""
+
+        def get(self, *args, **kwargs):
+            if threading.get_ident() == owner and "now" in world:
+                refuse("an unscripted blocking call: queue.SimpleQueue.get")
+            return super().get(*args, **kwargs)
+
+    # Every selectors class that defines select (the others inherit one of
+    # these; DefaultSelector is an alias), so the select of any selector is
+    # refused, including one whose class kept the real select.epoll from
+    # import time.
+    selector_classes = []
+    for cls in vars(selectors).values():
+        if (isinstance(cls, type) and issubclass(cls, selectors.BaseSelector)
+                and cls is not selectors.BaseSelector and "select" in vars(cls)
+                and cls not in selector_classes):
+            selector_classes.append(cls)
+
+    boundaries = (
+        (time, "monotonic", lambda: world["now"], None), (time, "sleep", advance, None),
+        (select, "poll", Poller, None), (socket, "recv_fds", recv_fds, None),
+        (signal, "pidfd_send_signal", pidfd_send_signal, None), (os, "waitpid", waitpid, None),
+        (os, "waitid", waitid, None), (os, "getpgid", getpgid, None), (os, "kill", kill, None),
+        (os, "listdir", listdir, None), (emit, "_fixture_stat_fields", stat_fields, None),
+        (emit, "_fixture_pidfd", pidfd_open, None), (emit, "_FixtureProcess", construct, None),
+        (os, "read", read, True), (os, "write", lambda fd, data: len(data), True),
+        (os, "close", lambda fd: None, True)) + tuple(
+            (target, name, blocked(label), None) for target, name, label in (
+                (threading.Event, "wait", "threading.Event.wait"),
+                (threading.Condition, "wait", "threading.Condition.wait"),
+                (threading.Thread, "join", "threading.Thread.join"),
+                (queue.Queue, "get", "queue.Queue.get"), (select, "select", "select.select"),
+                (select, "epoll", "select.epoll"), (signal, "sigtimedwait", "signal.sigtimedwait"),
+                (signal, "sigwaitinfo", "signal.sigwaitinfo"), (signal, "pause", "signal.pause"),
+                (os, "wait", "os.wait"), (os, "wait3", "os.wait3"), (os, "wait4", "os.wait4"))
+            ) + tuple((cls, "select", blocked("selectors.%s.select" % cls.__name__), None)
+                      for cls in selector_classes)
+    unreaped = (emit.ChildStatusUnavailable, "not collected after escalation")
+    clean = b"[0, false]"  # the guardian's receipt: subject status 0, not timed out
+    schedules = dict([
+        ("armed", dict(ready=True, receipt="end", collect="late",
+                       end=(emit.ChildStatusUnavailable,
+                            "escalation could not confirm subject exit"))),
+        ("armed-cleaned", dict(ready=True, receipt="end", collect="late", exits=True,
+                               end=(emit.ChildStatusUnavailable,
+                                    "after bounded-close escalation"))),
+        ("armed-tree", dict(ready=True, receipt="end", collect="late", exits=True,
+                            quiesces=True, end=(emit.ChildStatusUnavailable,
+                                                "subject tree killed: every observed member"))),
+        ("ownership-lost-cleaned", dict(ready=True, receipt="end", collect="echild", exits=True,
+                                        end=(emit.ChildStatusUnavailable,
+                                             "receipt subject killed on its held pidfd and "
+                                             "exit proven"))),
+        ("poll-collected-cleaned", dict(ready=True, receipt="end", collect="failed-early",
+                                        exits=True,
+                                        end=(emit.ChildStatusUnavailable,
+                                             "subject exit proven on its pidfd (subject-only"))),
+        ("completed", dict(ready=True, receipt="end", collect="clean", report=clean,
+                           end=(subprocess.CompletedProcess, "returncode=0"))),
+        ("completed-overdue", dict(ready=True, receipt="end", collect="clean-overdue",
+                                   report=clean, end=(subprocess.TimeoutExpired, "timed out"))),
+        ("startup-collected", dict(collect="killed",
+                                   end=(subprocess.TimeoutExpired, "timed out"))),
+        ("armed-interrupted", dict(ready=True, receipt="end", collect="raise",
+                                   end=(OSError, "injected collection failure"))),
+        ("ownership-lost", dict(ready=True, receipt="end", collect="echild",
+                                end=(emit.ChildStatusUnavailable, "exit not confirmed"))),
+        ("poll-collected", dict(ready=True, receipt="end", collect="failed-early",
+                                end=(emit.ChildStatusUnavailable,
+                                     "guardian failure could not confirm subject exit"))),
+        ("startup-timeout", dict(end=unreaped)),
+        ("startup-cancelled", dict(cancel=True, end=unreaped)),
+        # start() begins just before its deadline, so the launch wait's
+        # floor (G) runs past it; the launcher finishes only as close()'s
+        # own launcher wait ends.
+        ("launch-timeout", dict(launched=(False, True), timeout=0.001, end=unreaped)),
+        ("launch-interrupted", dict(launched=(False, True), timeout=0.001, collect="raise",
+                                    end=(OSError, "injected collection failure"))),
+    ])
+    paths, allowance = _watchdog_closeout_paths(), _watchdog_leg_closeout_seconds()
+    faults = ["close-out vector %s: a path without a schedule, or a schedule without a path"
+              % label for label in sorted(set(paths) ^ set(schedules))]
+    with ExitStack() as stack:
+        for target, name, fake, ours in boundaries:
+            stack.enter_context(patch.object(target, name,
+                                             scoped(getattr(target, name), fake, ours)))
+        stack.enter_context(patch.object(queue, "SimpleQueue", SimpleQueue))
+        for label in [label for label in paths if label in schedules]:
+            spec = schedules[label]
+            world.clear()
+            world.update(origin=1000.0, ready="pending" if spec.get("ready") else None,
+                         receipt=spec.get("receipt"), collect=spec.get("collect", "never"),
+                         reaped=False, spec=spec, deadline=None)
+            world["now"] = world["origin"]
+            try:
+                end = emit._run_fixture_process(["close-out-vector"],
+                                                timeout=spec.get("timeout", 1.0))
+            except BaseException as exc:  # noqa: BLE001 - the scripted cancellation is one
+                if (isinstance(exc, (KeyboardInterrupt, SystemExit))
+                        and exc is not world.get("cancelled")):
+                    raise
+                end = exc
+            now = world.pop("now")  # the boundaries are inert from here
+            kind, fragment = spec["end"]
+            total = _watchdog_path_seconds(paths[label])
+            if world.get("refused"):
+                faults.append("close-out vector %s: refused boundary use: %s"
+                              % (label, "; ".join(world["refused"])))
+                continue
+            if not (isinstance(end, kind) and fragment in str(end)):
+                faults.append("close-out vector %s: ended in %r, not the path's %s (%s)"
+                              % (label, end, kind.__name__, fragment))
+                continue
+            if spec.get("cancel") and world.get("cancelled") is None:
+                faults.append("close-out vector %s: the scripted cancellation never ran" % label)
+                continue
+            elapsed = now - world["deadline"]
+            if elapsed > min(total, allowance) + 1e-6:
+                faults.append("close-out vector %s: %.3f s after the deadline, above the path's "
+                              "derived %.3f s or the allowance %.3f s"
+                              % (label, elapsed, total, allowance))
+                continue
+            faults.extend(
+                "close-out vector %s: %.3f s after the deadline would still fit the path without "
+                "its %s (%.3f s): the schedule fell short of that wait"
+                % (label, elapsed, wait, total - limit - sleeps * tick)
+                for wait, limit, sleeps in paths[label]
+                if limit and elapsed <= total - limit - sleeps * tick)
+    if source is None:
+        faults.extend(_watchdog_closeout_mutant_faults())
+    return faults
+
+
+def _watchdog_closeout_mutant_faults():
+    """The close-out vector's own red-on-revert check: each mutant adds one
+    wait to a copy of _opf_emit at one anchor line, and
+    _watchdog_closeout_vectors must refuse that copy. Just before
+    _finish_close records its cleaned state (a line only the cleaned and
+    clean-collection schedules reach): a 70 s time.sleep (past every path's
+    total), and, each refused outright, a 1 s threading.Event wait, a 1 s
+    select.select, a 1 s get on a new queue.SimpleQueue (its queue.Empty
+    caught, so only the refusal exposes it) and a 1 s select on a new
+    selectors.DefaultSelector. Just before _fixture_verify_group_kill
+    returns its "tree" observation (a line only the armed-tree schedule
+    reaches): a 70 s time.sleep. Returns a fault for each mutant the vector
+    does not refuse, and one for each anchor not found exactly once."""
+    import tempfile
+    text = (Path(__file__).resolve().parent / "_opf_emit.py").read_text(encoding="utf-8")
+    indent = " " * 16
+    cleaned = "_finish_close's cleaned state"
+    tree = "_fixture_verify_group_kill's \"tree\" return"
+    anchors = dict([
+        (cleaned, ('                            "survive".format(self.subject_pid))\n'
+                   + indent + "self.cleaned = True\n", indent + "self.cleaned = True")),
+        (tree, ("            if clean >= 2:\n" + indent + 'return ("tree", [])\n',
+                indent + 'return ("tree", [])')),
+    ])
+    faults = ["close-out mutant: %s anchor found %d times, not once" % (name, text.count(anchor))
+              for name, (anchor, _line) in anchors.items() if text.count(anchor) != 1]
+    if faults:
+        return faults
+    with tempfile.TemporaryDirectory(prefix="opf-closeout-mutant-") as directory:
+        for index, (label, where, lines) in enumerate((
+                ("a 70 s time.sleep", cleaned, ("time.sleep(70)",)),
+                ("a 1 s threading.Event wait", cleaned,
+                 ("import threading", "threading.Event().wait(1.0)")),
+                ("a 1 s select.select", cleaned, ("select.select([], [], [], 1.0)",)),
+                ("a 1 s queue.SimpleQueue get", cleaned,
+                 ("import queue", "try:", "    queue.SimpleQueue().get(timeout=1.0)",
+                  "except queue.Empty:", "    pass")),
+                ("a 1 s selectors.DefaultSelector select", cleaned,
+                 ("import selectors", "with selectors.DefaultSelector() as chosen:",
+                  "    chosen.select(1.0)")),
+                ("a 70 s time.sleep", tree, ("time.sleep(70)",)))):
+            # One file per mutant: no copy can load another's cached code.
+            mutant = Path(directory, "_opf_emit_mutant_%d.py" % index)
+            anchor, line = anchors[where]
+            added = "".join(indent + piece + "\n" for piece in lines)
+            mutant.write_text(text.replace(anchor, anchor.replace(line, added + line)),
+                              encoding="utf-8")
+            if not _watchdog_closeout_vectors(source=mutant):
+                faults.append("close-out mutant not refused: %s before %s" % (label, where))
+    return faults
 
 
 def _watchdog_finite_seconds(value):
@@ -1838,8 +2624,9 @@ def _watchdog_ledger_case(mode, budget):
     """Private subprocess: one concurrency vector of the runtime ledger, in its
     own independently bounded fixture process (claude round-6 MEDIUM-2, codex
     round-7 MEDIUM 6): a regression that hangs a vector is killed at that
-    vector's own process bound and reported as that vector's failure, never a
-    hung suite and never a false pass. Returns the vector leg's own verdict
+    vector's own process bound, which the runner records as that vector's own
+    no-verdict CANNOT-EVALUATE (EXIT_MALFORMED), never a
+    hung suite and never a pass. Returns the vector leg's own verdict
     int for the launching fixture to compare (3 marks a fixture that never
     exercised its path); the two bool-return control modes
     deliberately return a bool the launching fixture must REJECT
@@ -3237,8 +4024,1072 @@ def _watchdog_launcher_case(label, disposition):
     return EXIT_OK if ok else EXIT_FINDING
 
 
-def _watchdog_completion_case(mode):
-    """Run each irreversible audit-hook/disposition experiment in its own fixture process."""
+def _fixture_fd_census():
+    """Every descriptor this process holds open, as (number, identity) pairs, identity being (st_dev,
+    st_ino, file type, st_rdev, access mode, and for an anonymous inode its kind and eventfd-id): a
+    number closed and reopened on another file between two censuses is a new pair, never read as the
+    one open before. Only the access mode (O_ACCMODE) of the status flags is compared: another status
+    flag (such as O_NONBLOCK) changed on a descriptor that stays open is no leak. Only a descriptor
+    OBSERVED closed (EBADF, the listing's own) is left out; any other read failure raises naming it,
+    never read as closed. Limits: one reopened on the same file with the same access mode is the same
+    pair. An anonymous-inode descriptor (eventfd, timerfd, signalfd, epoll, inotify and the like share
+    one inode) is told apart only by its kind (the /proc/self/fd link) and, for an eventfd, by the
+    eventfd-id /proc/self/fdinfo names: a replacement of the same kind and access mode is the same pair
+    for every kind but eventfd, and for an eventfd when the kernel names no eventfd-id or reuses the id
+    (it is unique only among live eventfds)."""
+    import errno
+    import fcntl
+    live = set()
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            st = os.fstat(int(name))
+            flags = fcntl.fcntl(int(name), fcntl.F_GETFL)
+            link = os.readlink("/proc/self/fd/" + name)
+            anon = None
+            if link.startswith("anon_inode:"):
+                info = Path("/proc/self/fdinfo", name).read_bytes().splitlines()
+                anon = (link, tuple(tuple(line.split()[1:]) for line in info
+                                    if line.startswith(b"eventfd-id:")))
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(name, exc))
+        live.add((int(name), (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_rdev,
+                              flags & os.O_ACCMODE, anon)))
+    return live
+
+
+def _fixture_fd_census_pins():
+    """Round 8: the pins of _fixture_fd_census, run by each completion mode that uses it, raising
+    AssertionError naming the first that fails. A number closed and reopened on another file is reported
+    (red against a number-only census); a distinct eventfd at a reused number is reported (red against
+    the stat and flags tuple alone); an O_NONBLOCK toggle is no leak (red against every status flag in
+    the identity); EIO injected into fstat, and separately into F_GETFL, raises naming the descriptor
+    (red against a census that reads any OSError as closed)."""
+    import errno
+    import fcntl
+    from unittest.mock import patch
+    entry_fd = os.open(os.devnull, os.O_RDONLY)
+    try:
+        before = _fixture_fd_census()
+    finally:
+        os.close(entry_fd)
+    reopened_fd = os.open(os.path.dirname(os.devnull), os.O_RDONLY)
+    try:
+        left = sorted(fd for fd, _ident in _fixture_fd_census() - before)
+    finally:
+        os.close(reopened_fd)
+    assert reopened_fd == entry_fd and left == [entry_fd], ("census-reports-reused-number", entry_fd,
+                                                            reopened_fd, left)
+    if hasattr(os, "eventfd"):
+        first_efd = os.eventfd(0)
+        kept_efd = os.dup(first_efd)
+        try:
+            try:
+                before = _fixture_fd_census()
+            finally:
+                os.close(first_efd)
+            second_efd = os.eventfd(0)
+            try:
+                left = sorted(fd for fd, _ident in _fixture_fd_census() - before)
+            finally:
+                os.close(second_efd)
+        finally:
+            os.close(kept_efd)
+        assert second_efd == first_efd and left == [first_efd], ("census-reports-replaced-eventfd",
+                                                                 first_efd, second_efd, left)
+    flag_r, flag_w = os.pipe()
+    try:
+        before = _fixture_fd_census()
+        os.set_blocking(flag_r, False)
+        left = sorted(_fixture_fd_census() - before)
+    finally:
+        os.close(flag_r)
+        os.close(flag_w)
+    assert not left, ("census-ignores-status-flag-change", flag_r, left)
+    real_fstat, real_fcntl = os.fstat, fcntl.fcntl
+    for read in ("fstat", "getfl"):
+        probe = os.open(os.devnull, os.O_RDONLY)
+
+        def fstat_eio(fd, *args, **kwargs):
+            if fd == probe:
+                raise OSError(errno.EIO, "injected census read fault")
+            return real_fstat(fd, *args, **kwargs)
+
+        def fcntl_eio(fd, cmd, *args):
+            if fd == probe and cmd == fcntl.F_GETFL:
+                raise OSError(errno.EIO, "injected census read fault")
+            return real_fcntl(fd, cmd, *args)
+        try:
+            with (patch.object(os, "fstat", fstat_eio) if read == "fstat"
+                  else patch.object(fcntl, "fcntl", fcntl_eio)):
+                try:
+                    got = ("returned", _fixture_fd_census())
+                except RuntimeError as exc:
+                    got = ("raised", str(exc))
+        finally:
+            os.close(probe)
+        assert (got[0] == "raised" and "descriptor {}:".format(probe) in got[1]
+                and "injected census read fault" in got[1]), ("census-" + read + "-failure-cannot-evaluate",
+                                                              probe, got[0])
+
+
+def _tree_publish_seconds(path):
+    """When this tree marker was PUBLISHED, as epoch seconds: its inode
+    change time, which the atomic rename into the final name refreshes. The
+    modification time records the earlier write into the scratch name and
+    SURVIVES the rename, so a subject preempted between its write and its
+    rename would read as published at the write. The reported no-verdict
+    causes name this time so they describe the publication, not the earlier
+    write; no verdict is decided by it (the never-parsed-markers check is
+    ordered by each poll's own observations, never by this stamp)."""
+    return path.stat().st_ctime
+
+
+def _tree_never_parsed(unparsed_polls, publish_seconds, last_poll_wall):
+    """Decide the tree legs' never-parsed harness defect: True exactly when
+    unparsed_polls records a poll at which the leg's own look, taken at that
+    same poll, parsed both published markers while the observer parsed
+    nothing. The other two arguments are the rest of the evidence the
+    decision site holds, for the reported causes only: the decision must
+    NEVER read the publish stamps (publish_seconds) or the last poll's
+    recorded wall time (last_poll_wall), because a realtime clock stepped
+    between the last poll and a later publication leaves the stamps reading
+    older than that poll, and deciding by them would turn that correct run
+    into this failure (the regression runner's clock-step rows pin the
+    decision against every stamp ordering)."""
+    return bool(unparsed_polls)
+
+
+def _watchdog_tree_case(mode, order="event-first", backstop=_TREE_STARTUP_BACKSTOP,
+                        publish=True, observe_waits=True, observe_parse=True,
+                        clock_shift=True, startup_stall=None, stall_guardian=False,
+                        facts=None):
+    """One nested-tree cleanup exercise (nested-timeout or nested-cancel).
+    Returns ("pass", "") or ("cannot-evaluate", cause) and raises
+    AssertionError on a definite failure.
+
+    The subject forks a setsid descendant; both publish a PID marker and
+    sleep. The stimulus is EVENT-ORDERED: it is mounted only at the first
+    wait poll that parsed both markers. nested-timeout makes the GUARDIAN's
+    own expiry branch fire (its supervision loop's monotonic clock, and only
+    that process's clock, jumps to its deadline once the `expire` file
+    exists, and the guardian records that it applied the shift in the
+    `shifted` file), so the leg drives guardian-side expiry, its tree
+    cleanup and the timed_out receipt exactly as a flat deadline did,
+    without racing subject startup. nested-cancel raises Cancelled in the
+    caller; close() then requests cleanup over the control channel (the
+    caller-side drain).
+
+    PASS requires a proof that the stimulus PRECEDED cleanup, not just that
+    both happened: (1) at the poll that parsed both markers, BEFORE the
+    stimulus, the guardian is unexited and both nested PIDs are running
+    (not stopped, zombie or gone), so cleanup had not begun; (2) the
+    guardian's receipt names the trigger: nested-timeout needs timed_out
+    True AND collection by a poll strictly before the caller's backstop
+    deadline (an expiry seen only at or after it may be the backstop's),
+    nested-cancel needs timed_out False (it left supervision on the
+    cleanup request, not on its own expiry); (3) the subject's recorded
+    status is SIGKILL (cleanup killed a still-running subject, not one that
+    exited by itself); (4) both nested PIDs are gone. The backstop is a
+    liveness bound only: when it, not the stimulus, ended supervision, or
+    when the stimulus was observed only after cleanup, there is no
+    tree-cleanup verdict, and the cause names what was observed. A cause
+    that is deterministic is a definite failure whose message says it is a
+    code regression, never reported as host scheduling: the observer never
+    ran, or parsed nothing at a poll where the leg's own look, taken at
+    that same poll, parsed both PUBLISHED markers (ordered by that poll's
+    observations, never by any clock); a malformed marker; a timed_out=False receipt from a
+    guardian a poll COLLECTED before the caller's deadline (one not
+    collected by then may have left on the EOF of the caller's own backstop
+    close, ordered by those observed events, so that is no verdict, never a
+    failure); a guardian asleep before READY (no READY byte in its channel
+    before or after its state sample: one published between them is the
+    host's scheduling, not a startup hang); a guardian runnable before
+    READY, placed there by that same empty channel at both checks, that
+    already consumed the busy-loop CPU floor
+    (_STARTUP_BUSY_CPU_SECONDS: judged by CPU time, which starvation
+    cannot accrue, never by wall time); and a guardian that ran its expiry
+    after a stimulus mounted before the caller's deadline without ever
+    applying the clock shift.
+
+    Vector parameters (the nested-orders leg; the real legs use the
+    defaults): order "cleanup-first" lets the backstop arrive on both sides
+    and waits for the guardian's cleanup to finish BEFORE the poll records
+    its observation (the late-observer schedule); order
+    "backstop-after-snapshot" records a clean observation, then lets the
+    backstop arrive and the guardian's cleanup finish BEFORE the stimulus
+    is mounted (the stimulus-lost-the-race schedule); order "no-stimulus"
+    records the observation, mounts no stimulus and lets the backstop
+    arrive instead (the stimulus-removed schedule); order
+    "self-exit-after-snapshot" records the observation, then lets the
+    nested processes exit BY THEMSELVES and the guardian collect them
+    before the cancel (the subject-ended-first schedule); order
+    "killed-after-snapshot" records the observation, kills the subject tree
+    from outside the guardian, mounts no stimulus, and lets the caller's
+    deadline pass between the guardian's collection and the caller's
+    overdue check (the left-without-expiry schedule); order
+    "eof-after-snapshot" records the observation, then lets the CALLER's
+    deadline pass with no stimulus mounted and no outside kill, so the
+    close()'s EOF, not an expiry, ends supervision and the guardian is
+    never collected by a poll (the caller-backstop-first schedule, which a
+    slow host can produce on a correct run); publish=False runs a
+    subject that never publishes, publish="malformed" one that publishes a
+    non-PID marker; observe_waits=False leaves the wait observer
+    uninstalled and observe_parse=False installs one that never parses the
+    markers (harness defects); clock_shift=False disables the guardian's
+    clock shift (a code regression); startup_stall "blocked" or "runnable"
+    holds the guardian before READY, asleep or busy, and "ready-late" holds
+    it until the caller's first READY check is done, then lets it publish
+    READY and block reading GO before the caller samples its state (the
+    READY-publication interleaving); stall_guardian=True, with order
+    "killed-after-snapshot", stops the guardian (SIGSTOP) before the
+    outside kill and resumes it only once its deadline has passed (a host
+    stall across its deadline). `facts`, when given,
+    records what the exercise observed, so each vector can tell a schedule
+    that was established from one this host never produced."""
+    import select
+    import signal
+    import socket
+    import subprocess
+    import tempfile
+    import time
+    from contextlib import nullcontext
+    from unittest.mock import patch
+    import _opf_emit as emit
+
+    class Cancelled(RuntimeError):
+        """The nested-cancel stimulus; no other error may stand in for it."""
+
+    if facts is None:
+        facts = {}
+    real_wait, real_process, real_clock = emit._fixture_wait, emit._FixtureProcess, time.monotonic
+    real_subreaper = emit._fixture_subreaper
+    leg = os.getpid()
+    with tempfile.TemporaryDirectory(prefix="opf-tree-") as directory:
+        markers = [Path(directory, name) for name in ("subject", "descendant")]
+        expire, shifted = Path(directory, "expire"), Path(directory, "shifted")
+        release, stalled = Path(directory, "release"), Path(directory, "stalled")
+        checked = Path(directory, "checked")
+        # Deliberate fork/session escape is a tree-cleanup stimulus, not a verdict.
+        subject = ("import os, time; from pathlib import Path; "
+                   "pid = os.fork(); "
+                   "os.setsid() if pid == 0 else None; "
+                   "name = 'descendant' if pid == 0 else 'subject'; "
+                   "scratch = Path(" + repr(directory) + ", name + '.tmp'); "
+                   "scratch.write_text(str(os.getpid()), encoding='ascii'); "
+                   "scratch.rename(Path(" + repr(directory) + ", name)); "  # atomic: never a partial PID
+                   "time.sleep(3600)")  # never exits on its own: the stimulus ends it
+        # Writer half: a tripwire against an accidental edit of the marker
+        # lines above, not a proof of atomic publication. It requires the
+        # name + '.tmp' scratch path, the prefix scratch.write_text( and the
+        # scratch.rename to the final name once each and in that order, and
+        # no other occurrence of the text write_text( or Path(directory, name)
+        # anywhere in the subject; it does not otherwise check the write's
+        # arguments. It matches exact text only, so anything spelled
+        # differently is outside it: another spelling of a call, the final
+        # path or a binding (spacing, an alias, a rebinding of scratch), a
+        # write by any method other than write_text, an os-level call, exec
+        # or a shell.
+        text = subject.replace(repr(directory), "directory")  # TMPDIR-blind
+        steps = ["scratch = Path(directory, name + '.tmp'); ",
+                 "scratch.write_text(", "scratch.rename(Path(directory, name)); "]
+        found = [text.find(step) for step in steps]
+        if not (all(text.count(step) == 1 for step in steps)
+                and -1 < found[0] < found[1] < found[2]
+                and text.count("write_text(") == 1
+                and text.count("Path(directory, name)") == 1):
+            raise AssertionError("marker write lines changed: " + text)
+        if publish == "malformed":
+            # Vector: a marker that exists but never holds a PID.
+            subject = ("from pathlib import Path; Path(" + repr(directory) + ", 'subject')"
+                       ".write_text('not-a-pid', encoding='ascii'); import time; time.sleep(3600)")
+        elif not publish:
+            subject = "import time; time.sleep(3600)"  # vector: never publishes a marker
+        if order == "self-exit-after-snapshot":
+            # Vector: both nested processes exit by themselves once `release` exists.
+            parked = "time.sleep(3600)"
+            if subject.count(parked) != 1:
+                raise AssertionError("self-exit vector: subject park changed: " + subject)
+            subject = subject.replace(parked, "[time.sleep(0.005) for _ in iter(lambda: "
+                                      "os.path.exists(" + repr(str(release)) + "), True)]")
+        launched, observed, snapshot, collected, shift = [], [], [], [], []
+        stimulus, startup, unparsed = [], [], []
+        polls = [0, 0.0]  # observer calls, and the wall time of the last one
+
+        def parse():
+            try:  # a marker counts only once its pid parses; empty is not ready yet
+                return [int(path.read_text(encoding="ascii")) for path in markers]
+            except (FileNotFoundError, ValueError):
+                return []
+
+        def ready_check(child):
+            # One look at the control socket that consumes nothing: "ready"
+            # when the READY byte waits there unread, "empty" when nothing
+            # does, "other" when something else does or the look fails. The
+            # caller reads no more once its startup deadline passes, so a
+            # READY byte, once written, stays until close().
+            try:
+                readable = select.poll()
+                readable.register(child.control, select.POLLIN)
+                if not readable.poll(0):
+                    return "empty"
+                pending = child.control.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+            except (OSError, ValueError):
+                return "other"
+            return "ready" if pending == b"R" else "other"
+
+        def proc_state(pid):
+            try:
+                return Path("/proc", str(pid), "stat").read_text(
+                    encoding="ascii").rpartition(")")[2].split()[0]
+            except (OSError, IndexError):
+                return None
+
+        def proc_cpu(pid):
+            # The CPU time this process has actually been granted (utime +
+            # stime), the measure that tells a busy startup loop (CPU
+            # accrues) from host starvation (it does not), where a wall
+            # clock cannot.
+            try:
+                fields = Path("/proc", str(pid), "stat").read_text(
+                    encoding="ascii").rpartition(")")[2].split()
+                return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+            except (OSError, IndexError, ValueError):
+                return None
+
+        def startup_state(child):
+            # Sampled when the leg's guardian missed READY, BEFORE close()
+            # kills it. The READY check and the state sample are separate
+            # observations, and between them the guardian can publish READY
+            # and then block, normally, reading GO. So READY is checked
+            # again AFTER the sample: still absent then, the guardian had not
+            # published it when sampled, and only a guardian asleep (state
+            # S) in that window is blocked in its startup, which makes no
+            # blocking call before READY.
+            if child.pid is None or not child.timed_out:
+                return "unlaunched", ("the guardian launch itself had not completed (no code "
+                                      "regression established)")
+            before = ready_check(child)
+            if before == "ready":
+                return _watchdog_startup_diagnosis(before, None, None)
+            if startup_stall == "ready-late":
+                # Vector only: the guardian publishes READY only once this
+                # first check is done; wait (bounded) until it has and is
+                # asleep reading GO, so the state sample below falls between.
+                checked.touch()
+                facts["published-late"] = hold(
+                    lambda: ready_check(child) == "ready" and proc_state(child.pid) == "S")
+            state = proc_state(child.pid)
+            return _watchdog_startup_diagnosis(before, state, ready_check(child),
+                                               proc_cpu(child.pid))
+
+        def capture(deadline, **kwargs):
+            # Record the leg's own launch; construction is otherwise real.
+            child = real_process(deadline, **kwargs)
+            launched.append(child)
+            real_start = child._start
+
+            def sampled_start():
+                try:
+                    return real_start()
+                except TimeoutError:
+                    startup.append(startup_state(child))
+                    raise
+            child._start = sampled_start
+            return child
+
+        def clock():
+            # The guardian's clock (any process but the leg's own): once the
+            # `expire` file exists it jumps to the guardian's own deadline
+            # and runs on from there, so the guardian's expiry branch fires
+            # at its next poll and its cleanup keeps the full grace (the
+            # cleanup deadline is computed from this same shifted clock).
+            # The guardian records the shift in `shifted` BEFORE returning a
+            # shifted value. The caller's clock is never shifted.
+            now = real_clock()
+            if os.getpid() == leg or not launched or not clock_shift:
+                return now
+            if not shift and os.path.exists(expire):
+                shifted.touch()
+                shift.append(max(0.0, launched[-1].deadline - now))
+            return now + (shift[0] if shift else 0.0)
+
+        def stalled_subreaper():
+            # Vector only (startup_stall): the guardian, before READY, holds
+            # asleep or busy past the backstop ("blocked", "runnable"), or
+            # until the caller's first READY check is done ("ready-late");
+            # close() then kills it.
+            if os.getpid() != leg:
+                stalled.touch()
+                until = real_clock() + backstop + _WATCHDOG_LAUNCH_MARGIN
+                if startup_stall == "ready-late":
+                    while not checked.exists() and real_clock() < until:
+                        select.poll().poll(5)
+                    return real_subreaper()
+                if startup_stall == "blocked":
+                    select.poll().poll(int((until - real_clock()) * 1000))
+                while real_clock() < until:
+                    pass
+            return real_subreaper()
+
+        def guardian_running(pid):
+            try:
+                return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None
+            except ChildProcessError:
+                return False
+
+        def tree_running(pids):
+            for pid in pids:
+                try:
+                    stat = Path("/proc", str(pid), "stat").read_text(encoding="ascii")
+                except OSError:
+                    return False
+                if stat.rpartition(")")[2].split()[:1] not in (["R"], ["S"], ["D"]):
+                    return False
+            return True
+
+        def gone(pids):
+            return not any(Path("/proc", str(pid)).exists() for pid in pids)
+
+        def children(parent):
+            found = []
+            for name in os.listdir("/proc"):
+                if name.isdigit():
+                    try:
+                        fields = Path("/proc", name, "stat").read_text(
+                            encoding="ascii").rpartition(")")[2].split()
+                    except OSError:
+                        continue
+                    if fields[1:2] == [str(parent)]:
+                        found.append(int(name))
+            return found
+
+        def hold(done):
+            # Vector only: wait, bounded by the backstop, for the forced
+            # event; whether it happened is recorded, never assumed.
+            until = real_clock() + backstop
+            while not done() and real_clock() < until:
+                time.sleep(0.005)
+            return done()
+
+        def backstop_now():
+            # Vector only: the backstop arrives on BOTH sides at once, as a
+            # real expiry does (the caller's deadline is this same moment).
+            launched[-1].deadline = real_clock()
+            expire.touch()
+
+        def observe(pid, flags):
+            polls[0] += 1
+            polls[1] = time.time()
+            if not observed:
+                # The leg's own look at the markers, taken at this same
+                # poll: both published and parseable here while the
+                # observer parsed nothing is ordered by this one poll's
+                # observations, never by any clock.
+                seen_now = parse()
+                if seen_now:
+                    # Recorded APART from the unparsed bookkeeping below,
+                    # which the never-parsed decision itself reads: the
+                    # blind-observer vector establishes its schedule from
+                    # this record, so losing that bookkeeping cannot also
+                    # silence the vector.
+                    facts["parsed-at-poll"] = True
+                pids = seen_now if observe_parse else []
+                if seen_now and not pids:
+                    unparsed.append(polls[0])
+                if pids and order == "cleanup-first":
+                    backstop_now()
+                    facts["held"] = hold(lambda: not guardian_running(pid))
+                if pids:
+                    observed.extend(pids)
+                    # The ordering proof's first half, taken BEFORE the stimulus.
+                    snapshot.append((real_clock(), guardian_running(pid), tree_running(pids)))
+                    facts["snapshot"] = snapshot[0][1] and snapshot[0][2]
+                    if order == "backstop-after-snapshot":
+                        backstop_now()
+                        facts["held"] = hold(lambda: not guardian_running(pid))
+                    elif order == "self-exit-after-snapshot":
+                        release.touch()
+                        facts["held"] = hold(lambda: not guardian_running(pid) and gone(pids))
+                    elif order == "killed-after-snapshot":
+                        if stall_guardian:
+                            # Vector only: the guardian is held stopped from
+                            # before the outside kill until its deadline has
+                            # passed, as a host stall would hold it.
+                            os.kill(pid, signal.SIGSTOP)
+                            facts["stopped"] = hold(lambda: proc_state(pid) == "T")
+                        for victim in children(pid) + pids:
+                            try:
+                                os.kill(victim, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        if stall_guardian:
+                            facts["stalled-past"] = hold(
+                                lambda: real_clock() > launched[-1].deadline)
+                            os.kill(pid, signal.SIGCONT)
+                        facts["held"] = hold(lambda: not guardian_running(pid) and gone(pids))
+                    if order in ("self-exit-after-snapshot", "killed-after-snapshot"):
+                        # Seen gone BEFORE its deadline, the guardian left
+                        # supervision before it: its unshifted clock (these
+                        # orders mount no `expire`) never reached the
+                        # deadline, so it cannot have taken its expiry
+                        # branch, whatever the host's scheduling.
+                        facts["held-early"] = (facts["held"]
+                                               and real_clock() < launched[-1].deadline)
+                    if order == "no-stimulus":
+                        backstop_now()
+                    elif order == "killed-after-snapshot":
+                        pass  # no stimulus: the subject tree was killed from outside
+                    elif order == "eof-after-snapshot":
+                        # No stimulus and no expire file: only the CALLER's
+                        # deadline passes, so its close()'s EOF ends
+                        # supervision while the guardian's own unshifted
+                        # clock never reaches its deadline.
+                        launched[-1].deadline = real_clock()
+                    elif mode == "nested-cancel":
+                        raise Cancelled("cancel with nested subject running")
+                    else:
+                        # THE nested-timeout stimulus. Removing this line
+                        # leaves only the backstop to end supervision, and
+                        # the leg then reports CANNOT-EVALUATE, never a pass
+                        # (the nested-orders no-stimulus vector pins that).
+                        # Its time is taken AFTER the file exists.
+                        expire.touch()
+                        stimulus.append(real_clock())
+            waited, raw = real_wait(pid, flags)
+            if waited:
+                collected.append(real_clock())
+                if order == "killed-after-snapshot":
+                    # The caller's deadline passes between this collection
+                    # and its overdue check (the window a timed_out=False
+                    # receipt would otherwise pass through).
+                    launched[-1].deadline = real_clock()
+            return waited, raw
+
+        # Marker-race control: a marker that exists but is still empty (created,
+        # pid not yet written) is no started subject; the observer keeps waiting.
+        markers[0].write_text(str(os.getpid()), encoding="ascii")
+        markers[1].touch()
+        try:
+            observe(os.getpid(), os.WNOHANG)
+        except emit.ChildStatusUnavailable:
+            pass
+        else:
+            raise AssertionError("fixture was accepted: " + mode)
+        assert not observed, "an empty marker was read as a started subject"
+        for path in markers:
+            path.unlink()
+        polls[:] = [0, 0.0]
+        del unparsed[:]
+        started, launch_at, outcome = time.time(), real_clock(), None
+        with patch.object(time, "monotonic", clock), \
+                patch.object(emit, "_FixtureProcess", capture), \
+                (patch.object(emit, "_fixture_wait", observe) if observe_waits
+                 else nullcontext()), \
+                (patch.object(emit, "_fixture_subreaper", stalled_subreaper) if startup_stall
+                 else nullcontext()):
+            try:
+                emit.run_status_owned(
+                    [sys.executable, "-I", "-B", "-c", subject], fixture_id="tree/" + mode,
+                    process_fixture=True, timeout=backstop)
+            except (Cancelled, subprocess.TimeoutExpired) as exc:
+                outcome = exc
+        facts["ready"] = bool(launched) and launched[-1].armed is True
+        facts["polls"] = polls[0]
+        facts["stalled"] = stalled.exists()
+        facts["startup"] = startup[0][0] if startup else None
+        facts["stimulus-early"] = bool(stimulus and stimulus[0] < launched[-1].deadline)
+        # The receipt's trigger and the collection order, recorded apart from
+        # the verdict's own checks so each vector can tell its forced
+        # schedule from one the host never produced.
+        facts["receipt-timed-out"] = launched[-1].timed_out if launched else None
+        facts["collected-early"] = bool(collected and launched
+                                        and collected[0] < launched[-1].deadline)
+        # What was published, recorded apart from the verdict's own checks.
+        facts["markers"] = [path.read_text(encoding="ascii") if path.exists() else None
+                            for path in markers]
+        if outcome is None:
+            raise AssertionError("fixture was accepted: " + mode)
+        if not observed:
+            # No stimulus was ever mounted. Name what was observed.
+            if isinstance(outcome.__cause__, TimeoutError):
+                state, seen = startup[0] if startup else ("unsampled", "it was not sampled")
+                if state == "S":
+                    raise AssertionError(
+                        "the leg's fixture guardian was alive and BLOCKED (state S) at the {} s "
+                        "startup backstop, with no READY byte in its channel either before or "
+                        "after that sample, so it had not signalled READY; its startup makes no "
+                        "blocking call before READY, so this is a code regression (a guardian "
+                        "startup hang), not host scheduling: {}".format(backstop, mode))
+                if state == "R-busy":
+                    raise AssertionError(
+                        "the leg's fixture guardian was RUNNABLE at the {} s startup backstop "
+                        "and had not signalled READY, yet {}; its bounded pre-READY work (a "
+                        "descriptor sweep and a few setup calls) cannot account for that CPU, "
+                        "so this is a code regression (a busy startup loop), judged by "
+                        "the CPU time it was granted, which host starvation cannot accrue, "
+                        "never by the wall clock: {}".format(backstop, seen, mode))
+                return ("cannot-evaluate", "the leg's fixture guardian never signalled READY "
+                        "within the {} s startup backstop ({}; at the backstop {}), so the "
+                        "nested subject never started".format(backstop, outcome.__cause__, seen))
+            if not polls[0]:
+                raise AssertionError("the wait observer never ran although the guardian "
+                                     "started: a code regression (harness defect), not host "
+                                     "scheduling: " + mode)
+            seen = []
+            published = []
+            for path in markers:
+                try:
+                    raw_text = path.read_text(encoding="ascii")
+                except FileNotFoundError:
+                    seen.append(path.name + " marker absent")
+                    continue
+                try:
+                    int(raw_text)
+                except ValueError:
+                    raise AssertionError("marker writer defect: the {} marker holds {!r} after "
+                                         "the backstop: a code regression, not host "
+                                         "scheduling".format(path.name, raw_text[:64])) from None
+                published.append(_tree_publish_seconds(path))
+                seen.append("{} marker published at +{:.2f} s".format(
+                    path.name, published[-1] - started))
+            if _tree_never_parsed(unparsed, published, polls[1]):
+                # Decided by the polls' own observations, never by the
+                # publish stamps or any clock (a stepped realtime clock
+                # must never turn a correct run into this harness-defect
+                # failure; the regression runner's clock-step rows pin
+                # the decision).
+                raise AssertionError(
+                    "both markers were published and parseable at {} of the observer's {} "
+                    "polls (the first at poll {}), yet the observer never parsed them: a "
+                    "code regression (harness defect), not host scheduling: {}".format(
+                        len(unparsed), polls[0], unparsed[0], mode))
+            return ("cannot-evaluate", "within the {} s startup backstop the observer polled {} "
+                    "times (the last at +{:.2f} s) and saw: {}; no stimulus was mounted".format(
+                        backstop, polls[0], max(0.0, polls[1] - started), ", ".join(seen)))
+        child = launched[-1]
+        if child.status is None:
+            raise AssertionError("no tree-cleanup receipt was recorded: " + mode)
+        at, guardian_live, tree_live = snapshot[0]
+        when = "+{:.2f} s".format(at - launch_at)
+        if not (guardian_live and tree_live):
+            if child.timed_out:
+                return ("cannot-evaluate", "stimulus observed only after cleanup: the guardian's "
+                        "own {} s backstop ended supervision (receipt timed_out=True), and when "
+                        "the first poll parsed both markers ({}) the guardian {} and the nested "
+                        "tree was {}".format(
+                            backstop, when, "was still running" if guardian_live else "had exited",
+                            "running" if tree_live else "stopped or gone"))
+            raise AssertionError(
+                "tree cleanup began before the stimulus with no backstop expiry (receipt "
+                "timed_out=False; guardian running={}, nested tree running={} at {}): {}".format(
+                    guardian_live, tree_live, when, mode))
+        if mode == "nested-cancel":
+            if not isinstance(outcome, Cancelled):
+                raise AssertionError("timeout stood in for the cancel stimulus: " + mode)
+            if child.timed_out:
+                return ("cannot-evaluate", "the guardian's own {} s backstop expired before the "
+                        "cancel's cleanup request reached it (receipt timed_out=True; cancel "
+                        "mounted at {})".format(backstop, when))
+        else:
+            if not child.timed_out:
+                # Ordered by the OBSERVED events, never by the wall clock: a
+                # poll that collected the guardian before the caller's
+                # deadline proves it left supervision while only the stimulus
+                # could have ended it (a code regression). Without such a
+                # collection, the caller's own backstop close may have ended
+                # supervision first (its EOF requests tree cleanup, and that
+                # close collects outside the polls), which a slow host can
+                # produce on a correct run: no verdict, never a failure.
+                if collected and collected[0] < child.deadline:
+                    raise AssertionError(
+                        "the guardian left supervision without its own expiry (receipt "
+                        "timed_out=False) and a poll collected it at +{:.2f} s, before the "
+                        "caller's backstop deadline (+{:.2f} s): {}".format(
+                            collected[0] - launch_at, child.deadline - launch_at, mode))
+                return ("cannot-evaluate", "the guardian left supervision without its own "
+                        "expiry (receipt timed_out=False) and no poll collected it before the "
+                        "caller's backstop deadline (+{:.2f} s), so the caller's own backstop "
+                        "close (EOF), not the stimulus, may have ended supervision".format(
+                            child.deadline - launch_at))
+            if not collected or collected[0] >= child.deadline:
+                # The guardian ran its expiry (timed_out=True). Had it taken
+                # any clock sample AFTER the stimulus file existed, it would
+                # have recorded the shift; a sample BEFORE it could not have
+                # reached a deadline later than the stimulus. So a stimulus
+                # mounted before the deadline with no shift record is a code
+                # regression, whatever the host's scheduling.
+                if stimulus and stimulus[0] < child.deadline and not shifted.exists():
+                    raise AssertionError(
+                        "the stimulus was mounted at +{:.2f} s, before the caller's backstop "
+                        "deadline (+{:.2f} s), and the guardian then ran its own expiry "
+                        "(receipt timed_out=True), yet its clock never applied the stimulus "
+                        "shift: a code regression (the guardian clock shift is absent), not "
+                        "host scheduling: {}".format(
+                            stimulus[0] - launch_at, child.deadline - launch_at, mode))
+                return ("cannot-evaluate", "both markers were parsed at {} (the stimulus is "
+                        "mounted at that poll) but the guardian was {} the caller's backstop deadline (+{:.2f} s), so its expiry may be the "
+                        "backstop's, not the stimulus's".format(
+                            when, ("collected only at +{:.2f} s, not before".format(
+                                collected[0] - launch_at)) if collected
+                            else "not collected by any poll before", child.deadline - launch_at))
+        if not (os.WIFSIGNALED(child.status) and os.WTERMSIG(child.status) == signal.SIGKILL):
+            raise AssertionError("tree cleanup did not kill a running subject (raw status {}): "
+                                 "{}".format(child.status, mode))
+        assert len(observed) == 2, "nested subject never started"
+        for pid in observed:
+            assert not Path("/proc", str(pid)).exists(), "descendant survived/unreaped"
+        return ("pass", "")
+
+
+def _watchdog_startup_diagnosis(before, state, after, cpu=None):
+    """Classify a tree leg's guardian that missed READY at its startup
+    backstop, from the READY check before its state sample (`before`), the
+    sampled /proc state (None when unreadable), the READY check after it
+    (`after`; each check is "ready", "empty" or "other") and the CPU time
+    the guardian has been granted (`cpu`, seconds, None when unreadable).
+    Returns (label, cause). Only two labels are the startup code
+    regressions the leg raises, and BOTH require an empty channel at BOTH
+    checks, which places the sample before READY (a check that found
+    something else, or that failed, leaves open that READY was already
+    published, so the sample does not place the guardian in its startup):
+    "S" (asleep: a startup hang) and "R-busy" (runnable with at least
+    _STARTUP_BUSY_CPU_SECONDS of CPU time consumed: a busy startup loop,
+    established by the CPU it burned, which host starvation cannot accrue
+    however much wall time passes); every other label, the unplaced ones
+    included, is no verdict."""
+    if before == "ready":
+        return "late-caller", ("it HAD signalled READY, but the caller did not read "
+                               "it in time: host scheduling")
+    if after == "ready":
+        return "late-ready", ("it published READY after the caller's first READY check "
+                              "(it was in state {} at the sample taken between the "
+                              "two checks), so the sample does not place it in its "
+                              "startup: host scheduling".format(state))
+    if state is None:
+        return "unreadable", "its state was unreadable (no code regression established)"
+    if state == "S" and (before, after) != ("empty", "empty"):
+        return "S-unplaced", ("it was asleep (state S), but the READY checks around that "
+                              "sample found {} and {}, not an empty channel, so its "
+                              "startup location is not established (no code regression "
+                              "established)".format(before, after))
+    if state == "R":
+        if (before, after) != ("empty", "empty"):
+            return "R-unplaced", ("it was runnable (state R), but the READY checks around "
+                                  "that sample found {} and {}, not an empty channel, so "
+                                  "the sample does not place it before READY and the CPU "
+                                  "it consumed may be legitimate work after READY (no "
+                                  "code regression established)".format(before, after))
+        if cpu is not None and cpu >= _STARTUP_BUSY_CPU_SECONDS:
+            return "R-busy", ("it had already consumed {:.2f} s of CPU time, at or above "
+                              "the {} s floor, far above the bounded pre-READY work its "
+                              "startup does (a sweep of its inherited descriptors and a "
+                              "few setup calls); a starved guardian is granted "
+                              "little CPU, so this CPU time, unlike wall time, "
+                              "establishes a busy startup loop".format(
+                                  cpu, _STARTUP_BUSY_CPU_SECONDS))
+        return state, ("it was runnable (state R) with {} of CPU time consumed, under the "
+                       "{} s busy-loop floor: host scheduling, or a busy startup loop too "
+                       "young for its granted CPU to establish, which stays no "
+                       "verdict".format("an unreadable amount" if cpu is None
+                                        else "{:.2f} s".format(cpu),
+                                        _STARTUP_BUSY_CPU_SECONDS))
+    return state, ("it was in state {}, not blocked in its startup (no code regression "
+                   "established)".format(state))
+
+
+def _watchdog_startup_vectors():
+    """Red-on-revert table for _watchdog_startup_diagnosis: returns each
+    ((before, state, after, cpu), got label, want label) that differs. A
+    channel holding something other than READY, or a failed look at it,
+    leaves a sleeping OR runnable guardian unplaced (no verdict), never a
+    startup code regression, whatever CPU it consumed; only an empty
+    channel at both checks makes state S the startup hang and lets state R
+    be judged by CPU time at _STARTUP_BUSY_CPU_SECONDS, each end of that
+    boundary pinned: just under it (and an unreadable CPU) stays the
+    no-verdict "R", exactly at it and just over it are the busy loop."""
+    floor = _STARTUP_BUSY_CPU_SECONDS
+    table = (
+        (("empty", "S", "empty", None), "S"), (("other", "S", "empty", None), "S-unplaced"),
+        (("empty", "S", "other", None), "S-unplaced"),
+        (("other", "S", "other", None), "S-unplaced"),
+        (("other", "R", "empty", floor), "R-unplaced"),
+        (("empty", "R", "other", floor), "R-unplaced"),
+        (("other", "R", "other", floor), "R-unplaced"),
+        (("other", "R", "other", None), "R-unplaced"),
+        (("empty", "R", "empty", None), "R"),
+        (("empty", "R", "empty", floor - 0.01), "R"),
+        (("empty", "R", "empty", floor), "R-busy"),
+        (("empty", "R", "empty", floor + 0.01), "R-busy"),
+        (("empty", "S", "empty", floor + 0.01), "S"),
+        (("empty", "D", "empty", None), "D"),
+        (("empty", None, "empty", None), "unreadable"),
+        (("empty", "S", "ready", None), "late-ready"),
+        (("ready", None, None, None), "late-caller"))
+    misses = []
+    for checks, want in table:
+        got = _watchdog_startup_diagnosis(*checks)[0]
+        if got != want:
+            misses.append((checks, got, want))
+    return misses
+
+
+def _watchdog_tree_vectors():
+    """The nested-orders leg: deterministic schedules the tree legs must
+    NEVER pass, each run through the real completion case and the runner's
+    own verdict mapping. Each vector names a predicate over the facts the
+    exercise recorded that says whether its forced schedule was ESTABLISHED
+    on this host. Raises AssertionError when a schedule was accepted or
+    refused for the wrong reason, and when a schedule that WAS established
+    drew another cause (a code regression, never read as host scheduling).
+    Returns False (after printing the _WATCHDOG_CANNOT_EVALUATE marker)
+    only when a vector's schedule was not established on this host."""
+    import io
+    import tempfile
+    from contextlib import redirect_stdout
+    unestablished = []
+
+    # The publish-time reading, pinned deterministically: a marker whose
+    # write is back-dated and then renamed into place must read as published
+    # at the inode change (which the rename refreshes), never at the
+    # back-dated write stamp, or the reported causes would describe a
+    # subject preempted between its write and its rename as having
+    # published at the write. os.utime itself refreshes the inode change
+    # time, so this discriminates WHICH stamp is read, not that the rename
+    # refreshed it (that is the platform's rename contract); no verdict is
+    # decided by the stamp (_tree_publish_seconds).
+    with tempfile.TemporaryDirectory(prefix="opf-tree-") as directory:
+        scratch = Path(directory, "marker.tmp")
+        scratch.write_text("1", encoding="ascii")
+        os.utime(scratch, (1.0, 1.0))
+        published = scratch.rename(Path(directory, "marker"))
+        if not _tree_publish_seconds(published) > published.stat().st_mtime + 1.0:
+            raise AssertionError(
+                "tree marker publish time read from the write, not the rename: publish "
+                "stamp %r against the back-dated write stamp %r"
+                % (_tree_publish_seconds(published), published.stat().st_mtime))
+
+    def run(mode, tree, facts):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            rc = _watchdog_completion_case(mode, tree=dict(tree, facts=facts))
+        return _watchdog_completion_verdict(rc, buffer.getvalue()), buffer.getvalue()
+
+    def unexplained(label, established, facts, got):
+        if established(facts):
+            raise AssertionError("tree vector %s: its schedule was established (recorded %r), "
+                                 "yet the leg reported %s: a code regression, not host "
+                                 "scheduling" % (label, facts, got))
+        unestablished.append("%s: schedule not established on this host (recorded %r; the "
+                             "leg reported %s)" % (label, facts, got))
+
+    def expect_unevaluated(label, phrase, established, mode, **tree):
+        facts = {}
+        verdict, out = run(mode, tree, facts)
+        if verdict != "cannot-evaluate":
+            raise AssertionError("tree vector %s: %s, not CANNOT-EVALUATE: %r" % (label, verdict, out))
+        if phrase not in out:
+            unexplained(label, established, facts, repr(out.strip()))
+
+    def expect_failure(label, phrase, established, mode, **tree):
+        # A pass or a CANNOT-EVALUATE is a code regression only when the
+        # vector's schedule was established; otherwise the host never
+        # produced it, and the vector holds no verdict.
+        facts = {}
+        try:
+            verdict, out = run(mode, tree, facts)
+        except AssertionError as exc:
+            if phrase not in str(exc):
+                raise AssertionError("tree vector %s refused for another reason: %s"
+                                     % (label, exc)) from exc
+            return
+        if verdict != "cannot-evaluate":
+            out = "%s, not refused: %s" % (verdict, out)
+        unexplained(label, established, facts, repr(out.strip()))
+
+    def held(facts):
+        return facts.get("held") is True
+
+    def live(facts):
+        return facts.get("snapshot") is True
+
+    def live_then_held(facts):
+        return live(facts) and held(facts)
+
+    def live_then_held_early(facts):
+        # The guardian was seen gone before its own deadline (see
+        # _watchdog_tree_case): a ~backstop host stall that let it expire
+        # first does not establish the schedule.
+        return live(facts) and held(facts) and facts.get("held-early") is True
+
+    # Both scheduling orders: event-first is the real nested-timeout and
+    # nested-cancel legs; cleanup-first (the guardian's backstop and its
+    # cleanup finish before the observation) must never pass. Once that
+    # schedule is established its cause is deterministic, so a removed
+    # snapshot guard is a definite failure here, not a stall.
+    expect_unevaluated("cleanup-first/timeout", "stimulus observed only after cleanup", held,
+                       "nested-timeout", order="cleanup-first")
+    expect_unevaluated("cleanup-first/cancel", "stimulus observed only after cleanup", held,
+                       "nested-cancel", order="cleanup-first")
+    # A clean observation whose stimulus loses the race to the backstop.
+    expect_unevaluated("backstop-after-snapshot/timeout", "may be the backstop's",
+                       live_then_held, "nested-timeout", order="backstop-after-snapshot")
+    expect_unevaluated("backstop-after-snapshot/cancel", "expired before the cancel's",
+                       live_then_held, "nested-cancel", order="backstop-after-snapshot")
+    # The stimulus removed: the backstop alone ends supervision. The
+    # schedule needs the guardian's own expiry on the receipt: a receipt
+    # with timed_out=False is the caller-backstop-first schedule (the
+    # caller's close()'s EOF won the race, which a slow host can produce
+    # on a correct run; the eof-after-snapshot vector below holds it to
+    # no verdict), not this one. Named so the paired receipt records
+    # below check the predicate this call uses.
+    def no_stimulus_established(facts):
+        return live(facts) and facts.get("receipt-timed-out") is True
+
+    expect_unevaluated("no-stimulus/timeout", "may be the backstop's",
+                       no_stimulus_established, "nested-timeout", order="no-stimulus")
+    expect_failure("no-stimulus/cancel", "timeout stood in for the cancel stimulus", live,
+                   "nested-cancel", order="no-stimulus")
+    # Pass condition (3): a subject that exits BY ITSELF between the
+    # snapshot and the cancel's cleanup was not killed by cleanup; only the
+    # SIGKILL status check refuses it.
+    expect_failure("self-exit/cancel", "tree cleanup did not kill a running subject",
+                   live_then_held_early, "nested-cancel", order="self-exit-after-snapshot")
+    # Pass condition (2), nested-timeout: a guardian that left supervision
+    # without its own expiry (its subject tree killed from outside) while
+    # the caller's deadline passed between collection and its overdue
+    # check; only the timed_out check refuses it. Its predicate and
+    # schedule are bound once here and shared with the stall vector below,
+    # so the predicate the call uses is the one that vector checks.
+    killed_timeout = dict(label="killed/timeout",
+                          phrase="left supervision without its own expiry",
+                          established=live_then_held_early, mode="nested-timeout",
+                          order="killed-after-snapshot")
+    expect_failure(**killed_timeout)
+    # The held-early rule: the same outside kill, but the guardian held
+    # stopped across its own deadline (a host stall) first expires, so the
+    # leg passes on a genuine expiry. That schedule is NOT killed/timeout's
+    # (a guardian that left supervision before its deadline): killed/timeout's
+    # own predicate must not hold on its facts, or this stall would be
+    # reported as a code regression by the killed/timeout vector above.
+    facts = {}
+    try:
+        verdict, out = run(killed_timeout["mode"], dict(order=killed_timeout["order"],
+                                                        backstop=_TREE_VECTOR_BACKSTOP,
+                                                        stall_guardian=True), facts)
+    except AssertionError as exc:
+        verdict, out = "refused", str(exc)
+    if not (live_then_held(facts) and facts.get("stopped") is True
+            and facts.get("stalled-past") is True):
+        unestablished.append("stalled-past-deadline/timeout: schedule not established on this "
+                             "host (recorded %r; the leg reported %s)" % (facts, verdict))
+    elif killed_timeout["established"](facts) or verdict == "refused":
+        raise AssertionError("tree vector stalled-past-deadline/timeout: a guardian held stopped "
+                             "past its deadline was read as leaving supervision before it "
+                             "(recorded %r; the leg reported %s: %r)" % (facts, verdict, out))
+    # The caller-backstop-first schedule a slow host can produce on a
+    # CORRECT run: only the caller's deadline passes, close()'s EOF ends
+    # supervision (receipt timed_out=False) and no poll ever collects the
+    # guardian. Ordered by the observed events, that is no verdict, never
+    # the left-without-expiry failure (which needs a collection observed
+    # before the caller's deadline; the killed/timeout vector above holds
+    # that failure red when the collection WAS observed).
+    expect_unevaluated("eof-after-snapshot/timeout",
+                       "the caller's own backstop close (EOF)",
+                       lambda facts: (live(facts)
+                                      and facts.get("receipt-timed-out") is False
+                                      and facts.get("collected-early") is False),
+                       "nested-timeout", order="eof-after-snapshot")
+    # A guardian clock that never applies the shift expires only at the
+    # real deadline, after a stimulus mounted well before it. The schedule
+    # needs that expiry on the receipt (timed_out=True): the caller and
+    # the guardian share this one deadline, so the caller's close()'s EOF
+    # can end supervision first on a slow host (receipt timed_out=False),
+    # which establishes nothing about the shift. Named so the paired
+    # receipt records below check the predicate this call uses.
+    def shift_absent_established(facts):
+        return (live(facts) and facts.get("stimulus-early") is True
+                and facts.get("receipt-timed-out") is True)
+
+    expect_failure("shift-absent/timeout", "the guardian clock shift is absent",
+                   shift_absent_established,
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, clock_shift=False)
+    # The guardian-expiry requirement of both predicates above, pinned on
+    # paired receipt records that differ ONLY in the receipt field, so the
+    # requirement holds whichever side of the shared-deadline expiry race
+    # this host produced: the record carrying the guardian's own expiry is
+    # the established schedule, and neither its caller-close-first pair
+    # (the caller's close()'s EOF won the race: receipt timed_out False)
+    # nor a record with no receipt at all may ever read as established.
+    for name, established, record in (
+            ("no-stimulus/timeout", no_stimulus_established, {"snapshot": True}),
+            ("shift-absent/timeout", shift_absent_established,
+             {"snapshot": True, "stimulus-early": True})):
+        expired = dict(record, **{"receipt-timed-out": True})
+        closed = dict(record, **{"receipt-timed-out": False})
+        if not established(expired) or established(closed) or established(record):
+            raise AssertionError(
+                "tree vector %s: its schedule predicate must require the guardian's own "
+                "expiry on the receipt: expiry record read %r, caller-close-first record "
+                "%r, missing-receipt record %r" % (name, established(expired),
+                                                   established(closed), established(record)))
+    # The leg's backstop return (no marker ever published), and the
+    # deterministic causes that must be definite failures, not stalls.
+    expect_unevaluated("backstop/no-markers", "subject marker absent",
+                       lambda facts: facts.get("ready") is True and facts.get("polls", 0) > 0,
+                       "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, publish=False)
+    expect_failure("inert-observer", "the wait observer never ran",
+                   lambda facts: facts.get("ready") is True,
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, observe_waits=False)
+    expect_failure("malformed-marker", "marker writer defect",
+                   lambda facts: facts.get("ready") is True
+                   and (facts.get("markers") or [None])[0] == "not-a-pid",
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, publish="malformed")
+    # The blind observer's schedule is established from the leg's own look
+    # (parsed-at-poll, recorded in the observer apart from the unparsed
+    # bookkeeping the never-parsed decision reads), so losing that
+    # bookkeeping cannot also turn this vector silently unestablished: the
+    # schedule stays established and the missing refusal is raised as a
+    # code regression.
+    expect_failure("blind-observer", "never parsed them",
+                   lambda facts: facts.get("ready") is True
+                   and facts.get("parsed-at-poll") is True,
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, observe_parse=False)
+    # A guardian that never signals READY: asleep before READY is a code
+    # regression (a definite failure), and so is a runnable one once the
+    # CPU time it was granted establishes the busy loop
+    # (_STARTUP_BUSY_CPU_SECONDS: the stall here IS a busy loop, so on a
+    # host that granted it that CPU the leg must raise); runnable without
+    # that CPU is indistinguishable from the host's scheduling and stays
+    # CANNOT-EVALUATE (the diagnosis table above pins both ends of the CPU
+    # boundary).
+    expect_failure("startup-blocked", "BLOCKED (state S)",
+                   lambda facts: facts.get("startup") == "S",
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, startup_stall="blocked")
+    expect_failure("startup-runnable", "busy startup loop",
+                   lambda facts: facts.get("startup") == "R-busy",
+                   "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, startup_stall="runnable")
+    # The READY-publication interleaving: the caller's first READY check
+    # finds nothing, the guardian then publishes READY and blocks reading
+    # GO, and only then is its state (S) sampled. Host scheduling, never a
+    # startup hang: without the READY re-check after the sample, this is
+    # the "BLOCKED (state S)" failure, raised out of this leg.
+    expect_unevaluated("startup-ready-late",
+                       "published READY after the caller's first READY check",
+                       lambda facts: facts.get("published-late") is True,
+                       "nested-timeout", backstop=_TREE_VECTOR_BACKSTOP, startup_stall="ready-late")
+    if unestablished:
+        print(_WATCHDOG_CANNOT_EVALUATE + " (tree vectors: schedule not established: "
+              + "; ".join(unestablished) + ")")
+        return False
+    return True
+
+
+def _watchdog_completion_case(mode, tree=None):
+    """Run each irreversible audit-hook/disposition experiment in its own fixture process.
+    `tree` carries the nested-orders vectors' parameters into the tree legs
+    (see _watchdog_tree_case); the registered legs pass none."""
     import json
     import signal
     import subprocess
@@ -3545,72 +5396,17 @@ def _watchdog_completion_case(mode):
         # CLI exit-status subjects have an explicit, separately supervised path.
         launch("raise SystemExit(2)", process_fixture=True, expected_returncode=2)
     elif mode in ("nested-timeout", "nested-cancel"):
-        import time
-        with tempfile.TemporaryDirectory(prefix="opf-tree-") as directory:
-            markers = [Path(directory, name) for name in ("subject", "descendant")]
-            # Deliberate fork/session escape is a tree-cleanup stimulus, not a verdict.
-            subject = ("import os, time; from pathlib import Path; "
-                       "pid = os.fork(); "
-                       "os.setsid() if pid == 0 else None; "
-                       "name = 'descendant' if pid == 0 else 'subject'; "
-                       "scratch = Path(" + repr(directory) + ", name + '.tmp'); "
-                       "scratch.write_text(str(os.getpid()), encoding='ascii'); "
-                       "scratch.rename(Path(" + repr(directory) + ", name)); "  # atomic: never a partial PID
-                       "time.sleep(60)")
-            # Writer half: a tripwire against an accidental edit of the marker
-            # lines above, not a proof of atomic publication. It requires the
-            # name + '.tmp' scratch path, the prefix scratch.write_text( and the
-            # scratch.rename to the final name once each and in that order, and
-            # no other occurrence of the text write_text( or Path(directory, name)
-            # anywhere in the subject; it does not otherwise check the write's
-            # arguments. It matches exact text only, so anything spelled
-            # differently is outside it: another spelling of a call, the final
-            # path or a binding (spacing, an alias, a rebinding of scratch), a
-            # write by any method other than write_text, an os-level call, exec
-            # or a shell.
-            text = subject.replace(repr(directory), "directory")  # TMPDIR-blind
-            steps = ["scratch = Path(directory, name + '.tmp'); ",
-                     "scratch.write_text(", "scratch.rename(Path(directory, name)); "]
-            found = [text.find(step) for step in steps]
-            if not (all(text.count(step) == 1 for step in steps)
-                    and -1 < found[0] < found[1] < found[2]
-                    and text.count("write_text(") == 1
-                    and text.count("Path(directory, name)") == 1):
-                raise AssertionError("marker write lines changed: " + text)
-
-            class Cancelled(RuntimeError):
-                """The nested-cancel stimulus; no other error may stand in for it."""
-
-            real_wait = emit._fixture_wait
-            observed = []
-
-            def observe(pid, flags):
-                if not observed:
-                    try:  # a marker counts only once its pid parses; empty is not ready yet
-                        pids = [int(path.read_text(encoding="ascii")) for path in markers]
-                    except (FileNotFoundError, ValueError):
-                        pids = []
-                    observed.extend(pids)
-                    if pids and mode == "nested-cancel":
-                        raise Cancelled("cancel with nested subject running")
-                return real_wait(pid, flags)
-
-            # Marker-race control: a marker that exists but is still empty (created,
-            # pid not yet written) is no started subject; the observer keeps waiting.
-            markers[0].write_text(str(os.getpid()), encoding="ascii")
-            markers[1].touch()
-            refuses(emit.ChildStatusUnavailable, lambda: observe(os.getpid(), os.WNOHANG))
-            assert not observed, "an empty marker was read as a started subject"
-            for path in markers:
-                path.unlink()
-            with patch.object(emit, "_fixture_wait", observe):
-                refuses(subprocess.TimeoutExpired if mode == "nested-timeout" else Cancelled,
-                        lambda: emit.run_status_owned(
-                            [*command[:4], subject], fixture_id="tree/" + mode,
-                            process_fixture=True, timeout=2))
-            assert len(observed) == 2, "nested subject never started"
-            for pid in observed:
-                assert not Path("/proc", str(pid)).exists(), "descendant survived/unreaped"
+        verdict, cause = _watchdog_tree_case(mode, **(tree or {}))
+        if verdict != "pass":
+            # No tree-cleanup verdict exists (the cause names what was
+            # observed): the distinct CANNOT-EVALUATE, never a definite
+            # failure and never a pass (the regression runner maps the
+            # marker to EXIT_MALFORMED).
+            print(_WATCHDOG_CANNOT_EVALUATE + " (tree/" + mode + ": " + cause + ")")
+            return EXIT_OK  # the marker above makes this CANNOT-EVALUATE, not a pass
+    elif mode == "nested-orders":
+        if not _watchdog_tree_vectors():
+            return EXIT_OK  # it printed the CANNOT-EVALUATE marker: not a pass
     elif mode == "no-signal-echild":
         import time
         # The immediately-exiting subject leaves the exited guardian as the raw
@@ -3858,6 +5654,7 @@ def _watchdog_completion_case(mode):
         # Identities, not bare numbers: a same-number replacement reads as a
         # change; EBADF only reads as closed, any other read error raises.
         open_fds = _st_census_fds
+        _fixture_fd_census_pins()
 
         def no_children():
             try:
@@ -5671,6 +7468,7 @@ def _watchdog_completion_case(mode):
         # Identities, not bare numbers: a same-number replacement reads as a
         # change; EBADF only reads as closed, any other read error raises.
         open_fds = _st_census_fds
+        _fixture_fd_census_pins()
 
         def no_children():
             try:
@@ -13660,6 +15458,64 @@ def _watchdog_overlap_case(mode):
     return EXIT_OK
 
 
+def _watchdog_completion_verdict(returncode, stdout):
+    """Map one launched watchdog leg's outcome. The exact
+    _WATCHDOG_CANNOT_EVALUATE marker in the fixture's stdout, on a CLEAN exit
+    only, means the leg holds no verdict (a backstop, not its stimulus, ended
+    the exercise, or the stimulus was observed only after cleanup; the
+    printed cause follows the marker): the distinct
+    CANNOT-EVALUATE outcome, never a pass (the runner's aggregate becomes
+    EXIT_MALFORMED) and never a finding. On any nonzero exit the marker is NOT
+    honored (fail closed: a leg that also failed stays a failure)."""
+    if returncode == EXIT_OK and _WATCHDOG_CANNOT_EVALUATE in stdout:
+        return "cannot-evaluate"
+    return "pass" if returncode == EXIT_OK else "fail"
+
+
+def _watchdog_run_legs(cases, launch):
+    """Launch each (label, code, timeout) leg in order through
+    launch(label, code, timeout) and print one line per leg. The aggregate
+    is the WORST outcome: EXIT_MALFORMED when any leg issued no verdict
+    (_watchdog_completion_verdict's cannot-evaluate, or a leg killed at its
+    own independent process bound, which a starved host can reach on a
+    correct leg and which therefore establishes nothing), else EXIT_FINDING
+    when any leg failed, else EXIT_OK."""
+    import subprocess
+    failed = False
+    unevaluated = []
+    for label, code, timeout in cases:
+        try:
+            result = launch(label, code, timeout)
+            verdict = _watchdog_completion_verdict(result.returncode, result.stdout)
+            detail = result.stdout + result.stderr
+        except (RuntimeError, subprocess.CalledProcessError) as exc:
+            verdict, detail = "fail", str(exc)
+        except subprocess.TimeoutExpired:
+            # A kill at the leg's process bound is no verdict on the leg:
+            # the distinct CANNOT-EVALUATE below, never a pass and never a
+            # definite failure (the scripted-launch aggregate vectors pin a
+            # lone bound kill to EXIT_MALFORMED).
+            verdict = "cannot-evaluate"
+            detail = "(fixture reached its independent process bound: no verdict)"
+        if verdict == "cannot-evaluate":
+            # The leg's own printed cause is in `detail`. Distinct outcome:
+            # recorded for the EXIT_MALFORMED aggregate below, never counted
+            # as a failure and never as a pass.
+            print("opf watchdog regression:", label, "CANNOT EVALUATE", detail)
+            unevaluated.append(label)
+            continue
+        print("opf watchdog regression:", label, "PASS" if verdict == "pass" else "FAIL", detail)
+        failed = failed or verdict != "pass"
+    if unevaluated:
+        # At least one leg issued no verdict: the distinct CANNOT-EVALUATE
+        # (the worst outcome, per run_self_tests_isolated's 2 > 1 > 0
+        # ordering; any leg failures above are already printed), never a pass.
+        print("opf watchdog regressions: CANNOT EVALUATE (no verdict from: "
+              + ", ".join(unevaluated) + ")")
+        return EXIT_MALFORMED
+    return EXIT_FINDING if failed else EXIT_OK
+
+
 def _watchdog_regression_self_test():
     """R10: startup/collection/exit bounds and the registered runner under hostile inherited state."""
     import ast
@@ -13692,8 +15548,9 @@ def _watchdog_regression_self_test():
     launcher_dispositions = ("ignored", "handler")
     # The runtime ledger's concurrency vectors (claude round-6 MEDIUM-2,
     # codex round-7 MEDIUM 6): each runs in its own independently bounded
-    # fixture process, so a regression that hangs one is killed at that
-    # vector's bound and reported as THAT vector's failure, never a hung
+    # fixture process, so a regression that hangs one is killed at THAT
+    # vector's bound, which the runner records as that vector's own
+    # no-verdict CANNOT-EVALUATE (never a pass), never a hung
     # suite. Each row is (mode, the vector leg's own declared budget,
     # which the fixture passes through to _watchdog_ledger_case, expected
     # verdict). The budgets are term-exact at the vectors' definitions;
@@ -13769,7 +15626,8 @@ def _watchdog_regression_self_test():
     )
     completion_modes = ("audit-ignore", "reaper", "nonce", "fixture-id", "status",
                         "early-exit", "cleanup-reaped", "cleanup-cancel", "premature-exit",
-                        "nested-timeout", "nested-cancel", "no-signal-echild",
+                        "nested-timeout", "nested-cancel", "nested-orders",
+                        "no-signal-echild",
                         "guardian-error", "empty-children", "bounded-diagnostics",
                         "cleanup-budget", "deadline-flips", "subject-setup",
                         "overdue-success", "launch-ownership", "launch-cancel",
@@ -13844,7 +15702,30 @@ def _watchdog_regression_self_test():
     budgets.update(("completion-" + mode, seconds) for mode, seconds in (
         ("audit-ignore", 16), ("reaper", 42), ("nonce", 32), ("fixture-id", 32),
         ("status", 32), ("early-exit", 48), ("cleanup-reaped", 15), ("cleanup-cancel", 16),
-        ("premature-exit", 80), ("nested-timeout", 11), ("nested-cancel", 11),
+        ("premature-exit", 80),
+        # The tree legs charge exactly one fixture launch at the startup
+        # backstop (their stimulus is event-ordered; the backstop is the
+        # only declared wait), so each budget IS that call's allowance,
+        # derived, never a flat constant under the sanctioned wait.
+        ("nested-timeout", _deadline_case_budget(_TREE_STARTUP_BACKSTOP)),
+        ("nested-cancel", _deadline_case_budget(_TREE_STARTUP_BACKSTOP)),
+        # nested-orders runs eighteen tree exercises, one fixture launch
+        # each: nine at the startup backstop and the nine real-expiry
+        # vectors at their short backstop, each launch charged its
+        # allowance. On top of the launch allowances, the forced-schedule
+        # holds those exercises make INSIDE their launches are real waits,
+        # each bounded by its exercise's backstop and each extending that
+        # launch past its own timeout; the ledger charges the launch only
+        # (a wait inside a registered call is never charged twice), so the
+        # budget declares each hold term by term instead: one hold at the
+        # startup backstop in each of the two cleanup-first orders, the
+        # two backstop-after-snapshot orders, the self-exit order and the
+        # outside-kill order (six), and at the vector backstop the stall
+        # vector's three holds and the late-READY wait (four). Nothing
+        # here is a blended margin: every term is a declared bound.
+        ("nested-orders", 9 * _deadline_case_budget(_TREE_STARTUP_BACKSTOP)
+         + 9 * _deadline_case_budget(_TREE_VECTOR_BACKSTOP)
+         + 6 * _TREE_STARTUP_BACKSTOP + 4 * _TREE_VECTOR_BACKSTOP),
         ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
         ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
@@ -13890,8 +15771,14 @@ def _watchdog_regression_self_test():
         ("poll-collected", 1266), ("close-cancel", 1014), ("escalate-degraded", 784),
         ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
         ("census-exception", 780), ("receipt-high-fd", 10)))
-    # The isolation matrix: 31 timer cases, each one 180 s fixture call.
-    budgets["blocked-isolation"] = 31 * _deadline_case_budget(180)
+    # The isolation matrix in this leg: 31 timer cases, each one 180 s
+    # fixture call, charged its allowance by the leg's ledger. A call that
+    # overruns that allowance overruns the leg, which its process bound then
+    # ends; the top-level run of the same matrix has no such bound (each of
+    # its calls is bounded on its own, and a call killed at that bound is
+    # the distinct CANNOT-EVALUATE there).
+    budgets["blocked-isolation"] = (len(_watchdog_isolation_cases())
+                                    * _deadline_case_budget(_WATCHDOG_ISOLATION_TIMEOUT))
     # The ledger concurrency vectors: the declared budget IS the vector
     # leg's own (the fixture passes it through), so the kill-bound rule
     # (budget + launch margin) prices each vector exactly.
@@ -13923,15 +15810,24 @@ def _watchdog_regression_self_test():
                   + "import signal; signal.signal(signal.SIGALRM, signal.SIG_IGN); "
                   + "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}); "
                   + "rc = opf._bootstrap(); "
-                  + "return rc if rc else opf._watchdog_leg_entry("
+                  + "rc = rc if rc else opf._watchdog_leg_entry("
                   + repr(budgets.get("blocked-isolation"))
-                  + ", dict(opf._self_tests())['opf-watchdog-isolation'])",
+                  + ", dict(opf._self_tests())['opf-watchdog-isolation']); "
+                  # Exit 2 from the nested run is NO VERDICT (a timer fixture
+                  # killed at its own bound, or an unlanded ledger charge),
+                  # never this leg's own failure: the marker on a clean exit
+                  # maps it to the distinct CANNOT-EVALUATE.
+                  + "print(opf._WATCHDOG_CANNOT_EVALUATE"
+                  + " + ' (blocked-isolation: the nested run issued no verdict (exit 2))')"
+                  + " if rc == opf.EXIT_MALFORMED else None; "
+                  + "return opf.EXIT_OK if rc == opf.EXIT_MALFORMED else rc",
                   bound("blocked-isolation")))
     # One fixture per ledger concurrency vector: the expected verdict is
-    # compared INSIDE the fixture (0 on a match, 3 otherwise), so a hang,
-    # crash or wrong verdict is a nonzero fixture status, and a hung
-    # vector is killed at its own independent bound and reported as that
-    # vector's failure, never a hung suite.
+    # compared INSIDE the fixture (0 on a match, 3 otherwise), so a crash
+    # or wrong verdict is a nonzero fixture status, and a hung vector is
+    # killed at its own independent bound, which the runner records as
+    # that vector's own no-verdict CANNOT-EVALUATE (never a pass), never
+    # a hung suite.
     def ledger_fixture(mode, seconds, want, control=False):
         # ONE comparison fragment serves the real vectors and the
         # boolean-return controls (codex round-8 MEDIUM): only an
@@ -14450,26 +16346,173 @@ def _watchdog_regression_self_test():
         if (not _watchdog_bound_faults(dict(probe=bad), dict(probe=10))
                 or not _watchdog_bound_faults(dict(probe=10 ** 6), dict(probe=bad))):
             flip_missed.append("non-finite floor input %r" % (bad,))
+    # The cannot-evaluate marker mapping (red-on-revert): only the exact
+    # marker on a CLEAN exit maps to the distinct cannot-evaluate outcome; a
+    # clean unmarked run passes; any nonzero exit stays a failure even WITH
+    # the marker (fail closed).
+    for got, want in (
+            (_watchdog_completion_verdict(EXIT_OK, "opf completion: x PASS\n"), "pass"),
+            (_watchdog_completion_verdict(EXIT_FINDING, ""), "fail"),
+            (_watchdog_completion_verdict(
+                EXIT_OK, _WATCHDOG_CANNOT_EVALUATE + " (tree/t: cause)\n"),
+             "cannot-evaluate"),
+            (_watchdog_completion_verdict(
+                EXIT_FINDING, _WATCHDOG_CANNOT_EVALUATE + " (tree/t: cause)\n"),
+             "fail"),
+    ):
+        if got != want:
+            flip_missed.append("completion verdict %r != %r" % (got, want))
+    # The aggregate itself (red-on-revert): _watchdog_run_legs over scripted
+    # launches, its per-leg lines captured. A cannot-evaluate leg makes the
+    # aggregate EXIT_MALFORMED, even beside a failure; a leg killed at its
+    # own process bound is cannot-evaluate ON ITS OWN (the lone-bound-kill
+    # row below is red when such a kill is read as a definite failure
+    # again, and the kill beside a failure stays EXIT_MALFORMED, the worst
+    # outcome); failures alone make it EXIT_FINDING; the marker on a
+    # nonzero exit stays a failure.
+    def scripted(outcomes):
+        def launch(label, code, timeout):
+            outcome = outcomes[label]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return subprocess.CompletedProcess([label], outcome[0], outcome[1], "")
+        return launch
+
+    marked = _WATCHDOG_CANNOT_EVALUATE + " (tree/t: cause)\n"
+    for outcomes, want in (
+            (dict(a=(EXIT_OK, "ok\n")), EXIT_OK),
+            (dict(a=(EXIT_OK, "ok\n"), b=(EXIT_OK, marked)), EXIT_MALFORMED),
+            (dict(a=subprocess.TimeoutExpired("a", 1)), EXIT_MALFORMED),
+            (dict(a=subprocess.TimeoutExpired("a", 1),
+                  b=subprocess.CalledProcessError(1, "b")), EXIT_MALFORMED),
+            (dict(a=subprocess.TimeoutExpired("a", 1), b=(EXIT_OK, marked)), EXIT_MALFORMED),
+            (dict(a=(EXIT_OK, marked), b=subprocess.CalledProcessError(1, "b")), EXIT_MALFORMED),
+            (dict(a=subprocess.CalledProcessError(1, "a"), b=(EXIT_OK, "ok\n")), EXIT_FINDING),
+            (dict(a=(EXIT_FINDING, marked)), EXIT_FINDING),
+            (dict(a=RuntimeError("cannot launch")), EXIT_FINDING)):
+        with contextlib.redirect_stdout(io.StringIO()):
+            got = _watchdog_run_legs([(label, "", 1) for label in outcomes], scripted(outcomes))
+        if got != want:
+            flip_missed.append("leg aggregate %r -> %r, want %r" % (sorted(outcomes), got, want))
+    # The window exercise's own classification (red-on-revert): only the
+    # subject's return passes; run_bounded's TIMEOUT sentinel is no verdict
+    # ONLY once the measured elapsed time reached the bound (run_bounded
+    # computes its deadline after the caller's measurement begins, so a
+    # correct run cannot trip it earlier, while host starvation can reach
+    # it on a correct subject), each end of that boundary pinned: just
+    # under the bound is the early trip, a definite run_bounded failure,
+    # exactly at it and just over it are no verdict; every other sentinel
+    # stays a definite failure whatever the elapsed time (fail closed).
+    for result, elapsed, want in (
+            ("RETURNED", 2.0, "pass"), ("RETURNED", 10.01, "pass"),
+            ("TIMEOUT", 10.0, "unestablished"), ("TIMEOUT", 10.01, "unestablished"),
+            ("TIMEOUT", 9.99, "fail"), ("TIMEOUT", 0.0, "fail"),
+            ("OOM", 10.01, "fail"), ("CHILD-DIED", 2.0, "fail"),
+            ("ERROR:ValueError", 2.0, "fail"), ("SETUP-ERROR:NoFork", 2.0, "fail")):
+        if _watchdog_window_verdict(result, elapsed, 10) != want:
+            flip_missed.append("window verdict %r at %s s -> %r, want %r"
+                               % (result, elapsed,
+                                  _watchdog_window_verdict(result, elapsed, 10), want))
+    # The tree legs' never-parsed decision (red-on-revert): ordered by the
+    # polls' own observations, never by the publish stamps or the last
+    # poll's recorded wall time. The clock-step row: no poll ever parsed
+    # the markers (they were published only after the last poll), while a
+    # realtime clock step between that poll and the publication left the
+    # stamps reading 31 s older than the poll's recorded wall time, which
+    # must stay no verdict (a stamp-against-poll comparison falsely fails
+    # it); a poll that DID parse both markers is the harness defect
+    # whatever the stamps read, older or newer than that poll.
+    for unparsed_polls, published, last_wall, want in (
+            ([], [1000.0, 1000.0], 1031.0, False),
+            ([], [1000.0, 1000.0], 1000.5, False),
+            ([], [], 1031.0, False),
+            ([7], [1000.0, 1000.0], 970.0, True),
+            ([7], [1000.0, 1000.0], 1031.0, True)):
+        if _tree_never_parsed(unparsed_polls, published, last_wall) is not want:
+            flip_missed.append("never-parsed decision (%r, %r, %r) -> %r, want %r"
+                               % (unparsed_polls, published, last_wall,
+                                  _tree_never_parsed(unparsed_polls, published,
+                                                     last_wall), want))
+    # The isolation self-test's own no-verdict mappings (red-on-revert), over
+    # scripted launches: a timer fixture killed at its process bound, and a
+    # clean exit carrying the exact cannot-evaluate marker (a fixture whose
+    # window exercise was never established), make that run the distinct
+    # EXIT_MALFORMED (no verdict), never a definite failure; clean unmarked
+    # launches keep EXIT_OK, failing ones EXIT_FINDING, and the marker on a
+    # failing exit is not honored (fail closed).
+    def isolation_scripted(outcome):
+        def launch(label, mode, code):
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return subprocess.CompletedProcess([label], outcome[0], outcome[1], "")
+        return launch
+
+    for outcome, want in ((subprocess.TimeoutExpired("timer", 1), EXIT_MALFORMED),
+                          ((EXIT_OK, ""), EXIT_OK), ((EXIT_FINDING, ""), EXIT_FINDING),
+                          ((EXIT_OK, marked), EXIT_MALFORMED),
+                          ((EXIT_FINDING, marked), EXIT_FINDING)):
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            got = _watchdog_isolation_self_test(launch=isolation_scripted(outcome))
+        if got != want:
+            flip_missed.append("isolation no-verdict aggregate for %r: %r, want %r"
+                               % (outcome, got, want))
+    # The TIMEOUT-to-marker connection inside the REAL timer fixture
+    # (red-on-revert): _watchdog_timer_case itself runs here with its
+    # bounded window run and its clock scripted (the "inactive" mode arms
+    # no timer; the SIGALRM disposition and the real itimer are restored
+    # around each call), and its exit and stdout feed the same completion
+    # mapping the launching runner applies, which the scripted rows above
+    # pin. The subject's own return is an unmarked pass; a TIMEOUT whose
+    # measured time reached the bound is a CLEAN exit that carries the
+    # exact marker (dropping that print would turn the starved window case
+    # into a silent pass); a TIMEOUT measured before the bound could have
+    # elapsed, and every other sentinel, is a definite failure carrying no
+    # honored marker.
+    def window_fixture(result, elapsed):
+        ticks = iter((0.0, elapsed))
+        sigalrm = signal.getsignal(signal.SIGALRM)
+        timer = signal.getitimer(signal.ITIMER_REAL)
+        buffer = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buffer):
+                rc = _watchdog_timer_case("window", "inactive",
+                                          bounded=lambda thunk, timeout_s: result,
+                                          clock=lambda: next(ticks))
+        finally:
+            signal.signal(signal.SIGALRM, sigalrm)
+            signal.setitimer(signal.ITIMER_REAL, *timer)
+        out = buffer.getvalue()
+        return (_watchdog_completion_verdict(rc, out), _WATCHDOG_CANNOT_EVALUATE in out)
+
+    for result, elapsed, want in (("RETURNED", 2.0, ("pass", False)),
+                                  ("TIMEOUT", 10.0, ("cannot-evaluate", True)),
+                                  ("TIMEOUT", 10.01, ("cannot-evaluate", True)),
+                                  ("TIMEOUT", 9.99, ("fail", False)),
+                                  ("OOM", 2.0, ("fail", False))):
+        got = window_fixture(result, elapsed)
+        if got != want:
+            flip_missed.append("window fixture %s at %s s -> %r, want %r"
+                               % (result, elapsed, got, want))
+    # The close-out allowance derivation: the real close-out code, run along
+    # each derived path under a virtual clock, must fit that path's total
+    # and reach each of its waits.
+    flip_missed.extend(_watchdog_closeout_vectors())
+    flip_missed.extend("startup diagnosis %r -> %r, want %r" % miss
+                       for miss in _watchdog_startup_vectors())
     floor = _watchdog_bound_faults(live, budgets)
     if floor or flip_missed:
         print("opf watchdog regressions: FAIL (process bound below a leg's own budget: %s; "
               "floor vectors not refused: %s)" % (
                   "; ".join(floor) or "none", ", ".join(flip_missed) or "none"))
         return EXIT_FINDING
-    failed = False
-    for label, code, timeout in cases:
-        try:
-            result = run_status_owned([sys.executable, "-I", "-B", "-c", code],
-                                    fixture_id="watchdog/" + label,
-                                    capture_output=True, text=True, timeout=timeout)
-            ok, detail = result.returncode == EXIT_OK, result.stdout + result.stderr
-        except (RuntimeError, subprocess.CalledProcessError) as exc:
-            ok, detail = False, str(exc)
-        except subprocess.TimeoutExpired:
-            ok, detail = False, "fixture exceeded its independent process bound"
-        print("opf watchdog regression:", label, "PASS" if ok else "FAIL", detail)
-        failed = failed or not ok
-    return EXIT_FINDING if failed else EXIT_OK
+
+    def launch(label, code, timeout):
+        return run_status_owned([sys.executable, "-I", "-B", "-c", code],
+                                fixture_id="watchdog/" + label,
+                                capture_output=True, text=True, timeout=timeout)
+
+    return _watchdog_run_legs(cases, launch)
 
 
 def _cmd_render(rest):
@@ -14633,6 +16676,11 @@ def _doctor_report(result):
         print("  CANNOT-EVALUATE: {}".format(c))
     if result.triage:
         print("  partial-import triage entries: {}".format(len(result.triage)))
+    if result.migration_incomplete:
+        print("  migration_incomplete entries (bounded adoption state, reported not failed): {}".format(
+            len(result.migration_incomplete)))
+        for entry in result.migration_incomplete:
+            print("    {}".format(entry))
     print("  residuals (disclosed by-design, not gradeable): {}".format(len(result.residuals)))
 
 
@@ -17795,30 +19843,20 @@ def _adopt_exit(status):
     return EXIT_MALFORMED   # CANNOT-EVALUATE, or any unexpected value, fails closed
 
 
-def _adopt_read_inputs(path):
-    """Read the `--inputs` adoption planning worksheet (a TOML file) for `opf adopt plan`, fail-closed.
-    The worksheet is CALLER input, not a store artefact, so it may live outside the store and is read
-    directly; a missing, unreadable, or malformed worksheet is a ValueError (the caller maps it to a
-    cannot-evaluate exit 2, never a silent nothing-to-do): an input it cannot read or parse refuses.
-    Shape: `schema = 1`, `product`, `expected_observation_digest`, a `bindings` table, and
-    the optional `sources` / `targets` (arrays of relative path strings) and `decisions` / `ops` (arrays
-    of tables). This reader validates STRUCTURE only, as a closed keyset; the planner and the schema
-    layer own the SEMANTICS (_opf_adopt_plan.plan: the digest grammar and inventory binding, the exact
-    _opf_adopt.PLAN_BINDING_INPUTS bindings keyset, per-row decision and op validation, the frozen-plan
-    validation), never duplicated here. The read is BOUNDED, the planner's own read discipline: a
-    no-follow, nonblocking open (every component is walked from the filesystem root with O_NOFOLLOW, the
-    store root's _opf_store._open_dir_nofollow walk, so a symlinked parent, ancestor or final component
-    refuses; and a FIFO returns at once rather than blocking; the parent is opened traverse_only, since it
-    is only the dir_fd of the worksheet open and never listed, so a worksheet in a search-only directory
-    reads as a plain open of it does), a SINGLY-LINKED (st_nlink == 1) regular file
-    only (a hardlinked worksheet is a second name for another inode, refused class-consistent with the
-    engine's own single-link control reads), and the planner's per-file byte bound
-    (_opf_adopt_plan.MAX_FILE_BYTES) checked on the opened fd and again by the journal's capped reader, so
-    a FIFO, device, directory, symlink, multiply-linked or oversized worksheet refuses. Returns the parsed
-    table with the
-    optional keys defaulted."""
-    import tomllib
-    cap = _opf_adopt_plan.MAX_FILE_BYTES
+def _adopt_read_bounded(path, label, cap):
+    """Read ONE caller-named `opf adopt` input file (the planning worksheet, a frozen plan, a captured
+    approval) BOUNDED and fail-closed, returning its raw bytes. Each is CALLER input, not a store artefact,
+    so it may live outside the store and is read directly; a missing or unreadable file is a ValueError
+    naming `label` (the caller maps it to a cannot-evaluate exit 2, never a silent nothing-to-do). The read
+    is the planner's own read discipline: a no-follow, nonblocking open (every component is walked from the
+    filesystem root with O_NOFOLLOW, the store root's _opf_store._open_dir_nofollow walk, so a symlinked
+    parent, ancestor or final component refuses; and a FIFO returns at once rather than blocking; the
+    parent is opened traverse_only, since it is only the dir_fd of the input open and never listed, so an
+    input in a search-only directory reads as a plain open of it does), a SINGLY-LINKED (st_nlink == 1)
+    regular file only (a hardlinked input is a second name for another inode, refused class-consistent
+    with the engine's own single-link control reads), and the byte bound `cap` checked on the opened fd
+    and again by the journal's capped reader, so a FIFO, device, directory, symlink, multiply-linked or
+    oversized input refuses."""
     try:
         parent, name = os.path.split(path if os.path.isabs(path) else os.path.join(os.getcwd(), path))
         pfd = _opf_store._open_dir_nofollow(parent, traverse_only=True)   # a dir_fd only, never read
@@ -17829,35 +19867,53 @@ def _adopt_read_inputs(path):
             try:
                 _opf_store._close_fd_exc_safe(pfd)
             except OSError:
-                # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2)
+                # A failing parent close must not leak the just-opened input fd (round-5 defect 2)
                 # or the parent fd itself (P1, #378): the parent close is _close_fd_exc_safe's single
-                # os.close (#377) and the worksheet close the journal engine's, and close(2) has released
+                # os.close (#377) and the input close the journal engine's, and close(2) has released
                 # the number when it reports the error, so it is never touched again; the propagating
                 # error still fails the read closed below.
                 if fd is not None:
                     _opf_adopt_apply._journal._close_fd_quietly(fd)
                 raise
     except FileNotFoundError:
-        raise ValueError("--inputs worksheet not found: {}".format(path))
-    except (OSError, ValueError) as exc:   # ELOOP/ENOTDIR: a symlinked worksheet or ancestor, never followed
-        raise ValueError("--inputs worksheet unreadable ({}): {}".format(path, exc))
+        raise ValueError("{} not found: {}".format(label, path))
+    except (OSError, ValueError) as exc:   # ELOOP/ENOTDIR: a symlinked input or ancestor, never followed
+        raise ValueError("{} unreadable ({}): {}".format(label, path, exc))
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            raise ValueError("--inputs worksheet is not a regular file (a FIFO, device or directory is "
-                             "refused): {}".format(path))
+            raise ValueError("{} is not a regular file (a FIFO, device or directory is refused): {}".format(
+                label, path))
         if st.st_nlink != 1:
-            raise ValueError("--inputs worksheet has {} hard links; a multiply-linked worksheet (a "
-                             "hardlink whose other name may be an out-of-tree victim) is refused, "
-                             "class-consistent with the engine's singly-linked control reads: "
-                             "{}".format(st.st_nlink, path))
+            raise ValueError("{} has {} hard links; a multiply-linked input (a hardlink whose other name may "
+                             "be an out-of-tree victim) is refused, class-consistent with the engine's "
+                             "singly-linked control reads: {}".format(label, st.st_nlink, path))
         if st.st_size > cap:
-            raise ValueError("--inputs worksheet exceeds the {}-byte bound: {}".format(cap, path))
+            raise ValueError("{} exceeds the {}-byte bound: {}".format(label, cap, path))
         raw = _opf_adopt_apply._journal._read_fd(fd, cap=cap)
     except (OSError, _opf_adopt_apply._journal.JournalError) as exc:
-        raise ValueError("--inputs worksheet unreadable ({}): {}".format(path, exc))
+        raise ValueError("{} unreadable ({}): {}".format(label, path, exc))
     finally:
         _opf_store._close_fd_exc_safe(fd)
+    return raw
+
+
+def _adopt_read_inputs(path):
+    """Read the `--inputs` adoption planning worksheet (a TOML file) for `opf adopt plan`, `approve` and
+    `apply`, fail-closed.
+    The worksheet is CALLER input, not a store artefact, so it may live outside the store and is read
+    directly; a missing, unreadable, or malformed worksheet is a ValueError (the caller maps it to a
+    cannot-evaluate exit 2, never a silent nothing-to-do): an input it cannot read or parse refuses.
+    Shape: `schema = 1`, `product`, `expected_observation_digest`, a `bindings` table, and
+    the optional `sources` / `targets` (arrays of relative path strings) and `decisions` / `ops` (arrays
+    of tables). This reader validates STRUCTURE only, as a closed keyset; the planner and the schema
+    layer own the SEMANTICS (_opf_adopt_plan.plan: the digest grammar and inventory binding, the exact
+    _opf_adopt.PLAN_BINDING_INPUTS bindings keyset, per-row decision and op validation, the frozen-plan
+    validation), never duplicated here. The read is BOUNDED (_adopt_read_bounded) at the planner's per-file
+    byte bound (_opf_adopt_plan.MAX_FILE_BYTES), so a FIFO, device, directory, symlink, multiply-linked or
+    oversized worksheet refuses. Returns the parsed table with the optional keys defaulted."""
+    import tomllib
+    raw = _adopt_read_bounded(path, "--inputs worksheet", _opf_adopt_plan.MAX_FILE_BYTES)
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
     except (ValueError, RecursionError, MemoryError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
@@ -17895,16 +19951,18 @@ def _adopt_read_inputs(path):
 
 def _cmd_adopt(rest):
     """`opf adopt <subcommand> ...` (spec 1, 14; OPF-ADOPT K9a): the adoption verb. The subcommand
-    vocabulary is `plan`, `approve`, `apply`, `complete`, `reconcile` and `status`; K9a ships ONLY the
-    two READ-ONLY subcommands, and every other recognized subcommand refuses fail-closed (exit 2) until
-    the mutating adoption engine lands in a later PR, so a stub can never read as a passing operation.
+    vocabulary is `plan`, `approve`, `apply`, `complete`, `reconcile` and `status`; K9a shipped the two
+    READ-ONLY subcommands, the stage driver adds `approve` and `apply`, and `complete` and `reconcile`
+    refuse fail-closed (exit 2) until the completion and recovery stages land, so a stub can never read as
+    a passing operation. plan, approve and apply each refuse over a non-clean adoption journal (an open
+    transaction or a held lock; _opf_adopt_apply.require_clean_journal) before anything else is read.
 
       plan --inputs FILE [--root DIR] : freeze and PRINT the inert adoption proposal through the
           existing planner (_opf_adopt_plan.plan), writing NOTHING. FILE is the caller planning
           worksheet (see _adopt_read_inputs). `now` is read from the clock (timestamp-from-clock) and
           `run_nonce` from os.urandom, both injected into the planner (the deterministic run id composes
           them). Exit 0: VALID -- the frozen plan TOML on stdout (an inert, digest-bound PROPOSAL, never
-          permission or readiness to apply; the approval lives in the run evidence, a later PR).
+          permission or readiness to apply; `approve` captures the one approval).
           Exit 1: INVALID (an op row or the frozen plan breaks the plan schema: an op missing a required
           field, enforcement rows that are not each platform once in order, a means its platform does not
           allow or one lacking its required residual, an enforcement member no op installs, a release
@@ -17916,6 +19974,21 @@ def _cmd_adopt(rest):
           a move destination with no observed absence; an op, product, skip policy, enforcement
           platform, means or residual outside its vocabulary; or a planner binding rule such as a
           missing init-store or render-views members that are not exactly the declared views).
+      approve --inputs FILE --plan FILE --actor NAME [--root DIR] : the one approval (spec 14.1), writing
+          NOTHING: re-prove the frozen plan PLAN printed from its own bytes, observe the live revision and
+          re-derive the plan from the worksheet over the live tree (a moved revision, a changed observation
+          or a changed worksheet refuses into a fresh plan), and print the
+          approval on stdout, attributed to NAME at the clock instant, binding the plan's plan_digest and
+          inventory_digest (_opf_adopt_apply.capture_approval). Exit 0: the approval TOML on stdout. Exit
+          2: every refusal or cannot-evaluate.
+      apply --inputs FILE --plan FILE --approval FILE [--root DIR] : the apply stage
+          (_opf_adopt_apply.run_apply): admit only a plan whose approval binds it, re-derive it over the
+          live tree and its observed revision, then in the run's one journaled base transaction persist the
+          plan and the approval in its evidence bundle, dispatch every plan op in the apply stage and compose
+          the mandatory receipt stage; a non-occupying plan source stays frozen in place for the retirement
+          stage. An op or the receipt stage not yet landed refuses the whole apply before anything is
+          written, which in this build is every plan. Exit 0: applied
+          (completion and retirement follow). Exit 2: every refusal or cannot-evaluate; exit 1 is not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
           validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's
@@ -17924,7 +19997,9 @@ def _cmd_adopt(rest):
           journal, a bundle the validator grades INVALID, or a directory at the evidence home that is not
           a run id). Exit 2: cannot-evaluate (a symlinked, dangling or wrong-type root or home, evidence-
           home entry or journal entry -- a journal entry other than a transaction directory or a
-          regular, singly-linked `lock` / `lock.break` -- a root reached through a symlink, `..` included, or an unreadable
+          regular, singly-linked `lock` / `lock.break` -- a root reached through a symlink, `..` included, a foreign
+          plan digest, a wrong phase, a missing or unproven plan.toml, unless an earlier finding
+          (no inventory, or a legacy-format inventory) ends verification first, or an unreadable
           journal or bundle). Like
           `plan`, a NOT-ADOPTED root is fine: adoption is the verb that PRECEDES a store, so neither
           subcommand requires store resolution (unlike import D7).
@@ -17933,7 +20008,7 @@ def _cmd_adopt(rest):
     option-looking or duplicate value -> exit 2. Every residual escape fails closed to exit 2 (never a
     false 0 or an uncaught exit-1), the same class-width backstop render and doctor carry."""
     subcommands = ("plan", "approve", "apply", "complete", "reconcile", "status")
-    deferred = ("approve", "apply", "complete", "reconcile")
+    deferred = ("complete", "reconcile")
     if not rest:
         print("opf adopt: give a subcommand ({})".format(" / ".join(subcommands)), file=sys.stderr)
         return EXIT_MALFORMED
@@ -17941,8 +20016,8 @@ def _cmd_adopt(rest):
     if sub in deferred:
         # Refused BEFORE any parse or filesystem read, so a deferred subcommand can never write; the
         # message names no command that does not exist (the K9b engine lands these).
-        print("opf adopt {}: not yet available in this build (fail-closed); the mutating adoption engine "
-              "lands in a later PR".format(sub), file=sys.stderr)
+        print("opf adopt {}: not yet available in this build (fail-closed); the completion and recovery "
+              "stages land in a later PR".format(sub), file=sys.stderr)
         return EXIT_MALFORMED
     if sub not in subcommands:
         print("opf adopt: unknown subcommand {!r}; subcommands: {}".format(
@@ -17950,7 +20025,10 @@ def _cmd_adopt(rest):
         return EXIT_MALFORMED
 
     root = None
-    inputs_file = None
+    # The value flags each subcommand takes, each required exactly once (status takes none).
+    takes = dict(plan=("--inputs",), approve=("--inputs", "--plan", "--actor"),
+                 apply=("--inputs", "--plan", "--approval"), status=())[sub]
+    given = dict()
 
     def _need_value(flag, idx):
         if idx + 1 >= len(tail):
@@ -17975,21 +20053,26 @@ def _cmd_adopt(rest):
                 return EXIT_MALFORMED
             root = val
             i += 2
-        elif tok == "--inputs" and sub == "plan":
-            if inputs_file is not None:
-                print("opf adopt plan: --inputs given more than once", file=sys.stderr)
+        elif tok in takes:
+            if tok in given:
+                print("opf adopt {}: {} given more than once".format(sub, tok), file=sys.stderr)
                 return EXIT_MALFORMED
             val = _need_value(tok, i)
             if val is None:
                 return EXIT_MALFORMED
-            inputs_file = val
+            given[tok] = val
             i += 2
         else:
             print("opf adopt {}: unrecognized argument {!r}".format(sub, tok), file=sys.stderr)
             return EXIT_MALFORMED
-    if sub == "plan" and inputs_file is None:
-        print("opf adopt plan: --inputs FILE is required (the planning worksheet)", file=sys.stderr)
-        return EXIT_MALFORMED
+    for flag, need in (("--inputs", "FILE is required (the planning worksheet)"),
+                       ("--plan", "FILE is required (the frozen plan `opf adopt plan` printed)"),
+                       ("--actor", "NAME is required (the attributed approver)"),
+                       ("--approval", "FILE is required (the approval `opf adopt approve` printed)")):
+        if flag in takes and flag not in given:
+            print("opf adopt {}: {} {}".format(sub, flag, need), file=sys.stderr)
+            return EXIT_MALFORMED
+    inputs_file = given.get("--inputs")
     try:
         # The EFFECTIVE root is what the operator's traversal names: the --root value, or the current
         # directory when --root is omitted. Every refusal below names it (never the absent --root value).
@@ -18045,6 +20128,7 @@ def _cmd_adopt(rest):
     if sub == "plan":
         import datetime
         try:
+            _opf_adopt_apply.require_clean_journal(root_abs)
             doc = _adopt_read_inputs(inputs_file)
             now = datetime.datetime.now(datetime.timezone.utc)
             res = _opf_adopt_plan.plan(
@@ -18060,13 +20144,40 @@ def _cmd_adopt(rest):
             for source in res.unresolved:
                 print("opf adopt plan: unresolved source disposition: {}".format(source), file=sys.stderr)
             return _adopt_exit(res.status)
-        except ValueError as exc:
-            # A fail-closed --inputs read error: cannot-evaluate (exit 2), never a silent skip.
+        except (ValueError, _opf_adopt_apply.AdoptApplyError) as exc:
+            # A fail-closed --inputs read error or a non-clean adoption journal: cannot-evaluate (exit 2),
+            # never a silent skip.
             print("opf adopt plan: cannot evaluate: {}".format(exc), file=sys.stderr)
             return EXIT_MALFORMED
         except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
             print("opf adopt plan: cannot evaluate: unexpected error ({!r}); failing closed to exit "
                   "2".format(exc), file=sys.stderr)
+            return EXIT_MALFORMED
+
+    if sub in ("approve", "apply"):
+        import datetime
+        try:
+            _opf_adopt_apply.require_clean_journal(root_abs)
+            doc = _adopt_read_inputs(inputs_file)
+            plan_bytes = _adopt_read_bounded(given["--plan"], "--plan file", _opf_adopt_plan.MAX_ARTIFACT_BYTES)
+            if sub == "approve":
+                approval = _opf_adopt_apply.capture_approval(
+                    root_abs, plan_bytes, doc, given["--actor"], datetime.datetime.now(datetime.timezone.utc))
+                sys.stdout.write(approval.decode("utf-8"))
+                return EXIT_OK
+            approval = _adopt_read_bounded(given["--approval"], "--approval file", _opf_adopt_plan.MAX_FILE_BYTES)
+            txn = _opf_adopt_apply.run_apply(root_abs, plan_bytes, approval, doc)
+            print("opf adopt apply: applied in transaction {}; the plan and its approval are in the evidence "
+                  "bundle at {}; completion, then retirement, follow".format(
+                      txn, _opf_adopt_apply.evidence_home_rel(txn)))
+            return EXIT_OK
+        except (ValueError, _opf_adopt_apply.AdoptApplyError) as exc:
+            # every refusal is a cannot-evaluate (exit 2), the record verb's convention; exit 1 is not used.
+            print("opf adopt {}: cannot evaluate: {}".format(sub, exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
+            print("opf adopt {}: cannot evaluate: unexpected error ({!r}); failing closed to exit "
+                  "2".format(sub, exc), file=sys.stderr)
             return EXIT_MALFORMED
 
     # sub == "status": the read-only state report over the two adoption homes; ZERO writes. Both homes
@@ -18282,11 +20393,27 @@ def _cli_self_test():
         expect(["adopt", "plan", "--inputs"], EXIT_MALFORMED)       # --inputs needs a value
         expect(["adopt", "plan", "--inputs", ""], EXIT_MALFORMED)   # empty inputs refused
         expect(["adopt", "plan", "--inputs", "w.toml", "--inputs", "w.toml"], EXIT_MALFORMED)  # duplicate
-        # The four deferred subcommands are RECOGNIZED and refuse fail-closed (exit 2) BEFORE any parse,
+        # approve and apply (the stage driver) take their value flags exactly once each, refused before
+        # any read: a missing, empty, option-looking or duplicate value, and a flag another subcommand owns.
+        expect(["adopt", "approve"], EXIT_MALFORMED)                                 # no flags at all
+        expect(["adopt", "approve", "--inputs", "w.toml", "--plan", "p.toml"], EXIT_MALFORMED)   # no --actor
+        expect(["adopt", "approve", "--inputs", "w.toml", "--actor", "a"], EXIT_MALFORMED)       # no --plan
+        expect(["adopt", "approve", "--plan", "p.toml", "--actor", "a"], EXIT_MALFORMED)         # no --inputs
+        expect(["adopt", "approve", "--inputs", "w.toml", "--plan", "p.toml", "--actor", "-a"],
+               EXIT_MALFORMED)                                                       # option-looking actor
+        expect(["adopt", "approve", "--inputs", "w.toml", "--plan", "p.toml", "--actor", "a",
+                "--approval", "x.toml"], EXIT_MALFORMED)                             # --approval is apply's
+        expect(["adopt", "apply", "--inputs", "w.toml", "--plan", "p.toml"], EXIT_MALFORMED)     # no approval
+        expect(["adopt", "apply", "--inputs", "w.toml", "--plan", "p.toml", "--approval", "x.toml",
+                "--plan", "p.toml"], EXIT_MALFORMED)                                 # duplicate --plan
+        expect(["adopt", "apply", "--inputs", "w.toml", "--plan", "p.toml", "--approval", "x.toml",
+                "--actor", "a"], EXIT_MALFORMED)                                     # --actor is approve's
+        expect(["adopt", "plan", "--inputs", "w.toml", "--plan", "p.toml"], EXIT_MALFORMED)      # --plan
+        # The two deferred subcommands are RECOGNIZED and refuse fail-closed (exit 2) BEFORE any parse,
         # store resolution or write, each with its own located not-yet-available message (never the
-        # unknown-verb or unknown-subcommand message, and naming no command that does not exist); the K9b
-        # engine lands them.
-        for deferred_sub in ("approve", "apply", "complete", "reconcile"):
+        # unknown-verb or unknown-subcommand message, and naming no command that does not exist); the
+        # completion and recovery stages land them.
+        for deferred_sub in ("complete", "reconcile"):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 rc = main(["adopt", deferred_sub])
@@ -18967,10 +21094,22 @@ def _cli_self_test():
                             os.close(jr_fd)
                     finally:
                         os.close(debris_fd)
-                    # done: a COMPLETED engine transaction (its journal entry stays, and its bundle is VALID).
+                    # done: a COMPLETED engine transaction (its journal entry stays, and its bundle is VALID):
+                    # it stages a plan sealed as the planner seals it, as apply stages the approved plan, so
+                    # the bundle verifier proves its inventory's plan digest against it (spec 4.2).
+                    def sealed_plan(run_id_):
+                        body = dict(format="opf.adoption.plan/v2", run_id=run_id_)
+                        digest = "sha256:" + _opf_adopt_apply._sha256(
+                            _opf_adopt_apply.emit_checked(body).encode("utf-8"))
+                        return (_opf_adopt_apply.emit_checked(dict(body, plan_digest=digest)).encode("utf-8"),
+                                digest)
+
+                    adopt_plan, adopt_digest = sealed_plan(adopt_rid)
                     done = os.path.join(abase, "done")
                     os.mkdir(done)
-                    _opf_adopt_apply.run_adopt_transaction(done, adopt_rid, lambda ops: None)
+                    _opf_adopt_apply.run_adopt_transaction(
+                        done, adopt_rid, lambda ops: ops.create(_opf_adopt_apply.plan_rel(adopt_rid), adopt_plan),
+                        plan_digest=adopt_digest)
                     # an empty (nothing-opened) journal entry, which the engine classifies as clean.
                     unopened = os.path.join(abase, "unopened")
                     os.makedirs(os.path.join(unopened, adopt_j_rel, "txn"))
@@ -19028,6 +21167,30 @@ def _cli_self_test():
                                        "adoption run {}: evidence bundle at".format(adopt_rid)),
                                       ("nothing-opened journal entry", unopened, EXIT_OK,
                                        "no adoption run exists")]
+                    # Round 9: status holds each inventory's [adoption] identity to the doctor's bar (spec
+                    # 4.2), each red at the round-9 head (which listed the run and exited 0): a plan digest
+                    # other than the bundle's own sealed plan's, a phase other than the file name's, and an
+                    # empty base inventory with no plan are each cannot-evaluate; the hand-built control
+                    # with its own sealed plan stays clean.
+                    for v_tag, v_plan, v_phase, v_digest, v_want, v_needle in (
+                            ("handbuilt", adopt_plan, None, adopt_digest, EXIT_OK,
+                             "adoption run {}: evidence bundle at".format(adopt_rid)),
+                            ("foreigndigest", adopt_plan, None, "sha256:" + "0" * 64, EXIT_MALFORMED,
+                             "not its bundle's own sealed plan"),
+                            ("wrongphase", adopt_plan, "completion", adopt_digest, EXIT_MALFORMED,
+                             "phase its file name carries"),
+                            ("emptynoplan", None, None, adopt_digest, EXIT_MALFORMED, "no plan.toml")):
+                        root = fresh_root(v_tag)
+                        os.makedirs(os.path.join(root, evidence_rel, adopt_rid))
+                        v_rows = []
+                        if v_plan is not None:
+                            v_plan_rel = _opf_adopt_apply.plan_rel(adopt_rid)
+                            with open(os.path.join(root, v_plan_rel), "wb") as fh:
+                                fh.write(v_plan)
+                            v_rows.append(_opf_adopt_apply.inventory_row(v_plan_rel, v_plan))
+                        with open(os.path.join(root, _opf_adopt_apply.inventory_rel(adopt_rid)), "wb") as fh:
+                            fh.write(_opf_adopt_apply.emit_inventory(adopt_rid, v_rows, v_phase, v_digest))
+                        status_vectors.append(("bundle ({})".format(v_tag), root, v_want, v_needle))
                     root = fresh_root("nobundle")
                     os.makedirs(os.path.join(root, evidence_rel, adopt_rid))
                     status_vectors.append(("run-id directory with no inventory", root, EXIT_FINDING,
@@ -19182,16 +21345,21 @@ def _cli_self_test():
                     home_abs = os.path.join(swaproot, evidence_rel)
                     payload_rel = evidence_rel + "/" + adopt_rid + "/payload.txt"
                     good_inv = _opf_adopt_apply.emit_inventory(
-                        adopt_rid, [_opf_adopt_apply.inventory_row(payload_rel, b"GOOD!")])
+                        adopt_rid, [_opf_adopt_apply.inventory_row(payload_rel, b"GOOD!")],
+                        plan_digest=adopt_digest)
                     os.makedirs(os.path.join(home_abs, adopt_rid))
                     with open(os.path.join(home_abs, adopt_rid, "inventory.toml"), "wb") as fh:
                         fh.write(good_inv)
+                    with open(os.path.join(home_abs, adopt_rid, "plan.toml"), "wb") as fh:
+                        fh.write(adopt_plan)                     # each home's own sealed plan (spec 4.2)
                     with open(os.path.join(home_abs, adopt_rid, "payload.txt"), "wb") as fh:
                         fh.write(b"BAD!!")                       # drifted: the original home is exit 1
                     repl_abs = os.path.join(swaproot, ".working", "imported", "adoption-replacement")
                     os.makedirs(os.path.join(repl_abs, adopt_rid))
                     with open(os.path.join(repl_abs, adopt_rid, "inventory.toml"), "wb") as fh:
                         fh.write(good_inv)
+                    with open(os.path.join(repl_abs, adopt_rid, "plan.toml"), "wb") as fh:
+                        fh.write(adopt_plan)
                     with open(os.path.join(repl_abs, adopt_rid, "payload.txt"), "wb") as fh:
                         fh.write(b"GOOD!")                       # verifies, but beside a foreign entry
                     os.mkdir(os.path.join(repl_abs, "zzz-foreign"))
@@ -19538,6 +21706,130 @@ def _cli_self_test():
                                     "validate_op finding)".format(rc))
                 if tree_snapshot(clean) != before:
                     failures.append("adopt plan (schema-violating op) mutated the product root")
+
+                # The stage driver end to end over a decision-complete fixture (a retire source and a
+                # kept file at a NOT-ADOPTED root), planned through the wired `plan`: approve -> 0 with
+                # the approval binding the plan's two digests on stdout, writing nothing; apply -> 2
+                # naming the unlanded ops (the fixture plan's init-store, install-pack, register-unmanaged
+                # and retire-file ops, and the driver's receipt stage, are not landed in this build),
+                # writing nothing, no journal and no bundle (the wiring discriminator: an unwired apply
+                # refuses with the not-yet-available message instead). Flips: an approval for a fresh plan
+                # of the same tree -> apply 2 on the binding; a source edited after planning -> approve 2
+                # into a fresh plan; an open adoption-journal transaction -> plan 2 directing to reconcile
+                # (the planner itself never reads that journal, so without the gate it reports the
+                # worksheet's digest mismatch).
+                import hashlib
+                import _opf_adopt
+                import _opf_init
+                from _opf_emit import emit_checked
+
+                def run_split(argv):
+                    out, err = io.StringIO(), io.StringIO()
+                    try:
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            return main(list(argv)), out.getvalue(), err.getvalue()
+                    except BaseException as exc:            # a dispatcher crash is itself a failure
+                        return "raised {!r}".format(exc), out.getvalue(), err.getvalue()
+
+                def sha(data):
+                    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+                adoptee = os.path.join(abase, "adoptee")
+                bindings = _opf_adopt.canonical_plan_bindings()   # its revision is the fixture's HEAD, below
+                manifest = _opf_init.build_manifest()
+                views = sorted(v["target"] for v in tomllib.loads(manifest)["views"].values())
+                # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry
+                # point) lies outside every walked root, so its absence is a declared target.
+                sheet = dict(schema=1, product="opf", sources=["keep.md", "legacy.md"],
+                             targets=[_opf_adopt.PACK_MIRROR_ROOT],
+                             decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),
+                                        dict(path="legacy.md", disposition="retire", actor="fixture")],
+                             ops=[dict(op="init-store", store_root=".", members=[dict(
+                                      path=".working/toml/manifest.toml", digest=sha(manifest.encode("utf-8")))]),
+                                  dict(op="render-views", store_root=".",
+                                       members=[dict(path=v, digest=sha(v.encode("utf-8"))) for v in views]),
+                                  _opf_adopt.enforcement_install_op(bindings["enforcement"])],
+                             bindings=bindings)
+                sheet_path, plan_path, plan2_path, approval_path = (
+                    os.path.join(abase, name) for name in ("adopt-sheet.toml", "adopt-plan.toml",
+                                                           "adopt-plan-2.toml", "adopt-approval.toml"))
+                try:
+                    os.mkdir(adoptee)
+                    for name, body in (("keep.md", "kept\n"), ("legacy.md", "legacy rules\n")):
+                        with open(os.path.join(adoptee, name), "w", encoding="utf-8") as fh:
+                            fh.write(body)
+                    # approve and apply observe the live revision, so the fixture is a git repository whose
+                    # HEAD is the revision the worksheet binds.
+                    head = _opf_adopt_apply._selftest_git_commit(adoptee)
+                    if head is None:
+                        raise ValueError("the fixture git repository could not be made")
+                    bindings["revision"] = head
+                    obs = _opf_adopt_plan.investigate(os.path.abspath(adoptee), sources=sheet["sources"],
+                                                      targets=sheet["targets"])
+                    sheet["expected_observation_digest"] = tomllib.loads(
+                        obs.observation.decode("utf-8"))["observation_digest"]
+                    with open(sheet_path, "w", encoding="utf-8") as fh:
+                        fh.write(emit_checked(sheet))
+                except (OSError, AttributeError, KeyError, ValueError) as exc:
+                    print("opf cli self-test: harness error: could not build the adopt stage fixture "
+                          "({})".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+                rc, plan_out, err = run_split(["adopt", "plan", "--inputs", sheet_path, "--root", adoptee])
+                rc2, plan2_out, _err2 = run_split(["adopt", "plan", "--inputs", sheet_path, "--root", adoptee])
+                if rc != EXIT_OK or rc2 != EXIT_OK or plan_out == plan2_out:
+                    failures.append("adopt plan over the stage fixture: rc={!r}/{!r} (expected 0 twice, two "
+                                    "distinct runs; {})".format(rc, rc2, err.strip()))
+                else:
+                    with open(plan_path, "w", encoding="utf-8") as fh:
+                        fh.write(plan_out)
+                    with open(plan2_path, "w", encoding="utf-8") as fh:
+                        fh.write(plan2_out)
+                    plan_doc = tomllib.loads(plan_out)
+                    before = tree_snapshot(adoptee)
+                    rc, approval_out, err = run_split(["adopt", "approve", "--inputs", sheet_path, "--plan",
+                                                       plan_path, "--actor", "adopter", "--root", adoptee])
+                    approval_doc = tomllib.loads(approval_out) if rc == EXIT_OK else dict()
+                    if not (rc == EXIT_OK and approval_doc.get("actor") == "adopter"
+                            and approval_doc.get("plan_digest") == plan_doc["plan_digest"]
+                            and approval_doc.get("inventory_digest") == plan_doc["inventory_digest"]):
+                        failures.append("adopt approve: rc={!r} (expected 0 + the approval binding the plan's "
+                                        "two digests; {})".format(rc, err.strip()))
+                    with open(approval_path, "w", encoding="utf-8") as fh:
+                        fh.write(approval_out)
+                    rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan_path,
+                                               "--approval", approval_path, "--root", adoptee])
+                    if rc != EXIT_MALFORMED or "not yet executable" not in err:
+                        failures.append("adopt apply with unlanded ops: rc={!r} (expected 2 + the unlanded-op "
+                                        "refusal; {})".format(rc, err.strip()))
+                    rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan2_path,
+                                               "--approval", approval_path, "--root", adoptee])
+                    if rc != EXIT_MALFORMED or "does not bind" not in err:
+                        failures.append("adopt apply with an approval for another plan: rc={!r} (expected 2 + "
+                                        "the binding refusal; {})".format(rc, err.strip()))
+                    if tree_snapshot(adoptee) != before or os.path.exists(os.path.join(adoptee, ".aiqt")):
+                        failures.append("adopt approve/apply mutated the stage fixture (each must write nothing "
+                                        "in this build)")
+                    with open(os.path.join(adoptee, "legacy.md"), "w", encoding="utf-8") as fh:
+                        fh.write("edited after planning\n")
+                    rc, _out, err = run_split(["adopt", "approve", "--inputs", sheet_path, "--plan", plan_path,
+                                               "--actor", "adopter", "--root", adoptee])
+                    if rc != EXIT_MALFORMED or "fresh plan" not in err:
+                        failures.append("adopt approve after a source edit: rc={!r} (expected 2 + the fresh-plan "
+                                        "refusal; {})".format(rc, err.strip()))
+                    with open(os.path.join(adoptee, "legacy.md"), "w", encoding="utf-8") as fh:
+                        fh.write("legacy rules\n")
+                    # a revision-only change (an empty commit, every inventoried byte unchanged) -> approve 2.
+                    moved = _opf_adopt_apply._selftest_git_commit(adoptee)
+                    rc, _out, err = run_split(["adopt", "approve", "--inputs", sheet_path, "--plan", plan_path,
+                                               "--actor", "adopter", "--root", adoptee])
+                    if moved is None or rc != EXIT_MALFORMED or "revision moved" not in err:
+                        failures.append("adopt approve after the revision moved: rc={!r} (expected 2 + the "
+                                        "revision-drift refusal; {})".format(rc, err.strip()))
+                # plan over an open adoption-journal transaction (the debris root) -> 2, reconcile first.
+                rc, _out, err = run_split(["adopt", "plan", "--inputs", stale, "--root", debris])
+                if rc != EXIT_MALFORMED or "must be reconciled" not in err:
+                    failures.append("adopt plan over an interrupted adoption transaction: rc={!r} (expected 2 + "
+                                    "the reconcile-first refusal; {})".format(rc, err.strip()))
             finally:
                 shutil.rmtree(abase, ignore_errors=True)
             return None
@@ -19612,10 +21904,15 @@ def _cli_self_test():
               "through routes the probe does not patch (posix, _io, ctypes, already-open handles, "
               "sockets), or another module patching this one; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
-              "adoption planner -- bare/malformed usage and the deferred approve/apply/complete/reconcile "
+              "adoption planner -- bare/malformed usage and the deferred complete/reconcile "
               "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
-              "bundle finding / 2 symlinked, dangling or wrong-type home, plan -> 2 missing, FIFO, oversized "
-              "or symlinked worksheet or stale digest / 1 schema-violating op, each mutating nothing; an "
+              "bundle finding / 2 symlinked, dangling or wrong-type home or a bundle whose inventory names "
+              "another phase or plan digest than its own sealed plan's, or has no plan, "
+              "plan -> 2 missing, FIFO, oversized "
+              "or symlinked worksheet, stale digest or an interrupted adoption transaction / 1 "
+              "schema-violating op, each mutating nothing; the stage driver's approve -> 0 with the approval "
+              "binding the plan's two digests / 2 after a source edit or a moved revision, and apply -> 2 on "
+              "the unlanded ops or an approval for another plan, each mutating nothing; an "
               "unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2)")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
@@ -20212,7 +22509,8 @@ def _close_exc_safe_vectors_self_test():
     sees no further os.close and no os.fstat. A run whose reuse setup failed (the unrelated file never
     reached the number) is red by REUSE, never a pass. Five flips then re-run the vectors and must turn
     exactly their own vectors red, each by that vector's own assertion: MASK (every close helper always
-    propagating) the body vectors; SWALLOW (always quiet) the normal and caller vectors; CALLER-FRAME
+    propagating, the adoption transaction's record-and-report close-out included) the body vectors;
+    SWALLOW (always quiet) the normal and caller vectors; CALLER-FRAME
     (#377 fix 1's any-exception test in place of the calling-frame test, in both helpers, the ExitStack
     callback and the descriptor stack's close) the caller vectors; RECLOSE (the pre-P1 fstat-then-reclose
     recovery put back in #377's helpers, in _journal's _close_fd_quietly and _close_fd_propagating, and in
@@ -20272,6 +22570,16 @@ def _close_exc_safe_vectors_self_test():
             os.close(fd)
         if not quiet:
             raise first
+
+    def propagating_close_out(fds, raised, close=None):
+        """MASK at the adoption transaction's final close-out (_opf_adopt_apply._close_held_into): its
+        record-and-report undone, each held descriptor closed propagating, the first close error raised at
+        once in place of the run's own outcome. That close-out never lets a close error replace the
+        outcome, whatever helper it closes through, so masking the helpers alone cannot redden its body
+        vectors; this is the mask that can."""
+        while fds:
+            item = fds.pop()
+            propagating(item[1] if isinstance(item, tuple) else item)
 
     def reclose_exc_safe(fd):
         tb = sys.exc_info()[2]
@@ -20499,7 +22807,8 @@ def _close_exc_safe_vectors_self_test():
             try:
                 with mock.patch.object(_opf_adopt_apply, "_open_product_root", open_root):
                     _opf_adopt_apply.run_adopt_transaction(
-                        str(product), "adopt-20260101T000000Z-0123456789abcdef", compose)
+                        str(product), "adopt-20260101T000000Z-0123456789abcdef", compose,
+                        plan_digest="sha256:" + "ab" * 32)
             finally:
                 shutil.rmtree(str(product), ignore_errors=True)
         return call
@@ -20874,7 +23183,8 @@ def _close_exc_safe_vectors_self_test():
         ("MASK", ((_opf_store, "_close_fd_exc_safe", propagating),
                   (check_opf_prompt_pack, "_close_fd_exc_safe", propagating),
                   (_opf_store, "_close_fd_on_exit", lambda fd, *exc: propagating(fd)),
-                  (journal, "_close_fd_quietly", propagating))),
+                  (journal, "_close_fd_quietly", propagating),
+                  (_opf_adopt_apply, "_close_held_into", propagating_close_out))),
         ("SWALLOW", ((_opf_store, "_close_fd_exc_safe", quietly),
                      (check_opf_prompt_pack, "_close_fd_exc_safe", quietly),
                      (_opf_store, "_close_fd_on_exit", lambda fd, *exc: quietly(fd)))),
@@ -21041,6 +23351,7 @@ def _self_tests():
     ("opf-record", _opf_record.self_test),
     ("opf-write-guard", _opf_write_guard.self_test),
     ("opf-adopt-apply", _opf_adopt_apply.self_test),
+    ("opf-adopt-state", _opf_adopt_state.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-journal", _opf_store._journal.self_test),   # #378: the _close_fd_yielding vectors
