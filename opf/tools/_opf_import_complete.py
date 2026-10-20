@@ -18,7 +18,9 @@ adoption run `run_id`, in four legs, each reporting under one SourceResult:
   receipt: the adoption receipt core this import runs under (spec 8.8: import refuses without one) is
     present, validates and binds this run and the approved plan (the apply shell's own
     receipt_binding_refusals), and its outcome-event chain validates through the shipped chain validator,
-    rooted at the receipt core's digest. The chain is every event-<NNNN>.toml the run's bundle inventories
+    rooted at the receipt core's digest, with every event's run_id the selected run and every recorded
+    event_digest recomputed from the event's own canonical bytes (apply.event_digest, the one minting
+    rule). The chain is every event-<NNNN>.toml the run's bundle inventories
     list (event-0001.toml, the genesis, and on, at most MAX_EVENTS), each read and chained in order; an
     event file present in the bundle but unlisted, listed but absent, spelled other than its
     event-<NNNN>.toml name, or past a gap in the numbering is CANNOT-EVALUATE naming it;
@@ -45,13 +47,16 @@ adoption run `run_id`, in four legs, each reporting under one SourceResult:
     actor (SKIP_EVENT_ACTOR);
   doctor: the caller's doctor run over the live tree returns the whole-store validator's own result type
     (_opf_check.StoreValidation, checked by exact type), VALID with no finding and no cannot-evaluate, whose
-    per-check map covers the doctor's full required roster (_opf_check.REQUIRED_CHECKS) and the four
-    section 8.3 imported-series checks (IMPORTED_SERIES_CHECKS), every entry PASS. An INVALID doctor keeps
-    its own findings; another result type, an absent roster check, or an entry other than PASS is
-    CANNOT-EVALUATE naming it. Green needs a doctor result that grades the imported-series checks, which no
-    shipped doctor does (REQUIRED_CHECKS holds none). The evaluator trusts the caller-supplied doctor run it
-    is given: the exact type and the roster are a shape bar on that run's result, not an authentication of
-    the run.
+    per-check map holds exactly the roster the whole-store validator requires of a store whose imported
+    series is active (_doctor_roster, _opf_check.required_checks(2, True): the strict checks, the homes-2
+    evidence enumeration, and the four section 8.3 imported-series checks), every entry PASS. An INVALID
+    doctor keeps its own findings; another result type, an absent roster check, a check id outside that
+    roster, or an entry other than PASS is CANNOT-EVALUATE naming it. Green needs a doctor result that
+    grades that full active-imported roster, which no doctor run over a store this tooling validates today
+    produces (the imported series is inactive for every such store, and three of its four checks are not
+    yet graded, so the whole-store validator routes them to CANNOT-EVALUATE on an active store). The
+    evaluator trusts the caller-supplied doctor run it is given: the exact type and the roster are a shape
+    bar on that run's result, not an authentication of the run.
 
 Read-only: the evaluator's own operations only read. Every live read is contained and no-follow through the
 apply shell's own reader (_opf_adopt_apply._read_live, single-linked regular files only, capped), the
@@ -125,10 +130,6 @@ import _opf_store as store           # noqa: E402
 from _opf_emit import emit_checked   # noqa: E402
 
 VALID, INVALID, CANNOT_EVALUATE = store.VALID, store.INVALID, store.CANNOT_EVALUATE
-# The four section 8.3 imported-series checks the doctor roster carries once the imported series activates
-# (spec 4.2): doctor VALID "over both the strict store and the imported series" grades each PASS.
-IMPORTED_SERIES_CHECKS = ("C-IMPORTED-SCHEMA", "C-IMPORTED-IDS", "C-IMPORTED-PROVENANCE",
-                          "C-IMPORTED-SEGREGATION")
 # The imported managed leaves (spec 4.2, 8.3), inline in the machine store in either layout: one index per
 # enabled type except the importer-only legacy_fragment, and the imported worklog on its own number line.
 IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
@@ -329,7 +330,11 @@ def _check_receipt(ev, rep):
     outcome-event chain, where spec 14.1 records each source's result and a skip is recorded. The receipt
     core validates and binds this run and the approved plan by the apply shell's own rule; the chain, every
     event file reconciled against the bundle (_event_files), validates through the shipped validator, rooted
-    at the core's digest. An INVALID chain is reported and none of its events is read as a skip."""
+    at the core's digest. A VALID chain is then bound to THIS run: every event's run_id must be the selected
+    run, and every recorded event_digest must recompute from the event's own canonical bytes
+    (apply.event_digest, the one minting rule), because the chain validator establishes internal agreement
+    only, seeded from the genesis event itself. An INVALID or unbound chain is reported and none of its
+    events is read as a skip."""
     rel = apply.receipt_rel(ev.run_id)
     core = _read(ev, rel)
     if core is None:
@@ -357,7 +362,27 @@ def _check_receipt(ev, rep):
         raise Unevaluable("outcome-event chain: " + "; ".join(chain.findings))
     for f in chain.findings:
         rep.finding("outcome-event chain: " + f)
-    ev.events = events if chain.status == VALID else []
+    bound = chain.status == VALID
+    if bound:
+        # The chain validator proves internal agreement only: it seeds the run from the genesis event and
+        # never recomputes a recorded digest, so a chain of another run, or one whose digests were resealed
+        # around edited events, validates there and is refused here. A VALID chain's events all carry the
+        # validated event shape, so the two keys are present.
+        for i, event in enumerate(events):
+            try:
+                recomputed = apply.event_digest(event)
+            except apply.AdoptApplyError as exc:
+                raise Unevaluable("outcome-event chain: event[{}]: {}".format(i, exc))
+            if event["event_digest"] != recomputed:
+                rep.finding("outcome-event chain: event[{}] records an event_digest that is not the digest "
+                            "of its own canonical bytes".format(i))
+                bound = False
+            if event["run_id"] != ev.run_id:
+                rep.finding("outcome-event chain: event[{}] names run {!r}, not this run: an internally "
+                            "consistent chain of another run never records this run's outcomes".format(
+                                i, event["run_id"]))
+                bound = False
+    ev.events = events if bound else []
 
 
 # --- the preserved original -------------------------------------------------------------------------
@@ -566,6 +591,17 @@ def _check_imports(ev, rep):
 
 # --- doctor validity on the live tree ---------------------------------------------------------------
 
+def _doctor_roster():
+    """The per-check roster a VALID doctor result must grade: exactly what the whole-store validator
+    requires of a store whose imported series is ACTIVE. Activation needs the homes-2 declaration
+    (_opf_check.imported_series_active), and required_checks widens every generation from 2 alike, so the
+    roster is required_checks(2, True): the strict checks, the homes-2 evidence enumeration
+    (C-EVIDENCE-ENUM), and the four section 8.3 imported-series checks, every id read from the validator's
+    own constants so the two modules cannot disagree."""
+    import _opf_check
+    return tuple(_opf_check.required_checks(2, True))
+
+
 def store_doctor(observations=None):
     """A doctor callable, the sanctioned way to build one: resolve the store and run the whole-store
     validator over the caller's inert git-derived observations (gathering them spawns git, which this
@@ -582,8 +618,10 @@ def _check_doctor(ev, rep):
     (_opf_check.StoreValidation, by exact type, what validate_store and so store_doctor return), so a
     callable's self-reported verdict of another shape is never read. Missing or non-list doctor evidence is
     never read as empty. An INVALID doctor reports every finding, none set aside; a VALID one's per-check
-    map must cover the full roster, _opf_check.REQUIRED_CHECKS and IMPORTED_SERIES_CHECKS, with every entry
-    PASS, or the leg is CANNOT-EVALUATE naming the checks absent or not passing. The run itself is the
+    map must hold exactly the full active-imported roster (_doctor_roster), with every entry PASS, or the
+    leg is CANNOT-EVALUATE naming the checks absent, outside the roster, or not passing; the whole-store
+    validator routes a check id it does not require to CANNOT-EVALUATE, so a map carrying one is never read
+    as that validator's VALID. The run itself is the
     caller's and is trusted: this is a bar on its result's shape, not an authentication of the run."""
     import _opf_check
     if ev.doctor is None:
@@ -609,11 +647,18 @@ def _check_doctor(ev, rep):
     if not isinstance(checks, dict):
         raise Unevaluable("doctor evidence carries no per-check verdict map, so its roster is not shown "
                           "graded")
-    missing = [cid for cid in tuple(_opf_check.REQUIRED_CHECKS) + IMPORTED_SERIES_CHECKS if cid not in checks]
+    roster = _doctor_roster()
+    missing = [cid for cid in roster if cid not in checks]
     if missing:
-        raise Unevaluable("the doctor did not grade its full roster: {} absent from its roster (the strict "
-                          "store's required checks, and the imported-series checks spec 8.3 and 4.2 add when "
-                          "the imported series activates)".format(", ".join(missing)))
+        raise Unevaluable("the doctor did not grade its full roster: {} absent from its roster (the "
+                          "whole-store validator's own roster for a store whose imported series is active: "
+                          "the strict checks, the homes-2 evidence enumeration, and the imported-series "
+                          "checks spec 8.3 and 4.2 add)".format(", ".join(missing)))
+    unknown = sorted(set(checks) - set(roster))
+    if unknown:
+        raise Unevaluable("the doctor graded {} outside its required roster: the whole-store validator "
+                          "routes a check id it does not require to CANNOT-EVALUATE, never to VALID".format(
+                              ", ".join(unknown)))
     ungraded = ["{} {}".format(cid, verdict) for cid, verdict in checks.items() if verdict != "PASS"]
     if ungraded:
         raise Unevaluable("doctor reports VALID while grading {}".format(", ".join(ungraded)))
@@ -818,20 +863,27 @@ def _fixture(root, skip_policy="no-skip", imports=None, events=()):
         _put(root, _LEAF, _emit(dict(schema=records.SUPPORTED_SCHEMA, record=leaf)))
 
 
-# The doctor roster of this release (the strict store's checks) and the four imported-series checks.
+# Rosters read from the whole-store validator's own constants: the shipped strict (homes-1) roster and the
+# four section 8.3 imported-series check ids; _doctor_roster above is the full roster the doctor leg requires.
 def _roster():
     import _opf_check
     return tuple(_opf_check.REQUIRED_CHECKS)
 
 
+def _imported_series_checks():
+    import _opf_check
+    return tuple(_opf_check.IMPORTED_CHECKS)
+
+
 class _Doctor:
     """A doctor stub returning one fixed result built by the test as the whole-store validator's own type
-    (_opf_check.StoreValidation), not a doctor run; by default VALID with every strict and imported-series
-    check graded PASS. `result` is that object, so a vector can edit it after it is built."""
+    (_opf_check.StoreValidation), not a doctor run; by default VALID with the full active-imported roster
+    (_doctor_roster, what the real doctor produces for an active imported store) graded PASS. `result` is
+    that object, so a vector can edit it after it is built."""
 
     def __init__(self, status=VALID, findings=(), cannot=(), checks=None):
         import _opf_check
-        full = dict((cid, "PASS") for cid in _roster() + IMPORTED_SERIES_CHECKS)
+        full = dict((cid, "PASS") for cid in _doctor_roster())
         self.result = _opf_check.StoreValidation(status, list(findings), list(cannot),
                                                  checks=full if checks is None else checks)
 
@@ -911,6 +963,9 @@ def self_test():
               and "backlog_item" in IMPORTED_TYPES and "worklog" in IMPORTED_TYPES)
         check("sanity-shipped-roster-has-no-imported-check", not any(
             cid.startswith("C-IMPORTED-") for cid in _roster()))
+        check("sanity-doctor-roster-is-the-active-imported-roster",
+              set(_doctor_roster()) == set(_roster()) | set(_imported_series_checks()) | {"C-EVIDENCE-ENUM"}
+              and len(_imported_series_checks()) == 4)
 
         # Green: one record of the source in one import run, every leg holding.
         base = _case()
@@ -981,6 +1036,21 @@ def self_test():
             check("skip-in-broken-chain-not-read", unchained.status == INVALID and len(unchained.findings) == 2
                   and _says(unchained, "outcome-event chain: event[1] previous_event_digest")
                   and _says(unchained, "no imported record references"))
+
+            # A skip event whose recorded event_digest is not its own canonical-bytes digest is the last
+            # event, so no later previous_event_digest covers it and the shipped validator accepts the
+            # chain; the recomputation refuses it and the skip is never consumed.
+            def forged_skip(root):
+                genesis = apply._canonical_toml(_bytes(root, apply.genesis_event_rel(_RUN)), "the genesis")
+                skipev = _event(genesis, SKIP_EVENT_KIND, **_skip()[1])
+                skipev["event_digest"] = "sha256:" + "8" * 64
+                _put(root, apply.evidence_home_rel(_RUN) + "/" + EVENT_NAME.format(2), _emit(skipev))
+                _reinventory(root)
+            forged = _case(forged_skip, imports=[], skip_policy=SKIP_POLICY)
+            check("skip-with-false-digest-not-read", forged.status == INVALID
+                  and _says(forged, "event[1] records an event_digest that is not the digest of its own "
+                            "canonical bytes")
+                  and _says(forged, "no imported record references"))
 
         # The preserved original: each digest mismatch names the path.
         preimage = apply.archive_rel(_RUN, _SOURCE)
@@ -1158,6 +1228,44 @@ def self_test():
             raced = _case(second_event(EVENT_NAME.format(2)))
         check("event-vanished-after-listing-cannot", raced.status == CANNOT_EVALUATE
               and _says(raced, "outcome event {} vanished after the bundle listing".format(second)))
+        # The chain is bound to THIS run: the shipped validator seeds its run agreement from the genesis
+        # event itself and never recomputes a recorded digest, so an internally consistent chain naming
+        # another run, or an event resealed around an edited digest, validates there and must be refused
+        # here (and its inventory is re-derived, so only the binding refuses it).
+        foreign_run = "adopt-20261001T000000Z-fedcba9876543210"
+
+        def foreign_genesis(root):
+            rel = apply.genesis_event_rel(_RUN)
+            event = apply._canonical_toml(_bytes(root, rel), "the fixture genesis event")
+            event["run_id"] = foreign_run
+            event["event_digest"] = apply.event_digest(event)
+            _put(root, rel, _emit(event))
+            _reinventory(root)
+        hijacked = _case(foreign_genesis)
+        check("event-chain-of-another-run-finding", hijacked.status == INVALID
+              and _says(hijacked, "event[0] names run {!r}, not this run".format(foreign_run)))
+
+        def false_digest(root):
+            rel = apply.genesis_event_rel(_RUN)
+            event = apply._canonical_toml(_bytes(root, rel), "the fixture genesis event")
+            event["event_digest"] = "sha256:" + "9" * 64
+            _put(root, rel, _emit(event))
+            _reinventory(root)
+        reforged = _case(false_digest)
+        check("event-genesis-false-digest-finding", reforged.status == INVALID
+              and _says(reforged, "event[0] records an event_digest that is not the digest of its own "
+                        "canonical bytes"))
+
+        def false_last_digest(root):
+            genesis = apply._canonical_toml(_bytes(root, apply.genesis_event_rel(_RUN)), "the genesis")
+            last = _event(genesis, "signed-off")
+            last["event_digest"] = "sha256:" + "9" * 64
+            _put(root, home + "/" + EVENT_NAME.format(2), _emit(last))
+            _reinventory(root)
+        tail = _case(false_last_digest)
+        check("event-last-false-digest-finding", tail.status == INVALID
+              and _says(tail, "event[1] records an event_digest that is not the digest of its own "
+                        "canonical bytes"))
 
         # Import runs and the correction chain.
         corrected = [(_IMP, _SOURCE, [_record(1, _IMP)]),
@@ -1266,6 +1374,13 @@ def self_test():
                 root, _LEAF, _emit(dict(schema=value, record=[_record(1, _IMP)]))))
             check("imported-leaf-schema-" + label + "-cannot", leafed.status == CANNOT_EVALUATE and _says(
                 leafed, "does not hold exactly schema = {}".format(records.SUPPORTED_SCHEMA)))
+        # The leaf holds EXACTLY schema and its one row array: an extra key (here a second row array whose
+        # record names a run the evaluator would otherwise never see) is refused, never skipped over.
+        sidecar = _case(lambda root: _put(root, _LEAF, _emit(dict(
+            schema=records.SUPPORTED_SCHEMA, record=[_record(1, _IMP)], entry=[_record(9, _IMP3)]))))
+        check("imported-leaf-extra-key-cannot", sidecar.status == CANNOT_EVALUATE and _says(
+            sidecar, "the imported leaf {} does not hold exactly schema = {} and an array of record "
+            "tables".format(_LEAF, records.SUPPORTED_SCHEMA)))
 
         # Doctor validity on the live tree.
         sick = _case(lambda root: dict(doctor=_Doctor(INVALID, ["C-LINKS: a dangling link"])))
@@ -1273,21 +1388,44 @@ def self_test():
         strict = dict((cid, "PASS") for cid in _roster())
         pinned_roster = _case(lambda root: dict(doctor=_Doctor(checks=strict)))
         check("doctor-without-imported-series-cannot", pinned_roster.status == CANNOT_EVALUATE
-              and _says(pinned_roster, ", ".join(IMPORTED_SERIES_CHECKS) + " absent from its roster"))
+              and _says(pinned_roster, ", ".join(("C-EVIDENCE-ENUM",) + _imported_series_checks())
+                        + " absent from its roster"))
+        # The roster is the real doctor's active-imported roster, so the homes-2 evidence enumeration alone
+        # absent is refused too: a map holding only the strict checks plus the imported-series checks is a
+        # roster no doctor run over an active imported store produces.
+        no_enum = dict((cid, "PASS") for cid in _doctor_roster() if cid != "C-EVIDENCE-ENUM")
+        enumless = _case(lambda root: dict(doctor=_Doctor(checks=no_enum)))
+        check("doctor-roster-without-evidence-enum-cannot", enumless.status == CANNOT_EVALUATE
+              and _says(enumless, "the doctor did not grade its full roster: C-EVIDENCE-ENUM absent from "
+                        "its roster"))
+        # A check id outside the required roster is never read as the validator's VALID, PASS or not.
+        padded = dict((cid, "PASS") for cid in _doctor_roster())
+        padded["C-NO-SUCH-CHECK"] = "PASS"
+        offroster = _case(lambda root: dict(doctor=_Doctor(checks=padded)))
+        check("doctor-unknown-check-id-cannot", offroster.status == CANNOT_EVALUATE
+              and _says(offroster, "the doctor graded C-NO-SUCH-CHECK outside its required roster"))
         kept = _case(lambda root: dict(doctor=_Doctor(INVALID, ["C-LINKS: a dangling link"], checks=strict)))
         check("doctor-invalid-keeps-its-reason", kept.status == INVALID
               and _says(kept, "doctor: C-LINKS: a dangling link") and not _says(kept, "absent from its roster"))
-        graded = dict((cid, "PASS") for cid in _roster() + IMPORTED_SERIES_CHECKS)
+        graded = dict((cid, "PASS") for cid in _doctor_roster())
         graded["C-IMPORTED-IDS"] = "FINDING"
         notpass = _case(lambda root: dict(doctor=_Doctor(checks=graded)))
         check("doctor-valid-imported-check-not-pass-cannot", notpass.status == CANNOT_EVALUATE
               and _says(notpass, "doctor reports VALID while grading C-IMPORTED-IDS FINDING"))
-        mapless = _case(lambda root: dict(doctor=_Doctor(checks=list(IMPORTED_SERIES_CHECKS))))
+        mapless = _case(lambda root: dict(doctor=_Doctor(checks=list(_imported_series_checks()))))
         check("doctor-no-check-map-cannot", mapless.status == CANNOT_EVALUATE
               and _says(mapless, "carries no per-check verdict map"))
         check("doctor-absent-cannot", _says(_case(lambda root: dict(doctor=None)), "no doctor run was supplied"))
         check("doctor-cannot-evaluate-cannot", _case(
             lambda root: dict(doctor=_Doctor(CANNOT_EVALUATE, cannot=["x"]))).status == CANNOT_EVALUATE)
+        # The status vocabulary stands alone: a CANNOT-EVALUATE result whose cannot_evaluate list is empty
+        # is refused on its status, and a status outside the vocabulary is never read.
+        hollow = _case(lambda root: dict(doctor=_Doctor(CANNOT_EVALUATE)))
+        check("doctor-cannot-evaluate-empty-list-cannot", hollow.status == CANNOT_EVALUATE
+              and _says(hollow, "doctor: CANNOT-EVALUATE"))
+        offbook = _case(lambda root: dict(doctor=_Doctor("GREEN")))
+        check("doctor-status-out-of-vocabulary-cannot", offbook.status == CANNOT_EVALUATE
+              and _says(offbook, "doctor: GREEN"))
         check("doctor-valid-with-cannot-list-cannot", _case(
             lambda root: dict(doctor=_Doctor(VALID, cannot=["x"]))).status == CANNOT_EVALUATE)
         check("doctor-invalid-without-finding-cannot", _case(
@@ -1335,10 +1473,25 @@ def self_test():
               and _says(real, "doctor: CANNOT-EVALUATE store is not resolved"))
 
         # Binding: only a migrate source the plan scopes is evaluated, under a readable plan of this run.
-        check("source-not-in-plan-cannot", _case(source="legacy/other.md").status == CANNOT_EVALUATE)
+        unplanned = _case(source="legacy/other.md")
+        check("source-not-in-plan-cannot", unplanned.status == CANNOT_EVALUATE
+              and _says(unplanned, "'legacy/other.md' is not a migrate-disposed source"))
         retired = _case(source=_RETIRED)
         check("retire-source-cannot", retired.status == CANNOT_EVALUATE
               and _says(retired, "'legacy/RULES.md' is not a migrate-disposed source"))
+        # The plan parser refuses a duplicate source row, so the one-row bar is defence in depth: stubbed
+        # past that refusal, a doubled migrate row is still ambiguous, never read as its first row.
+        genuine_plan = apply.frozen_plan
+
+        def doubled_rows(plan_bytes):
+            plan = genuine_plan(plan_bytes)
+            plan["sources"] = list(plan["sources"]) + [dict(row) for row in plan["sources"]
+                                                       if row["path"] == _SOURCE]
+            return plan
+        with mock.patch.object(apply, "frozen_plan", doubled_rows):
+            doubled_plan = _case()
+        check("plan-row-duplicated-cannot", doubled_plan.status == CANNOT_EVALUATE
+              and _says(doubled_plan, "'notes/old.md' is not a migrate-disposed source"))
 
         def other_run(root):
             # A self-consistent plan the same fixture freezes for another run, placed in this run's bundle.
@@ -1348,7 +1501,13 @@ def self_test():
                     _fixture(elsewhere)
                 _put(root, apply.plan_rel(_RUN), _bytes(elsewhere, apply.plan_rel(other)))
         check("plan-naming-another-run-cannot", _says(_case(other_run), "the bundle's plan names run"))
-        check("run-id-malformed-cannot", evaluate_source("/", "adopt-nope", _SOURCE).status == CANNOT_EVALUATE)
+        # A malformed run id against a real fixture, so only the run-id grammar bar refuses it (against a
+        # bare root the plan read would refuse first) and its named reason is pinned.
+        with tempfile.TemporaryDirectory(prefix="opf-import-complete-") as root:
+            _fixture(root)
+            malformed = evaluate_source(root, "adopt-nope", _SOURCE, doctor=_Doctor())
+        check("run-id-malformed-cannot", malformed.status == CANNOT_EVALUATE
+              and _says(malformed, "run id 'adopt-nope' does not match the adoption grammar"))
         check("plan-absent-cannot", _case(lambda root: _remove(root, apply.plan_rel(_RUN))).status
               == CANNOT_EVALUATE)
         # A leg that cannot evaluate stops only itself: the other legs still report.
