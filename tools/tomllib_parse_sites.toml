@@ -871,6 +871,14 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
+function = "flip_t5_count_narrow.narrow"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
 function = "flip_t74_schema.loose"
 form = "call"
 count = 1
@@ -913,6 +921,14 @@ reason = "test-code"
 path = "opf/tools/check_opf_record.py"
 function = "t2_round_trip"
 form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t5_handoff_count_malformed"
+form = "alias"
 count = 1
 class = "EXEMPT"
 reason = "test-code"
