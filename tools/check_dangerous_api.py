@@ -531,6 +531,12 @@ ALLOWLIST = (
      "self-test probe: reloads this file itself under a finder that hides tomllib, to pin the"
      " nested missing-dependency refusal; no external input"),
     ("tools/selftest_orch_hooks.py", "_rdp_cases", "shell", 2, _SAVED),
+    ("tools/selftest_orch_hooks.py", "_hook_variant", "code", 2,
+     "self-test variant: exec_module loads a module written under the self-test's temporary"
+     " directory from one top-level function of the repository's own aiqt_hooks.py source (read"
+     " from aiqt_hooks.__file__) with one literal replacement, never registered in sys.modules, and"
+     " types.FunctionType rebinds its code to the hook module's own globals; each caller restores"
+     " the original function in a finally; no external input"),
     ("opf/tools/check_opf_doctor.py", "_claude_hook_self_test", "code", 1,
      "self-test probe: loads the repository's own opf/enforcement/claude/pretooluse_deny.py as a"
      " fresh module to drive its classifier directly; no external input"),
