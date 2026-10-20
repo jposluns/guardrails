@@ -23,7 +23,9 @@
 # TOML reformatting are allowed; a duplicate key in any snapshot, a carriage return in a table line or
 # in a header-matching line of any compared snapshot (a CRLF table), and a declared table that cannot be
 # located in a file that exists at the first parent or the branch tip while that snapshot's config
-# declared the same table, fail closed. At the merge-base an unlocatable table reads as absent, which can
+# declared the same table (at the branch tip the merge-base's config counts too, so a branch that
+# renames or removes a declared table cannot shed its own row obligations), fail closed. For the
+# merge-base's rows an unlocatable table reads as absent, which can
 # only add branch-owned row obligations, never remove one. Rows have no
 # deletion opt-out: supersede a row with a new row, or correct it in place under key-stable.
 schema-version = 2

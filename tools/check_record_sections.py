@@ -53,8 +53,10 @@ kinds must be declared; [[record]] and opt-out-marker come together:
 
 Row identity. For a Markdown table, exactly one line of the file must match `header` cell for cell after
 trimming surrounding cell whitespace (so a re-padded header still locates the table) and be followed by a
-GFM delimiter row; a file carries at most one declared table (a duplicate table path in the config is
-refused); the table's rows are the consecutive following lines that start with `|`, and each row line must
+GFM delimiter row; one config declares at most one table per file (a duplicate table path in a config is
+refused; the working config and the first parent's combined can still put two declared tables, under
+different headers or arrays, in one file); the table's rows are the consecutive following lines that
+start with `|`, and each row line must
 also end with an unescaped `|` (a GFM-style row without the trailing pipe is refused); the first line that
 does not start with `|` ends the rows, and it is exit 2 when it still carries an unescaped `|` (an indented
 row, or a row without its leading pipe, which GFM renders as a further row); cells are split
@@ -67,12 +69,16 @@ CR-stripped BEFORE the leading-pipe test, so a CR-prefixed header line is caught
 fails closed rather than reading as absent. A declared table the header search cannot locate at the first
 parent or at the branch tip, while the file exists there and that snapshot's own config declared the table
 (CR-only line endings, an indented table, or any other unlocatable form), is exit 2 naming the file and
-snapshot, never read as the table not existing yet; only a file genuinely absent at that snapshot, or an
-existing file whose snapshot config had not yet declared the table, is skippable. A snapshot's config
-declared the table when it declares the same path, format, and header cells (Markdown) or array name
-(TOML); a declaration of another table at the same path (another array, another header) does not count,
-so a new table added beside a declared one reads as not-yet at the snapshots that did not declare it,
-while the earlier declaration stays in force for its own table. For a TOML table, rows
+snapshot, never read as the table not existing yet; at the branch tip the merge-base's config counts as
+declaring too, so a branch that renamed or removed a table both sides had declared (its own config and
+file no longer carry the declared form) fails closed rather than shedding the branch's own row
+obligations, while a branch forked before the table was declared, where neither the branch tip's config
+nor the merge-base's declares it, still reads as not-yet. Only a file genuinely absent at a snapshot, or
+an existing file whose applicable configs had not yet declared the table, is skippable. A snapshot's
+config declared the table when it declares the same path, format, and header cells (Markdown) or array
+name (TOML); a declaration of another table at the same path (another array, another header) does not
+count, so a new table added beside a declared one reads as not-yet at the snapshots that did not declare
+it, while the earlier declaration stays in force for its own table. For a TOML table, rows
 are the declared
 top-level array, which must be an array of tables whose key fields are present strings or integers, compared
 by parsed value so key order and layout do not matter. A row's identity is the tuple of its `key` columns; a
@@ -89,8 +95,9 @@ valid and declares no tables: the first parent's config is read and FULLY valida
 the same parser and shape checks as the working config (shared code, not a second looser copy), so a
 first-parent config that is present but is not a valid schema-version-1 or schema-version-2 config fails
 closed, whatever the working config's version, because the declarations it may carry cannot be known.
-Declarations come from the working config and the first parent's config only; the branch tip's config is
-read solely to decide whether an unlocatable branch-tip table fails closed, never to add obligations. R1 needs only the post-merge commit and its first
+Declarations come from the working config and the first parent's config only; the branch tip's config and
+the merge-base's are read solely to decide whether an unlocatable branch-tip table fails closed, never to
+add obligations. R1 needs only the post-merge commit and its first
 parent, so a version-2 config declaring only tables is evaluable on a single-parent (squash) commit with
 no --branch-ref and no --base-ref (an explicit --base-ref cannot be validated without a branch graph, so
 it fails closed there); [[record]] entries keep the version-1 graph requirements. R2 (the row analogue of
@@ -122,13 +129,15 @@ Exit convention:
   2  malformed or unreadable config/input (a heading-pattern that cannot be compiled included, whatever
      the compiler raises), a missing, duplicate or misshapen declared table, a declared
      table that cannot be located at the first parent or the branch tip while the file exists there and
-     that snapshot's config declared it, a duplicate
+     that snapshot's config declared it (at the branch tip a declaration in the merge-base's config
+     counts too), a duplicate
      row key in any snapshot, a missing key column, a CR in a table line or in a header-matching line of
      any compared snapshot, a line directly after a table's rows that carries a pipe without starting
      with one, an explicit --base-ref on a single-parent commit with no branch ref, a
-     first-parent config that is not a valid version-1 or version-2 config, a branch-tip config that is
-     not a valid version-1 or version-2 config when a declared table cannot be located at the branch tip
-     (the only case that reads the branch tip's config), a declared TOML array that
+     first-parent config that is not a valid version-1 or version-2 config, a branch-tip or merge-base
+     config that is not a valid version-1 or version-2 config when a declared table cannot be located at
+     the branch tip (the only case that reads either of those snapshots' configs), a declared TOML array
+     that
      is not an array of tables or carries a non-scalar key value, a version-2 config with unknown keys,
      a config path whose canonicalization net-redirects through a
      symlink (its real target differs from the literal name) or that resolves outside the repository root,
@@ -153,8 +162,10 @@ over-deny: a column rename or addition cannot land through a gated merge that ke
 scope. A carriage return in a header-matching line of any compared snapshot fails closed, an over-deny when
 the loss it blocks would have been benign line-ending normalization, and an unlocatable declared table at
 the first parent or the branch tip fails closed the same way, an over-deny when the unlocatable form was
-benign. A file carries at most one declared
-table, and uniqueness is judged on trimmed cells: a SECOND table in the same file whose header carries the
+benign; at the branch tip that includes a table only the merge-base's config declared (the branch renamed
+or removed it), an over-deny when the branch had added no rows to it. Each config declares at most one
+table per file, and header uniqueness is judged on trimmed cells: a SECOND table in the same file whose
+header carries the
 same cells as the declared header (padding aside) makes the declared header ambiguous and is refused, so
 while such a file sits on the target every gated merge is refused, an over-deny. When a key absent at the
 merge-base is added by BOTH sides of a frozen table with different content, every resolution is refused
@@ -493,13 +504,15 @@ def _compile_heading_pattern(pattern, where):
     """Compile one heading-pattern, turning EVERY compilation failure into a contextual refusal.
 
     re.compile raises re.error for a malformed pattern, but also OverflowError for a repetition count
-    past the engine's limit (a{4294967296}) and RecursionError for nesting deeper than the interpreter's
-    recursion limit; MemoryError is caught too, should compilation exhaust memory. Catching only re.error
-    let the others escape as a traceback (exit 1, the finding code) that names neither the config nor the
-    snapshot, for the working config and for every historical config alike."""
+    past the engine's limit (a{4294967296}), a BARE ValueError for a repetition count past CPython's
+    integer string conversion limit (re's parser converts the count with int(), so a{<4400 digits>}
+    raises before the engine's own count check can), and RecursionError for nesting deeper than the
+    interpreter's recursion limit; MemoryError is caught too, should compilation exhaust memory.
+    Catching only re.error let the others escape as a traceback (exit 1, the finding code) that names
+    neither the config nor the snapshot, for the working config and for every historical config alike."""
     try:
         return re.compile(pattern)
-    except (re.error, OverflowError, RecursionError, MemoryError) as exc:
+    except (re.error, OverflowError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("{}: heading-pattern is invalid ({}: {})".format(where, type(exc).__name__, exc))
 
 
@@ -1016,25 +1029,28 @@ def _require_present(rows, decl, where):
     return rows
 
 
-def _require_locatable(rows, text, declared, decl, where):
+def _require_locatable(rows, text, declared_by, decl, where):
     """Fail closed on a declared table that cannot be located in an EXISTING file at a compared snapshot.
 
     rows is None when _read_table_rows could not locate the declared table. With the file itself absent
     (text is None) the table genuinely did not exist at that snapshot, so None passes through and the
-    caller skips that snapshot's obligations. With the file present, the decision follows the config that
-    applies to that snapshot: when that snapshot's own config declared the table (declared: it carries a
-    declaration with the same _table_locator, not merely one at the same path), an
-    unlocatable form (CR-only line endings, an indented table, or anything else the header search cannot
-    find) is ambiguous input, and reading it as "the table did not exist yet" would silently empty the
-    snapshot's row obligations and let a simultaneous drop pass, so it is exit 2 naming the file and
-    snapshot; when that snapshot's config did not declare the table (it was declared only later), absence
-    from the existing file is genuinely not-yet and None passes through.
+    caller skips that snapshot's obligations. With the file present, the decision follows the configs
+    that apply to that snapshot: declared_by is None when none of them declared the table (a declaration
+    with the same _table_locator, not merely one at the same path), or a short phrase naming the config
+    that did ("that snapshot's config"; at the branch tip "the merge-base's config" counts too, so a
+    branch that renamed or removed a table both sides had declared cannot shed its own row obligations).
+    When the table was declared, an unlocatable form (CR-only line endings, an indented table, or
+    anything else the header search cannot find) is ambiguous input, and reading it as "the table did
+    not exist yet" would silently empty the snapshot's row obligations and let a simultaneous drop pass,
+    so it is exit 2 naming the file, the snapshot, and the declaring config; when no applicable config
+    declared the table (it was declared only later), absence from the existing file is genuinely not-yet
+    and None passes through.
     """
-    if rows is None and text is not None and declared:
+    if rows is None and text is not None and declared_by:
         raise GateError(
-            "{}: the file exists and that snapshot's config declares the table, but the declared table "
+            "{}: the file exists and {} declares the table, but the declared table "
             "({}) cannot be located; an unlocatable declared table fails closed rather than reading as "
-            "absent".format(where, decl.header or decl.array))
+            "absent".format(where, declared_by, decl.header or decl.array))
     return rows
 
 
@@ -1158,17 +1174,20 @@ def _table_locator(spec):
     return (spec.path, spec.table_format, spec.header_cells, spec.array)
 
 
-def _branch_decl_locators(root, config_rel, branch_commit):
-    """Locators (_table_locator) of the tables the branch tip's own config declares, read ONLY to decide
+def _snapshot_decl_locators(root, config_rel, commit, label):
+    """Locators (_table_locator) of the tables one snapshot's own config declares, read ONLY to decide
     whether an unlocatable branch-tip table fails closed (_require_locatable), never to add obligations.
-    An absent or out-of-root config declares none; an invalid branch-tip config fails closed here (exit
-    2), since whether the unlocatable table was declared at that snapshot then cannot be known. The read
-    is lazy: it happens only once a branch-tip table was found unlocatable, so an ordinary merge never
-    pays it, and an invalid branch-tip config is refused only on that path."""
+    The branch tip's config and the merge-base's are both read for that decision: a table only the
+    merge-base's config declared is one the branch itself renamed or removed, and reading its branch-tip
+    copy as not yet there would shed the branch's own row obligations. An absent or out-of-root config
+    declares none; an invalid config at that snapshot fails closed here (exit 2), since whether the
+    unlocatable table was declared there then cannot be known. The reads are lazy: they happen only once
+    a branch-tip table was found unlocatable, so an ordinary merge never pays them, and an invalid config
+    at either snapshot is refused only on that path."""
     if config_rel is None:
         return frozenset()
     return frozenset(_table_locator(spec) for spec in
-                     _snapshot_config_tables(root, config_rel, branch_commit, "the branch tip"))
+                     _snapshot_config_tables(root, config_rel, commit, label))
 
 
 def _compare_tables(root, decls, base_decl_locators, config_rel, target, graph, post_merge):
@@ -1176,21 +1195,27 @@ def _compare_tables(root, decls, base_decl_locators, config_rel, target, graph, 
     frozen tables) when the branch graph is resolvable, for every declared table. Returns (checked key
     count, findings). An unlocatable declared table in an existing file fails closed at the first parent
     (when the first parent's config declared that same table: base_decl_locators) and at the branch tip
-    (when the branch tip's own config did, read lazily); at the merge-base it reads as absent, which can
-    only ADD branch-owned obligations, never shed one. Every first-parent declaration is itself in decls,
-    so each table the first parent declared is checked under its own declaration; a working-config table
-    the first parent did not declare (a new TOML array or header at an already-declared path) reads as
-    not-yet there, like any adoption."""
+    (when the branch tip's own config did, or the merge-base's config did, both read lazily: a branch
+    that renamed or removed a table the merge-base's config declared must fail closed rather than shed
+    its own branch rows, while a branch forked before the table was declared, where neither config
+    declares it, still reads as not-yet); for the merge-base's ROWS an unlocatable table reads as absent,
+    which can only ADD branch-owned obligations, never shed one. Every first-parent declaration is itself
+    in decls, so each table the first parent declared is checked under its own declaration; a
+    working-config table the first parent did not declare (a new TOML array or header at an
+    already-declared path) reads as not-yet there, like any adoption."""
     findings = []
     checked = 0
     branch_locators = None
+    mergebase_locators = None
     r1_base = _r1_base_commit(target, graph[0] if graph else None)
     for decl in decls:
         base_where = "{} at the pre-merge target".format(decl.path)
         base_text = _tree_text(root, r1_base, decl.path)
         base_rows = _require_locatable(
             None if base_text is None else _read_table_rows(base_text, decl, base_where),
-            base_text, _table_locator(decl) in base_decl_locators, decl, base_where)
+            base_text,
+            "that snapshot's config" if _table_locator(decl) in base_decl_locators else None,
+            decl, base_where)
         post_where = "{} at post-merge".format(decl.path)
         post_text = _tree_text(root, post_merge, decl.path)
         if post_text is None:
@@ -1217,10 +1242,16 @@ def _compare_tables(root, decls, base_decl_locators, config_rel, target, graph, 
                              _read_table_rows(branch_text, decl, branch_where))
             if branch_parsed is None and branch_text is not None:
                 if branch_locators is None:
-                    branch_locators = _branch_decl_locators(root, config_rel, branch_commit)
+                    branch_locators = _snapshot_decl_locators(
+                        root, config_rel, branch_commit, "the branch tip")
+                    mergebase_locators = _snapshot_decl_locators(
+                        root, config_rel, mergebase_commit, "the merge-base")
+                locator = _table_locator(decl)
+                declared_by = ("that snapshot's config" if locator in branch_locators
+                               else "the merge-base's config" if locator in mergebase_locators
+                               else None)
                 branch_parsed = _require_locatable(
-                    branch_parsed, branch_text, _table_locator(decl) in branch_locators, decl,
-                    branch_where)
+                    branch_parsed, branch_text, declared_by, decl, branch_where)
             branch_rows = branch_parsed or {}
             checked += sum(1 for key in branch_rows if key not in mergebase_rows)
             findings.extend(_r2_findings(decl, mergebase_rows, branch_rows, post_rows))
@@ -2132,13 +2163,18 @@ def _self_test_isolated():
           "a CR-bearing header, a CR-prefixed one included, in any compared "
           "snapshot, an unlocatable declared table in an existing file at "
           "the first parent or the branch tip under that snapshot's own "
-          "declaration of the same table, an invalid branch-tip config read "
+          "declaration of the same table, at the branch tip under the "
+          "merge-base's declaration too (so a branch-side rename of a "
+          "declared table cannot shed the branch's own rows), an invalid "
+          "branch-tip config read "
           "for that decision, a schema downgrade or any invalid first-parent "
           "config (validated by the working loader's own shape checks) that "
           "would shed declarations, a heading-pattern the compiler rejects "
-          "with OverflowError or RecursionError in the working or the "
+          "with OverflowError, ValueError, RecursionError or MemoryError in "
+          "the working or the "
           "first-parent config, a row-shaped line directly after a table's "
-          "rows that does not start with a pipe, an explicit --base-ref on a "
+          "rows that does not start with a pipe, a pipe after a double "
+          "backslash on such a line, an explicit --base-ref on a "
           "single-parent commit, a no-break-space cell edit, and the "
           "exercised grammar, shape and graph refusals, each table-leg "
           "refusal and each config-shape refusal asserted by its specific "
@@ -2150,10 +2186,12 @@ def _self_test_isolated():
           "an unchanged NaN "
           "value, a NaN respelled as +nan, a datetime respelled to the "
           "identical parsed value, a heading directly after a table's rows, "
-          "escaped pipes, key-stable corrections, new tables, a table "
+          "escaped pipes (directly after the rows included), key-stable "
+          "corrections, new tables, a table "
           "adopted into an existing file, a branch forked before adoption, "
           "a new table declared beside an already-declared one at the same "
-          "path, a valid version-1 first-parent config, a clean "
+          "path, at the first parent and at the branch tip alike, a valid "
+          "version-1 first-parent config, a clean "
           "squash, a rows-preserved schema downgrade, and a mixed "
           "heading-and-table config with both legs live, each allowed change "
           "shown failing under a naive variant or discriminated by a paired "
@@ -2472,6 +2510,39 @@ def _v2_self_test_cases(directory):
     with _swapped("_check_row_run_end", any_nonblank_end):
         expect("the heading after the rows fails when any non-blank line is refused (naive variant)",
                _quiet_run(root, cfg_frozen, True, heading_after, None, None), 2)
+
+    # The table-ending test uses _split_cells's escape rule: a backslash escapes exactly the next
+    # character, so a line whose every pipe is `\|` carries no unescaped pipe and ends the table like
+    # prose, while `\\|` (the first backslash escapes the second) still carries an unescaped pipe and is
+    # refused. A naive any-pipe test refuses the escaped-pipe prose; a pair-blind test that erases every
+    # `\|` sequence silently ends the table at the double-backslash line.
+    escaped_after = _v2_branch_commit(root, "v2-escaped-pipe-after", target,
+                                      {"done.md": md(row_y, row_x1)
+                                                  + "prose with an escaped \\| pipe\n"},
+                                      "escaped pipe directly after the rows")
+    expect("control: a line with only an escaped pipe directly after the rows ends the table",
+           _quiet_run(root, cfg_frozen, True, escaped_after, None, None), 0)
+    with _swapped("_has_unescaped_pipe", lambda line: "|" in line):
+        expect("the escaped-pipe prose fails when any pipe after the rows is refused (naive variant)",
+               _quiet_run(root, cfg_frozen, True, escaped_after, None, None), 2)
+    paired_base = _v2_branch_commit(root, "v2-paired-backslash", target,
+                                    {"done.md": md(row_y, "a stray row with \\\\| a pipe after a "
+                                                          "double backslash")},
+                                    "double backslash does not escape the pipe")
+    paired_drop = _v2_branch_commit(root, "v2-paired-backslash-drop", paired_base,
+                                    {"done.md": md(row_y)}, "that line dropped")
+    expect_refusal("a pipe after a double backslash directly after the rows",
+                   _quiet_run_refusal(root, cfg_frozen, True, paired_drop, None, None),
+                   "done.md at the pre-merge target: a line directly after the table's rows "
+                   "carries a pipe but does not start with one")
+
+    def pair_blind_pipe(line):
+        return "|" in line.replace("\\|", "")
+
+    with _swapped("_has_unescaped_pipe", pair_blind_pipe):
+        expect("the double-backslash pipe line ends the table silently once backslash pairs are "
+               "ignored (mutant)",
+               _quiet_run(root, cfg_frozen, True, paired_drop, None, None), 0)
 
     # The whole declared file deleted: every row disappeared.
     file_deleter = _v2_branch_commit(root, "v2-delete-file", target,
@@ -3306,7 +3377,9 @@ def _v2_self_test_cases(directory):
                                   {"done.md": md(row_y)}, "normalized to LF, a row dropped")
     expect_refusal("a CR-only first-parent table under that snapshot's declaration fails closed",
                    _quiet_run_refusal(uloc, uloc_config, True, uloc_drop, None, None),
-                   "done.md at the pre-merge target")
+                   "done.md at the pre-merge target: the file exists and that snapshot's config "
+                   "declares the table, but the declared table (| id | pr | closed | note |) cannot "
+                   "be located")
     with _swapped("_require_locatable",
                   lambda rows, text, declared, decl, where: rows):
         expect("the CR-only drop hides once the unlocatable-table check is removed (mutant)",
@@ -3319,7 +3392,9 @@ def _v2_self_test_cases(directory):
                                       {"done.md": md(row_y)}, "dedented, a row dropped")
     expect_refusal("an indented first-parent table under that snapshot's declaration fails closed",
                    _quiet_run_refusal(uloc, uloc_config, True, uloc_ind_drop, None, None),
-                   "done.md at the pre-merge target")
+                   "done.md at the pre-merge target: the file exists and that snapshot's config "
+                   "declares the table, but the declared table (| id | pr | closed | note |) cannot "
+                   "be located")
     with _swapped("_require_locatable",
                   lambda rows, text, declared, decl, where: rows):
         expect("the indented-table drop hides once the unlocatable-table check is removed (mutant)",
@@ -3393,7 +3468,8 @@ def _v2_self_test_cases(directory):
                                 "merge keeps the target file, branch row gone")
     expect_refusal("a CR-only branch-tip table under that snapshot's declaration fails closed",
                    _quiet_run_refusal(uloc, uloc_config, True, m_tip, None, None),
-                   "done.md at branch tip")
+                   "done.md at branch tip: the file exists and that snapshot's config declares the "
+                   "table, but the declared table (| id | pr | closed | note |) cannot be located")
     with _swapped("_require_locatable",
                   lambda rows, text, declared, decl, where: rows):
         expect("the dropped branch row stays hidden once the unlocatable-table check is removed "
@@ -3415,17 +3491,32 @@ def _v2_self_test_cases(directory):
                    _quiet_run_refusal(uloc, uloc_config, True, m_badtip, None, None),
                    ".aiqt/record-sections.toml at the branch tip: at least one [[record]] or [[table]] "
                    "table is required")
-    true_branch_locators = _branch_decl_locators
+    true_decl_locators = _snapshot_decl_locators
 
-    def lenient_branch_locators(root_path, config_rel, branch_commit):
+    def lenient_decl_locators(root_path, config_rel, commit, label):
         try:
-            return true_branch_locators(root_path, config_rel, branch_commit)
+            return true_decl_locators(root_path, config_rel, commit, label)
         except GateError:
             return frozenset()
 
-    with _swapped("_branch_decl_locators", lenient_branch_locators):
+    def mergebase_blind_locators(root_path, config_rel, commit, label):
+        if label == "the merge-base":
+            return frozenset()
+        return lenient_decl_locators(root_path, config_rel, commit, label)
+
+    # With only the invalid branch-tip config read as declaring nothing, the merge-base's own
+    # declaration still fails the unlocatable table closed (defence in depth); hiding the dropped
+    # branch row needs the merge-base read removed as well.
+    with _swapped("_snapshot_decl_locators", lenient_decl_locators):
+        expect_refusal("an invalid branch-tip config read as declaring nothing is still caught by the "
+                       "merge-base's declaration (mutant)",
+                       _quiet_run_refusal(uloc, uloc_config, True, m_badtip, None, None),
+                       "done.md at branch tip: the file exists and the merge-base's config declares "
+                       "the table, but the declared table (| id | pr | closed | note |) cannot be "
+                       "located")
+    with _swapped("_snapshot_decl_locators", mergebase_blind_locators):
         expect("the dropped branch row hides once an invalid branch-tip config reads as declaring "
-               "nothing (mutant)",
+               "nothing and the merge-base declaration is not read (mutants)",
                _quiet_run(uloc, uloc_config, True, m_badtip, None, None), 0)
 
     # A snapshot declared the table when its config declares the same table (path, format, header cells
@@ -3446,8 +3537,43 @@ def _v2_self_test_cases(directory):
                    "done.md at branch tip: the file exists and that snapshot's config declares the "
                    "table")
     with _swapped("_table_locator", lambda spec: spec):
-        expect("the dropped branch row hides once the whole declaration must match (mutant)",
-               _quiet_run(uloc, uloc_config, True, m_kstip, None, None), 0)
+        expect_refusal("the key-stable branch declaration is still caught by the merge-base's "
+                       "declaration once the whole declaration must match (mutant)",
+                       _quiet_run_refusal(uloc, uloc_config, True, m_kstip, None, None),
+                       "done.md at branch tip: the file exists and the merge-base's config declares "
+                       "the table")
+        with _swapped("_snapshot_decl_locators", mergebase_blind_locators):
+            expect("the dropped branch row hides once the whole declaration must match and the "
+                   "merge-base declaration is not read (mutants)",
+                   _quiet_run(uloc, uloc_config, True, m_kstip, None, None), 0)
+
+    # A branch that RENAMES a declared table in its own config and file (adding a row under the new
+    # form) must not read as the table not yet existing at the branch tip: the merge-base's config
+    # declared the table, so the unlocatable branch-tip copy fails closed, and a resolver who keeps the
+    # target's side cannot silently drop the branch's own rows into a PASS. A branch forked before the
+    # table was declared stays allowed (the adoption fixtures below), because there neither the branch
+    # tip's config nor the merge-base's declares it.
+    renamed_header = "| id | pr | closed | notes |"
+    renamed_cfg = ('schema-version = 2\n\n[[table]]\npath = "done.md"\nformat = "markdown"\n'
+                   'header = "| id | pr | closed | notes |"\nkey = ["id", "pr"]\nedit = "frozen"\n')
+    renamed_md = ("# Done log\n\n" + renamed_header + "\n" + delimiter + "\n"
+                  + row_y + "\n" + row_x1 + "\n" + row_x2 + "\n")
+    uloc_ren_b = _v2_branch_commit(uloc, "v2-uloc-rename-b", uloc_clean,
+                                   {"done.md": renamed_md,
+                                    ".aiqt/record-sections.toml": renamed_cfg},
+                                   "branch renames the declared header and adds a row")
+    m_ren = _v2_synthetic_merge(uloc, uloc_tip_t, [uloc_tip_t, uloc_ren_b],
+                                "resolver keeps the target side, branch row gone")
+    _selftest_git(uloc, ["checkout", "-q", uloc_tip_t])
+    expect_refusal("a branch-side rename of a declared table fails closed through the merge-base's "
+                   "declaration",
+                   _quiet_run_refusal(uloc, uloc_config, True, m_ren, None, None),
+                   "done.md at branch tip: the file exists and the merge-base's config declares the "
+                   "table, but the declared table (| id | pr | closed | note |) cannot be located")
+    with _swapped("_snapshot_decl_locators", mergebase_blind_locators):
+        expect("the renamed table's dropped branch row hides once the merge-base declaration is not "
+               "read (mutant)",
+               _quiet_run(uloc, uloc_config, True, m_ren, None, None), 0)
 
     # A declaration of ANOTHER table at an already-declared path (a new TOML array, a new Markdown
     # header) is not a declaration of the new table at the first parent, so the new table reads as
@@ -3490,6 +3616,31 @@ def _v2_self_test_cases(directory):
         with _swapped("_table_locator", lambda spec: spec.path):
             expect(case_name + " fails when a declaration matches on the path alone (naive variant)",
                    _quiet_run(locr, locr_config, True, locr_next, None, None), 2)
+
+    # The branch-tip half of the same rule: a branch forked before the new header was declared leaves
+    # it unlocatable in its existing done.md, and neither the branch tip's config nor the merge-base's
+    # declares it, so it reads as not-yet there; matching on the path alone would read the old
+    # declaration at the same path as declaring it and refuse the merge.
+    locr_tip_new = _v2_branch_commit(locr, "v2-loc-tip-new", locr_base,
+                                     {".aiqt/record-sections.toml":
+                                          "schema-version = 2\n\n" + toml_decl.format("done")
+                                          + "\n" + new_md_decl,
+                                      "done.md": md(row_y) + "\n" + new_header
+                                                 + "\n| --- | --- | --- | --- | --- |\n"
+                                                   "| Z | PR9 | 2026-03-01 | new | owner |\n"},
+                                     "the new header declared and added on the target")
+    locr_tip_old = _v2_branch_commit(locr, "v2-loc-tip-old", locr_base,
+                                     {"b.txt": "b\n"}, "branch forked before the new header")
+    m_loc_tip = _v2_synthetic_merge(locr, locr_tip_new, [locr_tip_new, locr_tip_old],
+                                    "merge keeps both tables")
+    _selftest_git(locr, ["checkout", "-q", locr_tip_new])
+    expect("control: a new Markdown header declared beside an already-declared path reads as not-yet "
+           "at the branch tip",
+           _quiet_run(locr, locr_config, True, m_loc_tip, None, None), 0)
+    with _swapped("_table_locator", lambda spec: spec.path):
+        expect("the pre-declaration branch tip fails when a declaration matches on the path alone "
+               "(naive variant)",
+               _quiet_run(locr, locr_config, True, m_loc_tip, None, None), 2)
 
     # The rule is bounded by the snapshot's OWN declarations: a table (and its declaration) adopted in
     # the very commit under gate, and an old branch that forked before adoption, both leave the earlier
@@ -3537,18 +3688,23 @@ def _heading_pattern_self_test_cases(directory):
     """A heading-pattern the compiler rejects with something other than re.error must still be a
     contextual exit-2 refusal naming the config, in the working config and in the first parent's config.
 
-    A repetition count past the engine's limit raises OverflowError from a real pattern. A recursion
-    overflow is INJECTED (re.compile raises RecursionError on a marked pattern) rather than provoked by a
-    deeply nested one, because the nesting depth that overflows depends on the interpreter's recursion
-    limit. Each refusal is paired with a mutant whose compile step catches re.error only, under which the
-    same fixture lets the exception escape run(). Returns failure strings.
+    A repetition count past the engine's limit raises OverflowError from a real pattern, and one past
+    CPython's integer string conversion limit raises a bare ValueError from a real pattern (re's parser
+    converts the count with int()); the conversion limit is pinned to the default 4300 digits for the
+    ValueError case, so the 4400-digit count overflows it whatever widening a caller applied
+    (test hermeticity). A recursion overflow and a memory exhaustion are INJECTED (re.compile raises
+    RecursionError or MemoryError on a marked pattern) rather than provoked by a deeply nested or
+    memory-exhausting one, because the depth that overflows depends on the interpreter's recursion limit
+    and a real allocation failure would destabilize the suite. Each refusal is paired with a mutant whose
+    compile step catches re.error only, under which the same fixture lets the exception escape run().
+    Returns failure strings.
     """
     failures = []
 
     def outcome(repo_root, config, post):
         try:
             return _quiet_run_refusal(repo_root, config, True, post, None, None)
-        except (OverflowError, RecursionError) as exc:
+        except (OverflowError, ValueError, RecursionError, MemoryError) as exc:
             return "escaped", type(exc).__name__
 
     def expect_refusal(name, result, needle):
@@ -3580,13 +3736,35 @@ def _heading_pattern_self_test_cases(directory):
     def injected_compile(pattern, flags=0):
         if isinstance(pattern, str) and "injected-recursion" in pattern:
             raise RecursionError("injected compiler recursion overflow")
+        if isinstance(pattern, str) and "injected-memory" in pattern:
+            raise MemoryError("injected compiler memory exhaustion")
         return real_compile(pattern, flags)
 
+    prev_digits = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        _heading_pattern_cases(directory, outcome, expect_refusal, expect_escape,
+                               re_error_only, v1_config, tables_only,
+                               injected_compile, real_compile)
+    finally:
+        sys.set_int_max_str_digits(prev_digits)
+    return failures
+
+
+def _heading_pattern_cases(directory, outcome, expect_refusal, expect_escape, re_error_only,
+                           v1_config, tables_only, injected_compile, real_compile):
+    """One fixture repo per exception class the compile boundary must catch beyond re.error; every
+    outcome is recorded through the expect callbacks, which append to the caller's failure list."""
     for label, pattern, exc_name, needle_detail in (
             ("a repetition count past the engine's limit", "^## a{4294967296}$", "OverflowError",
              "OverflowError: the repetition number is too large"),
+            ("a repetition count past the integer string conversion limit",
+             "^## a{" + "9" * 4400 + "}$", "ValueError",
+             "ValueError: Exceeds the limit"),
             ("an injected compiler recursion overflow", "^## injected-recursion$", "RecursionError",
-             "RecursionError: injected compiler recursion overflow")):
+             "RecursionError: injected compiler recursion overflow"),
+            ("an injected compiler memory exhaustion", "^## injected-memory$", "MemoryError",
+             "MemoryError: injected compiler memory exhaustion")):
         repo = directory / "pattern-{}".format(exc_name.lower())
         repo.mkdir()
         _selftest_git(repo, ["init", "-q", "-b", "main"])
@@ -3622,7 +3800,6 @@ def _heading_pattern_self_test_cases(directory):
                               "caught (mutant)", outcome(repo, historical, child), exc_name)
         finally:
             re.compile = real_compile
-    return failures
 
 
 def _parser():
