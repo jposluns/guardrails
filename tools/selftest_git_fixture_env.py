@@ -4446,7 +4446,8 @@ _SCAN_ALLOWED_UNPINNED = (
      "production gate probe over the real checkout (rev-parse/merge-base family reads under"
      " _git_env); read-only by design, and production launches stay unchanged"),
     ("tools/check_msg_leaks.py", "_run_git", ("git",),
-     "production gate read helper (log/rev-parse over the real repository); read-only by"
+     "production gate read helper (log/rev-parse/ls-tree/show/symbolic-ref over the real"
+     " repository, or in --pre-push mode over the repository the caller names); read-only by"
      " design, and production launches stay unchanged"),
     ("tools/check_record_sections.py", "_git", ("git",),
      "shared gate/self-test funnel under _clean_env (GIT_* scrubbed, PATH kept):"

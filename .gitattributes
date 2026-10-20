@@ -754,6 +754,7 @@ tools/orch_doctor.py text eol=lf
 tools/orch_preflight.py text eol=lf
 tools/orch_register.py text eol=lf
 tools/pin.py text eol=lf
+tools/push_branch.py text eol=lf
 tools/run_all_checks.sh text eol=lf
 tools/selftest_aiqt_corpus.py text eol=lf
 tools/selftest_aiqt_hooks.py text eol=lf
