@@ -29,8 +29,9 @@ pass, not a dispatch entry, which the stage driver composes ahead of the plan ro
 require an apply-stage archive copy (a retire or migrate source, and an occupying move source; a kept
 source and a non-occupying move source take none), the pass archives only those no plan retire-file or
 move-file row binds (a migrate source takes no op row); such a row archives its own source. The driver
-then requires exactly one archive copy of each source requiring one in its base transaction
-(_require_archived_once), so a row that skipped its copy refuses the apply. PR3 slice 2 makes `enable-hook`
+then requires exactly one archive copy of each source requiring one, at the source's approved digest, in
+its base transaction (_require_archived_once), so a row that skipped its copy, or archived other bytes
+at its path, refuses the apply. PR3 slice 2 makes `enable-hook`
 executable, in the run's
 base (apply-stage) transaction only, as does slice 4 with the two structured-edit ops (_REGISTRATION_OPS:
 register-unmanaged, repoint-consumer). The stage driver
@@ -127,10 +128,12 @@ the driver's mandatory receipt stage (DRIVER_STAGES; spec 14 ends apply with the
 outcome-event chain, which no plan row can carry). It refuses any composed remove or write of a plan
 source that occupies no managed destination (such a source stays frozen in place until the retirement
 stage after a green completion check, and apply takes only its preimage), and any source requiring an
-apply-stage archive copy that the composition does not archive exactly once. The driver, not handler
-convention, enforces the composition rules: handlers run under a per-thread composition guard that
-refuses any direct filesystem or process effect and any transaction of their own (so a slice composes
-into `ops`, init-store's substrate included), and composition first runs as a write-free preflight
+apply-stage archive copy that the composition does not archive exactly once at its approved digest. The
+driver, not handler convention, enforces the composition rules: handlers run under a per-thread
+composition guard that refuses any direct filesystem or process effect and any transaction of their own
+(so a slice composes into `ops`; init-store's substrate is its own journaled run, sequenced outside the
+base transaction, which this driver does not sequence: apply refuses an init-store row by name,
+_DRIVER_UNSUPPLIED), and composition first runs as a write-free preflight
 before the journal is prepared, so a preflight refusal writes nothing at all; a refusal of the second
 composition, under the journal lock, releases the lock and removes the journal directories the run
 created, so it too leaves the tree as it found it, unless a release or a removal fails or may not be
@@ -4016,9 +4019,11 @@ def _init_store_postcondition(root_fd, product_root, members, operation_id):
 
 
 def _init_store(op_row, context=None):
-    """init-store (spec 14, 14.2): scaffold the default machine store by COMPOSING the coupled-init
-    substrate's journaled, create-only operation (`_opf_init_operation.run_init_operation`) INSIDE
-    this engine's own adoption transaction — never the thin `opf init` CLI path and never
+    """init-store (spec 14, 14.2): scaffold the default machine store by RUNNING the coupled-init
+    substrate's journaled, create-only operation (`_opf_init_operation.run_init_operation`) as this
+    run's OWN init-store transaction under the one shared journal lock, sequenced OUTSIDE the apply
+    stage's base transaction (the stage driver does not sequence that run and refuses an init-store
+    row by name, _DRIVER_UNSUPPLIED) — never the thin `opf init` CLI path and never
     re-implemented here. `context` carries `product_root` (absolute), `plan` (its `run_id`, `store`
     identity and `sources` dispositions), `ancestral` (the pinned evidence commit of a re-adoption's
     counters seed, else None) and `recover` (default False: EXPLICIT recovery, never implicit).
@@ -5488,24 +5493,33 @@ def _driver_contexts(ops, plan_doc, approval, product_root):
 def _require_archived_once(ops, plan_doc):
     """Refuse a composed apply stage unless every plan source that requires an apply-stage archive copy (a
     retire or migrate source, and an occupying move source: _classify_source; a kept source and a
-    non-occupying move source take none) has exactly one create at its archive path (archive_rel). The
-    preservation pass and the retire-file and move-file rows divide those copies between them
-    (compose_preservation, _file_op_archived); this holds the division to its composed result, not to
-    handler convention, so a row that skips its copy refuses the apply (ApplyOps.create already refuses a
-    second copy)."""
-    creates = [op["path"] for op in ops.ops if op.get("op") == "create"]
+    non-occupying move source take none) has exactly one create at its archive path (archive_rel), and
+    that create's content digest equals the source row's approved digest. The preservation pass and the
+    retire-file and move-file rows divide those copies between them (compose_preservation,
+    _file_op_archived); this holds the division, and the copied bytes, to the composed result, not to
+    handler convention, so a row that skips its copy, or archives other bytes at its path, refuses the
+    apply (ApplyOps.create already refuses a second copy at one path, and check_apply_ops refuses a
+    create whose staged bytes do not hash to its own content digest, so a digest-equal create carries
+    the approved bytes before commit)."""
+    creates = {}
+    for op in ops.ops:
+        if op.get("op") == "create":
+            creates.setdefault(op["path"], []).append((op.get("poststate") or {}).get("content-sha256"))
     wrong = []
     for row in plan_doc["sources"]:
         if row["disposition"] == "keep" or (row["disposition"] == "move" and not row["occupying"]):
             continue
-        count = creates.count(archive_rel(ops.run_id, row["path"]))
-        if count != 1:
-            wrong.append("{} ({} archive copies)".format(row["path"], count))
+        found = creates.get(archive_rel(ops.run_id, row["path"]), [])
+        if len(found) != 1:
+            wrong.append("{} ({} archive copies)".format(row["path"], len(found)))
+        elif found[0] != _plan_hex(row["digest"]):
+            wrong.append("{} (an archive copy at another digest than the approved source's)".format(
+                row["path"]))
     if wrong:
-        raise AdoptApplyError("the apply stage composes other than exactly one archive copy of plan source(s) "
-                              "{}; each source requiring an apply-stage archive copy takes exactly one, from "
-                              "the preservation pass or the file-op row that binds it (spec 14.2, "
-                              "fail-closed)".format(", ".join(wrong)))
+        raise AdoptApplyError("the apply stage composes other than exactly one archive copy, at the approved "
+                              "source digest, of plan source(s) {}; each such source takes exactly one, "
+                              "byte-identical under its approved digest, from the preservation pass or the "
+                              "file-op row that binds it (spec 14.2, fail-closed)".format(", ".join(wrong)))
 
 
 def _canonical_toml(data, label):
@@ -5706,11 +5720,13 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     HookContext, else the context table of `ops`, the transaction's ApplyOps; `plan`; `approval`;
     `product_root`; `stage`), then composes the mandatory receipt stage whatever rows the plan carries; the
     first refusing verdict refuses the whole composition, and so does a composition that does not archive
-    each source requiring an apply-stage archive copy exactly once (_require_archived_once). Handlers run
+    each source requiring an apply-stage archive copy exactly once at its approved digest
+    (_require_archived_once). Handlers run
     under the composition guard (_composing): a handler only stages into
-    `ops`, so a direct filesystem or process effect, or a transaction of its own, refuses the composition (a
-    slice that would delegate to its own journaled operation, init-store's substrate included, composes into
-    `ops` instead). Retirement partition (spec 14.1, 14.2): a plan source that occupies no managed
+    `ops`, so a direct filesystem or process effect, or a transaction of its own, refuses the composition
+    (init-store's substrate is its own journaled run, sequenced outside the base transaction; this driver
+    does not sequence it and refuses an init-store row by name, _DRIVER_UNSUPPLIED).
+    Retirement partition (spec 14.1, 14.2): a plan source that occupies no managed
     destination stays frozen, byte-identical in place, until the retirement stage after a green completion
     check, so the apply stage may take only its preimage: a composed remove or write of any non-occupying
     plan source refuses. The compose function first runs as a write-free preflight against the live tree,
@@ -11632,8 +11648,8 @@ def _self_test_checks():
               and "needs context observations" in (err or "") and "before anything is written" in (err or "")
               and not reached and _snapshot(root) == before, observed=err)
         # init-store keeps its REAL handler: apply names its unsequenced substrate run before anything is
-        # written (red against a _DRIVER_UNSUPPLIED without the init-store entry, where the composition
-        # guard refuses its nested transaction instead, unnamed).
+        # written (red against a _DRIVER_UNSUPPLIED without the init-store entry, where the real handler
+        # dispatches and refuses at its member-set precondition instead, the substrate run unnamed).
         with typed_driver({"render-views": benign, "install-pack": benign}):
             err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
         check("driver-apply-init-store-named-refused",
@@ -11647,6 +11663,37 @@ def _self_test_checks():
             err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
         check("driver-apply-unarchived-source-refused", "other than exactly one archive copy" in (err or "")
               and "legacy.md (0 archive copies)" in (err or "") and ("retire-file", "OpContext") in reached
+              and _snapshot(root) == before, observed=err)
+
+        def wrong_payload(op_row, context):
+            # a retire-file composer that archives OTHER bytes at the expected archive path: the guard
+            # holds the copied bytes too, never path cardinality alone (codex round 2).
+            reached.append(("retire-file", type(context).__name__))
+            _data, mode = context.ops.frozen(op_row["path"], op_row["preimage_digest"])
+            context.ops.create(archive_rel(context.ops.run_id, op_row["path"]), b"WRONG ARCHIVE\n", mode)
+        # red against a _require_archived_once that counts creates by path alone, where the apply commits
+        # and publishes the wrong archive bytes; the migrate source's pass copy stays right, so only the
+        # retire source is named, and nothing is written.
+        with typed_driver(stood_in, retire=wrong_payload):
+            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+        check("driver-apply-wrong-retire-archive-payload-refused", "at the approved" in (err or "")
+              and "legacy.md (an archive copy at another digest" in (err or "")
+              and "old.md" not in (err or "") and ("retire-file", "OpContext") in reached
+              and _snapshot(root) == before, observed=err)
+
+        def preserve_wrong(self, source_path, plan_digest):
+            # a faulty pass: every ApplyOps.preserve drift-checks its source, then archives OTHER bytes,
+            # so the migrate source's copy (the pass's own) and the retire source's are both wrong.
+            _data, mode = self.frozen(source_path, plan_digest)
+            self.create(archive_rel(self.run_id, source_path), b"WRONG ARCHIVE\n", mode)
+            return _data, mode
+        # red against the path-cardinality guard, where the apply commits; the enable-hook preimage goes
+        # through preserve_masked, so only the two plan sources are named, and nothing is written.
+        with typed_driver(stood_in), mock.patch.object(ApplyOps, "preserve", preserve_wrong):
+            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+        check("driver-apply-wrong-migrate-archive-payload-refused",
+              "old.md (an archive copy at another digest" in (err or "")
+              and "legacy.md (an archive copy at another digest" in (err or "")
               and _snapshot(root) == before, observed=err)
         del reached[:], composed_creates[:]
         with typed_driver(stood_in):
@@ -11711,6 +11758,114 @@ def _self_test_checks():
     # alone), and the ops the driver supplies in full name nothing.
     with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, lambda op_row, context=None: schema._ok())):
         check("driver-unsupplied-keyed-by-handler", _unsupplied([schema.canonical_op("create-file")]) == [])
+
+    # 11c: the driver's archive rule over a planner-frozen MOVE fixture (claude round 2, MEDIUM-2): one
+    # occupying move source (.working/TODO.md, a declared view target) and one non-occupying one
+    # (legacy/MOVE.md). The real move-file composer archives the occupying source exactly once and leaves
+    # the non-occupying source frozen with no archive copy, so the commit below is red against a
+    # _require_archived_once that requires a copy for non-occupying move sources too (it would refuse
+    # every planner-valid plan carrying one), and the skipping and wrong-payload composers are red
+    # against one that skips every move source, or counts creates by path alone.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        move_files = dict([(".working/TODO.md", b"todo\n"), ("legacy/MOVE.md", b"keep moving\n")])
+        for rel, payload in move_files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(payload)
+        head = _selftest_git_commit(root)
+        sheet = _sheet_with(root, head, [dict(path=".working/TODO.md", disposition="move", actor="fixture"),
+                                         dict(path="legacy/MOVE.md", disposition="move", actor="fixture")])
+        move_plan = _freeze(root, sheet) or b""
+        move_doc = tomllib.loads(move_plan.decode("utf-8")) if move_plan else dict(
+            run_id=rid, ops=[], sources=[], store=dict(store_root=".", machine_rel=".working/toml"))
+        mrid = move_doc["run_id"]
+        move_approval = attempt(capture_approval, root, move_plan, sheet, "adopter", now)[0] or b""
+        move_sources = dict((row["path"], row) for row in move_doc["sources"])
+        # PRECONDITION: the fixture froze and was approved, carrying one occupying and one non-occupying
+        # move source (a failed freeze turns this and every check below red: run_apply(b"") refuses).
+        check("driver-move-fixture-frozen-and-approved", bool(move_plan) and bool(move_approval)
+              and [row["op"] for row in move_doc["ops"]].count("move-file") == 2
+              and move_sources.get(".working/TODO.md", dict()).get("occupying") is True
+              and move_sources.get("legacy/MOVE.md", dict()).get("occupying") is False)
+        taken = []
+
+        def move_scaffold(op_row, context):
+            # init-store's stand-in, as in 11b: the scaffolded manifest, staged through the context table.
+            if not isinstance(context, dict):
+                return schema._cannot("the init-store stand-in composes only through the context table")
+            context["ops"].create(schema.store_manifest(move_doc["store"]),
+                                  _opf_init.build_manifest().encode("utf-8"))
+            return schema._ok()
+
+        def move_benign(op_row, context):
+            return schema._ok()
+
+        def move_receipt(context):
+            taken.append([op["path"] for op in context["ops"].ops if op.get("op") == "create"])
+            return schema._ok()
+
+        def move_driver(move=None):
+            stack = contextlib.ExitStack()
+            stack.enter_context(mock.patch.dict(OP_HANDLERS, dict([
+                ("init-store", move_scaffold), ("render-views", move_benign),
+                ("install-pack", move_benign)])))
+            stack.enter_context(mock.patch.dict(DRIVER_STAGES, dict([(RECEIPT_STAGE, move_receipt)])))
+            if move is not None:
+                stack.enter_context(mock.patch.dict(_FILE_OPS, dict([("move-file", move)])))
+            return stack
+
+        before = _snapshot(root)
+
+        def move_skipping(op_row, context):
+            # a move-file composer that drift-checks both sources but archives neither, treating the
+            # occupying source as frozen too.
+            context.ops.require_absent(op_row["destination"])
+            context.ops.frozen(op_row["source"], op_row["source_digest"])
+        # red against a _require_archived_once that skips every move source, where the apply commits with
+        # .working/TODO.md never archived; only the occupying source is named (red also against a guard
+        # that requires a copy for the non-occupying source, which it would name too), nothing written.
+        with move_driver(move=move_skipping):
+            err = refusal(run_apply, root, move_plan, move_approval, sheet)
+        check("driver-apply-move-skipped-archive-refused",
+              "other than exactly one archive copy" in (err or "")
+              and ".working/TODO.md (0 archive copies)" in (err or "")
+              and "legacy/MOVE.md" not in (err or "") and _snapshot(root) == before, observed=err)
+
+        def move_wrong(op_row, context):
+            # the occupying source's copy lands at the right path with OTHER bytes, so path cardinality
+            # alone would accept it (codex round 2, over the move class).
+            context.ops.require_absent(op_row["destination"])
+            _data, mode = context.ops.frozen(op_row["source"], op_row["source_digest"])
+            if op_row["source"] == ".working/TODO.md":
+                context.ops.create(archive_rel(context.ops.run_id, op_row["source"]),
+                                   b"WRONG ARCHIVE\n", mode)
+        # red against a _require_archived_once that counts creates by path alone, where the apply commits
+        # and publishes the wrong archive bytes; nothing is written.
+        with move_driver(move=move_wrong):
+            err = refusal(run_apply, root, move_plan, move_approval, sheet)
+        check("driver-apply-move-wrong-archive-payload-refused",
+              ".working/TODO.md (an archive copy at another digest" in (err or "")
+              and _snapshot(root) == before, observed=err)
+        # the REAL composer commits: red against a _require_archived_once that requires a copy for
+        # non-occupying move sources too (it would refuse this planner-valid plan before anything runs).
+        del taken[:]
+        with move_driver():
+            mtxn, merr = attempt(run_apply, root, move_plan, move_approval, sheet)
+        check("driver-apply-move-sources-commit", mtxn == mrid and merr is None, observed=merr)
+        after = _snapshot(root)
+        todo_copy = archive_rel(mrid, ".working/TODO.md")
+        # the occupying source is archived byte-exact exactly once (in the preflight and the transaction
+        # alike) and removed; the non-occupying source stays frozen in place with NO archive copy; both
+        # move destinations wait for the retirement stage; and the bundle claims the one copy.
+        check("driver-apply-move-occupying-archived-once-non-occupying-none",
+              after.get(todo_copy) == move_files[".working/TODO.md"]
+              and ".working/TODO.md" not in after
+              and after.get("legacy/MOVE.md") == move_files["legacy/MOVE.md"]
+              and archive_rel(mrid, "legacy/MOVE.md") not in after
+              and store.moved_dest(".working/TODO.md") not in after
+              and store.moved_dest("legacy/MOVE.md") not in after
+              and len(taken) == 2 and all(c.count(todo_copy) == 1 for c in taken)
+              and verify_bundle(root, mrid).status == VALID)
 
     # 12: the finish ops (slice 5), see _finish_ops_self_test.
     _finish_ops_self_test(check)
