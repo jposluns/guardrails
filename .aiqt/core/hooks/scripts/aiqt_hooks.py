@@ -341,7 +341,7 @@ NOTE_CONSTRUCTORS = (
     "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
     "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
-    "_orch_stop_family")
+    "_orch_ask_attended", "_orch_stop_family")
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
@@ -12466,8 +12466,14 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
 def decide_yield(ctx):
     """The PURE decision core. ctx keys: kind, escape, loop_signal, counter, enum_status, enum_detail,
     actionable, waiting, blocked, cannot_evaluate, proposed, wake_named, schedule_denials, basis_unchanged.
-    Returns (verdict, reason, disposition) with verdict ALLOW | ALLOW_WITH_FINDINGS | DENY."""
+    kind is "stop", "schedule_idle", or "ask" (the attended blocking-question binding: it shares the
+    schedule path's cap-bounded fail-closed posture, because a blocking question parks the run exactly as
+    a scheduled idle does, but it has NO wake-naming requirement, since a question names no recheck wake,
+    and its actionable deny names the question's two exits: dispatch the items, or record them as blocked
+    by this decision, then re-issue). Returns (verdict, reason, disposition) with verdict
+    ALLOW | ALLOW_WITH_FINDINGS | DENY."""
     kind = ctx["kind"]
+    capped = kind in ("schedule_idle", "ask")  # the cap-relieved kinds; "stop" takes the loop bound
     disposition = ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
                    + [("cannot_evaluate", i, c, p) for i, c, p in ctx.get("cannot_evaluate", [])]
                    + [("waiting", i, c, p) for i, c, p in ctx["waiting"]]
@@ -12475,17 +12481,29 @@ def decide_yield(ctx):
                    + [("proposed", i, "", "") for i in ctx["proposed"]])
     if ctx["escape"]:
         return ("ALLOW", "operator escape artefact present (logged)", disposition)
-    if kind != "schedule_idle" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]):
+    if not capped and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]):
         return ("ALLOW_WITH_FINDINGS",
                 "loop bound reached after {} denial(s); yielding with the unresolved items as "
                 "findings rather than re-firing".format(ctx["counter"]), disposition)
     if ctx["enum_status"] != "ok":
-        if kind == "schedule_idle":
+        if capped:
             if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
+                if kind == "ask":
+                    return ("ALLOW_WITH_FINDINGS",
+                            "{} ask denials on an unchanged basis; a guard that can be farmed "
+                            "trains its own bypass, so this question proceeds with findings"
+                            .format(ctx["schedule_denials"]), disposition)
                 return ("ALLOW_WITH_FINDINGS",
                         "{} schedule denials on an unchanged basis; a guard that can be farmed "
                         "trains its own bypass, so this yield proceeds with findings"
                         .format(ctx["schedule_denials"]), disposition)
+            if kind == "ask":
+                return ("DENY",
+                        "cntdef: the backlog is not enumerable ({}: {}); a blocking question would "
+                        "park the run on work this session cannot even enumerate (cannot-evaluate). "
+                        "Fix the enumerator or the registry, or release through the operator-owned "
+                        "escape sentinel, then re-issue the question".format(
+                            ctx["enum_status"], ctx["enum_detail"]), disposition)
             return ("DENY",
                     "the backlog is not enumerable ({}: {}); missing evidence never licenses a new "
                     "idle or wake. Fix the enumerator or the registry, or release through the "
@@ -12501,11 +12519,14 @@ def decide_yield(ctx):
     # schedule path DENIES (never licenses an idle), and (FIX 1) the stop path DENIES too, because an
     # unconfirmable blocker cannot confirm exhaustion (ignorance refuses the wind-down); the operator
     # escape is the release.
-    if ctx.get("cannot_evaluate", []) and kind == "schedule_idle":
+    if ctx.get("cannot_evaluate", []) and capped:
         if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
             return ("ALLOW_WITH_FINDINGS",
-                    "{} schedule denials on an unchanged basis; yielding with findings"
-                    .format(ctx["schedule_denials"]), disposition)
+                    "{} {} denials on an unchanged basis; {} with findings"
+                    .format(ctx["schedule_denials"],
+                            "schedule" if kind == "schedule_idle" else "ask",
+                            "yielding" if kind == "schedule_idle"
+                            else "the question proceeds"), disposition)
         sched_cannot = ctx.get("cannot_evaluate", [])
         # the unevaluable items are NAMED here exactly as on the stop path below, so a
         # scope-level cannot-evaluate such as lease:max_age_hours tells the operator WHAT to
@@ -12515,8 +12536,12 @@ def decide_yield(ctx):
             named_sched += "; and {} more".format(len(sched_cannot) - _ORCH_MAX_NAMED)
         return ("DENY",
                 "a proof source for {} open item(s) is unreadable (cannot-evaluate): {}. Missing "
-                "evidence never licenses a new idle or wake. Fix the source, or release through "
-                "the operator-owned escape sentinel.".format(len(sched_cannot), named_sched),
+                "evidence never licenses {}. Fix the source, or release through "
+                "the operator-owned escape sentinel{}.".format(
+                    len(sched_cannot), named_sched,
+                    "a new idle or wake" if kind == "schedule_idle"
+                    else "parking the run on a blocking question",
+                    "" if kind == "schedule_idle" else ", then re-issue the question"),
                 disposition)
     if not ctx["actionable"]:
         rechecked = ctx["waiting"] + ctx["blocked"]
@@ -12545,16 +12570,27 @@ def decide_yield(ctx):
                     "for a genuine block.".format(len(cannot_items), named_cannot), disposition)
         return ("ALLOW", "no actionable item remains; the disposition table is the enumeration",
                 disposition)
-    if kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
+    if capped and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
             and ctx["basis_unchanged"]:
         return ("ALLOW_WITH_FINDINGS",
-                "{} schedule denials on an unchanged basis; yielding with findings"
-                .format(ctx["schedule_denials"]), disposition)
+                "{} {} denials on an unchanged basis; {} with findings"
+                .format(ctx["schedule_denials"],
+                        "schedule" if kind == "schedule_idle" else "ask",
+                        "yielding" if kind == "schedule_idle"
+                        else "the question proceeds"), disposition)
     named = ctx["actionable"][:_ORCH_MAX_NAMED]
     more = len(ctx["actionable"]) - len(named)
     listing = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in named)
     if more > 0:
         listing += "; and {} more".format(more)
+    if kind == "ask":
+        return ("DENY",
+                "AIQT rule cntdef: {} granted open item(s) are actionable while this attended session "
+                "raises a blocking question that would idle them: {}. Two ways forward: DISPATCH the "
+                "actionable items (each then waits on a live tracked task), or RECORD each as blocked "
+                "by this decision (a human-decision blocker on the item plus a matching row in the "
+                "pending-decisions record); then re-issue the question. A fired timer or an existing "
+                "cron is neither.".format(len(ctx["actionable"]), listing), disposition)
     return ("DENY",
             "AIQT rules setcmp/cntdef: {} granted open item(s) are actionable: {}. Two legal exits: "
             "do one of them, or record a proven blocker on each (a live tracked-task ref, a matching "
@@ -12605,17 +12641,23 @@ def _schema_turn_state(raw):
     """A counter is 0 when its key is ABSENT on a readable turn-state (a fresh count), the value when
     present and valid, and None when present-but-malformed OR the whole turn-state is unreadable (raw is
     not a dict). The CALLER maps None to the fail-safe direction (stop -> the loop bound, so a malformed
-    or unreadable counter never licenses unbounded denies; schedule -> 0, so it never buys cap relief).
-    schedule_basis is a string or None."""
+    or unreadable counter never licenses unbounded denies; schedule and ask -> 0, so neither ever buys
+    cap relief). schedule_basis and ask_basis are each a string or None. The ask counters are the
+    attended-ask binding's own (a question is never relieved by schedule denials, and ask denials never
+    relieve a scheduling call)."""
     if not isinstance(raw, dict):
-        return ("ok", {"stop_denials": None, "schedule_denials": None, "schedule_basis": None})
+        return ("ok", {"stop_denials": None, "schedule_denials": None, "schedule_basis": None,
+                       "ask_denials": None, "ask_basis": None})
 
     def _count(key):
         return 0 if key not in raw else _v_exact_int(raw[key], 0, _ORCH_COUNTER_MAX)
     basis = raw.get("schedule_basis")
+    ask_basis = raw.get("ask_basis")
     return ("ok", {"stop_denials": _count("stop_denials"),
                    "schedule_denials": _count("schedule_denials"),
-                   "schedule_basis": basis if isinstance(basis, str) else None})
+                   "schedule_basis": basis if isinstance(basis, str) else None,
+                   "ask_denials": _count("ask_denials"),
+                   "ask_basis": ask_basis if isinstance(ask_basis, str) else None})
 
 
 _ORCH_SCHEMAS = {"staleness": _schema_staleness, "turn_state": _schema_turn_state}
@@ -12767,8 +12809,13 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     tstate = _orch_validate("turn_state", ts)[1]
     # stop counter fails OPEN to the loop bound (an unreadable counter never licenses unbounded denies);
     # schedule counter fails CLOSED to 0 (a malformed value never manufactures cap relief, CX-R4-3).
+    # The ask kind reads its OWN cap counter (same fail-closed direction), so a question is never
+    # relieved by schedule denials and ask denials never relieve a scheduling call.
     counter = tstate["stop_denials"] if tstate["stop_denials"] is not None else _ORCH_LOOP_BOUND
-    schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
+    if kind == "ask":
+        schedule_denials = tstate["ask_denials"] if tstate["ask_denials"] is not None else 0
+    else:
+        schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
     status, payload = _orch_enumerate(reg, root)
     record_warn = []
     if status == "ok":
@@ -12802,7 +12849,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     if kind == "schedule_idle" and rechecked:
         wake_named = any(_orch_token_present(i, wake_text) or _orch_token_present(p, wake_text)
                          for i, _c, p in rechecked)
-    basis_unchanged = tstate["schedule_basis"] == basis
+    basis_unchanged = (tstate["ask_basis"] if kind == "ask" else tstate["schedule_basis"]) == basis
     escape_active, escape_spoof = _orch_escape_active(reg, root)
     ctx = {"kind": kind, "escape": escape_active, "escape_spoof": escape_spoof,
            "record_warn": " ".join(record_warn),
@@ -12822,13 +12869,16 @@ def _orch_record_denial(root, ts, kind, basis):
     so a tampered non-int counter cannot raise here; a STOP-path caller that gets a failure must fail OPEN,
     since an un-persistable counter never reaches the loop bound and would otherwise re-deny forever."""
     state = dict(ts or {})
-    if kind == "schedule_idle":
-        prior = _v_exact_int(state.get("schedule_denials"), 0, _ORCH_COUNTER_MAX)
+    if kind in ("schedule_idle", "ask"):
+        count_key, basis_key = (("ask_denials", "ask_basis") if kind == "ask"
+                                else ("schedule_denials", "schedule_basis"))
+        prior = _v_exact_int(state.get(count_key), 0, _ORCH_COUNTER_MAX)
         prior = prior if prior is not None else 0
         # D12: a CHANGED basis starts a fresh count (1), so denials accrued on a different basis can
-        # never buy premature cap relief on this one.
-        state["schedule_denials"] = prior + 1 if state.get("schedule_basis") == basis else 1
-        state["schedule_basis"] = basis
+        # never buy premature cap relief on this one. The ask kind keeps its own pair, so neither
+        # cap-relieved binding's denials relieve the other.
+        state[count_key] = prior + 1 if state.get(basis_key) == basis else 1
+        state[basis_key] = basis
     else:
         prior = _v_exact_int(state.get("stop_denials"), 0, _ORCH_COUNTER_MAX)
         state["stop_denials"] = (prior if prior is not None else 0) + 1
@@ -13137,7 +13187,11 @@ def orch_ask_guard(data):
     file, or content with no declaration line that does not parse as JSON and whose first non-whitespace character
     is not `{`, `[`, or `"` (ordinary prose, for example `42 items done` or `true trailing`, so prose beginning
     with a number or word does not arm) is the fail-OPEN no-marker default (this guards one mistake shape, not a
-    security boundary). Its regression vectors are held by the behaviour self-test."""
+    security boundary). A mode that reads in the ATTENDED family no longer allows unconditionally: where the
+    registry also declares a backlog enumerator, the question is judged against the same fresh enumeration the
+    yield guard uses (_orch_ask_attended below), because an attended-family spelling with queued work was the
+    incident shape the unattended deny could not see. Its regression vectors are held by the behaviour
+    self-test."""
     if data.get("tool_name") != "AskUserQuestion":
         return _allow()
     root = _orch_root(data)
@@ -13147,8 +13201,8 @@ def orch_ask_guard(data):
     if status != "ok":
         return _allow()  # absent OR unreadable registry: fail open, this control is advisory-shaped
     mode, unread = _orch_mode_detail(reg, root)
-    if mode is None or "unattended" not in mode:
-        if mode is None and not _orch_guard_event(
+    if mode is None:
+        if not _orch_guard_event(
                 root, "ask-guard", "fail-open",
                 "mode record absent, empty, or prose with no declaration or JSON marker"):
             # the fail-open stands; only the failed guard-events row is surfaced, never a silent loss
@@ -13156,6 +13210,8 @@ def orch_ask_guard(data):
                                "could read as a declaration), and the guard-events row recording that "
                                "fail-open could not be written; record it manually (nocncl).")
         return _allow()
+    if "unattended" not in mode:
+        return _orch_ask_attended(data, reg, root)
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
     text = json.dumps(tool_input, sort_keys=True)
@@ -13185,6 +13241,70 @@ def orch_ask_guard(data):
               if recorded else "AIQT guardrail: denied a blocking question in unattended mode, but the "
               "pending row could NOT be persisted; record the decision manually (nocncl).")
     return _deny(reason + tail, banner + tail)
+
+
+def _orch_ask_attended(data, reg, root):
+    """cntdef at the attended-ask boundary: an attended-family mode never disarms the backlog judgement.
+    A blocking question parks the session on its answer exactly as a scheduled idle parks it on a timer,
+    so it is judged against the same FRESH enumeration the yield guard uses (ctx kind "ask": the shared
+    decision core with the schedule-cap semantics and no wake-naming requirement, since a question names
+    no recheck wake). The question is DENIED while granted open items are actionable, neither dispatched
+    (waiting on a live tracked task) nor blocked by a human decision recorded in the declared
+    pending-decisions record (the stop guard's blocker grammar; fresh external evidence and a not-before
+    time also block); the deny names up to _ORCH_MAX_NAMED items and the two ways forward (dispatch them,
+    or record them as blocked by this decision, then re-issue the question). An enumerator error or an
+    unreadable item proof source is a cannot-evaluate DENY, bounded by _ORCH_SCHEDULE_CAP ask denials on
+    an unchanged basis, after which the question is allowed with findings (a guard that can be farmed
+    trains its own bypass); the ask counters (ask_denials/ask_basis in turn-state.json) are this
+    binding's own, so neither cap-relieved binding's denials relieve the other. A registry that declares
+    NO enumerator leaves this judgement out of scope (allow); the operator escape sentinel releases the
+    deny exactly as in the yield guard; a deny whose counter cannot be saved stands and says so."""
+    if not isinstance(reg.get("enumerator"), dict):
+        return _allow()  # no declared backlog enumerator: the attended backlog judgement is out of scope
+    ctx, ts, basis = _orch_build_ctx(reg, root, "ask", data)
+    spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
+                  if ctx.get("escape_spoof") else "")
+    verdict, reason, _disposition = decide_yield(ctx)
+    if verdict == "DENY":
+        # the deny stands when its counter cannot be saved; relief on a later question comes only from
+        # the count that question reads from turn-state.json (the same contract as the yield guard's
+        # schedule path, and the failure is reported on the deny)
+        unsaved = _orch_record_denial(root, ts, "ask", basis)
+        counter_warn = "" if unsaved is None else (
+            "Additionally, the denial counter could not be written to turn-state.json ({}), so this "
+            "deny does not count toward the ask cap; a later question is relieved only when the count "
+            "it reads from turn-state.json is at or above the cap on an unchanged basis; record it "
+            "manually (nocncl).".format(unsaved))
+        tail = _orch_warn_tail(_orch_event_warn(root, "ask-guard", "deny", reason), counter_warn,
+                               spoof_warn, ctx["record_warn"])
+        return _deny(reason + tail,
+                     "AIQT guardrail: denied a blocking question past the enumerated backlog.{}"
+                     .format(tail))
+    if verdict == "ALLOW_WITH_FINDINGS":
+        ev = _orch_event_warn(root, "ask-guard", verdict.lower(), reason)
+        msg = "AIQT guardrail: {}".format(reason)
+        if _orch_open_dispositions(ctx) or ctx["enum_status"] != "ok":
+            # the cap released this question past open work (or during a whole-enumerator failure);
+            # mark it forced_unresolved for the next resume audit's triage, a failed record surfacing
+            # in the note rather than silently vanishing
+            extra = _orch_record_forced_exit(root, "ask-guard", ctx, reason)
+            if extra:
+                msg += " " + extra
+        return _allow_note(msg + _orch_warn_tail(ev, spoof_warn, ctx["record_warn"]))
+    if ctx["escape"]:
+        # the operator-escape ALLOW: its guard-events row is the only record that the override was used,
+        # so a failed append is surfaced (the ALLOW stands)
+        tail = _orch_warn_tail(_orch_escape_event_warn(root, "ask-guard", reason), spoof_warn,
+                               ctx["record_warn"])
+    else:
+        # a clean ALLOW with no escape: its row is the over-fire metric only, best effort, a failed
+        # append is not surfaced
+        _orch_guard_event(root, "ask-guard", verdict.lower(), reason)
+        tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
+    if tail:
+        # a clean ALLOW whose spoof or checkpoint record FAILED still surfaces it (never a silent None)
+        return _allow_note("AIQT guardrail:" + tail)
+    return _allow()
 
 
 _ORCH_PLAIN_COMMAND_RE = re.compile(r"[A-Za-z0-9_ \t./=:@,+%-]+")

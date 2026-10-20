@@ -1384,6 +1384,26 @@ def _test_note_literal_sites(failures, tmp):
              sched("NL-2"), "NL-SPOOF-UNRECORDED")
     finally:
         aiqt_hooks._orch_escape_active, aiqt_hooks._orch_record_escape_spoof = saved
+    # the attended-ask judgement's two note sites: the cap-relieved findings allow, and the clean allow
+    # whose only signal is a recording-failure tail (here an unrecorded escape spoof)
+    y.mode.write_text("Operating-mode: attended\n", encoding="utf-8")
+    y.enum_exit.write_text("3", encoding="utf-8")
+    y.set_turn_state(dict(ask_denials=aiqt_hooks._ORCH_SCHEDULE_CAP, ask_basis="ENUMERATOR_ERROR"))
+    note("(nl-question-cap) a cap-relieved attended question past an unenumerable backlog allows with a note",
+         aiqt_hooks.orch_ask_guard(y.payload("PreToolUse", "AskUserQuestion", dict(questions=[]))),
+         "ask denials on an unchanged basis")
+    y.enum_exit.write_text("0", encoding="utf-8")
+    saved = (aiqt_hooks._orch_escape_active, aiqt_hooks._orch_record_escape_spoof)
+    try:
+        aiqt_hooks._orch_escape_active = lambda reg, root: (False, "nl-ask-spoof-detail")
+        aiqt_hooks._orch_record_escape_spoof = lambda root, detail: "NL-ASK-SPOOF-UNRECORDED"
+        y.set_items([])
+        y.set_turn_state(dict())
+        note("(nl-question-spoof) a clean attended question with an unrecorded escape spoof allows with a note",
+             aiqt_hooks.orch_ask_guard(y.payload("PreToolUse", "AskUserQuestion", dict(questions=[]))),
+             "NL-ASK-SPOOF-UNRECORDED")
+    finally:
+        aiqt_hooks._orch_escape_active, aiqt_hooks._orch_record_escape_spoof = saved
     r = orch.Fixture(base, "barrier")
     state = Path(aiqt_hooks._orch_state_dir_for_root(str(r.root)))
     state.mkdir(parents=True, exist_ok=True)

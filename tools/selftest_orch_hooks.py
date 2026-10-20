@@ -9246,6 +9246,118 @@ def _main_isolated(report_path=None):
         check("ask/idempotent-append", len(keyed), 1)
         check("ask/redacted", any("SECRETPHRASE" in r for r in rows), False)
 
+        # ---------- the attended-ask backlog judgement (ctx kind "ask") ----------
+        # An attended-family mode with queued actionable work: the question is judged against the same
+        # fresh enumeration as the yield guard. Each deny case below ALLOWED on the code before this
+        # judgement existed (the attended branch returned unconditionally), so each fails without it.
+        def ask_att(tool_use_id, questions=1):
+            return aiqt_hooks.orch_ask_guard(h.payload(
+                "PreToolUse", "AskUserQuestion",
+                {"questions": [{"question": "pick"} for _ in range(questions)]},
+                extra={"tool_use_id": tool_use_id}))
+
+        def ask_reason(result):
+            _c, obj, _e = result
+            if isinstance(obj, dict) and isinstance(obj.get("hookSpecificOutput"), dict):
+                return obj["hookSpecificOutput"].get("permissionDecisionReason", "")
+            return ""
+
+        # two open items with no blocker and a four-question ask: denied, naming both items and the
+        # two exits (dispatch, or record each as blocked by this decision, then re-issue)
+        h.mode.write_text("Operating-mode: attended-autonomous\n", encoding="utf-8")
+        h.set_items([item("A-1"), item("A-2")])
+        h.set_turn_state({})
+        att_res = ask_att("tu-a1", questions=4)
+        check("ask/attended-actionable-denies", _verdict(att_res), "deny")
+        check("ask/attended-actionable-names-items",
+              "A-1" in ask_reason(att_res) and "A-2" in ask_reason(att_res), True)
+        check("ask/attended-actionable-names-exits",
+              "DISPATCH" in ask_reason(att_res) and "pending-decisions" in ask_reason(att_res)
+              and "re-issue the question" in ask_reason(att_res), True)
+        check("ask/attended-deny-counts", h.turn_state().get("ask_denials"), 1)
+        # the compound attended spelling, one actionable item, the rest blocked by a RECORDED human
+        # decision: denied, naming only the actionable item
+        h.mode.write_text("Operating-mode: attended (iPad); continuous mode\n", encoding="utf-8")
+        h.pending.write_text("D-9: deferred to the maintainer\n", encoding="utf-8")
+        h.set_items([item("A-3"),
+                     item("B-1", blocker={"kind": "human-decision", "ref": "D-9"}),
+                     item("B-2", blocker={"kind": "human-decision", "ref": "D-9"})])
+        h.set_turn_state({})
+        att_res = ask_att("tu-a2")
+        check("ask/attended-compound-one-actionable-denies", _verdict(att_res), "deny")
+        check("ask/attended-compound-names-the-item",
+              "A-3" in ask_reason(att_res) and "B-1" not in ask_reason(att_res), True)
+        # an enumerator error is cannot-evaluate: denied; the cap on an unchanged basis (just under,
+        # exactly at, and past it) then releases the question with findings
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-enum-error-denies", _verdict(ask_att("tu-a3")), "deny")
+        h.set_turn_state({"ask_denials": 2, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-enum-error-under-cap-denies", _verdict(ask_att("tu-a3b")), "deny")
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-enum-error-cap-allows-findings", _verdict(ask_att("tu-a3c")), "warn")
+        h.set_turn_state({"ask_denials": 4, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-enum-error-past-cap-allows-findings", _verdict(ask_att("tu-a3d")), "warn")
+        # a schedule count never relieves a question (the ask cap is its own counter)
+        h.set_turn_state({"schedule_denials": 3, "schedule_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-schedule-count-never-relieves", _verdict(ask_att("tu-a3e")), "deny")
+        h.enum_exit.write_text("0", encoding="utf-8")
+        # the JSON attended marker arms the same judgement
+        h.mode.write_text('{"mode": "attended"}\n', encoding="utf-8")
+        h.set_items([item("A-4")])
+        h.set_turn_state({})
+        check("ask/json-attended-actionable-denies", _verdict(ask_att("tu-a4")), "deny")
+        # controls the judgement must leave alone: a backlog with nothing actionable allows the question
+        h.mode.write_text("Operating-mode: attended-autonomous\n", encoding="utf-8")
+        h.set_items([item("B-3", blocker={"kind": "human-decision", "ref": "D-9"})])
+        h.set_turn_state({})
+        check("ask/attended-all-blocked-recorded-allows", _verdict(ask_att("tu-a5")), "allow")
+        (hsd / "dispatch-ledger.jsonl").write_text(
+            json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-9",
+                        "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
+        h.set_items([item("W-9", blocker={"kind": "tracked-task", "ref": "T-9"})])
+        h.set_turn_state({})
+        check("ask/attended-dispatched-waiting-allows", _verdict(ask_att("tu-a6")), "allow")
+        h.set_items([item("P-1", state="proposed")])
+        h.set_turn_state({})
+        check("ask/attended-proposed-only-allows", _verdict(ask_att("tu-a7")), "allow")
+        # the no-marker fail-open is unchanged even with actionable work queued
+        h.mode.write_text("shared notes with no mode declaration\n", encoding="utf-8")
+        h.set_items([item("A-5")])
+        h.set_turn_state({})
+        check("ask/prose-mode-actionable-allows", _verdict(ask_att("tu-a8")), "allow")
+        # the unattended deny is unchanged whatever the backlog: same verdict, same reason shape
+        h.mode.write_text("Operating-mode: unattended\n", encoding="utf-8")
+        h.set_turn_state({})
+        att_res = ask_att("tu-a9")
+        check("ask/unattended-actionable-denies", _verdict(att_res), "deny")
+        check("ask/unattended-actionable-reason-unchanged",
+              ask_reason(att_res).startswith(
+                  "AskUserQuestion BLOCKED: the session operating-mode is unattended"), True)
+        # the operator escape sentinel releases the attended deny (the stop/yield acceptance seam)
+        h.mode.write_text("Operating-mode: attended-autonomous\n", encoding="utf-8")
+        h.set_items([item("A-6")])
+        _orig_ask_escape_stat = aiqt_hooks._orch_escape_stat
+        try:
+            aiqt_hooks._orch_escape_stat = lambda path: _St(_stat.S_IFREG | 0o600, os.geteuid() + 1)
+            h.set_turn_state({})
+            check("ask/attended-escape-sentinel-allows", _verdict(ask_att("tu-a10")), "allow")
+        finally:
+            aiqt_hooks._orch_escape_stat = _orig_ask_escape_stat
+        # a registry with no enumerator keeps the attended judgement out of scope; an absent registry
+        # keeps the whole hook inert
+        _hregp = h.root / ".aiqt" / "orchestration.local.json"
+        _hreg = json.loads(_hregp.read_text(encoding="utf-8"))
+        _henum = _hreg.pop("enumerator")
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_items([item("A-7")])
+        h.set_turn_state({})
+        check("ask/attended-no-enumerator-allows", _verdict(ask_att("tu-a11")), "allow")
+        _hregp.unlink()
+        check("ask/attended-no-registry-allows", _verdict(ask_att("tu-a12")), "allow")
+        _hreg["enumerator"] = _henum
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+
         # ---------- component 3: the truncation guard ----------
         t = Fixture(tmp, "trunc")
         bg = lambda cmd, rib=True: aiqt_hooks.orch_truncation_guard(
@@ -10782,6 +10894,15 @@ def _main_isolated(report_path=None):
               aiqt_hooks._orch_validate("turn_state", {"stop_denials": "x"})[1]["stop_denials"], None)
         check("vB/turn-unreadable-none",
               aiqt_hooks._orch_validate("turn_state", None)[1]["stop_denials"], None)
+        # the ask cap counter validates exactly as the schedule counter (absent fresh, malformed None)
+        check("vB/turn-ask-absent-fresh",
+              aiqt_hooks._orch_validate("turn_state", {})[1]["ask_denials"], 0)
+        check("vB/turn-ask-valid",
+              aiqt_hooks._orch_validate("turn_state", {"ask_denials": 2})[1]["ask_denials"], 2)
+        check("vB/turn-ask-malformed-none",
+              aiqt_hooks._orch_validate("turn_state", {"ask_denials": 1.0})[1]["ask_denials"], None)
+        check("vB/turn-ask-unreadable-none",
+              aiqt_hooks._orch_validate("turn_state", None)[1]["ask_denials"], None)
         check("vB/unknown-boundary-cannot-evaluate",
               aiqt_hooks._orch_validate("nope", {})[0], "cannot-evaluate")
         # D13: the registry version must be an exact int 1 (True and 1.0 do not pass)
