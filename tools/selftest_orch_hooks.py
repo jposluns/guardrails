@@ -1242,6 +1242,479 @@ def _rdp_cases(tmp):
     _rdp_scope_cases(base, bare)
 
 
+def _rwh_iso(hours=0):
+    """An ISO-8601 UTC timestamp `hours` from now (negative for the past), for review-hold markers."""
+    return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=hours)).isoformat()
+
+
+def _rwh_without_hold(fn):
+    """fn() with the hold reader patched inert, so every marker reads as absent: the revert leg of each
+    refuse case. The refuse case's deny leg goes red when the hook's check is reverted, and this leg
+    shows the deny comes from the marker check alone (the command is allowed today without it)."""
+    saved = aiqt_hooks._rwh_holds
+    aiqt_hooks._rwh_holds = lambda common, cache, notes: ("absent", [])
+    try:
+        return fn()
+    finally:
+        aiqt_hooks._rwh_holds = saved
+
+
+def _rwh_cases(tmp):
+    """The review-workdir-hold vectors (rwh/*), enforcing rvwpin: a live adopter-written marker in
+    GIT_COMMON_DIR/aiqt/review-holds/ pins its worktree against mutating git commands. Every refuse case
+    of the placement study is asserted as a deny AND shown allowed with the hold reader reverted
+    (red on revert); every allow case names the over-broad implementation it catches."""
+    base = tmp / "rwh"
+    main = base / "main"
+    main.mkdir(parents=True)
+    _rdp_git(base, "init", "-q", "-b", "main", str(main))
+    (main / "f").write_text("x\n", encoding="utf-8")
+    (main / "sub").mkdir()
+    (main / "sub" / "g").write_text("y\n", encoding="utf-8")
+    _rdp_git(main, "add", "-A")
+    _rdp_git(main, "commit", "-q", "-m", "seed")
+    seed = _rdp_git(main, "rev-parse", "HEAD")
+    (main / "f").write_text("x2\n", encoding="utf-8")
+    _rdp_git(main, "add", "f")
+    _rdp_git(main, "commit", "-q", "-m", "change")
+    tip = _rdp_git(main, "rev-parse", "HEAD")
+    held = base / "held"
+    _rdp_git(main, "worktree", "add", "-q", "-b", "review", str(held), "main")
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(base / "held2"), tip)
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(base / "other"), tip)
+    (base / "alias").symlink_to(held)
+    # an unrelated repository with NO holds: the allow control for every fail-closed uncertain-target
+    # deny, showing the hold set discriminates (uncertain plus a clear hold set stays allowed)
+    free = base / "free"
+    free.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(free))
+    (free / "sub").mkdir()
+    holds = main / ".git" / "aiqt" / "review-holds"
+    holds.mkdir(parents=True)
+
+    def marker(name, **over):
+        doc = dict(version=1, workdir=str(held), head=tip, dispatch_id=name,
+                   created_utc=_rwh_iso(), expires_utc=_rwh_iso(4))
+        doc.update(over)
+        (holds / (name + ".json")).write_text(json.dumps(doc), encoding="utf-8")
+
+    def run(cwd, command):
+        return aiqt_hooks.review_workdir_hold(dict(
+            hook_event_name="PreToolUse", cwd=str(cwd), session_id="s1", tool_name="Bash",
+            tool_input=dict(command=command)))
+
+    def kind(cwd, command):
+        return _rdp_kind(run(cwd, command))
+
+    marker("rev-1")
+    # ---------- refuse cases (study section 3), each red on revert ----------
+    co = "git -C " + str(held) + " checkout " + seed
+    check("rwh/held-checkout-denies-red-on-revert",
+          [kind(base, co), _rwh_without_hold(lambda: kind(base, co))], ["deny", "allow"])
+    sw = "git -C " + str(held) + " switch main"
+    check("rwh/held-switch-denies-red-on-revert",
+          [kind(base, sw), _rwh_without_hold(lambda: kind(base, sw))], ["deny", "allow"])
+    rh = "git -C " + str(held) + " reset --hard " + seed
+    check("rwh/held-reset-denies-red-on-revert",
+          [kind(base, rh), kind(base, "git -C " + str(held) + " reset --soft " + seed),
+           _rwh_without_hold(lambda: kind(base, rh))], ["deny", "deny", "allow"])
+    mg = "git -C " + str(held) + " merge --ff-only main"
+    check("rwh/held-merge-denies-red-on-revert",
+          [kind(base, mg), _rwh_without_hold(lambda: kind(base, mg))], ["deny", "allow"])
+    pl = "git -C " + str(held) + " pull"
+    check("rwh/held-pull-denies-red-on-revert",
+          [kind(base, pl), _rwh_without_hold(lambda: kind(base, pl))], ["deny", "allow"])
+    rb = "git -C " + str(held) + " rebase main"
+    check("rwh/held-rebase-denies-red-on-revert",
+          [kind(base, rb), _rwh_without_hold(lambda: kind(base, rb))], ["deny", "allow"])
+    cf = ["git -C " + str(held) + " " + c for c in
+          ("commit -m x", "cherry-pick " + seed, "revert " + seed, "am")]
+    check("rwh/held-commit-family-denies-red-on-revert",
+          [kind(base, c) for c in cf] + [_rwh_without_hold(lambda: kind(base, cf[0]))],
+          ["deny"] * 4 + ["allow"])
+    # tree mutations that keep HEAD still mutate the held artefact (rvwpin: "not modified")
+    tm = ["git -C " + str(held) + " " + c for c in
+          ("restore f", "checkout -- f", "stash pop", "clean -f")]
+    check("rwh/held-tree-mutation-denies-red-on-revert",
+          [kind(base, c) for c in tm] + [_rwh_without_hold(lambda: kind(base, tm[0]))],
+          ["deny"] * 4 + ["allow"])
+    # any directory change makes a later ambient-target git uncertain, so the deny is the fail-closed
+    # UNVERIFIABLE form, driven by the held repository the cd operand puts in the hold set
+    cd = "cd " + str(held) + " && git checkout " + seed
+    check("rwh/cd-into-held-denies-red-on-revert",
+          [kind(base, cd), _rwh_without_hold(lambda: kind(base, cd))], ["unverifiable", "allow"])
+    check("rwh/cwd-inside-held-denies-red-on-revert",
+          [kind(held / "sub", "git switch main"),
+           _rwh_without_hold(lambda: kind(held / "sub", "git switch main"))], ["deny", "allow"])
+    al = "git -C " + str(base / "alias") + " checkout " + seed
+    check("rwh/symlink-alias-denies-red-on-revert",
+          [kind(base, al), _rwh_without_hold(lambda: kind(base, al))], ["deny", "allow"])
+    wr = ["command " + co, "env " + co]
+    check("rwh/wrapper-peel-denies-red-on-revert",
+          [kind(base, c) for c in wr] + [_rwh_without_hold(lambda: kind(base, wr[0]))],
+          ["deny", "deny", "allow"])
+    ur = "git -C " + str(main) + " update-ref refs/heads/review " + seed
+    check("rwh/update-ref-held-branch-denies-red-on-revert",
+          [kind(base, ur), _rwh_without_hold(lambda: kind(base, ur))], ["deny", "allow"])
+    wt = ["git -C " + str(main) + " worktree remove " + str(held),
+          "git -C " + str(main) + " worktree move " + str(held) + " " + str(base / "elsewhere")]
+    check("rwh/worktree-remove-or-move-denies-red-on-revert",
+          [kind(base, c) for c in wt] + [_rwh_without_hold(lambda: kind(base, wt[0]))],
+          ["deny", "deny", "allow"])
+    ut = 'git -C "$X" checkout y'
+    check("rwh/unresolvable-target-unverifiable-red-on-revert",
+          [kind(main, ut), _rwh_without_hold(lambda: kind(main, ut))], ["unverifiable", "allow"])
+    (holds / "bad.json").write_text("{not json", encoding="utf-8")
+    bad_got = [kind(base, co), kind(held, "git status")]
+    (holds / "bad.json").unlink()
+    (holds / "link.json").symlink_to(holds / "rev-1.json")
+    bad_got.append(kind(base, co))
+    bad_got.append(_rwh_without_hold(lambda: kind(base, co)))
+    (holds / "link.json").unlink()
+    # an unreadable or malformed marker state withholds mutating git commands only (fail closed);
+    # read-only commands pass, and the revert leg shows the deny comes from the marker state alone
+    check("rwh/malformed-marker-state-denies-red-on-revert", bad_got,
+          ["deny", "allow", "deny", "allow"])
+    # both ends of the marker size bound: a marker of exactly _RWH_MARKER_MAX bytes is still a live
+    # hold (the opaque-target probe reads it as live: unverifiable), and one byte over is malformed
+    # (the same probe denies fail-closed), so the bound is tested at and just outside its edge
+    pad = dict(version=1, workdir=str(held), head=tip, dispatch_id="rev-pad",
+               created_utc=_rwh_iso(), expires_utc=_rwh_iso(4))
+    pad["dispatch_id"] = "rev-pad" + "x" * (aiqt_hooks._RWH_MARKER_MAX - len(json.dumps(pad)))
+    (holds / "pad.json").write_text(json.dumps(pad), encoding="utf-8")
+    size_got = [len(json.dumps(pad)) == aiqt_hooks._RWH_MARKER_MAX, kind(main, ut)]
+    pad["dispatch_id"] += "x"
+    (holds / "pad.json").write_text(json.dumps(pad), encoding="utf-8")
+    size_got.append(kind(main, ut))
+    (holds / "pad.json").unlink()
+    check("rwh/marker-size-boundary", size_got, [True, "unverifiable", "deny"])
+    # a GIT_DIR/GIT_WORK_TREE assignment (inline, behind env, via -c, or inherited from the session
+    # environment) moves the repository away from the lexical target, so the mutation is
+    # unresolvable while a hold is live, never silently bound to the session directory
+    held_gd = main / ".git" / "worktrees" / "held"
+    ev = ["GIT_DIR=" + str(held_gd) + " GIT_WORK_TREE=" + str(held) + " git reset --hard " + seed,
+          "env GIT_DIR=" + str(held_gd) + " git reset --hard " + seed,
+          "git -c core.worktree=" + str(held) + " reset --hard " + seed]
+    ev_got = [kind(main, c) for c in ev]
+    os.environ["GIT_DIR"] = str(held_gd)
+    try:
+        ev_got.append(kind(main, "git reset --hard " + seed))
+    finally:
+        del os.environ["GIT_DIR"]
+    ev_got.append(_rwh_without_hold(lambda: kind(main, ev[0])))
+    check("rwh/env-override-unverifiable-red-on-revert", ev_got, ["unverifiable"] * 4 + ["allow"])
+    # a glob the shell may expand to the held worktree, and a target that resolves to no worktree,
+    # are unresolvable: fail closed while a hold is live, never a silent allow
+    gl = "git -C " + str(base / "hel*") + " checkout " + seed
+    nx = "git -C " + str(base / "missing") + " checkout " + seed
+    check("rwh/glob-or-unresolved-target-unverifiable-red-on-revert",
+          [kind(main, gl), kind(main, nx),
+           _rwh_without_hold(lambda: kind(main, gl)), _rwh_without_hold(lambda: kind(main, nx))],
+          ["unverifiable", "unverifiable", "allow", "allow"])
+    # a piped or subshell cd does not move the shell that runs the later mutation, and a cd to a
+    # missing directory fails in place, so whether any of the three leaves the held worktree cannot
+    # be read from the text: each is fail-closed UNVERIFIABLE while the session repository is held.
+    # The allow control walks from an unheld session into the unrelated free repository: the same
+    # uncertain shape with a clear hold set stays allowed
+    pc = "cd " + str(main) + " | true; git reset --hard " + seed
+    sc = "(cd " + str(main) + "); git reset --hard " + seed
+    fc = "cd " + str(base / "missing") + "; git reset --hard " + seed
+    check("rwh/pipeline-or-failed-cd-refused-red-on-revert",
+          [kind(held, pc), kind(held, sc), kind(held, fc),
+           kind(base, "cd " + str(free) + " && git commit -m x"),
+           _rwh_without_hold(lambda: kind(held, pc))],
+          ["unverifiable", "unverifiable", "unverifiable", "allow", "allow"])
+    # git also accepts a worktree named by the unique last components of its path; an unknown name
+    # is unresolvable (fail closed), and an absolute path to an unheld worktree still passes
+    ws = ["git worktree remove held", "git worktree move held " + str(base / "elsewhere2")]
+    check("rwh/worktree-shorthand-denies-red-on-revert",
+          [kind(main, c) for c in ws] +
+          [kind(main, "git worktree remove nosuchname"),
+           kind(main, "git worktree remove " + str(base / "other")),
+           _rwh_without_hold(lambda: kind(main, ws[0]))],
+          ["deny", "deny", "unverifiable", "allow", "allow"])
+    # the cross-worktree ref path worktrees/<id>/HEAD moves a held worktree's HEAD without entering
+    # it; the same path of an unheld worktree still passes
+    cr = "git update-ref worktrees/held/HEAD " + seed
+    check("rwh/cross-worktree-head-ref-denies-red-on-revert",
+          [kind(main, cr), kind(main, "git update-ref worktrees/other/HEAD " + seed),
+           _rwh_without_hold(lambda: kind(main, cr))],
+          ["deny", "allow", "allow"])
+    # a symbolic-ref write can move the held HEAD (in place or through the cross-worktree path) or
+    # re-point its checked-out branch; the read form and a write of an unheld HEAD still pass
+    sr = ["git -C " + str(held) + " symbolic-ref HEAD refs/heads/main",
+          "git symbolic-ref worktrees/held/HEAD refs/heads/main",
+          "git symbolic-ref refs/heads/review refs/heads/main"]
+    check("rwh/symbolic-ref-held-head-denies-red-on-revert",
+          [kind(main, c) for c in sr] +
+          [kind(held, "git symbolic-ref -q HEAD"),
+           kind(main, "git symbolic-ref HEAD refs/heads/main"),
+           _rwh_without_hold(lambda: kind(main, sr[0]))],
+          ["deny", "deny", "deny", "allow", "allow", "allow"])
+    # a marker-directory path that exists but is not a directory is invalid state, not absence:
+    # mutating git is withheld (at review-holds itself and at its aiqt parent), reads still pass
+    shutil.rmtree(holds)
+    holds.write_text("x", encoding="utf-8")
+    nd_got = [kind(base, co), kind(held, "git status")]
+    holds.unlink()
+    aiqt_dir = main / ".git" / "aiqt"
+    aiqt_dir.rmdir()
+    aiqt_dir.write_text("x", encoding="utf-8")
+    nd_got.append(kind(base, co))
+    nd_got.append(kind(held, "git log --oneline"))
+    nd_got.append(_rwh_without_hold(lambda: kind(base, co)))
+    aiqt_dir.unlink()
+    holds.mkdir(parents=True)
+    marker("rev-1")
+    check("rwh/marker-dir-not-a-directory-denies-red-on-revert", nd_got,
+          ["deny", "allow", "deny", "allow", "allow"])
+    # a marker version of another type that compares equal to 1 (True, 1.0) is malformed state, not
+    # a live version-1 hold: a valid marker pins only its worktree (see rwh/other-worktree-allows),
+    # malformed state withholds every mutating git command and still passes reads
+    marker("rev-1", version=True)
+    vt_got = [kind(base, "git -C " + str(base / "other") + " checkout " + seed)]
+    marker("rev-1", version=1.0)
+    vt_got.append(kind(base, "git -C " + str(base / "other") + " checkout " + seed))
+    vt_got.append(kind(held, "git status"))
+    marker("rev-1")
+    check("rwh/marker-version-type-strict", vt_got, ["deny", "deny", "allow"])
+    # malformed marker state withholds mutating git only: worktree list is a read and passes while
+    # worktree remove stays withheld
+    (holds / "bad.json").write_text("{not json", encoding="utf-8")
+    wl_got = [kind(held, "git worktree list"), kind(main, "git worktree remove " + str(held))]
+    (holds / "bad.json").unlink()
+    check("rwh/worktree-list-under-bad-state-allows", wl_got, ["allow", "deny"])
+    # ---------- fail-closed certainty cases, the session cwd OUTSIDE every repository ----------
+    # a -c/--config-env override, a GIT_ assignment or export, or a cd anywhere earlier makes the
+    # target uncertain; the deny comes from the held repository in the command's HOLD SET (the -C,
+    # cd and GIT_ path operands), never from the session repository alone, so a session outside
+    # every repository still fails closed; the same shapes against the unheld free repo pass
+    ov = ["git -c user.name=x -C " + str(held) + " reset --hard " + seed,
+          "git -C " + str(held) + " -c user.name=x reset --hard " + seed,
+          "GIT_NAMESPACE=x git -C " + str(held) + " reset --hard " + seed,
+          "cd " + str(held) + " || exit 1; git reset --hard " + seed,
+          "export GIT_DIR=" + str(held_gd) + "; git reset --hard " + seed]
+    check("rwh/outside-session-override-unverifiable-red-on-revert",
+          [kind(base, c) for c in ov] +
+          [kind(base, "git -c user.name=x -C " + str(free) + " commit -m x"),
+           kind(base, "export GIT_DIR=" + str(free / ".git") + "; git commit -m x"),
+           _rwh_without_hold(lambda: kind(base, ov[0]))],
+          ["unverifiable"] * 5 + ["allow", "allow", "allow"])
+    # a wrapper the peel cannot see through (timeout, nice, env with an option, a quoted sh -c or
+    # eval body) hides which repository its git mutates: fail closed on the hold set, with the raw
+    # -C and cd operands inside quoted bodies still contributing to it
+    wv = ["timeout 60 git -C " + str(held) + " reset --hard " + seed,
+          "nice git -C " + str(held) + " reset --hard " + seed,
+          "env -i git -C " + str(held) + " reset --hard " + seed,
+          "sh -c 'git -C " + str(held) + " reset --hard " + seed + "'",
+          "eval 'cd " + str(held) + "; git reset --hard " + seed + "'"]
+    check("rwh/wrapper-word-unverifiable-red-on-revert",
+          [kind(base, c) for c in wv] +
+          [kind(base, "timeout 60 git -C " + str(free) + " commit -m x"),
+           _rwh_without_hold(lambda: kind(base, wv[0]))],
+          ["unverifiable"] * 5 + ["allow", "allow"])
+    # a git behind a shell reserved word, inside a quoted command substitution, or in a heredoc
+    # body is not one plain git segment: the raw git word fails closed on the hold set, from the
+    # held session and from outside with the held path as a literal -C operand alike; the same
+    # shapes naming only the unheld free repository pass
+    rsv = ["{ git reset --hard " + seed + "; }",
+           "if true; then git reset --hard " + seed + "; fi",
+           "! git reset --hard " + seed,
+           "bash <<'EOF'\ngit reset --hard " + seed + "\nEOF",
+           'echo "$(git reset --hard ' + seed + ')"']
+    check("rwh/reserved-word-or-substitution-denies-red-on-revert",
+          [kind(held, c) for c in rsv] +
+          [kind(base, "{ git -C " + str(held) + " reset --hard; }"),
+           kind(base, "{ git -C " + str(free) + " reset --hard; }"),
+           kind(base, "if true; then git -C " + str(free) + " commit -m x; fi"),
+           _rwh_without_hold(lambda: kind(held, rsv[0]))],
+          ["unverifiable"] * 6 + ["allow", "allow", "allow"])
+    # a --git-dir/--work-tree value (= and separated forms), a later -C in an accumulated chain,
+    # and a quoted operand inside a shell body all join the hold set from the raw text, so these
+    # spellings fail closed from a session outside every repository; the same spellings naming only
+    # the unheld free repository pass, and an opaque operand ($VAR, a tilde) from an unheld outside
+    # session is the disclosed allow residual of a hold set built from literal text
+    oo = ["git --git-dir=" + str(held_gd) + " --work-tree=" + str(held) + " reset --hard",
+          "git --git-dir " + str(held_gd) + " --work-tree " + str(held) + " checkout -f",
+          "git -C " + str(free) + " --work-tree=" + str(held) + " checkout -f main",
+          "git -c user.name=x -C " + str(base) + " -C held reset --hard",
+          "sh -c \"git -C '" + str(held) + "' reset --hard\""]
+    check("rwh/override-operand-denies-red-on-revert",
+          [kind(base, c) for c in oo] +
+          [kind(base, "git --git-dir=" + str(free / ".git") + " --work-tree=" + str(free) +
+                " reset --hard"),
+           kind(base, "git -c user.name=x -C " + str(base) + " -C free reset --hard"),
+           kind(base, 'git -C "$HELD" reset --hard'),
+           kind(base, "git -C ~/held reset --hard"),
+           _rwh_without_hold(lambda: kind(base, oo[0]))],
+          ["unverifiable"] * 5 + ["allow"] * 5)
+    # ANY wrapper word, listed or not, and a git-<name> executable path carry the raw git word, so
+    # they fail closed while a hold-set repository is held; the same shapes against the unheld free
+    # repository pass
+    wo = ["watch -n 1 -g git reset --hard",
+          "script -qc 'git reset --hard' /dev/null",
+          "find . -maxdepth 0 -exec git reset --hard ;",
+          "/usr/lib/git-core/git-reset --hard"]
+    check("rwh/wrapper-outside-list-denies-red-on-revert",
+          [kind(held, c) for c in wo] +
+          [kind(base, "watch -n 1 -g git -C " + str(held) + " reset --hard"),
+           kind(base, "bash -c 'cd \"" + str(held) + "\" && git reset --hard'"),
+           kind(base, "watch -n 1 -g git -C " + str(free) + " reset --hard"),
+           kind(free, wo[3]),
+           _rwh_without_hold(lambda: kind(held, wo[0]))],
+          ["unverifiable"] * 6 + ["allow"] * 3)
+    # a read-only positional operand after a shell body does not mask the body: the raw git word
+    # fails closed from the held worktree, while the same command in the unheld free repository
+    # passes
+    pb = "sh -c 'git reset --hard HEAD' git status"
+    check("rwh/positional-body-denies-red-on-revert",
+          [kind(held, pb), kind(free, pb), _rwh_without_hold(lambda: kind(held, pb))],
+          ["unverifiable", "allow", "allow"])
+    # a wrapped or quoted git, read-only included, is not one plain git segment, so it fails closed
+    # while the session repository is held: the stated over-deny of a raw-text rule that classifies
+    # no shell bodies. The same wrapped reads in the unheld free repository still pass, and plain
+    # unwrapped reads in the held worktree stay allowed (rwh/held-read-only-allows)
+    wro = ["env SAFE=1 git worktree list", "timeout 5 git status", "nice git log --oneline",
+           "sh -c 'git worktree list'"]
+    check("rwh/wrapped-read-only-held-denies-unheld-allows",
+          [kind(held, c) for c in wro] + [kind(free, c) for c in wro] +
+          [_rwh_without_hold(lambda: kind(held, wro[0]))],
+          ["unverifiable"] * 4 + ["allow"] * 5)
+    # git prefers the registered-worktree name over an ordinary directory carrying the same name,
+    # so the held name denies BEFORE any path resolution; a same-shaped ordinary directory whose
+    # name matches no held worktree passes
+    (main / "held").mkdir()
+    (main / "spare").mkdir()
+    (free / "spare").mkdir()
+    nc = ["git worktree remove held", "git worktree move held " + str(base / "elsewhere3")]
+    check("rwh/worktree-name-collision-denies-red-on-revert",
+          [kind(main, c) for c in nc] +
+          [kind(main, "git worktree remove spare"),
+           kind(free, "git worktree remove spare"),
+           _rwh_without_hold(lambda: kind(main, nc[0]))],
+          ["deny", "deny", "allow", "allow", "allow"])
+    (free / "spare").rmdir()
+    (main / "spare").rmdir()
+    (main / "held").rmdir()
+    # -C operands resolve physically before any identity lookup: 'link/..' traverses the symlink
+    # the way the kernel does for git, reaching the held worktree, never the link's lexical parent
+    (base / "lnkp").symlink_to(held / "sub")
+    (base / "lnkf").symlink_to(free / "sub")
+    lp = "git -C " + str(base / "lnkp") + "/.. reset --hard " + seed
+    check("rwh/symlink-parent-target-denies-red-on-revert",
+          [kind(base, lp), kind(base, "git -C " + str(base / "lnkf") + "/.. commit -m x"),
+           _rwh_without_hold(lambda: kind(base, lp))],
+          ["deny", "allow", "allow"])
+    (base / "lnkp").unlink()
+    (base / "lnkf").unlink()
+    # a repository-file core.worktree moves the files a mutation writes without changing the
+    # compared git-directory identity, so the target is uncertain and the configured worktree's
+    # repository joins the hold set; a core.worktree naming an unheld tree passes
+    evil = base / "evil"
+    evil.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(evil))
+    _rdp_git(evil, "config", "core.worktree", str(held))
+    evil2 = base / "evil2"
+    evil2.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(evil2))
+    _rdp_git(evil2, "config", "core.worktree", str(free))
+    _rdp_git(main, "config", "core.worktree", str(held))
+    cwv = "git -C " + str(evil) + " reset --hard"
+    cw_got = [kind(base, cwv), kind(main, "git reset --hard " + tip),
+              kind(base, "git -C " + str(evil2) + " reset --hard"),
+              _rwh_without_hold(lambda: kind(base, cwv))]
+    _rdp_git(main, "config", "--unset", "core.worktree")
+    check("rwh/repo-config-worktree-unverifiable-red-on-revert", cw_got,
+          ["unverifiable", "unverifiable", "allow", "allow"])
+    # a candidate repository's core.worktree expands the hold set even where the mutation hides
+    # behind a wrapper or a configuration override, so the held tree it points at still fails
+    # closed; the same shapes through the repository whose core.worktree names the unheld free
+    # tree pass
+    cwx = ["timeout 5 git -C " + str(evil) + " reset --hard",
+           "git -c user.name=x -C " + str(evil) + " reset --hard"]
+    check("rwh/config-worktree-hold-set-denies-red-on-revert",
+          [kind(base, c) for c in cwx] +
+          [kind(base, "timeout 5 git -C " + str(evil2) + " reset --hard"),
+           kind(base, "git -c user.name=x -C " + str(evil2) + " reset --hard"),
+           _rwh_without_hold(lambda: kind(base, cwx[0]))],
+          ["unverifiable"] * 2 + ["allow"] * 3)
+    # a cd that fails (arity) or is skipped (behind &&) leaves the shell where it was, so the later
+    # mutation is never bound to the cd's destination: uncertain, judged by the hold set from the
+    # held session AND from a session outside every repository
+    ca = ["cd " + str(main) + " extra; git reset --hard " + seed,
+          "false && cd " + str(main) + "; git reset --hard " + seed]
+    check("rwh/cd-arity-or-conditional-unverifiable-red-on-revert",
+          [kind(held, c) for c in ca] +
+          [kind(base, "cd " + str(held) + " extra; git reset --hard " + seed),
+           kind(base, "cd " + str(free) + " extra; git commit -m x"),
+           _rwh_without_hold(lambda: kind(held, ca[0]))],
+          ["unverifiable"] * 3 + ["allow", "allow"])
+    # every ref in the held HEAD's symbolic chain is protected (review is symbolic to main here, so
+    # writing either moves the held HEAD), and a symbolic-ref delete in any accepted spelling (the
+    # --del abbreviation, the clustered -qd, and clusters where m consumes a reason, attached or
+    # separated) is a write of the ref the cluster leaves as the operand; a cluster whose operand
+    # cannot be determined fails closed; deleting an unrelated ref passes, from the held repository
+    # and from the unheld free repository alike
+    _rdp_git(main, "branch", "sparebr")
+    _rdp_git(main, "symbolic-ref", "refs/heads/review", "refs/heads/main")
+    sd = ["git symbolic-ref --del refs/heads/review", "git symbolic-ref -qd refs/heads/review",
+          "git symbolic-ref -qm reason -d refs/heads/review",
+          "git symbolic-ref -qdm reason refs/heads/review",
+          "git symbolic-ref -dmreason refs/heads/review",
+          "git symbolic-ref refs/heads/review refs/heads/sparebr",
+          "git update-ref refs/heads/main " + seed]
+    sd_got = [kind(main, c) for c in sd]
+    sd_got.append(kind(main, "git symbolic-ref -qz refs/heads/review"))
+    sd_got.append(kind(main, "git symbolic-ref -qd refs/heads/sparebr"))
+    sd_got.append(kind(base, "git -C " + str(free) + " symbolic-ref -qdm reason refs/heads/x"))
+    sd_got.append(_rwh_without_hold(lambda: kind(main, sd[0])))
+    _rdp_git(main, "symbolic-ref", "--delete", "refs/heads/review")
+    _rdp_git(main, "update-ref", "refs/heads/review", tip)
+    _rdp_git(main, "branch", "-D", "sparebr")
+    check("rwh/symbolic-ref-chain-and-spellings-denies-red-on-revert", sd_got,
+          ["deny"] * 7 + ["unverifiable", "allow", "allow", "allow"])
+
+    # ---------- allow cases, each naming the over-broad implementation it catches ----------
+    # catches: matching on "git in the held path" instead of on the mutating forms
+    check("rwh/held-read-only-allows", [kind(held, c) for c in (
+        "git status", "git log --oneline", "git diff", "git show", "git rev-parse HEAD",
+        "git fetch")], ["allow"] * 6)
+    # catches: holding per repository instead of per worktree (same common dir, different git dir)
+    check("rwh/other-worktree-allows",
+          kind(base, "git -C " + str(base / "other") + " checkout " + seed), "allow")
+    # catches: a path-prefix match without a boundary check (held2 shares held's prefix)
+    check("rwh/prefix-sibling-allows",
+          kind(base, "git -C " + str(base / "held2") + " checkout " + seed), "allow")
+    # catches: judging by the session cwd over an explicit -C target
+    check("rwh/explicit-target-over-cwd-allows",
+          kind(held / "sub", "git -C " + str(base / "other") + " switch --detach " + seed), "allow")
+    # catches: a raw substring scan that fires on the held path as data
+    check("rwh/path-as-data-allows", kind(base, "grep checkout " + str(held) + "/f"), "allow")
+    # catches: an armed hook in non-adopting repositories (no marker directory: silent allow)
+    norepo = base / "plain"
+    norepo.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(norepo))
+    check("rwh/no-marker-directory-inert", kind(norepo, "git checkout -b x"), "allow")
+    # catches: a hold that never ends (marker removed -> allow; expired -> allow with a note)
+    (holds / "rev-1.json").unlink()
+    ended = [kind(base, co)]
+    marker("rev-2", expires_utc=_rwh_iso(-1))
+    expired = run(base, co)
+    ended.append(_rdp_kind(expired))
+    ended.append("expired review-hold marker" in (expired[1] or {}).get("systemMessage", ""))
+    (holds / "rev-2.json").unlink()
+    check("rwh/removed-or-expired-marker-allows", ended, ["allow", "warn", True])
+    # catches: a missing drift check (the held HEAD moved outside the hook: the next Bash call notes
+    # the invalidated review without denying, and the hold still denies a mutation)
+    marker("rev-3")
+    _rdp_git(held, "checkout", "-q", "--detach", seed)
+    drift = run(main, "git -C " + str(main) + " status")
+    check("rwh/drift-notes-without-denying",
+          [_rdp_kind(drift), "re-dispatch" in (drift[1] or {}).get("systemMessage", ""),
+           _rdp_kind(run(main, "ls")), kind(base, "git -C " + str(held) + " checkout main")],
+          ["warn", True, "warn", "deny"])
+
+
 def _rdp_draft_diff(root, base, head):
     """A worker draft as git writes it: the diff from base to head with git's default a/ and b/ prefixes
     and rename detection, whatever the ambient configuration says."""
@@ -13399,6 +13872,7 @@ def _main_isolated(report_path=None):
         _leasehb_write_integrity_cases(tmp)
         _leasehb_status_and_parse_cases(tmp)
         _rdp_cases(tmp)
+        _rwh_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)

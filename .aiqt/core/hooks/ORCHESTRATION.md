@@ -1014,6 +1014,130 @@ Limits:
   A draft with CRLF line ends, or one holding a hunk of a CRLF file, is withheld as `UNVERIFIABLE:`
   rather than censused.
 
+## Review holds
+
+The optional review-hold markers turn on the review workdir hold hook (`review-workdir-hold`, rule
+rvwpin): once a review is dispatched against a worktree, that worktree is not modified until the
+review returns or is abandoned. The markers are adopter-provided: the pack ships the hook, the
+dispatcher writes the holds. Without a marker directory the hook is inert (a silent allow), so
+adopters who write no markers see nothing.
+
+One marker file per live review lives in `GIT_COMMON_DIR/aiqt/review-holds/<dispatch-id>.json`,
+beside the hook-owned `review-dispatch-binding/` records. Every linked worktree of a repository
+shares that directory, so the hook finds a hold from the command's target alone and needs no
+orchestration registry. The marker is a JSON object owned by the hook's user with exactly these
+fields:
+
+- `version`: 1.
+- `workdir`: the held worktree's absolute top level.
+- `head`: the full lowercase object id the worktree was at when the review was dispatched.
+- `dispatch_id`: a non-empty identifier for the review.
+- `created_utc` and `expires_utc`: ISO-8601 UTC timestamps. `expires_utc` is required: an expired
+  marker is ignored with a note, so a crashed dispatcher cannot pin a worktree forever. No maximum
+  lifetime is enforced, so a marker with a far-future expiry pins its worktree until the dispatcher
+  removes it; keep the horizon short and refresh it for a long review.
+
+The adopter's steps:
+
+1. The dispatch tool writes the marker atomically (write a temporary file elsewhere in
+   `GIT_COMMON_DIR/aiqt/`, then rename it into `review-holds/`) before the reviewer starts, and
+   removes it when the review returns or is abandoned. Never write the temporary file inside
+   `review-holds/` itself: every entry there is read as a marker, so a partial or oddly named file
+   reads as malformed state and withholds mutating git commands repository-wide until it is renamed
+   into place or removed.
+2. The resync or fast-forward tool runs the preflight before it moves any worktree: pipe the
+   PreToolUse payload (`tool_name` `Bash`, `cwd`, and `tool_input.command`) to
+   `aiqt_hooks.py review_workdir_hold`, and withhold the move on exit 2 or a printed `deny`
+   decision; or read the markers itself.
+3. Dispatch each review on a dedicated worktree per review, as the review dispatch binding's limits
+   above already advise.
+
+While a live marker pins a worktree, the rule is one-plain-git-or-fail-closed, judged from the RAW
+command text, so shell grammar is never modelled construct by construct. Every command is judged
+against its HOLD SET: the repositories of the session working directory and of every literal path
+the raw text names after `-C`, `--git-dir`, `--work-tree` (the `=` and the separated form), `cd`,
+`pushd` or a `GIT_` assignment, with one level of surrounding quotes stripped (quoted `sh -c`
+bodies, heredoc bodies and option values included), each resolved physically and each expanded
+through its configured `core.worktree` (a repository-file `core.worktree` adds the configured
+worktree's repository to the set, so the expansion also reaches a mutation hidden behind a wrapper
+or override). While ANY repository in that set has a live hold, ANY command whose raw text carries
+a git word (the word `git`, the git of a `git-<name>` executable, the git ending an interpreter
+path such as `/usr/bin/git`), anywhere, inside quotes, substitutions, heredoc bodies and option
+values included, is denied with the reason prefixed `UNVERIFIABLE:`, EXCEPT one plain git segment:
+exactly one segment, no wrapper or reserved word before git (a bare `command`, `exec`, `builtin`,
+`env` or `sudo` prefix is peeled by the shared peel), the command word the literal word `git`, and
+no `$(`, backquote or heredoc operator anywhere in the raw text. That one plain segment passes
+only when its subcommand is read-only under the existing read-only rules (read-only git is never
+withheld by a hold), or when its target is CERTAIN and resolves outside every held worktree: its
+only directory moves literal `-C` operands resolved physically (`os.path.realpath`), no
+`--git-dir`/`--work-tree` or `-c`/`--config-env` override, no `GIT_` variable assigned, exported
+or unset in the command, none of the inherited variables GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
+GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_QUARANTINE_PATH,
+GIT_NAMESPACE, GIT_REPLACE_REF_BASE, GIT_GRAFT_FILE or GIT_SHALLOW_FILE set in the hook's own
+environment (exactly that list: another inherited variable, the `GIT_CONFIG_*` family included,
+does not block certainty, a disclosed limit), and the resolved repository's configuration setting
+no `core.worktree`. A certain target that is a held worktree is denied; identity is compared by
+git's absolute git directory on physically resolved paths, never by path string, so a symlinked
+alias of the held worktree (`-C link/..` included) is the same worktree and a sibling path that
+merely shares a prefix is not. `git worktree remove` and `git worktree move` of the held worktree
+are denied by name shorthand or exact path BEFORE any path resolution (git prefers the
+registered-worktree name over an ordinary directory carrying the same name) and by resolved
+identity after it, and `git update-ref` or `git symbolic-ref` writes of the held worktree's HEAD,
+of its cross-worktree ref paths (`worktrees/<id>/HEAD`, `main-worktree/HEAD`) or of any ref in its
+symbolic HEAD chain (the checked-out branch included; a delete in any accepted spelling, `--del`,
+clustered `-qd` and clusters whose `m` consumes a reason included) are denied from any worktree of
+the repository; a `worktree remove`/`move` operand that resolves to no worktree, a symbolic-ref
+option cluster whose written operand cannot be determined, and an update-ref batch are denied as
+`UNVERIFIABLE:` while a hold is live. STATED OVER-DENIAL: while a hold-set repository is held, a
+wrapped or quoted read-only git (`timeout 5 git status`, `sh -c 'git worktree list'`, `env X=1 git
+worktree list`) is DENIED, not passed: the raw-text rule classifies no shell bodies, so only the
+one plain git segment earns the read-only pass, and any other text carrying a git word, however
+read-only or data-only, fails closed until the hold ends. ALLOW RESIDUAL: the hold set is built
+from literal text, so an operand only an expansion resolves (`git -C "$DIR"`, a leading `~`, a
+glob) names no repository; from a session outside every held repository such a command stays
+allowed even where the expansion would land in a held worktree, and a git reached through an
+opaque program name (a wrapper script, an alias) carries no git word at all. An unreadable or
+malformed marker directory, in any consulted repository and including a `review-holds` path that
+exists but is not a directory, denies git-word commands other than the one plain read-only form
+(fail closed); non-git commands pass, and a dry-run spelling of a mutating verb (`git clean -n`,
+`git commit --dry-run`) is read as mutating, a safe over-deny. When a live marker's recorded
+`head` differs from the held worktree's current HEAD, the hook surfaces a drift note (the
+in-flight review is invalidated; re-dispatch per rvwpin.4) on each check without denying, which
+catches a move made outside the session after the fact.
+
+Limits:
+
+- Movers the hook cannot see: a resync from cron, a terminal, another session without the plugin, a
+  Codex or Gemini worker, or a non-Bash tool. These are caught only after the fact by the drift
+  note, and only on the next hooked Bash call in a session; they are prevented only where the
+  adopter's tool runs the preflight above.
+- Indirect git is not seen: an alias, a shell function, a script, or git configured to run programs
+  (a `post-checkout` hook, `core.fsmonitor`). A relative `cd` resolved through `CDPATH` can land in
+  a repository the hold set does not name.
+- The held BRANCH is pinned only against the ref writes named above: from another worktree of the
+  same repository, `git push . <rev>:<held-branch>`, a `git fetch` into the held branch, or a
+  `git switch --ignore-other-worktrees` checkout followed by a commit can still move it, as can a
+  push from another repository; these surface after the fact as the drift note. Plumbing that
+  rewrites the files or index without a recognized mutating verb (`checkout-index`, `read-tree`,
+  `filter-branch`) is likewise not denied.
+- File edits inside a held worktree (the Write and Edit tools, `sed -i`, `cp`) are covered by the
+  rule but not by this hook; extending the write-scope hook is a separate follow-on.
+- Marker accuracy is the adopter's: a missing marker, an early removal, a wrong `workdir`, or a
+  review that outlasts `expires_utc` are adopter errors the hook cannot judge.
+- A race between the check and the command running remains.
+- The marker directory can be written by the assistant, so a determined actor can remove a hold;
+  the same suite-level limit the honest-limits section below discloses for the pack's other
+  machine-local state.
+- A held branch tip moved by `git branch -f`, a push into the held worktree's checked-out branch,
+  and a mutating verb outside the recognized set (`checkout-index`, `read-tree`, `filter-branch`)
+  are not matched; safe over-denies (a repository-level write such as `push` or `tag` targeted into
+  the held worktree, a path that literally contains `$`, a backquote, a glob or brace character or
+  a leading `~`, a `cd` in a pipeline or subshell read as making the working directory unknown, a
+  `cd` destination that cannot be entered read as the directory it started from, and a worktree
+  name or override the hook cannot resolve while a hold is live) are taken instead of
+  under-blocking. The `review-holds` directory itself is resolved through the filesystem, so a
+  symlinked directory is followed; only its entries are opened without following links.
+
 ## Platforms without hooks
 
 The decision algorithm binds as an operating procedure: before any stop, idle wake, or drained
