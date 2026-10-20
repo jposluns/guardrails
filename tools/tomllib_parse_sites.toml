@@ -56,7 +56,7 @@ reason = "test-code"
 path = "opf/tools/_opf_adopt_apply.py"
 function = "_self_test_checks"
 form = "call"
-count = 14
+count = 17
 class = "EXEMPT"
 reason = "test-code"
 
@@ -71,6 +71,14 @@ reason = "test-code"
 [[site]]
 path = "opf/tools/_opf_adopt_apply.py"
 function = "_self_test_checks._sheet.<genexpr>"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks._sheet_with"
 form = "call"
 count = 1
 class = "EXEMPT"
