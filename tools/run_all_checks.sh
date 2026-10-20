@@ -167,6 +167,8 @@ run_gate "agents-selftest" python3 -I -B tools/gen_agents.py --self-test
 run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
 run_gate "first-pin-demo-selftest" python3 -I -B tools/gen_first_pin_demo.py --self-test
 run_gate "first-pin-demo-drift"    python3 -I -B tools/gen_first_pin_demo.py --check
+run_gate "must-deliver-selftest" python3 -I -B tools/check_must_deliver.py --self-test
+run_gate "must-deliver"          python3 -I -B tools/check_must_deliver.py
 run_gate "mappings-page-drift" python3 -I -B tools/gen_mappings.py --check
 run_gate "reference-roster-selftest" python3 -I -B tools/gen_reference_facts.py --self-test
 run_gate "reference-roster-drift" python3 -I -B tools/gen_reference_facts.py --check
