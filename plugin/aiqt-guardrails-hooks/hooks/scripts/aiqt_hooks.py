@@ -13353,6 +13353,225 @@ def _orch_foreground_detach(command):
     return _orch_foreground_detach_kind(command) is not None
 
 
+# Commands that detach work, or keep it alive past the call, without a bare `&`, each with the effect the
+# out-of-scope note names. setsid without -w can return before its command finishes: it forks and returns
+# when it is already a process-group leader, as it is when bash runs it as the last simple command of a
+# command string without forking and that bash leads its own process group (or always, under -f).
+_ORCH_DETACH_WORD_EFFECTS = {
+    "setsid": "starts the command in a new session and, without -w, can return before it finishes",
+    "nohup": "lets the command outlive the session that started it",
+    "disown": "drops a job from this shell's job table, so nothing waits for it",
+}
+# Words after which the next word is still in command position: reserved words that open or continue a
+# compound command, and command-modifier wrappers. An option, a number or an assignment after one of these
+# keeps command position as well (_orch_note_scan), so `timeout 5 nohup job` reads nohup as the command.
+_ORCH_NOTE_COMMAND_PREFIXES = frozenset((
+    "!", "{", "if", "then", "else", "elif", "while", "until", "do", "time",
+    "builtin", "command", "doas", "env", "exec", "ionice", "nice", "nohup", "setsid", "stdbuf", "sudo",
+    "timeout"))
+# One run of plain word characters: no blank, quote, escape, expansion or shell metacharacter.
+_ORCH_NOTE_WORD_RE = re.compile(r"[^\s;&|()<>'\"\\$`]+")
+_ORCH_NOTE_NUMBER_RE = re.compile(r"[0-9][0-9.]*[smhd]?")
+
+
+def _orch_setsid_waits(command, i):
+    """True when the options after a setsid word that ends at index i include -w or --wait (or a unique
+    prefix of --wait), so setsid waits for its command. The option words are read up to the first word
+    that is not an option, or up to `--`."""
+    n = len(command)
+    while True:
+        while i < n and command[i] in " \t":
+            i += 1
+        match = _ORCH_NOTE_WORD_RE.match(command, i)
+        if match is None:
+            return False
+        word = match.group()
+        if word == "--" or not word.startswith("-") or word == "-":
+            return False
+        if word.startswith("--"):
+            if len(word) > 3 and "--wait".startswith(word):
+                return True
+        elif "w" in word[1:]:
+            return True
+        i = match.end()
+
+
+def _orch_arith_closes(command):
+    """For each index of an opening parenthesis, the index of its matching closing one (-1 when it has
+    none), matched by nesting alone. Quotes are not read, so a quoted parenthesis inside an arithmetic
+    expression can misalign the match; such a misread only adds or drops a note outside registry scope."""
+    closes = [-1] * len(command)
+    stack = []
+    for i, ch in enumerate(command):
+        if ch == "(":
+            stack.append(i)
+        elif ch == ")" and stack:
+            closes[stack.pop()] = i
+    return closes
+
+
+def _orch_note_scan(command, bash_word_starts):
+    """The scan behind the note outside registry scope. It reads quotes, escapes and `#` comments exactly
+    as _orch_foreground_scan does (bash_word_starts selects the same comment rule), and adds three things
+    that scan does not model. A here-document body is skipped as data, quoted delimiter or not, so an `&`
+    or an apostrophe in it neither notes nor shifts the quote state. An arithmetic expansion $(( ... )) or
+    arithmetic command (( ... )) is skipped, so a bitwise `&` in it does not note; it counts as arithmetic
+    only when its two opening parentheses close as `))`, which is how bash tells it from a nested
+    subshell. A setsid, nohup or disown in command position (at the start of a command, after an operator
+    or a reserved word such as then or do, or after a wrapper such as env, nice, sudo or timeout and its
+    options, numbers and assignments) is reported, setsid only without -w or --wait.
+
+    Returns "detach" when it meets a bare `&` control operator, else the first such command word it met
+    (setsid, nohup or disown), else None. A scan that ends inside an open quote returns the same, never a
+    separate kind: outside registry scope that case stays silent. The in-scope deny does not use this scan;
+    it keeps _orch_foreground_detach_kind."""
+    in_single = in_double = escaped = False
+    prev_dup = False
+    word_start = True
+    command_position = next_command = True  # next_command: the position the next word takes after a blank
+    groups = []  # next_command saved at each unquoted `(`, restored at its `)`
+    heredocs = []  # (delimiter, strip_tabs) opened on the current line; their bodies follow its newline
+    closes = _orch_arith_closes(command) if "((" in command else None
+    found = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if escaped:
+            escaped, prev_dup, word_start = False, False, False
+            i += 1
+            continue
+        if in_single:
+            if ch == "'":
+                in_single = False
+            prev_dup, word_start = False, False
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_double = False
+            prev_dup, word_start = False, False
+            i += 1
+            continue
+        if ch == "#" and word_start:
+            nl = command.find("\n", i)
+            if nl == -1:
+                break
+            i = nl
+            continue
+        if ch == "\n" and heredocs:
+            # The bodies of the here-documents opened on this line follow its newline: skip them as data.
+            i = _skip_heredoc_bodies(command, i + 1, n, heredocs)
+            heredocs = []
+            prev_dup, word_start = False, True
+            command_position = next_command = True
+            continue
+        if ch.isspace():
+            prev_dup, word_start = False, (ch in _ORCH_BASH_WORD_BREAKS) if bash_word_starts else True
+            if ch == "\n":
+                command_position = next_command = True
+            elif ch in " \t":
+                command_position = next_command
+            else:
+                command_position = next_command = False  # any other space is a word character to bash
+            i += 1
+            continue
+        if ch in "\\'\"":
+            if ch == "\\":
+                escaped = True
+            elif ch == "'":
+                in_single = True
+            else:
+                in_double = True
+            prev_dup, word_start = False, False
+            if command_position:
+                command_position = next_command = False  # a quoted or escaped command word is not read
+            i += 1
+            continue
+        if ch == "&":
+            nxt = command[i + 1] if i + 1 < n else ""
+            if nxt == "&":
+                prev_dup, word_start = False, bash_word_starts
+                command_position = next_command = True
+                i += 2
+                continue
+            if nxt == ">":
+                prev_dup, word_start = False, bash_word_starts
+                i += 1
+                continue
+            if prev_dup:
+                if command[i - 1] == "|":
+                    command_position = next_command = True
+                prev_dup, word_start = False, bash_word_starts
+                i += 1
+                continue
+            return "detach"
+        if closes is not None and ch in "$(" and command.startswith("((", i + (ch == "$")):
+            start = i + (ch == "$")
+            end = closes[start]
+            if end != -1 and closes[start + 1] == end - 1:
+                # arithmetic: `$((` or `((` whose parentheses close as `))`; its `&` is a bitwise AND
+                prev_dup, word_start = False, False
+                command_position = next_command = False
+                i = end + 1
+                continue
+        if ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i):
+            parsed = _parse_heredoc_delim(command, i + 2, n)
+            if parsed is not None:
+                heredocs.append((parsed[1], parsed[2]))
+                prev_dup, word_start = False, False
+                command_position = False
+                i = parsed[3]
+                continue
+        if command_position:
+            match = _ORCH_NOTE_WORD_RE.match(command, i)
+            if match is not None:
+                word, end = match.group(), match.end()
+                base = word.rsplit("/", 1)[-1]
+                at_break = end >= n or command[end] in _ORCH_BASH_WORD_BREAKS
+                if (found is None and at_break and base in _ORCH_DETACH_WORD_EFFECTS
+                        and not (base == "setsid" and _orch_setsid_waits(command, end))):
+                    found = base
+                next_command = bool(
+                    _ENV_ASSIGN_RE.match(word) or word.startswith("-")
+                    or (at_break and (base in _ORCH_NOTE_COMMAND_PREFIXES
+                                      or _ORCH_NOTE_NUMBER_RE.fullmatch(word))))
+                command_position = False
+                prev_dup, word_start = False, False
+                i = end
+                continue
+        if ch in ";|":
+            command_position = next_command = True
+        elif ch == "(":
+            groups.append(next_command)
+            command_position = next_command = True
+        elif ch == ")":
+            if groups:
+                next_command = groups.pop()
+                command_position = False
+            else:
+                command_position = next_command = True  # a case pattern's `)`: a command follows
+        elif ch in "<>":
+            command_position = False  # the next word is the redirect's target, not a command
+        elif command_position:
+            command_position = next_command = False
+        prev_dup = ch in (">", "<", "|")
+        word_start = bash_word_starts and ch in _ORCH_BASH_WORD_BREAKS
+        i += 1
+    return found
+
+
+def _orch_foreground_note_kind(command):
+    """What the note outside registry scope names for a foreground command: "detach" when either `#`
+    comment rule (_orch_note_scan) meets a bare `&`, else the first setsid, nohup or disown command word
+    either rule met, else None."""
+    kinds = (_orch_note_scan(command, False), _orch_note_scan(command, True))
+    if "detach" in kinds:
+        return "detach"
+    return kinds[0] or kinds[1]
+
+
 # ROUND-2 FINDING 9: sinks that TRUNCATE their input, so a producer piped into one loses both its full
 # output and (absent `pipefail`) its exit status. A subset of _CONSOLE_SINKS: cat/tee pass output through
 # (tee can even durably capture to a real file), so only head/tail are truncating.
@@ -13890,9 +14109,13 @@ def orch_truncation_guard(data):
     the ancestor chain; by default a git discovery failure alone - no git binary, a dubious-ownership
     refusal, a broken config, a bare repository - still never denies, while in registry-required mode one
     that hides a registry reachable only through the git toplevel reads as absent and denies), so with NO registry entry on that chain and
-    none at a git-resolved toplevel the guard is, by default, inert and allows every Bash call that
+    none at a git-resolved toplevel the guard by default denies nothing and allows every Bash call that
     passes the pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
-    unreadable, or invalid keeps it active. REGISTRY-REQUIRED MODE (opt-in, default
+    unreadable, or invalid keeps it active. OUT-OF-SCOPE NOTE: in that no-registry case a readable
+    foreground command (run_in_background false or omitted, command a string) that detaches work, by a
+    bare `&` or by a setsid (without -w), nohup or disown command (_orch_foreground_note_kind, a scan that
+    also skips here-document bodies and arithmetic), is allowed WITH A NOTE naming the tracked background
+    mechanism; every other call there is the silent allow, malformed input included. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
     off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
     stripped, so a padded off word reads as ON), an ABSENT registry DENIES instead of
@@ -13915,7 +14138,8 @@ def orch_truncation_guard(data):
     cannot open or examine, or an ancestor chain that changed while the walk read it:
     _orch_registry_walk), each deny naming the defect and an action that repairs it. Only a plain
     non-Bash string tool_name, and a cwd whose completed walk and git-toplevel union find no registry,
-    are out of scope (allow; in registry-required mode that cwd is denied instead)."""
+    are out of scope (allow, with the out-of-scope note above for a foreground detach; in
+    registry-required mode that cwd is denied instead)."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name("trkasy")
@@ -13981,7 +14205,27 @@ def orch_truncation_guard(data):
                 "restore the default scoping (inert allow with no registry).",
                 "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
                 "registry found (rule trkasy, fail-closed).")
-        return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
+        # Not an orchestrated session: no registry on the chain or at a git toplevel. A readable foreground
+        # command that detaches work (a bare `&`, or a setsid, nohup or disown command) is allowed WITH A
+        # NOTE naming the tracked background mechanism; every other call, malformed input included, is the
+        # silent allow it always was here (no new fail-closed case outside registry scope).
+        out_input = data.get("tool_input")
+        out_command = out_input.get("command") if isinstance(out_input, dict) else None
+        if (not isinstance(out_command, str)
+                or out_input.get("run_in_background", False) is not False):
+            return _allow()
+        note_kind = _orch_foreground_note_kind(out_command)
+        if note_kind is None:
+            return _allow()
+        what = ("detaches a child with a bare '&', so the work runs on after this call returns"
+                if note_kind == "detach" else "runs {}, which {}".format(
+                    note_kind, _ORCH_DETACH_WORD_EFFECTS[note_kind]))
+        return _allow_note(
+            "AIQT guardrail (note, rule trkasy): this foreground command {}; its result and failure are not "
+            "collected unless something tracks them. No orchestration registry scopes this session, so this "
+            "is a note, not a deny. To keep the work observable, use the platform's tracked background "
+            "mechanism (run_in_background) and collect its completion, or run it in the foreground and "
+            "wait. If the detach is deliberate and its result is not needed, record that choice.".format(what))
     if scope == "cannot-evaluate" and _orch_registry_required():
         # REGISTRY-REQUIRED MODE, round 5: the discovery found an entry it can neither rule out nor confirm
         # as a registry. By default that keeps the guard ACTIVE (deny-safe); in this mode a discovery fault

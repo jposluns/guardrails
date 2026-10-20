@@ -152,6 +152,10 @@ def _verdict(result):
     return "unexpected({!r})".format(result)
 
 
+def _fg(command):
+    return {"command": command, "run_in_background": False}
+
+
 def _registry_ceiling(root, probe):
     """Wrap a registry probe of the truncation guard's ancestor walk (aiqt_hooks._orch_dirfd_has_registry)
     so that every directory STRICTLY ABOVE root reads as carrying no registry while every other directory
@@ -9348,12 +9352,81 @@ def _main_isolated(report_path=None):
         check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
         check("trunc/fg-comment-then-detach-denies", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "deny")
         check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
-        # inert BY DEFAULT when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
+        # Inside registry scope the deny reads a here-document body and arithmetic as code and does not
+        # read setsid, nohup or disown, exactly as before the out-of-scope note was added: the note's own
+        # scan must not leak into the deny.
+        check("trunc/fg-heredoc-amp-still-denies",
+              _verdict(bg("cat > /tmp/f <<'EOF'\nFix A & B\nEOF", rib=False)), "deny")
+        check("trunc/fg-arith-amp-still-denies", _verdict(bg("echo $(( 6 & 3 ))", rib=False)), "deny")
+        check("trunc/fg-setsid-still-allows", _verdict(bg("setsid long_job", rib=False)), "allow")
+        # With no orchestration registry the guard denies nothing, but a readable foreground command that
+        # detaches work is allowed WITH A NOTE (the reducer's "warn") naming the tracked background
+        # mechanism; every other call stays the silent allow.
         ti = Fixture(tmp, "trunc-inert")
         (ti.root / ".aiqt" / "orchestration.local.json").unlink()
         check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash",
-                       {"command": "long_job &", "run_in_background": False}))), "allow")
+                       {"command": "long_job &", "run_in_background": False}))), "warn")
+        # The same no-registry fixture: (check id, tool_input, reduced verdict). A foreground command that
+        # detaches work notes ("warn"); the controls stay the silent allow ("allow"). Each control carries an
+        # ampersand or a detach word that a scan ignoring quotes, comments, here-document bodies, arithmetic,
+        # command position, setsid -w or the background flag would note.
+        for check_id, tool_input, want in (
+                ("trunc/oos-detach-no-space-notes", _fg("long_job&"), "warn"),
+                ("trunc/oos-detach-loop-end-notes", _fg('for d in a b; do run_one "$d"; done &'), "warn"),
+                ("trunc/oos-detach-loop-body-notes", _fg('for d in a b; do run_one "$d" & done'), "warn"),
+                ("trunc/oos-detach-subshell-notes", _fg("( long_job ) &"), "warn"),
+                ("trunc/oos-detach-brace-notes", _fg("{ long_job; } &"), "warn"),
+                ("trunc/oos-detach-redirect-notes", _fg("long_job > /tmp/log 2>&1 &"), "warn"),
+                ("trunc/oos-detach-here-string-notes", _fg('grep foo <<< "$x" &'), "warn"),
+                ("trunc/oos-detach-second-line-notes", _fg("cd /tmp\nlong_job &"), "warn"),
+                ("trunc/oos-detach-after-comment-notes", _fg("echo hi  # note\nsleep 100 &"), "warn"),
+                ("trunc/oos-detach-after-heredoc-notes",
+                 _fg("cat <<'EOF'\nthe user's file & more\nEOF\nlong_job &"), "warn"),
+                ("trunc/oos-detach-omitted-flag-notes", {"command": "long_job &"}, "warn"),
+                ("trunc/oos-setsid-notes", _fg("setsid long_job"), "warn"),
+                ("trunc/oos-setsid-fork-notes", _fg("setsid -f long_job"), "warn"),
+                ("trunc/oos-nohup-notes", _fg("nohup long_job > /tmp/log 2>&1"), "warn"),
+                ("trunc/oos-disown-notes", _fg("long_job; disown"), "warn"),
+                ("trunc/oos-wrapped-nohup-notes", _fg("timeout 5 nohup long_job"), "warn"),
+                ("trunc/oos-assign-setsid-notes", _fg("X=1 setsid long_job"), "warn"),
+                ("trunc/oos-after-and-setsid-notes", _fg("cd /tmp && setsid long_job"), "warn"),
+                ("trunc/oos-logical-and-allows", _fg("build && test"), "allow"),
+                ("trunc/oos-amp-redirect-allows", _fg("build &> /tmp/o"), "allow"),
+                ("trunc/oos-dup-allows", _fg("build 2>&1"), "allow"),
+                ("trunc/oos-pipe-stderr-allows", _fg("build |& tee /tmp/l"), "allow"),
+                ("trunc/oos-single-quoted-amp-allows", _fg("echo 'a & b'"), "allow"),
+                ("trunc/oos-double-quoted-amp-allows", _fg('echo "a & b"'), "allow"),
+                ("trunc/oos-escaped-amp-allows", _fg("echo a \\& b"), "allow"),
+                ("trunc/oos-comment-amp-allows", _fg("echo done # & comment"), "allow"),
+                ("trunc/oos-heredoc-quoted-amp-allows",
+                 _fg("cat > /tmp/f <<'EOF'\nFix A & B\nEOF"), "allow"),
+                ("trunc/oos-heredoc-unquoted-amp-allows",
+                 _fg("cat > /tmp/f <<EOF\nFix A & B\nEOF"), "allow"),
+                ("trunc/oos-heredoc-detach-word-allows", _fg("cat <<'EOF'\nsetsid x\nEOF"), "allow"),
+                ("trunc/oos-arith-expansion-allows", _fg("echo $(( 6 & 3 ))"), "allow"),
+                ("trunc/oos-arith-command-allows", _fg("(( x = 6 & 3 ))"), "allow"),
+                ("trunc/oos-setsid-wait-allows", _fg("setsid -w long_job"), "allow"),
+                ("trunc/oos-setsid-wait-long-allows", _fg("setsid --wait long_job"), "allow"),
+                ("trunc/oos-detach-word-argument-allows", _fg("git log --grep setsid"), "allow"),
+                ("trunc/oos-detach-word-redirect-target-allows", _fg("echo hi > nohup"), "allow"),
+                ("trunc/oos-plain-allows", _fg("python3 build.py"), "allow"),
+                ("trunc/oos-unbalanced-allows", _fg("echo 'oops & bg"), "allow"),
+                ("trunc/oos-background-allows",
+                 {"command": "setsid long_job &", "run_in_background": True}, "allow"),
+                ("trunc/oos-flag-not-boolean-allows",
+                 {"command": "long_job &", "run_in_background": "true"}, "allow")):
+            check(check_id, _verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", tool_input))), want)
+        _oos = aiqt_hooks.orch_truncation_guard(ti.payload(
+            "PreToolUse", "Bash", {"command": "setsid long_job", "run_in_background": False}))
+        _oos_note = (_oos[1] or {}).get("systemMessage", "")
+        check("trunc/oos-note-names-mechanism",
+              (_verdict(_oos), "run_in_background" in _oos_note, "setsid" in _oos_note), ("warn", True, True))
+        _oos_bad = ti.payload("PreToolUse", "Bash")
+        _oos_bad["tool_input"] = "long_job &"
+        check("trunc/oos-malformed-input-allows", _verdict(aiqt_hooks.orch_truncation_guard(_oos_bad)),
+              "allow")
         # REGISTRY-REQUIRED MODE (opt-in, AIQT_ORCH_REQUIRE_REGISTRY): an ABSENT registry DENIES instead
         # of leaving the guard inert, with a reason naming the mode and its repair; an explicit off value
         # keeps the default inert allow, and a PRESENT registry behaves identically in both modes.
@@ -9372,9 +9445,10 @@ def _main_isolated(report_path=None):
             check("trunc/registry-required-present-detach-denies",
                   _verdict(bg("long_job &", rib=False)), "deny")
             os.environ[_rr] = "off"
+            # an explicit off value keeps the default no-registry outcome: no deny, the detach note only
             check("trunc/registry-required-off-value-inert", _verdict(aiqt_hooks.orch_truncation_guard(
                 ti.payload("PreToolUse", "Bash",
-                           {"command": "long_job &", "run_in_background": False}))), "allow")
+                           {"command": "long_job &", "run_in_background": False}))), "warn")
             # The off values are matched EXACTLY, nothing stripped (ASCII case-insensitive): a comparison that
             # stripped the value first would read a tab, a newline, or an off word wrapped in spaces or
             # no-break spaces as OFF and allow without a registry. Each reads as ON.
@@ -9536,7 +9610,9 @@ def _main_isolated(report_path=None):
         bare = tmp / "cwd-bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True,
                        timeout=30)
-        check("trunc/cwd-bare-repo-no-registry-allows", _cwd_case(str(bare))[0], "allow")
+        # nocwd carries a detach (sleep 5 &), so each out-of-scope row below reads the out-of-scope note
+        # ("warn"): an allow, never a deny, and a note that only a no-registry read produces.
+        check("trunc/cwd-bare-repo-no-registry-allows", _cwd_case(str(bare))[0], "warn")
         barein = t.root / "inner-bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(barein)], check=True, capture_output=True,
                        timeout=30)
@@ -9584,7 +9660,7 @@ def _main_isolated(report_path=None):
                                (_git_dubious, "trunc/git-dubious-ownership-no-registry-allows"),
                                (_git_badconfig, "trunc/git-broken-config-no-registry-allows")):
                 aiqt_hooks._recovery_git = _sim
-                check(_row, _cwd_case(str(norig))[0], "allow")
+                check(_row, _cwd_case(str(norig))[0], "warn")
             # the same failing git INSIDE an orchestrated tree: the registry is on the walk, so the guard
             # still applies its rules (the detach denies with the DETACH reason, a plain command allows).
             aiqt_hooks._recovery_git = _git_missing
@@ -9601,7 +9677,7 @@ def _main_isolated(report_path=None):
         cv, cw = _cwd_case(str(t.root / ".git"))
         check("trunc/cwd-inside-git-dir-with-registry-detach-denies",
               (cv, "detaches a child" in cw), ("deny", True))
-        check("trunc/cwd-inside-git-dir-no-registry-allows", _cwd_case(str(norig / ".git"))[0], "allow")
+        check("trunc/cwd-inside-git-dir-no-registry-allows", _cwd_case(str(norig / ".git"))[0], "warn")
         # the walk's own failure DENIES with an actionable fix: an ancestor directory it cannot open (the
         # openat of ".." is patched to refuse, as a root-run self-test reads every directory as readable).
         anc = tmp / "anc-noread"
@@ -9647,7 +9723,7 @@ def _main_isolated(report_path=None):
                                capture_output=True, text=True, timeout=30,
                                env=dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.realpath(str(tmp))))
         check("trunc/cwd-confirmed-outside-repo-allows",
-              (probe.returncode, _cwd_case(str(outside))[0]), (128, "allow"))
+              (probe.returncode, _cwd_case(str(outside))[0]), (128, "warn"))
         # HERMETICITY of every truncation-guard row: a registry ABOVE the fixture root never decides a
         # verdict (before this, a live registry above TMPDIR turned each out-of-scope row above into a
         # deny and let each registry-present row pass on the host's registry instead of its fixture's).
