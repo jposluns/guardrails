@@ -78,10 +78,36 @@ parse is unfinished, and OFFSET never passes it, so it is evaluated once complet
 256 bytes before OFFSET. The next Stop (with stop_hook_active or not) evaluates only records starting at or
 after OFFSET. The file is written when this hook blocks, and on a pass once a state file exists or was
 unavailable. LATE-ARRIVAL EXCEPTION: at a block, when the blocked final message is NOT yet in the transcript,
-its SHA-256 is recorded as pending; a later record with that text is skipped ONCE (the pending entry is consumed) because it arrived
-after OFFSET only through transcript lag. Pending entries are dropped at any new genuine user message and
+its SHA-256 is recorded as pending (at most MAX_PENDING, 8, the OLDEST hash evicted when a ninth is
+stored); a later record with that text is skipped ONCE (the pending entry is consumed) because it arrived
+after OFFSET only through transcript lag. Only a Stop that actually BLOCKS records an entry: a capped or
+fail-open ALLOW stores none, nor does a block that turns into a fail-open allow because its save did not
+raise the stored counter (the warning names the violation; the arrival is checked like any other record
+when a later Stop of the SAME turn reads it, still under the cap, and is never checked when a new genuine
+user message follows it before a Stop reads it). The block's save RESERVES its raised counter but stores
+no entry; main() then writes the block decision to stdout while the evaluation still holds the state lock
+(a Stop with no transcript_path, or one that could not take the lock, holds none, and it saves no state and
+so stores no entry), and the entry is
+COMMITTED only when that write succeeded locally (print and flush raised nothing), so a refusal whose
+write failed stores none and its arrival is checked like the allows' above. A successful local write is
+not proof that the host received the line. While that write BLOCKS (a stdout whose reader has stalled),
+the lock stays held, so every other Stop of the same transcript is allowed UNCHECKED with the busy warning
+(see evaluate()). RESIDUAL: a hook killed between that write and the commit
+stores no entry for a refusal it did write, so that arrival is checked once more (refused again within
+the cap, the strict direction). So the entries never outnumber the refusals written to stdout.
+Consumption is by
+COUNT, not position: each pending entry
+excuses exactly ONE matching record, the entries are consumed by the EARLIEST matching records of the
+scan in order, and every matching record beyond the count of entries is checked. A final read from the
+transcript within the count consumes an entry and is excused as that entry's late arrival. A SUPPLIED
+current final is checked like any other final (the platform states this text is the message ending the
+turn NOW, so a re-submission is never passed over), and it spends an entry, unexcused, only when it also
+matches the last collected transcript record and the entries outnumber the earlier matching records of
+the scan; supplied before its arrival it spends none, and a refusal of it records a further entry for
+the arrival still owed. No entry a scan consumed is saved back, so a repeat beyond
+the recorded refusals is never excused, the final record included. Pending entries are dropped at any new genuine user message and
 when the transcript is reset (shorter than OFFSET, or the bytes before OFFSET changed), which also discards
-OFFSET. A blocked final message already in the transcript creates no exception. The boundary is never
+OFFSET and is RECORDED in the state (round 40, see BLOCK CAP). A blocked final message already in the transcript creates no exception. The boundary is never
 inferred from message text. State dir: $XDG_RUNTIME_DIR/clock-truth when XDG_RUNTIME_DIR is absolute, else
 /dev/shm/clock-truth-<euid>, created 0700 and used only when it is a real directory owned by this user with
 no group or other permission bits; round 30: each transcript has its own SUBDIRECTORY there, named by the
@@ -94,23 +120,129 @@ read, or is malformed) and
 UNPERSISTABLE state (the boundary could not be written at a block) mean the boundary is unknown: only the
 FINAL message (last_assistant_message, else the last collected transcript assistant entry) is checked, never
 older messages, because re-checking already-reported messages would re-block every Stop and wedge the actor.
+(At an unpersistable save the older messages were already checked; their violations can no longer block,
+but they are still counted in the final message's refusal (`+N more`) or in the warning of the allow
+(`N UNRESOLVED`), each line naming only its first violation (the final message's, when it has one), so a
+violation detected there is never dropped in silence. A transcript read that fails part-way is not
+covered: no boundary can be persisted, and the older violations that read found are dropped with no
+warning, a known gap.)
 A pass rewrites an unavailable state so it recovers. State I/O never crashes.
 STOP_HOOK_ACTIVE (the corrective loop after a block): violations only in messages older than the final one
 never block; a bad FINAL message still blocks, and then older violations are reported with it. So a corrected
 final message always passes.
-BLOCK CAP (defence in depth against a loop the model cannot satisfy, for example a hook defect): when
-stop_hook_active is true AND this Stop would block, the consecutive block cycles of this hook immediately
+BLOCK CAP (defence in depth against a loop the model cannot satisfy, for example a hook defect): when this
+Stop would block and its stop_hook_active field is true OR ABSENT (round 38: an absent field is not read as a
+new turn, so the cap binds on a host that omits the field; before, the cap ran only under an explicit true,
+so such a host could be refused at every stop), the consecutive block cycles of this hook immediately
 preceding it are the LARGER of two counts (round 24). (i) The hook's own recovery-state counter: the state
-file (see WHICH MESSAGES) also records `blocks`, set to 1 by a block outside the corrective loop, incremented
-by each further block under stop_hook_active, kept at a capped allow AND at a pass under stop_hook_active
-(round 27), set to the cap at a fail-open allow and at a pass under stop_hook_active whose counter was
-unreadable (so the rest of that corrective loop stays capped), and reset to 0 ONLY by a Stop without
-stop_hook_active. While stop_hook_active is true the counter NEVER decreases, whatever the transcript shows
+file (see WHICH MESSAGES) also records `blocks`, set to 1 by a block that starts a count, incremented
+by each further block, kept at a capped allow AND at a pass that is not an observed new turn
+(rounds 27, 38), set to the cap at a fail-open allow and at such a pass whose counter was
+unreadable (so the rest of that corrective loop stays capped), and reset to 0 ONLY by an observable new-turn
+signal: a Stop whose stop_hook_active field is explicitly false (trusted as the platform's statement of a
+new turn, so the cap does not hold against a host that sends false on a Stop that continues a refusal), or a
+new genuine user message read past the boundary by a persisting Stop with a readable counter and no explicit
+true (this hook registers only Stop, so the transcript is its UserPromptSubmit analogue; round 39: only past
+a stored boundary that HELD, since a reset scan re-reads OLD user messages from the start, and a block on
+such a new turn whose boundary save FAILS is unrecorded and fails open, since an unmoved boundary would
+re-arm the signal at every Stop; round 40: only from a READABLE scan, an unreadable one keeping an unmoved
+boundary too, and only while the state records NO earlier reset scan, since a resetting Stop saves its
+re-scanned boundary, often 0, which the next Stop verifies trivially, so a truncation followed by a restore
+would otherwise replay the OLD user message as new one Stop later; round 43: and only while the state
+carries NO UNKNOWN-history marker (round 42 allowed a new turn past a held non-trivial marker boundary,
+but a repair cannot see a truncation that preceded the state fault, so its boundary can sit on truncated
+content, and a staged restore of the old records, one per Stop, holds every boundary along the way; a
+held boundary is never proof of new user content once the history is unknown). An allowed stop
+alone never resets it. While stop_hook_active is true the counter NEVER decreases, whatever the transcript shows
 (round 26) and whatever the final message is (round 27): a transcript reset or rewrite, or a user-role entry
 read as a genuine user message, resets the boundary and the late-arrival exception but never the counter,
 and a clean pass inside the loop keeps it (in round 26 a clean pass reset it, so alternating with ANOTHER Stop
-hook that rejected the clean message, 1, 0, 1, 0, let this hook block every other Stop without limit). So
-within one continuous stop_hook_active run this hook blocks at most BLOCK_CAP times, for any interleaving of
+hook that rejected the clean message, 1, 0, 1, 0, let this hook block every other Stop without limit); where
+the host omits the field, a NEW user-role entry read as a genuine user message can still restart the count,
+and an externally deleted state file reads as an established 0 and erases the recorded reset history (the
+round-26 count protections need the explicit true, and even under it such a deletion read as CLEARED reset
+history until round 42, which records it as the unknown marker below), each a disclosed residual, but a
+transcript reset or rewrite
+never restarts it, on the Stop that reads the reset or on any later Stop (round 39: a reset scan is not a
+new-turn signal; round 40: the reset is RECORDED in the state, and from then on only an explicit false, never
+transcript content, re-enables the transcript-derived new-turn signal; before, a truncation that saved a zero
+boundary let the next Stop read the restored old user message as new, so a truncate-restore alternation
+blocked at every Stop). Where the host omits the field, a recorded reset therefore suppresses every
+transcript-derived new turn, a genuinely NEW user message included, until an explicit false: once the count
+reaches the cap, the hook stays in CAPPED-ALLOW mode for the rest of that transcript (each violating Stop
+is allowed with the cap warning, the fail-open direction), a disclosed residual of recording the reset.
+Round 41: an UNREADABLE state hides any recorded reset, so the history is UNKNOWN, never read as cleared
+(read as False, it let the save-time repair re-arm restored old transcript bytes one Stop later, so a
+failed state read followed by a restore restarted the count without new user input). Round 42: unknown
+history is recorded as its own UNKNOWN marker in the state, a separate field so a state fault stays
+distinguishable from an observed truncation, and an ABSENT state under an explicit true, an unknown count
+since round 26, is unknown HISTORY too, where before the deletion read as CLEARED history and erased a
+recorded reset; a CLEAN Stop that discovers an absent state under an explicit true persists the marker too
+(round 43), on the readable and the unreadable transcript branches alike, so the discovery survives to the
+next Stop, and a clean Stop whose state READ failed persists it the same way, on both transcript branches
+(round 43: before, with the transcript unreadable and the field omitted or explicitly true, neither save
+predicate held, so the one Stop that observed the fault wrote nothing and a later genuine user turn
+restarted the count); on the READABLE transcript branch a Stop whose state read failed also re-reads the
+state under the still-held lock BEFORE the messages are checked, and the pending reconciliation is ONE
+invariant: the (boundary, pending list) pair advances only together, computed from ONE
+transcript snapshot, a single rescan from the RECOVERED boundary that replaces the from-0 scan wholesale,
+so a stored hash is consumed only by a record that lies after the stored boundary within that same
+snapshot (a genuine user message there still invalidates them all), the pending entries are consumed by
+COUNT at the earliest matching records of the scan in order, the final included, supplied or
+transcript-read alike (a last_assistant_message matching the arrived record is re-checked and spends its
+entry unexcused; a transcript-read final within the count is excused; every matching record beyond the
+count is checked, so a repeat beyond the recorded refusals is never excused), and an arrival
+appended between reads is either consumed AND covered by the saved boundary or neither (an earlier fix
+reconciled against a SECOND scan while the FIRST scan and its boundary were kept, so a record BEFORE the
+recovered boundary could consume a hash and a mid-fault arrival was consumed yet re-reported; the round
+43 follow-up before it merged the recovered hashes back after the consumption scan and resurrected
+consumed or invalidated entries), all under the MAX_PENDING (8) eviction every save applies, the oldest
+hash evicted when a ninth is stored. When the reconciliation cannot be performed the stored pair that
+read back is kept EXACTLY as it was, never saved as an empty list: an unreadable or RESET rescan keeps
+the stored (boundary, pending) pair untouched for the next readable Stop to resolve, at the disclosed
+cost that such a faulting Stop records no NEW late hash of its own (its blocked final can be re-reported
+once: at its late arrival, or, already in the transcript, when the next readable Stop re-reads it past
+the held unmoved boundary); a state still unreadable at that re-read keeps the empty loaded list, so
+EVERY stored pending entry can be lost and each late-arriving already-reported message those entries
+excused can be re-reported once, the disclosed readable-branch residual (see RESIDUAL COVERAGE). Round
+43: the marker FAILS CLOSED, exactly like the recorded reset: while either stands, no
+transcript-derived user message is a new turn, at ANY offset, and ONLY an explicit-false Stop clears them
+(round 42 cleared the marker at a genuinely new user message past a held NON-trivial boundary, reasoning
+that bytes past a boundary that held were appended after the repair; but the repair cannot see a truncation
+that preceded the state fault, so its boundary can sit on truncated content, and a STAGED restore of the
+old records, one record per Stop, holds every boundary along the way, so restored old content restarted the
+count with no new user input and no fabricated records: a held boundary, trivial or not, is never proof
+that user content is new once the history is unknown). The cost is disclosed: ONE transient state fault
+CAN leave a host that omits the field in
+capped-allow mode for the rest of that transcript, until an explicit false, the same residual a recorded
+reset already carries (for such a host the trigger is the UNREADABLE read, the deletion trigger needing
+the explicit true that host never sends, and a faulting Stop whose persistence is unavailable stores no
+marker); a LATER deletion or prune of the state ends the capped-allow mode early, the next Stop without
+an explicit true reading the absent state as an established 0, the disclosed deletion residual. A clean
+explicit-false Stop SAVES whenever a reset or an unknown marker stands,
+clearing it even at offset 0 and counter 0, where it previously wrote nothing and the flag stuck, and
+(round 42) even when BOTH the state and the transcript are unreadable; there (round 43) it re-reads the
+state under the lock and keeps a stored boundary and pending list that read back (every Stop of that
+both-unreadable branch whose state read failed re-reads the same way, the clean faulting Stop above
+included), so a transient
+state-read fault does not overwrite them with 0 and an empty list, while a state still unreadable at the
+re-read is cleared to boundary 0, whose one-time recheck can re-report an already-reported old message
+once, a disclosed residual; the clear is DURABLE only as far as persistence allows: a Stop that finds the
+lock held writes nothing, a Stop that cannot persist at all (locking unavailable, or no usable private
+state directory) writes nothing, and a failed or SHORT write (round 43: save_state writes every byte of
+the serialized state or fails, keeping the previous state) leaves the stored flag standing, the
+conservative direction. An explicit-false Stop that read a TRUNCATED transcript clears the recorded reset
+like any other (the field is the platform's own new-turn statement), so restoring the old content after
+it can restart the count, once per restored old user record under a STAGED restore (each restarting Stop
+records normally, so each restart is bounded at the cap), a disclosed residual. A v2 state written before
+round 40 carries no reset field and one written before round 42 no unknown field, each read as False,
+never True, so history lost before the upgrade can let restored old user messages restart the count, once
+per restored old user record under a staged restore (each such Stop records normally, so each restart is
+bounded at the cap), a disclosed residual in deliberate tension with the unknown-history rule: a missing
+field marks every pre-upgrade state, not a per-transcript fault, and
+reading it as unknown would put each upgraded transcript into the suppressed
+mode at once. So within one continuous run of Stops that carries no new-turn signal this
+hook blocks at most BLOCK_CAP times, for any interleaving of
 other hooks' feedback, transcript contents, and clean or violating messages (the argument is at the counter
 code in _evaluate()). Round 28: that bound assumes the Stops for one transcript are SERIALIZED (two concurrent
 evaluations, one loading the counter and saving it back after the other raised it, re-armed it every time),
@@ -155,7 +287,8 @@ locked when they were examined, and eligible ones the cursor has not reached yet
 prune (a prune runs only when a Stop creates a new transcript's subdirectory, so a backlog drains only as new
 transcripts arrive). Two concurrent prunes can each write the cursor, the later write winning; a name either
 skips is examined when the cursor next wraps round to it.
-Under stop_hook_active each save also re-reads the stored counter and never
+On each Stop that is not an observed new turn (stop_hook_active true or absent, round 38) the save also
+re-reads the stored counter and never
 writes a lower value, and a block whose write would not raise the stored counter fails open. It is written
 even when the transcript is unreadable (the boundary is then kept as loaded). (ii) The transcript count: walking back at
 most 8 MiB and 512 records from the transcript tail, each record that is this hook's own block feedback is a
@@ -174,7 +307,15 @@ entry, at the start of the file, or at the cap; an unreadable transcript, a coun
 byte bound leaves it unestablished. At 3 or more the Stop is ALLOWED instead, with a warning that says the cap
 was hit, counts the unresolved claims, and names the first (see MESSAGES). The own counter is the REQUIRED brake: whenever the counter is
 unusable under stop_hook_active (no usable private state dir, no transcript_path to key it, a state file that
-cannot be read, or a block that cannot be written to it), the hook could not establish whether it is looping,
+cannot be read, or a block that cannot be written to it), and equally on a Stop whose field is ABSENT when
+it has a transcript_path (round 38; rounds 39 and 40: a new genuine user message read by such a Stop is
+consumed as a new turn only when it was read by a READABLE scan past a boundary that held, with no reset
+recorded in the state, no unknown marker standing at any boundary (rounds 42 and 43), and the block
+it lets through saves its moved boundary, so a block whose save fails
+takes this same fail-open, never a restarted count that blocks at every Stop; with neither the field nor a
+transcript_path the Stop blocks normally,
+since nothing could key a counter to bound it, a disclosed residual), the hook could not establish whether
+it is looping,
 so the Stop FAILS OPEN at once with a one-line warning counting the unresolved claims and naming the
 first (see MESSAGES), WHATEVER the
 transcript count says (the transcript count alone is never the only brake). An ABSENT state file in a usable
@@ -185,7 +326,10 @@ missing mid-loop was removed by something else (a tmp cleaner deleting it betwee
 removed or replaced after the evaluation opened it) or pruned after 7 idle days,
 and the Stop FAILS OPEN at once as for an unusable counter,
 never restarting the count at 0; that closes the round-25 residual in which such a deletion, or a transcript
-reset or a synthetic user-role entry resetting the counter, let every corrective Stop block. Each warning is delivered to the user as a top-level {"systemMessage": ...} on stdout (the
+reset or a synthetic user-role entry resetting the counter, let every corrective Stop block. The absence test needs the explicit true: where the host
+omits the field an absent state still reads as an established count of 0 (otherwise the first Stop of every
+transcript would fail open), so there an externally deleted state file restarts the count, a disclosed
+residual (round 38). Each warning is delivered to the user as a top-level {"systemMessage": ...} on stdout (the
 hooks reference's common JSON output field), ONE line (see MESSAGES); its detail
 (the true UTC, elapsed, and the first violation in full) goes to ONE different diagnostic line on stderr, which
 on exit 0 reaches only the host's debug log, so stderr is diagnostic logging, not a user-visible channel.
@@ -312,7 +456,13 @@ zone's abbreviation; a foreign zone sharing that abbreviation is not distinguish
 abbreviation or an invalid date is not checked anywhere, a line-leading status stamp included (round 26: it
 fails open, so a fabricated `[2026-09-24 09:00 PDT]` header in an Eastern-zone process is a MISS). Genuine-user detection is heuristic on entry shape and a fixed list of
 notification prefixes. The recovery boundary lives in volatile per-user storage: it is lost on reboot (the
-state is then absent and the whole current turn is evaluated once more). Two OVERLAPPING Stops for one
+state is then absent and the whole current turn is evaluated once more). READABLE-BRANCH RESIDUAL:
+on a Stop whose transcript is readable but whose state read failed, the stored pending
+late-arrival hashes survive only through the re-read under the lock, reconciled against ONE rescan from
+the recovered boundary (an unreadable or RESET rescan keeps the stored pair untouched instead, and such
+a Stop records no NEW late hash of its own, so its blocked final can be re-reported once at its late
+arrival); a state STILL unreadable at that re-read loses the pending ENTRIES, every one of them, so EACH
+already-reported message they excused is re-reported once at its late arrival. Two OVERLAPPING Stops for one
 transcript (round 28): the one that finds the lock held is allowed UNCHECKED with a warning (the fail-open
 direction), so a violation in it passes. The window is one whole evaluation, which grows with the transcript
 scanned: milliseconds on a short turn, but about 1.2 s on a 49 MiB turn and 1.6 s on a 63 MiB one, near the
@@ -328,7 +478,8 @@ ABSENT and fails open once. A same-uid process
 that rewrites the state file directly while holding no lock, or swaps a state directory holding a lower count
 into place, is outside the threat model (it can set the counter to any value anyway). Where flock is
 unavailable (no fcntl, or a filesystem that refuses it), no state is ever written, so, as with an unpersistable state, only final messages are
-checked and every violation under stop_hook_active is allowed with a warning. A record over 4 MiB and anything beyond
+checked and every violation on a Stop that is not an observed new turn (stop_hook_active true or absent,
+round 38) is allowed with a warning. A record over 4 MiB and anything beyond
 64 MiB back are not scanned. Only the host clock is authoritative, so a wrong host clock is enforced
 faithfully. The elapsed check is only as right as the lease (a stale, wrong-clock, or another session's
 lease yields a false block or a false pass; so does a stale Session-start-UTC value, trusted as written).
@@ -340,10 +491,15 @@ footer unchecked. Subagent output is not checked. BLOCK CAP: after 3
 consecutive block cycles a still-wrong final message PASSES with only a warning (by design: an unsatisfiable
 hook must not wedge the actor), and when the count cannot be established at all it PASSES at once with a
 one-line warning (the fail-open direction: a possible loop is never risked for an unverifiable count). The
-cap counts blocks per continuous stop_hook_active run, not per violation (round 27): a corrected message that
+cap counts blocks per continuous run without a new-turn signal, not per violation (round 27): a corrected message that
 passes here but is rejected by another Stop hook keeps the loop running, and a NEW violation later in that
 same loop gets only the blocks the run has left, possibly none (then a capped allow with a warning), until a
-Stop without stop_hook_active starts a new count. The cap exists ONLY as defence in depth against a loop the model cannot
+Stop whose stop_hook_active field is explicitly false, or a new genuine user message read by a persisting
+Stop from a readable scan past a boundary that held, with a readable counter, no reset recorded in the state,
+no unknown-history marker standing, no explicit true, and a boundary save that succeeds, starts a new
+count (round 38: a Stop whose field is
+merely ABSENT does not; rounds 39 and 40: nor does one whose scan reset, failed to read, or follows a
+recorded reset, an explicit false being the only signal that clears a recorded reset). The cap exists ONLY as defence in depth against a loop the model cannot
 satisfy; it is not how a violation is normally resolved. The marker record shape (a user-role entry whose
 text starts "Stop hook feedback" and carries this hook's block-reason prefix) is INFERRED from the host's
 documented Stop feedback and has NOT been observed in a live transcript; if the host records Stop feedback in
@@ -352,9 +508,11 @@ reaches the cap, and the cap then rests on the hook's own recovery-state counter
 512-record tail is not counted; an isMeta user entry between cycles does not end the run, while any other
 user entry does; a corrective continuation longer than 10 assistant entries is not counted as a consecutive
 cycle by the transcript count (the own recovery-state counter still counts it). The counter lives in the
-same volatile per-user state as the boundary; with that state unusable, or absent, a Stop under
-stop_hook_active is allowed with a warning (fail open), so a violation in the corrective loop then goes
-unenforced. That includes a corrective loop this hook did not start (another Stop hook blocked) in a session
+same volatile per-user state as the boundary; with that state unusable (or absent under an explicit true,
+round 26), a Stop that is not an observed new turn (stop_hook_active true or absent, round 38) is allowed
+with a warning (fail open), so a violation in the corrective loop then goes
+unenforced. Where the host omits the field an absent state reads as an established count of 0, which still
+blocks below the cap. That includes a corrective loop this hook did not start (another Stop hook blocked) in a session
 where this hook has never yet written its state for the transcript (round 26: the absence cannot be told
 apart from a deletion, so it fails open rather than risk a loop). The capped
 warning reaches
@@ -1406,9 +1564,11 @@ def load_state(sdir, tp, extra=None, dfd=None):
     state is genuinely ABSENT (a usable private dir holding no file for this transcript); ok is False with
     (0, None, []) when the state is UNAVAILABLE: the dir cannot be created or is not private, or the file
     cannot be opened, is not a regular own-uid file, cannot be read, or is malformed. When `extra` (a dict) is
-    given and ok is True, extra["blocks"] receives the consecutive-block counter (0 when absent; round 24), and
-    an absent state also sets extra["absent"] (round 26: under stop_hook_active the caller reads absence as an
-    unknown count, not 0). Round 29: with `dfd` (the evaluation's locked state-dir descriptor) the file is
+    given and ok is True, extra["blocks"] receives the consecutive-block counter (0 when absent; round 24), a
+    READ state also sets extra["reset"], the recorded reset-scan flag, and (round 42) extra["unknown"], the
+    recorded unknown-history marker (each False in a state written before its round), and an absent state
+    also sets extra["absent"] (round 26: under stop_hook_active the caller reads
+    absence as an unknown count, not 0). Round 29: with `dfd` (the evaluation's locked state-dir descriptor) the file is
     opened RELATIVE to it, never through `sdir`; without it the dir is opened and checked for this call. Round
     30: `dfd` is the transcript's own state SUBDIRECTORY (see state_subdir), holding the file STATE_FILE; without
     it, a missing subdirectory is an ABSENT state (it is not created by a read)."""
@@ -1441,12 +1601,15 @@ def load_state(sdir, tp, extra=None, dfd=None):
             obj = json.loads(os.read(fd, STATE_MAX_BYTES))
             off, tail, pending = obj.get("offset"), obj.get("tail"), obj.get("pending")
             blocks = obj.get("blocks", 0)  # absent in a state written before round 24: no blocks counted
+            reset = obj.get("reset", False)  # absent in a state written before round 40: no reset recorded
+            unknown = obj.get("unknown", False)  # absent before round 42: no unknown history recorded
             if obj.get("v") != 2 or type(off) is not int or off < 0 or not isinstance(pending, list) \
                     or not (tail is None or _is_hash(tail)) or (off > 0) != (tail is not None) \
-                    or not all(_is_hash(h) for h in pending) or type(blocks) is not int or blocks < 0:
+                    or not all(_is_hash(h) for h in pending) or type(blocks) is not int or blocks < 0 \
+                    or type(reset) is not bool or type(unknown) is not bool:
                 return unavailable
             if extra is not None:
-                extra["blocks"] = blocks
+                extra["blocks"], extra["reset"], extra["unknown"] = blocks, reset, unknown
             return off, tail, pending[-MAX_PENDING:], True
         except (OSError, ValueError, AttributeError):
             return unavailable
@@ -1457,10 +1620,21 @@ def load_state(sdir, tp, extra=None, dfd=None):
             os.close(dfd)
 
 
-def save_state(sdir, tp, offset, tail, pending, blocks=0, dfd=None):
-    """Record the boundary, pending late-arrival hashes, and the consecutive-block counter. Returns True only
-    when the state file was written and atomically renamed into place; any failure returns False (never
-    raises). Round 29: with `dfd` the temp file, the rename, and any cleanup are all RELATIVE to that
+def save_state(sdir, tp, offset, tail, pending, blocks=0, dfd=None, reset=False, unknown=False):
+    """Record the boundary, pending late-arrival hashes, the consecutive-block counter, (round 40) `reset`: a
+    scan of this transcript RESET (its stored boundary did not hold), recorded until an explicit-false Stop
+    clears it, and (round 42) `unknown`: the reset history at this write was UNKNOWN (the state unreadable,
+    or absent under an explicit true), recorded until an explicit false clears it (round 43: it fails
+    closed, exactly like the reset flag). Returns True only
+    when the COMPLETE serialized state was written (round 43: the write loops until every byte is written,
+    and zero progress is a failure) and atomically renamed into place; the atomic rename is the COMMIT
+    point (round 43): any failure BEFORE it keeps the previous state file byte-identical and returns False,
+    and a failure after it leaves the committed state standing and still returns True (never raises either
+    way). Cleanup is BEST EFFORT, handled apart from that outcome: the temp file of a failed write is
+    unlinked, but a failed unlink only leaves it behind, never shadowing the state file, which only the
+    rename names; and a failed close of an OWNED directory descriptor (a direct call without `dfd`) is
+    suppressed, never raised and never a rollback (before, it escaped a successful rename as an OSError
+    with the state already replaced). Round 29: with `dfd` the temp file, the rename, and any cleanup are all RELATIVE to that
     descriptor (os.replace with src_dir_fd and dst_dir_fd), so the write lands in the directory the caller
     locked; without it the dir is opened and checked for this call. Round 30: `dfd` is the transcript's own
     state SUBDIRECTORY; without it the subdirectory is created when missing."""
@@ -1477,8 +1651,14 @@ def save_state(sdir, tp, offset, tail, pending, blocks=0, dfd=None):
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):  # round 32: never write a non-regular file
                 raise OSError("state temporary is not a regular file")
-            os.write(fd, json.dumps({"v": 2, "offset": offset, "tail": tail,
-                                     "pending": list(pending)[-MAX_PENDING:], "blocks": blocks}).encode())
+            data = memoryview(json.dumps({"v": 2, "offset": offset, "tail": tail,
+                                          "pending": list(pending)[-MAX_PENDING:], "blocks": blocks,
+                                          "reset": bool(reset), "unknown": bool(unknown)}).encode())
+            while data:  # round 43: a SHORT write is not persistence; write every byte, or fail below
+                n = os.write(fd, data)
+                if not isinstance(n, int) or n <= 0:  # zero progress would loop forever: a failure
+                    raise OSError("state write made no progress")
+                data = data[n:]
         finally:
             os.close(fd)
         os.replace(tmp, STATE_FILE, src_dir_fd=dfd, dst_dir_fd=dfd)
@@ -1491,9 +1671,12 @@ def save_state(sdir, tp, offset, tail, pending, blocks=0, dfd=None):
             try:
                 os.unlink(tmp, dir_fd=dfd)
             except OSError:
-                pass
+                pass  # best effort: a leftover temp file never shadows the state file (see the contract)
         if own:
-            os.close(dfd)
+            try:
+                os.close(dfd)  # apart from the outcome: the rename above is the commit point
+            except OSError:
+                pass
 
 
 def lock_state(sdir, tp, info=None):
@@ -1657,8 +1840,14 @@ def prune_state(sdir, keep=None, now_ns=None):
     return removed
 
 
-def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None):
-    """Return a block reason string, or None to pass (see _evaluate). Round 28: the WHOLE load, evaluate, and
+def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None, emit=None):
+    """Return a block reason string, or None to pass (see _evaluate). `emit`, if given, writes a block reason
+    and returns True only when that write succeeded locally (main() passes the stdout writer): it is called
+    with the reason still under the lock, and the late-arrival pending entry of that block is committed
+    only after it returns True, so a refusal whose write failed stores no entry; a successful local write
+    is not proof that the host received it, and a process killed between the write and the commit stores
+    none (the disclosed residual, see LATE-ARRIVAL EXCEPTION). Without `emit` (a caller that delivers the
+    reason itself) the entry is stored with the block's own save. Round 28: the WHOLE load, evaluate, and
     save runs under an exclusive non-blocking lock (lock_state; round 29: on a state directory itself, with
     every state read and write relative to the locked directory descriptor; round 30: on the transcript's own
     state subdirectory), so two concurrent Stops can never interleave a load of the recovery state with
@@ -1666,7 +1855,8 @@ def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None)
     evaluation FAILS OPEN: it is allowed unchecked with a one-line warning appended to `notes`, and it reads and
     writes no state, so the counter is unchanged. A Stop that cannot lock for any other reason (locking
     unavailable, or no usable private state dir) is evaluated but WRITES NO STATE, exactly as for an
-    unpersistable state: only its final message can block, and under stop_hook_active nothing can block (a
+    unpersistable state: only its final message can block, and on a Stop that is not an observed new turn
+    (stop_hook_active true or absent, round 38) nothing can block (a
     block there must record its raised counter, and none is recorded, so every violation fails open with a
     warning), so the counter is unchanged and no loop can form. With no transcript_path there is nothing to key
     a state file and no state is ever read or written. Round 30: a Stop that CREATED its transcript's
@@ -1676,8 +1866,9 @@ def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None)
     tp = payload.get("transcript_path")
     tp = tp if isinstance(tp, str) and tp else None
     sdir = sdir or default_state_dir()
+    owed = None if emit is None else []  # receives the commit of a block's pending entry, run after emit
     if not tp:
-        return _evaluate(payload, now, start, notes, None, False, report, diag)
+        return _deliver(_evaluate(payload, now, start, notes, None, False, report, diag, owed), emit, owed)
     info = {}
     dfd, status = lock_state(sdir, tp, info)
     if status == "busy":
@@ -1689,7 +1880,11 @@ def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None)
                         f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}")
         return None
     try:
-        return _evaluate(payload, now, start, notes, dfd, status == "held", report, diag)
+        # the reason is written while the lock is still held, so the commit after it writes the same state;
+        # a write that blocks keeps the lock, and every other Stop of this transcript meanwhile takes the
+        # busy path above, allowed unchecked
+        return _deliver(_evaluate(payload, now, start, notes, dfd, status == "held", report, diag, owed), emit,
+                        owed)
     finally:
         if dfd is not None:
             os.close(dfd)
@@ -1697,14 +1892,26 @@ def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None)
             prune_state(sdir, state_subdir(tp))
 
 
-def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
+def _deliver(reason, emit, owed):
+    """Write a block `reason` through `emit` (when given) and commit the block's pending entry (`owed`) only
+    when that write reported success; return `reason`."""
+    if reason and emit is not None and emit(reason) is True:
+        for commit in owed:
+            commit()
+    return reason
+
+
+def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, owed=None):
     """Return a block reason string, or None to pass. `now` and `start` are aware datetimes (start may be None).
     When the block cap turns a block into an allow, the warning is appended to `notes` (a list) if given.
     Called by evaluate() with the lock held (round 28). Round 29: `dfd` is the locked state-dir descriptor (round
     30: the transcript's own state subdirectory) and
     every state read and write is made relative to it (None: no usable private state dir, so the state is
     UNAVAILABLE); `persist` False (the lock could not be taken: locking unavailable, or no usable private state
-    dir) means no state is written by this call. `report` and `diag`: see evaluate()."""
+    dir) means no state is written by this call. `report` and `diag`: see evaluate(). `owed` (a list, or None
+    to store the entry with the block's save): a block's late-arrival pending entry is NOT saved with the
+    block; a callable that commits it is appended instead, for evaluate() to run once the reason has been
+    written."""
     bad, seen, over = [], set(), [0]  # a bounded report list; `seen` dedupes in O(1); `over` counts the rest
     # round 37: whether a violation past MAX_REPORTED (never the claim shown) is an elapsed footer or a time AHEAD,
     # so the elapsed and future-fact extras do not depend on the report truncation
@@ -1736,22 +1943,108 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     else:
         offset, tail, pending, state_ok = load_state(None, tp, extra, dfd)
     blocks = extra.get("blocks")  # None: the counter is unavailable (no transcript_path, or unusable state)
+    reset_seen = bool(extra.get("reset"))  # round 40: a reset scan recorded by an earlier Stop still stands
+    unknown_seen = bool(extra.get("unknown"))  # round 42: unknown history recorded by an earlier Stop's repair
     active = payload.get("stop_hook_active") is True
+    new_turn = payload.get("stop_hook_active") is False  # round 38: an ABSENT field is NOT a new turn
+    # round 41: an UNREADABLE state hides any recorded reset, so the history is UNKNOWN, never read as
+    # cleared (reading it as False let the save-time repair write the counter at the cap with the flag
+    # CLEAR, so restored OLD transcript bytes re-armed the new-turn signal one Stop later and the count
+    # restarted without new user input); a transcript-derived message is never a new turn on such a Stop
+    # regardless: state_ok False means `extra` is empty, so `blocks` is None and `fresh` below can only
+    # come from an explicit false. Round 42: unknown history is recorded as its own UNKNOWN marker
+    # (new_unknown below), a separate field so a state fault stays distinguishable from an observed
+    # truncation, and an ABSENT state under an explicit true is unknown history too: the count is unknown
+    # there (round 26), and reading its reset history as cleared let an external deletion under the
+    # explicit true erase a recorded reset. Round 43: the marker FAILS CLOSED exactly like the recorded
+    # reset, cleared ONLY by an explicit false (round 42 cleared it at a new user message past a held
+    # non-trivial boundary, but the repair cannot see a truncation that preceded the state fault, so a
+    # staged restore of the old records, one per Stop, held every boundary the repairs saved and replayed
+    # old content as new turns; the disclosed cost is capped-allow after one state fault on a host that
+    # omits the field, until an explicit false)
+    absent_unknown = active and bool(extra.get("absent"))  # a deletion met under an explicit true (round 42)
+    reset_unknown = not state_ok or absent_unknown
     if active and extra.get("absent"):
         # round 26: this hook writes the state at the block that starts a corrective loop, so an ABSENT state under
         # stop_hook_active (deleted between Stops, or its directory removed mid-call) is an UNKNOWN count, never 0
         blocks = None
-    had_state = bool(offset or pending or blocks)
+    # round 41: a recorded reset is state too (a round-40 review: a READABLE clean explicit-false Stop at
+    # offset 0, counter 0 and the flag set skipped the save, so the one signal that clears the flag left
+    # it standing and every later transcript-derived new turn stayed suppressed); round 42: so is the
+    # unknown marker, for the same reason
+    had_state = bool(offset or pending or blocks or reset_seen or unknown_seen)
     t = turn_messages(tp, offset, tail) if tp else {"msgs": [], "size": None}
     msgs = t["msgs"]
-    if blocks is not None and not active:
-        # only a Stop outside the corrective loop starts the count again; under stop_hook_active the counter is
-        # PRESERVED whatever the transcript shows (round 26: a transcript rewrite that resets the boundary, or a
-        # user-role entry read as a genuine user message, reset it and let a loop block without limit)
+    # round 38: the count restarts ONLY at an observable new-turn signal: a Stop whose stop_hook_active field
+    # is explicitly false (the platform's statement that this stop does not continue a stop-hook refusal,
+    # trusted even over an unknown stored counter), or a NEW genuine user message past the boundary on a
+    # persisting Stop whose field is not explicitly true (this hook registers only Stop, so the transcript is
+    # its UserPromptSubmit analogue; trusted only with a readable counter, a READABLE scan (round 40: an
+    # unreadable scan, size None, cannot move its boundary, so a block that kept the loaded boundary would
+    # re-arm the signal at every Stop), a scan whose stored boundary HELD, and NO reset recorded in the
+    # state (round 40: the round-39 exclusion bound only the resetting Stop, which saved its re-scanned
+    # boundary, often 0; the next Stop verified that trivial boundary and read the RESTORED old user message
+    # as new, so a truncation alternating with a restore blocked at every Stop without reaching the cap; the
+    # reset is now carried in the state until an explicit false, the one independently trustworthy new-turn
+    # signal, clears it), and consumed by a block only when the moved boundary is SAVED, since a boundary
+    # that never moves would re-arm the signal at every Stop: round 39, a reset scan re-reads OLD user
+    # messages from the start and is never a new turn, and a block on a user-message new turn whose save
+    # fails is unrecorded and fails open below; `persist` alone says only that the lock is held, never that
+    # the boundary moved).
+    # Before round 38 any Stop
+    # without the field restarted the count, so on a host that omits the field the cap never bound and an
+    # unsatisfiable violation was refused at every stop. An allowed stop alone never resets. Under an explicit
+    # true the counter is PRESERVED whatever the transcript shows (round 26: a transcript rewrite that resets
+    # the boundary, or a user-role entry read as a genuine user message, reset it and let a loop block without
+    # limit; where the host omits the field, a NEW user-role entry read as a genuine user message can still
+    # restart the count, a disclosed residual; round 39: a rewrite or reset alone no longer restarts it
+    # there, and round 40: nor does any later Stop while the recorded reset stands; rounds 42 and 43: an
+    # unknown marker, see new_unknown below, suppresses the transcript-derived signal the same way while
+    # it stands, at ANY offset (round 42 suppressed it only at a trivial offset-0 boundary, but a staged
+    # restore of the old records, one per Stop, holds every boundary the repairs saved, so a held boundary
+    # is no proof of new content once the history is unknown); only the explicit false clears it)
+    fresh = new_turn or (persist and not active and blocks is not None and not t.get("reset")
+                         and not reset_seen and not unknown_seen
+                         and t.get("size") is not None and bool(t.get("user")))
+    if fresh:
         blocks = 0
     if t.get("reset") or t.get("user"):
         pending = []  # a reset transcript or a new genuine user message invalidates the late-arrival exception
     remaining = list(pending)
+    # the pending reconciliation is ONE invariant now:
+    # the (boundary, pending list) pair advances only TOGETHER, computed from ONE transcript snapshot,
+    # and a hash is consumed only by a record that lies after the stored boundary within that same
+    # snapshot. On a Stop whose state read failed but whose transcript is readable, the state is re-read
+    # under the still-held lock and ONE rescan from the recovered boundary replaces the from-0 scan
+    # wholesale (boundary, messages, flags), so the consumption below (both final-message paths and the
+    # per-message loop) sees exactly the records past the stored boundary, and the boundary saved later
+    # is that same snapshot. Before this change, the recovered hashes were reconciled against a SECOND
+    # scan while the FIRST scan and its boundary were kept, so a record BEFORE the recovered boundary
+    # could consume a pending hash, and an arrival appended between the two scans was consumed
+    # yet left past the saved boundary and re-reported at the next Stop. When the
+    # reconciliation cannot be performed, the stored pair that read back is kept EXACTLY as it was,
+    # never saved as an empty list: an unreadable or RESET rescan holds the stored (boundary, pending)
+    # pair untouched for the next readable Stop to resolve (held below), at the disclosed cost
+    # that such a Stop records no NEW late hash of its own; a state still unreadable at the re-read
+    # keeps the empty loaded list, the disclosed readable-branch residual (see RESIDUAL COVERAGE): every
+    # stored pending entry can then be lost, so each late-arriving already-reported message those
+    # entries excused can be re-reported once. save_state still applies the MAX_PENDING eviction to
+    # whatever is kept.
+    held = None  # a failed reconciliation keeps this stored (boundary, tail, pending) pair verbatim
+    if tp and not state_ok and dfd is not None and t["size"] is not None:
+        cur = {}
+        off2, tl2, pend2, ok2 = load_state(None, tp, cur, dfd)
+        if ok2 and not cur.get("absent"):
+            t2 = turn_messages(tp, off2, tl2)
+            if t2["size"] is not None and not t2["reset"]:
+                # the ONE snapshot: records past the stored boundary only, with that boundary adopted
+                t, msgs = t2, t2["msgs"]
+                offset, tail, pending = off2, tl2, pend2
+                if t2["user"]:
+                    pending = []  # a new genuine user message invalidates the exception, exactly as above
+                remaining = list(pending)
+            else:
+                held = (off2, tl2, pend2)  # unreadable or reset rescan: the stored pair is kept as-is
     lam_in_transcript = lam is not None and any(text.strip() == lam.strip() for text, _ in msgs)
     # the FINAL message: last_assistant_message, else the last collected transcript assistant entry
     final, final_ref = lam, now_us
@@ -1759,11 +2052,36 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
         if msgs[-1][1] is not None:
             final_ref = msgs[-1][1]
         msgs = msgs[:-1]  # checked below as the final message
+        h = _sha(final.strip())
+        if remaining.count(h) > sum(text.strip() == final.strip() for text, _ in msgs):
+            # a pending entry excuses one TRANSCRIPT record, never the supplied final: the platform
+            # states this text is the message ending the turn NOW, so re-submitting an already-refused
+            # message word for word is checked like any other final (before, the entry exempted the
+            # supplied final itself, ending a corrective loop with nothing reported, and under
+            # stop_hook_active an identical arrival earlier in the same scan was re-reported yet
+            # discarded with the clean-final rule, so the pair passed in silence). Consumption COUNTS:
+            # each pending entry excuses exactly one matching record, spent at the earliest matching
+            # records of this scan in order (the per-message loop below consumes one entry at each of
+            # the earliest matching earlier records), and the final consumes one only when the entries
+            # OUTNUMBER those earlier matches; the entry it consumes is spent here, unexcused, and
+            # never saved back (before, ONE matching earlier record stopped all consumption at the
+            # final, so a duplicate entry of the same text was saved back unspent and later excused a
+            # verbatim repeat in silence)
+            remaining.remove(h)
     elif lam is None and msgs:
         (final, final_ref), msgs = msgs[-1], msgs[:-1]
         h = _sha(final.strip())
-        if h in remaining:
-            remaining.remove(h)  # the already-reported final message arriving late: skipped once, consumed
+        if remaining.count(h) > sum(text.strip() == final.strip() for text, _ in msgs):
+            # the already-reported final message arriving late: skipped once, consumed. Consumption
+            # COUNTS here too: the entries are spent at the earliest matching records of this scan in
+            # order (the per-message loop below consumes one entry at each of the earliest matching
+            # earlier records), so this final is excused only while the entries OUTNUMBER the earlier
+            # matches, and a repeat beyond the count is checked like any other final (before, the
+            # entry was spent on this LAST record, so with the arrival and its repeat in one scan the
+            # repeat was excused, and the earliest-match fix for that still stopped ALL consumption at
+            # the final once ONE earlier record matched, so a duplicate entry of the same text was
+            # saved back unspent and later excused a verbatim repeat in silence)
+            remaining.remove(h)
             final = None
         elif final_ref is None:
             final = None  # no trustworthy written_at
@@ -1776,13 +2094,15 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     # Older messages are checked only when the recovery state could be READ: with it unavailable the boundary
     # is unknown, and re-checking already-reported messages would re-block every Stop and wedge the actor.
     n = len(msgs) if state_ok else 0
-    for i, (text, ref) in enumerate(msgs[:n], 1):
+    for i, (text, ref) in enumerate(msgs, 1):
         h = _sha(text.strip())
         if h in remaining:
-            remaining.remove(h)  # the already-reported final message arriving late: skipped once, consumed
+            # consumption runs over every record of the ONE snapshot (after a recovery above,
+            # msgs lies entirely past the stored boundary); the state_ok gate bounds only the re-CHECK
+            remaining.remove(h)  # the already-reported message arriving late: skipped once, consumed
             continue
-        if ref is None:
-            continue  # no trustworthy written_at
+        if i > n or ref is None:
+            continue  # unchecked (the boundary is unknown), or no trustworthy written_at
         try:
             earlier_bad.extend(check_message(text, ref, start_us, f"earlier message {i} of {n} this turn",
                                              BEHIND_US))
@@ -1793,25 +2113,38 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     readable = bool(tp) and t["size"] is not None
     if not readable:
         earlier_bad = []  # no readable transcript size: no boundary can be persisted
-    # BLOCK CAP (round 24): under stop_hook_active the prior consecutive blocks are the larger of this hook's
-    # OWN counter in the recovery state and the transcript marker count; when neither can be established the
-    # Stop FAILS OPEN with a one-line warning, and at BLOCK_CAP it is allowed with the cap warning
+    # BLOCK CAP (round 24): on a Stop that is not an observed new turn (round 38: stop_hook_active true OR
+    # absent, so the cap binds on a host that omits the field) the prior consecutive blocks are the larger of
+    # this hook's OWN counter in the recovery state and the transcript marker count; when neither can be
+    # established the Stop FAILS OPEN with a one-line warning, and at BLOCK_CAP it is allowed with the cap
+    # warning. A Stop with neither the field nor a transcript_path blocks normally (nothing could key a
+    # counter to bound it, a disclosed residual)
     cap, tknown = None, False  # cap None: block normally; "cap" or "open": allow with a warning instead
-    if (final_bad or earlier_bad) and active:
+    if (final_bad or earlier_bad) and not fresh and (active or tp):
         tcount, tknown = block_cycles(tp) if tp else (0, False)
         known = [c for c in (blocks, tcount if tknown else None) if c is not None]
         # the transcript count is never the only brake: without a usable own counter, fail open (round 24)
         cap = "open" if blocks is None else "cap" if max(known) >= BLOCK_CAP else None
     will_block = bool(final_bad or earlier_bad) and cap is None
-    # The counter this Stop records (round 27: while stop_hook_active holds it NEVER decreases).
-    #   block: loaded + 1. A block under stop_hook_active happens only with a loaded integer counter below the
-    #          cap (an unknown one gives cap "open", a count at the cap gives "cap").
+    # The counter this Stop records (round 27: while stop_hook_active holds it NEVER decreases; round 38: nor
+    # does any other Stop that is not an observed new turn, an absent field included).
+    #   block: loaded + 1. A block on a Stop that is not a new turn happens only with a loaded integer counter
+    #          below the cap (an unknown one gives cap "open", a count at the cap gives "cap"; with neither
+    #          the field nor a transcript_path nothing is keyed, loaded, or saved).
+    #   a new-turn Stop (fresh: stop_hook_active explicitly false, or a new genuine user message read by a
+    #          READABLE scan past a boundary that HELD, on a persisting Stop with a readable counter, no
+    #          reset recorded in its state (round 40), no unknown marker standing at any boundary
+    #          (rounds 42 and 43), and no explicit true): 0 then
+    #          (+1 if it blocks); the
+    #          only resets (round 38: a Stop whose field is merely ABSENT is NOT a new turn and keeps the
+    #          counter, and an allowed stop alone never resets it; round 39: a block on a user-message new
+    #          turn whose save FAILS becomes the unrecorded-block fail-open below, so an unmoved boundary
+    #          never re-arms the signal into a second block).
     #   fail-open allow ("open"): BLOCK_CAP (round 26), so the rest of that corrective loop stays capped.
-    #   capped allow ("cap"), or a PASS, under stop_hook_active: the loaded counter, unchanged (round 27: a clean
+    #   capped allow ("cap"), or a PASS, on any other Stop: the loaded counter, unchanged (round 27: a clean
     #          pass inside the loop used to reset it to 0, so alternating with another Stop hook that rejected
     #          the clean message let this hook block every other Stop without limit); an UNKNOWN counter (the
     #          state unreadable, so none was loaded) is recorded as BLOCK_CAP, capped, never as 0.
-    #   any Stop without stop_hook_active: 0 then (+1 if it blocks); the only reset, since it starts a new turn.
     # CONCURRENCY (round 28). The argument below reads the file's successive values as a SEQUENCE of Stops, each
     # loading the counter and then saving what it computed from that load. That holds only if no two evaluations
     # for one transcript interleave between one's load and its save: round 27 assumed serialized Stops, and two
@@ -1832,89 +2165,225 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     # cannot replace a directory: deleting the state file while A holds the lock leaves B finding the lock HELD;
     # removing the subdirectory or the root (rm -r) makes A's save fail (nothing can be created in a removed
     # directory); and renaming the subdirectory or the root away and recreating it lands A's save in the
-    # ORPHANED directory, harmlessly, while B, in the new directory, finds the state ABSENT, an unknown count
-    # that fails open and records BLOCK_CAP, so the counter the next Stop reads never moves down.
+    # ORPHANED directory, harmlessly, while B, in the new directory, finds the state ABSENT: under an
+    # explicit true an unknown count that fails open and records BLOCK_CAP and the unknown marker (round
+    # 42); where the field is absent, an
+    # ESTABLISHED 0 that can restart the count, and the recorded reset history with it, exactly as for any
+    # external deletion (the disclosed deletion residual, round 38; see the BOUND below).
     # PRUNING (round 30): prune_state() removes a subdirectory only while IT holds that subdirectory's lock (a
     # non-blocking flock that fails whenever an evaluation holds it) and only when the subdirectory has gone
     # unwritten for PRUNE_AGE_NS, so a removal is an external deletion between Stops, the case the BOUND below covers
-    # (the next load is None: fail open, recording BLOCK_CAP); a Stop that opened the subdirectory just before
+    # (the next load is ABSENT: under an explicit true an unknown count that fails open recording BLOCK_CAP
+    # and the unknown marker (round 42); where the field is absent, an established 0 that restarts the
+    # count, the disclosed deletion residual,
+    # round 38); a Stop that opened the subdirectory just before
     # the pruner removed it locks the removed inode, finds the state ABSENT, and cannot save (the rm -r case).
     # A Stop that finds the lock held reads and writes
     # nothing and allows; a Stop that cannot lock for another reason runs with `persist` False and writes
-    # nothing, so under stop_hook_active it cannot block (a block needs a recorded raise, below). Neither can
+    # nothing, so unless it is an observed new turn it cannot block (a block needs a recorded raise, below;
+    # round 38: an explicit-false Stop still blocks, starting a count it may fail to record). Neither can
     # move the counter or block inside the loop. So the Stops that write the state file are serialized, and each
     # one's load and save are adjacent in the sequence the argument reads. As defence in
-    # depth against a writer that ignores the (advisory) lock, save() below also re-reads the stored counter
-    # under stop_hook_active and never writes a value lower than it, and a block whose write would not RAISE
-    # the stored counter is not counted as recorded (it fails open instead). RESIDUAL: a same-uid process that
+    # depth against a writer that ignores the (advisory) lock, save() below also re-reads the stored counter on
+    # every Stop that is not an observed new turn and never writes a value lower than it, and a block whose
+    # write would not RAISE the stored counter is not counted as recorded (it fails open instead). RESIDUAL: a
+    # same-uid process that
     # rewrites the state file directly while holding no lock (or that swaps a directory holding a LOWER valid
     # count back into place) is outside the threat model: it can set the counter to any value anyway, so the
     # lock gives no protection against it and claims none.
-    # BOUND (round 27). Take one continuous run of Stops with stop_hook_active true for one transcript_path (so
-    # one state file). The state file is written only by save_state(), called through save() below with
+    # BOUND (round 27). Take one continuous run of Stops for one transcript_path (so one state file) in which
+    # no Stop is an observed new turn: none carries an explicit stop_hook_active false, and none reads a new
+    # genuine user message past a boundary that HELD as a persisting Stop with a readable counter and no
+    # explicit true (round 38: a Stop whose field is ABSENT is inside the run, so the bound holds on a host
+    # that omits the field; round 39: a Stop whose scan was RESET is inside the run too, whatever user message
+    # the re-read from the start meets; round 40: so is every LATER Stop while the recorded reset stands, an
+    # explicit false being the only signal that clears it, and so is a Stop whose scan was UNREADABLE, its
+    # size None, and (rounds 41 and 42) a Stop whose STATE was unreadable, its repair writing the UNKNOWN
+    # marker at the boundary its own scan established, every later Stop staying inside the run while the
+    # marker stands, at any boundary (round 43: only the explicit false clears it, see CORRUPTION
+    # below); and a
+    # user-message new-turn Stop whose boundary save FAILS separates
+    # two runs without blocking, its block failing open as unrecorded below; a run of
+    # explicit trues is round 27's special case). The state file is written only by save_state(), called
+    # through save() below with
     # `new_blocks` (or, round 28, the higher stored value), and never deleted by this hook while in use (round
     # 30: prune_state() deletes only a subdirectory it has locked and that has gone unwritten for PRUNE_AGE_NS,
     # which this argument treats exactly as an external deletion); every write is an
     # atomic rename of a complete v2 file. Let
-    # c be the counter a Stop LOADS (None when absent or unreadable) and w what it writes. By the cases above,
+    # c be the counter a Stop LOADS (None when unreadable, or when ABSENT under an explicit true; an ABSENT
+    # state where the field is absent loads an ESTABLISHED 0, round 38, the external-deletion case below)
+    # and w what it writes. By the cases above,
     # within the run w >= c whenever c is an integer (block c + 1, cap or pass c, open BLOCK_CAP >= c since no
     # write ever exceeds BLOCK_CAP: a block writes c + 1 only when c < BLOCK_CAP), and w = BLOCK_CAP whenever
     # c is None. So, reading the file's successive values across the run, the counter is non-decreasing and
-    # bounded by BLOCK_CAP. A Stop that BLOCKS under stop_hook_active must have loaded an integer c < BLOCK_CAP
+    # bounded by BLOCK_CAP. A Stop in the run that BLOCKS must have loaded an integer c < BLOCK_CAP
     # and SAVED c + 1 (a failed save turns it into a fail-open allow below), so each such block raises the
     # recorded counter by exactly 1; a non-decreasing integer in [0, BLOCK_CAP] can be raised by 1 at most
     # BLOCK_CAP times, so the run holds at most BLOCK_CAP blocks (at most BLOCK_CAP - 1 when the Stop that
     # started it was this hook's own block, which recorded 1). Nothing in this argument reads the transcript
-    # or another hook's output: other hooks' feedback records, a transcript rewrite or reset, a user-role entry
-    # read as genuine, and clean or violating messages in any order change only the transcript count and the
-    # boundary, neither of which can lower the counter or make a Stop block without the own counter below the
-    # cap. An external deletion or corruption of the state file makes the next load None, which fails open
-    # (a violation) or records BLOCK_CAP or nothing (a pass), never a lower integer. The residual is a writer
+    # or another hook's output: other hooks' feedback records, a transcript rewrite or reset (round 39: a
+    # reset scan is never a new turn, and round 40: it is recorded, so no later re-read of the rewritten
+    # content is one either; such Stops stay inside the run), and clean or violating messages
+    # in any order change only the transcript count and the boundary, neither of which can lower the counter
+    # or make a Stop block without the own counter below the cap; a user-role entry read as a NEW genuine
+    # user message by a persisting Stop with a readable counter and no explicit true ENDS the run (where the
+    # host omits the field, the disclosed synthetic-entry residual above), and when its boundary save fails
+    # it ends the run without blocking (round 39: that block is unrecorded and fails open). CORRUPTION of the
+    # state file (unreadable or malformed) makes the next load UNAVAILABLE, an unknown count, which fails
+    # open (a violation) or records BLOCK_CAP or nothing (a pass), never a lower integer, and any repair
+    # it writes records the UNKNOWN marker (round 42; round 41 wrote the reset flag itself). While the
+    # marker stands NO transcript-derived user message ends the run, at any boundary (round 43; round 42
+    # ended it past a held non-trivial boundary, but the repair cannot see a truncation that preceded the
+    # state fault, so a staged restore of the old records, one per Stop, held every boundary the repairs
+    # saved and replayed old content as new turns); only an explicit false ends it, so one state fault
+    # keeps the rest of the run on a host that omits the field in capped-allow, the disclosed
+    # residual. An external
+    # DELETION makes the next load ABSENT: under an explicit true that too is an unknown count (round 26), its
+    # repair recording the unknown marker (round 42), but where the field is absent it reads as an
+    # established 0 and restarts the count, the disclosed
+    # deletion residual (round 38). The residual is a writer
     # OTHER than this hook replacing the file (or the directory) with a valid lower count (the same uid,
     # deliberately), or writing it while ignoring the lock: outside the threat model (see CONCURRENCY).
     if will_block:
         new_blocks = (blocks or 0) + 1
-    elif cap == "open" or (active and blocks is None):
+    elif fresh:
+        new_blocks = 0  # an observed new turn with a pass (blocks was already reset to 0 above)
+    elif cap == "open" or blocks is None:
         new_blocks = BLOCK_CAP
-    elif active:
-        new_blocks = blocks  # a capped allow or a pass inside the corrective loop: preserved (round 27)
     else:
-        new_blocks = 0  # outside the corrective loop (blocks was already reset to 0 above)
+        new_blocks = blocks  # a capped allow or a pass that is no observed new turn: preserved (rounds 27, 38)
+    # round 40: the reset history this Stop records: a reset scan, this one or a recorded earlier one, stands
+    # until an explicit-false Stop, the platform's own new-turn statement, clears it; transcript content
+    # never does (what follows a reset is exactly what cannot be trusted). Rounds 42 and 43: UNKNOWN
+    # history (the state unreadable at this Stop's load, or absent under an explicit true) is recorded as
+    # its own marker, carried exactly like the flag and cleared ONLY by the explicit false (round 42 also
+    # cleared it at a transcript-derived new turn past a held non-trivial boundary, which a staged restore
+    # of old records satisfied, so restored content restarted the count with no new user input)
+    new_reset = not new_turn and (reset_seen or bool(t.get("reset")))
+    new_unknown = not new_turn and (unknown_seen or reset_unknown)
 
-    def save(off, tl, pend):
-        """Write the state with `new_blocks`; True only when it was written and, for a block, the write RAISED the
-        stored counter. Round 28: under stop_hook_active the stored counter is re-read first (the lock is held)
-        and a lower value is never written over it; a block whose write would not raise it (another writer got
-        there first) returns False, so the block fails open as an unrecorded one. Round 29: the re-read and the
-        write are both relative to the locked directory descriptor."""
+    def save(off, tl, pend, late=()):
+        """Write the state with `new_blocks` and `new_reset`; True only when it was written and, for a block,
+        the write RAISED the stored counter. Round 28: on a Stop that is not an observed new turn (round 38;
+        before, only under stop_hook_active) the stored counter is re-read first (the lock is held) and a
+        lower value is never written over it (an observed new turn writes its reset, or its fresh count of 1,
+        as loaded); a block whose write would not raise it (another writer got there first) returns False, so
+        the block fails open as an unrecorded one, and its `late` pending entry is NOT written (that refusal
+        is never delivered, so no arrival is owed; before, the entry was written and later excused the
+        arrival in silence); round 40: the same re-read keeps a stored reset flag, never
+        clearing it on a Stop that is not an observed new turn, and (round 42) the stored unknown marker
+        the same way, defence in depth beside the loaded `unknown_seen` that new_unknown already
+        carries. Round 29: the re-read and the write are both
+        relative to the locked directory descriptor. With `owed` given, this write RESERVES the raised
+        counter and stores no `late` entry: the entry is committed by commit_late() only after the block
+        reason has been written (see evaluate())."""
         if not persist or dfd is None:
             return False
-        nb, raised = new_blocks, True
-        if active:
+        nb, rs, un, raised = new_blocks, new_reset, new_unknown, True
+        if not fresh:
             cur = {}
             ok = load_state(None, tp, cur, dfd)[3]
             stored = cur.get("blocks") if ok and not cur.get("absent") else None
             if stored is not None:
                 nb, raised = max(new_blocks, stored), stored < new_blocks
-        return save_state(None, tp, off, tl, pend, nb, dfd) and (raised or not will_block)
+                rs = new_reset or bool(cur.get("reset"))  # round 40: a recorded reset is never erased mid-run
+                un = new_unknown or bool(cur.get("unknown"))  # round 42: nor is the unknown marker
+        recorded = raised or not will_block
+        late = list(late) if recorded else []
+        if owed is None:
+            return save_state(None, tp, off, tl, list(pend) + late, nb, dfd, rs, un) and recorded
+        written = save_state(None, tp, off, tl, pend, nb, dfd, rs, un) and recorded
+        if written and late:
+            owed.append(lambda: commit_late(off, tl, nb, late))
+        return written
+
+    def commit_late(off, tl, nb, late):
+        """Add the `late` entries of a block whose reason was written, still under the lock, to the state
+        this Stop saved; True only when they were written. The state is re-read first and the entries are
+        stored only when it still holds this Stop's boundary (offset and tail hash) and counter (a writer
+        that ignored the lock changed them otherwise), so the commit never revives an older boundary or
+        lowers a counter; a state whose boundary or counter changed, or that cannot be read, stores no
+        entry, and the arrival is then checked. Only those fields are compared: a pending list or a reset
+        or unknown flag that changed is kept as read, with the entries added."""
+        cur = {}
+        o2, t2, p2, ok2 = load_state(None, tp, cur, dfd)
+        if not ok2 or cur.get("absent") or (o2, t2, cur.get("blocks")) != (off, tl, nb):
+            return False
+        return save_state(None, tp, off, tl, list(p2) + list(late), nb, dfd, bool(cur.get("reset")),
+                          bool(cur.get("unknown")))
 
     saved = False  # whether this Stop's counter reached the recovery state
+    kept = []  # older violations detected but no longer able to block (an unpersisted boundary): reported only
     if readable:
+        # the reconciliation above adopted the ONE rescan snapshot (the boundary and the
+        # hashes advance together), so these saves need no merge; when it could NOT be performed (held),
+        # the stored pair is written back EXACTLY as it was, never an empty list, and this Stop records
+        # no NEW late hash of its own (the pair may not advance alone), so a block here can see its
+        # final re-reported once (at its late arrival, or, already in the transcript, when the next
+        # readable Stop re-reads it past the held unmoved boundary), the disclosed cost of holding
+        # the pair
         if final_bad or earlier_bad:
-            late = [_sha(lam.strip())] if lam is not None and not lam_in_transcript else []
-            saved = save(t["end"], t["tail"], remaining + late)
+            # only an actual block records a pending entry: a capped or fail-open ALLOW stores none, so
+            # the entries never outnumber the refusals written (before, such an allow stored one too,
+            # and that entry later excused the message's arrival although no refusal of it was ever
+            # delivered); the unexcused arrival is checked like any other record when a Stop of the same
+            # turn reads it, still under the cap. save() keeps `late` only when this block's write raised
+            # the stored counter, so a block that turns into a fail-open allow there stores none either,
+            # and (from main()) commits it only after the block decision was written to stdout
+            late = ([_sha(lam.strip())]
+                    if will_block and lam is not None and not lam_in_transcript else [])
+            saved = save(*held) if held is not None else save(t["end"], t["tail"], remaining, late)
             if not saved:
-                earlier_bad = []  # the boundary cannot be PERSISTED: only the final message may block
-        elif had_state or not state_ok:
-            # advance, or repair an unreadable state; round 27: the counter is written too (preserved under
-            # stop_hook_active, BLOCK_CAP when it was unknown), never reset to 0 inside the corrective loop
-            save(t["end"], t["tail"], remaining)
-    elif tp and (blocks is not None or cap == "open") and (will_block or had_state or cap == "open"):
+                # the boundary cannot be PERSISTED: only the final message may block, but the older
+                # violations stay detected and are still REPORTED (kept): counted in the final message's
+                # refusal or in the allow's warning, which names the first violation; dropping them let an
+                # earlier-message-only violation pass with no warning at all
+                kept, earlier_bad = earlier_bad, []
+        elif had_state or not state_ok or absent_unknown:
+            # advance, or repair an unreadable state, or (round 43) persist the unknown marker a CLEAN Stop
+            # discovered in an absent state under an explicit true; round 27: the counter is written too
+            # (preserved under stop_hook_active, BLOCK_CAP when it was unknown), never reset to 0 inside
+            # the corrective loop
+            save(*(held if held is not None else (t["end"], t["tail"], remaining)))
+    # round 42: `new_turn` joins the final save condition: on a clean explicit-false Stop with BOTH the
+    # state and the transcript unreadable, none of will_block, had_state (the failed read hid the
+    # recorded reset) or cap == "open" held, so the one signal that clears the flags wrote nothing and a
+    # recorded reset survived two transient faults, capping later genuine turns (found in round 41). Round
+    # 43: unreadable-state discovery joins BOTH predicates, as reset_unknown (the unreadable read
+    # itself, or the absent state met under an explicit true), so a CLEAN Stop that discovered either,
+    # with the transcript unreadable and the field omitted or explicitly true, still persists the
+    # unknown marker and the capped counter (before, only absent_unknown joined: a clean Stop whose
+    # STATE read failed saved nothing, the fault was forgotten, and the next genuine user turn
+    # restarted the count, found in round 43)
+    elif tp and (blocks is not None or cap == "open" or reset_unknown) and (will_block or had_state
+                                                                            or cap == "open" or new_turn
+                                                                            or reset_unknown):
+        # round 43: a Stop whose state read failed loaded 0, None and [] above (the explicit false, or
+        # the clean faulting Stop persisting its discovery); re-read
+        # under the still-held lock and keep a stored boundary and pending list that read back, so a
+        # transient fault does not overwrite them with 0 and an empty list (the reset-to-0 rescan
+        # re-reported an already-reported old message once); a state still unreadable here is cleared to
+        # boundary 0, its one-time recheck a disclosed residual
+        if not state_ok and dfd is not None:
+            cur = {}
+            off2, tl2, pend2, ok2 = load_state(None, tp, cur, dfd)
+            if ok2 and not cur.get("absent"):
+                offset, tail, pending = off2, tl2, pend2
         saved = save(offset, tail, pending)  # keep the boundary, record the counter
-    if will_block and active and not saved:
-        cap = "open"  # this block could not be recorded in the own counter, so the next Stop could not cap
+    if will_block and not new_turn and tp and not saved:
+        # this block could not be recorded in the own counter, so the next Stop could not cap (round 38: on
+        # any Stop that is not an observed new turn, an absent field included; round 39: on a user-message
+        # new turn too, since its unsaved boundary would re-arm the reset and let every Stop block; only an
+        # explicit-false Stop, the platform's own new-turn statement, still blocks with an unrecorded count;
+        # with no transcript_path no counter exists at all and the block stands, the disclosed residual above)
+        cap = "open"
+    if kept and not final_bad and cap is None:
+        # an explicit-false Stop whose only violations lie in older messages that can no longer block: an
+        # allow, but a loud one that counts them and names the first, like the unrecorded block above
+        cap = "open"
     add(final_bad)
     add(earlier_bad)
+    add(kept)
     if not bad:
         return None
     shown = bad + ([f"... and {over[0]} more distinct violation(s) not listed"] if over[0] else [])
@@ -2074,12 +2543,16 @@ def main(argv):
         tp = payload.get("transcript_path") if isinstance(payload.get("transcript_path"), str) else None
         now = datetime.datetime.now(UTC)
         notes, diag = [], []
-        reason = evaluate(payload, now, lease_start(lease_file(), tp), notes=notes, diag=diag)
+        # a block decision is written by evaluate() through this writer, under the state lock, and the
+        # block's late-arrival pending entry is committed only when _emit_line reports a successful local
+        # write (a refusal that never reached stdout must not excuse its arrival later)
+        reason = evaluate(payload, now, lease_start(lease_file(), tp), notes=notes, diag=diag,
+                          emit=lambda r: _emit_line(json.dumps({"decision": "block", "reason": r})))
     except Exception:
         return 0  # fail-open silently
     # round 33: ONE stdout line per Stop, then at most ONE different diagnostic line on stderr (see MESSAGES)
     if reason:
-        _emit_line(json.dumps({"decision": "block", "reason": reason}))
+        pass  # already written by evaluate() above
     elif notes:
         _emit_line(json.dumps({"systemMessage": notes[0]}))  # an allow with a warning: visible to the user
     if (reason or notes) and diag:
@@ -2110,16 +2583,18 @@ def _self_test():
     # round 34: a message names its claim as `literal` then the compact offset, +Nm AHEAD or -Nm BEHIND
     AHEAD_IN, BEHIND_IN = "` +", "` -"
 
-    def run_main(payload_text, env=None, argv=("stamp-truth-stop.py",)):
+    def run_main(payload_text, env=None, argv=("stamp-truth-stop.py",), out=io.StringIO):
+        # `out` makes the stdout main() sees (None: a descriptor closed at startup); its text is returned when
+        # it has any
         old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
         sys.stdin = io.StringIO(payload_text) if isinstance(payload_text, str) else payload_text
-        sys.stdout = io.StringIO()
+        sys.stdout = out()
         try:
             for k in ("AIQT_HOOKS_WORKER", "ORCH_WORKER", "ORCH_VERIFY_OWNER", "CLAUDE_PROJECT_DIR"):
                 os.environ.pop(k, None)
             os.environ.update(env or {})
             rc = main(list(argv) if isinstance(argv, tuple) else argv)
-            return rc, sys.stdout.getvalue()
+            return rc, getattr(sys.stdout, "getvalue", lambda: None)()
         finally:
             sys.stdin, sys.stdout = old_in, old_out
             os.environ.clear()
@@ -2812,7 +3287,7 @@ def _self_test():
 
         def test_r8_block_cap_uncapped_still_blocks(self):
             for entries, active in ((self.cycles(2), True),  # under the cap
-                                    (self.cycles(3), False),  # the cap applies only under stop_hook_active
+                                    (self.cycles(3), False),  # an explicit false is a new turn: no cap holds
                                     # a genuine user message ends the run of consecutive cycles
                                     (self.cycles(2) + [self.user("try again"), self.asst("x"), self.block_entry(),
                                                        self.asst("y")], True)):
@@ -3595,7 +4070,7 @@ def _self_test():
             self.assertLessEqual(kinds.count("block"), BLOCK_CAP, kinds)
             self.assertEqual(kinds[BLOCK_CAP:], ["warn"] * (5 - BLOCK_CAP), kinds)
             self.assertIn("block cap hit", outs[-1]["systemMessage"])
-            # a Stop outside the corrective loop starts the count again, and so blocks
+            # a Stop with stop_hook_active explicitly false starts the count again, and so blocks
             p0 = json.dumps({"hook_event_name": "Stop", "stop_hook_active": False, "transcript_path": missing,
                              "last_assistant_message": "[2099-01-01T00:00Z] done"})
             self.assertEqual(json.loads(run_main(p0, lease)[1]).get("decision"), "block")
@@ -3616,9 +4091,16 @@ def _self_test():
                 self.assertNotIn("\n", notes[0])
                 self.assertIn("block count unknown", notes[0])
                 self.assertIn("UNRESOLVED", notes[0])
-            # outside the corrective loop nothing changes: the violation blocks
-            self.assertTrue(evaluate({"transcript_path": self.tr, "last_assistant_message": "[2099-01-01T00:00Z] x"},
+            # an explicit false is a new turn and still blocks; round 38: a Stop whose field is ABSENT is
+            # not, so with the counter unusable it fails open too
+            self.assertTrue(evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                                      "last_assistant_message": "[2099-01-01T00:00Z] x"},
                                      self.now, self.start, self.sdir).startswith(BLOCK_PREFIX))
+            notes = []
+            self.assertIsNone(evaluate({"transcript_path": self.tr,
+                                        "last_assistant_message": "[2099-01-01T00:00Z] x"},
+                                       self.now, self.start, self.sdir, notes))
+            self.assertIn("block count unknown", notes[0])
             self.assertEqual(block_cycles(self.tr), (0, False))
             self.assertEqual(block_cycles(os.path.join(self.tmp, "missing.jsonl")), (0, False))
             self.write(self.cycles(1))
@@ -3929,7 +4411,7 @@ def _self_test():
             kinds, counters = self.alternating(missing, os.path.join(self.tmp, "state-missing"), 17)
             self.assertLessEqual(kinds.count("block"), BLOCK_CAP, kinds)
             self.assertEqual(counters[1:], sorted(counters[1:]), counters)
-            # a Stop outside the loop starts a new count: the next violation blocks again
+            # a Stop with an explicit false starts a new count: the next violation blocks again
             self.assertTrue(self.ev(last_assistant_message="[2026-09-23T20:00Z] x").startswith(BLOCK_PREFIX))
 
         def test_r27_unknown_counter_pass_in_loop_records_cap(self):
@@ -3951,7 +4433,7 @@ def _self_test():
                                        self.sdir, notes))
             self.assertIn("block cap hit", notes[0])
             doc = " ".join(__doc__.split())
-            for s in ("reset to 0 ONLY by a Stop without stop_hook_active", "NEVER decreases",
+            for s in ("reset to 0 ONLY by an observable new-turn", "NEVER decreases",
                       "at most BLOCK_CAP times", "gets only the blocks the run has left"):
                 self.assertIn(s, doc)
             self.assertNotIn("reset to 0 only by a pass", doc)
@@ -4118,9 +4600,9 @@ def _self_test():
 
         def test_r28_lock_unavailable_writes_no_state(self):
             # locking unavailable (round 29: no fcntl, or a flock the filesystem refuses, on a usable private state
-            # dir): the Stop writes no state, so under stop_hook_active it cannot block (it fails open with a
-            # warning) and outside the loop only its final message can block, as for an unpersistable state
-            # (test_r7_state_unpersistable_...)
+            # dir): the Stop writes no state, so unless it is an explicit new turn it cannot block (it fails
+            # open with a warning; round 38: a Stop whose field is ABSENT fails open too); an explicit false
+            # still blocks on its final message, as for an unpersistable state (test_r7_state_unpersistable_...)
             import errno
             bad = "[2026-09-23T20:00Z] heartbeat"
             self.write([self.user("go"), self.asst(bad)])
@@ -4144,8 +4626,13 @@ def _self_test():
                                                 "last_assistant_message": bad}, self.now, self.start, self.sdir,
                                                notes), how)
                     self.assertIn("block count unknown", notes[0], how)
-                    self.assertTrue(evaluate({"transcript_path": self.tr, "last_assistant_message": bad}, self.now,
+                    self.assertTrue(evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                                              "last_assistant_message": bad}, self.now,
                                              self.start, self.sdir).startswith(BLOCK_PREFIX), how)
+                    notes = []
+                    self.assertIsNone(evaluate({"transcript_path": self.tr, "last_assistant_message": bad},
+                                               self.now, self.start, self.sdir, notes), how)
+                    self.assertIn("block count unknown", notes[0], how)
                     dfd, status = lock_state(self.sdir, self.tr)
                     try:
                         self.assertEqual(status, "unavailable", how)
@@ -4159,8 +4646,9 @@ def _self_test():
                     self.assertEqual(f.read(), before, how)
                 self.assertEqual(os.listdir(self.sdir), [state_subdir(self.tr)], how)
             # with no usable private state dir (not private; a symlink to a private dir, which is not followed; a
-            # regular file) there is nothing to serialize and no state can be read or written: outside the loop a
-            # bad final message still blocks, and inside it the Stop fails open as before
+            # regular file) there is nothing to serialize and no state can be read or written: on an explicit
+            # false a bad final message still blocks; under an explicit true, and (round 38) with the field
+            # absent, the Stop fails open as before
             public = os.path.join(self.tmp, "public")
             os.mkdir(public, 0o755)
             os.chmod(public, 0o755)
@@ -4171,8 +4659,13 @@ def _self_test():
                 f.write("x")
             for sdir in (public, link, plain):
                 self.assertEqual(lock_state(sdir, self.tr), (None, "nodir"), sdir)
-                self.assertTrue(evaluate({"transcript_path": self.tr, "last_assistant_message": bad}, self.now,
+                self.assertTrue(evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                                          "last_assistant_message": bad}, self.now,
                                          self.start, sdir).startswith(BLOCK_PREFIX), sdir)
+                notes = []
+                self.assertIsNone(evaluate({"transcript_path": self.tr, "last_assistant_message": bad},
+                                           self.now, self.start, sdir, notes), sdir)
+                self.assertIn("block count unknown", notes[0], sdir)
                 notes = []
                 self.assertIsNone(evaluate({"transcript_path": self.tr, "stop_hook_active": True,
                                             "last_assistant_message": bad}, self.now, self.start, sdir, notes), sdir)
@@ -4399,7 +4892,7 @@ def _self_test():
                     os.mkdir(path, 0o700)
                     extra = {}
                     self.assertEqual(load_state(None, self.tr, extra, dfd)[3], True, moved)
-                    self.assertEqual(extra, {"blocks": 1}, moved)
+                    self.assertEqual(extra, {"blocks": 1, "reset": False, "unknown": False}, moved)
                     self.assertTrue(save_state(None, self.tr, 0, None, [], 2, dfd), moved)
                     self.assertEqual(os.listdir(path), [], moved)
                     msub = sub + ".moved" if moved == "subdir" else os.path.join(self.sdir + ".moved",
@@ -4974,6 +5467,2278 @@ def _self_test():
             self.assertIn("os.replace(tmp, PRUNE_CURSOR", src)
             self.assertNotIn("O_TRUNC", src)
             self.assertIn("never by opening the existing entry", " ".join(__doc__.split()))
+
+        # -- round 38 (an absent stop_hook_active field is not a new turn) --
+        def r38_ev(self, sdir, final, append=None):
+            """One Stop from a test payload that omits the stop_hook_active field; returns (outcome kind, notes)."""
+            if append:
+                self.write(append, "a")
+            notes = []
+            r = evaluate({"transcript_path": self.tr, "hook_event_name": "Stop", "last_assistant_message": final},
+                         self.now, self.start, sdir, notes)
+            return ("block" if r else "cap" if notes and "block cap hit" in notes[0]
+                    else "open" if notes and "block count unknown" in notes[0] else "pass"), notes
+
+        def test_r38_cap_binds_when_the_field_is_absent(self):
+            # the defect: a Stop without the field was read as a new turn, so the count restarted at every Stop
+            # and the cap never bound; a host that omits the field could be refused at every stop. An absent
+            # field is not a new turn: the count goes on from the stored value and blocking stays capped. The
+            # first Stop (an absent state, outside any known loop) still read an established 0 and blocked
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state38")
+            self.write([self.user("go"), self.asst(bad)])
+            kinds = []
+            for k in range(6):
+                kind, _ = self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)] if k else None)
+                kinds.append(kind)
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"] * (6 - BLOCK_CAP))
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], BLOCK_CAP)
+
+        def test_r38_explicit_false_still_starts_a_new_count(self):
+            # a payload field of exactly False is a new-turn statement from the platform: the count restarts,
+            # so the next violating turn end is refused once more with a fresh count of 1
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state38f")
+            self.write([self.user("go"), self.asst(bad)])
+            self.r38_ev(sdir, bad)
+            for _ in range(3):
+                self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])
+            self.assertEqual(self.r38_ev(sdir, bad)[0], "cap")
+            payload = {"transcript_path": self.tr, "stop_hook_active": False, "last_assistant_message": bad}
+            r = evaluate(payload, self.now, self.start, sdir)
+            self.assertTrue(r and r.startswith(BLOCK_PREFIX))
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], 1)
+
+        def test_r38_allowed_stop_never_resets_the_count(self):
+            # a pass without the field preserves the count (two hooks that each reset at their own allowed
+            # stop could refuse in turn without bound), so after it the run has only its remaining blocks
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state38p")
+            self.write([self.user("go"), self.asst(bad)])
+            kinds = [self.r38_ev(sdir, bad)[0]]
+            kinds.append(self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])[0])
+            kinds.append(self.r38_ev(sdir, "Done.", append=[self.block_entry(), self.asst("Done.")])[0])
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], 2)  # the allowed stop neither reset nor raised the count
+            kinds.append(self.r38_ev(sdir, bad, append=[self.other_hook_feedback(), self.asst(bad)])[0])
+            kinds.append(self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])[0])
+            self.assertEqual(kinds, ["block", "block", "pass", "block", "cap"])
+
+        def test_r38_new_user_message_starts_a_new_count(self):
+            # a NEW genuine user message past the boundary is the observable new-turn signal (this hook
+            # registers only Stop, so the transcript is its UserPromptSubmit analogue): the count restarts;
+            # under an explicit true the same message never resets the counter (round 26)
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state38u")
+            self.write([self.user("go"), self.asst(bad)])
+            self.r38_ev(sdir, bad)
+            for _ in range(3):
+                self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])
+            self.assertEqual(self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])[0], "cap")
+            self.assertEqual(self.r38_ev(sdir, bad, append=[self.user("try again"), self.asst(bad)])[0], "block")
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], 1)
+            for _ in range(2):
+                self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])
+            self.write([self.user("try harder"), self.asst(bad)], "a")
+            notes = []
+            self.assertIsNone(evaluate({"transcript_path": self.tr, "stop_hook_active": True,
+                                        "last_assistant_message": bad}, self.now, self.start, sdir, notes))
+            self.assertIn("block cap hit", notes[0])
+
+        def test_r38_unusable_counter_without_the_field_fails_open(self):
+            # with the field absent the hook may be inside a corrective loop, so an unusable counter fails
+            # open exactly as under an explicit true (the own counter is the required brake), where such a
+            # turn end used to be refused with no bound available
+            bad = "[2026-09-23T20:00Z] still wrong"
+            self.write([self.user("go"), self.asst(bad)])
+            self.seed()
+            with open(self.key(), "w") as f:
+                f.write("{not json")
+            kind, notes = self.r38_ev(self.sdir, bad)
+            self.assertEqual(kind, "open")
+            self.assertIn("block count unknown", notes[0])
+            # the fail-open allow recorded the cap, so the loop stays capped until a new-turn signal
+            self.assertEqual(self.r38_ev(self.sdir, bad, append=[self.block_entry(), self.asst(bad)])[0], "cap")
+
+        def test_r38_save_never_lowers_counter_without_the_field(self):
+            # the save's monotonic re-read (round 28) also covers a Stop whose field is absent: a concurrent
+            # writer's higher count is never overwritten with a lower one, and a block whose write would not
+            # raise it fails open as unrecorded (test_r28_save_never_lowers_counter_inside_loop, field absent)
+            bad = "[2026-09-23T20:00Z] heartbeat"
+            real_tm = turn_messages
+
+            def raising(*a, **k):  # between this Stop's load and its save, another writer records 2
+                self.assertTrue(save_state(self.sdir, self.tr, 0, None, [], 2))
+                return real_tm(*a, **k)
+
+            for final, expect in (("Done.", "pass"), (bad, "open")):
+                # no genuine user message in the scanned span, so the Stop is not an observed new turn
+                self.write([self.block_entry(), self.asst(final)])
+                self.seed(1)
+                globals()["turn_messages"] = raising
+                try:
+                    kind, _ = self.r38_ev(self.sdir, final)
+                finally:
+                    globals()["turn_messages"] = real_tm
+                self.assertEqual(kind, expect, final)
+                extra = {}
+                self.assertTrue(load_state(self.sdir, self.tr, extra)[3])
+                self.assertEqual(extra["blocks"], 2, final)  # the other writer's higher value, never lowered
+
+        # -- round 39 (QA of round 38: an unsaved or rewritten boundary
+        # must not re-arm the new-turn reset) --
+        def test_r39_failed_save_user_message_fails_open_absent_state(self):
+            # the defect: `fresh` required only `persist` (the lock taken), not a SAVED boundary, so with
+            # every save failing (os.replace raising ENOSPC here; an unwritable subdirectory equally) the
+            # same user message re-armed the reset at every Stop, each block went unrecorded, and the hook
+            # blocked without limit. A block on a user-message new turn whose boundary save fails now takes
+            # the unrecorded-block fail-open instead; here from an initially ABSENT state
+            import errno
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state39a")
+            self.write([self.user("go"), self.asst(bad)])
+            real = os.replace
+
+            def enospc(*a, **k):
+                raise OSError(errno.ENOSPC, "No space left on device")
+            kinds = []
+            os.replace = enospc
+            try:
+                for k in range(4):
+                    kinds.append(self.r38_ev(sdir, bad,
+                                             append=[self.block_entry(), self.asst(bad)] if k else None)[0])
+            finally:
+                os.replace = real
+            self.assertEqual(kinds, ["open"] * 4)  # fails open every time, never blocks repeatedly
+            self.assertFalse(os.path.exists(self.key(sdir=sdir)))  # the failed saves wrote no state at all
+
+        def test_r39_failed_save_user_message_fails_open_capped_state(self):
+            # the second vector: an existing CAPPED state, then one new genuine user message whose boundary
+            # can no longer be saved (os.replace raising ENOSPC). The reset is never consumed, so each Stop
+            # re-reads the same message: every one fails open, none blocks, and the capped counter survives
+            import errno
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state39b")
+            self.write([self.user("go"), self.asst(bad)])
+            kinds = [self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)] if k else None)[0]
+                     for k in range(4)]
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"])  # the capped state the vector starts at
+            real = os.replace
+
+            def enospc(*a, **k):
+                raise OSError(errno.ENOSPC, "No space left on device")
+            kinds = []
+            os.replace = enospc
+            try:
+                kinds.append(self.r38_ev(sdir, bad, append=[self.user("try again"), self.asst(bad)])[0])
+                for _ in range(3):
+                    kinds.append(self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])[0])
+            finally:
+                os.replace = real
+            self.assertEqual(kinds, ["open"] * 4)
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], BLOCK_CAP)  # the capped count survived every failed save
+
+        def test_r39_transcript_rewrite_never_restarts_the_count(self):
+            # a record rewritten inside the TAIL_BYTES window invalidates the stored boundary, so the scan
+            # is RESET and re-reads the turn from the start, meeting the OLD genuine user message again;
+            # before, each such Stop read it as a new turn and the cap never bound where the host omits the
+            # field. A reset scan is never a new turn: the count goes on and the cap binds
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state39c")
+            self.write([self.user("go"), self.asst(bad)])
+            kinds = [self.r38_ev(sdir, bad)[0]]
+            for _ in range(3):
+                # rewrite the newest record inside the TAIL_BYTES window: b"still" becomes b"STILL" below,
+                # so FIVE bytes of the record differ
+                with open(self.tr, "r+b") as f:
+                    data = f.read()
+                    i = data.rindex(b"still wrong")
+                    self.assertGreaterEqual(i, len(data) - TAIL_BYTES)
+                    f.seek(i)
+                    f.write(b"STILL")
+                kinds.append(self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])[0])
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"])
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], BLOCK_CAP)
+
+        def test_r39_unknown_counter_pass_without_the_field_records_cap(self):
+            # the absent-field sibling of test_r27_unknown_counter_pass_in_loop_records_cap: a PASS meeting
+            # an UNREADABLE counter repairs the state AT the cap, as a readable integer, never as 0 or a
+            # non-integer, so the loop is capped at the next violation instead of failing open from then on
+            bad = "[2026-09-23T20:00Z] still wrong"
+            self.write([self.block_entry(), self.asst("Done.")])  # no genuine user message: not a new turn
+            self.seed()
+            with open(self.key(), "w") as f:
+                f.write("{not json")
+            self.assertEqual(self.r38_ev(self.sdir, "Done.")[0], "pass")
+            extra = {}
+            self.assertTrue(load_state(self.sdir, self.tr, extra)[3])  # repaired to a READABLE state
+            self.assertEqual(extra["blocks"], BLOCK_CAP)  # at the cap, never 0 or a non-integer
+            self.assertEqual(self.r38_ev(self.sdir, bad, append=[self.block_entry(), self.asst(bad)])[0],
+                             "cap")
+
+        def test_r39_non_bool_field_values_cap_as_absent(self):
+            # the field is trusted only as an exact Boolean: null, "true", "false", 1, 0, and "" are each
+            # read as ABSENT (neither an explicit true nor an explicit-false new turn), so the count runs
+            # to the cap: block three times, then capped allows
+            bad = "[2026-09-23T20:00Z] still wrong"
+            for i, v in enumerate((None, "true", "false", 1, 0, "")):
+                sdir = os.path.join(self.tmp, f"state39v{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                kinds = []
+                for k in range(5):
+                    if k:
+                        self.write([self.block_entry(), self.asst(bad)], "a")
+                    notes = []
+                    r = evaluate({"transcript_path": self.tr, "hook_event_name": "Stop",
+                                  "stop_hook_active": v, "last_assistant_message": bad},
+                                 self.now, self.start, sdir, notes)
+                    kinds.append("block" if r else "cap" if notes and "block cap hit" in notes[0]
+                                 else "open" if notes and "block count unknown" in notes[0] else "pass")
+                self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"] * (5 - BLOCK_CAP), repr(v))
+
+        # -- round 40 (QA of round 39: a boundary that moved BACKWARDS must
+        # never re-enable a transcript-derived new turn on a later Stop, and an unreadable scan is never a
+        # new turn) --
+        def test_r40_truncate_restore_never_restarts_the_count(self):
+            # the defect: the round-39 reset exclusion bound only the resetting Stop, which saved its
+            # re-scanned boundary of 0; the NEXT Stop verified that trivial boundary and read the RESTORED
+            # old user message as a new turn, so a truncation of the transcript alternating with a restore
+            # of its old content (state preserved, field absent) blocked at every Stop with the counter
+            # going 1, 2, 1, 2 and the cap never bound. The reset is now recorded in the state: no later
+            # transcript-derived user message is a new turn, the count goes on, and the cap binds
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state40a")
+            self.write([self.user("go")])
+            with open(self.tr, "rb") as f:
+                record = f.read()
+            kinds = []
+            for k in range(6):
+                with open(self.tr, "wb") as f:  # restore, truncate, restore, ... the SAME transcript path
+                    f.write(b"" if k % 2 else record)
+                kinds.append(self.r38_ev(sdir, bad)[0])
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"] * (6 - BLOCK_CAP))
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], BLOCK_CAP)
+            self.assertTrue(extra["reset"])  # the reset history is what survives the restore
+
+        def test_r40_unreadable_scan_user_message_is_not_a_new_turn(self):
+            # the defect: a scan that met a genuine user message and then failed to read (size None; here
+            # _tail_sha raising EIO at the end-boundary hash) still counted as a new turn, and its block
+            # SAVED the unmoved loaded boundary, so the same old user message re-armed the reset and the
+            # hook blocked at every Stop. An unreadable scan cannot move its boundary and is never a new
+            # turn: the count goes on and the cap binds
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state40b")
+            self.write([self.user("go"), self.asst(bad)])
+            real = _tail_sha
+
+            def eio(fd, offset):
+                raise OSError(5, "Input/output error")
+            kinds = []
+            globals()["_tail_sha"] = eio
+            try:
+                for _ in range(5):
+                    kinds.append(self.r38_ev(sdir, bad)[0])
+            finally:
+                globals()["_tail_sha"] = real
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"] * (5 - BLOCK_CAP))
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], BLOCK_CAP)  # each block was recorded on the unmoved boundary
+
+        # -- round 41 (QA of round 40: unreadable reset
+        # history is UNKNOWN, never read as cleared, and an explicit-false clean Stop always clears a
+        # recorded reset; the carry-forward and the commit's reset-field
+        # claims get their own vectors) --
+        def test_r41_unreadable_state_repair_records_unknown_history(self):
+            # the defect (12 blocks in 19 Stops): an unreadable state read the reset history
+            # as False, and the save-time repair wrote the counter at the cap with the flag CLEAR, so the
+            # restored OLD user record (104 bytes serialized here, not 63: round-40 wording corrected) was
+            # read as a new turn one Stop later and the count restarted without new user input. The history
+            # is UNKNOWN there: the repair records it (round 42: as the UNKNOWN marker; round 41 wrote
+            # the reset flag itself; round 43: the marker fails closed exactly like the flag, at any
+            # boundary) and the sequence stays bounded at the cap
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state41a")
+            self.write([self.user("go")])
+            with open(self.tr, "rb") as f:
+                record = f.read()
+            kinds = [self.r38_ev(sdir, bad)[0]]  # the one user record: a new turn, block 1
+            with open(self.tr, "wb") as f:
+                f.write(b"")  # truncate: a reset scan, block 2, the reset recorded
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            with open(self.key(sdir=sdir), "w") as f:
+                f.write("{not json")  # the next Stop's initial AND save-time state reads both fail
+            kinds.append(self.r38_ev(sdir, bad)[0])  # fails open; the repair must record the unknown history
+            with open(self.tr, "wb") as f:
+                f.write(record)  # restore the OLD bytes: never a new turn while the reset stands
+            for _ in range(3):
+                kinds.append(self.r38_ev(sdir, bad)[0])
+            self.assertEqual(kinds, ["block", "block", "open", "cap", "cap", "cap"])
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], BLOCK_CAP)
+            # round 42: the repair records the unknown marker, never the reset flag and never cleared history
+            self.assertEqual((extra["reset"], extra["unknown"]), (False, True))
+
+        def test_r41_explicit_false_clean_stop_clears_a_recorded_reset(self):
+            # the defect: had_state ignored the reset field, so a READABLE
+            # clean explicit-false Stop at offset 0, counter 0 and the flag set wrote nothing: the one
+            # signal that clears the flag left it standing, and every later genuine user turn stayed
+            # suppressed (a review's recovery table: zero offset, zero counter). A recorded reset now triggers
+            # the save, so the explicit false always writes the cleared flag
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state41b")
+            self.write([self.user("go"), self.asst(bad)])
+            self.assertEqual(self.r38_ev(sdir, bad)[0], "block")
+            clean = {"transcript_path": self.tr, "stop_hook_active": False,
+                     "last_assistant_message": "Done."}
+            self.assertIsNone(evaluate(dict(clean), self.now, self.start, sdir))  # counter back to 0
+            with open(self.tr, "wb") as f:
+                f.write(b"")  # truncate, then a clean Stop: offset 0, counter 0, the flag set
+            self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass")
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (0, True))
+            self.assertIsNone(evaluate(dict(clean), self.now, self.start, sdir))  # explicit false, clean
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (0, False))  # the flag no longer sticks
+            # the cleared flag re-enables the transcript-derived signal: each genuinely new user turn
+            # starts a fresh count of 1 instead of running to the cap
+            for k in range(4):
+                self.assertEqual(self.r38_ev(sdir, bad, append=[self.user(f"try {k}"), self.asst(bad)])[0],
+                                 "block", k)
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], k)
+                self.assertEqual(extra["blocks"], 1, k)  # round 42: EACH turn blocks with a fresh count of 1
+
+        def test_r41_reset_survives_a_stop_that_records_no_reset(self):
+            # a review found that TWO pieces of code carry the recorded flag forward (reset_seen in new_reset,
+            # and the save re-read), each alone sufficient under the lock, so a mutant removing BOTH
+            # passed every round-40 test while restore, truncate, truncate, restore blocked without limit
+            # (the counter going 1, 2, 3, 1, ...). The Stop between the truncation and the restore scans
+            # an UNCHANGED empty transcript and re-records nothing: the flag must be CARRIED, not
+            # re-derived, so the restore meets it and the cap binds
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state41c")
+            self.write([self.user("go")])
+            with open(self.tr, "rb") as f:
+                record = f.read()
+            kinds = []
+            for data in (record, b"", b"", record, b"", b"", record):
+                with open(self.tr, "wb") as f:
+                    f.write(data)
+                kinds.append(self.r38_ev(sdir, bad)[0])
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"] * 4)
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (BLOCK_CAP, True))
+
+        def test_r41_non_bool_stored_reset_makes_the_state_unavailable(self):
+            # the round-40 commit claims non-boolean `reset` values make the state unavailable; no vector
+            # pinned it (the mutant dropping the type check survived). Each such state is UNAVAILABLE: an
+            # unknown count that fails open and is repaired at the cap with the unknown marker (round 42;
+            # round 41 repaired it with the flag SET), never a readable state that blocks. Round 42: a
+            # non-boolean stored `unknown` value is held to the same type check
+            bad = "[2026-09-23T20:00Z] still wrong"
+            cases = [{"reset": v} for v in (None, "true", "false", 1, 0, "")]
+            cases += [{"reset": False, "unknown": v} for v in (None, "true", "false", 1, 0, "")]
+            for i, fields in enumerate(cases):
+                sdir = os.path.join(self.tmp, f"state41d{i}")
+                self.write([self.block_entry(), self.asst(bad)])  # no genuine user message: no new turn
+                with open(self.key(sdir=sdir, make=True), "w") as f:
+                    f.write(json.dumps({"v": 2, "offset": 0, "tail": None, "pending": [], "blocks": 1,
+                                        **fields}))
+                self.assertFalse(load_state(sdir, self.tr, {})[3], repr(fields))
+                kind, notes = self.r38_ev(sdir, bad)
+                self.assertEqual(kind, "open", repr(fields))
+                self.assertIn("block count unknown", notes[0])
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], repr(fields))
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]),
+                                 (BLOCK_CAP, False, True), repr(fields))
+
+        def test_r41_pre_round40_state_restarts_the_count_once_per_record(self):
+            # a v2 state written before round 40 carries no reset key, which reads as False, never True
+            # (the mutant defaulting it to True survived round 40 with no vector), so reset history lost
+            # before the upgrade can let restored OLD user messages restart the count, once PER RESTORED
+            # record under a staged restore (round 43: the round-42 wording claimed one restart in total;
+            # each restarting Stop records normally, so each restart is bounded at the cap), a disclosed
+            # residual (round 42: in deliberate tension with the unknown-history rule, a missing field
+            # marks every pre-upgrade state, not a per-transcript fault, so it stays read as False rather
+            # than putting each upgraded transcript into the suppressed mode; see the docstring)
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state41e")
+            self.write([self.user("go"), self.asst(bad)])
+            with open(self.tr, "rb") as f:
+                first = f.read()
+            self.write([self.user("more"), self.asst(bad)], "a")
+            with open(self.tr, "rb") as f:
+                both = f.read()
+            with open(self.key(sdir=sdir, make=True), "w") as f:  # the shape a round-39 truncation saved
+                f.write(json.dumps({"v": 2, "offset": 0, "tail": None, "pending": [], "blocks": 2}))
+            with open(self.tr, "wb") as f:
+                f.write(first)  # restore the first old record: the count restarts (restart 1)
+            kinds = [self.r38_ev(sdir, bad)[0]]
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], 1)
+            with open(self.tr, "wb") as f:
+                f.write(both)  # restore the second old record: the count restarts AGAIN (restart 2)
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual(extra["blocks"], 1)  # once per restored record, never once in total
+            for _ in range(BLOCK_CAP):
+                kinds.append(self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])[0])
+            self.assertEqual(kinds, ["block", "block"] + ["block"] * (BLOCK_CAP - 1) + ["cap"])
+
+        def test_r41_recorded_reset_caps_genuine_turns_until_explicit_false(self):
+            # the disclosed trade-off of recording the reset, now stated in the residual
+            # list: where the host omits the field, genuinely NEW user messages are suppressed as new-turn
+            # signals while the flag stands, so once the count reaches the cap the hook stays in capped-
+            # allow mode for that transcript (violations allowed with the cap warning, the fail-open
+            # direction) until an explicit-false Stop, which clears the flag and blocks with a fresh
+            # count of 1
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state41f")
+            self.write([self.user("go")])
+            with open(self.tr, "rb") as f:
+                record = f.read()
+            kinds = [self.r38_ev(sdir, bad)[0]]
+            with open(self.tr, "wb") as f:
+                f.write(b"")  # truncate: the reset is recorded
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            with open(self.tr, "wb") as f:
+                f.write(record)  # restore: not a new turn while the reset stands
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            for k in range(3):  # three genuinely NEW violating user turns, field absent: each capped
+                kinds.append(self.r38_ev(sdir, bad, append=[self.user(f"redo {k}"), self.asst(bad)])[0])
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"] * 3)
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (BLOCK_CAP, True))
+            payload = {"transcript_path": self.tr, "stop_hook_active": False,
+                       "last_assistant_message": bad}
+            self.assertTrue(evaluate(payload, self.now, self.start, sdir))  # the explicit false releases
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (1, False))
+
+        # -- round 42 (QA of round 41: a clean explicit-false
+        # Stop clears the flags even with BOTH reads unavailable; unknown history is its own marker; an
+        # absent state under an explicit true is unknown history too; round 43 below makes the marker
+        # fail closed) --
+        def test_r42_explicit_false_clears_with_both_reads_unavailable(self):
+            # the defect: with the state read failing (EIO) AND the transcript unreadable, a
+            # clean explicit-false Stop satisfied none of will_block, had_state (the failed read hid the
+            # recorded reset) or cap == "open", so the one clearing signal wrote nothing, the stored reset
+            # survived two transient faults, and later genuine turns ran to the cap. `new_turn` now joins
+            # the final save condition: the clearing save is written from the clean in-memory state
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state42a")
+            self.assertTrue(save_state(sdir, self.tr, 0, None, [], 0, reset=True))  # a recorded reset stands
+            clean = {"transcript_path": self.tr, "stop_hook_active": False, "last_assistant_message": "Done."}
+            real, fails = os.read, []
+
+            def eio(fd, n):
+                fails.append(fd)
+                raise OSError(5, "Input/output error")
+            os.read = eio  # the state read fails; self.tr does not exist, so the transcript read fails too
+            try:
+                r = evaluate(dict(clean), self.now, self.start, sdir)
+            finally:
+                os.read = real
+            self.assertIsNone(r)
+            self.assertTrue(fails)  # the state read was attempted and actually FAILED, never routed around
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])  # the clearing save was written
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (0, False, False))
+            self.write([self.user("go"), self.asst(bad)], "a")  # both reads recover
+            for k in range(4):  # every genuine user turn blocks with a fresh count of 1: nothing stuck
+                self.assertEqual(self.r38_ev(sdir, bad,
+                                             append=[self.user(f"try {k}"), self.asst(bad)] if k else None)[0],
+                                 "block", k)
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], k)
+                self.assertEqual(extra["blocks"], 1, k)
+
+        def test_r43_unknown_history_caps_new_turns_until_explicit_false(self):
+            # round 43 (the blocking round-42 finding, decided fail-closed): round 42 cleared the
+            # unknown marker at a genuinely new user message past a held non-trivial boundary, but a
+            # staged restore of old records satisfies that rule with no new user input (see the three
+            # staged-restore vectors below), so the marker now fails CLOSED like the recorded reset:
+            # while it stands, NO transcript-derived user message is a new turn, at any offset, and only
+            # the explicit false clears it. The disclosed cost: after ONE state fault a host that omits
+            # the field stays in capped-allow mode for the rest of the transcript
+            # (test_r41_recorded_reset_caps_genuine_turns_until_explicit_false pins the reset-flag side)
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state42b")
+            self.write([self.user("go"), self.asst(bad)])
+            kinds = [self.r38_ev(sdir, bad)[0]]  # block, count 1, a boundary past offset 0
+            with open(self.key(sdir=sdir), "w") as f:
+                f.write("{not json")  # ONE unreadable read: the repair save replaces it, so reads recover
+            kinds.append(self.r38_ev(sdir, bad, append=[self.block_entry(), self.asst(bad)])[0])
+            self.assertEqual(kinds, ["block", "open"])
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            # the repair records the unknown marker, never the reset flag, at its own non-trivial boundary
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
+            for k in range(3):  # genuinely NEW user turns past the held boundary: capped, never a restart
+                self.assertEqual(self.r38_ev(sdir, bad, append=[self.user(f"again {k}"), self.asst(bad)])[0],
+                                 "cap", k)
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], k)
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]),
+                                 (BLOCK_CAP, False, True), k)
+            payload = {"transcript_path": self.tr, "stop_hook_active": False, "last_assistant_message": bad}
+            self.assertTrue(evaluate(payload, self.now, self.start, sdir))  # only the explicit false releases
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
+
+        def test_r42_absent_state_under_explicit_true_is_unknown_history(self):
+            # the defect (pre-existing since round 40): an absent state under an explicit
+            # true is an UNKNOWN count (round 26), but its reset history read as CLEARED, so an external
+            # deletion of the state file mid-loop erased a recorded reset and the restored old user record
+            # restarted the count (block, block, block after the deletion, up to BLOCK_CAP more blocks per
+            # deletion). The deletion is unknown history too (reset_unknown): the repair records the marker
+            # (round 43: at any boundary), the restored record is never a new turn while it stands, and
+            # only the explicit false releases
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state42c")
+            self.write([self.user("go")])
+            with open(self.tr, "rb") as f:
+                record = f.read()
+            kinds = [self.r38_ev(sdir, bad)[0]]  # block 1
+            with open(self.tr, "wb") as f:
+                f.write(b"")  # truncate: block 2, the reset recorded
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            os.remove(self.key(sdir=sdir))  # external deletion between Stops
+            notes = []
+            payload = {"transcript_path": self.tr, "stop_hook_active": True, "last_assistant_message": bad}
+            self.assertIsNone(evaluate(payload, self.now, self.start, sdir, notes))
+            self.assertIn("block count unknown", notes[0])  # round 26: an unknown count, fail-open
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
+            with open(self.tr, "wb") as f:
+                f.write(record)  # restore the OLD record: never a new turn while the marker stands
+            for _ in range(3):
+                kinds.append(self.r38_ev(sdir, bad)[0])
+            self.assertEqual(kinds, ["block", "block", "cap", "cap", "cap"])
+            payload = {"transcript_path": self.tr, "stop_hook_active": False, "last_assistant_message": bad}
+            self.assertTrue(evaluate(payload, self.now, self.start, sdir))  # the explicit false releases
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
+
+        # -- round 43 (round-42 QA: the blocking finding, unknown history fails closed; the medium
+        # findings; the once-per-explicit-false and carry minor findings) --
+        def test_r43_unknown_history_staged_restore_stays_capped(self):
+            # the blocking round-42 finding (staged restoration): truncate, make the state unreadable (the
+            # repair saves the marker at its trivial offset-0 boundary), then restore the old content in
+            # TWO writes: first a non-user prefix (a system record), whose capped Stop advances the
+            # boundary past 0 and carries the marker, then the old user suffix, which round 42 read as a
+            # new user message past a held non-trivial boundary: the count restarted with no new user
+            # input and no fabricated records. The marker now suppresses at ANY offset: every restore
+            # Stop stays capped, and only the explicit false releases
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state43a")
+            sysrec = {"type": "system", "timestamp": iso(self.now), "content": "session start"}
+            self.write([sysrec, self.user("go")])
+            with open(self.tr, "rb") as f:
+                record = f.read()
+            prefix = record.splitlines(keepends=True)[0]
+            kinds = [self.r38_ev(sdir, bad)[0]]  # block 1
+            with open(self.tr, "wb") as f:
+                f.write(b"")  # truncate: block 2, the reset recorded
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            with open(self.key(sdir=sdir), "w") as f:
+                f.write("{not json")  # the state fault: the repair records the marker at offset 0
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
+            with open(self.tr, "wb") as f:
+                f.write(prefix)  # stage 1: the old system record alone; the capped Stop moves the boundary
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            extra = {}
+            off, _tl, _pd, ok = load_state(sdir, self.tr, extra)
+            self.assertTrue(ok)
+            self.assertGreater(off, 0)  # the boundary advanced past 0 and the marker was carried
+            self.assertTrue(extra["unknown"])
+            with open(self.tr, "wb") as f:
+                f.write(record)  # stage 2: the old user suffix past the held boundary: NOT a new turn
+            for _ in range(3):
+                kinds.append(self.r38_ev(sdir, bad)[0])
+            self.assertEqual(kinds, ["block", "block", "open", "cap", "cap", "cap", "cap"])
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
+            payload = {"transcript_path": self.tr, "stop_hook_active": False, "last_assistant_message": bad}
+            self.assertTrue(evaluate(payload, self.now, self.start, sdir))  # the explicit false releases
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
+
+        def test_r43_unknown_history_two_write_restore_stays_capped(self):
+            # the blocking round-42 finding (two-write variant): the round-41 blocker vector with the restore done in
+            # TWO writes. The repair saved the marker at offset 0; round 42 suppressed only the FIRST
+            # restore Stop (trivial boundary), whose capped allow advanced the boundary, so the second
+            # write was read as a new user message past a held boundary and the count restarted (five
+            # blocks over the sequence against two at the round-41 parent). Every restore stays capped
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state43b")
+            self.write([self.user("go")])
+            with open(self.tr, "rb") as f:
+                first = f.read()
+            self.write([self.user("second")], "a")
+            with open(self.tr, "rb") as f:
+                both = f.read()
+            kinds = [self.r38_ev(sdir, bad)[0]]  # block 1
+            with open(self.tr, "wb") as f:
+                f.write(b"")  # truncate: block 2, the reset recorded
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            with open(self.key(sdir=sdir), "w") as f:
+                f.write("{not json")  # the state fault: the repair records the marker at offset 0
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            with open(self.tr, "wb") as f:
+                f.write(first)  # restore the first OLD user record
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            with open(self.tr, "wb") as f:
+                f.write(both)  # restore the rest of the OLD content past the now-held boundary
+            for _ in range(4):
+                kinds.append(self.r38_ev(sdir, bad)[0])
+            self.assertEqual(kinds, ["block", "block", "open", "cap", "cap", "cap", "cap", "cap"])
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
+
+        def test_r43_unknown_history_nonzero_offset_repair_stays_capped(self):
+            # the blocking round-42 finding (nonzero-offset variant): truncation to a
+            # NON-empty record prefix, then the state fault. The repair scanned the partial prefix, so
+            # it saved the marker at a NON-trivial boundary sitting on truncated content; round 42 read
+            # the restored old suffix past that held boundary as a new user message and the count
+            # restarted (and one corrupt read had erased the recorded reset: three extra blocks per
+            # corruption cycle, the round-41 shape again). The marker suppresses at any offset
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state43c")
+            self.write([self.user("go")])
+            with open(self.tr, "rb") as f:
+                first = f.read()
+            self.write([self.user("second")], "a")
+            with open(self.tr, "rb") as f:
+                both = f.read()
+            kinds = [self.r38_ev(sdir, bad)[0]]  # block 1, a boundary at the end of both records
+            with open(self.tr, "wb") as f:
+                f.write(first)  # truncate to the first record: a reset scan, block 2, the reset recorded
+            kinds.append(self.r38_ev(sdir, bad)[0])
+            with open(self.key(sdir=sdir), "w") as f:
+                f.write("{not json")  # the state fault hides the recorded reset
+            kinds.append(self.r38_ev(sdir, bad)[0])  # the repair saves the marker, boundary NON-trivial
+            extra = {}
+            off, _tl, _pd, ok = load_state(sdir, self.tr, extra)
+            self.assertTrue(ok)
+            self.assertGreater(off, 0)  # the repair boundary sits on truncated old content
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
+            with open(self.tr, "wb") as f:
+                f.write(both)  # restore the OLD suffix past the held boundary: NOT a new turn
+            for _ in range(4):
+                kinds.append(self.r38_ev(sdir, bad)[0])
+            self.assertEqual(kinds, ["block", "block", "open", "cap", "cap", "cap", "cap"])
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
+
+        def test_r43_absent_state_clean_explicit_true_persists_unknown(self):
+            # a round-42 finding: a CLEAN explicit-true Stop that discovered an
+            # absent state computed the unknown history but persisted nothing (the readable branch needed
+            # had_state or an unreadable state, the other branch a readable counter), so the deletion was
+            # forgotten by the next Stop and a host that omits the field restarted the count on restored
+            # old content. The discovery is now saved on both transcript branches, right at that Stop
+            bad = "[2026-09-23T20:00Z] still wrong"
+            for i, readable in enumerate((True, False)):
+                sdir = os.path.join(self.tmp, f"state43d{i}")
+                self.write([self.user("go")])
+                with open(self.tr, "rb") as f:
+                    record = f.read()
+                kinds = [self.r38_ev(sdir, bad)[0]]  # block 1
+                with open(self.tr, "wb") as f:
+                    f.write(b"")  # truncate: block 2, the reset recorded
+                kinds.append(self.r38_ev(sdir, bad)[0])
+                self.assertEqual(kinds, ["block", "block"], readable)
+                os.remove(self.key(sdir=sdir))  # external deletion between Stops
+                if not readable:
+                    os.remove(self.tr)  # the unreadable-transcript branch
+                payload = {"transcript_path": self.tr, "stop_hook_active": True,
+                           "last_assistant_message": "Done."}
+                self.assertIsNone(evaluate(payload, self.now, self.start, sdir))  # a CLEAN explicit true
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], readable)
+                # the marker is stored right after the clean explicit-true Stop, on either branch
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]),
+                                 (BLOCK_CAP, False, True), readable)
+                with open(self.tr, "wb") as f:
+                    f.write(record)  # restore the OLD record: never a new turn while the marker stands
+                self.assertEqual(self.r38_ev(sdir, bad)[0], "cap", readable)
+
+        def test_r43_save_state_short_write_fails_and_keeps_the_state(self):
+            # a round-42 finding (pre-existing): save_state ignored the os.write return value,
+            # so a SHORT write renamed a truncated JSON prefix into place: the next load was unavailable
+            # and neither the cleared state nor the previous stored flag survived, against the clear-
+            # durability disclosure. The write now loops until every byte is written, zero progress is a
+            # failure, and any failure BEFORE the atomic rename, the commit point, keeps the previous
+            # state file untouched and returns False
+            sdir = os.path.join(self.tmp, "state43e")
+            self.write([self.user("go")])
+            self.assertTrue(save_state(sdir, self.tr, 0, None, [], 2, reset=True))
+            with open(self.key(sdir=sdir), "rb") as f:
+                before = f.read()
+            real, calls = os.write, []
+
+            def partial(fd, data):  # writes half, then refuses progress
+                calls.append(1)
+                half = bytes(data)[:len(bytes(data)) // 2]
+                return real(fd, half) if len(calls) == 1 else 0
+
+            def zero(fd, data):  # no progress at all
+                calls.append(1)
+                return 0
+
+            def partial_then_error(fd, data):  # writes half, then fails
+                calls.append(1)
+                if len(calls) == 1:
+                    return real(fd, bytes(data)[:len(bytes(data)) // 2])
+                raise OSError(5, "Input/output error")
+
+            for wrapper in (partial, zero, partial_then_error):
+                calls.clear()
+                os.write = wrapper
+                try:
+                    r = save_state(sdir, self.tr, 0, None, [], 0, reset=False, unknown=False)
+                finally:
+                    os.write = real
+                self.assertFalse(r, wrapper.__name__)  # a short write is never reported as persistence
+                with open(self.key(sdir=sdir), "rb") as f:
+                    self.assertEqual(f.read(), before, wrapper.__name__)  # the previous state untouched
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], wrapper.__name__)
+                self.assertEqual((extra["blocks"], extra["reset"]), (2, True), wrapper.__name__)
+                sub = os.path.dirname(self.key(sdir=sdir))
+                left = [n for n in os.listdir(sub) if n.endswith(".tmp")]
+                self.assertEqual(left, [], wrapper.__name__)  # cleaned up here; cleanup itself is best
+                # effort, see test_r43_save_state_failed_unlink_is_best_effort_cleanup
+
+            def dribble(fd, data):  # the loop finishes a write the kernel splits into single bytes
+                return real(fd, bytes(data)[:1])
+            os.write = dribble
+            try:
+                r = save_state(sdir, self.tr, 7, "a" * 64, [], 1, reset=False, unknown=True)
+            finally:
+                os.write = real
+            self.assertTrue(r)  # every byte was written, one at a time
+            extra = {}
+            self.assertEqual(load_state(sdir, self.tr, extra), (7, "a" * 64, [], True))
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, True))
+
+        def test_r43_explicit_false_unreadable_state_keeps_the_boundary(self):
+            # a round-42 finding: an explicit-false Stop whose state read failed loaded
+            # 0, None and [], and the round-42 new_turn save wrote THAT over the stored boundary and
+            # pending list, so the next Stop re-scanned from 0 and re-blocked on an already-reported old
+            # message. The Stop now re-reads the state under the lock: a boundary that reads back is kept
+            # (no spurious block), and a state still unreadable at the re-read is cleared to boundary 0,
+            # whose ONE-time recheck is the disclosed residual. Round 43: the preserved
+            # pending list is seeded NON-empty (a block whose last_assistant_message is not yet in the
+            # transcript), asserted to survive the re-read, and consumed at its late arrival, so a mutant
+            # that keeps the boundary but drops the pending list fails here
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, transient in enumerate((True, False)):
+                sdir = os.path.join(self.tmp, f"state43f{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block")  # block 1, a boundary past 0
+                extra = {}
+                off0, tl0, pend0, ok0 = load_state(sdir, self.tr, extra)
+                self.assertTrue(ok0, transient)
+                self.assertGreater(off0, 0, transient)
+                self.assertEqual(pend0, [_sha(missing)], transient)  # a NON-empty pending list at stake
+                self.write([self.asst("Done.")], "a")  # the corrected final message
+                with open(self.tr, "rb") as f:
+                    content = f.read()
+                os.remove(self.tr)  # the transcript is unreadable for the explicit-false Stop
+                fails = []
+                real_tm = turn_messages
+
+                def unavailable_load(*a, **k):
+                    fails.append(1)
+                    return 0, None, [], False  # UNAVAILABLE, as for an unreadable file
+
+                def recovering_tm(*a, **k):  # the transient fault clears before the save-time re-read
+                    globals()["load_state"] = real_load
+                    return real_tm(*a, **k)
+                clean = {"transcript_path": self.tr, "stop_hook_active": False,
+                         "last_assistant_message": "Done."}
+                globals()["load_state"] = unavailable_load
+                if transient:
+                    globals()["turn_messages"] = recovering_tm
+                try:
+                    r = evaluate(dict(clean), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                    globals()["turn_messages"] = real_tm
+                self.assertIsNone(r, transient)
+                self.assertTrue(fails, transient)  # the state load was attempted and actually failed
+                extra = {}
+                off, tl, pend, ok = load_state(sdir, self.tr, extra)
+                self.assertTrue(ok, transient)
+                self.assertEqual(extra["blocks"], 0, transient)  # the explicit false reset the count
+                if transient:  # ...and the re-read kept the stored boundary AND pending list
+                    self.assertEqual((off, tl, pend), (off0, tl0, pend0))
+                else:  # both reads failed: the disclosed reset to 0 clears the pending list too
+                    self.assertEqual((off, tl, pend), (0, None, []))
+                with open(self.tr, "wb") as f:
+                    f.write(content)  # the transcript recovers
+                if transient:
+                    self.write([self.asst(missing)], "a")  # the reported message ARRIVES late
+                    self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass")  # consumed, never re-blocked
+                    extra = {}
+                    _o, _t, pend, ok = load_state(sdir, self.tr, extra)
+                    self.assertTrue(ok)
+                    self.assertEqual(pend, [])  # the late arrival consumed the pending hash
+                else:
+                    self.assertEqual(self.r38_ev(sdir, "Done.")[0], "block")  # the ONE-time recheck
+                    extra = {}
+                    self.assertTrue(load_state(sdir, self.tr, extra)[3])
+                    self.assertEqual(extra["blocks"], 1)
+                    self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass")  # bounded: the boundary moved
+
+        def test_r43_save_reread_carries_each_flag_on_its_own(self):
+            # a round-42 finding: the save-time re-read carries rs = new_reset or the stored flag
+            # and un = new_unknown or the stored marker, defence in depth under the advisory lock; no
+            # vector discriminated either carry on its own (each alone failed no test). Between this
+            # Stop's load and its save another writer records the flag: the re-read must carry it, for
+            # each flag on its own
+            real_tm = turn_messages
+            for field in ("reset", "unknown"):
+                sdir = os.path.join(self.tmp, f"state43g{field}")
+                self.write([self.block_entry(), self.asst("Done.")])  # no user message: not a new turn
+                self.seed(1, sdir=sdir)
+
+                def writer(*a, **k):  # between the load and the save, another writer records the flag
+                    self.assertTrue(save_state(sdir, self.tr, 0, None, [], 1, **{field: True}))
+                    return real_tm(*a, **k)
+                globals()["turn_messages"] = writer
+                try:
+                    kind, _ = self.r38_ev(sdir, "Done.")
+                finally:
+                    globals()["turn_messages"] = real_tm
+                self.assertEqual(kind, "pass", field)
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], field)
+                self.assertTrue(extra[field], field)  # the re-read carried the concurrent record
+
+        def test_r43_explicit_false_staged_restore_restarts_per_record(self):
+            # a round-42 finding: the once-per-explicit-false wording was wrong. An explicit
+            # false that read a TRUNCATED transcript clears the recorded reset (the field is the
+            # platform's own new-turn statement), so a STAGED restore of the old content afterwards
+            # restarts the count once PER restored old user record, each restart recorded normally and
+            # bounded at the cap; the corrected docstring discloses exactly that
+            bad = "[2026-09-23T20:00Z] still wrong"
+            sdir = os.path.join(self.tmp, "state43h")
+            self.write([self.user("go")])
+            with open(self.tr, "rb") as f:
+                first = f.read()
+            self.write([self.user("second")], "a")
+            with open(self.tr, "rb") as f:
+                both = f.read()
+            self.assertEqual(self.r38_ev(sdir, bad)[0], "block")  # block 1
+            with open(self.tr, "wb") as f:
+                f.write(b"")  # truncate: the reset is recorded on the next Stop
+            self.assertEqual(self.r38_ev(sdir, bad)[0], "block")  # block 2
+            clean = {"transcript_path": self.tr, "stop_hook_active": False,
+                     "last_assistant_message": "Done."}
+            self.assertIsNone(evaluate(dict(clean), self.now, self.start, sdir))  # clears, count 0
+            for data in (first, both):  # each restored OLD user record restarts the count once
+                with open(self.tr, "wb") as f:
+                    f.write(data)
+                self.assertEqual(self.r38_ev(sdir, bad)[0], "block")
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3])
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
+
+        def test_r43_unreadable_state_clean_stop_persists_unknown(self):
+            # a round-43 finding: a CLEAN Stop whose STATE read failed, with the transcript
+            # unreadable and the field omitted (or explicitly true), satisfied neither predicate of the
+            # unreadable-transcript save (blocks None, cap None, no absent state), so the one Stop that
+            # observed the fault persisted nothing: the next genuine user turn read a clear history and
+            # restarted the count, against the disclosed one-fault capped-allow residual. Unreadable-
+            # state discovery (reset_unknown) now joins both predicates: the marker and the capped
+            # counter are stored right at the faulting Stop, and the re-read under the lock keeps the
+            # recoverable boundary and the pending list, seeded NON-empty here (a review
+            # finding) so a conditional mutant that keeps the boundary but drops the pending list on
+            # the legs that are not a new turn goes red on both field variants
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True})):
+                sdir = os.path.join(self.tmp, f"state43i{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                # block 1 reports a message NOT yet in the transcript: a boundary past 0 AND a
+                # non-empty pending list are both at stake
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)
+                off0, tl0, pend0, ok0 = load_state(sdir, self.tr, {})
+                self.assertTrue(ok0, i)
+                self.assertGreater(off0, 0, i)
+                self.assertEqual(pend0, [_sha(missing)], i)  # the non-empty pending list at stake
+                with open(self.tr, "rb") as f:
+                    content = f.read()
+                os.remove(self.tr)  # the transcript is unreadable for the faulting Stop
+                fails = []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+                payload = {"transcript_path": self.tr, "last_assistant_message": "Done."}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                self.assertIsNone(r, i)  # the final message is clean: allowed
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                extra = {}
+                off, tl, pend, ok = load_state(sdir, self.tr, extra)
+                self.assertTrue(ok, i)  # the discovery was persisted right at the faulting Stop
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]),
+                                 (BLOCK_CAP, False, True), i)
+                self.assertEqual((off, tl, pend), (off0, tl0, pend0), i)  # the boundary stays recoverable
+                with open(self.tr, "wb") as f:
+                    f.write(content)  # the transcript recovers
+                # a genuinely NEW violating user turn, field absent: capped, never a restart
+                self.assertEqual(self.r38_ev(sdir, bad, append=[self.user("again"), self.asst(bad)])[0],
+                                 "cap", i)
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], i)
+                self.assertEqual((extra["blocks"], extra["unknown"]), (BLOCK_CAP, True), i)
+                payload = {"transcript_path": self.tr, "stop_hook_active": False,
+                           "last_assistant_message": bad}
+                self.assertTrue(evaluate(payload, self.now, self.start, sdir), i)  # the false releases
+                extra = {}
+                self.assertTrue(load_state(sdir, self.tr, extra)[3], i)
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False), i)
+
+        def test_r43_readable_transcript_state_fault_keeps_pending(self):
+            # the defect: a Stop whose STATE read failed but whose transcript was
+            # READABLE loaded an empty pending list, and both readable-branch saves wrote that over
+            # the stored one, so one transient fault erased the late-arrival exception and the
+            # already-reported message was re-reported (field omitted or explicitly true) or
+            # re-refused (explicit false) once at its late arrival. The readable branch now re-reads
+            # the state under the still-held lock and keeps the stored pending hashes that read
+            # back and that the transcript past the recovered boundary neither consumed nor
+            # invalidated (added by a later repair), under the MAX_PENDING eviction, for the field omitted,
+            # explicitly true and explicitly false alike; the boundary is EXACTLY the one the
+            # readable scan established, asserted with its tail hash (added by that repair)
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state43m{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)  # block 1, pending seeded
+                st0 = load_state(sdir, self.tr, {})
+                self.assertTrue(st0[3], i)
+                pend0 = st0[2]
+                self.assertEqual(pend0, [_sha(missing)], i)  # the non-empty pending list at stake
+                self.write([self.asst("Done.")], "a")  # the corrected final message: a CLEAN Stop
+                fails = []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+                payload = {"transcript_path": self.tr, "last_assistant_message": "Done."}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                self.assertIsNone(r, i)  # the final message is clean: allowed
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                extra = {}
+                off, tl, pend, ok = load_state(sdir, self.tr, extra)
+                self.assertTrue(ok, i)
+                self.assertEqual(pend, pend0, i)  # the stored pending list survives the fault
+                t = turn_messages(self.tr)
+                self.assertGreater(t["end"], st0[0], i)  # the scan moved past the stored boundary
+                # EXACTLY the readable scan complete-record offset and
+                # tail hash; off > 0 alone also held for a mutant that saved the OLD boundary that
+                # the re-read under the lock recovered
+                self.assertEqual((off, tl), (t["end"], t["tail"]), i)
+                self.write([self.asst(missing)], "a")  # the reported message ARRIVES late
+                self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass", i)  # consumed, never re-blocked
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # consumed exactly once
+
+        def test_r43_readable_violating_stop_state_fault_keeps_pending(self):
+            # the readable-branch recovery holds on the VIOLATING
+            # faulting Stop too, for the field omitted, explicitly true and explicitly false alike,
+            # and the saved boundary is EXACTLY the readable scan complete-record offset and tail
+            # hash: red when the recovery is restricted to non-violating Stops, and red when the
+            # save keeps the OLD boundary from the re-read. Only the explicit-false leg BLOCKS and
+            # so records its new late hash; the fail-open allows keep the stored entry and store
+            # none of their own (only an actual block owes a late arrival)
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            late2 = "[2026-09-23T22:00Z] also wrong and also not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state43p{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)  # block 1, pending seeded
+                st0 = load_state(sdir, self.tr, {})
+                self.assertTrue(st0[3], i)
+                self.assertEqual(st0[2], [_sha(missing)], i)
+                self.write([self.asst("working")], "a")  # the readable scan moves past the stored boundary
+                fails = []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+                payload = {"transcript_path": self.tr, "last_assistant_message": late2}
+                payload.update(field)
+                notes = []
+                globals()["load_state"] = transient_load
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir, notes)
+                finally:
+                    globals()["load_state"] = real_load
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                extra = {}
+                off, tl, pend, ok = load_state(sdir, self.tr, extra)
+                self.assertTrue(ok, i)
+                t = turn_messages(self.tr)
+                self.assertGreater(t["end"], st0[0], i)  # the boundaries differ, so EXACT discriminates
+                self.assertEqual((off, tl), (t["end"], t["tail"]), i)  # the readable scan boundary
+                if field.get("stop_hook_active") is False:
+                    self.assertTrue(r, i)  # the explicit false restarts the count: refused
+                    self.assertEqual((extra["blocks"], extra["unknown"]), (1, False), i)
+                    self.assertEqual(pend, [_sha(missing), _sha(late2)], i)  # kept, plus the refusal's
+                    # own new late hash
+                else:
+                    self.assertIsNone(r, i)  # the unknown count fails open, loudly
+                    self.assertTrue(notes and "block count unknown" in notes[0], i)
+                    self.assertEqual((extra["blocks"], extra["unknown"]), (BLOCK_CAP, True), i)
+                    self.assertEqual(pend, [_sha(missing)], i)  # kept; the fail-open ALLOW stores no
+                    # new late hash, so no entry ever outnumbers the refusals made
+
+        def test_r43_recovered_pending_hash_of_arrived_message_is_consumed(self):
+            # the defect: the first merge of the recovered pending
+            # hashes ran AFTER the consumption scan, on the readable-branch saves, so a hash whose
+            # message had already arrived was saved back, and the same violating message, repeated
+            # verbatim on the next Stop, passed with nothing reported (the parent and the no-fault
+            # path both refuse it). A recovered hash whose message is already present in the
+            # readable transcript past the recovered boundary is consumed before the save, for the
+            # field omitted, explicitly true and explicitly false alike
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state43q{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)  # block 1, pending seeded
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)], i)
+                self.write([self.asst(missing), self.asst("Done.")], "a")  # it ARRIVES before the fault
+                fails = []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+                payload = {"transcript_path": self.tr, "last_assistant_message": "Done."}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                self.assertIsNone(r, i)  # the final message is clean; the arrival was already excused
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # consumed, never saved back
+                # the same violating message again, verbatim: the exception is spent, so it is refused
+                # (the explicit false restarted the count) or capped with the violation reported (the
+                # fault left the counter at the cap), never passed in silence
+                kind, _ = self.r38_ev(sdir, "Done 2.", append=[self.asst(missing), self.asst("Done 2.")])
+                self.assertEqual(kind, "block" if i == 2 else "cap", i)
+
+        def test_r43_recovered_pending_dropped_at_new_user_turn(self):
+            # the defect: a reset transcript or a new genuine user
+            # message invalidates the late-arrival exception, but the first merge ran after that
+            # invalidation and resurrected the recovered hashes, so a message refused in an earlier
+            # turn, repeated verbatim after the fault, passed with nothing reported. Recovered
+            # hashes are dropped when the readable transcript past the recovered boundary shows a
+            # genuine user message, for the field omitted, explicitly true and explicitly false alike
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state43r{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)  # block 1, pending seeded
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)], i)
+                self.write([self.user("next task"), self.asst("Done.")], "a")  # a NEW genuine user turn
+                fails = []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+                payload = {"transcript_path": self.tr, "last_assistant_message": "Done."}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                self.assertIsNone(r, i)  # the final message is clean
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # invalidated, never saved back
+                kind, _ = self.r38_ev(sdir, "Done 2.", append=[self.asst(missing), self.asst("Done 2.")])
+                self.assertEqual(kind, "block" if i == 2 else "cap", i)  # refused or capped, reported
+
+        def test_r43_pending_capacity_evicts_oldest_at_max_pending(self):
+            # "keeps every stored pending hash" was always bounded by
+            # the MAX_PENDING (8) eviction that every save applies; the docstring now states it. A
+            # CONTRACT test at the capacity boundary: the eighth stored hash still fits (just
+            # inside), and a ninth, recorded by a state-faulting Stop whose recovery read all eight
+            # back, evicts exactly the oldest (just past the limit). Every seeding Stop carries the
+            # explicit false, so each one BLOCKS and stores its hash (only an actual refusal stores
+            # one; a stop allowed at the cap stores none, so a capped run could not seed this). At the
+            # full list, a fail-open allow and then a capped allow, each supplying a lagging text of
+            # its own, store no hash and so evict none: red when the gate that keeps an allow from
+            # storing an entry is reverted, for either allow (the stored ninth would evict the oldest)
+            self.assertEqual(MAX_PENDING, 8)
+            lates = [f"[2026-09-23T21:0{k}Z] not yet in the transcript, number {k}" for k in range(9)]
+            spares = [f"[2026-09-23T22:0{k}Z] allowed and not yet in the transcript, number {k}"
+                      for k in range(2)]
+            real_load = load_state
+            sdir = os.path.join(self.tmp, "state43s")
+            self.write([self.user("go")])
+            for k in range(8):  # eight refusals whose final messages never reach the transcript
+                r = evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                              "last_assistant_message": lates[k]}, self.now, self.start, sdir)
+                self.assertTrue(r, k)
+            st = load_state(sdir, self.tr, {})
+            self.assertTrue(st[3])
+            self.assertEqual(st[2], [_sha(x) for x in lates[:8]])  # exactly at the limit: all kept
+            fails = []
+
+            def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                fails.append(1)
+                globals()["load_state"] = real_load
+                return 0, None, [], False
+            globals()["load_state"] = transient_load
+            try:  # a fail-open allow at the full list: the unknown count fails open, loudly
+                kind, _ = self.r38_ev(sdir, spares[0])
+            finally:
+                globals()["load_state"] = real_load
+            self.assertEqual(kind, "open")
+            self.assertEqual(len(fails), 1)  # the state load was attempted and actually failed
+            st = load_state(sdir, self.tr, {})
+            self.assertTrue(st[3])
+            self.assertEqual(st[2], [_sha(x) for x in lates[:8]])  # no hash stored, none evicted
+            # the fail-open allow recorded the cap, so the next Stop without the field is a capped allow
+            kind, _ = self.r38_ev(sdir, spares[1])
+            self.assertEqual(kind, "cap")
+            st = load_state(sdir, self.tr, {})
+            self.assertTrue(st[3])
+            self.assertEqual(st[2], [_sha(x) for x in lates[:8]])  # no hash stored, none evicted
+            globals()["load_state"] = transient_load
+            try:  # the ninth hash, recorded by a refusal through the recovery read under the lock
+                r = evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                              "last_assistant_message": lates[8]}, self.now, self.start, sdir)
+            finally:
+                globals()["load_state"] = real_load
+            self.assertTrue(r)  # the explicit false restarts the count: the ninth is refused too
+            self.assertEqual(len(fails), 2)  # this second state load was attempted and actually failed
+            st = load_state(sdir, self.tr, {})
+            self.assertTrue(st[3])
+            self.assertEqual(st[2], [_sha(x) for x in lates[1:]])  # just past the limit: the oldest
+            # hash is evicted, so that message, were it still to arrive, would be refused once more
+
+        def test_r44_supplied_final_matching_arrived_pending_consumed_once(self):
+            # the defect: a supplied last_assistant_message matching the arrived pending
+            # record was exempted as that record's late arrival, so re-submitting the refused message
+            # word for word ended the corrective loop with nothing reported and nothing noted, where
+            # the pre-recovery code refused it. The pending entry excuses one TRANSCRIPT record, never
+            # the current final: the verbatim re-submission is re-checked, and the entry is spent (the
+            # arrival IS the checked final here), never saved back for a later repeat, for the field
+            # omitted, explicitly true and explicitly false alike, with and without a transient
+            # state-read fault
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                for transient in (False, True):
+                    sdir = os.path.join(self.tmp, f"state44a{i}{int(transient)}")
+                    self.write([self.user("go"), self.asst(bad)])
+                    self.assertEqual(self.r38_ev(sdir, missing)[0], "block", (i, transient))
+                    self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)], (i, transient))
+                    self.write([self.asst(missing)], "a")  # the reported message ARRIVES as the last record
+                    fails = []
+
+                    def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                        fails.append(1)
+                        globals()["load_state"] = real_load
+                        return 0, None, [], False
+                    payload = {"transcript_path": self.tr, "last_assistant_message": missing}
+                    payload.update(field)
+                    if transient:
+                        globals()["load_state"] = transient_load
+                    notes, report = [], []
+                    try:
+                        r = evaluate(dict(payload), self.now, self.start, sdir, notes, report)
+                    finally:
+                        globals()["load_state"] = real_load
+                    if transient:
+                        self.assertTrue(fails, (i, transient))  # the state load actually failed
+                    if transient and i < 2:
+                        # the fault left the counter unknown: the refusal fails open, loudly, with the
+                        # violation reported, never passed in silence
+                        self.assertIsNone(r, (i, transient))
+                        self.assertTrue(notes and "block count unknown" in notes[0], (i, transient))
+                    else:
+                        self.assertIsNotNone(r, (i, transient))  # re-checked and refused
+                    self.assertTrue(any("your final message" in v for v in report), (i, transient))
+                    st = load_state(sdir, self.tr, {})
+                    self.assertTrue(st[3], (i, transient))
+                    self.assertEqual(st[2], [], (i, transient))  # spent, never saved back
+                    # the same message once more, verbatim, behind a clean final on a new turn: the
+                    # spent entry never excuses it, so the earlier repeat is reported
+                    notes2, report2 = [], []
+                    self.write([self.asst(missing), self.asst("Done.")], "a")
+                    r2 = evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                                   "last_assistant_message": "Done."}, self.now, self.start, sdir,
+                                  notes2, report2)
+                    self.assertIsNotNone(r2, (i, transient))
+                    self.assertTrue(any("earlier message" in v for v in report2), (i, transient))
+
+        def test_r44_same_scan_arrival_and_repeat_leave_the_final_checked(self):
+            # the defect: with the late arrival AND its verbatim repeat in one scan, the
+            # repeat supplied as the current final was exempted by the pending entry while the arrival,
+            # re-reported in its place, was discarded by the clean-final corrective-loop rule under an
+            # explicit stop_hook_active true, so the pair passed with nothing reported, where the
+            # pre-recovery code refused it. The entry is spent at the FIRST matching record in
+            # transcript order (the arrival, excused once, never re-reported) and the identical current
+            # final stays checked, for the field omitted, explicitly true and explicitly false alike,
+            # with and without a transient state-read fault
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                for transient in (False, True):
+                    sdir = os.path.join(self.tmp, f"state44d{i}{int(transient)}")
+                    self.write([self.user("go")])
+                    self.assertEqual(self.r38_ev(sdir, missing)[0], "block", (i, transient))
+                    self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)], (i, transient))
+                    # the late arrival and its verbatim repeat land in the SAME scan
+                    self.write([self.asst(missing), self.asst(missing)], "a")
+                    fails = []
+
+                    def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                        fails.append(1)
+                        globals()["load_state"] = real_load
+                        return 0, None, [], False
+                    payload = {"transcript_path": self.tr, "last_assistant_message": missing}
+                    payload.update(field)
+                    if transient:
+                        globals()["load_state"] = transient_load
+                    notes, report = [], []
+                    try:
+                        r = evaluate(dict(payload), self.now, self.start, sdir, notes, report)
+                    finally:
+                        globals()["load_state"] = real_load
+                    if transient:
+                        self.assertTrue(fails, (i, transient))  # the state load actually failed
+                    if transient and i < 2:
+                        self.assertIsNone(r, (i, transient))  # the counter is unknown: fail open, loudly
+                        self.assertTrue(notes and "block count unknown" in notes[0], (i, transient))
+                    else:
+                        self.assertIsNotNone(r, (i, transient))  # the current final is refused
+                    # the violation named is the final's; the arrival earlier in the scan is excused,
+                    # not re-reported
+                    self.assertTrue(any("your final message" in v for v in report), (i, transient))
+                    if not transient:
+                        # discriminating only on the no-fault legs: after a state-read fault older
+                        # messages are never re-checked, so no "earlier message" line could appear
+                        # whether or not the arrival was consumed (there, the empty saved pending
+                        # list below carries the consumption check)
+                        self.assertFalse(any("earlier message" in v for v in report), (i, transient))
+                    st = load_state(sdir, self.tr, {})
+                    self.assertTrue(st[3], (i, transient))
+                    self.assertEqual(st[2], [], (i, transient))  # spent at the arrival, never saved back
+
+        def test_r44_transcript_final_repeat_stays_checked_without_supplied_final(self):
+            # the defect: with no last_assistant_message, the pending entry was spent on the
+            # LAST transcript record before earlier records were scanned, so with the late arrival and
+            # its verbatim repeat in one scan the repeat, read from the transcript as the final, was
+            # exempted while the arrival, re-reported in its place, was discarded by the clean-final
+            # corrective-loop rule under an explicit stop_hook_active true, and after a transient
+            # state-read fault (older messages are never re-checked) the pair passed silently under
+            # every field setting. The entry is spent at the FIRST matching record in transcript order
+            # here too: the arrival is excused once and the identical final transcript record stays
+            # checked, for the field omitted, explicitly true and explicitly false alike, with and
+            # without a transient state-read fault
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                for transient in (False, True):
+                    sdir = os.path.join(self.tmp, f"state44e{i}{int(transient)}")
+                    self.write([self.user("go")])
+                    self.assertEqual(self.r38_ev(sdir, missing)[0], "block", (i, transient))
+                    self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)], (i, transient))
+                    # the late arrival and its verbatim repeat land in the SAME scan; no supplied
+                    # final, so the repeat is read from the transcript as the final message
+                    self.write([self.asst(missing), self.asst(missing)], "a")
+                    fails = []
+
+                    def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                        fails.append(1)
+                        globals()["load_state"] = real_load
+                        return 0, None, [], False
+                    payload = {"transcript_path": self.tr}
+                    payload.update(field)
+                    if transient:
+                        globals()["load_state"] = transient_load
+                    notes, report = [], []
+                    try:
+                        r = evaluate(dict(payload), self.now, self.start, sdir, notes, report)
+                    finally:
+                        globals()["load_state"] = real_load
+                    if transient:
+                        self.assertTrue(fails, (i, transient))  # the state load actually failed
+                    if transient and i < 2:
+                        self.assertIsNone(r, (i, transient))  # the counter is unknown: fail open, loudly
+                        self.assertTrue(notes and "block count unknown" in notes[0], (i, transient))
+                    else:
+                        self.assertIsNotNone(r, (i, transient))  # the final transcript record is refused
+                    # the violation named is the final's; the arrival earlier in the scan is excused,
+                    # not re-reported
+                    self.assertTrue(any("your final message" in v for v in report), (i, transient))
+                    if not transient:
+                        # discriminating only on the no-fault legs: after a state-read fault older
+                        # messages are never re-checked, so no "earlier message" line could appear
+                        # whether or not the arrival was consumed (there, the empty saved pending
+                        # list below carries the consumption check)
+                        self.assertFalse(any("earlier message" in v for v in report), (i, transient))
+                    st = load_state(sdir, self.tr, {})
+                    self.assertTrue(st[3], (i, transient))
+                    self.assertEqual(st[2], [], (i, transient))  # spent at the arrival, never saved back
+
+        def test_r44_transcript_final_single_arrival_excused_once(self):
+            # the control for the repeat test above: with no supplied final and the ONE late arrival
+            # as the last transcript record, that arrival is itself the earliest matching record of the
+            # scan, so the pending entry still excuses it exactly once, for the field omitted,
+            # explicitly true and explicitly false alike, with and without a transient state-read
+            # fault; the spent entry never excuses a later verbatim repeat
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                for transient in (False, True):
+                    sdir = os.path.join(self.tmp, f"state44f{i}{int(transient)}")
+                    self.write([self.user("go")])
+                    self.assertEqual(self.r38_ev(sdir, missing)[0], "block", (i, transient))
+                    self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)], (i, transient))
+                    self.write([self.asst(missing)], "a")  # the reported message ARRIVES as the last record
+                    fails = []
+
+                    def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                        fails.append(1)
+                        globals()["load_state"] = real_load
+                        return 0, None, [], False
+                    payload = {"transcript_path": self.tr}
+                    payload.update(field)
+                    if transient:
+                        globals()["load_state"] = transient_load
+                    notes, report = [], []
+                    try:
+                        r = evaluate(dict(payload), self.now, self.start, sdir, notes, report)
+                    finally:
+                        globals()["load_state"] = real_load
+                    if transient:
+                        self.assertTrue(fails, (i, transient))  # the state load actually failed
+                    self.assertIsNone(r, (i, transient))  # excused once: the arrival IS the final here
+                    self.assertEqual(report, [], (i, transient))
+                    self.assertEqual(notes, [], (i, transient))
+                    st = load_state(sdir, self.tr, {})
+                    self.assertTrue(st[3], (i, transient))
+                    self.assertEqual(st[2], [], (i, transient))  # consumed exactly once
+                    # the same text once more as the final transcript record on a new turn: the spent
+                    # entry never excuses it
+                    notes2, report2 = [], []
+                    self.write([self.asst(missing)], "a")
+                    r2 = evaluate({"transcript_path": self.tr, "stop_hook_active": False},
+                                  self.now, self.start, sdir, notes2, report2)
+                    self.assertIsNotNone(r2, (i, transient))
+                    self.assertTrue(any("your final message" in v for v in report2), (i, transient))
+
+        def test_r44_pre_boundary_record_never_consumes_pending(self):
+            # the defect: the earlier recovery reconciled against a SECOND scan from the
+            # recovered boundary while the final-message machinery still read the from-0 scan, so an
+            # identical historical record BEFORE the recovered boundary consumed the pending hash and
+            # the saved list went empty; the eventual actual arrival was then reported again. A hash is
+            # consumed only by a record past the stored boundary within the one adopted snapshot, for
+            # the field omitted, explicitly true and explicitly false alike
+            bad = "[2026-09-23T20:00Z] still wrong"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state44b{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, bad)[0], "block", i)  # reported; boundary advances
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # in the transcript: no pending
+                # the same text again as the supplied final, NOT appended: seeds its pending hash
+                self.assertEqual(self.r38_ev(sdir, bad)[0], "block", i)
+                st1 = load_state(sdir, self.tr, {})
+                self.assertTrue(st1[3], i)
+                self.assertEqual(st1[2], [_sha(bad)], i)  # the pending hash at stake
+                fails = []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+                payload = {"transcript_path": self.tr}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                self.assertIsNone(r, i)  # no record past the boundary: nothing to check
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                off, tl, pend, ok = load_state(sdir, self.tr, {})
+                self.assertTrue(ok, i)
+                # the identical record BEFORE the recovered boundary consumed nothing: the pair survives
+                self.assertEqual((off, tl, pend), (st1[0], st1[1], [_sha(bad)]), i)
+                # the actual late arrival is excused exactly once, like the no-fault path
+                kind, _ = self.r38_ev(sdir, "Done.", append=[self.asst(bad), self.asst("Done.")])
+                self.assertEqual(kind, "pass", i)
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # consumed exactly once
+
+        def test_r44_arrival_between_scans_consumed_and_covered_together(self):
+            # the defect: the earlier recovery consumed hashes against its OWN second scan
+            # while the first scan boundary was saved, so an arrival appended between the two scans was
+            # consumed yet left PAST the saved boundary and re-reported at the next Stop. The pair now
+            # comes from ONE snapshot: an arrival is either consumed AND covered by the saved boundary,
+            # or neither, for the field omitted, explicitly true and explicitly false alike
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load, real_tm = load_state, turn_messages
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state44c{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)  # block 1, pending seeded
+                self.write([self.asst("Done.")], "a")  # a clean final past the stored boundary
+                fails, scans = [], []
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+
+                def appending_tm(*a, **k):  # the pending message lands between the scans
+                    scans.append(1)
+                    out = real_tm(*a, **k)
+                    if len(scans) == 1:
+                        self.write([self.asst(missing)], "a")
+                    return out
+                payload = {"transcript_path": self.tr, "last_assistant_message": "Done."}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                globals()["turn_messages"] = appending_tm
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                    globals()["turn_messages"] = real_tm
+                self.assertIsNone(r, i)  # the final message is clean
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                self.assertGreaterEqual(len(scans), 2, i)  # the append really sat between the scans
+                off, tl, pend, ok = load_state(sdir, self.tr, {})
+                self.assertTrue(ok, i)
+                t = turn_messages(self.tr)
+                # consumed AND covered together: the saved boundary includes the arrival whose hash the
+                # reconciliation consumed
+                self.assertEqual((off, tl, pend), (t["end"], t["tail"], []), i)
+                kind, _ = self.r38_ev(sdir, "Done 2.", append=[self.asst("Done 2.")])
+                self.assertEqual(kind, "pass", i)  # never reported again
+
+        def test_r44_unreadable_rescan_keeps_the_stored_pair(self):
+            # the defect: a recovery rescan that is UNREADABLE (the transcript vanished
+            # between the two reads) contributed nothing, and the readable first scan still saved the
+            # empty loaded list with its own boundary, silently destroying a recoverable pair. A
+            # reconciliation that cannot be performed now keeps the stored (boundary, pending) pair
+            # exactly as it was, never an empty list, for the field omitted, explicitly true and
+            # explicitly false alike
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load, real_tm = load_state, turn_messages
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                sdir = os.path.join(self.tmp, f"state44d{i}")
+                self.write([self.user("go"), self.asst(bad)])
+                self.assertEqual(self.r38_ev(sdir, missing)[0], "block", i)  # block 1, pending seeded
+                st0 = load_state(sdir, self.tr, {})
+                self.assertTrue(st0[3], i)
+                self.assertEqual(st0[2], [_sha(missing)], i)
+                self.write([self.asst("Done.")], "a")
+                fails, scans, hidden = [], [], self.tr + ".hidden"
+
+                def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                    fails.append(1)
+                    globals()["load_state"] = real_load
+                    return 0, None, [], False
+
+                def hiding_tm(*a, **k):  # the transcript is renamed around the SECOND read only
+                    scans.append(1)
+                    if len(scans) != 2:
+                        return real_tm(*a, **k)
+                    os.rename(self.tr, hidden)
+                    try:
+                        return real_tm(*a, **k)
+                    finally:
+                        os.rename(hidden, self.tr)
+                payload = {"transcript_path": self.tr, "last_assistant_message": "Done."}
+                payload.update(field)
+                globals()["load_state"] = transient_load
+                globals()["turn_messages"] = hiding_tm
+                try:
+                    r = evaluate(dict(payload), self.now, self.start, sdir)
+                finally:
+                    globals()["load_state"] = real_load
+                    globals()["turn_messages"] = real_tm
+                self.assertIsNone(r, i)  # the final message is clean
+                self.assertTrue(fails, i)  # the state load was attempted and actually failed
+                self.assertGreaterEqual(len(scans), 2, i)  # the rescan ran, and ran unreadable
+                off, tl, pend, ok = load_state(sdir, self.tr, {})
+                self.assertTrue(ok, i)
+                self.assertEqual((off, tl, pend), (st0[0], st0[1], st0[2]), i)  # kept EXACTLY as stored
+                self.write([self.asst(missing)], "a")  # the reported message finally arrives
+                self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass", i)  # excused once, not refused
+                self.assertEqual(load_state(sdir, self.tr, {})[2], [], i)  # consumed exactly once
+
+        def test_r44_residual_reread_still_unreadable_loses_every_entry(self):
+            # the readable-branch residual is PLURAL: a state still
+            # unreadable at the re-read under the lock keeps the empty loaded list, so EVERY stored
+            # pending entry can be lost, and EACH late-arriving already-reported message those entries
+            # excused is reported once more; a RESIDUAL contract test (green at the pin by design, like
+            # the capacity test), pinning the disclosed loss at two entries, not the singular wording
+            miss1 = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            miss2 = "[2026-09-23T22:00Z] also reported and also not yet in the transcript"
+            real_load = load_state
+            sdir = os.path.join(self.tmp, "state44e")
+            self.write([self.user("go")])
+            self.assertEqual(self.r38_ev(sdir, miss1)[0], "block")  # block 1, first pending hash
+            self.assertEqual(self.r38_ev(sdir, miss2)[0], "block")  # block 2, second pending hash
+            self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(miss1), _sha(miss2)])
+            self.write([self.asst("Done.")], "a")
+            fails = []
+
+            def failing_load(*a, **k):  # EVERY state read of this Stop fails; restored only afterwards
+                fails.append(1)
+                return 0, None, [], False
+            globals()["load_state"] = failing_load
+            try:
+                r = evaluate({"transcript_path": self.tr, "last_assistant_message": "Done."},
+                             self.now, self.start, sdir)
+            finally:
+                globals()["load_state"] = real_load
+            self.assertIsNone(r)  # the final message is clean
+            self.assertGreaterEqual(len(fails), 2)  # the load AND the re-read under the lock failed
+            self.assertEqual(load_state(sdir, self.tr, {})[2], [])  # every stored entry is lost
+            # BOTH excused messages arrive late: each one is reported once more, the disclosed cost
+            self.write([self.asst(miss1), self.asst(miss2), self.asst("Done 2.")], "a")
+            notes, report = [], []
+            r = evaluate({"transcript_path": self.tr, "last_assistant_message": "Done 2."},
+                         self.now, self.start, sdir, notes, report=report)
+            self.assertIsNone(r)  # the faulting Stop left the counter capped: reported, allowed
+            self.assertTrue(notes and "block cap hit" in notes[0])
+            self.assertEqual(sum("2026-09-23T21:00Z" in v for v in report), 1)  # the first, once more
+            self.assertEqual(sum("2026-09-23T22:00Z" in v for v in report), 1)  # the second, once more
+
+        def test_r45_pending_counting_table(self):
+            # the defect: the final-message paths asked only whether ANY earlier record of the
+            # scan matched, not how many pending entries the text held, so with TWO entries of one text
+            # and both arrivals in one scan the checked final left a duplicate allowance behind, and
+            # that entry later excused a new verbatim repeat in silence. The rule is COUNTING, not
+            # position: each pending entry excuses exactly one matching record, the entries are
+            # consumed by the earliest matching records of the scan in order, every matching record
+            # beyond the count is checked, and no entry the scan consumed is saved back. Each row runs
+            # with the field omitted, explicitly true and explicitly false, with and without a
+            # transient state-read fault, the final read from the transcript. Expected per
+            # (k entries, m matching records): the final is excused exactly while k >= m (the entries
+            # outnumber the m - 1 earlier matches), k - m entries survive for arrivals still to come,
+            # earlier records beyond the count are reported on the readable-state legs, and a
+            # follow-up verbatim repeat on a new turn is excused only by a surviving entry
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            bad = "[2026-09-23T20:00Z] still wrong"
+            # (k, m, final excused, earlier records reported when readable, entries left)
+            table = [
+                (0, 1, False, 0, 0),  # nothing pending: the final is checked
+                (0, 2, False, 1, 0),  # nothing pending: the earlier record and the final are checked
+                (0, 3, False, 2, 0),  # nothing pending: both earlier records and the final are checked
+                (1, 1, True, 0, 0),   # the one arrival is the final: excused once, nothing left
+                (1, 2, False, 0, 0),  # arrival excused, the repeat final is checked, nothing left
+                (1, 3, False, 1, 0),  # arrival excused, the second repeat and the final are checked
+                (2, 1, True, 0, 1),   # first arrival excused; one entry survives for the second
+                (2, 2, True, 0, 0),   # BOTH arrivals excused, both entries spent, nothing saved back
+                (2, 3, False, 0, 0),  # both arrivals excused, the third record is a checked repeat
+            ]
+            real_load = load_state
+            for k, m, excused, earlier, left in table:
+                for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                    for transient in (False, True):
+                        tag = (k, m, i, transient)
+                        sdir = os.path.join(self.tmp, f"state45t{k}{m}{i}{int(transient)}")
+                        if k:
+                            self.write([self.user("go")])
+                        else:  # no pending entry: the state and boundary come from an in-transcript block
+                            self.write([self.user("go"), self.asst(bad)])
+                            self.assertEqual(self.r38_ev(sdir, bad)[0], "block", tag)
+                        for _ in range(k):  # each refusal of the lagging text stores one entry
+                            self.assertEqual(self.r38_ev(sdir, missing)[0], "block", tag)
+                        self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)] * k, tag)
+                        self.write([self.asst(missing)] * m, "a")  # m matching records in ONE scan
+                        fails = []
+
+                        def transient_load(*a, **kw):  # ONE unavailable read; the re-read recovers
+                            fails.append(1)
+                            globals()["load_state"] = real_load
+                            return 0, None, [], False
+                        payload = {"transcript_path": self.tr}
+                        payload.update(field)
+                        if transient:
+                            globals()["load_state"] = transient_load
+                        notes, report = [], []
+                        try:
+                            r = evaluate(dict(payload), self.now, self.start, sdir, notes, report)
+                        finally:
+                            globals()["load_state"] = real_load
+                        if transient:
+                            self.assertTrue(fails, tag)  # the state load actually failed
+                        if excused:
+                            self.assertIsNone(r, tag)  # within the count: the final is excused
+                            self.assertEqual(report, [], tag)
+                            self.assertEqual(notes, [], tag)
+                        elif transient and i < 2:
+                            self.assertIsNone(r, tag)  # the counter is unknown: fail open, loudly
+                            self.assertTrue(notes and "block count unknown" in notes[0], tag)
+                            self.assertTrue(any("your final message" in v for v in report), tag)
+                        else:
+                            self.assertIsNotNone(r, tag)  # beyond the count: the final is refused
+                            self.assertTrue(any("your final message" in v for v in report), tag)
+                        # after a state-read fault older messages are never re-checked (disclosed),
+                        # so the earlier-record report discriminates only on the readable-state legs
+                        self.assertEqual(sum("earlier message" in v for v in report),
+                                         0 if transient else earlier, tag)
+                        st = load_state(sdir, self.tr, {})
+                        self.assertTrue(st[3], tag)
+                        self.assertEqual(st[2], [_sha(missing)] * left, tag)  # consumed: never saved back
+                        # a follow-up verbatim repeat on a new turn is excused only by a surviving
+                        # entry (its own arrival, still owed), never by one the scan consumed
+                        self.write([self.asst(missing)], "a")
+                        notes2, report2 = [], []
+                        r2 = evaluate({"transcript_path": self.tr, "stop_hook_active": False},
+                                      self.now, self.start, sdir, notes2, report2)
+                        if left:
+                            self.assertIsNone(r2, tag)
+                            self.assertEqual(report2, [], tag)
+                        else:
+                            self.assertIsNotNone(r2, tag)
+                            self.assertTrue(any("your final message" in v for v in report2), tag)
+
+        def test_r45_supplied_final_duplicate_pending_spent_not_saved_back(self):
+            # the defect, on the supplied-final path: with TWO entries of one text, the
+            # arrived record and the re-submitted identical final in one scan spent only the arrival's
+            # entry (one earlier record matched, so the final consumed nothing), the duplicate was
+            # saved back, and it later excused a new verbatim repeat in silence. The re-submitted
+            # final stays refused and spends the second entry, unexcused: nothing is saved back, so
+            # the later repeat is reported, for the field omitted, explicitly true and explicitly
+            # false alike, with and without a transient state-read fault
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                for transient in (False, True):
+                    sdir = os.path.join(self.tmp, f"state45s{i}{int(transient)}")
+                    self.write([self.user("go")])
+                    self.assertEqual(self.r38_ev(sdir, missing)[0], "block", (i, transient))
+                    self.assertEqual(self.r38_ev(sdir, missing)[0], "block", (i, transient))
+                    self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)] * 2,
+                                     (i, transient))
+                    # BOTH arrivals land in one scan; the identical text returns as the final
+                    self.write([self.asst(missing), self.asst(missing)], "a")
+                    fails = []
+
+                    def transient_load(*a, **k):  # ONE unavailable read; the re-read recovers
+                        fails.append(1)
+                        globals()["load_state"] = real_load
+                        return 0, None, [], False
+                    payload = {"transcript_path": self.tr, "last_assistant_message": missing}
+                    payload.update(field)
+                    if transient:
+                        globals()["load_state"] = transient_load
+                    notes, report = [], []
+                    try:
+                        r = evaluate(dict(payload), self.now, self.start, sdir, notes, report)
+                    finally:
+                        globals()["load_state"] = real_load
+                    if transient:
+                        self.assertTrue(fails, (i, transient))  # the state load actually failed
+                    if transient and i < 2:
+                        self.assertIsNone(r, (i, transient))  # the counter is unknown: fail open
+                        self.assertTrue(notes and "block count unknown" in notes[0], (i, transient))
+                    else:
+                        self.assertIsNotNone(r, (i, transient))  # the re-submitted final is refused
+                    self.assertTrue(any("your final message" in v for v in report), (i, transient))
+                    st = load_state(sdir, self.tr, {})
+                    self.assertTrue(st[3], (i, transient))
+                    self.assertEqual(st[2], [], (i, transient))  # the duplicate is spent, never saved
+                    # the same text once more as the final transcript record on a new turn: no entry
+                    # is left to excuse it
+                    self.write([self.asst(missing)], "a")
+                    notes2, report2 = [], []
+                    r2 = evaluate({"transcript_path": self.tr, "stop_hook_active": False},
+                                  self.now, self.start, sdir, notes2, report2)
+                    self.assertIsNotNone(r2, (i, transient))
+                    self.assertTrue(any("your final message" in v for v in report2), (i, transient))
+
+        def test_r45_readable_reset_rescan_keeps_the_stored_pair(self):
+            # the recovery guard requires the rescan NOT to read as reset: a READABLE rescan
+            # whose stored boundary fails validation (the transcript now shorter than it, or the bytes
+            # before it changed) is a failed reconciliation too, and the stored (boundary, tail,
+            # pending) pair is kept exactly as stored, on a clean and on a violating Stop alike; only
+            # the unreadable half of the guard was exercised before, so dropping the reset half
+            # survived the suite (the adopted reset scan re-reads the old user message, drops the
+            # nonempty pending list, and saves the rewritten file's own boundary over the stored pair)
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            for i, field in enumerate(({}, {"stop_hook_active": True}, {"stop_hook_active": False})):
+                for violating in (False, True):
+                    sdir = os.path.join(self.tmp, f"state45r{i}{int(violating)}")
+                    self.write([self.user("go"), self.asst(bad)])
+                    self.assertEqual(self.r38_ev(sdir, missing)[0], "block", (i, violating))
+                    st0 = load_state(sdir, self.tr, {})
+                    self.assertTrue(st0[3], (i, violating))
+                    self.assertGreater(st0[0], 0, (i, violating))
+                    self.assertEqual(st0[2], [_sha(missing)], (i, violating))
+                    # the transcript is rewritten in place, READABLE but shorter than the stored
+                    # boundary, so the rescan from that boundary reads as RESET
+                    with open(self.tr, "w") as f:
+                        f.write(json.dumps(self.user("hello again")) + "\n")
+                    fails = []
+
+                    def transient_load(*a, **k):  # ONE unavailable read; the re-read recovers
+                        fails.append(1)
+                        globals()["load_state"] = real_load
+                        return 0, None, [], False
+                    payload = {"transcript_path": self.tr,
+                               "last_assistant_message": bad if violating else "Done."}
+                    payload.update(field)
+                    globals()["load_state"] = transient_load
+                    notes, report = [], []
+                    try:
+                        r = evaluate(dict(payload), self.now, self.start, sdir, notes, report)
+                    finally:
+                        globals()["load_state"] = real_load
+                    self.assertTrue(fails, (i, violating))  # the state load actually failed
+                    if not violating:
+                        self.assertIsNone(r, (i, violating))  # the final message is clean
+                        self.assertEqual(report, [], (i, violating))
+                    elif i < 2:
+                        self.assertIsNone(r, (i, violating))  # the counter is unknown: fail open
+                        self.assertTrue(notes and "block count unknown" in notes[0], (i, violating))
+                        self.assertTrue(any("your final message" in v for v in report), (i, violating))
+                    else:
+                        self.assertIsNotNone(r, (i, violating))  # an explicit-false Stop still blocks
+                    off, tl, pend, ok = load_state(sdir, self.tr, {})
+                    self.assertTrue(ok, (i, violating))
+                    # kept EXACTLY as stored: the boundary, the tail and the nonempty pending list
+                    self.assertEqual((off, tl, pend), (st0[0], st0[1], st0[2]), (i, violating))
+
+        def test_r46_capped_and_fail_open_allows_store_no_pending_entry(self):
+            # the defect: a pending entry was stored whenever the diagnosed final message was absent
+            # from the transcript, on a capped or fail-open ALLOW too, so the entries could outnumber
+            # the refusals delivered: three refusals and one capped allow of one lagging text stored
+            # FOUR entries, and the fourth later excused, in silence, a record whose only refusal was
+            # never delivered. Only an actual block stores an entry: the capped allow still warns, and
+            # the unexcused fourth arrival is diagnosed again at its own Stop, still capped, never silent
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            sdir = os.path.join(self.tmp, "state46c")
+            self.write([self.user("go")])
+            kinds = [self.r38_ev(sdir, missing)[0] for _ in range(BLOCK_CAP + 1)]
+            self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"])
+            # the capped allow stored NO entry beyond the three the refusals stored
+            self.assertEqual(load_state(sdir, self.tr, {})[2], [_sha(missing)] * BLOCK_CAP)
+            # every owed arrival and the unexcused fourth land in ONE scan: the three entries excuse
+            # the three owed arrivals, and the fourth record, the final, is diagnosed and allowed at
+            # the cap with the warning naming it, never passed over in silence
+            self.write([self.asst(missing)] * (BLOCK_CAP + 1), "a")
+            notes, report = [], []
+            r = evaluate({"transcript_path": self.tr, "stop_hook_active": True},
+                         self.now, self.start, sdir, notes, report)
+            self.assertIsNone(r)
+            self.assertTrue(notes and "block cap hit" in notes[0], notes)
+            self.assertTrue(any("your final message" in v for v in report), report)
+            st = load_state(sdir, self.tr, {})
+            self.assertTrue(st[3])
+            self.assertEqual(st[2], [])  # the spent entries were not saved back
+            # the fail-open allow stores none either: one refusal stores one entry, then a transient
+            # state-read fault at the next Stop (its counter unknown: fail open, loudly) supplies a
+            # SECOND lagging text; only the refused text's entry is stored
+            missing2 = "[2026-09-23T22:00Z] a second text not yet in the transcript"
+            real_load = load_state
+            sdir2 = os.path.join(self.tmp, "state46o")
+            self.write([self.user("go")])
+            self.assertEqual(self.r38_ev(sdir2, missing)[0], "block")
+            fails = []
+
+            def transient_load(*a, **k):  # ONE unavailable read; the re-read recovers
+                fails.append(1)
+                globals()["load_state"] = real_load
+                return 0, None, [], False
+            globals()["load_state"] = transient_load
+            notes2, report2 = [], []
+            try:
+                r2 = evaluate({"transcript_path": self.tr, "last_assistant_message": missing2},
+                              self.now, self.start, sdir2, notes2, report2)
+            finally:
+                globals()["load_state"] = real_load
+            self.assertTrue(fails)  # the state load actually failed
+            self.assertIsNone(r2)
+            self.assertTrue(notes2 and "block count unknown" in notes2[0], notes2)
+            self.assertTrue(any("your final message" in v for v in report2), report2)
+            st2 = load_state(sdir2, self.tr, {})
+            self.assertTrue(st2[3])
+            self.assertEqual(st2[2], [_sha(missing)])  # the refused text's entry alone survives
+
+        def test_unraised_block_save_stores_no_pending_entry(self):
+            # the defect: a block whose save did not RAISE the stored counter (a writer ignoring the
+            # lock recorded the value this block would write, between this Stop's load and its save)
+            # still wrote its new late hash, then failed open as an unrecorded block, so an entry stood
+            # for a refusal never delivered and later excused the arrival in silence. The entry is
+            # written only with a raised counter: the allow stores none and the arrival is diagnosed at
+            # the next Stop of the turn. The control (no other writer) blocks and stores the entry, so
+            # the other writer alone makes the difference
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_tm = turn_messages
+
+            def raising(*a, **k):  # between this Stop's load and its save, another writer records 2
+                self.assertTrue(save_state(self.sdir, self.tr, 0, None, [], 2))
+                return real_tm(*a, **k)
+
+            for other_writer in (False, True):
+                self.write([self.user("go")])
+                self.seed(1)
+                notes = []
+                if other_writer:
+                    globals()["turn_messages"] = raising
+                try:
+                    r = evaluate({"transcript_path": self.tr, "stop_hook_active": True,
+                                  "last_assistant_message": missing}, self.now, self.start, self.sdir, notes)
+                finally:
+                    globals()["turn_messages"] = real_tm
+                extra = {}
+                st = load_state(self.sdir, self.tr, extra)
+                self.assertTrue(st[3], other_writer)
+                self.assertEqual(extra["blocks"], 2, other_writer)
+                if not other_writer:
+                    self.assertTrue(r)  # the control: the raised save records the block and its entry
+                    self.assertEqual(st[2], [_sha(missing)])
+                    continue
+                self.assertIsNone(r)  # the unraised save: the block fails open as an unrecorded one
+                self.assertTrue(notes and "block count unknown" in notes[0], notes)
+                self.assertEqual(st[2], [])  # no entry for the refusal never delivered
+                # the arrival is read from the transcript and diagnosed (still under the cap: refused),
+                # never passed over as the late arrival of a refusal that was not delivered
+                self.write([self.asst(missing)], "a")
+                notes, report = [], []
+                r = evaluate({"transcript_path": self.tr, "stop_hook_active": True},
+                             self.now, self.start, self.sdir, notes, report)
+                self.assertTrue(r)
+                self.assertTrue(any("your final message" in v for v in report), report)
+
+        def unwritten_refusal(self, leg):
+            """One Stop through main() refusing a final message not yet in the transcript, with stdout for
+            `leg`: "written" (a working stream, the control), "none" (descriptor 1 closed at startup), or
+            "failed" (every write raises). Returns (the refused text, the stored pending list, the stored
+            counter, main()'s stdout text, the text of each write attempted on the "failed" stream)."""
+            missing = "[2099-01-01T00:00Z] refused but not yet in the transcript"
+            null = os.open(os.devnull, os.O_WRONLY)
+            tried = []
+
+            class Unwritable(io.StringIO):
+                def write(self, s):
+                    tried.append(s)
+                    raise OSError("stdout write failed")
+
+                def fileno(self):
+                    return null  # the rescue in _emit_line points this descriptor at /dev/null
+
+            try:
+                self.write([self.user("go")])
+                p = json.dumps({"transcript_path": self.tr, "hook_event_name": "Stop", "stop_hook_active": False,
+                                "last_assistant_message": missing})
+                old_err, sys.stderr = sys.stderr, io.StringIO()
+                try:
+                    rc, out = run_main(p, out={"written": io.StringIO, "none": lambda: None,
+                                               "failed": Unwritable}[leg])
+                finally:
+                    sys.stderr = old_err
+            finally:
+                os.close(null)
+            self.assertEqual(rc, 0)
+            extra = {}
+            st = load_state(default_state_dir(), self.tr, extra)
+            self.assertTrue(st[3], leg)
+            return missing, st[2], extra["blocks"], out, tried
+
+        def test_unwritten_refusal_stores_no_pending_entry(self):
+            # the defect: the block's save stored its late-arrival entry BEFORE main() wrote the block
+            # decision, and _emit_line swallows a failed write, so a refusal that never reached stdout still
+            # left an entry that later excused the arrival in silence. The block's save now only reserves
+            # the raised counter, and the entry is committed after _emit_line reports a successful local
+            # write; the written control stores it, so the failed write alone makes the difference
+            for leg in ("written", "none", "failed"):
+                missing, pending, blocks, out, tried = self.unwritten_refusal(leg)
+                self.assertEqual(blocks, 1, leg)  # the counter is reserved whether or not the write succeeded
+                if leg == "written":
+                    self.assertEqual(json.loads(out)["decision"], "block")
+                    self.assertEqual(pending, [_sha(missing)])
+                    continue
+                self.assertEqual(pending, [], leg)  # no entry for a refusal that was never written
+                if leg == "failed":
+                    # the block decision was attempted on the stream and that write failed, so the failed
+                    # write is what left no entry (the stream's own text is always empty: it cannot show this)
+                    self.assertEqual([json.loads(s)["decision"] for s in tried], ["block"])
+
+        def test_unwritten_refusal_arrival_is_checked(self):
+            # the arrival of a refused final whose refusal was never written is checked like any other record
+            # (here refused again, under the cap), never passed over as the late arrival of a delivered
+            # refusal; the written control's arrival is passed over once, as before
+            for leg in ("written", "none", "failed"):
+                missing = self.unwritten_refusal(leg)[0]
+                self.write([self.asst(missing)], "a")
+                p = json.dumps({"transcript_path": self.tr, "hook_event_name": "Stop", "stop_hook_active": True})
+                old_err, sys.stderr = sys.stderr, io.StringIO()
+                try:
+                    rc, out = run_main(p)
+                finally:
+                    sys.stderr = old_err
+                self.assertEqual(rc, 0)
+                extra = {}
+                self.assertTrue(load_state(default_state_dir(), self.tr, extra)[3])
+                if leg == "written":
+                    self.assertEqual(out, "")  # the delivered refusal's arrival: excused once
+                    self.assertEqual(extra["blocks"], 1)
+                    continue
+                self.assertTrue(out, leg)  # never passed over in silence
+                obj = json.loads(out)
+                self.assertEqual(obj["decision"], "block", leg)
+                self.assertIn("`2099-01-01T00:00Z`", obj["reason"], leg)
+                self.assertEqual(extra["blocks"], 2, leg)
+
+        def test_late_entry_commit_never_overwrites_a_changed_state(self):
+            # the entry is committed after the write, in a second save that re-reads the state first and
+            # stores nothing unless the boundary (offset and tail hash) and the counter are still the ones
+            # this Stop saved, so it never writes an older boundary or a lower counter back. Between the
+            # block's save and the commit a writer ignoring the lock changes ONE compared field (the counter
+            # alone, the boundary alone, the tail alone at the same offset, or the offset alone, one byte past
+            # or one byte short of the saved one, with the same tail) or, as before, the offset and the
+            # counter together, keeping every other field, so each part of the comparison is needed on its
+            # own: the intervening state stays exactly as written and no entry is added. The control (state
+            # unchanged) stores the entry
+            missing = "[2026-09-23T21:00Z] refused but not yet in the transcript"
+            other_tail = _sha("the tail of different transcript bytes")
+            for leg in ("unchanged", "offset and counter", "counter", "boundary", "tail", "offset past",
+                        "offset short"):
+                self.write([self.user("go")])
+                self.seed(0)
+                seen = []
+
+                def emit(reason):
+                    off, tail = load_state(self.sdir, self.tr)[:2]  # as this Stop's save wrote it, counter 1
+                    new = {"unchanged": None, "offset and counter": (0, None, 3), "counter": (off, tail, 3),
+                           "boundary": (0, None, 1), "tail": (off, other_tail, 1), "offset past": (off + 1, tail, 1),
+                           "offset short": (off - 1, tail, 1)}[leg]
+                    if new is not None:
+                        self.assertTrue(save_state(self.sdir, self.tr, new[0], new[1], [], new[2]))
+                    seen.append((off, tail, new))
+                    return True
+                r = evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                              "last_assistant_message": missing}, self.now, self.start, self.sdir, emit=emit)
+                self.assertTrue(r, leg)
+                self.assertEqual(len(seen), 1, leg)
+                off, tail, new = seen[0]
+                self.assertGreater(off, 0, leg)  # the block saved a boundary past the user message
+                self.assertNotEqual(tail, other_tail, leg)
+                extra = {}
+                st = load_state(self.sdir, self.tr, extra)
+                self.assertTrue(st[3], leg)
+                want = (off, tail, [_sha(missing)], 1) if new is None else (new[0], new[1], [], new[2])
+                self.assertEqual((st[0], st[1], st[2], extra["blocks"]), want, leg)
+
+        def test_late_entry_commit_keeps_the_reset_and_unknown_flags(self):
+            # the commit rewrites the state with the entry added, so it must carry over the stored reset
+            # flag and unknown marker, each cleared ONLY by an explicit false: writing either as False here
+            # would erase it at a refusal inside the corrective loop, and a later user message read from the
+            # transcript could then restart the count (the fail-open direction). Each flag alone, and the
+            # control with neither; the stored entry shows that the commit ran
+            missing = "[2026-09-23T21:00Z] refused but not yet in the transcript"
+            for flags in ((False, False), (True, False), (False, True)):
+                self.write([self.user("go")])
+                self.assertTrue(save_state(self.sdir, self.tr, 0, None, [], 1, reset=flags[0], unknown=flags[1]))
+                r = evaluate({"transcript_path": self.tr, "stop_hook_active": True,
+                              "last_assistant_message": missing}, self.now, self.start, self.sdir,
+                             emit=lambda reason: True)
+                self.assertTrue(r, flags)
+                extra = {}
+                st = load_state(self.sdir, self.tr, extra)
+                self.assertTrue(st[3], flags)
+                self.assertEqual(st[2], [_sha(missing)], flags)
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (2,) + flags, flags)
+
+        def test_late_entry_commit_keeps_an_uncompared_change(self):
+            # only the boundary and the counter are compared before the commit: a writer ignoring the lock
+            # that changed only the pending list, or only the reset and unknown flags, leaves them as it
+            # wrote them, and the entry is added to that list
+            missing = "[2026-09-23T21:00Z] refused but not yet in the transcript"
+            other = _sha("an entry another writer stored")
+            for leg in ("pending", "flags"):
+                self.write([self.user("go")])
+                self.seed(0)
+
+                def emit(reason):
+                    off, tail = load_state(self.sdir, self.tr)[:2]  # as this Stop's save wrote it, counter 1
+                    self.assertTrue(save_state(self.sdir, self.tr, off, tail, [other] if leg == "pending" else [],
+                                               1, reset=leg == "flags", unknown=leg == "flags"))
+                    return True
+                r = evaluate({"transcript_path": self.tr, "stop_hook_active": False,
+                              "last_assistant_message": missing}, self.now, self.start, self.sdir, emit=emit)
+                self.assertTrue(r, leg)
+                extra = {}
+                st = load_state(self.sdir, self.tr, extra)
+                self.assertTrue(st[3], leg)
+                self.assertEqual(st[2], ([other] if leg == "pending" else []) + [_sha(missing)], leg)
+                self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]),
+                                 (1, leg == "flags", leg == "flags"), leg)
+
+        def test_unraised_save_warns_for_an_earlier_only_violation(self):
+            # the defect: a block whose save did not RAISE the stored counter (another writer recorded the
+            # value first) dropped the older messages' violations before the warning was built, so with a
+            # clean final message an earlier-message-only violation was allowed with no warning at all. The
+            # violations stay detected and the fail-open allow names them, while the counter stays at the
+            # other writer's value and no entry is stored; the control (no other writer) blocks
+            bad = "[2026-09-23T21:00Z] an earlier message ahead of the clock"
+            clean = "all done"
+            real_tm = turn_messages
+            for other_writer in (False, True):
+                sdir = os.path.join(self.tmp, f"state-earlier-{other_writer}")
+                self.write([self.user("go")])
+                self.assertTrue(save_state(sdir, self.tr, 0, None, [], 1))
+                self.r38_ev(sdir, clean)  # a clean Stop past the user message: the boundary moves past it
+                off, tail = load_state(sdir, self.tr)[:2]
+                self.assertGreater(off, 0)
+                self.assertTrue(save_state(sdir, self.tr, off, tail, [], 1))
+                self.write([self.asst(bad)], "a")
+
+                def raising(*a, **k):  # between this Stop's load and its save, another writer records 2
+                    self.assertTrue(save_state(sdir, self.tr, off, tail, [], 2))
+                    return real_tm(*a, **k)
+                if other_writer:
+                    globals()["turn_messages"] = raising
+                notes, report = [], []
+                try:
+                    r = evaluate({"transcript_path": self.tr, "hook_event_name": "Stop",
+                                  "last_assistant_message": clean}, self.now, self.start, sdir, notes, report)
+                finally:
+                    globals()["turn_messages"] = real_tm
+                extra = {}
+                st = load_state(sdir, self.tr, extra)
+                self.assertTrue(st[3], other_writer)
+                self.assertEqual(extra["blocks"], 2, other_writer)
+                self.assertTrue(any("earlier message 1 of 1" in v for v in report), (other_writer, report))
+                if not other_writer:
+                    self.assertTrue(r)  # the control: the raised save records the block
+                    continue
+                self.assertIsNone(r)
+                self.assertEqual(len(notes), 1, notes)
+                self.assertIn("block count unknown; ALLOWED, 1 UNRESOLVED", notes[0])
+                self.assertIn("`2026-09-23T21:00Z`", notes[0])  # the warning names the violation
+                self.assertEqual(st[2], [])  # no entry: no refusal was delivered
+
+        def test_unpersisted_boundary_still_reports_earlier_violations(self):
+            # an explicit-false Stop whose boundary save FAILS: the older messages' violations can no longer
+            # block (only the final message may), but they are still reported. With a clean final message
+            # the Stop is allowed with a warning that names them (before, it passed with no warning, and
+            # without the allow it would block on an older message); with a violating final it is refused
+            # and the report lists both. The controls save normally and block on the older message
+            bad = "[2026-09-23T21:00Z] an earlier message ahead of the clock"
+            wrong = "[2026-09-23T22:00Z] a final message ahead of the clock"
+            real_save = save_state
+            for failing in (False, True):
+                for final in ("all done", wrong):
+                    sdir = os.path.join(self.tmp, f"state-unpersisted-{failing}-{final == wrong}")
+                    self.write([self.user("go"), self.asst(bad)])
+                    self.assertTrue(save_state(sdir, self.tr, 0, None, [], 0))
+                    if failing:
+                        globals()["save_state"] = lambda *a, **k: False
+                    notes, report = [], []
+                    try:
+                        r = evaluate({"transcript_path": self.tr, "hook_event_name": "Stop",
+                                      "stop_hook_active": False, "last_assistant_message": final},
+                                     self.now, self.start, sdir, notes, report)
+                    finally:
+                        globals()["save_state"] = real_save
+                    case = (failing, final)
+                    self.assertTrue(any("earlier message 1 of 1" in v for v in report), (case, report))
+                    self.assertEqual(any("your final message" in v for v in report), final == wrong, case)
+                    if not failing or final == wrong:
+                        self.assertTrue(r, case)
+                        self.assertEqual(notes, [], case)
+                        if final == wrong:
+                            # the emitted refusal names the final message's violation and counts the older one
+                            self.assertIn("`2026-09-23T22:00Z`", r, case)
+                            self.assertIn("; +1 more", r, case)
+                        continue
+                    self.assertIsNone(r)
+                    self.assertEqual(len(notes), 1, notes)
+                    self.assertIn("ALLOWED, 1 UNRESOLVED", notes[0])
+                    self.assertIn("`2026-09-23T21:00Z`", notes[0])
+
+        def test_r43_open_stop_both_reads_failing_rereads_the_state(self):
+            # the round-43 re-read runs on EVERY Stop of the
+            # both-unreadable branch whose state read failed, the fail-open VIOLATING Stop (cap
+            # "open", not a new turn) included, but no vector exercised that leg on its own: a
+            # revert of the widened re-read condition to the new-turn leg was caught only through
+            # the clean faulting Stop. A transient state fault at a violating Stop keeps the stored
+            # boundary and pending list and records the capped counter with the unknown marker
+            bad = "[2026-09-23T20:00Z] still wrong"
+            missing = "[2026-09-23T21:00Z] reported but not yet in the transcript"
+            real_load = load_state
+            sdir = os.path.join(self.tmp, "state43n")
+            self.write([self.user("go"), self.asst(bad)])
+            self.assertEqual(self.r38_ev(sdir, missing)[0], "block")  # block 1, pending seeded
+            off0, tl0, pend0, ok0 = load_state(sdir, self.tr, {})
+            self.assertTrue(ok0)
+            self.assertGreater(off0, 0)
+            self.assertEqual(pend0, [_sha(missing)])
+            os.remove(self.tr)  # the transcript is unreadable for the faulting Stop
+            fails = []
+
+            def transient_load(*a, **k):  # ONE unavailable read; the re-read under the lock recovers
+                fails.append(1)
+                globals()["load_state"] = real_load
+                return 0, None, [], False
+            globals()["load_state"] = transient_load
+            try:
+                kind, _ = self.r38_ev(sdir, bad)  # a VIOLATING Stop: the unknown count fails open
+            finally:
+                globals()["load_state"] = real_load
+            self.assertEqual(kind, "open")
+            self.assertTrue(fails)  # the state load was attempted and actually failed
+            extra = {}
+            off, tl, pend, ok = load_state(sdir, self.tr, extra)
+            self.assertTrue(ok)
+            self.assertEqual((off, tl, pend), (off0, tl0, pend0))  # kept by the re-read
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]),
+                             (BLOCK_CAP, False, True))
+
+        def test_r43_save_state_failed_unlink_is_best_effort_cleanup(self):
+            # a round-43 finding: temporary-file CLEANUP is best effort, apart from the outcome: a
+            # zero-progress write followed by a failed unlink still returns False with the previous
+            # state byte-identical, and the one temp file left behind never shadows the state file
+            # (only the atomic rename names it); the round-42 wording claimed every failure unlinked
+            # it. A CONTRACT test: the behaviour it locks in already held
+            # at the parent, so it is green there by design; it documents the cleanup contract and
+            # guards no revert of the round-43 change
+            sdir = os.path.join(self.tmp, "state43j")
+            self.write([self.user("go")])
+            self.assertTrue(save_state(sdir, self.tr, 0, None, [], 2, reset=True))
+            with open(self.key(sdir=sdir), "rb") as f:
+                before = f.read()
+            real_write, real_unlink = os.write, os.unlink
+
+            def zero(fd, data):  # no progress at all: the write fails before the rename
+                return 0
+
+            def fail_unlink(*a, **k):  # ...and the cleanup unlink fails too
+                raise OSError(5, "Input/output error")
+            os.write, os.unlink = zero, fail_unlink
+            try:
+                r = save_state(sdir, self.tr, 0, None, [], 0)
+            finally:
+                os.write, os.unlink = real_write, real_unlink
+            self.assertFalse(r)  # the failed write is never reported as persistence
+            with open(self.key(sdir=sdir), "rb") as f:
+                self.assertEqual(f.read(), before)  # the previous state byte-identical
+            sub = os.path.dirname(self.key(sdir=sdir))
+            left = [n for n in os.listdir(sub) if n.endswith(".tmp")]
+            self.assertEqual(len(left), 1)  # best effort: the one temp file remains, beside the state
+            extra = {}
+            self.assertTrue(load_state(sdir, self.tr, extra)[3])
+            self.assertEqual((extra["blocks"], extra["reset"]), (2, True))
+
+        def test_r43_save_state_owned_close_never_raises_after_commit(self):
+            # a round-43 finding: the atomic rename is the COMMIT point. On a direct call without
+            # `dfd` the state-directory descriptor is OWNED by save_state, and a close failure AFTER a
+            # successful rename escaped as an OSError from a function documented never to raise, with
+            # the state already replaced (no rollback is possible). The owned close is now handled
+            # apart from the outcome: the committed save returns True and the failure is suppressed
+            sdir = os.path.join(self.tmp, "state43k")
+            self.write([self.user("go")])
+            self.assertTrue(save_state(sdir, self.tr, 0, None, [], 1))
+            real_close, real_osd, seen, fails = os.close, _open_state_dir, [], []
+
+            def tracking_osd(*a, **k):  # record the OWNED state-directory descriptor
+                fd = real_osd(*a, **k)
+                seen.append(fd)
+                return fd
+
+            def failing_close(fd):  # the close of exactly that descriptor fails, after the rename
+                if seen and fd == seen[-1]:
+                    seen.pop()
+                    real_close(fd)
+                    fails.append(fd)
+                    raise OSError(5, "Input/output error")
+                return real_close(fd)
+            globals()["_open_state_dir"] = tracking_osd
+            os.close = failing_close
+            try:
+                r = save_state(sdir, self.tr, 9, "b" * 64, [], 2, unknown=True)
+            finally:
+                os.close = real_close
+                globals()["_open_state_dir"] = real_osd
+            self.assertTrue(r)  # the rename committed the state: the outcome stands
+            self.assertTrue(fails)  # the owned close was attempted and actually failed
+            extra = {}
+            self.assertEqual(load_state(sdir, self.tr, extra), (9, "b" * 64, [], True))
+            self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (2, False, True))
 
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
         HANG_GUARD_TESTS = ()
