@@ -70,7 +70,13 @@ def load_registry(root):
         p = root / rel
         if entry_state(p) is None:
             continue  # confirmed absence: the next registry file may still be present
-        data = json.loads(_read_following(p, "the orchestration registry").decode("utf-8"))
+        try:
+            data = json.loads(_read_following(p, "the orchestration registry").decode("utf-8"))
+        except RecursionError:
+            # the decoder raises RecursionError, not ValueError, past its nesting limit;
+            # a registry that deep is the same named refusal, never an escaped traceback
+            raise CannotEvaluate("the orchestration registry is nested too deeply for the "
+                                 "JSON decoder")
         # CONV4-CL3 (D13): require the version to be the int 1 by TYPE, so a bool True (1 == True in
         # Python) or a float 1.0 cannot satisfy the version-1 gate and slip a malformed registry through.
         if not isinstance(data, dict) or type(data.get("version")) is not int or data.get("version") != 1:
@@ -197,7 +203,10 @@ def run(root):
 
 
 def self_test():
+    import contextlib
+    import io
     import shutil
+    import signal
     import tempfile
     # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
     # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
@@ -211,6 +220,42 @@ def self_test():
     def _case(name, got, want):
         if got != want:
             failures.append("{}: got {}, want {}".format(name, got, want))
+
+    class _CaseAlarm(Exception):
+        # deliberately NOT an OSError: the registry reader's handlers catch OSError, and
+        # the alarm must escape them to fail the vector
+        pass
+
+    def _bounded_case(name, root, want_rc, naming, seconds=60):
+        # the unresolvable-registry probes run under a time bound, so a reader that
+        # regresses into a blocking read (a FIFO with no writer) FAILS here within the
+        # bound instead of hanging the suite, and each asserts the refusal's NAMED cause,
+        # never only the exit code; the alarm records a failure and can only fail a
+        # vector, never pass one, so a loaded host can at worst cause a false failure
+        def on_alarm(signum, frame):
+            raise _CaseAlarm("blocked for {} s".format(seconds))
+        old_handler = signal.signal(signal.SIGALRM, on_alarm)
+        signal.alarm(seconds)
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                rc = run(root)
+        except _CaseAlarm as exc:
+            failures.append("{}: the live leg blocked instead of refusing ({})".format(
+                name, exc))
+            return
+        except RecursionError:
+            failures.append("{}: a RecursionError escaped instead of a named "
+                            "refusal".format(name))
+            return
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+        text = out.getvalue()
+        missing = [w for w in naming if w not in text]
+        if rc != want_rc or missing:
+            failures.append("{}: want exit {} naming {}, got exit {}: {}".format(
+                name, want_rc, " and ".join(repr(w) for w in naming), rc, text.strip()))
 
     try:
         repo = tmp / "repo"
@@ -300,21 +345,30 @@ def self_test():
         _case("no-registry-not-applicable", run(bare), 0)
         (bare / ".aiqt").mkdir()
         _case("no-registry-with-aiqt-not-applicable", run(bare), 0)
-        # an UNRESOLVABLE registry path is exit 2, never NOT APPLICABLE and never a blocked
-        # read: a dangling symlink at the registry path; a dangling entry on the registry's
-        # parent chain; a FIFO registry (refused by the opened descriptor's type, without
-        # blocking, by the shared non-blocking reader)
+        # an UNRESOLVABLE registry path is exit 2 NAMING the cause, never NOT APPLICABLE
+        # and never a blocked read: a dangling symlink at the registry path; a dangling
+        # entry on the registry's parent chain; a FIFO registry (refused by the opened
+        # descriptor's type, without blocking, by the shared non-blocking reader); each
+        # runs under the bound, so a reader reverted to a blocking read fails in time
         (bare / ".aiqt" / "orchestration.local.json").symlink_to("missing-registry-target")
-        _case("dangling-registry-fails", run(bare), 2)
+        _bounded_case("dangling-registry-fails", bare, 2, ("dangling symbolic link",))
         (bare / ".aiqt" / "orchestration.local.json").unlink()
         chainroot = tmp / "chainroot"
         chainroot.mkdir()
         (chainroot / ".aiqt").symlink_to("missing-aiqt-target")
-        _case("unresolvable-registry-parent-fails", run(chainroot), 2)
+        _bounded_case("unresolvable-registry-parent-fails", chainroot, 2,
+                      ("parent directory", "cannot be opened"))
         fiforoot = tmp / "fiforoot"
         (fiforoot / ".aiqt").mkdir(parents=True)
         os.mkfifo(str(fiforoot / ".aiqt" / "orchestration.local.json"))
-        _case("fifo-registry-fails", run(fiforoot), 2)
+        _bounded_case("fifo-registry-fails", fiforoot, 2, ("FIFO", "not a regular file"))
+        # a registry nested too deeply for the JSON decoder (which raises RecursionError,
+        # not ValueError) is the same named fail-closed refusal, never an escaped traceback
+        deeproot = tmp / "deeproot"
+        (deeproot / ".aiqt").mkdir(parents=True)
+        (deeproot / ".aiqt" / "orchestration.local.json").write_bytes(b"[" * 2000000)
+        _bounded_case("deep-registry-fails", deeproot, 2,
+                      ("nested too deeply for the JSON decoder",))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:
@@ -325,10 +379,12 @@ def self_test():
     print("SELF-TEST PASS: merged-pr drift is detected across the full first-parent history, the "
           "registry-declared changelog path is honoured, unmerged and narrative rows pass, every "
           "malformed, absent, or unreadable declared input fails closed, and an unresolvable "
-          "registry path (a dangling symlink at the registry path or on its parent chain) or a "
-          "non-regular registry (a FIFO, refused by type without blocking) is exit 2, never NOT "
-          "APPLICABLE, while a registry path confirmed absent down its own chain still reads NOT "
-          "APPLICABLE")
+          "registry path (a dangling symlink at the registry path or on its parent chain), a "
+          "non-regular registry (a FIFO, refused by type without blocking) and a registry nested "
+          "too deeply for the JSON decoder are each exit 2 naming the cause (asserted under a "
+          "time bound, so a reader that regresses into a blocking read fails instead of "
+          "hanging), never NOT APPLICABLE and never a traceback, while a registry path confirmed "
+          "absent down its own chain still reads NOT APPLICABLE")
     return 0
 
 

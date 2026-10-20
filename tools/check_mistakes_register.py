@@ -651,6 +651,10 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
     # seq was coerced to 1 and still compared).
     try:
         a = json.loads(raw.decode("utf-8"))
+    except RecursionError:
+        # the decoder raises RecursionError, not ValueError, past its nesting limit; an
+        # anchor that deep is an authority that cannot be read, never an escaped traceback
+        raise CannotEvaluate("the anchor file is nested too deeply for the JSON decoder")
     except ValueError as exc:
         raise CannotEvaluate("the anchor file cannot be read as JSON ({})".format(exc))
     n = a.get("seq") if isinstance(a, dict) else None
@@ -764,6 +768,12 @@ def run(root, update=False):
                 p, "the orchestration registry").decode("utf-8"))
         except CannotEvaluate as exc:
             print("error: {}; fail-closed".format(exc))
+            return 2
+        except RecursionError:
+            # the decoder raises RecursionError, not ValueError, past its nesting limit;
+            # a registry that deep is the same named refusal, never an escaped traceback
+            print("error: the orchestration registry is nested too deeply for the JSON "
+                  "decoder; fail-closed")
             return 2
         except (OSError, ValueError) as exc:
             print("error: cannot read the orchestration registry: {}".format(exc))
@@ -978,12 +988,59 @@ def self_test():
         class _Unrenderable:
             def __repr__(self):
                 raise RecursionError("synthetic unrenderable value")
-        if _shown(_Unrenderable()) != "<a value nested too deeply to display>":
-            failures.append("shown-placeholder: _shown must substitute the placeholder for "
-                            "a value repr cannot walk")
+        # the direct probe is guarded so a regressed helper records a NAMED failure here
+        # and the later vectors still run, instead of the whole suite dying on a traceback
+        try:
+            shown_got = _shown(_Unrenderable())
+        except RecursionError:
+            failures.append("shown-placeholder: a RecursionError escaped _shown instead of "
+                            "the placeholder")
+        else:
+            if shown_got != "<a value nested too deeply to display>":
+                failures.append("shown-placeholder: _shown must substitute the placeholder "
+                                "for a value repr cannot walk, got {!r}".format(shown_got))
         if _shown("x") != "'x'":
             failures.append("shown-control: _shown must stay repr for a renderable value, "
                             "got {!r}".format(_shown("x")))
+        # every PRODUCTION rendering call site is driven UNCONDITIONALLY by fault
+        # injection (host-independent, so this coverage cannot vanish on a host whose
+        # decoder does not out-run its renderer): the crafted row reaches verify_lines
+        # through its own decoding hook, so each probe exercises the real call site, not
+        # the helper alone, and a value repr cannot walk must surface as the placeholder
+        # in that site's own violation message, never as an escaped RecursionError
+
+        def _site_fields(**overrides):
+            fields = {"seq": 1, "id": "MR-1", "ts": "t", "mistake": "m", "evidence": "e",
+                      "rule": "r", "guardrail": "g", "status": "proposed", "prev": ZERO}
+            fields.update(overrides)
+            return fields
+
+        real_pairs_hook = _pairs_without_duplicates
+        for site_name, site_row, site_naming, site_root in (
+                ("unrenderable-seq-value-named",
+                 _site_fields(seq=_Unrenderable()), "is not the line number", None),
+                ("unrenderable-status-value-named",
+                 _site_fields(status=_Unrenderable()), "unknown status", None),
+                ("unrenderable-id-value-named",
+                 _site_fields(id=_Unrenderable()), "is not an MR- id", None),
+                ("unrenderable-check-ref-value-named",
+                 _site_fields(status="landed", check_ref=_Unrenderable()),
+                 "not an existing repo-relative path", tmp)):
+            globals()["_pairs_without_duplicates"] = \
+                lambda pairs, crafted=site_row: dict(crafted)
+            try:
+                site_problems = verify_lines(["{}"], root=site_root, prefix="MR-")
+            except RecursionError:
+                failures.append(site_name + ": a RecursionError escaped the violation "
+                                "rendering instead of naming the row")
+            else:
+                if not any(site_naming in p and "nested too deeply to display" in p
+                           for p in site_problems):
+                    failures.append("{}: want a violation naming {!r} with the "
+                                    "placeholder, got {!r}".format(
+                                        site_name, site_naming, site_problems[:3]))
+            finally:
+                globals()["_pairs_without_duplicates"] = real_pairs_hook
 
         def _deepest(ok):
             lo, hi = 1, 2
@@ -1041,9 +1098,17 @@ def self_test():
                         failures.append("{}: want a violation naming {!r} with the "
                                         "placeholder, got {!r}".format(
                                             shp_name, shp_naming, shp_problems[:3]))
-        # when render_max >= decode_max no decodable input can out-run the renderer on this
-        # host, so there is nothing to drive end to end here; the placeholder probe above
-        # still proves the substitution unconditionally
+        else:
+            # when render_max >= decode_max no decodable input can out-run the renderer
+            # on this host, so there is no real-value window to drive end to end here;
+            # the injection probes above drove every rendering call site unconditionally,
+            # and the omitted window cases are reported BY NAME, never silently folded
+            # into the PASS text
+            print("NOT RUN: deep-seq-value-named, deep-status-value-named and "
+                  "deep-id-value-named (this host's render limit {} is not below its "
+                  "decode limit {}, so no decodable input can out-run the renderer; the "
+                  "unconditional injection probes still drove every rendering call "
+                  "site)".format(render_max, decode_max))
         # edit/delete/reorder of an anchored row fails via the anchor
         reg_dir = tmp / "r"
         reg_dir.mkdir()
@@ -1094,6 +1159,19 @@ def self_test():
             if "malformed" not in str(exc):
                 failures.append("the non-object anchor refusal should say malformed, got: "
                                 "{}".format(exc))
+        # an anchor nested too deeply for the JSON decoder (which raises RecursionError,
+        # not ValueError) is the same named cannot-evaluate, never an escaped traceback
+        anchor_path.write_text("[" * 2000000, encoding="utf-8")
+        try:
+            verify_append_only(reg_dir, rp, good)
+            failures.append("deep-anchor-named: a too-deep anchor should be cannot-evaluate")
+        except CannotEvaluate as exc:
+            if "nested too deeply" not in str(exc):
+                failures.append("deep-anchor-named: the too-deep anchor refusal should name "
+                                "the nesting, got: {}".format(exc))
+        except RecursionError:
+            failures.append("deep-anchor-named: a RecursionError escaped the anchor read "
+                            "instead of a named refusal")
         # anchor presence is lstat-based: an entry that EXISTS at the anchor path but cannot be
         # used (a dangling symlink, a directory) is cannot-evaluate, never the missing-anchor
         # allowance, with allow_missing_anchor True (the --update-anchor bootstrap) included
@@ -1140,6 +1218,69 @@ def self_test():
                         failures.append("the {} refusal should name the link and the "
                                         "allowance, got: {}".format(tag, exc))
             anchor_path.unlink()
+        # final_entry_state's own close refusal: a parent descriptor whose close fails is
+        # a named cannot-evaluate, never an escaped OSError and never a trusted answer;
+        # the injected close really releases the descriptor exactly once, identified by
+        # the parent directory's file identity, and only then reports failure
+        pclose_fired = {"n": 0}
+        pclose_parent_id = os.stat(str(reg_dir))
+        real_parent_release, real_parent_fstat = os.close, os.fstat
+
+        def failing_parent_close(release_fd):
+            try:
+                st_released = real_parent_fstat(release_fd)
+            except OSError:
+                st_released = None
+            real_parent_release(release_fd)
+            if st_released is not None and (st_released.st_dev, st_released.st_ino) == \
+                    (pclose_parent_id.st_dev, pclose_parent_id.st_ino):
+                pclose_fired["n"] += 1
+                raise OSError(5, "injected close failure")
+
+        os.close = failing_parent_close
+        try:
+            try:
+                final_entry_state(reg_dir / "pclose-probe.txt")
+                failures.append("parent-close-failure-named: want a named cannot-evaluate, "
+                                "got an answer")
+            except CannotEvaluate as exc:
+                if "could not be closed" not in str(exc):
+                    failures.append("parent-close-failure-named: the refusal should name "
+                                    "the close failure, got: {}".format(exc))
+            except OSError as exc:
+                failures.append("parent-close-failure-named: an OSError escaped the parent "
+                                "descriptor's close ({})".format(exc))
+        finally:
+            os.close = real_parent_release
+        if pclose_fired["n"] == 0:
+            failures.append("parent-close-failure-named: the injected close failure never "
+                            "fired, so the vector proved nothing")
+        # entry_state's inconsistent re-inspection refusal: an lstat that reports ENOENT
+        # while an entry is PRESENT at the final name is a named cannot-evaluate, never
+        # read as absence
+        incon_entry = reg_dir / "inconsistent-entry.txt"
+        incon_entry.write_text("x\n", encoding="utf-8")
+        real_incon_lstat = os.lstat
+
+        def inconsistent_lstat(p, *largs, **lkw):
+            if not largs and not lkw and str(p) == str(incon_entry):
+                raise FileNotFoundError(2, "injected inconsistent ENOENT")
+            return real_incon_lstat(p, *largs, **lkw)
+
+        os.lstat = inconsistent_lstat
+        try:
+            try:
+                entry_state(incon_entry)
+                failures.append("inconsistent-reinspection-refused: want a named "
+                                "cannot-evaluate, got an answer")
+            except CannotEvaluate as exc:
+                if "present at the final name" not in str(exc):
+                    failures.append("inconsistent-reinspection-refused: the refusal should "
+                                    "name the inconsistent re-inspection, got: "
+                                    "{}".format(exc))
+        finally:
+            os.lstat = real_incon_lstat
+        incon_entry.unlink()
 
         def timed_refusal(seconds=10):
             # a TIMED daemon thread, so a blocking anchor read is a named failure here, never
@@ -1870,6 +2011,26 @@ def self_test():
                             "naming the registry and the file type, got exit {!r}: {}".format(
                                 fifo_got[0], fifo_got[1].strip()))
         registry.unlink()
+        # a registry nested too deeply for the JSON decoder (which raises RecursionError,
+        # not ValueError) is the same named fail-closed refusal (exit 2), never an escaped
+        # traceback
+        registry.write_bytes(b"[" * 2000000)
+
+        def deep_registry_run():
+            try:
+                return bounded_run("gate-deep-registry-refused", repo)
+            except RecursionError as exc:
+                return "an uncaught RecursionError: {}".format(exc), ""
+
+        deepreg_got = deep_registry_run()
+        if deepreg_got is not None and (
+                deepreg_got[0] != 2
+                or "nested too deeply for the JSON decoder" not in deepreg_got[1]):
+            failures.append("gate-deep-registry-refused: a registry nested too deeply for "
+                            "the JSON decoder should be exit 2 naming the nesting, got "
+                            "exit {!r}: {}".format(deepreg_got[0],
+                                                   str(deepreg_got[1]).strip()))
+        registry.unlink()
         # a symlink to a SOCKET at the declared register path: the read follows the path,
         # as it always has, so the refusal names the TARGET's type (a socket), never the
         # link's own numeric mode, still exit 2 under the same bound
@@ -2281,11 +2442,18 @@ def self_test():
           "link at the declared register path, a register path under a missing parent "
           "directory, and a dangling entry on the registry's own parent chain are each "
           "exit 2 by name, while the first-run control, a clean tree with no registry and "
-          "no register, still reads NOT APPLICABLE); and a row value the decoder accepts "
+          "no register, still reads NOT APPLICABLE); a registry or anchor nested too "
+          "deeply for the JSON decoder is a named fail-closed refusal, never a traceback; "
+          "an inconsistent entry re-inspection and a parent descriptor whose close fails "
+          "are each a named cannot-evaluate, never an answer and never an escaped "
+          "OSError; and a row value the decoder accepts "
           "but repr cannot walk renders as a fixed placeholder in the violation message "
-          "(seq, status and id each driven through the measured window between the "
-          "decoder's and the renderer's recursion limits, with the placeholder "
-          "substitution itself proven directly), never an escaped RecursionError")
+          "(seq, status, id and check_ref each driven unconditionally by fault injection "
+          "at the production call sites, seq, status and id additionally through the "
+          "measured window between the decoder's and the renderer's recursion limits "
+          "where this host has one, a skipped window case being reported as a named NOT "
+          "RUN line, and the placeholder substitution itself proven directly), never an "
+          "escaped RecursionError")
     return 0
 
 

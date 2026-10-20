@@ -316,6 +316,11 @@ def _declared_family(root, path):
         try:
             registry = json.loads(_read_following(
                 candidate, "the orchestration registry").decode("utf-8"))
+        except RecursionError:
+            # the decoder raises RecursionError, not ValueError, past its nesting limit;
+            # a registry that deep is the same named refusal, never an escaped traceback
+            raise CannotEvaluate("the orchestration registry is nested too deeply for the "
+                                 "JSON decoder")
         except (OSError, ValueError) as exc:
             raise CannotEvaluate("the orchestration registry cannot be read ({})".format(exc))
         break
@@ -979,6 +984,9 @@ def cmd_append(a, _waits=0):
     tmp_fd = -1
     created = False
     made_dirs = []
+    landed_seq = None
+    retried = False
+    escaping = False
     try:
         try:
             # read-write though the commit never writes through it, so a register this caller
@@ -1066,6 +1074,7 @@ def cmd_append(a, _waits=0):
             if st_named is None or (st_locked.st_dev, st_locked.st_ino) != \
                     (st_named.st_dev, st_named.st_ino):
                 if _waits < LOCK_WAITS:
+                    retried = True
                     return cmd_append(a, _waits + 1)
                 print("append: refused, the register was replaced {} times while this call "
                       "waited for its lock; nothing written".format(_waits + 1),
@@ -1221,6 +1230,7 @@ def cmd_append(a, _waits=0):
             return 2
         # The rename has landed: the row is in the register. What follows cannot undo it, so
         # a failure here exits 2 saying the row is in place.
+        landed_seq = seq
         notes = []
         sync_note = _dir_synced(path.parent)
         if sync_note is not None:
@@ -1241,14 +1251,22 @@ def cmd_append(a, _waits=0):
         else:
             print("appended {} seq {}".format(a.id, seq))
         return 0
+    except BaseException:
+        # whether an exception is escaping THIS append is tracked explicitly: ambient
+        # exception state (sys.exc_info) would also see an exception a CALLER is already
+        # handling around this call, and the close failure below would then print its
+        # report but return the body's own verdict (success included) instead of exit 2
+        escaping = True
+        raise
     finally:
-        # A close failure here is a NAMED refusal (exit 2), never an escaped OSError: each
-        # owned descriptor's close is attempted exactly once (Linux releases the number
-        # even when close reports a failure), the failure is reported on stderr beside
-        # whatever verdict was in flight, and when nothing else is propagating the
-        # append's own verdict is replaced by the refusal (any row this call landed was
-        # already written and fsynced before this point; an in-flight exception keeps
-        # propagating with the failure reported beside it).
+        # A close failure here is NAMED on stderr and the call exits 2, never an escaped
+        # OSError: each owned descriptor's close is attempted exactly once (Linux
+        # releases the number even when close reports a failure), the failure is reported
+        # beside whatever verdict was in flight, and only when no exception is escaping
+        # this append's own body (tracked above, never read from ambient state) does the
+        # close failure replace the verdict. A row this call landed was already written
+        # and fsynced before this point, so the message then says the row is in the
+        # register; only an append that landed nothing is called refused.
         close_failures = []
         if tmp_fd >= 0:
             try:
@@ -1263,8 +1281,17 @@ def cmd_append(a, _waits=0):
                 close_failures.append("the register descriptor could not be closed "
                                       "({})".format(exc))
         if close_failures:
-            print("append: refused, {}".format("; ".join(close_failures)), file=sys.stderr)
-            if sys.exc_info()[0] is None:
+            if landed_seq is not None:
+                print("append: {} seq {} was appended and is in the register, but {}".format(
+                    a.id, landed_seq, "; ".join(close_failures)), file=sys.stderr)
+            elif retried:
+                print("append: {} (the descriptor belonged to this call's superseded "
+                      "lock-wait attempt; the retried append reported its own verdict "
+                      "above)".format("; ".join(close_failures)), file=sys.stderr)
+            else:
+                print("append: refused, {}".format("; ".join(close_failures)),
+                      file=sys.stderr)
+            if not escaping:
                 raise SystemExit(2)
 
 
@@ -1835,6 +1862,99 @@ def self_test():
             failures.append("append-close-failure-named: the refusal changed the register "
                             "entry")
         fifo_close_reg.unlink()
+        # a close failure AFTER a row landed: the row was written and fsynced before the
+        # close, so the exit is 2 but the message says the row is in the register, never
+        # that the append was refused; the injection fires on the descriptor that holds
+        # the renamed commit temporary (identified as the file now at the register path),
+        # so the temporary's own close wrapper is the one exercised
+        real_lc_close, real_lc_fstat, real_lc_lstat = os.close, os.fstat, os.lstat
+
+        def landed_close_injector(target_reg, fired):
+            def failing_close(close_fd):
+                try:
+                    st_closed = real_lc_fstat(close_fd)
+                except OSError:
+                    st_closed = None
+                real_lc_close(close_fd)
+                if st_closed is None:
+                    return
+                try:
+                    st_reg = real_lc_lstat(str(target_reg))
+                except OSError:
+                    return
+                if (st_closed.st_dev, st_closed.st_ino) == \
+                        (st_reg.st_dev, st_reg.st_ino):
+                    fired["n"] += 1
+                    raise OSError(5, "injected close failure")
+            return failing_close
+
+        declare(mistakes_register="landed-close.jsonl")
+        landed_close_reg = repo / "landed-close.jsonl"
+        landed_fired = {"n": 0}
+
+        def landed_close_append():
+            try:
+                return append(landed_close_reg, "MR-1", bootstrap=True)
+            except OSError as exc:
+                return "an uncaught OSError: {}".format(exc), ""
+
+        os.close = landed_close_injector(landed_close_reg, landed_fired)
+        try:
+            lc_got = alarm_bounded("landed-close-failure-named", landed_close_append)
+        finally:
+            os.close = real_lc_close
+        if lc_got is not None:
+            lc_rc, lc_err = lc_got
+            if lc_rc != 2 or "was appended and is in the register" not in lc_err \
+                    or "could not be closed" not in lc_err or "refused" in lc_err:
+                failures.append("landed-close-failure-named: want exit 2 saying the landed "
+                                "row is in the register beside the close failure (never "
+                                "'refused'), got exit {!r}: {}".format(lc_rc, lc_err.strip()))
+            if landed_fired["n"] == 0:
+                failures.append("landed-close-failure-named: the injected close failure "
+                                "never fired, so the vector proved nothing")
+            if not _lines(landed_close_reg):
+                failures.append("landed-close-failure-named: the landed row is not in the "
+                                "register")
+        vector_cleanup("landed-close-failure-named", landed_close_reg.unlink)
+        vector_cleanup("landed-close-failure-named",
+                       Path(str(landed_close_reg) + ".anchor").unlink)
+        # the same landed append plus close failure, invoked while the CALLER is inside
+        # its own exception handler: the exit-2 decision must come from tracking this
+        # append's own escaping exception, because ambient exception state sees the
+        # caller's handled exception and would let the printed close failure return the
+        # body's success
+        declare(mistakes_register="landed-close-handler.jsonl")
+        handler_reg = repo / "landed-close-handler.jsonl"
+        handler_fired = {"n": 0}
+
+        def handler_close_append():
+            try:
+                raise ValueError("a caller's handled exception")
+            except ValueError:
+                try:
+                    return append(handler_reg, "MR-1", bootstrap=True)
+                except OSError as exc:
+                    return "an uncaught OSError: {}".format(exc), ""
+
+        os.close = landed_close_injector(handler_reg, handler_fired)
+        try:
+            hc_got = alarm_bounded("landed-close-failure-in-handler", handler_close_append)
+        finally:
+            os.close = real_lc_close
+        if hc_got is not None:
+            hc_rc, hc_err = hc_got
+            if hc_rc != 2 or "was appended and is in the register" not in hc_err \
+                    or "could not be closed" not in hc_err:
+                failures.append("landed-close-failure-in-handler: a close failure on a "
+                                "landed append must exit 2 even inside a caller's handler, "
+                                "got exit {!r}: {}".format(hc_rc, hc_err.strip()))
+            if handler_fired["n"] == 0:
+                failures.append("landed-close-failure-in-handler: the injected close "
+                                "failure never fired, so the vector proved nothing")
+        vector_cleanup("landed-close-failure-in-handler", handler_reg.unlink)
+        vector_cleanup("landed-close-failure-in-handler",
+                       Path(str(handler_reg) + ".anchor").unlink)
         # a directory at the register path: the appender's read-write open refuses it with
         # the same named diagnostic, and the projection's file-type check refuses it too
         declare(mistakes_register="dirreg.jsonl")
@@ -1928,6 +2048,23 @@ def self_test():
         if not stat.S_ISFIFO(os.lstat(str(registry)).st_mode):
             failures.append("fifo-registry-refused: the refusal changed the registry entry")
         registry.unlink()
+        # a registry nested too deeply for the JSON decoder (which raises RecursionError,
+        # not ValueError) is the same named refusal (exit 2), never an escaped traceback,
+        # and the refused append creates nothing
+        registry.write_bytes(b"[" * 2000000)
+
+        def deep_registry_append():
+            try:
+                return append(repo / "deepreg-probe.jsonl", "MR-1")
+            except RecursionError as exc:
+                return "an uncaught RecursionError: {}".format(exc), ""
+
+        want_refusal("deep-registry-append-refused",
+                     alarm_bounded("deep-registry-append-refused", deep_registry_append),
+                     ("orchestration registry", "nested too deeply"))
+        if entry_state(repo / "deepreg-probe.jsonl") is not None:
+            failures.append("deep-registry-append-refused: the refused append created the "
+                            "register")
         registry.write_bytes(saved_registry_bytes)
         # the registry control: with the registry a regular file again, the same read
         # evaluates and a clean append lands under the same bound
@@ -2152,6 +2289,67 @@ def self_test():
         if noparent_got is not None and noparent_got[2] != "":
             failures.append("missing-parent-project-refused: a refused projection must "
                             "print nothing on stdout, got {!r}".format(noparent_got[2][:120]))
+        # both production rendering sites are driven UNCONDITIONALLY by fault injection
+        # (host-independent, so this coverage cannot vanish on a host whose decoder does
+        # not out-run its renderer): a decoded row value whose rendering raises
+        # RecursionError is a named refusal at the projection's formatting handler
+        # (exit 2, nothing on stdout) and at the appender's shared row validation
+        # (exit 1 through the gate's placeholder), never an escaped RecursionError
+        class _UnshowableValue:
+            def __repr__(self):
+                raise RecursionError("synthetic unrenderable value")
+
+            def __str__(self):
+                raise RecursionError("synthetic unrenderable value")
+
+        unshow_proj = repo / "unshow-proj.jsonl"
+        unshow_proj.write_text("{}\n", encoding="utf-8")
+        real_proj_loads = json.loads
+
+        def unshowable_loads(s, *largs, **lkw):
+            return {"id": "MR-1", "status": "accepted", "guardrail": _UnshowableValue()}
+
+        json.loads = unshowable_loads
+        try:
+            unshow_got = alarm_bounded("project-unrenderable-value-refused",
+                                       lambda: project_rc(unshow_proj))
+        finally:
+            json.loads = real_proj_loads
+        want_refusal("project-unrenderable-value-refused", unshow_got,
+                     ("nested too deeply to format",))
+        if unshow_got is not None and unshow_got[2] != "":
+            failures.append("project-unrenderable-value-refused: a refused projection must "
+                            "print nothing on stdout, got {!r}".format(unshow_got[2][:120]))
+        unshow_proj.unlink()
+        import check_mistakes_register as gate_module
+        declare(mistakes_register="unshow-append.jsonl")
+        unshow_append_reg = repo / "unshow-append.jsonl"
+        real_pairs_hook = gate_module._pairs_without_duplicates
+        unshow_row = {"seq": _UnshowableValue(), "id": "MR-1", "ts": "t", "mistake": "m",
+                      "evidence": "e", "rule": "r", "guardrail": "g", "status": "proposed",
+                      "prev": ZERO}
+
+        def unshow_append():
+            try:
+                return append(unshow_append_reg, "MR-1", bootstrap=True)
+            except RecursionError as exc:
+                return "an uncaught RecursionError: {}".format(exc), ""
+
+        gate_module._pairs_without_duplicates = lambda pairs: dict(unshow_row)
+        try:
+            ua_got = alarm_bounded("append-unrenderable-seq-named", unshow_append)
+        finally:
+            gate_module._pairs_without_duplicates = real_pairs_hook
+        if ua_got is not None:
+            ua_rc, ua_err = ua_got
+            if ua_rc != 1 or "is not the line number" not in ua_err \
+                    or "nested too deeply to display" not in ua_err:
+                failures.append("append-unrenderable-seq-named: want exit 1 naming the seq "
+                                "violation through the placeholder, got exit {!r}: "
+                                "{}".format(ua_rc, ua_err.strip()))
+            if entry_state(unshow_append_reg) is not None:
+                failures.append("append-unrenderable-seq-named: the refused append created "
+                                "the register")
         # a row the decoder ACCEPTS whose value is still too deep to format into the
         # enumeration is refused with exit 2 naming the nesting (a wording distinct from
         # the decoder refusal above, so a mis-measured depth cannot satisfy this vector
@@ -2235,9 +2433,17 @@ def self_test():
                                     "{}".format(ds_rc, ds_err.strip()))
             deep_seq_reg.unlink()
             Path(str(deep_seq_reg) + ".anchor").unlink()
-        # when render_max >= decode_max no decodable input can out-run the renderer on
-        # this host, so there is no window to drive here; the gate's own self-test proves
-        # the placeholder substitution directly and unconditionally
+        else:
+            # when render_max >= decode_max no decodable input can out-run the renderer
+            # on this host, so there is no real-value window to drive here; the
+            # fault-injection vectors above drove both production rendering sites
+            # unconditionally, and the omitted window cases are reported BY NAME, never
+            # silently folded into the PASS text
+            print("NOT RUN: deep-value-project-refused and append-deep-seq-value-named "
+                  "(this host's render limit {} is not below its decode limit {}, so no "
+                  "decodable input can out-run the renderer; the unconditional "
+                  "fault-injection vectors still drove both rendering sites)".format(
+                      render_max, decode_max))
 
         # a tracked register with no computable merge-base is cannot-evaluate (exit 2), not a pass
         tracked = repo / "tracked.jsonl"
@@ -2285,6 +2491,22 @@ def self_test():
         declare(mistakes_register="garbled.jsonl")
         garbled.write_bytes(b"\xff\n")
         refused("unreadable-register-exit-2", garbled, 2, "cannot be read", "MR-1")
+        # the DECLARATION check's own dangling-link refusal: a dangling symbolic link at a
+        # declared register path is refused by name in _declared_family (the stat's ENOENT
+        # is never read as a confirmed-absent declaration), before the register open could
+        # refuse the link with its own wording
+        declare(mistakes_register="dangle-decl.jsonl")
+        dangle_decl = repo / "dangle-decl.jsonl"
+        dangle_decl.symlink_to("missing-decl-target")
+        refused("declared-dangling-link-refused", dangle_decl, 2,
+                "the declared mistakes_register path names a dangling symbolic link", "MR-1")
+        if not dangle_decl.is_symlink():
+            failures.append("declared-dangling-link-refused: the refusal changed the "
+                            "register entry")
+        if entry_state(repo / "missing-decl-target") is not None:
+            failures.append("declared-dangling-link-refused: the refusal created the "
+                            "link's target")
+        dangle_decl.unlink()
         # an absent register refused on its first row stays absent, directory included
         declare(mistakes_register="sub/new.jsonl")
         refused("refused-first-row-creates-nothing", repo / "sub" / "new.jsonl", 1,
@@ -4961,11 +5183,20 @@ def self_test():
           "items); a row value the decoder accepts but the formatter cannot walk is a "
           "named refusal too (the projection refuses with exit 2 naming the nesting, and "
           "the appender's shared validation names the violation through a placeholder at "
-          "exit 1, both driven through the measured window between the decoder's and the "
-          "renderer's recursion limits), never an escaped RecursionError; a descriptor "
-          "close failure on the appender's unwind is a named refusal (exit 2, the close "
-          "attempted exactly once and the injection's firing asserted), never an escaped "
-          "OSError; and every "
+          "exit 1, both driven unconditionally by fault injection at the production "
+          "rendering sites and additionally through the measured window between the "
+          "decoder's and the renderer's recursion limits where this host has one, a "
+          "skipped window case being reported as a named NOT RUN line, never a silent "
+          "omission), never an escaped RecursionError; a registry nested too deeply for "
+          "the JSON decoder is the same named refusal (exit 2), never a traceback; a "
+          "descriptor close failure on the appender's unwind is exit 2 with the close "
+          "attempted exactly once and each injection's firing asserted, never an escaped "
+          "OSError (after a refusal it is a named refusal; after a LANDED row the message "
+          "says the row is in the register, never refused, and the exit stays 2 even when "
+          "the caller invokes the append inside its own exception handler, the escaping "
+          "exception being tracked explicitly, never read from ambient exception state); "
+          "the declaration check refuses a dangling symbolic link at a declared register "
+          "path by name; and every "
           "clean append is re-read with its last row and "
           "verify_lines checked")
     return 0

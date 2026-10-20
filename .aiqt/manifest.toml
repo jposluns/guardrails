@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c0de811a2f60700b3da039f29b3f290a18d3afd3a13dccbaa7d563b9701b4d6f"
+tree-sha256 = "6fd35feab564824351e9c5111d05d89032e2699821c73a0326522a67f873f8b5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3431,8 +3431,8 @@ sha256 = "e4fbc6cccdfb032cd5c0f6fecba4fdde40e4ed510435643b2bcba573151b6616"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
-bytes = 137474
-sha256 = "c1f4c9cf268124400fd97ca0c31cc00d9bcda1f14b9d42f25d25dbfc52d8ee32"
+bytes = 147218
+sha256 = "8c057bdd996316b9552fa4a0082a285660446b9dc1013d999ea930487574f7c7"
 
 [[sources]]
 path = "tools/check_msg_leaks.py"
@@ -3491,8 +3491,8 @@ sha256 = "ce538e0eb326029347223915c4f85b81ac19e99beff0916bd5269acb9e2170c6"
 
 [[sources]]
 path = "tools/check_record_drift.py"
-bytes = 17765
-sha256 = "bcd9fb8cac711c9ee00f6e1f577570f93b5454d419161d0167cfe0906ff909b5"
+bytes = 20881
+sha256 = "fb55c662fc9a98c41ef3ccbf8cded6b4f5426a277eed0c6073918a8ec63ac241"
 
 [[sources]]
 path = "tools/check_record_sections.py"
@@ -3751,8 +3751,8 @@ sha256 = "26b2e951fe7c452e19c919e04bbc2cf3854eefd085fe3f10399678b84b4d5b9a"
 
 [[sources]]
 path = "tools/orch_register.py"
-bytes = 292468
-sha256 = "3383bef040b82bb821d4af222a8af801e5875f3c05f135a47a3f5c139e6d04e6"
+bytes = 305505
+sha256 = "2650bfb1b34afe20c411d05e5551b71199349932f2dc002e2f99f161299b4b43"
 
 [[sources]]
 path = "tools/pin.py"
