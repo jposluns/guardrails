@@ -58,9 +58,12 @@ nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readines
 the adoption journal; with neither present it reports that no adoption run exists). The stage driver adds
 `opf adopt approve --inputs FILE --plan FILE --actor NAME`, the one approval, printed and writing nothing,
 and `opf adopt apply --inputs FILE --plan FILE --approval FILE`, which admits only the approved plan and
-refuses before any write while a plan op's slice, or the driver's receipt stage, has not landed. `complete`
-and `reconcile` are recognized and refuse (exit 2) until the completion and recovery stages land in a later
-PR.
+refuses before any write while a plan op's slice, or the driver's receipt stage, has not landed.
+`opf adopt reconcile [--root DIR]` recovers an interrupted adoption transaction from the adoption journal
+alone (_opf_adopt_apply.reconcile_report), never resolving the store, holding the journal lock and its
+own single-writer store leases across the recovery, and refuses with a named finding what it cannot prove
+safe; releasing a dead run's leftover store lease (spec 5.7) is not built yet. `complete` is
+recognized and refuses (exit 2) until the completion stage lands in a later PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -19952,10 +19955,11 @@ def _adopt_read_inputs(path):
 def _cmd_adopt(rest):
     """`opf adopt <subcommand> ...` (spec 1, 14; OPF-ADOPT K9a): the adoption verb. The subcommand
     vocabulary is `plan`, `approve`, `apply`, `complete`, `reconcile` and `status`; K9a shipped the two
-    READ-ONLY subcommands, the stage driver adds `approve` and `apply`, and `complete` and `reconcile`
-    refuse fail-closed (exit 2) until the completion and recovery stages land, so a stub can never read as
-    a passing operation. plan, approve and apply each refuse over a non-clean adoption journal (an open
-    transaction or a held lock; _opf_adopt_apply.require_clean_journal) before anything else is read.
+    READ-ONLY subcommands, the stage driver adds `approve` and `apply`, `reconcile` runs the journal-only
+    recovery, and `complete` refuses fail-closed (exit 2) until the completion stage lands, so a stub can
+    never read as a passing operation. plan, approve and apply each refuse over a non-clean adoption
+    journal (an open transaction or a held lock; _opf_adopt_apply.require_clean_journal) before anything
+    else is read; `reconcile` is how that journal is made clean again.
 
       plan --inputs FILE [--root DIR] : freeze and PRINT the inert adoption proposal through the
           existing planner (_opf_adopt_plan.plan), writing NOTHING. FILE is the caller planning
@@ -19989,6 +19993,36 @@ def _cmd_adopt(rest):
           stage. An op or the receipt stage not yet landed refuses the whole apply before anything is
           written, which in this build is every plan. Exit 0: applied
           (completion and retirement follow). Exit 2: every refusal or cannot-evaluate; exit 1 is not used.
+      reconcile [--root DIR] : the EXPLICIT recovery of an interrupted adoption transaction
+          (_opf_adopt_apply.reconcile_report) from the adoption journal ALONE: the store is never
+          resolved (spec 14.2), and no reconcile-first gate runs (this IS the reconcile). Each open
+          transaction rolls FORWARD when every poststate already verifies, else BACK from its durable
+          preimages, under the journal lock, and a confirmed-dead run's journal lock is broken only
+          through the journal's stale-lock arbitration. The interrupted run is never resumed. Exit 0:
+          each recovered transaction printed with its outcome (rolled-back or rolled-forward) and a
+          released dead-run lock named; or "nothing to reconcile": with no journal, or no open transaction
+          and no lock, NOTHING is written; when the journal lock was taken and every transaction was
+          already terminal (a concurrent reconcile recovered it first), it says so, and that no recovery
+          write was made. Beside an open transaction other than an init-store one, reconcile takes the
+          adoption journal lock, then the single-writer store lease of every machine subdirectory under
+          `.working/` (the apply's order: init-store takes the journal lock, then its substrate's lease),
+          before any recovery write, and releases only those leases, after the journal lock. Exit 2 is
+          printed as `REFUSED (<finding>)`, in two classes. A refusal BEFORE ANY RECOVERY WRITE leaves the
+          product files and every transaction as found, and releases any lock or lease it took; its message
+          names anything that stays (the stale-lock arbitration file lock.break, a lock or lease whose
+          creation failed part-way): journal-lock-held (a possibly-live owner holds the journal lock, never
+          seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
+          classify), store-lease-held (a store pointer at the product root, or a store lease present, or
+          claimed by another writer, in a machine subdirectory, beside an open transaction other than
+          init-store's), init-store-reversal-unproven (the reversal could remove content the operation
+          did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
+          began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
+          recovery-failed (files already restored or frames already published stay, the transaction stays
+          open, and a later reconcile resumes it), or store-lease-release-failed (the recovery finished,
+          but a store lease this run took could not be released and stays, named). Also exit 2: a
+          cannot-evaluate root. NOT BUILT: releasing a dead run's leftover store lease (the spec 5.7
+          lease leg) lands with the adoption lease join; until then the operator releases it. Exit 1 is
+          not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
           validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's
@@ -20008,7 +20042,7 @@ def _cmd_adopt(rest):
     option-looking or duplicate value -> exit 2. Every residual escape fails closed to exit 2 (never a
     false 0 or an uncaught exit-1), the same class-width backstop render and doctor carry."""
     subcommands = ("plan", "approve", "apply", "complete", "reconcile", "status")
-    deferred = ("complete", "reconcile")
+    deferred = ("complete",)
     if not rest:
         print("opf adopt: give a subcommand ({})".format(" / ".join(subcommands)), file=sys.stderr)
         return EXIT_MALFORMED
@@ -20016,8 +20050,8 @@ def _cmd_adopt(rest):
     if sub in deferred:
         # Refused BEFORE any parse or filesystem read, so a deferred subcommand can never write; the
         # message names no command that does not exist (the K9b engine lands these).
-        print("opf adopt {}: not yet available in this build (fail-closed); the completion and recovery "
-              "stages land in a later PR".format(sub), file=sys.stderr)
+        print("opf adopt {}: not yet available in this build (fail-closed); the completion stage lands "
+              "in a later PR".format(sub), file=sys.stderr)
         return EXIT_MALFORMED
     if sub not in subcommands:
         print("opf adopt: unknown subcommand {!r}; subcommands: {}".format(
@@ -20025,9 +20059,9 @@ def _cmd_adopt(rest):
         return EXIT_MALFORMED
 
     root = None
-    # The value flags each subcommand takes, each required exactly once (status takes none).
+    # The value flags each subcommand takes, each required exactly once (status and reconcile take none).
     takes = dict(plan=("--inputs",), approve=("--inputs", "--plan", "--actor"),
-                 apply=("--inputs", "--plan", "--approval"), status=())[sub]
+                 apply=("--inputs", "--plan", "--approval"), reconcile=(), status=())[sub]
     given = dict()
 
     def _need_value(flag, idx):
@@ -20124,6 +20158,41 @@ def _cmd_adopt(rest):
         print("opf adopt {}: cannot evaluate: cannot resolve the product root ({})".format(sub, exc),
               file=sys.stderr)
         return EXIT_MALFORMED
+
+    if sub == "reconcile":
+        # The explicit recovery (spec 14.2): the adoption journal ALONE, never a store resolution and
+        # never the reconcile-first gate (this IS the reconcile). Every refusal names its finding.
+        try:
+            outcomes, stale_released, lock_taken = _opf_adopt_apply.reconcile_report(root_abs)
+        except _opf_adopt_apply.ReconcileRefusal as exc:
+            print("opf adopt reconcile: REFUSED ({}): {}".format(exc.finding, exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        except _opf_adopt_apply.AdoptApplyError as exc:
+            print("opf adopt reconcile: cannot evaluate: {}".format(exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0 or uncaught exit-1
+            print("opf adopt reconcile: cannot evaluate: unexpected error ({!r}); failing closed to exit "
+                  "2".format(exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        recovered = [(txn, outcome) for txn, outcome in outcomes
+                     if outcome in ("rolled-back", "rolled-forward")]
+        for txn, outcome in recovered:
+            print("opf adopt reconcile: transaction {}: {}".format(txn, outcome))
+        if stale_released:
+            print("opf adopt reconcile: released the adoption journal lock a confirmed-dead run left at "
+                  "{}/lock".format(_opf_adopt_apply.JOURNAL_REL))
+        if not (recovered or stale_released) and lock_taken:
+            print("opf adopt reconcile: nothing to reconcile: every adoption transaction was already terminal "
+                  "when this run took the journal lock (another reconcile may have recovered it first); no "
+                  "recovery write was made, and the journal lock and any store lease this run took are "
+                  "released")
+        elif not (recovered or stale_released):
+            print("opf adopt reconcile: nothing to reconcile (no interrupted adoption transaction and no "
+                  "leftover journal lock); nothing was written")
+        else:
+            print("opf adopt reconcile: the interrupted run is not resumed: inspect the reconciled tree; a "
+                  "rolled-back run takes a fresh plan with its own run id (spec 14.1)")
+        return EXIT_OK
 
     if sub == "plan":
         import datetime
@@ -20241,10 +20310,12 @@ def _cmd_adopt(rest):
         journal_rel = adopt.JOURNAL_REL
         if owner is not None:
             findings.append("the adoption journal lock at {} is held (pid {}); status never seizes it "
-                            "(reconcile once no adoption run is live)".format(journal_rel, owner.get("pid")))
+                            "(run `opf adopt reconcile` once no adoption run is live)".format(
+                                journal_rel, owner.get("pid")))
         if opened:
             findings.append("the adoption journal at {} holds interrupted transaction(s) {} -- an "
-                            "adoption transaction did not complete".format(journal_rel, ", ".join(opened)))
+                            "adoption transaction did not complete (run `opf adopt reconcile`)".format(
+                                journal_rel, ", ".join(opened)))
         for run_id in runs:
             print("opf adopt status: adoption run {}: evidence bundle at {}/{}".format(
                 run_id, evidence_rel, run_id))
@@ -20409,11 +20480,31 @@ def _cli_self_test():
         expect(["adopt", "apply", "--inputs", "w.toml", "--plan", "p.toml", "--approval", "x.toml",
                 "--actor", "a"], EXIT_MALFORMED)                                     # --actor is approve's
         expect(["adopt", "plan", "--inputs", "w.toml", "--plan", "p.toml"], EXIT_MALFORMED)      # --plan
-        # The two deferred subcommands are RECOGNIZED and refuse fail-closed (exit 2) BEFORE any parse,
-        # store resolution or write, each with its own located not-yet-available message (never the
-        # unknown-verb or unknown-subcommand message, and naming no command that does not exist); the
-        # completion and recovery stages land them.
-        for deferred_sub in ("complete", "reconcile"):
+        # The deferred subcommand is RECOGNIZED and refuses fail-closed (exit 2) BEFORE any parse, store
+        # resolution or write, with its own located not-yet-available message (never the unknown-verb or
+        # unknown-subcommand message, and naming no command that does not exist); the completion stage
+        # lands it. `reconcile` is wired: its grammar refuses like status's (it takes only --root), and an
+        # unrecognized argument is named by the PARSER, which the deferred head never reached (it printed
+        # not-yet-available instead), the routing discriminator; the recovery itself rides
+        # _adopt_reconcile_leg below.
+        # Each malformed vector asserts the PARSER's own diagnostic, so it is red when the routing reverts to
+        # the deferred head (exit 2 there too, but with not-yet-available and no parser message).
+        for argv, diagnostic in (
+                (["adopt", "reconcile", "--root"], "opf adopt reconcile: --root requires an argument"),
+                (["adopt", "reconcile", "--root", ".", "--root", "."],
+                 "opf adopt reconcile: --root given more than once"),
+                (["adopt", "reconcile", "--inputs", "w.toml"],
+                 "opf adopt reconcile: unrecognized argument {!r}".format("--inputs")),
+                (["adopt", "reconcile", "--bogus"],
+                 "opf adopt reconcile: unrecognized argument {!r}".format("--bogus"))):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rc = main(argv)
+            if rc != EXIT_MALFORMED or diagnostic not in buf.getvalue() or "not yet available" in buf.getvalue():
+                failures.append("{}: rc={!r} (expected 2 + the parser diagnostic {!r}, never "
+                                "not-yet-available; {})".format(" ".join(argv), rc, diagnostic,
+                                                                buf.getvalue().strip()))
+        for deferred_sub in ("complete",):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 rc = main(["adopt", deferred_sub])
@@ -21834,6 +21925,288 @@ def _cli_self_test():
                 shutil.rmtree(abase, ignore_errors=True)
             return None
 
+        def _adopt_reconcile_leg():
+            """`opf adopt reconcile` end to end over product-root fixtures, judged on exit codes, the printed
+            outcome or named finding, and file snapshots. Every vector is red on the deferred head, which
+            refused each `adopt reconcile` with exit 2 and not-yet-available before any read. Recovery of
+            each interrupted state the journal leaves: a transaction interrupted before every op landed
+            (rolled back to the byte-identical prestate, with the store resolver and discovery patched to
+            raise, so a store resolution turns it red), one interrupted after every op landed but before
+            its COMPLETE frame (rolled forward, its bundle VALID), one whose rollback was itself interrupted
+            (the rollback finished), and a dead run's journal lock beside an open transaction and beside a
+            transaction that never published its INTENT (each lock released and named). The no-op: no
+            journal, a completed transaction, a store lease with nothing open, and a second reconcile after
+            a recovery each exit 0 with nothing written. Each refusal before any recovery write exits 2 with
+            its named finding and every file byte-identical: a live journal lock (journal-lock-held), a
+            malformed lock and a transaction with an invalid frame sequence (journal-unclassifiable), a store
+            lease beside an open transaction (store-lease-held), and an init-store reversal whose live
+            creations are not the operation's own (init-store-reversal-unproven). A fault after recovery
+            began exits 2 as recovery-failed with the partial state the journal records (the transaction
+            open, no lock and no lease left), and a second reconcile resumes it to the prestate. The
+            lease exclusion itself, the pre-lock-fault finding and the race reports ride the library
+            self-test (_opf_adopt_apply section 8d). Returns None on success or EXIT_MALFORMED on a harness
+            error."""
+            from unittest import mock
+            adopt = _opf_adopt_apply
+            journal = adopt._journal
+            j_rel = adopt.JOURNAL_REL
+            rid = "adopt-20260101T000000Z-0123456789abcdef"
+            files = {".working/TODO.md": b"hand-kept todo\n", "legacy/RULES.md": b"old rules\n"}
+            body = dict(format="opf.adoption.plan/v2", run_id=rid)
+            digest = "sha256:" + adopt._sha256(adopt.emit_checked(body).encode("utf-8"))
+            plan = adopt.emit_checked(dict(body, plan_digest=digest)).encode("utf-8")
+            lease_rel = "{}/{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR,
+                                          "lease.toml")
+
+            class _Interrupt(Exception):
+                pass
+
+            def compose(ops):
+                ops.create(adopt.plan_rel(rid), plan)
+                ops.archive_occupying(".working/TODO.md", "sha256:" + adopt._sha256(files[".working/TODO.md"]))
+                ops.preserve("legacy/RULES.md", "sha256:" + adopt._sha256(files["legacy/RULES.md"]))
+
+            def snap(root):
+                got = dict()
+                for dirpath, _dirs, names in os.walk(root):
+                    for name in names:
+                        p = os.path.join(dirpath, name)
+                        with open(p, "rb") as fh:
+                            got[os.path.relpath(p, root)] = fh.read()
+                return got
+
+            def product(root):
+                return {rel: data for rel, data in snap(root).items() if not rel.startswith(".aiqt" + os.sep)}
+
+            def journal_clean(root):
+                try:
+                    adopt.require_clean_journal(root)
+                    return True
+                except adopt.AdoptApplyError:
+                    return False
+
+            def fixture(name):
+                root = os.path.join(rbase, name)
+                for rel, payload in files.items():
+                    os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                    with open(os.path.join(root, rel), "wb") as fh:
+                        fh.write(payload)
+                return root
+
+            def interrupted(name, when):
+                root = fixture(name)
+
+                def kill(point):
+                    if point.startswith("after-apply-") and when(root):
+                        raise _Interrupt(point)
+                with mock.patch.object(journal, "_kill_point", kill):
+                    try:
+                        adopt.run_adopt_transaction(root, rid, compose, plan_digest=digest)
+                    except (_Interrupt, adopt.AdoptApplyError):
+                        pass
+                return root
+
+            def mid_archive(root):
+                return (os.path.exists(os.path.join(root, adopt.archive_rel(rid, ".working/TODO.md")))
+                        and os.path.exists(os.path.join(root, ".working/TODO.md")))
+
+            def all_landed(root):
+                return os.path.exists(os.path.join(root, adopt.inventory_rel(rid)))
+
+            def lock_bytes(pid):
+                owner = dict(uid=os.getuid(), pid=pid, session="opf-cli-selftest", utc="2026-01-01T00:00:00Z")
+                owner["pid-start"] = ""
+                return json.dumps(owner).encode("utf-8")
+
+            def dead_pid():
+                # a pid with POSITIVE evidence of death (ProcessLookupError on signal 0); nothing is signalled
+                pid = (1 << 22) - 1
+                for _ in range(4096):
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        return pid
+                    except OSError:
+                        pass
+                    pid -= 1
+                return None
+
+            def put(root, rel, data):
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                with open(os.path.join(root, rel), "wb") as fh:
+                    fh.write(data)
+
+            def run(root):
+                out, err = io.StringIO(), io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        return main(["adopt", "reconcile", "--root", root]), out.getvalue() + err.getvalue()
+                except BaseException as exc:            # a dispatcher crash is itself a failure
+                    return "raised {!r}".format(exc), out.getvalue() + err.getvalue()
+
+            try:
+                rbase = tempfile.mkdtemp(prefix="opf-cli-reconcile-")
+            except OSError as exc:
+                print("opf cli self-test: harness error: could not create the reconcile fixture tempdir "
+                      "({})".format(exc), file=sys.stderr)
+                return EXIT_MALFORMED
+            try:
+                try:
+                    dead = dead_pid()
+                    before = product(fixture("prestate"))
+                    back = interrupted("back", mid_archive)
+                    forward = interrupted("forward", all_landed)
+                    rip = interrupted("rip", mid_archive)
+                    rip_fired = []
+
+                    def kill_restore(point):
+                        if point.startswith("after-restore-") and not rip_fired:
+                            rip_fired.append(point)
+                            raise _Interrupt(point)
+                    with mock.patch.object(journal, "_kill_point", kill_restore):
+                        try:
+                            adopt.reconcile_report(rip)
+                        except (_Interrupt, adopt.AdoptApplyError):
+                            pass
+                    stale_open = interrupted("staleopen", mid_archive)
+                    put(stale_open, j_rel + "/lock", lock_bytes(dead or 1))
+                    stale_unopened = fixture("staleunopened")
+                    os.makedirs(os.path.join(stale_unopened, j_rel, rid))
+                    put(stale_unopened, j_rel + "/lock", lock_bytes(dead or 1))
+                    empty = fixture("nojournal")
+                    done = fixture("completed")
+                    adopt.run_adopt_transaction(done, rid, compose, plan_digest=digest)
+                    lease_only = fixture("leaseonly")
+                    put(lease_only, lease_rel, b"held\n")
+                    live = interrupted("livelock", mid_archive)
+                    put(live, j_rel + "/lock", lock_bytes(os.getpid()))
+                    badlock = interrupted("badlock", mid_archive)
+                    put(badlock, j_rel + "/lock", b"not a lock record\n")
+                    badseq = fixture("badsequence")
+                    adopt.run_adopt_transaction(badseq, rid, compose, plan_digest=digest)
+                    # the committed frame log written twice over: two INTENTs, never an accepted sequence
+                    frames = os.path.join(badseq, j_rel, rid, "frames.log")
+                    with open(frames, "rb") as fh:
+                        logged = fh.read()
+                    with open(frames, "wb") as fh:
+                        fh.write(logged * 2)
+                    leased = interrupted("leased", mid_archive)
+                    put(leased, lease_rel, b"held\n")
+                    # an open transaction the reversal treats as init-store's (its name) whose live creations
+                    # are not that operation's own publication: the reversal preverify refuses it
+                    unproven = interrupted("unproven", mid_archive)
+                    os.rename(os.path.join(unproven, j_rel, rid),
+                              os.path.join(unproven, j_rel, rid + "." + adopt.INIT_STORE_PHASE))
+                    failing = interrupted("recoveryfailed", mid_archive)
+                    failing_before = product(fixture("recoveryfailedprestate"))
+                except (OSError, journal.JournalError, adopt.AdoptApplyError) as exc:
+                    print("opf cli self-test: harness error: could not build the reconcile fixtures "
+                          "({})".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+
+                # the fixtures reached the states they name, so no vector below passes vacuously
+                for label, root, want_clean in (("interrupted before every op landed", back, False),
+                                                ("interrupted after every op landed", forward, False),
+                                                ("interrupted mid-rollback", rip, False),
+                                                ("completed", done, True)):
+                    if journal_clean(root) != want_clean:
+                        failures.append("reconcile fixture {}: journal clean={!r} (expected {!r})".format(
+                            label, not want_clean, want_clean))
+                if not rip_fired or dead is None:
+                    failures.append("reconcile fixtures: rollback interrupt fired={!r}, dead pid={!r} (both "
+                                    "needed)".format(bool(rip_fired), dead))
+
+                # recovery, each red on the deferred head; the rollback runs with the store resolver and
+                # discovery raising (spec 14.2: recovery never requires the tree to resolve as a store).
+                no_store = AssertionError("reconcile resolved the store")
+                with mock.patch.object(_opf_store, "resolve_store", side_effect=no_store), \
+                        mock.patch.object(_opf_store, "discover_machine_store", side_effect=no_store):
+                    rc, out = run(back)
+                if not (rc == EXIT_OK and "transaction {}: rolled-back".format(rid) in out
+                        and product(back) == before and journal_clean(back)):
+                    failures.append("adopt reconcile over a transaction interrupted before every op landed: "
+                                    "rc={!r} (expected 0 + rolled-back, the byte-identical prestate, no store "
+                                    "resolution; {})".format(rc, out.strip()))
+                rc, out = run(forward)
+                if not (rc == EXIT_OK and "transaction {}: rolled-forward".format(rid) in out
+                        and journal_clean(forward)
+                        and adopt.verify_bundle(forward, rid).status == _opf_store.VALID
+                        and not os.path.exists(os.path.join(forward, ".working/TODO.md"))):
+                    failures.append("adopt reconcile over a transaction interrupted after every op landed: "
+                                    "rc={!r} (expected 0 + rolled-forward, its bundle VALID; {})".format(
+                                        rc, out.strip()))
+                rc, out = run(rip)
+                if not (rc == EXIT_OK and "transaction {}: rolled-back".format(rid) in out
+                        and product(rip) == before and journal_clean(rip)):
+                    failures.append("adopt reconcile over an interrupted rollback: rc={!r} (expected 0 + "
+                                    "rolled-back, the byte-identical prestate; {})".format(rc, out.strip()))
+                for label, root, needle in (
+                        ("a dead run's lock beside an open transaction", stale_open,
+                         "transaction {}: rolled-back".format(rid)),
+                        ("a dead run's lock beside a transaction that never published its INTENT",
+                         stale_unopened, "is not resumed")):
+                    rc, out = run(root)
+                    if not (rc == EXIT_OK and needle in out and "released the adoption journal lock" in out
+                            and product(root) == before and journal_clean(root)):
+                        failures.append("adopt reconcile over {}: rc={!r} (expected 0 + {!r} + the released "
+                                        "lock named, the prestate, a clean journal; {})".format(
+                                            label, rc, needle, out.strip()))
+
+                # nothing to recover: exit 0 and every file, the journal included, byte-identical; a
+                # second reconcile after a recovery is the same no-op.
+                for label, root in (("no journal", empty), ("a completed transaction", done),
+                                    ("a store lease with nothing open", lease_only),
+                                    ("an already reconciled journal", back)):
+                    was = snap(root)
+                    rc, out = run(root)
+                    if rc != EXIT_OK or "nothing to reconcile" not in out or snap(root) != was:
+                        failures.append("adopt reconcile over {}: rc={!r} (expected 0 + nothing to reconcile, "
+                                        "byte-identical; {})".format(label, rc, out.strip()))
+
+                # each refusal: exit 2, its named finding, every file byte-identical.
+                for label, root, finding in (
+                        ("a live journal lock", live, adopt.RECONCILE_LOCK_HELD),
+                        ("a malformed journal lock", badlock, adopt.RECONCILE_UNCLASSIFIABLE),
+                        ("an invalid frame sequence", badseq, adopt.RECONCILE_UNCLASSIFIABLE),
+                        ("a store lease beside an open transaction", leased, adopt.RECONCILE_STORE_LEASE_HELD),
+                        ("an init-store reversal whose live creations are not its own", unproven,
+                         adopt.RECONCILE_REVERSAL_UNPROVEN)):
+                    was = snap(root)
+                    rc, out = run(root)
+                    if rc != EXIT_MALFORMED or "REFUSED ({})".format(finding) not in out or snap(root) != was:
+                        failures.append("adopt reconcile over {}: rc={!r} (expected 2 + REFUSED ({}), "
+                                        "byte-identical; {})".format(label, rc, finding, out.strip()))
+
+                # recovery-failed: a fault AFTER recovery began (an EIO at a rollback checkpoint once the
+                # archive copy is discarded) exits 2 named, and the state is the journal's record of a
+                # PARTIAL recovery: the transaction still open, the archive copy gone, no journal lock and no
+                # store lease left; a second reconcile resumes it to the byte-identical prestate.
+                copy = os.path.join(failing, adopt.archive_rel(rid, ".working/TODO.md"))
+                fired = []
+
+                def restore_fault(point):
+                    if point.startswith("after-restore-") and not os.path.exists(copy) and not fired:
+                        fired.append(point)
+                        raise OSError(5, "injected EIO at " + point)
+                with mock.patch.object(journal, "_kill_point", restore_fault):
+                    rc, out = run(failing)
+                partial = (fired != [] and rc == EXIT_MALFORMED
+                           and "REFUSED ({})".format(adopt.RECONCILE_FAILED) in out and "PARTIAL" in out
+                           and not journal_clean(failing) and not os.path.exists(copy)
+                           and not os.path.exists(os.path.join(failing, j_rel, "lock"))
+                           and not any(rel.endswith("lease.toml") for rel in snap(failing))
+                           and product(failing) != failing_before)
+                rc2, out2 = run(failing)
+                if not (partial and rc2 == EXIT_OK and "transaction {}: rolled-back".format(rid) in out2
+                        and product(failing) == failing_before and journal_clean(failing)):
+                    failures.append("adopt reconcile over a recovery that faults after it began: rc={!r} then "
+                                    "{!r} (expected 2 + REFUSED (recovery-failed), the partial state the "
+                                    "journal records, then 0 + rolled-back to the prestate; {} / {})".format(
+                                        rc, rc2, out.strip(), out2.strip()))
+            finally:
+                shutil.rmtree(rbase, ignore_errors=True)
+            return None
+
         harness_rc = _fixture_leg()
         if harness_rc is not None:
             return harness_rc
@@ -21843,6 +22216,9 @@ def _cli_self_test():
         adopt_rc = _adopt_leg()
         if adopt_rc is not None:
             return adopt_rc
+        reconcile_rc = _adopt_reconcile_leg()
+        if reconcile_rc is not None:
+            return reconcile_rc
 
         # Discriminating harness-path coverage (FIX 2): an injected OSError at fixture SETUP (mkdtemp) and at
         # fixture I/O (directory creation) must each route to the located cannot-evaluate (exit 2), never
@@ -21904,8 +22280,14 @@ def _cli_self_test():
               "through routes the probe does not patch (posix, _io, ctypes, already-open handles, "
               "sockets), or another module patching this one; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
-              "adoption planner -- bare/malformed usage and the deferred complete/reconcile "
-              "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
+              "adoption planner -- bare/malformed usage and the deferred complete fail closed to exit 2; "
+              "reconcile -> 0 recovering an interrupted transaction from the journal alone (rolled back "
+              "with no store resolution, rolled forward, an interrupted rollback finished, a dead run's "
+              "lock released) or a byte-identical no-op with nothing to recover / 2 with a named finding "
+              "and nothing written on a live or malformed lock, an invalid frame sequence, a store "
+              "lease beside an open transaction or an unproven init-store reversal, and 2 recovery-failed "
+              "with the journal's partial state that a second reconcile resumes, malformed arguments named "
+              "by the parser; status -> 0 no-run or verified run / 1 open-transaction or invalid-"
               "bundle finding / 2 symlinked, dangling or wrong-type home or a bundle whose inventory names "
               "another phase or plan digest than its own sealed plan's, or has no plan, "
               "plan -> 2 missing, FIFO, oversized "
