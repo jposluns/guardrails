@@ -3716,6 +3716,15 @@ _GIT_REF_SPECS = {
 _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section",
     "-e", "--edit"))
+# git's newer subcommand spellings of config, judged by the first operand token: the write
+# subcommands (set/unset/edit/... open or alter the configuration) must be read as mutating
+# before any read-option shortcut, so 'config edit -l' or 'config set a.b c --list' is not
+# mistaken for a read because it also carries a read flag. The read subcommands report only.
+_GIT_CONFIG_WRITE_SUBCMDS = frozenset((
+    "set", "unset", "unset-all", "edit", "add", "replace-all", "rename-section",
+    "remove-section"))
+_GIT_CONFIG_READ_SUBCMDS = frozenset((
+    "get", "get-all", "get-regexp", "get-urlmatch", "list"))
 _EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
 _RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
 _RAW_EXPBND_MUTATE_RE = _RawSequence(
@@ -3888,13 +3897,20 @@ def _git_is_mutating(sub, args):
     if sub == "stash":
         return not args or args[0] not in ("list", "show")
     if sub == "config":
+        if args and not args[0].startswith("-"):
+            # the newer subcommand form: the first token is the subcommand, classified before any
+            # read flag so 'config edit -l', 'config set a.b c --list' and 'config unset a.b --get'
+            # are read as writes, never masked by a trailing read flag (an old-syntax read keeps its
+            # mode flag first, '--get edit', so its key token never lands here)
+            if args[0] in _GIT_CONFIG_WRITE_SUBCMDS:
+                return True
+            if args[0] in _GIT_CONFIG_READ_SUBCMDS:
+                return False
         if any(a == "-l" or a == "--list" or a.startswith("--get") for a in args):
             return False
         if any(a in _GIT_CONFIG_WRITE_FLAGS for a in args):
             return True
         operands = [a for a in args if not a.startswith("-")]
-        if operands and operands[0] == "edit":
-            return True  # the subcommand spelling of --edit opens the configuration in an editor
         return len(operands) >= 2
     if sub == "worktree":
         return not args or args[0] != "list"
@@ -17329,7 +17345,9 @@ _RWH_REPO_REF_WRITERS = frozenset(("fetch", "pull", "push", "send-pack"))
 # token the verb's set does not name drops the read-only shortcut, so the command is judged
 # against the hold set instead (with no live hold nothing changes; while a hold is live a held or
 # uncertain target is withheld, a stated over-refusal for read spellings the sets do not model).
-# The sets name NOTHING that writes a file (--output and -o spellings are absent), runs a program
+# The sets name NOTHING that writes a file: --output is absent, and the only -o spellings present
+# (grep's --only-matching and ls-files' --others) report to stdout, they do not open an output
+# file. Nor does any set name an option that runs a program
 # named in the command or in configuration (-O/--open-files-in-pager, --upload-pack, --ext-diff,
 # --textconv, --show-signature, tag -v, and the --format/--pretty/--sort families wherever a
 # signature placeholder or atom could run the signing program, are absent), or edits
@@ -17615,19 +17633,29 @@ def _rwh_head_chain(workdir):
     them moves or breaks the worktree's HEAD, so all are protected, not only the terminal one a
     recursive query reports. Walked one level at a time with --no-recurse; on a git too old to know
     --no-recurse, the recursive answer (the terminal branch alone) is the fallback, a disclosed
-    partial cover. [] when HEAD is detached or cannot be read. Bounded: a longer or cyclic chain is
-    git misuse, and stopping early only under-extends a list every caller reads additively."""
+    partial cover. [] when HEAD is detached; None when the chain cannot be read (git unavailable or
+    a fatal probe code), which the caller fails closed, never reads as an empty chain that would let
+    a write of the held branch through. Bounded: a longer or cyclic chain is git misuse, and
+    stopping early only under-extends a list every caller reads additively."""
     chain = []
     ref = "HEAD"
     for _ in range(16):
         p = _review_git(workdir, "symbolic-ref", "--no-recurse", ref)
-        if p is None or p.returncode != 0:
+        if p is None:
+            return None
+        if p.returncode != 0:
             if not chain:
                 p = _review_git(workdir, "symbolic-ref", "-q", ref)
-                if p is not None and p.returncode == 0:
+                if p is None:
+                    return None
+                if p.returncode == 0:
                     value = p.stdout.decode("utf-8", "surrogateescape").strip()
                     if value:
                         chain.append(value)
+                elif p.returncode != 1:
+                    # -q answers 1 for a detached or absent HEAD; any other code is a git failure,
+                    # so the chain is unknown and the caller fails closed rather than read it empty
+                    return None
             break
         value = p.stdout.decode("utf-8", "surrogateescape").strip()
         if not value or value in chain:
@@ -17944,9 +17972,11 @@ def _rwh_enclosing_text(marker, path):
 
 def _rwh_ref_writer_text(sub, marker, path):
     return ("AIQT rule rvwpin (review-in-flight-pins-its-artefact): git '{}' can write any ref of "
-            "the repository it targets (an explicit refspec reaches the held branch, and "
-            "--update-head-ok lifts git's own checked-out-branch refusal), and that repository has "
-            "a live review hold (dispatch {}, worktree {} held at {}, marker {}). Run it from a "
+            "the repository it targets (an explicit refspec reaches the held branch, and git's own "
+            "refusal to update a checked-out branch can be lifted by an option such as "
+            "--update-head-ok or relaxed by the receiving side's configuration), and that "
+            "repository has a live review hold (dispatch {}, worktree {} held at {}, marker {}). "
+            "Run it from a "
             "separate clone, or end the hold first; the dispatcher removes the marker when the "
             "review ends.".format(sub, marker["dispatch_id"], marker["workdir"],
                                   marker["head"][:12], path))
@@ -18014,7 +18044,13 @@ def _rwh_chain_hit(name, marker, path, views):
     otherwise."""
     if name in _rwh_held_head_refs(marker, views):
         return ("deny", _rwh_deny_text(marker, path))
-    for ref in _rwh_head_chain(marker["workdir"]):
+    chain = _rwh_head_chain(marker["workdir"])
+    if chain is None:
+        return ("unverifiable", "AIQT rule rvwpin: the symbolic HEAD chain of the held worktree {} "
+                "cannot be resolved while a review hold is live, so whether this ref write moves the "
+                "held HEAD cannot be ruled out; retry once the repository answers, or end the hold "
+                "first.".format(marker["workdir"]))
+    for ref in chain:
         if name in (ref, ref.removeprefix("refs/heads/")):
             return ("deny", _rwh_deny_text(marker, path))
     return None
@@ -18232,11 +18268,14 @@ def _rwh_set_state(dirs, views, holds, cw_cache, notes):
     EXPANDED through its configured core.worktree (a repository-file core.worktree moves the files
     a mutation writes, so the configured worktree's repository is consulted even though no command
     operand names it, behind a wrapper or an override included): ("bad", detail) when any marker
-    state there is unreadable or malformed, ("live", None) when any has a live hold, ("clear",
-    None) otherwise. A candidate that resolves to no repository contributes nothing. Every named
-    candidate is consulted; only the expansion chain is bounded, so a configuration cycle or an
-    absurd chain ends (under-extending only what the chain added, never a named candidate)."""
-    live = False
+    state there is unreadable or malformed, ("live", live_holds) when any has a live hold (live_holds
+    is every such (marker, path) across the set, deduplicated by marker path, so a caller can judge
+    each one), ("clear", None) otherwise. A candidate that resolves to no repository contributes
+    nothing. Every named candidate is consulted; only the expansion chain is bounded, so a
+    configuration cycle or an absurd chain ends (under-extending only what the chain added, never a
+    named candidate)."""
+    live = []
+    live_paths = set()
     queue = list(dirs)
     seen = set()
     extra = 64
@@ -18254,14 +18293,17 @@ def _rwh_set_state(dirs, views, holds, cw_cache, notes):
         if state == "bad":
             return ("bad", payload)
         if state == "ok" and payload:
-            live = True
+            for marker, path in payload:
+                if path not in live_paths:
+                    live_paths.add(path)
+                    live.append((marker, path))
         _known, config_wt = _rwh_core_worktree(directory, cw_cache)
         if config_wt is not None and extra > 0:
             extra -= 1
             # core.worktree is read relative to the git directory
             queue.append(config_wt if os.path.isabs(config_wt)
                          else os.path.join(view[0], config_wt))
-    return ("live" if live else "clear", None)
+    return ("live", live) if live else ("clear", None)
 
 
 def _rwh_core_worktree(directory, cache):
@@ -18411,14 +18453,18 @@ def _rwh_decide(data):
                         if sub in _RWH_REPO_REF_WRITERS and t_live:
                             marker, path = t_live[0]
                             return ("deny", _rwh_ref_writer_text(sub, marker, path))
-                        # the holds reached here: the target repository's, plus the session
-                        # repository's (a held worktree nested under the target can belong to a
-                        # repository the target's common directory does not name)
-                        reach = list(t_live)
-                        seen_markers = {p for _m, p in t_live}
-                        for s_marker, s_path in s_live:
-                            if s_path not in seen_markers:
-                                reach.append((s_marker, s_path))
+                        # EVERY live hold in the command's HOLD SET is judged here, not only the
+                        # target repository's and the session's: a held worktree the raw text names
+                        # only inside an option value (a program-running option such as
+                        # --upload-pack, grep -O, rebase -x or submodule foreach) or through a -C
+                        # step that is not the resolved target still joins the set, yet belongs to
+                        # neither the target's repository nor a tree the target encloses, so the
+                        # one-plain-git-on-a-certain-target reasoning cannot show the command leaves
+                        # it untouched. Such a hold fails closed (a stated over-refusal: a command
+                        # whose text names a foreign held worktree is withheld while that hold is
+                        # live). A sibling worktree of the TARGET's own repository, which a
+                        # one-plain-git command on the target cannot reach, is not such a case.
+                        reach = set_payload if set_state == "live" else list(t_live)
                         top = False  # the target's top level, resolved once, on first need
                         for marker, path in reach:
                             held_view = _rwh_view(marker["workdir"], views)
@@ -18441,6 +18487,19 @@ def _rwh_decide(data):
                                         "readable non-bare target, or end the hold first.")
                             if _rwh_inside(held_real, top):
                                 return ("deny", _rwh_enclosing_text(marker, path))
+                            if held_view is not None and held_view[1] == t_common:
+                                # a sibling worktree of the target's own repository that the target
+                                # neither is nor encloses: a one-plain-git command bound to the
+                                # target cannot reach it, so it does not withhold the command
+                                continue
+                            return ("unverifiable", "AIQT rule rvwpin: this git command's text "
+                                    "names a held worktree ({}) that its resolved target does not "
+                                    "account for, so whether the command (a program-running option "
+                                    "or a directory step its one-plain-git form does not model) "
+                                    "modifies the held worktree cannot be ruled out while the "
+                                    "review hold is live; run one plain 'git -C /absolute/path "
+                                    "<subcommand>' naming no held worktree, or end the hold "
+                                    "first.".format(marker["workdir"]))
                     return ("note", " ".join(notes)) if notes else ("allow", None)
     return ("unverifiable", "AIQT rule rvwpin: this command names git while a review hold is live "
             "in a repository it can reach, and it is not one plain git segment whose read-only "

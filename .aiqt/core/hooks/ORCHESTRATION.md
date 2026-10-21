@@ -1129,8 +1129,13 @@ unmodelled flag, an attached-value short such as `-U5` or `-n5`, a pickaxe `-S`/
 withheld while the hold is live, as is every mutation whose target sits anywhere under a tree
 that encloses a held worktree (a scoped `git clean` in a subdirectory beside the nested hold
 included) and every certain-target command whose repository top level cannot be read (a bare
-repository). Each is a safe over-refusal taken instead of under-blocking; none fires with no
-live hold. ALLOW RESIDUAL: the hold set is built
+repository), and a command whose raw text names a held worktree its resolved target does not
+account for: a held path carried in a program-running option value (`--upload-pack`, grep's `-O`,
+`rebase -x`, `submodule foreach`, `difftool -x`) or in a `-C` chain step that is not the resolved
+target joins the hold set yet belongs to neither the target's repository nor a tree the target
+encloses, so the one-plain-git-on-a-certain-target reasoning cannot show that held worktree is
+left untouched and the command is withheld as `UNVERIFIABLE`. Each is a safe over-refusal taken
+instead of under-blocking; none fires with no live hold. ALLOW RESIDUAL: the hold set is built
 from literal text, so an operand only an expansion resolves (`git -C "$DIR"`, a leading `~`, a
 glob) names no repository; from a session outside every held repository such a command stays
 allowed even where the expansion would land in a held worktree, and a git reached through an
@@ -1151,7 +1156,13 @@ Limits:
   adopter's tool runs the preflight above.
 - Indirect git is not seen: an alias, a shell function, a script, or git configured to run programs
   (a `post-checkout` hook, `core.fsmonitor`). A relative `cd` resolved through `CDPATH` can land in
-  a repository the hold set does not name.
+  a repository the hold set does not name. The closed per-verb option sets drop
+  `--ext-diff`/`--textconv`/`-O`, but a read verb still runs any program git's configuration already
+  wires to its DEFAULT form (`diff.external` and textconv for `diff`, `log -p`, `show` and `blame`,
+  a configured pager) with no option at all, since the rule judges argv, not configuration.
+- A read verb the grammar passes may still write git's on-disk index: `git status` (and other reads)
+  refresh the held worktree's index stat cache in the background, a metadata-only write the grammar
+  treats as read-only because it changes no tracked content.
 - The held BRANCH is pinned against the ref writes named above and against
   `fetch`/`pull`/`push`/`send-pack` anywhere in the held repository, but from another worktree of
   the same repository a
@@ -1160,7 +1171,10 @@ Limits:
   another repository naming this one by URL or path operand (the operand is not a `-C` move, so it
   joins no hold set); these surface after the fact as the drift note.
 - File edits inside a held worktree (the Write and Edit tools, `sed -i`, `cp`) are covered by the
-  rule but not by this hook; extending the write-scope hook is a separate follow-on.
+  rule but not by this hook; extending the write-scope hook is a separate follow-on. A shell
+  redirection (`>`, `>>`) is stripped from the one plain git segment before the grammar reads it, so
+  a read verb redirected into a file inside the held worktree writes that file outside the grammar's
+  view, the same file-edit residual.
 - Marker accuracy is the adopter's: a missing marker, an early removal, a wrong `workdir`, or a
   review that outlasts `expires_utc` are adopter errors the hook cannot judge.
 - A race between the check and the command running remains.
