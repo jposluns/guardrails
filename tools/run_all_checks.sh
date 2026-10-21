@@ -114,6 +114,7 @@ run_gate "opf-adopt-state-selftest" python3 -I -B opf/tools/_opf_adopt_state.py 
 run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
 run_gate "opf-adopt-complete-selftest" python3 -I -B opf/tools/_opf_adopt_complete.py --self-test
 run_gate "opf-import-batch-selftest" python3 -I -B opf/tools/_opf_import_batch.py --self-test
+run_gate "opf-import-complete-selftest" python3 -I -B opf/tools/_opf_import_complete.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
 run_gate "opf-adopt-discover-selftest" python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
