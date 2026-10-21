@@ -17763,12 +17763,12 @@ def _main_isolated(monitor):
             mpexpect("(mp-a20) a multi-line wrapper body whose words never spell a gh merge in order "
                      "still allows (the ordered walk discriminates)", "allow",
                      "bash -c 'git merge main\ngit push'", mpd)
-            # a descriptor redirection's '&' belongs to ONE command, never to a separator, and so
-            # does the '|' of the '>|' forced-clobber redirect: both are blanked before the chunk
-            # split, so they cannot scatter one command's words across chunks and hide the
-            # spelling from the scan. The detection is additive only: mp-a33c keeps the
-            # exact-argv 2>&1 allow, and mp-k9* pin that no shape is newly authorized where
-            # nothing declares
+            # a descriptor redirection's '&' and the '|' of the '>|' forced-clobber redirect
+            # belong to ONE command, never to a separator: the scan walks the whole reading
+            # (nothing splits it) and blanks those operator spellings so none can hide a word
+            # boundary. Retained as regression pins from the chunk-split scan this walk
+            # replaced: mp-a33c keeps the exact-argv 2>&1 allow, and mp-k9*/mp-k10* pin that
+            # no shape is newly authorized where nothing declares
             mpexpect("(mp-d62) a 2>&1 between the merge words cannot split the scan: DENIES",
                      "deny", "gh pr 2>&1 merge --admin 3", mpd)
             mpexpect("(mp-d62b) the same spelling inside a bash -c body DENIES too", "deny",
@@ -17793,11 +17793,10 @@ def _main_isolated(monitor):
                      "too", "deny", "gh api >|log -X PUT repos/owner/repo/pulls/3/merge", mpd)
             # a ';', '|' or '&' inside a quoted or escaped word (a quoted redirect target, a
             # quoted header or field value, an escaped separator) is part of ONE command's word
-            # in bash, never a separator: the chunk split is quote- and escape-aware, so such a
-            # character cannot scatter the merge words across chunks and hide the spelling.
-            # mp-a40 keeps the exact-argv allow with a quoted separator-bearing redirect target
-            # (awareness only merges chunks), and the mp-k* twins pin inertness with no
-            # declaration
+            # in bash, never a separator: the whole-reading walk never splits, wherever the
+            # character sits. Retained as regression pins from the chunk-split scan this walk
+            # replaced: mp-a40 keeps the exact-argv allow with a quoted separator-bearing
+            # redirect target, and the mp-k* twins pin inertness with no declaration
             mpexpect("(mp-d67) a ';' inside a quoted redirect target cannot split the scan: "
                      "DENIES", "deny", "gh pr >'a;b' merge --admin 3", mpd)
             mpexpect("(mp-d67b) a '|' inside a quoted redirect target cannot split it either",
@@ -17854,6 +17853,67 @@ def _main_isolated(monitor):
                      "bash -c 'gh pr >a\\;b merge --admin 3'", mpn)
             mpexpect("(mp-k12c) the escaped gh api header stays inert too", "allow",
                      "gh api -X PUT -H a\\;b repos/owner/repo/pulls/3/merge", mpn)
+            # NOTHING splits the scan's walk: a separator spelled inside a command or process
+            # substitution, a backtick body, a parameter expansion, quotes nested within a
+            # substitution, or a $'...' escape (whose \' once ended the scan's quote early)
+            # used to scatter the merge words across chunks and hide the spelling from the
+            # chunk-split scan; the whole-reading walk finds the literally spelled words
+            # whatever lies between them, and the strict shape check then refuses the
+            # substitution, expansion or $'...' spelling (or the inexact argv). The
+            # mp-k13* twins pin inertness with no declaration
+            mpexpect("(mp-d69) a ';' inside a parameter expansion cannot hide the merge words: "
+                     "DENIES", "deny", "gh pr ${x:+;} merge 5", mpd)
+            mpexpect("(mp-d69b) a '|' inside a parameter expansion DENIES too", "deny",
+                     "gh pr ${x:+|} merge 5", mpd)
+            mpexpect("(mp-d69c) an '&' inside a parameter expansion DENIES too", "deny",
+                     "gh pr ${x:+&} merge 5", mpd)
+            mpexpect("(mp-d69d) a ';' inside a command substitution DENIES", "deny",
+                     "gh pr $(:;) merge 5", mpd)
+            mpexpect("(mp-d69e) a ';' inside a backtick body DENIES", "deny",
+                     "gh pr `:;` merge 5", mpd)
+            mpexpect("(mp-d69f) a ';' inside a substitution in a double-quoted gh api field "
+                     "value DENIES", "deny",
+                     'gh api -f "commit_title=$(echo "a;b")" -X PUT '
+                     "repos/owner/repo/pulls/3/merge", mpd)
+            mpexpect("(mp-d69g) a ';' inside quotes nested within an expansion DENIES", "deny",
+                     'gh pr --body "${x:-"a;b"}" merge 5', mpd)
+            mpexpect("(mp-d69h) a \\' escape inside $'...' cannot end the scan's quote early: "
+                     "DENIES", "deny",
+                     "gh api -f $'commit_title=a\\';b' -X PUT repos/owner/repo/pulls/3/merge",
+                     mpd)
+            mpexpect("(mp-d69i) the $'...' escape between pr and merge DENIES too", "deny",
+                     "gh pr --body $'a\\';b' merge 5", mpd)
+            mpreason("(mp-d69j) the substitution deny names the construct, not only the "
+                     "decision", "gh pr $(:;) merge 5", mpd, "command substitution")
+            # the over-denial the unsplit walk buys, pinned openly: merge words spread across
+            # REAL separators deny in a declaring checkout (the shape check refuses the
+            # multi-command line), exactly as the newline-separated pair always did; a
+            # checkout with no declaration stays inert (mp-k14*)
+            mpexpect("(mp-d70) merge words spread across a real ';' DENY in the declaring "
+                     "checkout (the disclosed over-deny of the whole-reading walk)", "deny",
+                     "gh pr list; git merge main", mpd)
+            mpexpect("(mp-d70b) merge words across a real '|' DENY there too", "deny",
+                     "gh pr list | grep merge", mpd)
+            mpexpect("(mp-d70c) merge words across a real '&' DENY there too", "deny",
+                     "gh pr list & git merge main", mpd)
+            mpexpect("(mp-k13) the expansion spelling stays inert with no declaration", "allow",
+                     "gh pr ${x:+;} merge 5", mpn)
+            mpexpect("(mp-k13b) the command-substitution spelling stays inert too", "allow",
+                     "gh pr $(:;) merge 5", mpn)
+            mpexpect("(mp-k13c) the backtick spelling stays inert too", "allow",
+                     "gh pr `:;` merge 5", mpn)
+            mpexpect("(mp-k13d) the quoted-field substitution spelling stays inert too", "allow",
+                     'gh api -f "commit_title=$(echo "a;b")" -X PUT '
+                     "repos/owner/repo/pulls/3/merge", mpn)
+            mpexpect("(mp-k13e) the nested-quotes spelling stays inert too", "allow",
+                     'gh pr --body "${x:-"a;b"}" merge 5', mpn)
+            mpexpect("(mp-k13f) the $'...' spellings stay inert too", "allow",
+                     "gh api -f $'commit_title=a\\';b' -X PUT repos/owner/repo/pulls/3/merge",
+                     mpn)
+            mpexpect("(mp-k14) merge words across a real ';' stay inert with no declaration",
+                     "allow", "gh pr list; git merge main", mpn)
+            mpexpect("(mp-k14b) merge words across a real '|' stay inert too", "allow",
+                     "gh pr list | grep merge", mpn)
             # read-only and scope spellings: every merge spelling denies, only the literal -R/--repo
             # out-of-scope read allows
             mpexpect("(mp-d32) --disable-auto beside a method flag DENIES", "deny",
