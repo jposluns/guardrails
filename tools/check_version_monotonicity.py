@@ -3636,20 +3636,26 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             # repository then goes through a spy on this module's working_blob binding that records
             # each read and, as soon as an input's bytes are captured, overwrites that file in place
             # with bytes no parser accepts (an invalid UTF-8 byte, then an unclosed TOML table
-            # header). For the length of the watched run, except while the shared reader itself
-            # runs, builtins.open, io.open, os.open, os.stat and os.lstat are wrapped too: each
-            # call whose target resolves (by device and inode) to a captured input is recorded
-            # before the call runs, whatever it then returns or raises. Path.open, read_bytes and
-            # read_text reach io.open, and Path.stat, exists and is_file, os.path.exists and
-            # os.path.isfile reach os.stat, so those are recorded too. The reads must be exactly
-            # the four inputs, once each, in first-access order, no later access may be recorded,
-            # and the run must print exactly what the unwatched run printed. A loader that
-            # bypasses the reader changes the reads. A later access by path is recorded even when
-            # an existence check or a FileNotFoundError fallback hides its result, and a re-read
-            # whose bytes reach a check gets the overwritten bytes, so the outcome changes as
-            # well. Not observed: an access from another process, or one made through io.FileIO,
-            # os.scandir or a descriptor opened before the capture. Each watched run restores the
-            # inputs' original bytes when it ends.
+            # header). The four inputs' device and inode identities are taken before the watched
+            # run starts, and for its whole length, except while the shared reader itself runs,
+            # builtins.open, io.open, os.open, os.stat and os.lstat are wrapped too: each call
+            # whose target resolves (by device and inode) to an input is recorded, with whether
+            # that input was captured yet, before the call runs, whatever it then returns or
+            # raises. Path.open, read_bytes and read_text reach io.open, and Path.stat, exists and
+            # is_file, os.path.exists and os.path.isfile reach os.stat, so those are recorded too.
+            # The reads must be exactly the four inputs, once each, in first-access order, no
+            # access outside the reader may be recorded, and the run must print exactly what the
+            # unwatched run printed. A loader that bypasses the reader changes the reads. An
+            # access by path before the capture (an existence check ahead of the reader, or a
+            # read ahead of it, which still sees the original bytes) is recorded, and so is one
+            # after it, even when an existence check or a FileNotFoundError fallback hides its
+            # result; a re-read after the capture whose bytes reach a check gets the overwritten
+            # bytes, so the outcome changes as well. Not observed: an access from another
+            # process; one made through io.FileIO, _io.open, os.scandir or the posix module's
+            # functions directly; a call through a function bound before the wrap (from os
+            # import stat, or a default argument); and a read through a descriptor opened before
+            # the watched run started. Each watched run restores the inputs' original bytes when
+            # it ends.
             rr36 = _relabel_repo("relabel-read-once")
             _write(rr36, head_log)
             _write_register(rr36, reg_relabelled)
@@ -3665,8 +3671,11 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             real_stat36, real_fstat36 = os.stat, os.fstat
 
             def _watched_run36():
-                """One watched run of rr36: (reads, later accesses, outcome)."""
-                reads, later, captured = [], [], {}
+                """One watched run of rr36: (reads, accesses outside the reader, outcome)."""
+                reads, accesses, captured, inputs = [], [], set(), {}
+                for rel in want36:
+                    found = real_stat36(rr36 / rel)
+                    inputs[(found.st_dev, found.st_ino)] = rel
 
                 def _identity(target, dir_fd):
                     try:
@@ -3680,10 +3689,11 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
 
                 def _watch(name, call, first):
                     def watched(*args, **kwargs):
-                        rel = captured.get(_identity(args[0] if args else kwargs.get(first),
-                                                     kwargs.get("dir_fd")))
+                        rel = inputs.get(_identity(args[0] if args else kwargs.get(first),
+                                                   kwargs.get("dir_fd")))
                         if rel is not None:
-                            later.append("{} {}".format(name, rel))
+                            accesses.append((name, rel, "after capture" if rel in captured
+                                             else "before capture"))
                         return call(*args, **kwargs)
                     return watched
 
@@ -3699,7 +3709,9 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
 
                 # The shared reader runs with the real functions bound: it is the one sanctioned
                 # read (the reads record covers it), and it refuses to run when os.open is not
-                # the function os.supports_dir_fd lists.
+                # the function os.supports_dir_fd lists. The in-place overwrite keeps the
+                # input's identity; were it ever to change, the watch would no longer see that
+                # file, so a changed identity is recorded as an access too.
                 def _recording_reader(root, rel):
                     reads.append(rel)
                     _swap(saved)
@@ -3708,7 +3720,9 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
                         if got is not None:
                             (root / rel).write_bytes(unparseable36)
                             found = real_stat36(root / rel)
-                            captured[(found.st_dev, found.st_ino)] = rel
+                            if inputs.get((found.st_dev, found.st_ino)) != rel:
+                                accesses.append(("identity changed", rel, "at capture"))
+                            captured.add(rel)
                     finally:
                         _swap(watchers)
                     return got
@@ -3724,53 +3738,92 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
                     globals()["working_blob"] = real_reader36
                     for rel, data in originals36.items():
                         (rr36 / rel).write_bytes(data)
-                return reads, later, outcome
+                return reads, accesses, outcome
 
-            reads36, later36, watched36 = _watched_run36()
-            if watched36 != control36 or reads36 != want36 or later36:
+            reads36, accesses36, watched36 = _watched_run36()
+            if watched36 != control36 or reads36 != want36 or accesses36:
                 failures.append("git case R36: an in-window relabel run expected each head input read "
-                                "once through the shared reader, in the order {!r}, no later open or "
-                                "stat of a captured input, and the same outcome as the unwatched run "
-                                "once each input was overwritten with unparseable bytes after its "
-                                "capture (got reads {!r}, later accesses {!r}, outcome {!r}, "
-                                "unwatched {!r})".format(want36, reads36, later36, watched36, control36))
+                                "once through the shared reader, in the order {!r}, no open or stat of "
+                                "an input outside that reader before or after its capture, and the "
+                                "same outcome as the unwatched run once each input was overwritten "
+                                "with unparseable bytes after its capture (got reads {!r}, accesses "
+                                "{!r}, outcome {!r}, unwatched {!r})".format(
+                                    want36, reads36, accesses36, watched36, control36))
 
-            # R36 discrimination: the watch must flag a re-read by path after the capture that an
-            # existence check or a FileNotFoundError fallback guards (deleting each input on capture
-            # passed both). For each input in turn, _HeadInputs.raw is replaced by a mutant that
-            # returns the captured bytes as before but, for that input, re-reads the path after
-            # the capture: one mutant returns the re-read bytes when Path.exists is true, the other
-            # returns them unless the re-read raises FileNotFoundError. Each mutant run must record
-            # a later access naming only that input and must change the outcome.
+            # R36 discrimination: the watch must flag an access by path outside the reader, before
+            # or after the capture, through each wrapped call. For each input in turn,
+            # _HeadInputs.raw is replaced by a mutant that, for that input only, reads the path
+            # before the reader runs and returns those bytes, checks Path.exists before the reader
+            # runs, re-reads the path after the capture when Path.exists is true, re-reads it
+            # unless that raises FileNotFoundError, re-reads it through the built-in open or
+            # through os.open, or calls os.lstat on it after the capture. Each mutant run must
+            # record accesses naming only that input, on the mutant's side of the capture,
+            # through every call the mutant makes (so each of the five wrappers is required by
+            # some mutant), and must change the outcome exactly when the mutant's re-read bytes
+            # reach a check: an access before the capture sees the original bytes and an lstat
+            # reads none, so only the watch catches those.
             real_raw36 = _HeadInputs.raw
 
             def _rereading_raw(kind, target):
                 def raw(self, rel):
-                    got = real_raw36(self, rel)
                     if rel != target:
-                        return got
+                        return real_raw36(self, rel)
                     path = self.root / rel
+                    if kind == "pre-capture read":
+                        if rel in self._raw:
+                            return real_raw36(self, rel)
+                        early = path.read_bytes()
+                        real_raw36(self, rel)
+                        return early
+                    if kind == "pre-capture exists":
+                        if rel not in self._raw and not path.exists():
+                            return None
+                        return real_raw36(self, rel)
+                    got = real_raw36(self, rel)
                     if kind == "exists-guarded":
                         return path.read_bytes() if path.exists() else got
-                    try:
-                        return path.read_bytes()
-                    except FileNotFoundError:
-                        return got
+                    if kind == "FileNotFoundError-fallback":
+                        try:
+                            return path.read_bytes()
+                        except FileNotFoundError:
+                            return got
+                    if kind == "builtins.open re-read":
+                        with builtins.open(path, "rb") as fh:
+                            return fh.read()
+                    if kind == "os.open re-read":
+                        fd = os.open(path, os.O_RDONLY)
+                        try:
+                            return os.read(fd, len(got) + 1)
+                        finally:
+                            os.close(fd)
+                    os.lstat(path)
+                    return got
                 return raw
 
-            for kind36 in ("exists-guarded", "FileNotFoundError-fallback"):
+            for kind36, side36, calls36, changes36 in (
+                    ("pre-capture read", "before capture", ("io.open",), False),
+                    ("pre-capture exists", "before capture", ("os.stat",), False),
+                    ("exists-guarded", "after capture", ("os.stat", "io.open"), True),
+                    ("FileNotFoundError-fallback", "after capture", ("io.open",), True),
+                    ("builtins.open re-read", "after capture", ("builtins.open",), True),
+                    ("os.open re-read", "after capture", ("os.open",), True),
+                    ("os.lstat probe", "after capture", ("os.lstat",), False)):
                 for rel36 in want36:
                     _HeadInputs.raw = _rereading_raw(kind36, rel36)
                     try:
-                        _reads36, later36m, watched36m = _watched_run36()
+                        _reads36, accesses36m, watched36m = _watched_run36()
                     finally:
                         _HeadInputs.raw = real_raw36
-                    if (not later36m or any(entry.split(" ", 1)[1] != rel36 for entry in later36m)
-                            or watched36m == control36):
-                        failures.append("git case R36 discrimination: a re-read of {} after its capture "
-                                        "({}) expected a later access naming only it and a changed "
-                                        "outcome (got later accesses {!r}, outcome {!r})".format(
-                                            rel36, kind36, later36m, watched36m))
+                    if (not accesses36m
+                            or any(entry[1:] != (rel36, side36) for entry in accesses36m)
+                            or not set(calls36) <= {entry[0] for entry in accesses36m}
+                            or (watched36m != control36) != changes36):
+                        failures.append("git case R36 discrimination: the {} mutant for {} expected "
+                                        "accesses naming only it {}, through {}, and {} outcome (got "
+                                        "accesses {!r}, outcome {!r})".format(
+                                            kind36, rel36, side36, " and ".join(calls36),
+                                            "a changed" if changes36 else "the unwatched run's",
+                                            accesses36m, watched36m))
 
             # R37 a read that runs out of memory is fail-closed (exit 2) naming the input, as a parse
             # that runs out of memory is, and never escapes run(): a spy on this module's
