@@ -6269,7 +6269,8 @@ def _citecheck_step_cases(tmp):
 # The command shapes whose cost the citation check's residue gives (_citecheck_cost_cases), each (name, head,
 # unit, tail, rows): the unit repeated as often as fits the length asked for, between head and tail, then
 # blanks to that exact length, and the rows (_CITECHK_COST_ROWS) its command gives at or under the command
-# bound. The first thirteen each hold a backslash-newline and cost most in the two lexings and the search
+# bound. The first thirteen each hold a backslash-newline and cost most in the lexings (two where the
+# command holds a double quote, one otherwise, that one reading serving as both) and the search
 # for split delimiters: double-quoted look-alikes of a split delimiter; one double-quoted substitution
 # holding many split delimiters that bash reads as quoted, many comments, many ANSI-C quotes (an odd count
 # of quote characters, so the nested lexing, which reads them as plain single quotes, does not lex), a long

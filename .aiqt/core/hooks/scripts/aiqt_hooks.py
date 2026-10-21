@@ -15575,7 +15575,8 @@ def citation_read_recorder(data):
 # most _CITECHK_MAX_CITES citations, the match of a relative cited path against the paths the ledger
 # records and of the range against the rows of its file (ledgers within their bound); the parse of a diff
 # probe's output (what git printed in the time it was given); the lexing of the command and the parse of
-# its here-documents, once in each of its two lexings (_citechk_commands), so twice, for a command of at
+# its here-documents, once in each of its lexings (_citechk_commands: twice, or once for a command with no
+# double quote, whose two lexings read alike), for a command of at
 # most _CITECHK_COMMAND_MAX characters, with the join of a body file or
 # git -C path to the directory it is relative to; for a command that lexes and holds a backslash-newline,
 # the search of the here-document operators and double-quoted strings that lexing read for a here-document
@@ -16204,7 +16205,7 @@ def _citechk_as_written(command, cwd, parse, reason):
 def _citechk_too_long(command, cwd):
     """A command longer than _CITECHK_COMMAND_MAX characters, as one item with parse "too-long", no text,
     and the command named as not read, whatever its text names: it is neither lexed nor scanned, since the
-    two lexings and the search for split delimiters are not checked against the deadline, the scan of its
+    lexings and the search for split delimiters are not checked against the deadline, the scan of its
     text is checked only between lines, and each takes time that grows with its length (the shapes
     tools/selftest_orch_hooks.py times, _citecheck_cost_cases), so no message, body file or here-document in
     it is read and no citation in it is checked. The item's cmd is the first git commit or gh pr create or
@@ -16227,8 +16228,9 @@ def _citechk_commands(command, cwd, deadline):
     absolute session cwd), base (a gh --base value) and, where parse is "both", why (what the walk met, or
     _CITECHK_LEXINGS_DIFFER). The command is lexed twice: as the walk reads a double-quoted string, which
     ends at its next unescaped double quote (nested=False), and as bash reads a command substitution or
-    backquote in one, whose own quotes nest (nested=True). A command that neither lexes is scanned as
-    written ("raw"). A command in which a backslash-newline splits a here-document delimiter where bash
+    backquote in one, whose own quotes nest (nested=True); a command with no double quote is lexed once,
+    since the two lexings differ only inside a double-quoted string, and that one reading serves as both.
+    A command that neither lexes is scanned as written ("raw"). A command in which a backslash-newline splits a here-document delimiter where bash
     reads one (_citechk_split_delim, from the places the first lexing that lexes shows) is scanned as one
     that does not lex: at an operator the lexer reads, quoted or not, the lexer reads a delimiter that no
     line can match and runs that body to the end of the command, later commands included, and in a command
@@ -16270,7 +16272,12 @@ def _citechk_commands(command, cwd, deadline):
     descriptor or none of the command's own (a pipe, or a redirection of its group, for example), named as
     unseen. A here-document is read only by the command it redirects."""
     readings = []  # (segments, heredocs, spans) of each lexing that lexes, the walk's (nested=False) first
-    for nested in (False, True):
+    # nested changes only how a double-quoted string is read (_read_word), so a command with no double quote
+    # anywhere in its text lexes the same both ways, raise included: it is lexed once and that one reading
+    # serves as both, so a command of many small segments costs one lexing and no shape comparison instead
+    # of two and one.
+    nestings = (False,) if '"' not in command else (False, True)
+    for nested in nestings:
         heredocs, spans = [], []
         try:
             readings.append((_lex_command(command, heredocs=heredocs, spans=spans, nested=nested), heredocs,
@@ -16314,7 +16321,8 @@ def _citechk_commands(command, cwd, deadline):
                     item["unread"] = unread
                     out.append(item)
         return out
-    differ = len(readings) == 1 or _citechk_shape(*readings[0][:2]) != _citechk_shape(*readings[1][:2])
+    differ = len(readings) < len(nestings) or (
+        len(readings) == 2 and _citechk_shape(*readings[0][:2]) != _citechk_shape(*readings[1][:2]))
     if differ:
         parse, why = "both", why or _CITECHK_LEXINGS_DIFFER
     out = _citechk_items(readings[0][0], readings[0][1], cwd, parse, deadline)
