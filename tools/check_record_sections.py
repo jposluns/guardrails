@@ -177,12 +177,19 @@ the table (the same path, format, and header cells or array name), so while that
 a branch that moved the declared file cannot shed the rows it added under the new path; when the
 declaration's header cells changed since the fork, the merge-base's config declares a different locator
 at the file's path, so the absence reads as the table not yet existing and rows the branch added under
-the new path are outside the gate (a state reachable only when the header change itself landed outside a
-gated merge, since the header-change over-deny above refuses it inside one). A branch-side deletion of
+the new path are outside the gate. That state is reachable when the header change landed outside a gated
+merge, and through gated merges alone too: the header-change over-deny above refuses the change only while
+the first parent's declaration is in force, so a gated merge that withdraws the declaration and a later
+gated merge that re-declares it under the changed header both pass, after which a branch forked before
+them that moved the declared file and added rows under the new path merges with exit 0 even when the
+resolver drops those rows. A branch-side deletion of
 the declared file cannot be told from such a move and is refused the same way, an over-deny for a
 deletion with no replacement (or a move the branch added no rows to). The in-band exit is to withdraw or
-narrow the declaration in an earlier, separate commit and then move or remove the file, directly or
-through a gated merge (reading the first parent's config closes narrowing only within the same merge); a
+narrow the declaration in an earlier, separate commit, land that withdrawal on the target (directly or
+through its own gated merge) before the commit or merge that moves or removes the file, and then move or
+remove the file, directly or through a gated merge (reading the first parent's config closes narrowing
+only within the same merge, and a branch that carries both the withdrawal and the removal into one gated
+merge is still refused, because the merge-base's declaration is in force for that branch tip); a
 single commit on the target that removes the file and its declaration together is NOT a route around the
 refusal, because the first parent's declaration is still in force there and the removal fails R1; and
 while the declaration is withdrawn, rows that in-flight branches add to the old path are outside the
@@ -3919,12 +3926,12 @@ def _v2_self_test_cases(directory):
                _quiet_run(declb, declb_config, True, m_declb, None, None), 2)
 
     # The deletion/move over-deny's in-band exit, end to end: withdrawing the declaration in an
-    # EARLIER, separate commit and then removing the file passes, directly and through gated merges
-    # alike, while a single commit on the target that removes the file and its declaration together
-    # still fails R1 under the first parent's declaration (landing on the target directly is not by
-    # itself a route around the refusal). While the declaration is withdrawn, a row an in-flight branch
-    # added to the old path is outside the gate, the disclosed cost of that route; the paired control
-    # shows the same row loss caught while the declaration is in force.
+    # EARLIER, separate commit that lands on the target before the removal, and then removing the file,
+    # passes, directly and through gated merges alike, while a single commit on the target that removes
+    # the file and its declaration together still fails R1 under the first parent's declaration (landing
+    # on the target directly is not by itself a route around the refusal). While the declaration is
+    # withdrawn, a row an in-flight branch added to the old path is outside the gate, the disclosed cost
+    # of that route; the paired control shows the same row loss caught while the declaration is in force.
     route = directory / "v2route"
     route.mkdir()
     _selftest_git(route, ["init", "-q", "-b", "main"])
@@ -3986,6 +3993,48 @@ def _v2_self_test_cases(directory):
     expect("an in-flight branch row added to the old path is outside the gate while the declaration "
            "is withdrawn (the disclosed cost of the in-band exit)",
            _quiet_run(route, route_config, True, m_route_window, None, None), 0)
+
+    # The header-change over-deny holds only while the first parent's declaration is in force, so a
+    # gated merge that withdraws the declaration and a later gated merge that re-declares it under a
+    # changed header both pass. For a branch forked before them, the merge-base's config then declares
+    # a different locator at the file's path, so a branch that moved the declared file and added a row
+    # under the new path reads as the table not yet existing at its tip, and a resolver who keeps the
+    # target's side drops that row with exit 0: the disclosed gap, pinned as it stands. The paired
+    # control refuses the same branch against a target that kept the declaration, and a path-only
+    # locator variant refuses it too, showing the pass rests on that locator mismatch.
+    route_rd = _v2_branch_commit(route, "v2-route-redeclare", route_mw,
+                                 {".aiqt/record-sections.toml": renamed_cfg + "\n" + other_decl,
+                                  "done.md": ("# Done log\n\n" + renamed_header + "\n" + delimiter
+                                              + "\n" + row_y + "\n")},
+                                 "re-declare the table under a changed header")
+    route_mrd = _v2_synthetic_merge(route, route_rd, [route_mw, route_rd],
+                                    "gated merge of the re-declaration")
+    _selftest_git(route, ["checkout", "-q", route_rd])
+    expect("control: the re-declaration under a changed header lands through a gated merge once the "
+           "declaration was withdrawn",
+           _quiet_run(route, route_config, True, route_mrd, None, None), 0)
+    route_mv = _v2_branch_commit(route, "v2-route-move", route_base,
+                                 {"done.md": None, "done2.md": md(row_y, row_x2),
+                                  ".aiqt/record-sections.toml": moved_cfg + "\n" + other_decl},
+                                 "branch forked before both moves the file and adds a row")
+    m_route_shed = _v2_synthetic_merge(route, route_rd, [route_mrd, route_mv],
+                                       "resolver keeps the target side, branch row gone")
+    _selftest_git(route, ["checkout", "-q", route_rd])
+    expect("a moved branch row dropped after a withdraw-then-redeclare header change through gated "
+           "merges passes (the disclosed gap)",
+           _quiet_run(route, route_config, True, m_route_shed, None, None), 0)
+    with _swapped("_table_locator", lambda spec: spec.path):
+        expect_refusal("the same drop is refused once a declaration matches on the path alone (variant)",
+                       _quiet_run_refusal(route, route_config, True, m_route_shed, None, None),
+                       "done.md at branch tip: the declared file is absent while it existed at the "
+                       "merge-base")
+    m_route_move_caught = _v2_synthetic_merge(route, route_keep, [route_keep, route_mv],
+                                              "resolver keeps the target side, branch row gone")
+    _selftest_git(route, ["checkout", "-q", route_keep])
+    expect_refusal("control: the same moved branch is refused against a target that kept the declaration",
+                   _quiet_run_refusal(route, route_config, True, m_route_move_caught, None, None),
+                   "done.md at branch tip: the declared file is absent while it existed at the "
+                   "merge-base and the merge-base's config declares the table")
 
     return failures
 
