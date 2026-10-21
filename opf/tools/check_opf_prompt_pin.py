@@ -38,30 +38,36 @@ Checks, each a named guard:
                   quote is a finding because pairing cannot be trusted there
   required-rule   a fixed list of section 16.1 and section 9.2 sentences appears verbatim
                   (whitespace-insensitively) in both the specification and the prompt
-  journal-grading the prompt carries the step 8 heading exactly once, outside fenced code
-                  (fences are tracked by opening character and run length, closed only by a line
-                  holding nothing but a run of the same character at least that long, with an
-                  unclosed fence open to the end of the document, never by a delimiter-parity
-                  count, which a longer run or the other fence character defeats), and that step
-                  (the heading to the next column-0 heading of level one to three) carries
-                  exactly one list item on `.working/journals/` (its bullet line and the lines
-                  indented deeper than the bullet, up to a blank or whitespace-only line); that
-                  item carries every named clause of JOURNAL_GRADING (whitespace-insensitively)
-                  and nothing in step 8 carries a clause of JOURNAL_GRADING_DENIED, so the item's
-                  store-path conclusion stays limited to a store that has not started an
-                  adoption, it keeps what the specification says of a store that has, and it
-                  keeps the rule that the upgrade check counts every journal entry; every line of
-                  step 8 must take one of a closed set of shapes (a blank or whitespace-only
-                  line, a column-0 space-led ATX heading of level one to six, a `- ` list bullet
-                  or a continuation line at an indent an open list item supports, or a plain
-                  paragraph line), and any other shape (a fence delimiter, a tab, an HTML comment
-                  opener anywhere in a line, a line opening with <, a setext underline or
-                  thematic break, an alternate list marker or blockquote opener, indented code,
-                  an indented or malformed heading) is an unsupported form and a finding, refused
-                  by name rather than read around, because Markdown renders each of those forms
-                  away from what this space-and-line scan reads; the closed set deliberately
-                  over-refuses, so a prompt that legitimately needs a refused form inside step 8
-                  must extend this gate first
+  journal-grading the prompt carries no carriage return anywhere (CommonMark reads a lone CR as
+                  a line ending, so a CR could move a heading, fence, underline or clause between
+                  what renders and what any byte reading sees; refused by name), and the step 8
+                  journal rule is judged on the vendored CommonMark parse (opf/tools/_vendor/
+                  marko, loaded fail-closed with its provenance checked through
+                  _commonmark_headings), never on a hand-written line model: the step 8 heading
+                  is the level-three ATX heading node whose raw source line is byte-for-byte the
+                  fixed text, a direct child of the document (so a spelling inside fenced or
+                  indented code, an HTML block, a blockquote, a list or any other container is
+                  never that heading), present exactly once; the step runs to the next top-level
+                  ATX or setext heading of level one to three; raw HTML anywhere inside the step,
+                  block or inline (a comment, a processing instruction, a declaration, a CDATA
+                  section or a tag), is refused by name, because rendered output drops or
+                  transforms it; the step must render exactly one list item, at any list depth,
+                  whose rendered text opens with the journal lead, and that item's rendered text
+                  must carry every named clause of JOURNAL_GRADING (whitespace-insensitively),
+                  so the item's store-path conclusion stays limited to a store that has not
+                  started an adoption, it keeps what the specification says of a store that has,
+                  and it keeps the rule that the upgrade check counts every journal entry; a
+                  clause of JOURNAL_GRADING_DENIED is refused where the step's rendered text or
+                  its raw source carries it. Rendered text is what a renderer shows: never a link
+                  or image destination or title, raw HTML, a link reference definition or
+                  code-block content, with inline code wrapped in single backticks, the spelling
+                  every clause quotes. The rule deliberately over-refuses (a heading spelled with
+                  trailing spaces or a closing hash run, a clause re-spelled with another
+                  code-span delimiter run or shown only inside a code block, raw HTML that hides
+                  nothing, and a CR whose rendering is harmless all fail), so a prompt whose step
+                  8 legitimately needs a refused form must extend this gate first; a parser that
+                  cannot load, raises, or returns a parse that does not cover the prompt is
+                  CANNOT-EVALUATE under journal-parse, never a fallback line reading
 
   check_opf_prompt_pin.py                    verify the shipped prompt beside this tool (../spec)
   check_opf_prompt_pin.py --self-test        synthetic trees assert each guard's exact status and
@@ -77,7 +83,8 @@ Checks, each a named guard:
                                              paragraph; exit 0 only when nothing is NO-MATCH
 
 Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such as pin drift),
-2 CANNOT-EVALUATE (unreadable input, a missing pinned commit under full history, a harness error).
+2 CANNOT-EVALUATE (unreadable input, a missing pinned commit under full history, a vendored
+parser that cannot load or parse, a harness error).
 
 The quotation leg checks only spans whose nearby context names a pinned source; a quotation
 attributed to a document outside the pin (the git man pages the prompt also quotes) or quoted
@@ -113,6 +120,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _opf_store import VALID, INVALID, CANNOT_EVALUATE  # noqa: E402
 from _opf_observe import _scrubbed_env  # noqa: E402
+# The vendored-marko loader (provenance-checked, fail-closed); marko itself is imported lazily at
+# the first parse, so importing this gate never requires the vendored tree to be present.
+import _commonmark_headings  # noqa: E402
 
 PROMPT_REL = "spec/OPF-IMPLEMENTATION-PROMPT.md"
 PACK_REL = "prompt-pack/pack.toml"
@@ -505,179 +515,192 @@ def _check_required_rules(spec_norm, prompt_norm):
                  "required rule {!r} is not restated in the prompt".format(name))
 
 
-def _is_fence(line):
-    """A fenced-code delimiter line as this gate reads one: optional leading spaces, then a
-    backtick or tilde run. Deliberately broader than Markdown's three-character minimum, so a
-    malformed near-delimiter is refused rather than read as prose."""
-    return line.lstrip(" ").startswith(("```", "~~~"))
+def _check_prompt_cr(prompt_text):
+    """A carriage return anywhere in the prompt is refused by name, before the parse: CommonMark
+    reads a lone CR as a line ending, so a CR can end a line that any byte reading sees as one
+    line, moving a heading, fence, underline or clause between what renders and what a scan of
+    the bytes sees. The shipped prompt is LF-only, so nothing legitimate is refused."""
+    _require("\r" not in prompt_text, "journal-grading",
+             "the prompt carries a carriage return (first at offset {}), an unsupported line "
+             "ending: CommonMark reads a lone CR as a line ending, so text around it can render "
+             "away from what a byte reading sees".format(prompt_text.find("\r")))
 
 
-_FENCE_OPEN_RE = re.compile(r" *(`{3,}|~{3,})")
+def _journal_markdown(prompt_text):
+    """The vendored CommonMark parse this gate judges step 8 on: the pinned marko under
+    opf/tools/_vendor, loaded and provenance-checked by _commonmark_headings (version and import
+    origin, fail-closed), parsed fresh per call with no extensions. The prompt is parsed exactly
+    as read (the carriage-return refusal has already run, and marko's remaining preprocessing
+    substitutions are length-preserving), so every node's source span indexes prompt_text, which
+    the covering-span requirement below pins. A parser that cannot load, raises, or returns a
+    document whose span does not cover the text is CANNOT-EVALUATE, never a silent pass or a
+    fallback line reading."""
+    try:
+        marko = _commonmark_headings._load_marko()
+        document = _commonmark_headings._new_parser(marko).parse(prompt_text)
+    except Exception as exc:
+        raise _Refusal(CANNOT_EVALUATE, "journal-parse",
+                       "the vendored CommonMark parser could not parse the prompt: {}".format(exc))
+    _require(getattr(document, "source_span", None) == (0, len(prompt_text))
+             and isinstance(getattr(document, "children", None), list), "journal-parse",
+             "the parsed document does not cover the prompt text", CANNOT_EVALUATE)
+    return marko, document
 
 
-def _open_fence_before(lines, stop):
-    """The fence still open at the start of line index stop, as (character, run length), or None.
-    Fences are tracked the way Markdown closes them, never by delimiter parity: a run of three or
-    more backticks or tildes opens a fence, and only a line holding nothing but a run of the SAME
-    character at least as LONG closes it, so a longer opening run or the other character is not
-    closed by a bare three-backtick line, and an unclosed fence stays open to the end. Leading
-    spaces are accepted on both delimiters, broader than Markdown's three-space bound, so a
-    deeper-indented near-delimiter still flips the state here and the mismatch is refused rather
-    than read around."""
-    state = None
-    for line in lines[:stop]:
-        if state is None:
-            match = _FENCE_OPEN_RE.match(line)
-            if match is not None:
-                run = match.group(1)
-                state = (run[0], len(run))
-        else:
-            char, length = state
-            body = line.strip()
-            if body and body == char * len(body) and len(body) >= length:
-                state = None
-    return state
-
-
-def _step_shapes(step):
-    """Refuse every line of step 8 that is not one of the closed set of shapes the shipped prompt
-    places there: a blank or whitespace-only line, a column-0 ATX heading of one to six number
-    signs then a space (levels one to three never reach here, because they end the step), a `- `
-    list bullet at an indent an open list item supports, a continuation line of an open list
-    item, or a plain paragraph line. Every other shape is refused by name, because Markdown
-    renders those forms (fenced or indented code, raw HTML and comments, setext underlines and
-    thematic breaks, blockquotes, alternate list markers, tab-shifted indentation) away from what
-    this space-and-line scan reads, so reading around them could pass step 8 text that never
-    renders or miss a form that renders as something else. The closed set deliberately
-    over-refuses (an emphasis-opening or plus-led paragraph line is refused too): a prompt that
-    legitimately needs a refused form inside step 8 must extend this gate first."""
-    lists = []  # content indents of the open list items, outermost first
-    in_paragraph = False
-    for line in step:
-        _require("\t" not in line, "journal-grading",
-                 "step 8 carries a tab, an unsupported character here: tabs move Markdown's "
-                 "column counting away from this scan's space-only indent reading")
-        _require("<!--" not in line, "journal-grading",
-                 "step 8 carries an HTML comment opener, an unsupported form: rendered output "
-                 "drops comment content, so text this scan reads there would never render")
-        stripped = line.lstrip(" ")
-        indent = len(line) - len(stripped)
-        if not stripped:
-            in_paragraph = False
+def _md_walk(nodes):
+    """Every element node under nodes, depth first; leaf text (a str in a children slot) is not a
+    node. Nesting depth is bounded by the prompt's own block nesting, far under the recursion
+    limit."""
+    for node in nodes:
+        if isinstance(node, str):
             continue
-        _require(not _is_fence(line), "journal-grading",
-                 "step 8 carries a fenced-code delimiter, an unsupported form: text inside a "
-                 "fence is literal, so this scan could read an item where none renders")
-        if stripped.startswith("#"):
-            _require(indent == 0, "journal-grading",
-                     "step 8 carries an indented heading, an unsupported form: Markdown renders "
-                     "it as a heading, but this scan would read it as ordinary step text")
-            _require(re.match(r"#{1,6} ", line) is not None, "journal-grading",
-                     "step 8 carries a number-sign line that is not a space-led ATX heading of "
-                     "level one to six (a bare run, a run past six, or a tab or other character "
-                     "after the run), an unsupported form: Markdown can still render it as a "
-                     "heading this scan cannot place")
-            lists = []
-            in_paragraph = False
-            continue
-        _require(not stripped.startswith("<"), "journal-grading",
-                 "step 8 carries a line opening with <, an unsupported form: raw HTML renders "
-                 "away from what this scan reads")
-        body = stripped.rstrip()
-        _require(stripped.startswith("- ")
-                 or not (set(body) <= {"-"} or set(body) <= {"="}), "journal-grading",
-                 "step 8 carries a dash-only or equals-only line, an unsupported form: a setext "
-                 "underline turns the paragraph above it into a heading that would end step 8, "
-                 "and a thematic break is not step text")
-        _require(stripped[0] not in ">*+", "journal-grading",
-                 "step 8 opens a line with {!r}, an unsupported form: a blockquote or an "
-                 "alternate list marker renders as a block this scan does not read".format(
-                     stripped[0]))
-        if stripped.startswith("- "):
-            while lists and lists[-1] > indent:
-                lists.pop()
-            _require(indent <= 3 or (bool(lists) and indent <= lists[-1] + 3),
-                     "journal-grading",
-                     "step 8 carries a list bullet indented {} space(s) with no open list item "
-                     "that deep, which Markdown renders as indented code, not a list "
-                     "item".format(indent))
-            lists.append(indent + 2)
-            in_paragraph = True
-            continue
-        if indent == 0:
-            # A column-0 paragraph line; where it follows a blank line it starts a new block,
-            # which closes every open list item.
-            if not in_paragraph:
-                lists = []
-            in_paragraph = True
-            continue
-        if in_paragraph:
-            # A paragraph accepts a continuation line at any indent (indented code cannot
-            # interrupt a paragraph), so this line renders as ordinary step text.
-            continue
-        while lists and lists[-1] > indent:
-            lists.pop()
-        _require(bool(lists), "journal-grading",
-                 "step 8 carries an indented line that starts a block outside any open list "
-                 "item, an unsupported form: at four or more spaces Markdown renders it as "
-                 "indented code, and this prompt places no shallower stray indented paragraph")
-        _require(indent <= lists[-1] + 3, "journal-grading",
-                 "step 8 carries a line indented {} space(s) after a blank line, four or more "
-                 "past the open list item's content indent of {}, which Markdown renders as "
-                 "indented code, not step text".format(indent, lists[-1]))
-        in_paragraph = True
+        yield node
+        children = getattr(node, "children", None)
+        if isinstance(children, list):
+            yield from _md_walk(children)
 
 
-def _journal_item(prompt_text):
-    """(normalized step 8 list item on `.working/journals/`, normalized step 8 text). The step
-    runs from its fixed heading to the next column-0 heading of level three or above; the item is
-    its bullet line and every following line indented deeper than the bullet, ending before the
-    first blank or whitespace-only line or line indented no deeper than the bullet. This parser
-    is not a Markdown parser, so it refuses what it cannot place instead of reading around it:
-    the heading must sit outside fenced code (_open_fence_before tracks fences by opening
-    character and run length, so a mismatched pair cannot hide the heading behind an even
-    delimiter count), and every line of the step must take a shape of the closed grammar in
-    _step_shapes, which over-refuses by design. Exactly one heading and exactly one item, or a
-    finding."""
-    lines = prompt_text.split("\n")
-    heads = [i for i, line in enumerate(lines) if line == _STEP8_HEAD]
+def _node_span(prompt_text, node):
+    """The node's source span as (start, end) indices into prompt_text, fail-closed on a missing
+    or malformed span rather than a wrong slice."""
+    span = getattr(node, "source_span", None)
+    _require(isinstance(span, tuple) and len(span) == 2
+             and all(isinstance(value, int) for value in span)
+             and 0 <= span[0] <= span[1] <= len(prompt_text), "journal-parse",
+             "a parsed node carries no usable source span", CANNOT_EVALUATE)
+    return span
+
+
+def _heading_level(node):
+    level = getattr(node, "level", None)
+    _require(isinstance(level, int), "journal-parse",
+             "a parsed heading carries no integer level", CANNOT_EVALUATE)
+    return level
+
+
+def _step8_section(marko, document, prompt_text):
+    """(the nodes of step 8, the step's raw source text). The step 8 heading is the ATX heading
+    node of level three, a direct child of the document, whose raw source line is byte-for-byte
+    _STEP8_HEAD: judged on the parse, a spelling inside fenced or indented code, an HTML block, a
+    blockquote, a list or any other container is not that node, and neither is an indented,
+    reworded or trailing-decorated spelling, so each of those reads as a missing heading (or, for
+    a stray top-level copy, a duplicate) rather than being read around. Exactly one such node, or
+    a finding. The step runs from that heading to the next direct-child heading of level one to
+    three (ATX or setext, at any indent Markdown still renders), or to the end of the document."""
+    children = document.children
+    heads = []
+    for index, child in enumerate(children):
+        if isinstance(child, marko.block.Heading) and _heading_level(child) == 3:
+            start, end = _node_span(prompt_text, child)
+            raw = prompt_text[start:end]
+            if raw.endswith("\n"):
+                raw = raw[:-1]
+            if raw == _STEP8_HEAD:
+                heads.append(index)
     _require(len(heads) == 1, "journal-grading",
-             "the prompt must carry the heading {!r} exactly once; found {}".format(
+             "the prompt must render the heading {!r} exactly once, at the top level and outside "
+             "any code, HTML or other container; the parse finds {}".format(
                  _STEP8_HEAD, len(heads)))
-    open_fence = _open_fence_before(lines, heads[0])
-    _require(open_fence is None, "journal-grading",
-             "a fence of {!r} opened before the step 8 heading and no later line holds a run of "
-             "that character at least that long alone, so the heading sits inside fenced code, "
-             "where it is literal text, not a heading".format(
-                 open_fence[0] * open_fence[1] if open_fence else ""))
-    end = next((i for i in range(heads[0] + 1, len(lines)) if re.match(r"#{1,3} ", lines[i])),
-               len(lines))
-    step = lines[heads[0] + 1:end]
-    _step_shapes(step)
-    starts = [i for i, line in enumerate(step) if line.lstrip(" ").startswith(_JOURNAL_ITEM_LEAD)]
-    _require(len(starts) == 1, "journal-grading",
-             "step 8 must carry exactly one list item opening {!r}; found {}".format(
-                 _JOURNAL_ITEM_LEAD, len(starts)))
-    bullet = step[starts[0]]
-    indent = len(bullet) - len(bullet.lstrip(" "))
-    item = [bullet]
-    for line in step[starts[0] + 1:]:
-        if not line.strip() or len(line) - len(line.lstrip(" ")) <= indent:
+    end_index = len(children)
+    for index in range(heads[0] + 1, len(children)):
+        child = children[index]
+        if (isinstance(child, (marko.block.Heading, marko.block.SetextHeading))
+                and _heading_level(child) <= 3):
+            end_index = index
             break
-        item.append(line)
-    return _normalize("\n".join(item)), _normalize("\n".join(step))
+    raw_start = _node_span(prompt_text, children[heads[0]])[1]
+    raw_end = (_node_span(prompt_text, children[end_index])[0] if end_index < len(children)
+               else len(prompt_text))
+    return children[heads[0] + 1:end_index], prompt_text[raw_start:raw_end]
+
+
+def _check_step8_html(marko, section):
+    """Raw HTML anywhere inside step 8, block or inline, is refused by name: rendered output drops
+    or transforms raw HTML (a comment, a processing instruction, a declaration, a CDATA section or
+    a tag), so text inside one never renders as the prompt text this gate credits, and what a
+    renderer makes of the rest is outside what this gate can judge. This over-refuses HTML that
+    hides nothing, by design."""
+    for node in _md_walk(section):
+        _require(not isinstance(node, marko.block.HTMLBlock), "journal-grading",
+                 "step 8 carries a raw HTML block, an unsupported form here: rendered output "
+                 "drops or transforms raw HTML, so nothing inside it is rendered prompt text")
+        _require(not isinstance(node, marko.inline.InlineHTML), "journal-grading",
+                 "step 8 carries inline raw HTML, an unsupported form here: rendered output "
+                 "drops or transforms raw HTML, so nothing inside it is rendered prompt text")
+
+
+def _visible_text(marko, node):
+    """The text a CommonMark renderer shows for node, as this gate credits it: rendered text only,
+    never a link or image destination or title, raw HTML, a link reference definition or
+    code-block content (fenced and indented code render literally, but text shown only as code is
+    not the prompt stating a rule, and no heading or list this gate judges can act from inside
+    one). Inline code joins wrapped in single backticks, the spelling every required clause
+    quotes, so a clause re-spelled with another code-span delimiter run does not match and is
+    refused rather than read around. Block children contribute a line break, which the
+    whitespace-insensitive comparison reads as a space, so adjacent blocks never glue together
+    without a separator, while a clause can still match across them exactly as it matches across
+    the wrapped lines of one paragraph."""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, (marko.block.FencedCode, marko.block.CodeBlock, marko.block.HTMLBlock,
+                         marko.block.LinkRefDef, marko.inline.InlineHTML)):
+        return ""
+    if isinstance(node, marko.inline.CodeSpan):
+        return "`{}`".format(node.children) if isinstance(node.children, str) else ""
+    if isinstance(node, marko.inline.LineBreak):
+        return "\n"
+    children = getattr(node, "children", None)
+    if isinstance(children, str):
+        return children
+    if not isinstance(children, list):
+        return ""
+    parts = []
+    for child in children:
+        parts.append(_visible_text(marko, child))
+        if isinstance(child, marko.block.BlockElement):
+            parts.append("\n")
+    return "".join(parts)
+
+
+def _journal_item_node(marko, section):
+    """The one list item of step 8 whose rendered text opens with the journal lead. List items are
+    searched at every depth of the step (the shipped item is nested inside the locations list),
+    and the lead is matched on rendered text, so lead text inside fenced or indented code is never
+    an item (code renders no list item) and a second rendering of the lead, nested or not, is a
+    duplicate. Exactly one, or a finding."""
+    lead = _normalize(_JOURNAL_ITEM_LEAD[len("- "):])
+    items = [node for node in _md_walk(section)
+             if isinstance(node, marko.block.ListItem)
+             and _normalize(_visible_text(marko, node)).startswith(lead)]
+    _require(len(items) == 1, "journal-grading",
+             "step 8 must render exactly one list item opening {!r}; the parse finds {}".format(
+                 _JOURNAL_ITEM_LEAD, len(items)))
+    return items[0]
 
 
 def _check_journal_grading(prompt_text):
-    item, step = _journal_item(prompt_text)
+    """Judge the step 8 journal rule on the vendored CommonMark parse, never on a line model: the
+    heading, the step's extent, the item and every clause are taken from what marko renders, so an
+    indentation, fence, setext, list or lazy-continuation reading cannot differ between this gate
+    and a renderer. The required clauses must appear in the item's rendered text; the denied
+    clause is refused where the step's rendered text or the step's raw source carries it, so an
+    unqualified conclusion is refused even where only a renderer, or only a byte reading, would
+    show it (a denied clause inside a code block is caught by the raw scan; one assembled only by
+    rendering, from inline markers the raw bytes interleave, by the rendered scan; raw HTML in
+    the step is refused outright before either scan runs)."""
+    _check_prompt_cr(prompt_text)
+    marko, document = _journal_markdown(prompt_text)
+    section, step_raw = _step8_section(marko, document, prompt_text)
+    _check_step8_html(marko, section)
+    item = _journal_item_node(marko, section)
+    item_text = _normalize(_visible_text(marko, item))
     for name, clause in JOURNAL_GRADING:
-        _require(_normalize(clause) in item, "journal-grading",
+        _require(_normalize(clause) in item_text, "journal-grading",
                  "the step 8 journal item lacks the required clause {!r}".format(name))
-    # The denied clause is refused anywhere in step 8, not only in the item's first block: a
-    # continuation paragraph of the item sits past the blank line where the item scan stops, but
-    # it still renders inside the step.
+    step_text = _normalize("\n".join(_visible_text(marko, node) for node in section))
     for name, clause in JOURNAL_GRADING_DENIED:
-        _require(_normalize(clause) not in step,
+        denied = _normalize(clause)
+        _require(denied not in step_text and denied not in _normalize(step_raw),
                  "journal-grading",
                  "step 8 carries the denied clause {!r}".format(name))
 
@@ -1051,7 +1074,12 @@ def _vectors():
 
     def every_entry_moved(indent, separator="\n"):
         # The every-entry clause moved to the end of the item at the given indentation (the
-        # bullet sits at 2), after the given separator.
+        # bullet sits at 2, so the item's content indent is 4), after the given separator.
+        # Judged on the parse, CommonMark decides where the clause renders: with no blank line
+        # the moved line is a lazy continuation of the item's paragraph at any indent, so the
+        # clause stays inside the item; after a blank or whitespace-only line it is a second
+        # paragraph of the item at the content indent (4) or deeper (5), and it falls outside
+        # the item below that indent (3), where the required clause is missing from the item.
         def build(base):
             root = _build_tree(base)
             _edit_prompt(root, "\n    " + _FIXTURE_JOURNAL_EVERY_ENTRY, "")
@@ -1080,8 +1108,8 @@ def _vectors():
         return build
 
     def journal_denied_in_continuation(base):
-        # The denied clause in a continuation paragraph of the item, past the blank line where
-        # the item scan stops; it still renders inside step 8, so it must still be refused.
+        # The denied clause in a second paragraph of the item, after a blank line: it renders
+        # inside step 8 (and inside the item), so it must still be refused.
         root = _build_tree(base)
         _edit_prompt(root, _FIXTURE_JOURNAL_ADOPTING, _FIXTURE_JOURNAL_ADOPTING +
                      "\n\n    In short, in a homes-1 origin store a journal entry is a store "
@@ -1133,8 +1161,8 @@ def _vectors():
         _edit_prompt(root, _FIXTURE_JOURNAL_ITEM, "<!--\n" + _FIXTURE_JOURNAL_ITEM + "\n-->")
 
     def journal_conclusion_in_html_comment(base):
-        # Only the required store-path conclusion wrapped in an inline HTML comment: this scan's
-        # text still carries the clause, but rendered output drops it.
+        # Only the required store-path conclusion wrapped in an inline HTML comment: rendered
+        # output drops it, so inline raw HTML is refused by name.
         root = _build_tree(base)
         _edit_prompt(root, "so in a homes-1 origin store that has not started an adoption a "
                      "journal entry is a store path, not machine-local data.",
@@ -1143,7 +1171,7 @@ def _vectors():
 
     def setext_heading(marker):
         # A paragraph plus a setext underline just after the step 8 heading: Markdown renders a
-        # heading there, where a space-and-line scan reads two ordinary text lines.
+        # heading there, which ends step 8 before the item.
         def build(base):
             root = _build_tree(base)
             _edit_prompt(root, _STEP8_HEAD + "\n\n",
@@ -1152,11 +1180,129 @@ def _vectors():
 
     def journal_step9_heading_tab(base):
         # A tab instead of the space after the number-sign run: Markdown still renders the
-        # heading, so step 9 begins there, but a space-only step-end scan reads past it and
-        # finds the item inside step 8.
+        # heading, so step 9 begins there and the item after it sits outside step 8.
         root = _build_tree(base)
         _edit_prompt(root, _FIXTURE_JOURNAL_ITEM + "\n\n" + _FIXTURE_STEP9_HEAD,
                      "###\tStep 9: fresh initialization\n\n" + _FIXTURE_JOURNAL_ITEM)
+
+    def fence_near_heading(insert):
+        # The given text just before the step 8 heading: each variant leaves a fence open there
+        # under CommonMark (a closer indented four spaces or led by a tab does not close a
+        # fence, and an opener indented four spaces is indented code, not a fence), so the
+        # heading renders as fenced-code text, never as a heading.
+        def build(base):
+            root = _build_tree(base)
+            _edit_prompt(root, _STEP8_HEAD, insert + _STEP8_HEAD)
+        return build
+
+    def setext_bullet_underline(base):
+        # A paragraph underlined by `- `: an empty list item cannot interrupt a paragraph, so
+        # CommonMark reads the dash line as a setext underline and renders a level-two heading,
+        # which ends step 8 before the item.
+        root = _build_tree(base)
+        _edit_prompt(root, _STEP8_HEAD + "\n\n", _STEP8_HEAD + "\n\nLater phases\n- \n\n")
+
+    def step8_in_html_block(base):
+        # The heading and the item inside an HTML comment block opened before the heading:
+        # nothing between <!-- and --> renders, so no step 8 heading renders at all.
+        root = _build_tree(base)
+        _edit_prompt(root, _STEP8_HEAD + "\n\n" + _FIXTURE_JOURNAL_ITEM,
+                     "<!--\n\n" + _STEP8_HEAD + "\n\n" + _FIXTURE_JOURNAL_ITEM + "\n\n-->")
+
+    def step8_head_in_blockquote(base):
+        # The heading inside a blockquote renders as quoted material, not as the top-level step
+        # 8 heading.
+        root = _build_tree(base)
+        _edit_prompt(root, _STEP8_HEAD, "> " + _STEP8_HEAD)
+
+    def cr_hides_step9_heading(base):
+        # A lone CR joining a note to the step 9 heading: a byte reading sees one paragraph
+        # line, but CommonMark reads the CR as a line ending, so a step 9 heading renders and
+        # the item after it sits outside step 8.
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_JOURNAL_ITEM + "\n\n" + _FIXTURE_STEP9_HEAD,
+                     "Note.\r" + _FIXTURE_STEP9_HEAD + "\n\n" + _FIXTURE_JOURNAL_ITEM)
+
+    def cr_opens_fence(base):
+        # A lone CR hiding a fence opener at the start of step 8: rendered, the fence swallows
+        # the item.
+        root = _build_tree(base)
+        _edit_prompt(root, _STEP8_HEAD + "\n\n", _STEP8_HEAD + "\n\nNote.\r```\n\n")
+
+    def cr_setext_underline(base):
+        # A lone CR hiding a setext underline: rendered, a level-two heading ends step 8 before
+        # the item.
+        root = _build_tree(base)
+        _edit_prompt(root, _STEP8_HEAD + "\n\n", _STEP8_HEAD + "\n\nLater phases\r---\n\n")
+
+    def cr_harmless(base):
+        # A CR whose rendered reading is harmless (a soft line break outside step 8): still
+        # refused, because the carriage-return refusal is by presence, not by effect, so this
+        # fixture discriminates that refusal alone.
+        _build_tree(base, extra_text="A note line.\rIts continuation.")
+
+    def conclusion_in_link_destination(base):
+        # The required conclusion moved into a link destination: a destination is not rendered
+        # text, so the clause no longer renders inside the item.
+        root = _build_tree(base)
+        _edit_prompt(root, "so in a homes-1 origin store that has not started an adoption a "
+                     "journal entry is a store path, not machine-local data.",
+                     "[.](<so in a homes-1 origin store that has not started an adoption a "
+                     "journal entry is a store path, not machine-local data.>)")
+
+    def conclusion_in_processing_instruction(base):
+        # The required conclusion wrapped in an inline processing instruction: rendered output
+        # drops it, exactly as it drops an HTML comment.
+        root = _build_tree(base)
+        _edit_prompt(root, "so in a homes-1 origin store that has not started an adoption a "
+                     "journal entry is a store path, not machine-local data.",
+                     "<?x so in a homes-1 origin store that has not started an adoption a "
+                     "journal entry is a store path, not machine-local data. ?>")
+
+    def html_block_harmless(base):
+        # An HTML comment block inside step 8 that hides no required text: refused by the
+        # raw-HTML guard alone, so this fixture discriminates that guard.
+        root = _build_tree(base)
+        _edit_prompt(root, "\n\n" + _FIXTURE_STEP9_HEAD,
+                     "\n\n<!-- a marker that hides nothing -->\n\n" + _FIXTURE_STEP9_HEAD)
+
+    def inline_html_harmless(base):
+        # An inline processing instruction appended after a required clause, hiding nothing:
+        # refused by the raw-HTML guard alone.
+        root = _build_tree(base)
+        _edit_prompt(root, "which is this prompt's choice.",
+                     "which is this prompt's choice. <?a marker that hides nothing?>")
+
+    def conclusion_in_code_block(code):
+        # The required conclusion moved into a code block inside the item (fenced at the item's
+        # content indent, or indented four past it): the text renders, but only as code, which
+        # is not the prompt stating its rule, so the clause is missing from the item.
+        def build(base):
+            root = _build_tree(base)
+            _edit_prompt(root, "so in a homes-1 origin store that has not started an adoption "
+                         "a journal entry is a store path, not machine-local data.",
+                         code.format("so in a homes-1 origin store that has not started an "
+                                     "adoption a journal entry is a store path, not "
+                                     "machine-local data."))
+        return build
+
+    def denied_in_code_block(base):
+        # The denied clause inside a fenced code block of step 8: it is absent from the
+        # rendered-text scan (code earns no clause credit), so only the raw-source scan of the
+        # denied clause refuses it.
+        root = _build_tree(base)
+        _edit_prompt(root, "\n\n" + _FIXTURE_STEP9_HEAD,
+                     "\n\n```text\nIn short, in a homes-1 origin store a journal entry is a "
+                     "store path.\n```\n\n" + _FIXTURE_STEP9_HEAD)
+
+    def denied_emphasised(base):
+        # The denied clause interleaved with emphasis markers: the raw bytes never spell it, but
+        # the rendered text does, so only the rendered-text scan of the denied clause refuses
+        # it.
+        root = _build_tree(base)
+        _edit_prompt(root, "\n\n" + _FIXTURE_STEP9_HEAD,
+                     "\n\nIn short, in a homes-1 origin store a *journal* entry is a store "
+                     "path.\n\n" + _FIXTURE_STEP9_HEAD)
 
     return [
         ("valid-tree", VALID, None, None, valid),
@@ -1216,14 +1362,15 @@ def _vectors():
         ("journal-item-under-level-four-heading", VALID, None, None,
          journal_item_under_level_four),
         ("journal-clause-indent-deeper", VALID, None, None, every_entry_moved(3)),
-        ("journal-clause-indent-equal", INVALID, "journal-grading", "_check_journal_grading",
-         every_entry_moved(2)),
-        ("journal-clause-indent-shallower", INVALID, "journal-grading", "_check_journal_grading",
-         every_entry_moved(1)),
-        ("journal-clause-after-blank-line", INVALID, "journal-grading", "_check_journal_grading",
-         every_entry_moved(4, "\n\n")),
-        ("journal-clause-after-whitespace-line", INVALID, "journal-grading",
-         "_check_journal_grading", every_entry_moved(4, "\n      \n")),
+        ("journal-clause-indent-equal", VALID, None, None, every_entry_moved(2)),
+        ("journal-clause-indent-shallower", VALID, None, None, every_entry_moved(1)),
+        ("journal-clause-after-blank-line", VALID, None, None, every_entry_moved(4, "\n\n")),
+        ("journal-clause-after-whitespace-line", VALID, None, None,
+         every_entry_moved(4, "\n      \n")),
+        ("journal-clause-after-blank-indent-five", VALID, None, None,
+         every_entry_moved(5, "\n\n")),
+        ("journal-clause-after-blank-outside-item", INVALID, "journal-grading",
+         "_check_journal_grading", every_entry_moved(3, "\n\n")),
         ("journal-item-in-fence", INVALID, "journal-grading", "_check_journal_grading",
          journal_item_in_fence),
         ("journal-step8-heading-in-fence", INVALID, "journal-grading", "_check_journal_grading",
@@ -1258,6 +1405,43 @@ def _vectors():
          "_check_journal_grading", setext_heading("=")),
         ("journal-step9-heading-tab", INVALID, "journal-grading", "_check_journal_grading",
          journal_step9_heading_tab),
+        ("journal-fence-closer-indented", INVALID, "journal-grading", "_check_journal_grading",
+         fence_near_heading("```text\n    ```\n\n")),
+        ("journal-fence-closer-tab-led", INVALID, "journal-grading", "_check_journal_grading",
+         fence_near_heading("```text\n\t```\n\n")),
+        ("journal-fence-opener-indented", INVALID, "journal-grading", "_check_journal_grading",
+         fence_near_heading("    ```\n\n```\n\n")),
+        ("journal-setext-underline-dash-bullet", INVALID, "journal-grading",
+         "_check_journal_grading", setext_bullet_underline),
+        ("journal-step8-heading-in-html-block", INVALID, "journal-grading",
+         "_check_journal_grading", step8_in_html_block),
+        ("journal-step8-heading-in-blockquote", INVALID, "journal-grading",
+         "_check_journal_grading", step8_head_in_blockquote),
+        ("journal-cr-hides-step9-heading", INVALID, "journal-grading", "_check_journal_grading",
+         cr_hides_step9_heading),
+        ("journal-cr-opens-fence", INVALID, "journal-grading", "_check_journal_grading",
+         cr_opens_fence),
+        ("journal-cr-setext-underline", INVALID, "journal-grading", "_check_journal_grading",
+         cr_setext_underline),
+        ("journal-cr-harmless-rendering", INVALID, "journal-grading", "_check_prompt_cr",
+         cr_harmless),
+        ("journal-conclusion-in-link-destination", INVALID, "journal-grading",
+         "_check_journal_grading", conclusion_in_link_destination),
+        ("journal-conclusion-in-processing-instruction", INVALID, "journal-grading",
+         "_check_journal_grading", conclusion_in_processing_instruction),
+        ("journal-html-block-harmless", INVALID, "journal-grading", "_check_step8_html",
+         html_block_harmless),
+        ("journal-inline-html-harmless", INVALID, "journal-grading", "_check_step8_html",
+         inline_html_harmless),
+        ("journal-conclusion-in-fenced-code", INVALID, "journal-grading",
+         "_check_journal_grading",
+         conclusion_in_code_block("\n\n    ```text\n    {}\n    ```")),
+        ("journal-conclusion-in-indented-code", INVALID, "journal-grading",
+         "_check_journal_grading", conclusion_in_code_block("\n\n        {}")),
+        ("journal-denied-clause-in-code-block", INVALID, "journal-grading",
+         "_check_journal_grading", denied_in_code_block),
+        ("journal-denied-clause-emphasised", INVALID, "journal-grading",
+         "_check_journal_grading", denied_emphasised),
     ]
 
 
@@ -1270,11 +1454,13 @@ _JOURNAL_CLAUSE_VECTORS = (
     ("journal-adopting-distinction-removed", "adopting-store-distinction"),
     ("journal-every-entry-rule-removed", "every-entry-counts"),
     ("journal-unqualified-conclusion-added", "unqualified-conclusion"),
-    ("journal-clause-indent-equal", "every-entry-counts"),
-    ("journal-clause-indent-shallower", "every-entry-counts"),
-    ("journal-clause-after-blank-line", "every-entry-counts"),
-    ("journal-clause-after-whitespace-line", "every-entry-counts"),
+    ("journal-clause-after-blank-outside-item", "every-entry-counts"),
+    ("journal-conclusion-in-link-destination", "non-adopting-conclusion"),
+    ("journal-conclusion-in-fenced-code", "non-adopting-conclusion"),
+    ("journal-conclusion-in-indented-code", "non-adopting-conclusion"),
     ("journal-denied-clause-after-blank-line", "unqualified-conclusion"),
+    ("journal-denied-clause-in-code-block", "unqualified-conclusion"),
+    ("journal-denied-clause-emphasised", "unqualified-conclusion"),
 )
 
 
@@ -1318,6 +1504,26 @@ def _journal_clause_mutants(tmp, check):
         ran += 1
         check(vector + "-without-" + clause, dropped, (VALID, None))
     return ran
+
+
+def _journal_parse_probe(tmp, check):
+    """The journal leg must fail closed where the vendored parser cannot load: the loader seam is
+    patched to raise its own fail-closed error, and the result must be CANNOT-EVALUATE under
+    journal-parse, never VALID and never a fallback line reading."""
+    from unittest.mock import patch
+    base = Path(tmp) / "journal-parse-unavailable"
+    base.mkdir()
+    _build_tree(base)
+
+    def refuse():
+        raise _commonmark_headings.HeadingScanError(
+            "injected: the vendored parser cannot load",
+            _commonmark_headings.REASON_VENDOR_UNREADABLE)
+
+    with patch.object(_commonmark_headings, "_load_marko", refuse):
+        got = validate_tree(base)
+    check("journal-parse-unavailable", got, (CANNOT_EVALUATE, "journal-parse"))
+    return 1
 
 
 def _history_vectors(tmp, check):
@@ -1493,6 +1699,7 @@ def _self_test_isolated():
                     check(name + "-disabled-" + covering, disabled, (VALID, None))
             count += _history_vectors(tmp, check)
             count += _journal_clause_mutants(tmp, check)
+            count += _journal_parse_probe(tmp, check)
             count += 1
             check("direct-entry-harness-error", _direct_entry_harness_error(),
                   (CANNOT_EVALUATE, None))
