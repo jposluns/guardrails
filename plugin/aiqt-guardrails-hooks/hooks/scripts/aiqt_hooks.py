@@ -11229,21 +11229,28 @@ _MERGE_VALUE_LONGS = frozenset((
 # inside echo/printf/cat/ls/grep arguments or a git commit -m value denies like any other mention (the
 # earlier never-executes-its-arguments allowlist was removed: printf -v evaluates an array subscript in
 # its target argument, and proving which commands never execute an argument is shell-semantics
-# modelling this guard no longer performs). The scan is ONE ordered word walk over the WHOLE
-# reading: each word is searched once from the end of the previous match, so the reading is linear
-# and carries NO gap bound (any amount of whitespace or filler between the words still matches; an
-# earlier bounded-gap regex silently stopped matching past its bound). NOTHING SPLITS the walk. The
+# modelling this guard no longer performs). The scan is ONE unordered word-presence read of the WHOLE
+# reading: each word is searched once over the whole text, in ANY order, so the read carries NO
+# gap bound and NO order requirement (any amount of whitespace or filler around the words still
+# matches; an earlier bounded-gap regex silently stopped matching past its bound, and an earlier
+# ordered walk read only the textual order gh..pr..merge, so a shape spelling the merge word
+# BEFORE 'gh' - a for-loop word list, an assignment, a 'set --' or array argument list, words fed
+# through xargs - spelled every word literally yet escaped it). NOTHING SPLITS the read. The
 # scan once split the text into chunks at unquoted, unescaped ';', '|' and '&' and walked each
 # chunk alone, and spelling after spelling of an in-word separator (inside a quote, an escape or a
 # redirect operator, and still inside a '$(...)' or backtick substitution, a '${...}' expansion,
 # quotes nested within a substitution, or a $'...' escape) scattered one command's words across
 # chunks and hid the merge; telling which separator characters bash reads as real separators takes
-# a full shell parser, which this guard refuses to model. Walking the whole reading closes that
-# class outright: literally spelled merge words are found WHATEVER lies between them. The cost,
-# stated plainly, is over-denial INSIDE a declaring checkout only: words that genuinely belong to
+# a full shell parser, which this guard refuses to model. Reading the whole text for presence
+# alone closes both classes outright: literally spelled merge words are found WHEREVER they sit
+# and WHATEVER lies between them. The cost, stated plainly, is over-denial for EVERY
+# merge-spelling text, not only inside a declaring checkout: words that genuinely belong to
 # separate commands on one line ('gh pr list | grep merge') now match too, exactly as the
-# newline-separated pair always did, and the strict single-simple-command check below then refuses
-# the multi-command shape; a checkout with no declaration stays inert whatever the shape. A
+# newline-separated pair always did; in a DECLARING checkout the strict single-simple-command
+# check below then refuses the multi-command shape, and OUTSIDE one the fail posture decides (a
+# matched command with no usable session cwd, or behind a work-tree discovery fault, denies
+# fail-closed; a session git confirms is in no work tree allows with a note); a checkout with no
+# declaration stays inert whatever the shape. A
 # DESCRIPTOR-REDIRECTION spelling ('2>&1', '>&2', '<&-', '&>file', '&>>file') and the '>|'
 # forced-clobber redirect are still blanked (replaced with a space) before the walk: such an
 # operator can abut a word ('gh pr2>|x merge') where the raw text hides the whole-word boundary
@@ -11779,30 +11786,32 @@ def _merge_simple_gh(command):
 
 
 def _merge_raw_hit(text):
-    """True when the raw merge backstop sees a gh pr-merge or gh api merge spelling in text: 'gh'
-    then 'pr' then 'merge' as words in order, or 'gh' then 'api' then a merge endpoint or mutation
-    name, anywhere in the ONE whole reading, with no bound on the gaps. NOTHING splits the walk
-    (not a ';', '|' or '&', a quote, an escape, a substitution, an expansion or a newline), so no
-    construct between literally spelled merge words can scatter them out of the scan's sight;
-    words of genuinely separate commands can only add a match, the disclosed over-deny direction,
-    armed only where a checkout declares and judged there by the strict shape check.
-    Backslash-newline pairs are dropped first, so a line continuation inside a wrapper body cannot
-    split a pair of words the inner shell would join; descriptor-redirection spellings (2>&1, >&2,
-    <&-, &>file, &>>file) and the '>|' redirect are blanked via _RAW_REDIRECT_NEUTRAL_RE, so an
-    operator abutting a word cannot hide the whole-word boundary the match needs (the comment at
-    the regex states the direction of that blanking). Taking the EARLIEST match of each word is
-    sound: an ordered occurrence exists exactly when this walk finds one, because an earlier first
-    word only widens where the later words may sit. Linear in the text, and never raises."""
+    """True when the raw merge backstop sees a gh pr-merge or gh api merge spelling in text: 'gh',
+    'pr' and 'merge' all present as words, or 'gh', 'api' and a merge endpoint or mutation name
+    all present, anywhere in the ONE whole reading, in ANY order, with no bound on the gaps.
+    NOTHING splits the read (not a ';', '|' or '&', a quote, an escape, a substitution, an
+    expansion or a newline) and NO order is required (an earlier walk matched only the textual
+    order gh..pr..merge, so a shape spelling the merge word before 'gh' - a for-loop word list,
+    an assignment, a 'set --' or array argument list, words fed through xargs - spelled every
+    word literally yet escaped it), so no construct around literally spelled merge words can
+    scatter them out of the scan's sight; words of genuinely separate commands can only add a
+    match, the disclosed over-deny direction, judged in a declaring checkout by the strict shape
+    check and elsewhere by the fail-closed discovery posture. Backslash-newline pairs are dropped
+    first, so a line continuation inside a wrapper body cannot split a pair of words the inner
+    shell would join; descriptor-redirection spellings (2>&1, >&2, <&-, &>file, &>>file) and the
+    '>|' redirect are blanked via _RAW_REDIRECT_NEUTRAL_RE, so an operator abutting a word cannot
+    hide the whole-word boundary the match needs (the comment at the regex states the direction
+    of that blanking). Each word is searched once, a linear pass; the api ENDPOINT read
+    (_RAW_API_TARGET_RE) is NOT linear on adversarial inputs (a long token of repeated endpoint
+    prefixes backtracks superlinearly, and a crafted command large enough to exhaust the 8-second
+    deadline fails closed with exit 2, a deny, never a bypass). Never raises."""
     text = text.replace("\\\n", "")
     text = _RAW_REDIRECT_NEUTRAL_RE.sub(" ", text)
-    start = _RAW_GH_RE.search(text)
-    if start is None:
+    if _RAW_GH_RE.search(text) is None:
         return False
-    pr = _RAW_PR_RE.search(text, start.end())
-    if pr is not None and _RAW_MERGE_RE.search(text, pr.end()):
+    if _RAW_PR_RE.search(text) is not None and _RAW_MERGE_RE.search(text) is not None:
         return True
-    api = _RAW_API_RE.search(text, start.end())
-    if api is not None and _RAW_API_TARGET_RE.search(text, api.end()):
+    if _RAW_API_RE.search(text) is not None and _RAW_API_TARGET_RE.search(text) is not None:
         return True
     return False
 
@@ -11859,12 +11868,12 @@ def merge_path_guard(data):
     never silently disarm the merge gate.
     DISCOVERY, for every Bash command whose raw or de-quoted text ANYWHERE carries a merge spelling
     (_merge_raw_hit, line continuations joined and descriptor-redirection spellings (2>&1, >&2,
-    <&-, &>file, &>>file) and the '>|' redirect blanked first: gh..pr..merge as ordered words
-    anywhere in the ONE whole reading, or gh..api.. followed
-    by a merge REST endpoint or merge-mutation name; NOTHING splits the walk, not a ';', '|' or
-    '&', a quote, an escape, a substitution, an expansion or a newline, so no construct between
-    literally spelled merge words can hide them, and words of genuinely separate commands can
-    only add a match, the disclosed over-deny inside a declaring checkout, in the
+    <&-, &>file, &>>file) and the '>|' redirect blanked first: gh, pr and merge all present as
+    words anywhere in the ONE whole reading, in ANY order, or gh and api present beside
+    a merge REST endpoint or merge-mutation name; NOTHING splits the read, not a ';', '|' or
+    '&', a quote, an escape, a substitution, an expansion or a newline, and NO order is required,
+    so no construct around literally spelled merge words can hide them, and words of genuinely
+    separate commands can only add a match, the disclosed over-deny direction, in the
     command text, a quoted string, a shell-string or eval body, a here-document body or plain prose
     alike): the declaration is read from the git toplevel of the SESSION CWD alone. Where no
     .aiqt/operations.json is found there, or one with no merge member, the command allows untouched
@@ -11903,9 +11912,10 @@ def merge_path_guard(data):
     DELIBERATE OVER-DENIAL in a declaring checkout, stated plainly: ANY compound, wrapped, quoted
     or otherwise non-simple command that so much as MENTIONS a merge denies there: a conditional or
     loop around the exact declared command, a multi-command line ending in 'cd -', 'echo gh pr
-    merge 3', and a multi-command line or newline-separated pair whose words spell gh..pr..merge
-    across its parts, whatever separates them (a ';', '|', '&' or a newline: the raw scan never
-    splits its reading). Every single-command mention that is not
+    merge 3', and a multi-command line or newline-separated pair whose words spell gh, pr and
+    merge across its parts IN ANY ORDER, whatever separates them (a ';', '|', '&' or a newline:
+    the raw scan never splits its reading and requires no order, so 'echo merge 3 | xargs gh pr'
+    denies there too). Every single-command mention that is not
     the exact declared argv also denies: 'gh pr merge --help' and -h, '--disable-auto', the GET
     repos/O/R/pulls/N/merge is-it-merged read, a 'gh api' merge endpoint whose endpoint text names
     an out-of-scope repository, a commit message or grep pattern mentioning the merge words, and
@@ -11932,10 +11942,9 @@ def merge_path_guard(data):
     naming a declaring repository) reaches that repository while staying unseen, because
     discovery reads only the session cwd and there is no network lookup of a target repository's
     own declaration. Also unseen: a merge whose spelling never survives into the
-    command text or its de-quoted reading (assembled at run time from fragments, from a brace or
-    glob expansion inside one token such as m{e..e}rge, or through stdin to a command that builds
-    the argv at run time, as in 'echo merge 3 | xargs gh pr', whose words never spell
-    gh..pr..merge in order, the only order the walk reads; read from a file written in an earlier
+    command text or its de-quoted reading (assembled at run time from fragments none of which
+    itself spells a merge word, or from a brace or
+    glob expansion inside one token such as m{e..e}rge; read from a file written in an earlier
     command or session, a gh alias or extension, a renamed binary, another forge, a raw curl, or a
     tool outside the Bash and MCP matchers; an alias or function REBINDING THE LITERAL 'gh' WORD
     established outside this command, e.g. in a shell profile, since a single simple 'gh' command

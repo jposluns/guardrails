@@ -17751,13 +17751,11 @@ def _main_isolated(monitor):
             mpexpect("(mp-r8b) the same explicit target from a NON-GIT session allows with the "
                      "note (nothing has opted in)", "allow-note",
                      "gh pr merge 3 -R owner/repo", mpp)
-            # THE RUN-TIME-ASSEMBLY RESIDUAL, pinned as behaviour: a spelling fed through stdin to
-            # a command that assembles the argv at run time is unseen even in the declaring
-            # checkout, because the pipe splits the raw chunks before any word walk (mp-d30g is
-            # the visible-spelling xargs deny twin)
-            mpexpect("(mp-r9) the xargs stdin-assembly shape stays unseen in the declaring "
-                     "checkout (the disclosed run-time-assembly residual)", "allow",
-                     "echo merge 3 | xargs gh pr", mpd)
+            # the xargs stdin-assembly shape spells every merge word literally in the one command
+            # text, so the unordered presence read now GOVERNS it: mp-d71e pins the deny in the
+            # declaring checkout and mp-k15e the inert no-declaration control (the residual that
+            # remains is a spelling that reaches the argv from a file or an earlier session, with
+            # no merge word in this command's own text)
             # here-strings and quoted here-documents beside a directory change: in the declaring
             # checkout the unlexable construct cannot discard a directory-change reading, because
             # the compound shape itself denies, with the construct named
@@ -18006,13 +18004,13 @@ def _main_isolated(monitor):
                      "substitution in mp-d34f, not the option, discriminates)", "allow",
                      "gh pr merge 3 -R other/x --body 'done'", mpd)
             # a real newline inside a quoted wrapper-body string is ONE inner command, so it cannot
-            # split the backstop's ordered word walk
+            # split the backstop's whole-reading scan
             mpexpect("(mp-d30i) a newline inside a quoted wrapper-body string cannot split the "
                      "backstop scan", "deny",
                      "bash -c 'gh api graphql -f query=\"\nmutation {\n  "
                      "mergePullRequest(input:{}) { clientMutationId }\n}\"'", mpd)
-            mpexpect("(mp-a20) a multi-line wrapper body whose words never spell a gh merge in order "
-                     "still allows (the ordered walk discriminates)", "allow",
+            mpexpect("(mp-a20) a multi-line wrapper body that spells no 'gh' or 'pr' word still "
+                     "allows (word presence discriminates)", "allow",
                      "bash -c 'git merge main\ngit push'", mpd)
             # a descriptor redirection's '&' and the '|' of the '>|' forced-clobber redirect
             # belong to ONE command, never to a separator: the scan walks the whole reading
@@ -18147,6 +18145,24 @@ def _main_isolated(monitor):
                      "gh pr list | grep merge", mpd)
             mpexpect("(mp-d70c) merge words across a real '&' DENY there too", "deny",
                      "gh pr list & git merge main", mpd)
+            # NO order is required among the words: a shape spelling the merge word BEFORE 'gh'
+            # (a for-loop word list, an assignment, a 'set --' or array argument list, words fed
+            # through xargs) spells every word literally, yet an earlier walk that read only the
+            # textual order gh..pr..merge let each of these run the declared repository's merge
+            # unseen; the presence read finds the words wherever they sit, and the strict shape
+            # check then refuses the compound or expansion-bearing shape. The mp-k15* twins pin
+            # inertness with no declaration
+            mpexpect("(mp-d71) a for-loop word list spelling the merge word before 'gh' DENIES "
+                     "in the declaring checkout", "deny",
+                     "for m in merge; do gh pr $m 3; done", mpd)
+            mpexpect("(mp-d71b) an assignment spelling the merge word before 'gh' DENIES too",
+                     "deny", "m=merge; gh pr $m 3", mpd)
+            mpexpect("(mp-d71c) a 'set --' argument list spelling the merge word first DENIES "
+                     "too", "deny", 'set -- merge 3; gh pr "$@"', mpd)
+            mpexpect("(mp-d71d) an array argument list spelling the merge word first DENIES too",
+                     "deny", 'a=(merge 3); gh pr "${a[@]}"', mpd)
+            mpexpect("(mp-d71e) the merge word fed through xargs to 'gh pr' DENIES too", "deny",
+                     "echo merge 3 | xargs gh pr", mpd)
             mpexpect("(mp-k13) the expansion spelling stays inert with no declaration", "allow",
                      "gh pr ${x:+;} merge 5", mpn)
             mpexpect("(mp-k13b) the command-substitution spelling stays inert too", "allow",
@@ -18165,6 +18181,16 @@ def _main_isolated(monitor):
                      "allow", "gh pr list; git merge main", mpn)
             mpexpect("(mp-k14b) merge words across a real '|' stay inert too", "allow",
                      "gh pr list | grep merge", mpn)
+            mpexpect("(mp-k15) the for-loop merge-word-first spelling stays inert with no "
+                     "declaration", "allow", "for m in merge; do gh pr $m 3; done", mpn)
+            mpexpect("(mp-k15b) the assignment merge-word-first spelling stays inert too",
+                     "allow", "m=merge; gh pr $m 3", mpn)
+            mpexpect("(mp-k15c) the 'set --' merge-word-first spelling stays inert too", "allow",
+                     'set -- merge 3; gh pr "$@"', mpn)
+            mpexpect("(mp-k15d) the array merge-word-first spelling stays inert too", "allow",
+                     'a=(merge 3); gh pr "${a[@]}"', mpn)
+            mpexpect("(mp-k15e) the xargs spelling stays inert too", "allow",
+                     "echo merge 3 | xargs gh pr", mpn)
             # read-only and scope spellings: every merge spelling denies, only the literal -R/--repo
             # out-of-scope read allows
             mpexpect("(mp-d32) --disable-auto beside a method flag DENIES", "deny",
