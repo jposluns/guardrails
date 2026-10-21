@@ -11,9 +11,12 @@ provenance. Check-only; never writes.
                                          the self-test, also writing its execution report, finalized at
                                          interpreter exit (tools/_selftest_exit_report.py), as the
                                          execution gate runs it
-An explicit --root must name an existing directory: an empty value, a path that does not exist (a dangling
-symlink included) or one that is not a directory is exit 2 (cannot evaluate), never read as a tree with no
-.claude/rules/. An existing root with no .claude/rules/ tree still passes.
+An explicit --root must be given once and name an existing directory: a repeated --root, an empty value, a
+path that does not exist (a dangling symlink included) or one that is not a directory is exit 2 (cannot
+evaluate), never read as a tree with no .claude/rules/. An existing root with no .claude/rules/ tree still
+passes. Residual: the root is checked once, before it is read, so a root removed or replaced between that
+check and the read (by another writer at the same moment) is not detected and can still read as a tree with
+no .claude/rules/.
 
 Emits the deterministic section 6.6 codes: loose, unknown-family, nested-dir, bad-name,
 tier-code-mismatch, numbered-non-aiqt, apex-nonstandard, frontmatter-drift, missing-provenance. Each
@@ -101,6 +104,17 @@ def root_problem(root_arg):
     return None
 
 
+def repeat_problem(root_args):
+    """Return why more than one --root cannot be evaluated, or None for at most one.
+
+    Only one root is read, so a second --root would otherwise silently replace the first and leave it never
+    checked. The message names every value given, in order."""
+    if len(root_args) > 1:
+        return "--root is given {} times ({}); name one root".format(
+            len(root_args), ", ".join(repr(root_arg) for root_arg in root_args))
+    return None
+
+
 def check_name(family, name):
     """Return a (code, detail) lexical violation for the file NAME alone, or None if well-formed.
 
@@ -151,16 +165,21 @@ def main(argv=None):
         return self_test(args[-1])
     if args == ["--self-test"]:
         return self_test()
-    root = None
+    root_args = []
     i = 0
     while i < len(args):
         if args[i] == "--root" and i + 1 < len(args):
-            root = args[i + 1]
+            root_args.append(args[i + 1])
             i += 2
         else:
             print("usage: check_rule_placement.py [--root DIR] | [--self-test] [--execution-report ABS_PATH]",
                   file=sys.stderr)
             return 2
+    problem = repeat_problem(root_args)
+    if problem is not None:
+        print("error: {} (cannot evaluate)".format(problem), file=sys.stderr)
+        return 2
+    root = root_args[-1] if root_args else None
     if root is not None:
         problem = root_problem(root)
         if problem is not None:
@@ -245,10 +264,12 @@ def main(argv=None):
 # ---------------------------------------------------------------------------------------------- self-test
 
 NO_RULES = "PASS: no .claude/rules/ tree\n"
-# (vector, fixture key, expected exit, expected stdout or None, expected stderr fragment or None); a "{}"
-# in a stderr fragment is filled with the fixture's --root value. Each root/ vector is one --root the
-# guard must refuse; each control/ vector is one it must still read.
+# (vector, fixture key, expected exit, expected stdout or None, expected stderr fragment or None); each
+# "{}" or "{!r}" in a stderr fragment is filled, in order, with the fixture's --root values. Each root/
+# vector is a --root the guard must refuse; each control/ vector is one it must still read.
 VECTORS = (
+    ("root/repeated", "repeated", 2, "", "error: --root is given 2 times ({!r}, {!r}); name one root (cannot "
+     "evaluate)"),
     ("root/nonexistent", "missing", 2, "", "error: cannot read --root {}: "),
     ("root/comma-joined", "comma-joined", 2, "", "error: cannot read --root {}: "),
     ("root/dangling-symlink", "dangling", 2, "", "error: cannot read --root {}: "),
@@ -263,7 +284,8 @@ VIOLATION = "  .claude/rules/stray.md: loose: "
 
 
 def _fixtures(base):
-    """Build the fixture roots; returns the --root value for each fixture key."""
+    """Build the fixture roots; returns the --root value for each fixture key (a tuple where the vector gives
+    --root more than once)."""
     base = Path(base)
     regular = base / "regular-file"
     regular.write_text("not a directory\n", encoding="utf-8")
@@ -278,7 +300,8 @@ def _fixtures(base):
     (violation / ".claude" / "rules" / "stray.md").write_text("# stray\n", encoding="utf-8")
     return {"missing": str(base / "no-such-root"), "comma-joined": str(base / "no-such-root") + ",also-missing",
             "dangling": str(dangling), "regular-file": str(regular), "empty": "", "no-rules": str(no_rules),
-            "linked": str(linked), "violation": str(violation), "repository": str(ROOT)}
+            "linked": str(linked), "violation": str(violation), "repository": str(ROOT),
+            "repeated": (str(base / "no-such-root"), str(no_rules))}
 
 
 def _gate(module, argv):
@@ -292,21 +315,22 @@ def _gate(module, argv):
     return code, out.getvalue(), err.getvalue()
 
 
-def _holds(vector, value, code, stdout, stderr, got):
+def _holds(vector, values, code, stdout, stderr, got):
     got_code, got_out, got_err = got
     if got_code != code or (stdout is not None and got_out != stdout):
         return False
     if vector == "control/violation-found":
         return VIOLATION in got_out and got_err == ""
-    return got_err == "" if stderr is None else stderr.format(value) in got_err
+    return got_err == "" if stderr is None else stderr.format(*values) in got_err
 
 
 def _run_vectors(module, roots):
     """Run every vector against module; returns [(vector, ok, (exit code, stdout, stderr))]."""
     results = []
     for vector, key, code, stdout, stderr in VECTORS:
-        got = _gate(module, ["--root", roots[key]])
-        results.append((vector, _holds(vector, roots[key], code, stdout, stderr, got), got))
+        values = roots[key] if isinstance(roots[key], tuple) else (roots[key],)
+        got = _gate(module, [arg for value in values for arg in ("--root", value)])
+        results.append((vector, _holds(vector, values, code, stdout, stderr, got), got))
     return results
 
 
@@ -343,6 +367,7 @@ def _empty_admitted(root_arg):
     return _ORIGINAL_ROOT_PROBLEM(root_arg or ".")
 
 
+# The refusals root_problem makes; the repeated-root refusal comes before it and is not among them.
 REFUSALS = {"root/nonexistent", "root/comma-joined", "root/dangling-symlink", "root/regular-file", "root/empty"}
 CONTROLS = {"control/no-rules-passes", "control/symlinked-root-passes", "control/violation-found",
             "control/repository-passes"}
@@ -356,6 +381,7 @@ MUTANTS = (
      {"root/nonexistent", "root/comma-joined", "root/dangling-symlink"}),
     ("non-directory-admitted", "_is_dir", lambda mode: True, {"root/regular-file"}),
     ("empty-admitted", "root_problem", _empty_admitted, {"root/empty"}),
+    ("repeat-admitted", "repeat_problem", lambda root_args: None, {"root/repeated"}),
     ("every-root-refused", "_is_dir", lambda mode: False, CONTROLS),
 )
 
@@ -399,8 +425,8 @@ def self_test(report_path=None):
         failing = [(vector, got) for vector, ok, got in outcomes if not ok]
         check("vector/every-vector-holds", len(outcomes) == len(VECTORS) and not failing, failing)
 
-        # 2. the reproduction, launched as an operator runs it: a missing root, plain or comma-joined, is
-        # cannot-evaluate with no PASS line, and the message names the root
+        # 2. the reported inputs, launched as an operator runs them, now give the fixed result: a missing
+        # root, plain or comma-joined, is cannot-evaluate with no PASS line, and the message names the root
         for check_id, key in (("launch/nonexistent-root-cannot-evaluate", "missing"),
                               ("launch/comma-joined-root-cannot-evaluate", "comma-joined")):
             got = _launch("--root", roots[key])
@@ -437,10 +463,10 @@ def self_test(report_path=None):
         for check_id, detail in failed:
             print("  {}: {!r}".format(check_id, detail))
         return 1
-    print("SELF-TEST PASS: rule-placement {} checks ({} vectors: an empty, missing, comma-joined, dangling or "
-          "non-directory --root is cannot-evaluate; an existing root with no rules tree, a symlinked root, a "
-          "violating root and the repository are still read; {} mutants each caught exactly, every vector "
-          "discriminating; the default root passes)".format(len(results), len(VECTORS), len(MUTANTS)))
+    print("SELF-TEST PASS: rule-placement {} checks ({} vectors: a repeated, empty, missing, comma-joined, "
+          "dangling or non-directory --root is cannot-evaluate; an existing root with no rules tree, a "
+          "symlinked root, a violating root and the repository are still read; {} mutants each caught exactly, "
+          "every vector discriminating; the default root passes)".format(len(results), len(VECTORS), len(MUTANTS)))
     return 0
 
 
