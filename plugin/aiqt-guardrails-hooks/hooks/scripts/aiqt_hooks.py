@@ -9698,10 +9698,13 @@ def _gate_terminator_index(sub, lits):
 # known, so the segment fails closed). A segment whose subcommand resolves to a verb OFF the roster
 # is left alone (git log --format="$f" stays allowed), as is a git word inside a region an earlier
 # accepted scan consumed (the -m value in git commit -m 'git commit x' is data, not a command). But
-# a quoted interior holding a shell operator, a newline or the other quote character leaves the
-# quote's pairing ambiguous (the scan begins at a git word, not at the command start), so it is NOT
-# treated as consumed data: a git inside such a span is re-judged as its own segment, catching a
-# bypass hidden where bash's own close and the next open bracket live command text.
+# a quoted interior that could hold live command text leaves the quote's pairing ambiguous (the scan
+# begins at a git word, not at the command start), so it is NOT treated as consumed data: a git inside
+# such a span is re-judged as its own segment, catching a bypass hidden where bash's own close and the
+# next open bracket live command text. A single-quoted interior triggers this on ANY byte that is not
+# a bare-word character or a space or tab (so a backquote, a '$', a shell operator, a newline or a
+# double quote all count); a double-quoted interior triggers it on a shell operator, a newline or a
+# single quote (a '$', backquote or backslash inside double quotes already denies outright).
 _GATE_GRAMMAR_WORD_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./=@:+,%^#~")
 # What may follow a completed bare word or quoted literal: whitespace, a segment end, or a
@@ -9786,6 +9789,18 @@ def _gate_grammar_redirect(command, i, start, fd):
     return k, None
 
 
+def _gate_grammar_offroster(words):
+    """True when the words resolved SO FAR already fix this segment's subcommand to a verb OFF the
+    no-verify roster. The lexer uses it to stop at the first ambiguous quote: an off-roster segment can
+    carry no bypass and the caller consumes it only up to that quote (data_end), so reading its remaining
+    operands is work the caller discards. Stopping there keeps the whole-command pass linear when many
+    off-roster git words that each open an ambiguous quote share one line, instead of re-lexing the
+    remainder from each. A subcommand that is NOT yet resolved (a global option's value fell on the
+    ambiguous quote) returns False, so the lexer keeps scanning and the segment still fails closed."""
+    sub, _args, resolved = _gate_grammar_sub(words)
+    return resolved and sub.lower() not in _NOVERIFY_VERBS
+
+
 def _gate_grammar_lex(command, start):
     """Lex ONE flagged segment of the raw command under the closed literal grammar, starting at the
     'git' word at command[start]. Returns (words, end, bad, data_end): words is the ordered list of
@@ -9794,10 +9809,18 @@ def _gate_grammar_lex(command, start):
     segment terminator, the first violation, or len(command)), bad is None or the (snippet, why) of
     the first byte outside the grammar, and data_end is how far a caller may treat this segment as
     CONSUMED data when it leaves the segment alone: `end` normally, but the index of the FIRST quoted
-    word whose interior turned the quote's pairing ambiguous (a shell operator, a newline or the
-    other quote character inside it) when there was one, so a 'git' hidden in such a span is re-judged
-    as its own segment rather than swallowed. The lexer never guesses past a violation: scanning
-    stops there, so `end` is also where a caller may safely resume."""
+    word whose interior turned the quote's pairing ambiguous (inside single quotes: any byte that is
+    not a bare-word character or a space or tab; inside double quotes: a shell operator, a newline or
+    the other quote character) when there was one, so a 'git' hidden in such a span is re-judged as its
+    own segment rather than swallowed. The lexer never guesses past a violation: scanning stops there,
+    so `end` is also where a caller may safely resume. As soon as the words already resolve an
+    OFF-ROSTER subcommand and an ambiguous quote is seen, the lexer stops at that quote
+    (_gate_grammar_offroster): the segment can carry no bypass and the caller consumes it only to
+    data_end, so reading the rest is discarded work. That early stop bounds each off-roster lex to its
+    first ambiguous quote, keeping the whole-command pass linear when many off-roster git words that
+    each open an ambiguous quote share one line; a ROSTER verb's segment is still read to its end (its
+    own flags may sit anywhere before the terminator), so a line packing many ambiguity-opening
+    roster-verb git words is still super-linear, bounded by the hook deadline (it fails closed)."""
     words = []
     i = start
     n = len(command)
@@ -9819,20 +9842,27 @@ def _gate_grammar_lex(command, start):
                 return result(i, bad)
             continue
         if c == "'":
-            # Everything between single quotes is literal to bash, but a shell operator, a newline or
-            # a double quote in the interior leaves the quote's pairing ambiguous (this scan began at
-            # a 'git' word, so it cannot know bash's quote context there): the span is not treated as
-            # consumed data, so a 'git' inside it is re-judged, while the word itself is still read.
+            # Everything between single quotes is literal to bash, but an interior byte that is not a
+            # bare-word character or a space or tab (a shell operator, a newline, a double quote, a
+            # backquote, a '$', or any other shape) leaves the quote's pairing ambiguous: this scan
+            # began at a 'git' word, so it cannot know bash's quote context, and such a byte is exactly
+            # where bash's own close and the next open can bracket live command text. The span is then
+            # not treated as consumed data, so a 'git' inside it is re-judged, while the word itself is
+            # still read. (A backquote or '$' in particular would otherwise hide a live substitution the
+            # shell runs between a mis-paired single-quote close and the next open.)
             j = command.find("'", i + 1)
             if j < 0:
                 return result(i, _gate_grammar_violation(command, i, i, n))
             if data_stop is None:
                 for k in range(i + 1, j):
-                    if command[k] in _GATE_GRAMMAR_QUOTE_BREAK or command[k] == '"':
+                    ck = command[k]
+                    if ck not in _GATE_GRAMMAR_WORD_CHARS and ck not in " \t":
                         data_stop = i
                         break
+                if data_stop is not None and _gate_grammar_offroster(words):
+                    return result(i, None)
             if j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END:
-                return result(i, _gate_grammar_violation(command, i, j + 1, n))
+                return result(i, _gate_grammar_violation(command, i, i, n))
             words.append(command[i + 1:j])
             i = j + 1
             continue
@@ -9861,8 +9891,10 @@ def _gate_grammar_lex(command, start):
                     return result(i, (command[i:j + 1][:40], _GATE_GRAMMAR_BANG_WHY))
                 if data_stop is None and (ck in _GATE_GRAMMAR_QUOTE_BREAK or ck == "'"):
                     data_stop = i
+            if data_stop is not None and _gate_grammar_offroster(words):
+                return result(i, None)
             if j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END:
-                return result(i, _gate_grammar_violation(command, i, j + 1, n))
+                return result(i, _gate_grammar_violation(command, i, i, n))
             words.append(command[i + 1:j])
             i = j + 1
             continue
@@ -9936,10 +9968,16 @@ def _gate_closed_grammar_scan(command):
     region an earlier scan consumed is skipped: there it is literal data or an operand of an
     accepted or off-roster git command, already judged by that scan. The consumed watermark advances
     only to the lexer's data_end, which stops SHORT of a quoted span whose interior turned the
-    quote's pairing ambiguous (a shell operator, a newline or the other quote inside it), so a 'git'
-    hidden in such a span is re-judged as its own segment instead of swallowed. Scanning resumes at
-    each scan's stop point, and the watermark never moves backwards, so the whole pass stays linear
-    in the command length."""
+    quote's pairing ambiguous (inside single quotes, any non-word non-space byte; inside double quotes,
+    a shell operator, a newline or the other quote), so a 'git' hidden in such a span is re-judged as
+    its own segment instead of swallowed. Scanning resumes at each scan's stop point, and the watermark
+    never moves backwards. The pass is linear in the command length while off-roster segments dominate:
+    the lexer stops an off-roster segment at its first ambiguous quote, so each such segment is read
+    once and the watermark passes it. A ROSTER-verb segment is read to its end (its own flags may sit
+    anywhere before the terminator), so a line packing many ambiguity-opening roster-verb git words
+    re-reads the remainder from each and is super-linear in that count; such a line is bounded by the
+    PreToolUse hook deadline, past which the check fails closed (deny), so it is an availability cost,
+    never a bypass."""
     consumed = 0
     for m in _GATE_GIT_WORD_RE.finditer(command):
         p = m.start()
@@ -10665,10 +10703,13 @@ def gate_weakening(data):
     shared lexer cannot place (after an escaped-backslash line end or a backslash-continued comment,
     inside quoted text or a here-document body) is still judged; an occurrence inside a region an earlier
     accepted scan consumed is data, not a command, and is skipped, EXCEPT where that region is a quoted
-    interior holding a shell operator, a newline or the other quote character: the quote's pairing is
-    then ambiguous (the scan starts at a git word, not at the command start), so the span is not treated
-    as consumed data and a git inside it is re-judged as its own segment (the enclosing word is still
-    read for its own bypass spelling, so a real flag after the quote is not missed). DISCLOSED
+    interior that could bracket live command text: a single-quoted interior holding ANY byte that is not
+    a bare-word character or a space or tab (a backquote, a '$', a shell operator, a newline or a double
+    quote), or a double-quoted interior holding a shell operator, a newline or a single quote: the
+    quote's pairing is then ambiguous (the scan starts at a git word, not at the command start), so the
+    span is not treated as consumed data and a git inside it is re-judged as its own segment (the
+    enclosing word is still read for its own bypass spelling, so a real flag after the quote is not
+    missed). DISCLOSED
     OVER-DENIAL (the deliberate cost of the closed grammar, pending maintainer review): a roster-verb git
     command carrying ANY live expansion denies even where it is a safe operand or value (git commit -m
     "$msg", git push origin "$branch", git merge "release-$v"), and so does one carrying a comment, a
@@ -10676,11 +10717,13 @@ def gate_weakening(data):
     or a here-document body (echo 'git commit -n', the heredoc line of cat <<EOF); a plain double-quoted
     literal that stays on one line and holds no '$', backquote, backslash or '!' inside is accepted like
     a bare word (git commit -m "fix the parser"), but an interior '!' denies (history expansion could
-    rewrite it; single-quote the text instead), and a quoted interior holding a shell operator or the
-    other quote re-judges any git named inside it and so denies a NAMED bypass there (git commit -m 'fix;
-    git commit -nv'), while the same value with no operator stays allowed (git commit -m 'git commit -nv')
-    and a benign operator message (git commit -m "a; b | c") still allows; re-issue anything else plainly
-    with every word literal, or keep git-with-roster-verb spellings out of quoted data.
+    rewrite it; single-quote the text instead), and a quoted interior that could bracket live command
+    text (a single-quoted non-word byte, a double-quoted shell operator or the other quote) re-judges
+    any git named inside it and so denies a NAMED bypass there (git commit -m 'fix; git commit -nv',
+    git commit -m 'hi `git commit -nv`'), while the same single-quoted value whose interior is all
+    bare-word characters and spaces stays allowed (git commit -m 'git commit -nv') and a benign operator
+    message (git commit -m "a; b | c") still allows; re-issue anything else plainly with every word
+    literal, or keep git-with-roster-verb spellings out of quoted data.
     DISCLOSED RESIDUAL: a '-n'/'--no-verify' assembled in a separate stage the shell runs and feeds to
     git (printf ... | xargs git commit) is not reconstructed, and an alias, wrapper or shell function
     that renames git is not resolved. A verb off the roster is untouched (git log ${x}-n, git log

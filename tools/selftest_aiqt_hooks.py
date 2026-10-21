@@ -12718,13 +12718,15 @@ def _main_isolated(monitor):
         # === gatdis: an ambiguous quote interior does not swallow a hidden 'git' bypass ==================
         # The scan starts at each raw 'git' word, so when a '"' or "'" it meets is really bash's CLOSING
         # quote it would otherwise pair with the NEXT opening quote and read the live command between them
-        # (operators and a real 'git commit -nv') as one consumed data word, skipping the bypass. A shell
-        # operator, a newline or the other quote inside a quoted interior now marks the pairing ambiguous:
-        # the span is not treated as consumed data, so the hidden 'git' is judged as its own segment and
-        # the bypass denies. Each denies here but ALLOWED at the pin (regression) or at both base and pin
-        # (the single-quote mirror); the control gw-dq-h7 shows a benign operator message still allows
-        # (only a 'git' inside such a span is re-judged, not every operator), so a mutant that swallows the
-        # span again turns gw-dq-h1..h5 red while one that denies every operator interior turns gw-dq-h7 red.
+        # (operators and a real 'git commit -nv') as one consumed data word, skipping the bypass. A
+        # single-quoted interior byte that is not a bare-word character or a space or tab, or a shell
+        # operator, newline or single quote inside a double-quoted interior, now marks the pairing
+        # ambiguous: the span is not treated as consumed data, so the hidden 'git' is judged as its own
+        # segment and the bypass denies. Each of gw-dq-h1..h5 ALLOWS at cea096d25cc9 (this change's
+        # parent) and DENIES here; the control gw-dq-h7/h8 shows a benign operator message still allows
+        # (only a 'git' inside such a span is re-judged, not every operator), so a mutant that swallows
+        # the span again turns gw-dq-h1..h5 (and gw-dq-m1a..m1e, gw-dq-q1, gw-dq-n2) red while one that
+        # denies every operator interior turns gw-dq-h7/h8 red.
         gexpect("(gw-dq-h1) a hidden 'git commit -nv' between a double-quoted close and the next open denies",
                 'echo "git log " ; git commit -nv ; echo " x"\necho "', "deny")
         gexpect("(gw-dq-h2) the same hidden bypass with a clustered -nq denies",
@@ -12733,12 +12735,12 @@ def _main_isolated(monitor):
                 'echo "git status " ; git commit -nv -m wip ; echo " x"\necho "', "deny")
         gexpect("(gw-dq-h4) the single-quote-outer form (a '\"' inside single quotes) denies",
                 "echo 'git log \"' ; git commit -nv ; echo '\" x'\necho \"", "deny")
-        gexpect("(gw-dq-h5) the single-quote mirror, allowed at BOTH base and pin, now denies",
+        gexpect("(gw-dq-h5) the single-quote-mirror form (a \"'\" inside double quotes) denies",
                 'echo "git log \'" ; git commit -nv ; echo "\' x"\necho "', "deny")
-        # The enclosing word is still read for its own bypass spelling, so a real flag AFTER an ambiguous
-        # quote is not missed (this must not regress to an allow when the span stops being swallowed).
-        gexpect("(gw-dq-h6) a real -nv after a double-quoted operand on the roster verb denies",
-                'git commit "a;" -nv ; echo "\necho "', "deny")
+        # (The former gw-dq-h6 vector, "git commit \"a;\" -nv", was removed: the enclosing roster word is
+        # still read past the ambiguous quote so its own trailing -nv is caught, but that flag is ALSO
+        # caught by the raw git-verb backstop, so the vector denied under every mutant tried, including one
+        # that stops the roster lex at the ambiguous quote, and discriminated nothing.)
         # A benign operator message carries no 'git' inside, so it still allows (the pin's gw-dq-a3 win is
         # kept, for single and double quotes alike): the fix re-judges only a hidden 'git', it does not
         # refuse every operator-bearing quoted literal.
@@ -12764,6 +12766,47 @@ def _main_isolated(monitor):
                 'git commit -m "ship it!"', "deny")
         gexpect("(gw-dq-h13) the same message single-quoted is literal and allows (the documented re-issue)",
                 "git commit -m 'ship it!'", "allow")
+
+        # A backquote (or '$') between a mis-paired single-quote CLOSE and the next OPEN is live command
+        # text bash runs, not quoted data: the single-quote ambiguity test marks the span on ANY interior
+        # byte outside the bare-word set plus space and tab, so the hidden 'git ... -nv' inside it is
+        # re-judged and denies. Each ALLOWS at cea096d25cc9 (this change's parent) AND at the reviewed head
+        # before this change (the backquote was not among the single-quote break bytes there); a mutant that
+        # tests only the shell operators, the newline and the double quote (the pre-change set) turns
+        # gw-dq-m1a..m1e red.
+        gexpect("(gw-dq-m1a) a backquote hidden between a single-quoted close and open denies",
+                "echo 'git log ' `git commit -nv` ' x'", "deny")
+        gexpect("(gw-dq-m1b) the same with the backquote glued to the quotes denies",
+                "echo 'git log '`git commit -nv`' x'", "deny")
+        gexpect("(gw-dq-m1c) a hidden clustered -n behind an off-roster outer verb denies",
+                "echo 'git status ' `git commit -n -m wip` ' done'", "deny")
+        gexpect("(gw-dq-m1d) a hidden push --no-verify in a backquote span denies",
+                "echo 'git log ' `git push --no-verify` ' x'", "deny")
+        gexpect("(gw-dq-m1e) a backquote span bound to an assignment word denies",
+                "echo 'git log ' x=`git commit -nv` ' x'", "deny")
+        # The other-quote and newline triggers the single-quote ambiguity test still needs are subsumed by
+        # the bounded rule (a double quote and a newline are both outside the bare-word set plus space and
+        # tab), and these two vectors pin them with the double quote (q1) or the newline (n2) as the ONLY
+        # non-word interior byte, so each isolates one trigger. Each ALLOWS at cea096d25cc9 (this change's
+        # parent, before the ambiguity feature); a mutant that excludes the double quote from the test
+        # turns gw-dq-q1 red, one that excludes the newline turns gw-dq-n2 red.
+        gexpect("(gw-dq-q1) a hidden 'git commit -nv' after a single-quoted 'a\"' (double quote the only "
+                "ambiguous byte) denies", "git log 'a\"' git commit -nv", "deny")
+        gexpect("(gw-dq-n2) a hidden bypass where a newline marks the single-quote span ambiguous denies",
+                "echo 'git log '\ngit commit -nv\necho ' x'\necho '", "deny")
+        # Timing: the lexer stops an off-roster segment at its first ambiguous quote, so a line packing
+        # many such segments is scanned in linear time, not quadratically re-lexed from each git word.
+        # This exact input took several seconds before the bound; the assertion holds far under the
+        # PreToolUse 8 s deadline, with wide margin for a shared host (a ROSTER-verb-dense line is still
+        # super-linear by design and relies on the deadline's fail-closed, as the scan docstring states).
+        import time as _time_lin
+        _gw_lin_cmd = "git log 'a;' " * 4000
+        _gw_lin_t0 = _time_lin.perf_counter()
+        aiqt_hooks._gate_closed_grammar_scan(_gw_lin_cmd)
+        _gw_lin_dt = _time_lin.perf_counter() - _gw_lin_t0
+        if _gw_lin_dt > 2.0:
+            failures.append("(gw-dq-lin) off-roster ambiguity re-lex is not linear: {:.3f}s for {} bytes"
+                            .format(_gw_lin_dt, len(_gw_lin_cmd)))
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
@@ -18752,8 +18795,10 @@ def _main_isolated(monitor):
           "substitution, backslash, glob, brace, comment, a glued, unterminated or newline-spanning "
           "double-quoted word, or a double-quoted word with an interior '!' - a standalone double-quoted "
           "literal that stays on one line and holds no $, backquote, backslash or '!' inside is accepted "
-          "like a bare word, and a shell operator or the other quote inside a quoted interior leaves its "
-          "pairing ambiguous so a git hidden there is re-judged rather than swallowed - or a redirection "
+          "like a bare word, and a quoted interior that could bracket live command text (inside single "
+          "quotes any non-word non-space byte, inside double quotes a shell operator or the other quote) "
+          "leaves its pairing ambiguous so a git hidden there is re-judged rather than swallowed - or a "
+          "redirection "
           "beyond >/dev/null, 2>/dev/null and 2>&1) or whose subcommand cannot be resolved, and a known "
           "verification run whose output reaches "
           "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
