@@ -40,3 +40,6 @@
     collected result or UNVERIFIABLE entry, how long you will wait (no less than you expect the work to
     need), and no verdict or closing line; the final deliverable restates any interim content, updated,
     without that label and with nothing pending. (trkasy, worker profile)
+11. When you propose a wording fix, give it as a complete replacement sentence, never a fragment or
+    an ellipsis. Whoever applies one, you included, re-checks every verb of the edited sentence
+    against the lines it cites. (worker profile)

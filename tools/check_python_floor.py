@@ -53,6 +53,16 @@ Legs, in order:
                  quote or a flow indicator and does not close on its own line is cannot-evaluate. A
                  plain (unquoted) pin of a floor whose text ends in 0 is a finding, since YAML reads
                  a plain 3.20 as the number 3.2.
+                 Inside a HOST_JOBS job of HOST_WORKFLOW_REL (.github/workflows/quality.yml), and
+                 nowhere else, a pin that is a patch release of the floor (MAJOR.MINOR.PATCH, each
+                 component at most four digits, HOST_PATCH_RE) passes only when it equals the
+                 python-host-patch that HOST_SOURCE_REL names (the host-patch CI jobs, which
+                 tools/check_python_host_pin.py also holds to it); that source is read only for such a
+                 pin, and a missing, unreadable or malformed one is cannot-evaluate. The job is the
+                 nearest job id at indent 2 above the pin under the top-level jobs: key. Every other
+                 pin in any workflow, a PIN_FILES entry or a local action file must equal the floor
+                 exactly, so a patch-release pin in another job or file is a finding, as is any other
+                 release.
                  The key is found without regard to case, since the runner reads an input by its
                  upper-cased name: a strict pin whose key is in any other case is cannot-evaluate,
                  and so is any line, script text included, that names INPUT_PYTHON-VERSION
@@ -349,6 +359,17 @@ SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "nonblockin
 WORKFLOWS_REL = ".github/workflows"
 PIN_FILES = ("opf/enforcement/ci/github-actions.yml", "opf/tools/check_opf_doctor.py")
 PIN_KEY = "python-version"
+# The host-patch CI jobs: inside a HOST_JOBS job of HOST_WORKFLOW_REL, and nowhere else, a pin that is a patch
+# release of the floor passes only when it equals the python-host-patch this repository-local source names
+# (_host_patch_pin). These names are those of tools/check_python_host_pin.py, whose self-test holds them
+# equal (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE there).
+HOST_WORKFLOW_REL = WORKFLOWS_REL + "/quality.yml"
+HOST_JOBS = ("opf-host-patch", "git-fixture-env-host-patch")
+HOST_SOURCE_REL = ".aiqt/python-host.toml"
+HOST_SOURCE_KEYS = {"format-version", "python-host-patch"}
+HOST_PATCH_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
+# A job id under the top-level jobs: key, a plain key at indent 2, then nothing but an optional comment.
+HOST_JOB_RE = re.compile(r"  (?P<id>[A-Za-z_][A-Za-z0-9_-]*) *:(?:[ \t]+#.*|[ \t]*)")
 # The step environment variable the Actions toolkit reads the input from ("INPUT_" plus the upper-cased
 # name). A line naming it can set the input outside a pin.
 INPUT_ENV = "INPUT_" + PIN_KEY.upper()
@@ -671,6 +692,62 @@ def switch_findings(source):
     return []
 
 
+def load_host_patch(root):
+    """The python-host-patch that HOST_SOURCE_REL names, schema-checked: a missing, unreadable or malformed
+    source is cannot-evaluate, never a pass."""
+    try:
+        data = tomllib.loads(_read_text(root / HOST_SOURCE_REL))
+    except tomllib.TOMLDecodeError as exc:
+        raise CannotEvaluate("{}: does not parse: {}".format(HOST_SOURCE_REL, exc))
+    # tomllib also raises a BARE ValueError on an integer literal past CPython's int-string limit, a
+    # RecursionError on a deeply nested array or inline table or, in a release that bounds key depth, on a
+    # key of more than 1000 dotted parts, and a MemoryError on a source too large for the memory left:
+    # each is cannot-evaluate, never a traceback.
+    except (ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{}: does not parse ({}): {}".format(HOST_SOURCE_REL, type(exc).__name__,
+                                                                     exc))
+    patch = data.get("python-host-patch")
+    if set(data) != HOST_SOURCE_KEYS or type(data["format-version"]) is not int \
+            or data["format-version"] != 1 or not isinstance(patch, str) \
+            or HOST_PATCH_RE.fullmatch(patch) is None:
+        raise CannotEvaluate("{}: want exactly format-version = 1 and python-host-patch = "
+                             "\"MAJOR.MINOR.PATCH\"".format(HOST_SOURCE_REL))
+    return patch
+
+
+def _workflow_job(lines):
+    """The id of the job the last of lines sits in: the nearest earlier job id at indent 2 (HOST_JOB_RE)
+    under a top-level jobs: line, or None when the line sits elsewhere or an indent-2 line above it is not a
+    plain job id."""
+    job = None
+    for text in reversed(lines[:-1]):
+        stripped = text.strip(" \t")
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = _indent(text)
+        if indent == 0:
+            return job if text.split("#", 1)[0].rstrip(" \t") == "jobs:" else None
+        if indent == 2 and job is None:
+            header = HOST_JOB_RE.fullmatch(text)
+            if header is None:
+                return None
+            job = header.group("id")
+    return None
+
+
+def _host_patch_pin(root, rel, lines, value, want, host):
+    """Whether a pin that differs from the floor is the host patch: rel is HOST_WORKFLOW_REL, the pin, the
+    last of lines, sits in a HOST_JOBS job, value is a patch release of the floor, and it equals the
+    python-host-patch HOST_SOURCE_REL names. The source is read only here, once per run (cached in host), so
+    it is cannot-evaluate only when such a pin needs it."""
+    if rel != HOST_WORKFLOW_REL or _workflow_job(lines) not in HOST_JOBS \
+            or not value.startswith(want + ".") or HOST_PATCH_RE.fullmatch(value) is None:
+        return False
+    if "patch" not in host:
+        host["patch"] = load_host_patch(root)
+    return value == host["patch"]
+
+
 def pin_findings(root, floor):
     want = "%d.%d" % floor
     try:
@@ -682,7 +759,7 @@ def pin_findings(root, floor):
     targets += [(rel, True) for rel in PIN_FILES]
     if "action-files" in RULES:
         targets += [(rel, False) for rel in _action_files(root)]
-    findings, seen = [], set()
+    findings, seen, host = [], set(), {}
     while targets:
         rel, required = targets.pop(0)
         if rel in seen:
@@ -729,10 +806,10 @@ def pin_findings(root, floor):
             plain = match.group("plain")
             value = next(group for group in match.group("plain", "single", "double")
                          if group is not None)
-            if value != want:
+            if value != want and not _host_patch_pin(root, rel, lines, value, want, host):
                 findings.append("{}:{}: python-version {!r} differs from the floor {!r}".format(
                     rel, number, value, want))
-            elif plain is not None and want.endswith("0"):
+            elif value == want and plain is not None and want.endswith("0"):
                 findings.append("{}:{}: python-version {} is unquoted; YAML reads it as a number, so "
                                 "quote it as '{}'".format(rel, number, value, want))
         if required and not pins:
@@ -2189,18 +2266,18 @@ def _declared(floor_text="3.14"):
 
 
 def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'",
-             declarations=True):
-    """A clean tree; workflow_pin is the version on quality.yml line 6, or with pin_quote="" the whole
-    text after that line's indentation. Every declaration file states the floor unless declarations
-    is false; files are written after them."""
+             declarations=True, job="q"):
+    """A clean tree; workflow_pin is the version on quality.yml line 6, in the job named job, or with
+    pin_quote="" the whole text after that line's indentation. Every declaration file states the floor
+    unless declarations is false; files are written after them."""
     root = Path(tempfile.mkdtemp(prefix="tree-", dir=base))
     for rel, text in (_declared() if declarations else {}).items():
         _write(root, rel, text)
     _write(root, SOURCE_REL, _source_text() if source is None else source)
     pin = "python-version: {0}{1}{0}".format(pin_quote, workflow_pin) if pin_quote else workflow_pin
     _write(root, WORKFLOWS_REL + "/quality.yml",
-           "jobs:\n  q:\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
-           "          {}\n".format(pin))
+           "jobs:\n  {}:\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
+           "          {}\n".format(job, pin))
     _write(root, PIN_FILES[0], "      - uses: actions/setup-python@v5\n        with:\n"
            "          python-version: '{}'\n".format(template_pin))
     _write(root, PIN_FILES[1], "TEMPLATE = \"\"\"\n          python-version: '{}'\n\"\"\"\n".format(
@@ -2619,6 +2696,118 @@ def _old_guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
     return "\n".join(out)
 
 
+class _ParserMismatch(Exception):
+    """tomllib's private key parser does not fit the parse_key(src, pos) -> (pos, key) the injection
+    wraps."""
+
+
+def _key_depth_bounded(real, calls, kind=RecursionError):
+    """tomllib's key parser, made to raise RecursionError on a key of more than 1000 dotted parts, as a
+    release that bounds key depth does, or kind (MemoryError or ValueError, to inject that class at the
+    parse: real memory exhaustion cannot be provoked safely). A RecursionError or MemoryError that the
+    real parser raises itself (a release whose own parser bounds key depth refuses such a key inside
+    it) is raised as kind too, as _key_part_capped does, so the class a vector asserts never depends on
+    the patch release that runs the self-test. calls records each call; a call or a result that does
+    not fit parse_key(src, pos) -> (pos, key), pos an int within src and key a tuple of str, raises
+    _ParserMismatch."""
+    def parse_key(*args, **kwargs):
+        calls.append(len(args))
+        try:
+            result = real(*args, **kwargs)
+        except TypeError as exc:
+            raise _ParserMismatch("calling it raised TypeError: {}".format(exc))
+        except (RecursionError, MemoryError):
+            raise kind("injected: the key parser itself refused a key") from None
+        src = args[0] if args else kwargs.get("src")
+        if not (isinstance(result, tuple) and len(result) == 2):
+            raise _ParserMismatch("it returned {} rather than (pos, key)".format(type(result).__name__))
+        if not (isinstance(src, str) and type(result[0]) is int and 0 <= result[0] <= len(src)):
+            raise _ParserMismatch("it returned the position {!r:.40}, not an int within the source".format(
+                result[0]))
+        if not (isinstance(result[1], tuple) and all(isinstance(part, str) for part in result[1])):
+            raise _ParserMismatch("it returned the key {!r:.60}, not a tuple of str".format(result[1]))
+        if len(result[1]) > 1000:
+            raise kind("injected: a key of more than 1000 dotted parts")
+        return result
+    return parse_key
+
+
+def _capped_parser(real):
+    """real, tomllib's key parser, as a release whose own parser bounds key depth runs it: a key of more
+    than 1000 dotted parts is refused by a RecursionError from inside the parser (emulated here once the
+    real parser returns such a key), so a vector shows what the injection does on such a release
+    whatever patch release runs the self-test."""
+    def parse_key(*args, **kwargs):
+        result = real(*args, **kwargs)
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], tuple) \
+                and len(result[1]) > 1000:
+            raise RecursionError("emulated: a key parser that bounds key depth")
+        return result
+    return parse_key
+
+
+def _host_parse_refusal(root, bound, kind=RecursionError, evaluate_tree=None, capped=False):
+    """(exit code, whether the report says HOST_SOURCE_REL does not parse) for evaluate_tree (evaluate when
+    None) over root, with tomllib's key parser bounded when bound is true (raising kind,
+    _key_depth_bounded) and, when capped is true, the parser under that bound refusing such a key itself
+    (_capped_parser); "raised NAME" when the exception escapes. The bound
+    patches a private tomllib function: on a release where it is missing, has another shape or is never
+    called, the result is a text naming that cause, so the case fails cleanly rather than crashing."""
+    parser = getattr(tomllib, "_parser", None)
+    real = getattr(parser, "parse_key", None)
+    if bound and not callable(real):
+        return ("tomllib._parser.parse_key is missing or not callable on this release, so the injected "
+                "key-depth case cannot run")
+    calls = []
+    if bound:
+        parser.parse_key = _key_depth_bounded(_capped_parser(real) if capped else real, calls, kind)
+    try:
+        code, lines = (evaluate if evaluate_tree is None else evaluate_tree)(root)
+    except (RecursionError, ValueError, MemoryError) as exc:
+        return "raised " + type(exc).__name__
+    except _ParserMismatch as exc:
+        return "tomllib._parser.parse_key does not fit the injection on this release: {}".format(exc)
+    finally:
+        if bound:
+            parser.parse_key = real
+    if bound and not calls:
+        return "tomllib._parser.parse_key was never called, so the injected key-depth case did not run"
+    return code, _has(lines, HOST_SOURCE_REL + ": does not parse")
+
+
+# A key parser whose (pos, key) result is malformed, each with the words of the mismatch it must raise: the
+# bounded parser names each as a mismatch, never a traceback, never the expected refusal.
+MALFORMED_RESULTS = {
+    "none-position": (lambda src, pos, key: (None, key), "not an int within the source"),
+    "negative-position": (lambda src, pos, key: (-1, key), "not an int within the source"),
+    "past-end-position": (lambda src, pos, key: (len(src) + 1, key), "not an int within the source"),
+    "bool-position": (lambda src, pos, key: (True, key), "not an int within the source"),
+    "non-str-key-part": (lambda src, pos, key: (pos, key + (1,)), "not a tuple of str"),
+}
+
+
+def _malformed_host_refusal(root, damage, marker):
+    """True when _host_parse_refusal(root, True), run with tomllib's key parser replaced by one whose result
+    damage(src, pos, key) rewrites, returns a text naming the mismatch marker words; otherwise what it
+    returned or raised."""
+    parser = getattr(tomllib, "_parser", None)
+    real = getattr(parser, "parse_key", None)
+    if not callable(real):
+        return "tomllib._parser.parse_key is missing or not callable on this release"
+
+    def parse_key(src, pos):
+        pos, key = real(src, pos)
+        return damage(src, pos, key)
+    parser.parse_key = parse_key
+    try:
+        got = _host_parse_refusal(root, True)
+    except Exception as exc:
+        got = "raised " + type(exc).__name__
+    finally:
+        parser.parse_key = real
+    return True if isinstance(got, str) and "does not fit the injection" in got and marker in got else got
+
+
 def _self_test_cases(base):
     floor = FLOOR
     good = guard_text("demo.py", floor)
@@ -2809,6 +2998,142 @@ def _self_test_cases(base):
         "      - run: echo done"), pin_quote=""))
     check("pins/block-scalar-pin-finding",
           (code, _has(lines, "quality.yml:8: python-version '3.12' differs")), (1, True))
+    # The host-patch jobs: a pin that is a patch release of the floor passes only inside a HOST_JOBS job of
+    # HOST_WORKFLOW_REL, and only when it equals the python-host-patch HOST_SOURCE_REL names; every other pin
+    # in any workflow must equal the floor exactly.
+    host = {HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"3.14.4\"\n"}
+    opf = HOST_JOBS[0]
+    check("pins/host-patch-host-job-passes",
+          tuple(evaluate(_fixture(base, workflow_pin="3.14.4", files=host, job=job))[0] for job in HOST_JOBS),
+          (0,) * len(HOST_JOBS))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.4", files=host))
+    check("pins/host-patch-other-job-finding",
+          (code, _has(lines, "quality.yml:6: python-version '3.14.4' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, files={**host, WORKFLOWS_REL + "/other.yml": (
+        "jobs:\n  " + opf + ":\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
+        "          python-version: '3.14.4'\n")}))
+    check("pins/host-patch-other-workflow-finding",
+          (code, _has(lines, "other.yml:6: python-version '3.14.4' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, files={**host, HOST_WORKFLOW_REL: (
+        "on:\n  " + opf + ":\n    python-version: '3.14.4'\njobs:\n  q:\n    steps:\n"
+        "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n")}))
+    check("pins/host-patch-outside-jobs-finding",
+          (code, _has(lines, "quality.yml:3: python-version '3.14.4' differs")), (1, True))
+    # A job whose id the grammar reads but HOST_JOB_RE does not (digit-led), below a host-patch job: the pin
+    # sits in no known job, so it is a finding, never read as the host-patch job above.
+    code, lines = evaluate(_fixture(base, files={**host, HOST_WORKFLOW_REL: (
+        "jobs:\n  " + opf + ":\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
+        "          python-version: '3.14.4'\n  1lint:\n    steps:\n      - uses: actions/setup-python@v5\n"
+        "        with:\n          python-version: '3.14.4'\n")}))
+    check("pins/host-patch-unplain-job-id-finding",
+          (code, _has(lines, "quality.yml:11: python-version '3.14.4' differs"),
+           _has(lines, "quality.yml:6: python-version")), (1, True, False))
+    # The real workflows with every '3.14' pin moved to the host patch. Only the host-patch jobs' pins
+    # pass; each pin that was '3.14' is a finding.
+    real = {WORKFLOWS_REL + "/" + name: _read_text(ROOT / WORKFLOWS_REL / name)
+            for name in sorted(os.listdir(ROOT / WORKFLOWS_REL)) if _yaml_name(name)}
+    floor_pin = "python-version: '3.14'"
+    expected = {"{}:{}".format(rel, number) for rel, text in real.items()
+                for number, line in enumerate(text.split("\n"), 1) if line.strip(" ") == floor_pin}
+    code, lines = evaluate(_fixture(base, files={**host, **{
+        rel: text.replace(floor_pin + "\n", "python-version: '3.14.4'\n") for rel, text in real.items()}}))
+    found = {line[len("FAIL: "):].split(": python-version", 1)[0] for line in lines
+             if line.startswith("FAIL: ") and "differs from the floor" in line}
+    check("pins/newest-legs-at-host-patch-finding", (code, found == expected, len(expected) > 0),
+          (1, True, True))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.8", files=host, job=opf))
+    check("pins/other-patch-workflow-finding",
+          (code, _has(lines, "quality.yml:6: python-version '3.14.8' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, template_pin="3.14.4", files=host))
+    check("pins/host-patch-template-finding",
+          (code, _has(lines, PIN_FILES[0] + ":3: python-version '3.14.4' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.14.4", job=opf))
+    check("pins/host-patch-source-missing-cannot-evaluate",
+          (code, _has(lines, HOST_SOURCE_REL + ": cannot stat")), (2, True))
+    for check_id, patch in (("pins/host-patch-source-malformed-cannot-evaluate", "3.14"),
+                            ("pins/host-patch-source-long-component-cannot-evaluate", "3.14." + "1" * 5000)):
+        code, lines = evaluate(_fixture(base, workflow_pin="3.14.4", job=opf, files={
+            HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"{}\"\n".format(patch)}))
+        check(check_id, (code, _has(lines, HOST_SOURCE_REL + ": want exactly")), (2, True))
+    code, lines = evaluate(_fixture(base, workflow_pin="3.13.4", job=opf, files={
+        HOST_SOURCE_REL: "format-version = 1\npython-host-patch = \"3.13.4\"\n"}))
+    check("pins/off-floor-host-patch-finding",
+          (code, _has(lines, "quality.yml:6: python-version '3.13.4' differs")), (1, True))
+    # tomllib refuses some host sources outside TOMLDecodeError: a RecursionError on deep nesting (a real
+    # payload, far past any default recursion limit) and on a key of more than 1000 dotted parts
+    # (INJECTED: the running release may not bound key depth, so its key parser is patched to raise as one
+    # that does), and a bare ValueError on an over-long integer literal. Each is cannot-evaluate; an
+    # exception that escapes evaluate() is recorded as raised, so each case is red when its mapping is
+    # removed.
+    for check_id, extra, bound in (
+            ("pins/host-patch-source-deep-nesting-cannot-evaluate",
+             "x = " + "[" * 10000 + "]" * 10000 + "\n", False),
+            ("pins/host-patch-source-long-dotted-key-cannot-evaluate", ".".join(["k"] * 1001) + " = 1\n",
+             True),
+            ("pins/host-patch-source-long-integer-cannot-evaluate", "x = " + "1" * 5000 + "\n", False)):
+        root = _fixture(base, workflow_pin="3.14.4", job=opf,
+                        files={HOST_SOURCE_REL: host[HOST_SOURCE_REL] + extra})
+        check(check_id, _host_parse_refusal(root, bound), (2, True))
+    # Each class load_host_patch maps (RecursionError, MemoryError and ValueError), INJECTED at tomllib's
+    # key parser on a key of more than 1000 dotted parts (real memory exhaustion cannot be provoked
+    # safely), is cannot-evaluate, never a traceback, and escapes the copy whose load_host_patch no
+    # longer maps that class (red on revert).
+    root = _fixture(base, workflow_pin="3.14.4", job=opf,
+                    files={HOST_SOURCE_REL: host[HOST_SOURCE_REL] + ".".join(["k"] * 1001) + " = 1\n"})
+    mapping = ("except (ValueError, RecursionError, " + "MemoryError) as exc:\n"
+               "        raise CannotEvaluate(\"{}: does not parse ({}): {}\".format(HOST_SOURCE_REL")
+    gate = _read_text(Path(__file__).resolve())
+    if gate.count(mapping) != 1:
+        raise CannotEvaluate("the load_host_patch mapping anchor occurs {} times".format(gate.count(mapping)))
+    for check_id, kind, kept in (
+            ("pins/host-patch-source-injected-recursion-error-cannot-evaluate", RecursionError,
+             "ValueError, MemoryError"),
+            ("pins/host-patch-source-injected-memory-error-cannot-evaluate", MemoryError,
+             "ValueError, RecursionError"),
+            ("pins/host-patch-source-injected-value-error-cannot-evaluate", ValueError,
+             "RecursionError, MemoryError")):
+        name = "python_floor_without_" + kind.__name__.lower()
+        _write(base, name + ".py", gate.replace(mapping, mapping.replace(
+            "ValueError, RecursionError, " + "MemoryError", kept)))
+        unmapped = _load_path(name, base / (name + ".py"))
+        check(check_id, (_host_parse_refusal(root, True, kind),
+                         _host_parse_refusal(root, True, kind, unmapped.evaluate)),
+              ((2, True), "raised " + kind.__name__))
+    # The same injection over a key parser that refuses the key itself first, by RecursionError, as a
+    # release that bounds key depth does (_capped_parser emulates one, so these vectors do not depend on
+    # the patch release that runs the self-test): MemoryError and ValueError still escape the copy that
+    # no longer maps them. Each is red in the copy whose _key_depth_bounded lets the parser's own
+    # RecursionError through: the copy that maps RecursionError then reports cannot-evaluate instead of
+    # letting the injected class escape.
+    passthrough = 'raise kind("injected: the key parser itself ' + 'refused a key") from None'
+    if gate.count(passthrough) != 1:
+        raise CannotEvaluate("the _key_depth_bounded conversion anchor occurs {} times".format(
+            gate.count(passthrough)))
+    _write(base, "python_floor_parser_class_passthrough.py", gate.replace(passthrough, "raise"))
+    passthrough_copy = _load_path("python_floor_parser_class_passthrough",
+                                  base / "python_floor_parser_class_passthrough.py")
+    for check_id, kind, kept in (
+            ("pins/host-patch-source-capped-parser-injected-memory-error-cannot-evaluate", MemoryError,
+             "ValueError, RecursionError"),
+            ("pins/host-patch-source-capped-parser-injected-value-error-cannot-evaluate", ValueError,
+             "RecursionError, MemoryError")):
+        name = "python_floor_capped_without_" + kind.__name__.lower()
+        _write(base, name + ".py", gate.replace(mapping, mapping.replace(
+            "ValueError, RecursionError, " + "MemoryError", kept)))
+        unmapped = _load_path(name, base / (name + ".py"))
+        check(check_id, (_host_parse_refusal(root, True, kind, capped=True),
+                         _host_parse_refusal(root, True, kind, unmapped.evaluate, capped=True),
+                         passthrough_copy._host_parse_refusal(root, True, kind, unmapped.evaluate, capped=True)),
+              ((2, True), "raised " + kind.__name__, (2, True)))
+    # A key parser whose result breaks the (pos, key) contract: the bounded parser names the mismatch.
+    root = _fixture(base, workflow_pin="3.14.4", job=opf, files=host)
+    for check_id, name in (
+            ("pins/host-patch-parser-none-position-named-failure", "none-position"),
+            ("pins/host-patch-parser-negative-position-named-failure", "negative-position"),
+            ("pins/host-patch-parser-past-end-position-named-failure", "past-end-position"),
+            ("pins/host-patch-parser-bool-position-named-failure", "bool-position"),
+            ("pins/host-patch-parser-non-str-key-part-named-failure", "non-str-key-part")):
+        check(check_id, _malformed_host_refusal(root, *MALFORMED_RESULTS[name]), True)
     # An explicit-key entry whose value is a quoted scalar over several lines is outside the grammar.
     code, lines = evaluate(_fixture(base, files={WORKFLOWS_REL + "/attack.yml": (
         "name: attack\non: push\njobs:\n  q:\n    runs-on: ubuntu-latest\n    steps:\n"
@@ -3301,8 +3626,8 @@ def _self_test_cases(base):
             (fallback_head + "    @staticmethod\n    def load():\n        return 1\n", 7),
             (fallback_head + "    class Fallback(dict):\n        pass\n", 6))], [(1, True)] * 2)
     # The canonical grammar, rule by rule. Each case breaks one rule, so it passes when that rule alone
-    # is removed from the matcher. The round-3 QA forms first: a message that execs a clean exit 0 or
-    # closes the stream, and a version test that raises (exit 1).
+    # is removed from the matcher. First a message that execs a clean exit 0 or closes the stream, and
+    # a version test that raises (exit 1).
     check("fallback/message-call-findings", [fallback_case(fallback_refusal(write=write), 7) for write in (
         "sys.stderr.write(os.execl(sys.executable, sys.executable, \"-I\", \"-B\", \"-c\", "
         "\"raise SystemExit(0)\"))",
@@ -3325,8 +3650,7 @@ def _self_test_cases(base):
             ("TOOL = str(1)", "TOOL"), ("TOOL = 1", "TOOL"), ("sys = \"error\\n\"", "sys"),
             ("TOOL = sys.stderr = \"error\\n\"", "TOOL"), ("sys.stderr = \"error\\n\"", "\"error\\n\""),
             ("TOOL: str = \"error\\n\"", "TOOL"))], [(1, True)] * 6)
-    # The round-3 QA MINOR 3: `import os` is required and must bind os (an unbound os is a NameError,
-    # exit 1).
+    # `import os` is required and must bind os (an unbound os is a NameError, exit 1).
     check("fallback/import-os-findings", [fallback_case(fallback_refusal(before=before), 6) for before in (
         "", "    import os as _os\n", "    import posix as os\n", "    import os, sys\n")], [(1, True)] * 4)
     check("fallback/version-split-findings", [fallback_case(source, 7) for source in (
@@ -3362,8 +3686,8 @@ def _self_test_cases(base):
         "    os._exit(2, os._exit(0))\n", "    os._exit(2, flag=os._exit(0))\n", "    sys._exit(2)\n",
         "    os.umask(2)\n", "    _exit(2)\n", "    os.path._exit(2)\n", "    CODE = os._exit(2)\n",
         "    os._exit\n")], [(1, True)] * 12)
-    # The round-3 QA MINOR 2 first: a re-raise naming another module re-raises the guarded module's
-    # own import error (exit 1). A dotted or from-import can fail on a module the re-raise does not name.
+    # A re-raise naming another module re-raises the guarded module's own import error (exit 1). A
+    # dotted or from-import can fail on a module the re-raise does not name.
     check("fallback/reraise-findings", [fallback_case(source, line) for source, line in (
         (fallback_reraise(reraise="    if exc.name != \"tomli\":\n        raise\n"), 6),
         (fallback_reraise(reraise="    if True:\n        raise\n"), 6),
@@ -3382,7 +3706,7 @@ def _self_test_cases(base):
         (fallback_reraise(guarded="    from tomllib import loads\n",
                           reraise="    if exc.name != \"loads\":\n        raise\n"), 6),
         (fallback_reraise(guarded="    import tomllib\n    import json\n"), 7))], [(1, True)] * 14)
-    # The round-4 QA MEDIUM: a re-raise in an unnamed handler reads None.name, one after a from-import
+    # A re-raise in an unnamed handler reads None.name, one after a from-import
     # compares exc.name with None (every import error is re-raised), and one under except* reads the
     # .name an ExceptionGroup lacks; each exits 1 without the diagnostic.
     check("fallback/reraise-binding-findings", [fallback_case(source, 6) for source in (
@@ -3397,7 +3721,7 @@ def _self_test_cases(base):
         prefix."""
         return prefix + "try:\n    import tomllib\nexcept ModuleNotFoundError" + name + ":\n"
 
-    # The round-4 QA MINOR 2: the handler's `as` clause rebinds a name the grammar reads (as sys the
+    # The handler's `as` clause rebinds a name the grammar reads (as sys the
     # diagnostic is never written, or the version split exits 1; as tuple the split exits 1; as
     # BaseException the wrapping try catches nothing). An `as os` is refused with them, though the
     # handler's `import os` rebinds os.
@@ -3406,7 +3730,7 @@ def _self_test_cases(base):
         fallback_split(head=fallback_named(" as tuple")),
         fallback_refusal(head=fallback_named(" as BaseException")),
         fallback_refusal(head=fallback_named(" as os")))], [(1, True)] * 5)
-    # The round-4 QA MINOR 3: sys is bound by a module-level `import sys` before the try. With none,
+    # The fallback needs sys bound by a module-level `import sys` before the try. With none,
     # with one after the try, an aliased one or one in a function body, the plain diagnostic's
     # NameError is swallowed (the diagnostic is lost) and the version split's exits 1.
     check("fallback/sys-binding-findings", [fallback_case(source, 5) for source in (
@@ -3618,8 +3942,8 @@ def _red_on_revert(base, good):
 
 
 def _rule_reverts(base):
-    """Red-on-revert for each rule of the line model: a reviewer reproduction judged by evaluate() of this
-    gate and of a copy loaded through importlib with that one rule removed from RULES."""
+    """Red-on-revert for each rule of the line model: a fixture that breaks that rule, judged by evaluate()
+    of this gate and of a copy loaded through importlib with that one rule removed from RULES."""
     copy = base / "python_floor_copy.py"
     _write(base, copy.name, _read_text(Path(__file__).resolve()))
     spec = importlib.util.spec_from_file_location("python_floor_copy", copy)
