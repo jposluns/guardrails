@@ -9680,22 +9680,26 @@ def _gate_terminator_index(sub, lits):
 # spellings into allows); the closed grammar replaces that reader outright. The grammar
 # accepts: bare words of _GATE_GRAMMAR_WORD_CHARS (a '#' or '~' may appear inside a word, where bash
 # treats it literally, but never lead one, where it is a comment or a tilde expansion); ONE
-# standalone complete single-quoted literal per word; the three harmless redirect spellings
-# (>/dev/null, 2>/dev/null, 2>&1), which bash removes from the argument list and which write no
-# file; and a segment end at ';', '&', '|', ')', a newline or the end of the text. EVERYTHING ELSE
-# DENIES BY CONSTRUCTION on a flagged segment: an expansion, substitution or backquote, a process
-# substitution, a double quote, a backslash (a line continuation included), a glob character, a
-# brace, a leading '#' comment or '~', a here-document, here-string or any other redirection, a
-# glued or unterminated quote. A segment is FLAGGED when its resolved literal subcommand is on the
-# no-verify roster, OR when its subcommand cannot be resolved because a global option, a global
-# option's value, or the subcommand word itself is outside the grammar (git $g commit, git -C $d:
-# the verb bash will run cannot be known, so the segment fails closed). A segment whose subcommand
-# resolves to a verb OFF the roster is left alone (git log --format="$f" stays allowed), as is a git
-# word inside a region an earlier accepted scan consumed (the -m value in git commit -m 'git commit
-# x' is data, not a command).
+# standalone complete single-quoted literal per word; ONE standalone complete double-quoted literal
+# per word whose interior stays on one line and holds no '$', backquote or backslash (inside double
+# quotes bash treats every other character literally, so such a word is exactly the literal between
+# the quotes, and its decoded interior is judged like a bare word); the three harmless redirect
+# spellings (>/dev/null, 2>/dev/null, 2>&1), which bash removes from the argument list and which
+# write no file; and a segment end at ';', '&', '|', ')', a newline or the end of the text.
+# EVERYTHING ELSE DENIES BY CONSTRUCTION on a flagged segment: an expansion, substitution or
+# backquote (inside double quotes too), a process substitution, a backslash (a line continuation
+# included, inside double quotes too), a double-quoted word that is glued, unterminated or spans a
+# newline, a glob character, a brace, a leading '#' comment or '~', a here-document, here-string or
+# any other redirection, a glued or unterminated single quote. A segment is FLAGGED when its
+# resolved literal subcommand is on the no-verify roster, OR when its subcommand cannot be resolved
+# because a global option, a global option's value, or the subcommand word itself is outside the
+# grammar (git $g commit, git -C $d: the verb bash will run cannot be known, so the segment fails
+# closed). A segment whose subcommand resolves to a verb OFF the roster is left alone (git log
+# --format="$f" stays allowed), as is a git word inside a region an earlier accepted scan consumed
+# (the -m value in git commit -m 'git commit x' is data, not a command).
 _GATE_GRAMMAR_WORD_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./=@:+,%^#~")
-# What may follow a completed bare word or single-quoted literal: whitespace, a segment end, or a
+# What may follow a completed bare word or quoted literal: whitespace, a segment end, or a
 # redirect operator (judged on its own). Any other adjacency glues onto the word and denies.
 _GATE_GRAMMAR_TOKEN_END = frozenset(" \t\n;&|)<>")
 _GATE_GRAMMAR_REDIR_WHY = "carries a redirection outside the accepted >/dev/null, 2>/dev/null and 2>&1 forms"
@@ -9770,7 +9774,7 @@ def _gate_grammar_redirect(command, i, start, fd):
 def _gate_grammar_lex(command, start):
     """Lex ONE flagged segment of the raw command under the closed literal grammar, starting at the
     'git' word at command[start]. Returns (words, end, bad): words is the ordered list of resolved
-    literal word texts (a single-quoted word contributes its content; everything accepted is literal,
+    literal word texts (a quoted word contributes its content; everything accepted is literal,
     so the list IS the argv bash would build), end is the index scanning stopped at (the segment
     terminator, the first violation, or len(command)), and bad is None or the (snippet, why) of the
     first byte outside the grammar. The lexer never guesses past a violation: scanning stops there,
@@ -9794,6 +9798,27 @@ def _gate_grammar_lex(command, start):
             j = command.find("'", i + 1)
             if j < 0:
                 return words, i, _gate_grammar_violation(command, i, i, n)
+            if j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END:
+                return words, i, _gate_grammar_violation(command, i, j + 1, n)
+            words.append(command[i + 1:j])
+            i = j + 1
+            continue
+        if c == '"':
+            # Inside double quotes bash treats every character literally except '$', a backquote,
+            # a backslash and the closing quote, so a complete standalone pair holding none of those
+            # is exactly the literal between the quotes and its interior is judged like a bare word
+            # (a quoted '-n' or '--no-verify' still reaches _no_verify_spelling). An interior '$',
+            # backquote or backslash denies at that byte; an interior newline denies at the quote
+            # (the segment model ends at a newline, so a quoted one cannot be carried); a glued or
+            # unterminated pair denies like its single-quoted counterpart.
+            j = command.find('"', i + 1)
+            if j < 0:
+                return words, i, _gate_grammar_violation(command, i, i, n)
+            for k in range(i + 1, j):
+                if command[k] in "$`\\":
+                    return words, i, _gate_grammar_violation(command, i, k, n)
+                if command[k] == "\n":
+                    return words, i, _gate_grammar_violation(command, i, i, n)
             if j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END:
                 return words, i, _gate_grammar_violation(command, i, j + 1, n)
             words.append(command[i + 1:j])
@@ -10503,7 +10528,8 @@ def _gate_grammar_messages(kind, what, how, unparsed):
     return (
         "AIQT rule gatdis (gate-discipline): {}names a git command, and the word {!r} {} {}. The "
         "gate holds such a git segment to a closed literal grammar (bare literal words, one "
-        "standalone single-quoted literal per word, literal global-option values, and only the "
+        "standalone single-quoted literal per word, one standalone double-quoted literal per word "
+        "holding no '$', backquote or backslash, literal global-option values, and only the "
         ">/dev/null, 2>/dev/null and 2>&1 redirections), because bash rewrites anything else before "
         "git parses its options (an empty expansion leaves a bare '-n' or '--no-verify', silently "
         "skipping the verification hooks), and this gate does not model those rewrites; it denies "
@@ -10574,27 +10600,32 @@ def gate_weakening(data):
     following -n is still read as the bypass. UNCERTAIN GIT SEGMENTS also DENY, fail-closed, via
     _gate_closed_grammar_scan over the raw command: every raw 'git' naming is held to a CLOSED LITERAL
     allowlist grammar (the git_discard shape, judged directly on the raw string), under which an accepted
-    segment can hold ONLY bare literal words, one standalone single-quoted literal per word, literal
+    segment can hold ONLY bare literal words, one standalone single-quoted literal per word, one
+    standalone double-quoted literal per word whose interior stays on one line and holds no '$',
+    backquote or backslash (bash reads such a word as exactly the literal between the quotes), literal
     global-option values, a literal subcommand and the >/dev/null, 2>/dev/null and 2>&1 redirections.
     On a segment whose resolved subcommand is on the roster, ANY other construct DENIES naming the word
     as typed: an expansion, substitution or backquote ('${x}-n', '$x-n', '`true`-n', '-m $(date)', and a
-    dash-free '-m "$msg"' or '--author="$a"' alike), a process substitution, a double quote, a backslash
-    (a line continuation included), a glob or brace character, a '#' comment or leading '~', a
+    dash-free '-m "$msg"' or '--author="$a"' alike, inside double quotes too), a process substitution, a
+    backslash (a line continuation included, inside double quotes too), a double-quoted word that is
+    glued, unterminated or spans a newline, a glob or brace character, a '#' comment or leading '~', a
     here-document, here-string or unlisted redirection, an ANSI-C '$'...'' word, or a glued quote. A
     segment whose subcommand CANNOT be resolved (an expansion where the subcommand or a global option's
     value is expected: git $g commit, git -C $d) also DENIES: the verb bash will run cannot be known.
     Accepted literal words are then checked for the bypass spellings themselves (_no_verify_spelling on
-    the resolved words, so a single-quoted '-n' or '--no-verify' still denies while '-m' consumes its
-    value), and EVERY raw 'git' occurrence is scanned, wherever it sits, so a bypass the shared lexer
-    cannot place (after an escaped-backslash line end or a backslash-continued comment, inside quoted
-    text or a here-document body) is still judged; an occurrence inside a region an earlier accepted
-    scan consumed is data, not a command, and is skipped. DISCLOSED OVER-DENIAL (the deliberate cost of
-    the closed grammar, pending maintainer review): a roster-verb git command carrying ANY live
-    expansion or double-quoted word now denies even where it is a safe operand or value (git commit -m
-    "$msg", git push origin "$branch", git merge "release-$v"), and so does one carrying a comment, a
-    file redirection, or a glob, and so does TEXT that merely names such a git command inside quoted
-    data or a here-document body (echo 'git commit -n', the heredoc line of cat <<EOF); re-issue the
-    command plainly with every word literal, or keep git-with-roster-verb spellings out of quoted data.
+    the resolved words, so a single- or double-quoted '-n' or '--no-verify' still denies while '-m'
+    consumes its value), and EVERY raw 'git' occurrence is scanned, wherever it sits, so a bypass the
+    shared lexer cannot place (after an escaped-backslash line end or a backslash-continued comment,
+    inside quoted text or a here-document body) is still judged; an occurrence inside a region an earlier
+    accepted scan consumed is data, not a command, and is skipped. DISCLOSED OVER-DENIAL (the deliberate
+    cost of the closed grammar, pending maintainer review): a roster-verb git command carrying ANY live
+    expansion denies even where it is a safe operand or value (git commit -m "$msg", git push origin
+    "$branch", git merge "release-$v"), and so does one carrying a comment, a file redirection, or a
+    glob, and so does TEXT that merely names such a git command inside quoted data or a here-document
+    body (echo 'git commit -n', the heredoc line of cat <<EOF); a plain double-quoted literal with no
+    '$', backquote or backslash inside is accepted like a bare word (git commit -m "fix the parser");
+    re-issue anything else plainly with every word literal, or keep git-with-roster-verb spellings out
+    of quoted data.
     DISCLOSED RESIDUAL: a '-n'/'--no-verify' assembled in a separate stage the shell runs and feeds to
     git (printf ... | xargs git commit) is not reconstructed, and an alias, wrapper or shell function
     that renames git is not resolved. A verb off the roster is untouched (git log ${x}-n, git log

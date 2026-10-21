@@ -75,10 +75,12 @@ It also covers the gate-weakening guard (gate_weakening, gatdis): a git verifica
 (--no-verify on commit/merge/push/pull/rebase/am, exact or abbreviated; the short -n only on
 commit/am, where -n IS --no-verify, with a value-aware '--' boundary so a '--' eaten as an option value
 does not hide a following -n) denies; every raw git naming is held to a closed literal allowlist
-grammar (bare literal words, one standalone single-quoted literal per word, literal global-option
+grammar (bare literal words, one standalone single-quoted literal per word, one standalone
+double-quoted literal per word holding no $, backquote or backslash, literal global-option
 values, the >/dev/null, 2>/dev/null and 2>&1 redirections), so on a roster verb any expansion,
-substitution, process substitution, double quote, backslash, glob, brace, comment, here-document or
-other redirection denies fail-closed, as does a git whose subcommand cannot be resolved, while an
+substitution, process substitution, backslash, glob, brace, comment, here-document or
+other redirection denies fail-closed, as does a double-quoted word that is glued, unterminated or
+spans a newline, and a git whose subcommand cannot be resolved, while an
 off-roster verb and data an accepted scan consumed stay allowed; a checker-shaped segment whose failure is swallowed
 (|| true, || :) or piped into an adjacent head or tail allows with a note, except that a narrow
 verification run on the allow-list whose output reaches a sink on the allow-list (head or tail with
@@ -12490,9 +12492,10 @@ def _main_isolated(monitor):
         gexpect("(gw-aj) pull -n is --no-stat, allows", "git pull -n", "allow")
         gexpect("(gw-ak) an -m value naming the no-verify word allows when single-quoted",
                 "git commit -m 'fix the no-verify flag'", "allow")
-        gexpect("(gw-ak2) the double-quoted form denies (the closed literal grammar refuses a double "
-                "quote on a roster-verb git segment; a disclosed over-deny)",
-                'git commit -m "fix the no-verify flag"', "deny")
+        gexpect("(gw-ak2) the double-quoted form allows too (the closed literal grammar accepts a "
+                "standalone double-quoted literal with no $, backquote or backslash inside, and the "
+                "decoded word is an -m value, not an option)",
+                'git commit -m "fix the no-verify flag"', "allow")
         gexpect("(gw-al) --no-verify-signatures on commit is not the bypass",
                 "git commit --no-verify-signatures -m 'x'", "allow")
         gexpect("(gw-am) cherry-pick with a stray -n is out of the verb roster, allows",
@@ -12553,12 +12556,13 @@ def _main_isolated(monitor):
         # backslash-ended comment, hiding the command on the next line), so the gate now holds EVERY raw
         # git naming to a closed literal allowlist grammar (_gate_closed_grammar_scan): on a segment whose
         # subcommand is on the no-verify roster, only bare literal words, one standalone single-quoted
-        # literal per word, literal global-option values and the >/dev/null, 2>/dev/null and 2>&1
-        # redirections are accepted; anything else denies by construction, and a git whose subcommand
-        # cannot be resolved denies too. The accepted literal words are then checked for the bypass
-        # spellings themselves. The allow controls pin the grammar's edges (plain words, the standalone
-        # single-quoted literal, the accepted redirects, a real '--' terminator, an off-roster verb, and
-        # quoted data consumed by an accepted scan).
+        # literal per word, one standalone double-quoted literal per word whose interior stays on one
+        # line and holds no '$', backquote or backslash, literal global-option values and the
+        # >/dev/null, 2>/dev/null and 2>&1 redirections are accepted; anything else denies by
+        # construction, and a git whose subcommand cannot be resolved denies too. The accepted literal
+        # words are then checked for the bypass spellings themselves. The allow controls pin the
+        # grammar's edges (plain words, the standalone quoted literals, the accepted redirects, a real
+        # '--' terminator, an off-roster verb, and quoted data consumed by an accepted scan).
         gexpect("(gw-eo-a) ${x}-n on commit denies (an empty expansion leaves a bare -n)",
                 "git commit ${x}-n -m y", "deny")
         gexpect("(gw-eo-b) $x-n on commit denies", "git commit $x-n -m y", "deny")
@@ -12580,8 +12584,9 @@ def _main_isolated(monitor):
         gexpect("(gw-eo-k) ${x}-n beside a here-string denies (raw fallback)",
                 "git am ${x}-n <<<x", "deny")
         # The grammar's deliberate over-denials, each disclosed in the gate docstring and the enforcement
-        # ledger: ANY live expansion or double-quoted word on a roster-verb git segment denies, even as a
-        # safe value or operand; the re-issue is a literal or standalone single-quoted word.
+        # ledger: ANY live expansion on a roster-verb git segment denies, even as a safe value or operand
+        # and inside double quotes too; a plain double-quoted literal with no $, backquote or backslash
+        # inside is accepted like a bare word, so the re-issue is a literal or standalone quoted word.
         gexpect("(gw-eo-l) -m \"$msg\" is a double-quoted expansion on a roster verb, denies (disclosed "
                 "over-deny; the single-quoted control gw-eo-o allows)",
                 'git commit -m "$msg"', "deny")
@@ -12663,6 +12668,52 @@ def _main_isolated(monitor):
                 'git merge "-release$v"', "deny")
         gexpect("(gw-eo-am-mut2) \"$v-release\" leads with the expansion, denies",
                 'git merge "$v-release"', "deny")
+
+        # === gatdis: a standalone double-quoted LITERAL is accepted like a bare word =====================
+        # Bash reads a complete standalone double-quoted word with no '$', backquote or backslash inside
+        # as exactly the literal between the quotes, so refusing it was pure over-refusal (it pushed
+        # routine commits into working around the gate). Each allow here DENIED before the grammar
+        # accepted the form; each deny pins the boundary that keeps the acceptance narrow (the interior
+        # scan, the glue checks, the one-line rule and the bypass check on the decoded word), so a
+        # mutant that accepts any terminated double-quoted word turns a deny red while a revert of the
+        # acceptance turns an allow red.
+        gexpect("(gw-dq-a1) a plain double-quoted -m value allows",
+                'git commit -m "Fix the parser"', "allow")
+        gexpect("(gw-dq-a2) a double-quoted ref whose closing quote ends the command allows",
+                'git push origin "main"', "allow")
+        gexpect("(gw-dq-a3) shell metacharacters inside double quotes are literal, allows",
+                'git commit -m "a; b | c"', "allow")
+        gexpect("(gw-dq-a4) an empty double-quoted word allows (like the empty single-quoted word)",
+                'git commit -m ""', "allow")
+        gexpect("(gw-dq-a5) a single quote inside double quotes is literal, allows",
+                "git commit -m \"it's a fix\"", "allow")
+        # The decoded interior is judged like a bare word, so a quoted bypass spelling still denies.
+        gexpect("(gw-dq-d1) a double-quoted \"-n\" is still the short bypass, denies",
+                'git commit "-n" -m x', "deny")
+        gexpect("(gw-dq-d2) a double-quoted \"--no-verify\" is still the long bypass, denies",
+                'git commit "--no-verify" -m x', "deny")
+        gexpect("(gw-dq-d3) the quoted bypass denies on the raw fallback too",
+                'git commit "-n" -m "unbalanced', "deny")
+        # The interior scan: '$', a backquote or a backslash anywhere inside denies ('$' just inside
+        # the opening quote is gw-eo-l; just before the closing quote is gw-dq-d6).
+        gexpect("(gw-dq-d4) a backslash inside double quotes denies",
+                'git commit -m "a\\"b"', "deny")
+        gexpect("(gw-dq-d5) a backquote inside double quotes denies",
+                'git commit -m "`x`"', "deny")
+        gexpect("(gw-dq-d6) a '$' just before the closing quote denies (bash reads a trailing '$' "
+                "literally; the grammar refuses every interior '$', a disclosed safe-direction over-deny)",
+                'git commit -m "msg$"', "deny")
+        # The one-line rule: a double-quoted word spanning a newline denies (the segment model ends at
+        # a newline, so a quoted one cannot be carried into an accepted word).
+        gexpect("(gw-dq-d7) a double-quoted word spanning a newline denies",
+                'git commit -m "a\nb"', "deny")
+        # The glue checks on both sides, and the unterminated form.
+        gexpect("(gw-dq-d8) an opening quote glued to a word denies (the separated gw-dq-a1 form is "
+                "the control)", 'git commit -m"x y"', "deny")
+        gexpect("(gw-dq-d9) a closing quote glued to trailing text denies",
+                'git commit -m "x y"z', "deny")
+        gexpect("(gw-dq-d10) an unterminated double quote denies (raw fallback, same grammar)",
+                'git commit -m "unterminated', "deny")
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
@@ -18648,7 +18699,9 @@ def _main_isolated(monitor):
           "gatdis (gate_weakening) DENIES a --no-verify bypass (with a value-aware '--' boundary so a '--' "
           "eaten as an option value does not hide a following -n), any raw git naming whose segment the "
           "closed literal allowlist grammar refuses on a roster verb (an expansion, substitution, process "
-          "substitution, double quote, backslash, glob, brace, comment, here-document or redirection "
+          "substitution, backslash, glob, brace, comment, a glued, unterminated or newline-spanning "
+          "double-quoted word - a standalone double-quoted literal with no $, backquote or backslash "
+          "inside is accepted like a bare word - or a redirection "
           "beyond >/dev/null, 2>/dev/null and 2>&1) or whose subcommand cannot be resolved, and a known "
           "verification run whose output reaches "
           "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
