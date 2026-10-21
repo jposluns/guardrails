@@ -24,7 +24,13 @@ MODES (auto-detected from GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH; overridable for 
     SCANNED SET is bound to what the push would actually publish: every commit reachable from the
     scanned commit and not reachable from any object the remote advertises, read with git ls-remote at
     check time (local remote-tracking refs can be stale, and a path or URL remote has none, so neither
-    is consulted); when that set cannot be computed, or it is empty, the run fails closed. --base does
+    is consulted); when that set cannot be computed, or it is empty, the run fails closed. That binding
+    holds only when the advertisement read and the push destination are one repository, so the remote's
+    push URL set must be exactly its one fetch URL (a remote.<name>.pushurl, an added URL or a
+    pushInsteadOf rewrite fails closed, and so does a --remote given as a URL while any pushInsteadOf
+    rewrite is configured); and every git read here is taken on the true object graph the push
+    transports (replace refs and a grafts file are ignored), so neither mechanism can substitute a
+    clean message, parent list or changelog for the ones the push sends. --base does
     not define the set (it could not: commits below it that the remote lacks are published too); it is
     kept as a CROSS-CHECK of the caller's intent and must still be a proper ancestor of the scanned
     commit; when the default branch has advanced past the branch point, pass the merge-base
@@ -72,8 +78,11 @@ that is not the repository root, a body file that is missing, a symlink, not a r
 MAX_BODY_BYTES or not UTF-8, an empty --title, --branch or --remote, a --base or --head that is not a
 canonical non-zero 40-hex SHA, a --head that does not name a commit in the repository, a --base that is
 not a proper ancestor of the scanned commit (base equal to it included; pass the merge-base when the
-default branch has advanced past the branch point), a remote whose advertised refs cannot be read with
-git ls-remote (without them the published set cannot be established), unexpected ls-remote or git log
+default branch has advanced past the branch point), a configured remote whose push URL set is not
+exactly its one fetch URL (a pushurl, an added URL or a pushInsteadOf rewrite would send the push to a
+repository other than the one whose advertisement defined the scanned set), a --remote given as a URL
+while any url.<base>.pushInsteadOf rewrite is configured, a remote whose advertised refs cannot be read
+with git ls-remote (without them the published set cannot be established), unexpected ls-remote or git log
 output, a published set that is EMPTY (the remote already has every commit reachable from the scanned
 commit: scanning nothing is never read as clean), a changelog.toml that does not parse or has an
 unexpected shape at any published commit or any of its parents, a changelog.toml deleted at any
@@ -157,19 +166,33 @@ class FailClosed(Exception):
     """A condition under which the gate must exit 2 rather than risk a false clean."""
 
 
+def _git_status(args, root=None, stdin_text=None):
+    """Launch git with an argv array (never a shell) and return (returncode, stdout), for the few
+    probes whose non-zero exit is an answer rather than an error; _run_git wraps this for every
+    read that must fail closed. Every launch reads the TRUE object graph the push transports:
+    --no-replace-objects keeps a refs/replace rewrite from substituting another commit's message,
+    parents or changelog for the ones the push sends (the push always sends the original objects),
+    and GIT_GRAFT_FILE pinned to the null device keeps an info/grafts file from cutting parents
+    out of the ancestry walk, so neither mechanism can hide a published commit from the scan."""
+    env = dict(os.environ)
+    env["GIT_GRAFT_FILE"] = os.devnull
+    try:
+        proc = subprocess.run(["git", "--no-replace-objects", "-C", str(root or ROOT), *args],
+                              capture_output=True, encoding="utf-8", input=stdin_text, env=env)
+    except (OSError, ValueError) as exc:                       # git missing, or undecodable output
+        raise FailClosed("git invocation failed ({})".format(type(exc).__name__))
+    return proc.returncode, proc.stdout
+
+
 def _run_git(args, root=None, stdin_text=None):
-    """Run git with an argv array (never a shell); fail closed on any error, without echoing git's stderr or
+    """Run git through _git_status; fail closed on any error, without echoing git's stderr or
     the revision values (which may reflect a leaked string). root (pre-push mode) defaults to ROOT (CI).
     stdin_text, when given, is fed to git's standard input (used with --stdin so a large revision set is
     never spliced into the argument vector)."""
-    try:
-        proc = subprocess.run(["git", "-C", str(root or ROOT), *args], capture_output=True, encoding="utf-8",
-                              input=stdin_text)
-    except (OSError, ValueError) as exc:                       # git missing, or undecodable output
-        raise FailClosed("git invocation failed ({})".format(type(exc).__name__))
-    if proc.returncode != 0:
-        raise FailClosed("git {} exited non-zero ({})".format(args[0] if args else "?", proc.returncode))
-    return proc.stdout
+    returncode, stdout = _git_status(args, root, stdin_text)
+    if returncode != 0:
+        raise FailClosed("git {} exited non-zero ({})".format(args[0] if args else "?", returncode))
+    return stdout
 
 
 def commit_messages(base, head, root=None):
@@ -456,6 +479,44 @@ def _rev_file_text(rev, rel, root):
     return _run_git(["show", "{}:{}".format(rev, rel)], root)
 
 
+def _require_push_url_matches(remote, root):
+    """git ls-remote reads the advertisement of the remote's FETCH URL, while git push writes to
+    its PUSH URL(s), so a scanned set derived from that advertisement describes the push only when
+    both name one repository; otherwise a commit the fetch repository already holds is excluded
+    from the scan yet still sent to the push repository. For a configured remote, git remote
+    get-url expands remote.<name>.url, remote.<name>.pushurl and the url.<base>.insteadOf /
+    pushInsteadOf rewrites, so this requires exactly one fetch URL and exactly one push URL,
+    byte-identical: an extra URL (push sends to every configured URL), a differing pushurl, or a
+    pushInsteadOf rewrite each fails closed. A --remote that is not a configured remote name is a
+    URL; ls-remote and push apply an insteadOf rewrite to it alike, but a pushInsteadOf rewrite
+    redirects only the push, so with any url.<base>.pushInsteadOf configured at all the run fails
+    closed (whether a given rewrite matches a given URL is git's prefix logic, not re-derived
+    here)."""
+    rc, names = _git_status(["remote"], root)
+    if rc != 0:
+        raise FailClosed("cannot list the configured remotes: the push destination cannot be "
+                         "established")
+    if remote in names.splitlines():
+        fetch_urls = _run_git(["remote", "get-url", "--all", remote], root).splitlines()
+        push_urls = _run_git(["remote", "get-url", "--push", "--all", remote], root).splitlines()
+        if len(fetch_urls) != 1 or push_urls != fetch_urls:
+            raise FailClosed("the remote's push URL set is not exactly its one fetch URL (a "
+                             "pushurl, an added URL or a pushInsteadOf rewrite): the refs it "
+                             "advertises would describe a different repository than the push "
+                             "writes to, so the set of commits the push would publish cannot "
+                             "be established")
+        return
+    rc, _out = _git_status(["config", "--get-regexp", r"^url\..*\.pushinsteadof$"], root)
+    if rc == 0:
+        raise FailClosed("--remote is a URL and a url.<base>.pushInsteadOf rewrite is "
+                         "configured: the push could be redirected away from the advertised "
+                         "refs the scan read, so the set of commits the push would publish "
+                         "cannot be established")
+    if rc != 1:
+        raise FailClosed("cannot read the URL rewrite configuration: the push destination "
+                         "cannot be established")
+
+
 def _remote_advertised_shas(remote, root):
     """Every object id the target remote advertises RIGHT NOW, read with git ls-remote at check
     time: local remote-tracking refs can be stale, and a path or URL remote has none at all, so
@@ -512,8 +573,9 @@ def pre_push_channels(repo, base, body, title, head=None, branch=None, remote="o
     detached HEAD fails closed: the push targets a branch, so without one there is nothing to bind
     the scan to). The SCANNED SET is every commit reachable from the scanned commit and not
     reachable from any object the remote advertises at check time (git ls-remote, never local
-    remote-tracking refs), because that is what the push sends; an empty set fails closed rather
-    than scanning nothing and reading it as clean. base does NOT define the set (a commit below it
+    remote-tracking refs), which is what the push sends once _require_push_url_matches has proven
+    the advertisement read and the push destination are one repository; an empty set fails closed
+    rather than scanning nothing and reading it as clean. base does NOT define the set (a commit below it
     the remote lacks is published and scanned all the same); it stays as a cross-check and must be
     a proper ancestor of the scanned commit. The changelog delta is taken PER COMMIT in the set, so
     every intermediate state the push publishes is scanned, including one later removed again."""
@@ -539,6 +601,7 @@ def pre_push_channels(repo, base, body, title, head=None, branch=None, remote="o
                          "the caller's intent; when the default branch has advanced past the "
                          "branch point, pass the merge-base, from git merge-base <default-branch> "
                          "HEAD, not the advanced tip)")
+    _require_push_url_matches(remote, repo)
     rows = _published_commits(head, _remote_advertised_shas(remote, repo), repo)
     if not rows:
         raise FailClosed("the remote already has every commit reachable from the scanned commit: "
