@@ -9438,8 +9438,12 @@ def _main_isolated(report_path=None):
                           "wake_digests": [hashlib.sha256(_hwake.encode("utf-8")).hexdigest()]})
         aiqt_hooks.orch_prompt_stamp(h.payload("UserPromptSubmit", extra={"prompt": _hwake}))
         _hts = h.turn_state()
+        # the consumed digest proves the timer-originated branch RAN: an early allow (out of scope,
+        # or a registry that does not read ok) would also leave the planted counters untouched, but
+        # it would leave the planted digest unconsumed
         check("ask/timer-wake-keeps-ask-counters",
-              (_hts.get("ask_denials"), _hts.get("ask_basis")), (3, "X"))
+              (_hts.get("ask_denials"), _hts.get("ask_basis"), _hts.get("wake_digests")),
+              (3, "X", []))
         # ask denials never relieve a scheduling call (the counter isolation's other direction)
         h.enum_exit.write_text("3", encoding="utf-8")
         h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
@@ -9507,15 +9511,38 @@ def _main_isolated(report_path=None):
         h.pending.write_text("D-9: deferred to the maintainer\n", encoding="utf-8")
         # the same mixed shape a session could manufacture itself: ONE schema-invalid line appended
         # to the dispatch ledger holds a tracked item as cannot-evaluate beside an actionable item;
-        # still denied on every unchanged call, never relieved
+        # still denied on every unchanged call, never relieved, and the fourth deny names both sets
         (hsd / "dispatch-ledger.jsonl").write_text('{"event": "launch"}\n', encoding="utf-8")
         h.set_items([item("A-13"), item("T-2", blocker={"kind": "tracked-task", "ref": "T-9"})])
         h.set_turn_state({})
+        _hled = [ask_att("tu-k{}".format(i)) for i in range(4)]
         check("ask/attended-mixed-invalid-ledger-line-still-denies",
-              [_verdict(ask_att("tu-k{}".format(i))) for i in range(4)], ["deny"] * 4)
+              [_verdict(r) for r in _hled], ["deny"] * 4)
+        check("ask/attended-mixed-invalid-ledger-deny-names-both-sets",
+              ("A-13" in ask_reason(_hled[3]), "T-2" in ask_reason(_hled[3]),
+               "cannot-evaluate" in ask_reason(_hled[3])), (True, True, True))
+        # the relief boundary is the CLASSIFIED actionable set: the same invalid ledger line over an
+        # ALL-tracked backlog holds every item (nothing stays classified actionable), so the fourth
+        # unchanged question is relieved at the cap; the mixed shape above, which keeps one
+        # classified-actionable item, is the control that still denies
+        h.set_items([item("T-3", blocker={"kind": "tracked-task", "ref": "T-9"}),
+                     item("T-4", blocker={"kind": "tracked-task", "ref": "T-8"})])
+        h.set_turn_state({})
+        check("ask/attended-all-held-invalid-ledger-line-cap-relieves",
+              [_verdict(ask_att("tu-l{}".format(i))) for i in range(4)],
+              ["deny", "deny", "deny", "warn"])
         (hsd / "dispatch-ledger.jsonl").write_text(
             json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-9",
                         "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
+        # an enumeration failure HIDES items rather than holding them: a duplicate item id fails the
+        # whole enumeration, so an item that would be actionable without the duplicate is absent from
+        # the classified sets and the fourth unchanged question is relieved at the cap; the
+        # four-denial actionable run above is the control that a valid enumeration never relieves
+        h.set_items([item("A-14"), item("A-14")])
+        h.set_turn_state({})
+        check("ask/attended-duplicate-id-cap-relieves",
+              [_verdict(ask_att("tu-m{}".format(i))) for i in range(4)],
+              ["deny", "deny", "deny", "warn"])
 
         # ---------- component 3: the truncation guard ----------
         t = Fixture(tmp, "trunc")

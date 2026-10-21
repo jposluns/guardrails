@@ -252,7 +252,11 @@ and `not-attended` do not match. A JSON marker must be exactly `{"mode": "<atten
 strict-exact with a duplicate-key-rejecting hook and no extra keys) or it fails closed. A recognized mode
 whose value begins with the `unattended` token arms the ask blocker's unattended deny; a recognized
 attended-family mode does not disarm it: for a session within the live scope (the yield guard's gate, so
-a co-located worker a holder-scoped lease does not name never inherits the global backlog), where the
+a co-located worker a holder-scoped lease does not name never inherits the global backlog; under such a
+lease the judgement is off for every session in three cases where no holder can be confirmed, a lease
+file that is absent or unreadable, a call that carries no session id, or a lease that names no session,
+while a lease stale past `max_age_hours` skips the holder check and a live mode record then keeps every
+session in scope, the judgement staying on there), where the
 registry declares a backlog enumerator, a blocking question is judged against the same fresh enumeration
 the yield guard uses (ctx kind `ask`, no wake-naming requirement, counted by its own
 `ask_denials`/`ask_basis` pair in `turn-state.json`, which genuine human input resets exactly as it
@@ -261,7 +265,10 @@ tracked task) nor blocked by a human decision recorded in the pending-decisions 
 items and the two exits (dispatch them, or record them as blocked by this decision, then re-issue the
 question) and is never cap-relieved, since both exits stay available (a backlog holding both an actionable
 item and a cannot-evaluate item keeps that deny, which then also names the held items, so held work never
-buys relief past dispatchable work); only the cannot-evaluate denies (an
+buys relief past work the enumeration still classifies as actionable; a proof-source failure that holds
+every otherwise-actionable item, such as one schema-invalid dispatch-ledger line or an unreadable
+pending-decisions record, or an enumeration failure that hides items, such as a duplicate item id, leaves
+nothing classified actionable, so the cap can still relieve such a shape); only the cannot-evaluate denies (an
 enumerator error, a declared non-object enumerator, or an unreadable item proof source) carry the schedule
 path's three-denial cap on an unchanged basis, and only while no item is actionable, and the ask blocker's
 manifest residue carries the full

@@ -623,6 +623,9 @@ expected-check-ids = [
   "ask/attended-mixed-cannot-evaluate-actionable-still-denies",
   "ask/attended-mixed-deny-names-both-sets",
   "ask/attended-mixed-invalid-ledger-line-still-denies",
+  "ask/attended-mixed-invalid-ledger-deny-names-both-sets",
+  "ask/attended-all-held-invalid-ledger-line-cap-relieves",
+  "ask/attended-duplicate-id-cap-relieves",
   # ---------- component 3: the truncation guard ----------
   "trunc/plain-bg-allows",
   "trunc/plain-args-allows",
