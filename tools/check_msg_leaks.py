@@ -16,17 +16,26 @@ MODES (auto-detected from GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH; overridable for 
     the authoritative check on the text that actually landed (a title/body edit after the PR check, or a
     merge-dialog edit of the squash message, is caught only here). Fires after publication -> drives removal.
   - --pre-push --repo <abs> --body-file <abs> --base <40-hex sha> [--title <text>] [--head <40-hex sha>]
-    [--branch <name>]: the LOCAL, pre-publication mode, run by tools/push_branch.py BEFORE a first push
-    leaves the machine (the one mode that is prevention rather than detection). Every input is explicit
-    (no ambient default): the repository root (and it must BE the root: a subdirectory would read the
-    changelog as absent), the drafted PR body file (composed with --title when one is given, the same
-    one-blob rule as the CI mode), and the base SHA, which must be a proper ancestor of the scanned
-    commit, so the scanned range is exactly the non-empty range the push adds. --head and --branch, when
-    given, bind the scan to the exact commit and branch name the helper resolved once and will push;
-    without them HEAD and the current branch are resolved here. Channels: the body file, every string
-    added to the parsed changelog.toml in base..head (keys and values alike, a multiset difference), the
-    commit messages in base..head, and the branch name. On a clean run it prints `body sha256:`, the
-    digest of the exact body bytes it scanned, for the helper to reprint.
+    [--branch <name>] [--remote <name-or-url>]: the LOCAL, pre-publication mode, run by
+    tools/push_branch.py BEFORE a first push leaves the machine (the one mode that is prevention rather
+    than detection). Every input is explicit (no ambient default): the repository root (and it must BE
+    the root: a subdirectory would read the changelog as absent), the drafted PR body file (composed
+    with --title when one is given, the same one-blob rule as the CI mode), and the base SHA. The
+    SCANNED SET is bound to what the push would actually publish: every commit reachable from the
+    scanned commit and not reachable from any object the remote advertises, read with git ls-remote at
+    check time (local remote-tracking refs can be stale, and a path or URL remote has none, so neither
+    is consulted); when that set cannot be computed, or it is empty, the run fails closed. --base does
+    not define the set (it could not: commits below it that the remote lacks are published too); it is
+    kept as a CROSS-CHECK of the caller's intent and must still be a proper ancestor of the scanned
+    commit; when the default branch has advanced past the branch point, pass the merge-base
+    (git merge-base <default-branch> HEAD), not the advanced tip. --remote defaults to origin. --head
+    and --branch, when given, bind the scan to the exact commit and branch name the helper resolved
+    once and will push; without them HEAD and the current branch are resolved here. Channels: the body
+    file, the message of every commit in the scanned set, every string each of those commits adds to
+    the parsed changelog.toml against its parent or parents (keys and values alike, a multiset
+    difference per commit, so a string added and removed again inside the range is still scanned at the
+    intermediate state that carried it), and the branch name. On a clean run it prints `body sha256:`,
+    the digest of the exact body bytes it scanned, for the helper to reprint.
   - --self-test (honoured only as the SOLE argument): run embedded fail-cases in memory (CI invokes this
     alongside the real run). Mixed with anything else it is an unknown argument and the run fails closed,
     so it can never stand in for a requested production scan.
@@ -34,8 +43,9 @@ MODES (auto-detected from GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH; overridable for 
 ATTRIBUTION LAYER (pre-merge and pre-push phases; the post-merge push scan keeps its landed-message
 denylist scope). Three narrow patterns, nothing broader: a trailer-shaped `*-by:` line at line start
 whose value names an AI identity, a generated/written/drafted with/by/using phrase followed within a
-bounded window by an AI identity (matched against the original line, and the complete identity must end
-inside the window), and an AI vendor address bounded so a longer domain is not read as the vendor's. The
+bounded window by an AI identity (matched against the original line, and the identity must BEGIN inside
+the window; its match may run past the edge, because a longer gpt- form such as a dated model id is
+itself an AI identity), and an AI vendor address bounded so a longer domain is not read as the vendor's. The
 identity set is defined in TWO PLACES kept byte-identical by a test: this gate's AI_IDENTITY_PATTERN and
 AI_IDENTITY_RE in the commit-identity hook (.aiqt/core/hooks/scripts/aiqt_hooks.py); the self-test
 extracts the hook's pattern from its source and fails on any drift, including a changed compile-call
@@ -59,11 +69,15 @@ branch-creation push whose complete range cannot be established, an unresolvable
 kind whose channel set cannot be established -> exit 2. In --pre-push mode, additionally: an unknown,
 repeated or valueless argument, a missing required argument, a relative --repo or --body-file, a --repo
 that is not the repository root, a body file that is missing, a symlink, not a regular file, over
-MAX_BODY_BYTES or not UTF-8, an empty --title or --branch, a --base or --head that is not a canonical
-non-zero 40-hex SHA, a --head that does not name a commit in the repository, a --base that is not a
-proper ancestor of the scanned commit (base equal to it included: an empty range scans nothing and is
-never clean), a changelog.toml that does not parse or has an unexpected shape at either revision, a
-changelog.toml that exists at base but not at head, a detached HEAD, or any git failure -> exit 2, and
+MAX_BODY_BYTES or not UTF-8, an empty --title, --branch or --remote, a --base or --head that is not a
+canonical non-zero 40-hex SHA, a --head that does not name a commit in the repository, a --base that is
+not a proper ancestor of the scanned commit (base equal to it included; pass the merge-base when the
+default branch has advanced past the branch point), a remote whose advertised refs cannot be read with
+git ls-remote (without them the published set cannot be established), unexpected ls-remote or git log
+output, a published set that is EMPTY (the remote already has every commit reachable from the scanned
+commit: scanning nothing is never read as clean), a changelog.toml that does not parse or has an
+unexpected shape at any published commit or any of its parents, a changelog.toml deleted at any
+published commit relative to a parent, a detached HEAD, or any git failure -> exit 2, and
 tools/push_branch.py refuses the push on it. A finding -> exit 1. Clean -> exit 0. Missing input
 is never read as clean. A confidentiality gate that cannot load its codename denylist does not run:
 absent/empty is exit 2, stricter than the file gate, because here there is no compensating repo-wide file
@@ -114,12 +128,15 @@ AI_IDENTITY_RE = re.compile(AI_IDENTITY_PATTERN)
 # A value that merely MENTIONS an AI name also fires: a documented false-positive cost.
 _AI_TRAILER_RE = re.compile(r"^[ \t]*[A-Za-z][A-Za-z0-9-]*-by[ \t]*:[ \t]*(?P<value>.*)$",
                             re.IGNORECASE)
-# An authorship verb bound to with/by/using; the AI identity must then match INSIDE the bounded
-# window right after the phrase, against the ORIGINAL line: the complete identity must end within
-# the window, so a mention far down the line is not bound to the phrase, and a longer word cut at
-# the window edge is never read as the shorter identity it begins with. A nearer mention that is
-# unrelated ("generated by the protobuf compiler, used by the Claude adapter") still fires: a
-# bounded textual window cannot read intent, a documented false-positive cost.
+# An authorship verb bound to with/by/using; the AI identity must then BEGIN inside the bounded
+# window right after the phrase, matched against the ORIGINAL line, never a slice of it: a longer
+# word that merely begins with an identity ("claudette") never matches at all, because the
+# pattern's word boundary decides that, not the window; an identity beginning inside the window
+# whose match runs past the edge still fires, because a longer gpt- form (a dated model id such
+# as gpt-4o-2024-08-06) is itself an AI identity; and a mention beginning past the window is not
+# bound to the phrase. A nearer mention that is unrelated ("generated by the protobuf compiler,
+# used by the Claude adapter") still fires: a bounded textual window cannot read intent, a
+# documented false-positive cost.
 _AI_PHRASE_RE = re.compile(r"(?i)\b(?:generated|written|drafted)[ \t]+(?:with|by|using)\b")
 _AI_PHRASE_WINDOW = 60
 # An AI vendor address names the vendor as a party wherever it appears (its usual carrier is a
@@ -140,11 +157,14 @@ class FailClosed(Exception):
     """A condition under which the gate must exit 2 rather than risk a false clean."""
 
 
-def _run_git(args, root=None):
+def _run_git(args, root=None, stdin_text=None):
     """Run git with an argv array (never a shell); fail closed on any error, without echoing git's stderr or
-    the revision values (which may reflect a leaked string). root (pre-push mode) defaults to ROOT (CI)."""
+    the revision values (which may reflect a leaked string). root (pre-push mode) defaults to ROOT (CI).
+    stdin_text, when given, is fed to git's standard input (used with --stdin so a large revision set is
+    never spliced into the argument vector)."""
     try:
-        proc = subprocess.run(["git", "-C", str(root or ROOT), *args], capture_output=True, encoding="utf-8")
+        proc = subprocess.run(["git", "-C", str(root or ROOT), *args], capture_output=True, encoding="utf-8",
+                              input=stdin_text)
     except (OSError, ValueError) as exc:                       # git missing, or undecodable output
         raise FailClosed("git invocation failed ({})".format(type(exc).__name__))
     if proc.returncode != 0:
@@ -192,9 +212,10 @@ def scan_attribution(channels):
     `*-by:` trailer line whose value names an AI identity, a generated/written/drafted with/by/using
     phrase with an AI identity inside the window right after it, and an AI vendor address. Returns
     finding strings, never echoing the matched text. The identity is matched against the ORIGINAL
-    line, never a slice of it, and the complete match must end inside the window: a name that only
-    starts inside does not fire, and a longer word cut at the window edge ("claudette", "gpt-4o")
-    can never be read as the shorter identity it begins with (tested at both edges)."""
+    line, never a slice of it, and the match must BEGIN inside the window: a longer word that
+    merely begins with an identity ("claudette") never matches at all (the pattern's word boundary
+    decides), while a match that begins inside and runs past the edge still fires, because a
+    longer gpt- form (a dated model id) is itself an AI identity (tested at both edges)."""
     findings = []
     for label, text in channels:
         for line in text.splitlines():
@@ -203,9 +224,13 @@ def scan_attribution(channels):
                 findings.append("{}: AI attribution (trailer)".format(label))
             for phrase in _AI_PHRASE_RE.finditer(line):
                 identity = AI_IDENTITY_RE.search(line, phrase.end())
-                # The leftmost identity match at or after the phrase decides: matches never overlap,
-                # so when it ends past the window no later match can end inside the window either.
-                if identity and identity.end() <= phrase.end() + _AI_PHRASE_WINDOW:
+                # The leftmost identity match at or after the phrase decides: any other match
+                # begins no earlier, so when this one begins at or past the window's end no
+                # identity begins inside it. (An end-inside rule would be unsound twice over: a
+                # long match beginning inside the window is dropped although a longer gpt- form
+                # is itself a model id, and an overlapped shorter identity ending inside the
+                # window is skipped because the search only ever returns the leftmost match.)
+                if identity and identity.start() < phrase.end() + _AI_PHRASE_WINDOW:
                     findings.append("{}: AI attribution (generated-with phrase)".format(label))
                     break
             if _AI_ADDRESS_RE.search(line):
@@ -358,36 +383,65 @@ def _document_strings(doc):
     return strings
 
 
-def changelog_added_items(base_text, head_text):
+def _changelog_counter(text, which):
+    """The multiset of EVERY string in one parsed changelog.toml revision, keys and values alike;
+    None (a tree without the file) counts as empty. A parse or shape failure fails closed, naming
+    which revision (never its content)."""
+    if text is None:
+        return Counter()
+    try:
+        doc = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # tomllib raises a bare ValueError on an over-long integer literal, RecursionError on deep
+        # nesting, and parsing a pathological document can exhaust memory; each is the same verdict
+        # here: the changelog revision cannot be evaluated, so the gate fails closed.
+        raise FailClosed("changelog.toml at {} does not parse ({})".format(which, type(exc).__name__))
+    _require_changelog_shape(doc, which)
+    return Counter(_document_strings(doc))
+
+
+def changelog_added_items(base_text, head_text, base_name="base", head_name="head"):
     """The strings present in changelog.toml at head but not at base, as a MULTISET difference over
     EVERY string in each parsed document, keys and values alike (a string added a second time is an
     addition), sorted for stable output. Scanning every string rather than a named subset means a
     leak in any parsed field, a misspelled or unexpected one included, is scanned, never silently
     ignored; only TOML comments are outside the parse. None stands for a revision whose tree has no
-    changelog.toml, with each absence defined explicitly: absent at both revisions is a repository
-    without a changelog (nothing added); absent only at base means the file is new and every string
-    at head is an addition; present at base but deleted at head fails closed (a deletion is never
-    read as clean). A parse error fails closed."""
+    changelog.toml, with each absence defined explicitly: absent at both revisions, nothing was
+    added between them; absent only at base means the file is new and every string at head is an
+    addition; present at base but deleted at head fails closed (a deletion is never read as
+    clean). A parse error fails closed. The pre-push mode applies this per PUBLISHED COMMIT against
+    its parent (base_name and head_name label the refusals), never only at the endpoints, where a
+    string added and removed again inside the range would cancel out of the difference while its
+    intermediate blob is still published."""
     if base_text is None and head_text is None:
         return []
     if head_text is None:
-        raise FailClosed("changelog.toml exists at base but not at head: a deleted changelog is "
-                         "never read as clean")
-    counts = []
-    for which, text in (("base", base_text), ("head", head_text)):
-        if text is None:
-            counts.append(Counter())
-            continue
-        try:
-            doc = tomllib.loads(text)
-        except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
-            # tomllib raises a bare ValueError on an over-long integer literal, RecursionError on deep
-            # nesting, and parsing a pathological document can exhaust memory; each is the same verdict
-            # here: the changelog revision cannot be evaluated, so the gate fails closed.
-            raise FailClosed("changelog.toml at {} does not parse ({})".format(which, type(exc).__name__))
-        _require_changelog_shape(doc, which)
-        counts.append(Counter(_document_strings(doc)))
-    return sorted((counts[1] - counts[0]).elements())
+        raise FailClosed("changelog.toml exists at {} but not at {}: a deleted changelog is "
+                         "never read as clean".format(base_name, head_name))
+    return sorted((_changelog_counter(head_text, head_name)
+                   - _changelog_counter(base_text, base_name)).elements())
+
+
+def _changelog_added_at(short, text, parent_texts):
+    """The changelog strings ONE published commit adds: present in its changelog.toml and carried
+    in from NO parent (for a merge, the multiset intersection of the per-parent differences, so a
+    string one parent already carried is that parent's, not an addition here). A root commit adds
+    every string. A changelog present at any parent but absent at the commit is a deletion and
+    fails closed, so no intermediate deletion is skipped."""
+    if not parent_texts:
+        parent_texts = [None]
+    if text is None:
+        if all(parent is None for parent in parent_texts):
+            return []
+        raise FailClosed("changelog.toml exists at a parent of commit {} but not at the commit: a "
+                         "deleted changelog is never read as clean".format(short))
+    added = None
+    commit_counter = _changelog_counter(text, "commit {}".format(short))
+    for number, parent_text in enumerate(parent_texts, 1):
+        step = commit_counter - _changelog_counter(
+            parent_text, "parent {} of commit {}".format(number, short))
+        added = step if added is None else (added & step)
+    return sorted(added.elements())
 
 
 def _rev_file_text(rev, rel, root):
@@ -402,17 +456,67 @@ def _rev_file_text(rev, rel, root):
     return _run_git(["show", "{}:{}".format(rev, rel)], root)
 
 
-def pre_push_channels(repo, base, body, title, head=None, branch=None):
+def _remote_advertised_shas(remote, root):
+    """Every object id the target remote advertises RIGHT NOW, read with git ls-remote at check
+    time: local remote-tracking refs can be stale, and a path or URL remote has none at all, so
+    neither is consulted. A failure to read the advertisement fails closed (without it the set of
+    commits the push would publish cannot be established), and so does an output line without a
+    canonical object id."""
+    try:
+        out = _run_git(["ls-remote", "--quiet", remote], root)
+    except FailClosed:
+        raise FailClosed("cannot read the refs the remote advertises (git ls-remote failed): the "
+                         "set of commits the push would publish cannot be established")
+    shas = set()
+    for line in out.splitlines():
+        sha = line.split("\t", 1)[0].strip()
+        if not _SHA_RE.match(sha):
+            raise FailClosed("unexpected git ls-remote output: the advertised refs cannot be "
+                             "established")
+        shas.add(sha)
+    return shas
+
+
+def _published_commits(head, advertised, root):
+    """The commits the push would PUBLISH: every commit reachable from head and not reachable from
+    any object the remote advertises, as [(sha, short_sha, [parent shas], message)] in rev-list
+    order. The revision set is fed to git on stdin (never spliced into the argument vector), and
+    --ignore-missing drops an advertised object this repository does not have: an object we do not
+    have cannot be in head's ancestry, so dropping it excludes nothing. Unexpected output fails
+    closed; an empty result (the remote already has head) is the caller's to refuse."""
+    feed = "\n".join([head, "--not"] + sorted(advertised)) + "\n"
+    out = _run_git(["log", "--no-color", "-z", "--format=%H%x1f%h%x1f%P%x1f%B",
+                    "--ignore-missing", "--stdin"], root, stdin_text=feed)
+    rows = []
+    for rec in (r for r in out.split("\0") if r):
+        parts = rec.split("\x1f", 3)
+        if len(parts) != 4:
+            raise FailClosed("unexpected git log output: the published commit set cannot be "
+                             "established")
+        full, short, parent_field, message = parts
+        parents = parent_field.split()
+        if not _SHA_RE.match(full) or not short or not all(_SHA_RE.match(p) for p in parents):
+            raise FailClosed("unexpected git log output: the published commit set cannot be "
+                             "established")
+        rows.append((full, short, parents, message))
+    return rows
+
+
+def pre_push_channels(repo, base, body, title, head=None, branch=None, remote="origin"):
     """Build the pre-push channel list over the repository at repo: the composed title+body (one
-    blob, the CI rule), every string added to the parsed changelog.toml in base..head, the commit
-    messages in base..head, and the branch name. head and branch, when given, come from
-    tools/push_branch.py, which resolves both ONCE and pushes exactly that commit to exactly that
-    branch, so the scan and the push are bound to the same commit even if HEAD moves in between;
-    without them HEAD and the current branch are resolved here (a detached HEAD fails closed: the
-    push targets a branch, so without one there is nothing to bind the scan to). base must be a
-    proper ancestor of the scanned commit, so the scanned range is exactly the non-empty range the
-    push adds; an empty range (base equal to the commit) or an unrelated base fails closed rather
-    than scanning no commits and reading that as clean."""
+    blob, the CI rule), the message of every commit the push would publish, every changelog.toml
+    string each of those commits adds against its parent or parents, and the branch name. head and
+    branch, when given, come from tools/push_branch.py, which resolves both ONCE and pushes exactly
+    that commit to exactly that branch, so the scan and the push are bound to the same commit even
+    if HEAD moves in between; without them HEAD and the current branch are resolved here (a
+    detached HEAD fails closed: the push targets a branch, so without one there is nothing to bind
+    the scan to). The SCANNED SET is every commit reachable from the scanned commit and not
+    reachable from any object the remote advertises at check time (git ls-remote, never local
+    remote-tracking refs), because that is what the push sends; an empty set fails closed rather
+    than scanning nothing and reading it as clean. base does NOT define the set (a commit below it
+    the remote lacks is published and scanned all the same); it stays as a cross-check and must be
+    a proper ancestor of the scanned commit. The changelog delta is taken PER COMMIT in the set, so
+    every intermediate state the push publishes is scanned, including one later removed again."""
     if head is None:
         head = _run_git(["rev-parse", "--verify", "HEAD^{commit}"], repo).strip()
         if not _SHA_RE.match(head):
@@ -431,23 +535,39 @@ def pre_push_channels(repo, base, body, title, head=None, branch=None):
     try:
         _run_git(["merge-base", "--is-ancestor", base, head], repo)
     except FailClosed:
-        raise FailClosed("--base is not a proper ancestor of the scanned commit (the scanned "
-                         "base..head range must be exactly what the push adds)")
-    channels = [("commit {}".format(sha), msg) for sha, msg in commit_messages(base, head, repo)]
+        raise FailClosed("--base is not a proper ancestor of the scanned commit (a cross-check of "
+                         "the caller's intent; when the default branch has advanced past the "
+                         "branch point, pass the merge-base, from git merge-base <default-branch> "
+                         "HEAD, not the advanced tip)")
+    rows = _published_commits(head, _remote_advertised_shas(remote, repo), repo)
+    if not rows:
+        raise FailClosed("the remote already has every commit reachable from the scanned commit: "
+                         "the push would publish no new commits, and scanning nothing is never "
+                         "read as clean")
+    channels = [("commit {}".format(short), message) for _full, short, _parents, message in rows]
     channels.append(("PR body file", (title + "\n\n" + body) if title is not None else body))
-    added = changelog_added_items(_rev_file_text(base, "changelog.toml", repo),
-                                  _rev_file_text(head, "changelog.toml", repo))
-    for number, item in enumerate(added, 1):
-        channels.append(("changelog string added #{}".format(number), item))
+    texts = {}
+
+    def changelog_at(sha):
+        if sha not in texts:
+            texts[sha] = _rev_file_text(sha, "changelog.toml", repo)
+        return texts[sha]
+
+    for full, short, parents, _message in rows:
+        added = _changelog_added_at(short, changelog_at(full),
+                                    [changelog_at(parent) for parent in parents])
+        for number, item in enumerate(added, 1):
+            channels.append(("commit {} changelog string added #{}".format(short, number), item))
     channels.append(("branch name", branch))
     return channels
 
 
 def parse_pre_push_argv(argv):
     """Strict flag parsing for --pre-push: exactly --repo, --body-file, --base and optionally
-    --title, --head and --branch, each with one value, each at most once. Anything else fails closed
-    (an unknown flag silently skipped could drop a channel)."""
-    opts = {"repo": None, "body-file": None, "base": None, "title": None, "head": None, "branch": None}
+    --title, --head, --branch and --remote, each with one value, each at most once. Anything else
+    fails closed (an unknown flag silently skipped could drop a channel)."""
+    opts = {"repo": None, "body-file": None, "base": None, "title": None, "head": None,
+            "branch": None, "remote": None}
     arguments = list(argv)
     while arguments:
         flag = arguments.pop(0)
@@ -498,9 +618,12 @@ def run_pre_push(argv):
     title = opts["title"]
     if title is not None and not title.strip():
         raise FailClosed("--title, when given, must be non-empty")
+    if opts["remote"] is not None and not opts["remote"].strip():
+        raise FailClosed("--remote, when given, must be non-empty")
+    remote = opts["remote"] if opts["remote"] is not None else "origin"
     body, body_digest = read_body_file(opts["body-file"])
     hashes, maxn = require_denylist(repo)
-    findings = all_findings(pre_push_channels(repo, base, body, title, head, branch),
+    findings = all_findings(pre_push_channels(repo, base, body, title, head, branch, remote),
                             "pre-push", hashes, maxn)
     if findings:
         print("FAIL: {} possible finding(s) in pre-push channels".format(len(findings)))
@@ -515,9 +638,11 @@ def run_pre_push(argv):
 _SCANNED = {
     "pre-merge": "the commit messages in base..head, the composed PR title+body, and the PR head ref",
     "post-merge": "the messages of the newly landed commits (before..after)",
-    "pre-push": "the PR body file (composed with any --title), every string added to the parsed "
-                "changelog.toml in base..head (keys and values; TOML comments are not parsed, so "
-                "not scanned), the commit messages in base..head, and the branch name",
+    "pre-push": "the PR body file (composed with any --title), the message of every commit the "
+                "push would publish (reachable from the pushed commit, absent from every ref the "
+                "remote advertises at check time), every string each published commit adds to the "
+                "parsed changelog.toml against its parent or parents (keys and values; TOML "
+                "comments are not parsed, so not scanned), and the branch name",
 }
 _SCOPE = ("PASS ({phase}): scanned STRUCTURAL patterns and the hashed codename denylist, plus (pre-merge "
           "and pre-push only) the narrow AI-attribution patterns (a *-by: trailer naming an AI, a "
@@ -563,8 +688,11 @@ def _hook_identity_pattern():
     AST of .aiqt/core/hooks/scripts/aiqt_hooks.py (never imported: it is a large event-hook module,
     and the gate must not execute it). Self-test only; a hook source without the assignment is a
     self-test failure, never a silent pass. The call must be exactly one positional string constant
-    with no other arguments: a flags argument on either side would change matching while leaving the
-    pattern strings equal, so any other call shape fails the parity test instead of passing it."""
+    with no other arguments: a flags argument would change matching while leaving the pattern
+    strings equal, so any other call shape on the HOOK's side fails the parity test instead of
+    passing it. This inspects the hook only; the GATE's own compile call is checked at run time in
+    the self-test, which compares the compiled regex's pattern and flags against a bare compile of
+    that pattern, so a flags argument on either side fails the parity test."""
     import ast
     source = (ROOT / ".aiqt" / "core" / "hooks" / "scripts" / "aiqt_hooks.py").read_text(encoding="utf-8")
     for node in ast.walk(ast.parse(source)):
@@ -716,31 +844,54 @@ def self_test():
              "generated-with phrase"),
             ("Reported-by: Jane Doe, who maintains the Gemini adapter", "trailer")):
         _expect(scan_attribution([("ch", text)]) == ["ch: AI attribution ({})".format(kind)], text)
-    # 13. phrase-window boundaries: the identity is matched against the ORIGINAL line and the whole
-    # match must END inside the window, so a name ending exactly at the edge matches; one whose last
-    # letter is past the edge, or that starts past it, does not; and a longer word cut at the edge
-    # ("claudette", "gpt-4o") never reads as the shorter identity it begins with. The filler is
-    # non-word so only the window decides.
-    inside = "generated with" + "." * (_AI_PHRASE_WINDOW - 6) + "claude"    # ends exactly at the edge
+    # 13. phrase-window boundaries: the identity is matched against the ORIGINAL line and the match
+    # must BEGIN inside the window (the window's last position is tested just inside, exactly at,
+    # and just outside); a match beginning inside may run past the edge and still fires, because a
+    # longer gpt- form (a dated model id) is itself an AI identity; and a longer word that merely
+    # begins with an identity ("claudette") never matches at all: the pattern's word boundary
+    # decides, not a slice. The filler is non-word so only the window decides.
+    fires = ["ch: AI attribution (generated-with phrase)"]
+    inside = "generated with" + "." * (_AI_PHRASE_WINDOW - 6) + "claude"    # begins well inside
     _expect(len(inside) - len("generated with") == _AI_PHRASE_WINDOW, "fixture arithmetic")
-    _expect(scan_attribution([("ch", inside)]) == ["ch: AI attribution (generated-with phrase)"], inside)
-    straddle = "generated with" + "." * (_AI_PHRASE_WINDOW - 5) + "claude"   # last letter is outside
-    _expect(scan_attribution([("ch", straddle)]) == [], straddle)
-    outside = "generated with" + "." * _AI_PHRASE_WINDOW + "claude"          # starts outside
-    _expect(scan_attribution([("ch", outside)]) == [], outside)
-    cut = "generated with" + "." * (_AI_PHRASE_WINDOW - 6) + "claudette"     # "claude" ends at the edge
-    _expect(scan_attribution([("ch", cut)]) == [], cut)
-    gpt_cut = "generated with" + "." * (_AI_PHRASE_WINDOW - 5) + "gpt-4o"    # "gpt-4" ends at the edge
-    _expect(scan_attribution([("ch", gpt_cut)]) == [], gpt_cut)
+    _expect(scan_attribution([("ch", inside)]) == fires, inside)
+    last_in = "generated with" + "." * (_AI_PHRASE_WINDOW - 1) + "claude"   # begins at the last
+    _expect(scan_attribution([("ch", last_in)]) == fires, last_in)          # position inside
+    straddle = "generated with" + "." * (_AI_PHRASE_WINDOW - 5) + "claude"  # begins inside, runs
+    _expect(scan_attribution([("ch", straddle)]) == fires, straddle)        # one past the edge
+    outside = "generated with" + "." * _AI_PHRASE_WINDOW + "claude"         # begins at the first
+    _expect(scan_attribution([("ch", outside)]) == [], outside)             # position outside
+    past = "generated with" + "." * (_AI_PHRASE_WINDOW + 1) + "claude"      # begins further out
+    _expect(scan_attribution([("ch", past)]) == [], past)
+    cut = "generated with" + "." * (_AI_PHRASE_WINDOW - 6) + "claudette"    # no word boundary:
+    _expect(scan_attribution([("ch", cut)]) == [], cut)                     # never an identity
+    dated = "generated with" + "." * (_AI_PHRASE_WINDOW - 5) + "gpt-4o-2024-08-06"
+    _expect(scan_attribution([("ch", dated)]) == fires, dated)   # a dated model id begins inside
+    _expect(scan_attribution([("ch", "Generated using the in-house summarisation wrapper around "
+                                     "the gpt-4o-2024-08-06 model")]) == fires,
+            "a dated gpt- model id past an end-inside window must still fire")
+    # overlapping candidates: the leftmost match (a long gpt- form) begins inside the window and
+    # fires even though it ends far outside; an end-inside rule read this line as silent while the
+    # shorter identity ending inside was unreachable, because a search returns only the leftmost
+    # of overlapping matches
+    overlap = "generated with " + "." * 40 + "gpt-4.claude-" + "a" * 30
+    _expect(scan_attribution([("ch", overlap)]) == fires, overlap)
     # 14. the phase wiring: attribution runs pre-merge and pre-push, never post-merge
     ch = [("commit abc1234", "Co-authored-by: Claude <c@example.org>")]
     _expect(all_findings(ch, "pre-merge", hashes, maxn) == ["commit abc1234: AI attribution (trailer)"])
     _expect(all_findings(ch, "pre-push", hashes, maxn) == ["commit abc1234: AI attribution (trailer)"])
     _expect(all_findings(ch, "post-merge", hashes, maxn) == [])
     # 15. the identity set: two copies kept byte-identical by this parity test (the gate's pattern
-    # against the hook's, extracted from the hook's source)
+    # against the hook's, extracted from the hook's source), checked on BOTH sides: the extractor
+    # constrains the hook's compile-call shape, and the gate's own compiled regex must carry the
+    # published pattern and the flags a bare compile of it yields, so a flags argument added on
+    # either side fails here instead of changing matching while the pattern strings stay equal
     _expect(_hook_identity_pattern() == AI_IDENTITY_PATTERN,
             "AI_IDENTITY_PATTERN drifted from the commit-identity hook's AI_IDENTITY_RE")
+    _expect(AI_IDENTITY_RE.pattern == AI_IDENTITY_PATTERN,
+            "the gate's compiled AI_IDENTITY_RE no longer carries AI_IDENTITY_PATTERN")
+    _expect(AI_IDENTITY_RE.flags == re.compile(AI_IDENTITY_PATTERN).flags,
+            "a flags argument on the gate's own compile call changes matching while the pattern "
+            "strings stay equal")
     # 16. changelog delta: a multiset difference over EVERY string in the parsed document (keys and
     # values), fail-closed on parse/shape and on a changelog deleted at head
     base_toml = 'title = "t"\n[[release]]\nitems = ["kept item"]\n'
@@ -769,6 +920,29 @@ def self_test():
         pass
     dup_head = 'title = "t"\n[[release]]\nitems = ["kept item", "kept item"]\n'
     _expect(changelog_added_items(base_toml, dup_head) == ["kept item"], "multiset, not set")
+    # 16b. the per-commit walk the pre-push mode uses over every published commit: an addition at
+    # any intermediate state is that commit's, a merge adds only what NO parent carried, a root
+    # commit adds its whole document, a commit with no changelog below parents without one adds
+    # nothing, and a changelog deleted at any commit (a merge included) fails closed
+    added = _changelog_added_at("abc1234", head_toml, [base_toml])
+    _expect(added == ["new: drafted using ChatGPT"], added)
+    _expect(_changelog_added_at("abc1234", base_toml, [base_toml, None]) == [],
+            "a merge carrying one parent's changelog unchanged adds nothing")
+    merged = 'title = "t"\n[[release]]\nitems = ["kept item", "merge only"]\n'
+    _expect(_changelog_added_at("abc1234", merged, [base_toml, head_toml]) == ["merge only"],
+            "a merge adds only the strings no parent carried")
+    _expect(_changelog_added_at("abc1234", base_toml, [])
+            == ["items", "kept item", "release", "t", "title"],
+            "a root commit's whole changelog is an addition")
+    _expect(_changelog_added_at("abc1234", None, []) == [], "no changelog anywhere: nothing added")
+    for text, parent_texts in ((None, [base_toml]), (None, [None, base_toml]),
+                               ("not toml [", [base_toml]), (base_toml, ["not toml ["])):
+        try:
+            _changelog_added_at("abc1234", text, parent_texts)
+            raise AssertionError("expected FailClosed for per-commit changelog {!r}/{!r}"
+                                 .format(text, parent_texts))
+        except FailClosed:
+            pass
     for bad_base, bad_head in ((base_toml, "not toml ["), ("= bad", head_toml),
                                (base_toml, 'release = 5\n'),
                                (base_toml, '[[release]]\nitems = "str"\n'),
@@ -810,10 +984,11 @@ def self_test():
     # 18. --pre-push argv and --base/--head validation fail closed on every malformed shape
     parsed = parse_pre_push_argv(["--repo", "/r", "--body-file", "/b", "--base", forty])
     _expect(parsed == {"repo": "/r", "body-file": "/b", "base": forty, "title": None,
-                       "head": None, "branch": None}, parsed)
+                       "head": None, "branch": None, "remote": None}, parsed)
     parsed = parse_pre_push_argv(["--repo", "/r", "--body-file", "/b", "--base", forty,
-                                  "--head", forty, "--branch", "feat/x"])
-    _expect(parsed["head"] == forty and parsed["branch"] == "feat/x", parsed)
+                                  "--head", forty, "--branch", "feat/x", "--remote", "upstream"])
+    _expect(parsed["head"] == forty and parsed["branch"] == "feat/x"
+            and parsed["remote"] == "upstream", parsed)
     for argv in (["--repo", "/r"],                                   # missing required flags
                  ["--repo", "/r", "--body-file", "/b", "--base", forty, "--bogus", "x"],
                  ["--repo", "/r", "--repo", "/r2", "--body-file", "/b", "--base", forty],
@@ -854,13 +1029,16 @@ def self_test():
           "base/head/before/after, a branch-creation push, an unknown event kind); a branch-deletion push "
           "yields no channels; malformed denylist metadata (maxn 0, duplicate, over-cap, oversized, "
           "trailing tokens) is rejected; a non-JSON NaN constant fails closed; the attribution layer "
-          "fires on trailers, bounded generated-with phrases and vendor addresses, stays silent on bare "
-          "mentions, longer vendor-lookalike domains and identities cut at the window edge, carries its "
-          "documented false-positive cases, runs pre-merge and pre-push only, and matches the hook's "
-          "identity set (two copies under a parity test); the changelog delta covers every parsed string "
-          "and fails closed on a deletion at head; the pre-push inputs (argv, --base, --head, body file, "
-          "changelog delta) each fail closed when malformed; and --self-test mixed into a production "
-          "invocation is rejected")
+          "fires on trailers, bounded generated-with phrases (a dated model id beginning inside the "
+          "window included, however far its match runs) and vendor addresses, stays silent on bare "
+          "mentions, longer vendor-lookalike domains, words without an identity boundary and "
+          "identities beginning past the window, carries its documented false-positive cases, runs "
+          "pre-merge and pre-push only, and matches the hook's identity set (two copies under a parity "
+          "test, with the compiled pattern and flags checked on the gate's side too); the changelog "
+          "delta covers every parsed string, per published commit against each of its parents, and "
+          "fails closed on any deletion; the pre-push inputs (argv, --base, --head, --remote, body "
+          "file, changelog delta) each fail closed when malformed; and --self-test mixed into a "
+          "production invocation is rejected")
     return 0
 
 

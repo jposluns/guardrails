@@ -9,25 +9,36 @@ themselves can disagree when a commit, reset or checkout lands in between, publi
 never scanned. Here the helper resolves the commit SHA and the branch name ONCE, hands both to the
 check it launches itself (--head/--branch), and pushes that exact SHA by name only after it has
 OBSERVED exit 0 from that check; a finding (exit 1) and a cannot-evaluate (exit 2 or anything else)
-both refuse the push. The check also requires --base to be a proper ancestor of that SHA, so the
-scanned range is exactly the non-empty range the push adds (an empty or unrelated range refuses).
+both refuse the push. The check binds its SCANNED SET to what the push would actually publish:
+every commit reachable from that SHA and not reachable from any ref the target remote advertises at
+check time (read with git ls-remote; local remote-tracking refs can be stale, and a path or URL
+remote has none), so a commit below --base that the remote lacks is scanned too, and a set that
+cannot be computed, or is empty, refuses. --base stays as a cross-check of the caller's intent and
+must be a proper ancestor of that SHA; when the default branch has advanced past the branch point,
+pass the merge-base (git merge-base <default-branch> HEAD), not the advanced tip. The push passes
+--no-follow-tags, so a push.followTags configuration cannot attach unscanned annotated tags to the
+gated push; pushing a tag remains outside this helper either way.
 
   push_branch.py --body-file <abs path> --base <40-hex sha> [--title <text>] [--remote <name>]
   push_branch.py --self-test
 
 The check is tools/check_msg_leaks.py --pre-push (the script beside this one), over the repository
 containing the current working directory: the drafted PR body file (composed with --title when one
-is given), every string added to the parsed changelog.toml in base..head, the commit messages in
-base..head, and the branch name, against the hashed leak denylist, the STRUCTURAL patterns and the
-narrow AI-attribution layer. Every input is explicit; there is no ambient default for the body or
-the base. On a pass the check prints the sha256 of the exact body bytes it scanned; this helper
+is given), the message of every commit in the published set, every string each of those commits
+adds to the parsed changelog.toml against its parent or parents (every intermediate state the push
+publishes, not only the endpoints), and the branch name, against the hashed leak denylist, the
+STRUCTURAL patterns and the narrow AI-attribution layer. Every input is explicit; there is no
+ambient default for the body or the base, and the helper hands the check the same --remote it will
+push to. On a pass the check prints the sha256 of the exact body bytes it scanned; this helper
 reprints that digest and never rereads the body itself, so the digest it prints can only describe
 bytes the check scanned, and the body later given to the PR can be compared against them. It then
-runs `git push <remote> <sha>:refs/heads/<branch>` for the commit and branch it resolved before the
-check. A push that exits non-zero is reported and mapped to exit 2 (the helper's cannot-evaluate
-verdict), not passed through as the push's own exit status. After a successful push the branch's
-upstream is set in a separate step (a SHA-sourced push sets none itself); if that convenience step
-fails, the completed, scanned push is still reported with exit 0 and the line says so.
+runs `git push --no-follow-tags <remote> <sha>:refs/heads/<branch>` for the commit and branch it
+resolved before the check. A push that exits non-zero is reported and mapped to exit 2 (the
+helper's cannot-evaluate verdict), not passed through as the push's own exit status. After a
+successful push the branch's upstream is set in a separate step (a SHA-sourced push sets none
+itself); if that convenience step fails, the completed, scanned push is still reported with exit 0
+and the line says so (a path or URL remote has no remote-tracking ref, so there the step always
+fails and the line is expected).
 
 FAIL-CLOSED: an unknown, repeated or valueless argument (--self-test mixed with anything else
 included: it is honoured only as the sole argument), a working directory outside a git repository,
@@ -48,11 +59,14 @@ outside the shared identity set, obfuscated denylist terms, changelog text outsi
 strings, such as TOML comments) carry over.
 
 The --self-test builds throwaway git repositories and a bare remote under a scrubbed fixture
-environment (tools/_git_fixture_env.py) and asserts, for each finding channel and a broad set of
-fail-closed shapes, that the helper exits non-zero AND the remote gained no ref, and that a clean
-branch pushes; it also drives the check directly for shapes reachable only there (a subdirectory
---repo, a --head bound to a commit other than the checkout, a detached HEAD), and drives a copy of
-this helper against stub checks for the digest-missing and unexpected-exit refusals.
+environment (tools/_git_fixture_env.py) and asserts, for each finding channel (a leaky commit below
+--base and a leaky intermediate changelog state included) and a broad set of fail-closed shapes,
+that the helper exits non-zero AND the remote gained no ref, and that a clean branch pushes and a
+push under push.followTags publishes no unscanned tag; it also drives the check directly for shapes
+reachable only there (a subdirectory --repo, a --head bound to a commit other than the checkout, a
+detached HEAD), and drives a copy of this helper against stub checks for the digest-missing and
+unexpected-exit refusals and for the race in which a commit lands between the check and the push,
+where the remote must hold exactly the scanned SHA.
 """
 import sys
 
@@ -185,7 +199,7 @@ def run_push(argv):
         return 2
     check_argv = [sys.executable, "-I", "-B", str(CHECK), "--pre-push", "--repo", toplevel,
                   "--body-file", opts["body-file"], "--base", opts["base"],
-                  "--head", head, "--branch", branch]
+                  "--head", head, "--branch", branch, "--remote", opts["remote"]]
     if opts["title"] is not None:
         check_argv += ["--title", opts["title"]]
     try:
@@ -203,7 +217,9 @@ def run_push(argv):
         _refuse("the check passed but did not report the scanned-body digest")
         return 2
     print("pre-push check passed; body sha256: {}".format(digest.group(1)))
-    pushed = subprocess.run(["git", "-C", toplevel, "push", opts["remote"],
+    # --no-follow-tags: a push.followTags configuration would otherwise attach annotated tags,
+    # whose messages this check never scanned, to the gated push
+    pushed = subprocess.run(["git", "-C", toplevel, "push", "--no-follow-tags", opts["remote"],
                              head + ":refs/heads/" + branch])
     if pushed.returncode != 0:
         print("push exited non-zero ({})".format(pushed.returncode))
@@ -212,8 +228,8 @@ def run_push(argv):
                                "--set-upstream-to=" + opts["remote"] + "/" + branch, branch],
                               capture_output=True, encoding="utf-8")
     if upstream.returncode != 0:
-        print("push completed; upstream not set (the local branch or its remote-tracking ref "
-              "changed after the push)")
+        print("push completed; upstream not set (this remote has no remote-tracking ref here, as "
+              "with a path or URL remote, or the local branch changed after the push)")
         return 0
     print("push completed; upstream set")
     return 0
@@ -412,11 +428,95 @@ def self_test():
         _expect(done.returncode == 2, ("deleted changelog", done.returncode, done.stdout, done.stderr),
                 failures)
         _expect(not ref_exists("feat-chlog-del"), "a deleted changelog must not push", failures)
-        # a push that fails (an unknown remote here) is reported and mapped to exit 2
+        # the scanned set is bound to what the push PUBLISHES: a leaky commit BELOW --base that the
+        # remote lacks is still scanned and refuses (a base..head scan pushed it unscanned); the
+        # clean-tip-over-clean-history control is the feat-clean vector above
+        fixture_git(["checkout", "-q", "main"], repo)
+        fixture_git(["checkout", "-q", "-b", "feat-below"], repo)
+        (repo / "work.txt").write_text("below one\n", encoding="utf-8")
+        fixture_git(["add", "-A"], repo)
+        fixture_git(["commit", "-q", "-m", "touch alpha bravo"], repo)
+        below_leaky = fixture_git(["rev-parse", "HEAD"], repo).strip()
+        (repo / "work.txt").write_text("below two\n", encoding="utf-8")
+        fixture_git(["add", "-A"], repo)
+        fixture_git(["commit", "-q", "-m", "a clean message"], repo)
+        done = helper(["--body-file", str(clean_body), "--base", below_leaky], repo)
+        _expect(done.returncode == 1,
+                ("leaky commit below base", done.returncode, done.stdout, done.stderr), failures)
+        _expect(not ref_exists("feat-below"), "a leaky commit below base must not push", failures)
+        _expect(fixture_git_rc(["cat-file", "-e", below_leaky], origin) != 0,
+                "the leaky commit below base must not reach the remote", failures)
+        # an intermediate changelog state the push publishes is scanned: a leaky string added in
+        # one commit and removed again before the tip refuses although the endpoint delta is empty
+        branch_with_commit("feat-chlog-mid", changelog='title = "t"\n[[release]]\nitems = '
+                           '["base item", "notes drafted using ChatGPT"]\n')
+        (repo / "changelog.toml").write_text('title = "t"\n[[release]]\nitems = ["base item"]\n',
+                                             encoding="utf-8")
+        fixture_git(["add", "-A"], repo)
+        fixture_git(["commit", "-q", "-m", "a clean message"], repo)
+        done = helper(["--body-file", str(clean_body), "--base", base], repo)
+        _expect(done.returncode == 1,
+                ("intermediate changelog leak", done.returncode, done.stdout, done.stderr), failures)
+        _expect(not ref_exists("feat-chlog-mid"), "an intermediate changelog leak must not push",
+                failures)
+        # a changelog deleted in an INTERMEDIATE commit fails closed even when the tip restores it
+        fixture_git(["checkout", "-q", "main"], repo)
+        fixture_git(["checkout", "-q", "-b", "feat-chlog-middel"], repo)
+        fixture_git(["rm", "-q", "changelog.toml"], repo)
+        fixture_git(["commit", "-q", "-m", "a clean message"], repo)
+        (repo / "changelog.toml").write_text('title = "t"\n[[release]]\nitems = ["base item"]\n',
+                                             encoding="utf-8")
+        fixture_git(["add", "-A"], repo)
+        fixture_git(["commit", "-q", "-m", "a clean message"], repo)
+        done = helper(["--body-file", str(clean_body), "--base", base], repo)
+        _expect(done.returncode == 2,
+                ("intermediate deleted changelog", done.returncode, done.stdout, done.stderr),
+                failures)
+        _expect(not ref_exists("feat-chlog-middel"),
+                "an intermediate changelog deletion must not push", failures)
+        # a push whose every commit the remote already advertises publishes nothing new and fails
+        # closed rather than scanning an empty set as clean (under a base..head rule this pushed:
+        # the base was a proper ancestor and the local range was non-empty)
+        old_clean_tip = fixture_git(["rev-parse", "refs/heads/feat-clean"], repo).strip()
+        fixture_git(["checkout", "-q", "-b", "feat-dup", old_clean_tip], repo)
+        done = helper(["--body-file", str(clean_body), "--base", base], repo)
+        _expect(done.returncode == 2,
+                ("already-published set", done.returncode, done.stdout, done.stderr), failures)
+        _expect(not ref_exists("feat-dup"), "an empty published set must not push", failures)
+        # push.followTags cannot attach an unscanned annotated tag: the helper pushes with
+        # --no-follow-tags, so the branch lands and the tag does not
+        branch_with_commit("feat-tags")
+        fixture_git(["config", "push.followTags", "true"], repo)
+        fixture_git(["tag", "-a", "v-tagged", "-m", "touch alpha bravo"], repo)
+        done = helper(["--body-file", str(clean_body), "--base", base], repo)
+        _expect(done.returncode == 0,
+                ("followTags push", done.returncode, done.stdout, done.stderr), failures)
+        _expect(ref_exists("feat-tags"), "the followTags push must still create the branch ref",
+                failures)
+        _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet", "refs/tags/v-tagged"],
+                               origin) != 0,
+                "an unscanned annotated tag must not ride along on the gated push", failures)
+        fixture_git(["config", "--unset", "push.followTags"], repo)
+        fixture_git(["tag", "-d", "v-tagged"], repo)
+        # an unknown remote refuses at CHECK time: the refs it advertises cannot be read, so the
+        # published set cannot be established, and nothing is pushed
         branch_with_commit("feat-badremote")
         done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "nosuch"], repo)
         _expect(done.returncode == 2, ("bad remote", done.returncode, done.stdout, done.stderr), failures)
+        _expect("ls-remote" in done.stderr, "an unreadable remote advertisement must be named",
+                failures)
+        _expect(not ref_exists("feat-badremote"), "an unreadable remote must not push", failures)
+        # a push that fails AFTER a passing check (a non-fast-forward here: the remote branch was
+        # pushed above and the local one is amended away from it) is reported and mapped to exit 2
+        fixture_git(["checkout", "-q", "feat-clean"], repo)
+        fixture_git(["commit", "-q", "--amend", "-m", "a clean message reworded"], repo)
+        done = helper(["--body-file", str(clean_body), "--base", base], repo)
+        _expect(done.returncode == 2,
+                ("non-fast-forward push", done.returncode, done.stdout, done.stderr), failures)
         _expect("push exited non-zero" in done.stdout, "a failed push must be reported", failures)
+        remote_clean = fixture_git(["rev-parse", "refs/heads/feat-clean"], origin).strip()
+        _expect(remote_clean == old_clean_tip,
+                "a failed push must leave the remote branch unchanged", failures)
         fixture_git(["checkout", "-q", "--detach", "main"], repo)
         done = helper(["--body-file", str(clean_body), "--base", base], repo)
         _expect(done.returncode == 2, ("detached HEAD", done.returncode, done.stderr), failures)
@@ -457,6 +557,41 @@ def self_test():
         _expect("(exit 3)" in done.stdout, "an unexpected check status must be named", failures)
         _expect(not ref_exists("feat-stub"), "an unexpected check status must not push", failures)
 
+        # the push is bound to the commit the check scanned, THROUGH the helper: a wrapper check
+        # runs the real check, then commits leaky text, so HEAD moves between the check and the
+        # push; the remote must receive exactly the scanned SHA and never the racing commit (a
+        # helper pushing HEAD, or dropping the --head binding, fails this vector)
+        racing_check = (
+            "import subprocess, sys\n"
+            "from pathlib import Path\n"
+            "if '--head' not in sys.argv or '--branch' not in sys.argv:\n"
+            "    sys.exit(3)\n"   # the helper must hand the check the exact commit and branch
+            "done = subprocess.run([sys.executable, '-I', '-B', " + repr(str(CHECK)) + "]\n"
+            "                      + sys.argv[1:], capture_output=True, encoding='utf-8')\n"
+            "sys.stdout.write(done.stdout)\n"
+            "sys.stderr.write(done.stderr)\n"
+            "if done.returncode == 0:\n"
+            "    repo = sys.argv[sys.argv.index('--repo') + 1]\n"
+            "    Path(repo, 'race.txt').write_text('raced\\n', encoding='utf-8')\n"
+            "    subprocess.run(['git', '-C', repo, 'add', '-A'], capture_output=True)\n"
+            "    subprocess.run(['git', '-C', repo, 'commit', '-q', '-m',\n"
+            "                    'racing touch alpha bravo'], capture_output=True)\n"
+            "sys.exit(done.returncode)\n")
+        branch_with_commit("feat-race")
+        scanned = fixture_git(["rev-parse", "HEAD"], repo).strip()
+        (stub / "check_msg_leaks.py").write_text(racing_check, encoding="utf-8")
+        done = helper(["--body-file", str(clean_body), "--base", base], repo,
+                      script=stub / "push_branch.py")
+        _expect(done.returncode == 0, ("race push", done.returncode, done.stdout, done.stderr),
+                failures)
+        moved = fixture_git(["rev-parse", "HEAD"], repo).strip()
+        _expect(moved != scanned, "the racing wrapper must move HEAD before the push", failures)
+        remote_tip = (fixture_git(["rev-parse", "refs/heads/feat-race"], origin).strip()
+                      if ref_exists("feat-race") else None)
+        _expect(remote_tip == scanned, ("race remote tip", remote_tip, scanned), failures)
+        _expect(fixture_git_rc(["cat-file", "-e", moved], origin) != 0,
+                "the racing commit must not reach the remote", failures)
+
         # shapes reachable only by driving the check directly
         # --repo must be the repository root: from a subdirectory the changelog would read as absent
         done = check_direct(["--pre-push", "--repo", str(repo / "tools"), "--body-file",
@@ -492,14 +627,19 @@ def self_test():
             print("  " + failure)
         return 1
     print("SELF-TEST PASS: a clean branch (an empty body or a clean title included) pushes, prints "
-          "the scanned-body digest twice (check and helper) and gets its upstream set; every finding "
-          "channel (an attribution trailer in the body, a denylist term in the body, a changelog "
-          "string added in base..HEAD, inside or outside the items array, a commit message in the "
-          "range, the branch name, a leaky --title) refuses with exit 1 and no remote ref; and every "
-          "exercised fail-closed shape (a relative, missing, symlinked or non-UTF-8 body, a non-SHA, "
-          "zero-SHA or nonexistent base, a base equal to the pushed commit or not its ancestor, an "
-          "empty title, an unknown, repeated or valueless flag, --self-test mixed with other "
-          "arguments, a malformed or deleted changelog, a failed push, a detached HEAD, an unborn "
+          "the scanned-body digest twice (check and helper), gets its upstream set, and carries no "
+          "unscanned tag along even under push.followTags; a commit landing between the check and "
+          "the push leaves exactly the scanned SHA on the remote, never the racing commit; every "
+          "finding channel (an attribution trailer in the body, a denylist term in the body, a "
+          "changelog string added in any published commit, an intermediate state or a leak outside "
+          "the items array included, a commit message anywhere in the published set, a leaky commit "
+          "below --base included, the branch name, a leaky --title) refuses with exit 1 and no "
+          "remote ref; and every exercised fail-closed shape (a relative, missing, symlinked or "
+          "non-UTF-8 body, a non-SHA, zero-SHA or nonexistent base, a base equal to the pushed "
+          "commit or not its ancestor, an empty title, an unknown, repeated or valueless flag, "
+          "--self-test mixed with other arguments, a malformed changelog, a changelog deleted at "
+          "the tip or in an intermediate commit, a remote whose advertised refs cannot be read, a "
+          "push publishing nothing the remote lacks, a failed push, a detached HEAD, an unborn "
           "HEAD, a non-repository working directory, a subdirectory --repo, an unknown --head, a "
           "digestless check pass, an unexpected check exit) refuses with exit 2 and no remote ref")
     return 0
