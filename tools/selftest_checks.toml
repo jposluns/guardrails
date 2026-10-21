@@ -2559,3 +2559,15 @@ expected-check-ids = [
   "measure/interrupt-sigint-cleans-up",
   "measure/interrupt-sighup-cleans-up",
 ]
+
+[[suite]]
+id = "rule-placement-selftest"
+runner = "tools/check_rule_placement.py"
+expected-check-ids = [
+  "vector/every-vector-holds",
+  "launch/nonexistent-root-cannot-evaluate",
+  "launch/comma-joined-root-cannot-evaluate",
+  "mutant/every-mutant-caught",
+  "mutant/every-vector-discriminates",
+  "live/default-root-passes",
+]
