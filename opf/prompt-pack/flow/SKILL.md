@@ -819,9 +819,11 @@ that takes the unit to `lane=merge`.
   the pinned reviewed revision, each leg briefed to refute. **VERIFY** runs after fixes land, to
   check the fixes and regressions on the fixed revision, before the next discovery panel.
 - Every finding is validated at source (a finding is a hypothesis until reproduced), fixed at
-  the width of its class, and committed before VERIFY dispatches. A verdict whose quoted
-  evidence does not match the reviewed revision fails the delivery: it is re-dispatched, and the
-  failure is recorded.
+  the width of its class, and committed before VERIFY dispatches. A brief asks each reviewer to
+  give a proposed wording fix as a complete replacement sentence, never a fragment or an
+  ellipsis, and whoever applies one re-checks every verb of the edited sentence against the
+  lines it cites. A verdict whose quoted evidence does not match the reviewed revision fails the
+  delivery: it is re-dispatched, and the failure is recorded.
 - **Convergence** is declared only on a complete, non-degraded DISCOVERY panel, every
   required family returning a real, non-empty, non-timed-out verdict on the same pinned
   revision, and is judged by one plain rule: the unit is converged when that latest
