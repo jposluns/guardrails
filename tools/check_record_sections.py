@@ -173,14 +173,24 @@ the first parent or the branch tip fails closed the same way, an over-deny when 
 benign; at the branch tip that includes a table only the merge-base's config declared (the branch renamed
 or removed it), an over-deny when the branch had added no rows to it. A declared table's file absent at
 the branch tip while it existed at the merge-base fails closed too when the merge-base's config declared
-the table, so a branch that moved the declared file cannot shed the rows it added under the new path; a
-branch-side deletion of the declared file cannot be told from such a move and is refused the same way, an
-over-deny for a deletion with no replacement (or a move the branch added no rows to), whose in-band exit
-is to land the removal, or the declaration's path change, on the target directly rather than through a
-gated branch. With a --config outside the repository root there is no in-repo config at any commit, so
+the table (the same path, format, and header cells or array name), so while that declaration is in force
+a branch that moved the declared file cannot shed the rows it added under the new path; when the
+declaration's header cells changed since the fork, the merge-base's config declares a different locator
+at the file's path, so the absence reads as the table not yet existing and rows the branch added under
+the new path are outside the gate (a state reachable only when the header change itself landed outside a
+gated merge, since the header-change over-deny above refuses it inside one). A branch-side deletion of
+the declared file cannot be told from such a move and is refused the same way, an over-deny for a
+deletion with no replacement (or a move the branch added no rows to). The in-band exit is to withdraw or
+narrow the declaration in an earlier, separate commit and then move or remove the file, directly or
+through a gated merge (reading the first parent's config closes narrowing only within the same merge); a
+single commit on the target that removes the file and its declaration together is NOT a route around the
+refusal, because the first parent's declaration is still in force there and the removal fails R1; and
+while the declaration is withdrawn, rows that in-flight branches add to the old path are outside the
+gate. With a --config outside the repository root there is no in-repo config at any commit, so
 the first-parent declaration read and both branch-tip refusals (the unlocatable table and the absent
 file) never apply there: declarations come from the working config alone, and a branch-side rename, move
-or removal of a declared table's form or file reads as not-yet or absent. Each config declares at most one
+or removal of a declared table's form or file reads as not-yet or absent; only a direct run() caller can
+reach that state, since the command line refuses an out-of-root --config. Each config declares at most one
 table per file, and header uniqueness is judged on trimmed cells: a SECOND table in the same file whose
 header carries the
 same cells as the declared header (padding aside) makes the declared header ambiguous and is refused, so
@@ -1081,9 +1091,12 @@ def _require_tip_file(branch_text, mergebase_text, mergebase_declared, decl, whe
     invisible to this declaration, so reading the table as genuinely absent would shed the branch's own
     row obligations: R2 would see no branch rows while a resolver that keeps the target's tree drops
     them. A move and a deletion cannot be told apart here, so both fail closed; for a deletion with no
-    replacement that is an over-deny, and such a removal must land on the target directly rather than
-    through a gated merge. A file also absent at the merge-base (the branch forked before the file
-    existed), or one whose table the merge-base's config did not declare, passes through: there is no
+    replacement that is an over-deny, whose in-band exit is to withdraw the declaration in an earlier,
+    separate commit and then remove the file (a single commit removing the file and its declaration
+    together still fails R1 under the first parent's declaration, so landing on the target directly is
+    not by itself a route around this refusal). A file also absent at the merge-base (the branch forked
+    before the file existed), or one whose table the merge-base's config did not declare, passes
+    through: there is no
     merge-base declaration whose branch rows the absence could shed.
     """
     if branch_text is None and mergebase_text is not None and mergebase_declared:
@@ -1475,9 +1488,11 @@ def _quiet_run_refusal(*args):
 def _swapped(name, value):
     """Swap one module-level helper for a mutant or naive variant during a self-test case and restore it.
 
-    The self-test proves each refusal is load-bearing by showing the same fixture PASS once the specific
-    check is removed, and proves each allowed change is deliberate by showing it FAIL under the naive
-    variant it guards against. Mutation is attribute patching only, never generated code.
+    A self-test case proves a refusal load-bearing by showing the same fixture PASS (or fall through to
+    its underlying finding) once the specific check is removed, and proves an allowed change deliberate
+    by showing it FAIL under the naive variant it guards against; a few allow controls are instead
+    discriminated by a paired refusing fixture on the same surface, where no swapped variant can reach
+    the check they bound. Mutation is attribute patching only, never generated code.
     """
     module = sys.modules[__name__]
     original = getattr(module, name)
@@ -2249,7 +2264,10 @@ def _self_test_isolated():
           "adopted into an existing file, a branch forked before adoption, "
           "a new table declared beside an already-declared one at the same "
           "path, at the first parent and at the branch tip alike, a valid "
-          "version-1 first-parent config, a clean "
+          "version-1 first-parent config, a declared file removed after its "
+          "declaration was withdrawn in an earlier, separate commit (directly "
+          "or through gated merges, while one commit removing the file and "
+          "its declaration together still fails R1), a clean "
           "squash, a rows-preserved schema downgrade, and a mixed "
           "heading-and-table config with both legs live, each allowed change "
           "shown failing under a naive variant or discriminated by a paired "
@@ -3660,6 +3678,26 @@ def _v2_self_test_cases(directory):
                "as declaring nothing (mutant)",
                _quiet_run(uloc, uloc_config, True, m_badmb, None, None), 0)
 
+    # The merge-base's config is read on the ABSENT-FILE path too (the branch deleted or moved the
+    # declared file), and an invalid one fails closed there the same way: whether the merge-base
+    # declared the table cannot be known, and reading it as declaring nothing would let the branch's
+    # removal shed its own row obligations.
+    uloc_badmb_del = _v2_branch_commit(uloc, "v2-uloc-badmb-del", uloc_badmb,
+                                       {"done.md": None},
+                                       "branch deletes the declared file under the invalid config")
+    m_badmb_del = _v2_synthetic_merge(uloc, uloc_badmb_t, [uloc_badmb_t, uloc_badmb_del],
+                                      "merge keeps the target file")
+    _selftest_git(uloc, ["checkout", "-q", uloc_badmb_t])
+    expect_refusal("an invalid merge-base config read for a declared file absent at the branch tip "
+                   "fails closed",
+                   _quiet_run_refusal(uloc, uloc_config, True, m_badmb_del, None, None),
+                   ".aiqt/record-sections.toml at the merge-base: at least one [[record]] or "
+                   "[[table]] table is required")
+    with _swapped("_snapshot_decl_locators", lenient_decl_locators):
+        expect("the deleted file reads as a PASS once an invalid merge-base config reads as declaring "
+               "nothing on the absent-file path (mutant)",
+               _quiet_run(uloc, uloc_config, True, m_badmb_del, None, None), 0)
+
     # A branch that MOVES the declared table's file (deleting the declared path and re-adding the
     # table under a new path its own config declares) must not read as the table genuinely absent at
     # the branch tip: the file existed at the merge-base and the merge-base's config declared the
@@ -3703,6 +3741,10 @@ def _v2_self_test_cases(directory):
                    _quiet_run_refusal(uloc, uloc_config, True, m_del, None, None),
                    "done.md at branch tip: the declared file is absent while it existed at the "
                    "merge-base")
+    with _swapped("_require_tip_file",
+                  lambda branch_text, mergebase_text, declared, decl, where: None):
+        expect("the deletion reads as a PASS once the absent-file check is removed (mutant)",
+               _quiet_run(uloc, uloc_config, True, m_del, None, None), 0)
 
     # A declaration of ANOTHER table at an already-declared path (a new TOML array, a new Markdown
     # header) is not a declaration of the new table at the first parent, so the new table reads as
@@ -3875,6 +3917,75 @@ def _v2_self_test_cases(directory):
         expect("the undeclared deletion fails under an absent-file rule unbounded by the merge-base's "
                "declaration (naive variant)",
                _quiet_run(declb, declb_config, True, m_declb, None, None), 2)
+
+    # The deletion/move over-deny's in-band exit, end to end: withdrawing the declaration in an
+    # EARLIER, separate commit and then removing the file passes, directly and through gated merges
+    # alike, while a single commit on the target that removes the file and its declaration together
+    # still fails R1 under the first parent's declaration (landing on the target directly is not by
+    # itself a route around the refusal). While the declaration is withdrawn, a row an in-flight branch
+    # added to the old path is outside the gate, the disclosed cost of that route; the paired control
+    # shows the same row loss caught while the declaration is in force.
+    route = directory / "v2route"
+    route.mkdir()
+    _selftest_git(route, ["init", "-q", "-b", "main"])
+    _selftest_git(route, ["config", "user.name", "AIQT Self-Test"])
+    _selftest_git(route, ["config", "user.email", "selftest@example.invalid"])
+    other_decl = ('[[table]]\npath = "newlog.md"\nformat = "markdown"\n'
+                  'header = "| id | pr |"\nkey = ["id", "pr"]\nedit = "frozen"\n')
+    (route / ".aiqt").mkdir()
+    (route / ".aiqt" / "record-sections.toml").write_text(
+        "schema-version = 2\n\n" + md_table + 'edit = "frozen"\n\n' + other_decl,
+        encoding="utf-8")
+    (route / "done.md").write_text(md(row_y), encoding="utf-8")
+    (route / "newlog.md").write_text("# New log\n\n| id | pr |\n| --- | --- |\n| N | PR0 |\n",
+                                     encoding="utf-8")
+    _selftest_git(route, ["add", "-A"])
+    _selftest_git(route, ["commit", "-q", "-m", "two tables declared"])
+    route_base = _selftest_git(route, ["rev-parse", "HEAD"])
+    route_config = route / ".aiqt" / "record-sections.toml"
+    withdrawn_cfg = "schema-version = 2\n\n" + other_decl
+    route_direct = _v2_branch_commit(route, "v2-route-direct", route_base,
+                                     {"done.md": None,
+                                      ".aiqt/record-sections.toml": withdrawn_cfg},
+                                     "one commit removes the file and its declaration")
+    expect("a single target commit removing a declared file and its declaration together fails R1",
+           _quiet_run(route, route_config, True, route_direct, None, None), 1)
+    route_w = _v2_branch_commit(route, "v2-route-withdraw", route_base,
+                                {".aiqt/record-sections.toml": withdrawn_cfg},
+                                "withdraw the declaration first")
+    expect("control: a direct commit withdrawing the declaration alone passes",
+           _quiet_run(route, route_config, True, route_w, None, None), 0)
+    route_rm = _v2_branch_commit(route, "v2-route-remove", route_w,
+                                 {"done.md": None}, "then remove the file")
+    expect("control: a direct removal after the earlier withdrawal passes",
+           _quiet_run(route, route_config, True, route_rm, None, None), 0)
+    route_mw = _v2_synthetic_merge(route, route_w, [route_base, route_w],
+                                   "gated merge of the withdrawal")
+    _selftest_git(route, ["checkout", "-q", route_w])
+    expect("control: the withdrawal lands through a gated merge too",
+           _quiet_run(route, route_config, True, route_mw, None, None), 0)
+    route_r2 = _v2_branch_commit(route, "v2-route-remove2", route_mw,
+                                 {"done.md": None}, "remove the file on a branch")
+    route_mr = _v2_synthetic_merge(route, route_r2, [route_mw, route_r2],
+                                   "gated merge of the removal")
+    _selftest_git(route, ["checkout", "-q", route_r2])
+    expect("control: the removal lands through a gated merge once the declaration was withdrawn",
+           _quiet_run(route, route_config, True, route_mr, None, None), 0)
+    route_f = _v2_branch_commit(route, "v2-route-inflight", route_base,
+                                {"done.md": md(row_y, row_x2)}, "in-flight branch adds a row")
+    route_keep = _v2_branch_commit(route, "v2-route-keep", route_base,
+                                   {"t.txt": "t\n"}, "target keeps the declaration")
+    m_route_caught = _v2_synthetic_merge(route, route_keep, [route_keep, route_f],
+                                         "resolver keeps the target file")
+    _selftest_git(route, ["checkout", "-q", route_keep])
+    expect("control: an in-flight branch row dropped while the declaration is in force is caught",
+           _quiet_run(route, route_config, True, m_route_caught, None, None), 1)
+    m_route_window = _v2_synthetic_merge(route, route_mr, [route_mr, route_f],
+                                         "resolver keeps the removed state")
+    _selftest_git(route, ["checkout", "-q", route_r2])
+    expect("an in-flight branch row added to the old path is outside the gate while the declaration "
+           "is withdrawn (the disclosed cost of the in-band exit)",
+           _quiet_run(route, route_config, True, m_route_window, None, None), 0)
 
     return failures
 
