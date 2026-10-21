@@ -56,6 +56,21 @@
             "args": [
               "-I",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "citation_read_check"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
               "commit_identity"
             ],
             "timeout": 10
@@ -304,6 +319,21 @@
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "Read|Grep|Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "citation_read_recorder"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
       {
         "matcher": "Bash|TaskOutput",
         "hooks": [

@@ -1345,11 +1345,11 @@ def _test_note_literal_sites(failures, tmp):
     _allow_note(...)`), reached from their handlers and judged by _reduce_result: allow-note is required,
     so a silent mutant (allow) and an explicit permissionDecision "allow" mutant (explicit-allow) at the
     site both fail. The PreToolUse sites are orch_yield_tool's two note returns, orch_resume_barrier's two
-    (an armed barrier, and one that is unreadable or malformed, which reads as armed) and
-    review_dispatch_pin's;
+    (an armed barrier, and one that is unreadable or malformed, which reads as armed),
+    review_dispatch_pin's and citation_read_check's;
     the UserPromptSubmit stamp's unwritten-stamp note and its timer-path _context_note (judged by its own
     shape: model context plus an operator systemMessage, no permissionDecision), the PostToolUse ledger
-    returns, the Stop loop-bound
+    returns and the citation recorder's failed-write note, the Stop loop-bound
     _stop_warn and the dispatcher's bad-argv fail-open note are pinned the same way (the other Stop and
     dispatcher sites: (ns-*)). The fixtures are selftest_orch_hooks.Fixture repos under tmp."""
     import selftest_orch_hooks as orch
@@ -1427,6 +1427,22 @@ def _test_note_literal_sites(failures, tmp):
              "recording that fail-open could not be written")
     finally:
         aiqt_hooks._orch_append_jsonl = saved_append
+    saved_cite = aiqt_hooks._cite_append
+    try:
+        aiqt_hooks._cite_append = lambda state_dir, session, rows: "QA write fault"
+        seed = str(r.root / "seed.txt")
+        note("(nl-citeledger-write) a failed citation-ledger write is surfaced with a note naming the failure",
+             aiqt_hooks.citation_read_recorder(r.payload("PostToolUse", "Read", dict(file_path=seed), extra=dict(
+                 tool_response=dict(type="text", file=dict(filePath=seed, content="seed", numLines=1,
+                                                           startLine=1))))),
+             "citation-ledger write failed (QA write fault)")
+    finally:
+        aiqt_hooks._cite_append = saved_cite
+    note("(nl-citecheck-unread) a commit message citing a line no recorded read covers allows with a note naming "
+         "the range (the citation check's bake posture)",
+         aiqt_hooks.citation_read_check(r.payload("PreToolUse", "Bash", dict(command="git commit -m 'see seed.txt:1'"),
+                                                  extra=dict(session_id="nl-citecheck"))),
+         "seed.txt:1 (no read or write recorded this session covers these lines)")
     saved_save = aiqt_hooks._orch_save_turn_state
     try:
         aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
@@ -3024,11 +3040,14 @@ _DEADLINE_SHAPES = {
         "question": "q" * n, "header": "h", "multiSelect": False,
         "options": [{"label": "a", "description": "b"}, {"label": "c", "description": "d"}]}]}),
     "wakeup_long": lambda n, base: ("ScheduleWakeup", {"prompt": "p" * n, "delaySeconds": 60, "reason": "r"}),
+    # A commit message made of cited line ranges, so the citation check lexes, scans and judges a long one.
+    "commit_cites": lambda n, base: ("Bash", {"command": 'git commit -m "' + _repeat("a.py:1-2 ", n - 15, '"')}),
 }
 _DEADLINE_CASES = {
     "absolute_paths": ("write_content", "read_deep_path"),
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens"),
     "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens"),
+    "citation_read_check": ("git_words", "subst_after", "commit_cites"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
@@ -3126,7 +3145,8 @@ def _deadline_shape_runs(tmp, sizes):
     plain, orch = _deadline_fixtures(tmp)
     runs = []
     for name, shapes in sorted(_DEADLINE_CASES.items()):
-        cwd = str(orch if name.startswith(("orch_", "review_")) else plain)
+        # The citation check is inert outside a git toplevel, so it is timed in the repository as well.
+        cwd = str(orch if name.startswith(("orch_", "review_", "citation_")) else plain)
         for shape in shapes:
             for size in sorted(sizes):
                 runs.append((name, shape, size, cwd) + _deadline_shape_case(name, shape, size, cwd))
@@ -11273,6 +11293,39 @@ def _main_isolated(monitor):
                 _redir("git diff > ./proc/self/fd/1"), [(">", 1, "./proc/self/fd/1", "opaque", "opaque")])
         texpect("(tok-18e) a nested 'dev' component ('foo/dev/x') is a plain file, still file-real",
                 _redir("git diff > foo/dev/x"), [(">", 1, "foo/dev/x", "file-real", "file-real")])
+        # Given a spans list, the lexer reports, in order, the '<<' of each quoted heredoc and each
+        # double-quoted string it reads in a word or a redirect target, and returns the same segments. A
+        # comment, a heredoc's body, single quotes, escaped quotes and a heredoc's quoted delimiter give none.
+        _spans_cmd = ("cat <<'A' \"x <<B\" >\"o\" # \"c\" <<'C'\n<<'D' \"y\"\nA\n"
+                      "echo '\"s\"' \\\"e\\\" <<-\"Q\" a\"b\"\nw\nQ\n")
+        _spans = []
+        _spans_segs = aiqt_hooks._lex_command(_spans_cmd, spans=_spans)
+        texpect("(tok-19) spans: each quoted heredoc's '<<' and each double-quoted string the lexer reads",
+                ([(s, _spans_cmd[s:e]) for s, e in _spans], _spans_segs == aiqt_hooks._lex_command(_spans_cmd)),
+                ([(_spans_cmd.index(at), text) for at, text in (("<<'A'", "<<"), ("\"x", "\"x <<B\""),
+                                                                 ("\"o\"", "\"o\""), ("<<-", "<<"),
+                                                                 ("\"b\"", "\"b\""))], True))
+        # By default a command substitution or backquote inside a double-quoted string is its own quoting
+        # context, so a double quote nested in it does not close the string, and an ANSI-C quote with an
+        # escaped quote inside one is refused. With nested=False, the reading only the citation check asks for,
+        # the string ends at the next unescaped double quote and that ANSI-C form lexes.
+        def _nested_read(command, **options):
+            spans = []
+            try:
+                segs = aiqt_hooks._lex_command(command, spans=spans, **options)
+            except ValueError:
+                return "ValueError"
+            return [seg.argv for seg in segs], [command[s:e] for s, e in spans]
+        _nested_cmds = ('git commit -m "x $(echo "a b") y" -F f', "echo \"$(echo $'x\\' y')\"",
+                        'echo "a `echo "b c"` d"')
+        texpect("(tok-20) nested: a substitution in a double-quoted string is its own quoting context by default, "
+                "and nested=False ends the string at the next unescaped double quote",
+                [(_nested_read(c), _nested_read(c, nested=False)) for c in _nested_cmds],
+                [(([["git", "commit", "-m", 'x $(echo "a b") y', "-F", "f"]], ['"x $(echo "a b") y"']),
+                  ([["git", "commit", "-m", "x $(echo a", "b) y", "-F", "f"]], ['"x $(echo "', '") y"'])),
+                 ("ValueError", ([["echo", "$(echo $'x\\' y')"]], ["\"$(echo $'x\\' y')\""])),
+                 (([["echo", 'a `echo "b c"` d']], ['"a `echo "b c"` d"']),
+                  ([["echo", "a `echo b", "c` d"]], ['"a `echo "', '"` d"']))])
         # Unsupported constructs are cannot-evaluate (ValueError), never partial argv. ROUND-2 FINDING 17: an
         # UNQUOTED heredoc still raises (its body interpolates and stays in scope); a QUOTED heredoc does NOT
         # (its body is literal data, excluded from analysis - asserted separately below).
@@ -15033,6 +15086,20 @@ def _main_isolated(monitor):
             if _ci_lex != _ci_lex_want:
                 failures.append("(ci-wr-locale-lex) the tokenizer with locale={} read {!r} as {!r} (want {!r})"
                                 .format(_ci_locale, _ci_cmd, _ci_lex, _ci_lex_want))
+        # A redirect target is read with the same locale setting as a word: with locale=True a locale quote
+        # there is a double-quoted string, by default its '$' stays literal, and the target stays opaque either
+        # way (ci-wr-locale-redirect).
+        _ci_redir_cmd = 'x >$"a b" 2>$"e""f"'
+        for _ci_locale, _ci_targets in ((False, ["$a b", "$ef"]), (True, ["a b", "ef"])):
+            try:
+                _ci_redir = [[(r.target, r.target_class) for r in seg.redirects]
+                             for seg in aiqt_hooks._lex_command(_ci_redir_cmd, locale=_ci_locale)]
+            except (TypeError, ValueError) as exc:
+                _ci_redir = "{}: {}".format(type(exc).__name__, exc)
+            if _ci_redir != [[(target, "opaque") for target in _ci_targets]]:
+                failures.append("(ci-wr-locale-redirect) the tokenizer with locale={} read the redirect targets of "
+                                "{!r} as {!r} (want {!r})".format(_ci_locale, _ci_redir_cmd, _ci_redir,
+                                                                  [[(t, "opaque") for t in _ci_targets]]))
         _ci_got = aiqt_hooks._segments(_ci_cmd)
         if _ci_got != [(_ci_want[False][0][0], "")]:
             failures.append("(ci-wr-locale-default) _segments read {!r} as {!r} by default (want the literal '$' "
