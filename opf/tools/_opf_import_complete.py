@@ -1245,6 +1245,37 @@ def self_test():
         check("event-chain-of-another-run-finding", hijacked.status == INVALID
               and _says(hijacked, "event[0] names run {!r}, not this run".format(foreign_run)))
 
+        # A chain of another run carrying a skip of this source, every digest recomputed: none of its events
+        # is read as a skip, so a source with no record also stays incomplete for want of a record or skip.
+        def foreign_skip(root):
+            rel = apply.genesis_event_rel(_RUN)
+            genesis = apply._canonical_toml(_bytes(root, rel), "the fixture genesis event")
+            genesis["run_id"] = foreign_run
+            genesis["event_digest"] = apply.event_digest(genesis)
+            skipev = _event(genesis, SKIP_EVENT_KIND, **_skip()[1])
+            skipev["run_id"] = foreign_run
+            skipev["event_digest"] = apply.event_digest(skipev)
+            _put(root, rel, _emit(genesis))
+            _put(root, home + "/" + EVENT_NAME.format(2), _emit(skipev))
+            _reinventory(root)
+        with _registered_skip():
+            usurped = _case(foreign_skip, imports=[], skip_policy=SKIP_POLICY, events=[_skip()])
+        check("skip-in-chain-of-another-run-not-read", usurped.status == INVALID and len(usurped.findings) == 3
+              and _says(usurped, "event[0] names run {!r}, not this run".format(foreign_run))
+              and _says(usurped, "event[1] names run {!r}, not this run".format(foreign_run))
+              and _says(usurped, "no imported record references 'notes/old.md'") and not usurped.skipped)
+
+        # An event whose digest the minting rule refuses is CANNOT-EVALUATE, never skipped over. Every event
+        # read from disk already round-trips canonically, so the refusal is injected at the minting rule.
+        def unmintable(event):
+            raise apply.AdoptApplyError("probe: no canonical form")
+        with tempfile.TemporaryDirectory(prefix="opf-import-complete-") as root:
+            _fixture(root)
+            with mock.patch.object(apply, "event_digest", unmintable):
+                unminted = evaluate_source(root, _RUN, _SOURCE, doctor=_Doctor())
+        check("event-digest-unmintable-cannot", unminted.status == CANNOT_EVALUATE
+              and _says(unminted, "outcome-event chain: event[0]: probe: no canonical form"))
+
         def false_digest(root):
             rel = apply.genesis_event_rel(_RUN)
             event = apply._canonical_toml(_bytes(root, rel), "the fixture genesis event")
