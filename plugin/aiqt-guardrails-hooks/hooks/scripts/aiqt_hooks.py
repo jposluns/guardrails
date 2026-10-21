@@ -200,14 +200,22 @@ or an interrupt) raised in a fail-open mode, which ends the hook as it would wit
 an exit whose status would be 2 ends it with status 1. The raw 'git ... <verb>'
 fallback scans are _RawSequence probes of linear cost: the single regexes they replaced grew with the
 square or the cube of the command length, and five guards ran past the hook timeout on some shape at or
-below 64 KB. Measured in-process on a 24-core host with Python 3.14.4 over runs on 2026-10-15 and
-2026-10-16, the slowest PreToolUse handler call on the worst shapes tools/selftest_aiqt_hooks.py times
+below 64 KB. The push backstop's raw mirror-configuration scan is a _RawMirrorConfig probe of linear cost,
+and its segment split walks a '<(' or '>(' process substitution in place: the single regex grew with the
+square of a run of quoted '-c' options with no blank (about 6.2 to 6.5 s of CPU for one call of the push
+backstop alone at 180 KB, against about 0.37 s at 1 MB with the probe), and a copy of the rest of the
+command for each substitution with the square of a run of them (about 3.4 s of CPU for one call of the
+copying split alone at 1 MB, against about 0.11 s for the in-place walk), each in-process on a 24-core
+host with Python 3.14.4, 2026-10-18. Measured in-process on a 24-core host with Python 3.14.4 over runs on
+2026-10-15 and 2026-10-16, the slowest PreToolUse handler call on the worst shapes tools/selftest_aiqt_hooks.py times
 took at most 0.10 s of wall-clock time at 64 KB, 0.49 s at 256 KB and 2.07 s at 1 MB (nest_parens under
 git_stash_ref). With the raw-text push backstop and the joined and de-quoted readings of the command,
 runs on 2026-10-17 on a 24-core host with Python 3.14.4 that was running other work measured at most
 0.13 s at 64 KB (protected_line, whose backstop reads the whole command before its 65,536-character
-commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard). Interpreter
-start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
+commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard); which clock those
+runs read, CPU or wall-clock time, was not recorded. Interpreter start-up adds about 0.1 to 0.2 s to each
+call, a figure first written on 2026-10-15 whose date of measurement, host and clock were not recorded.
+Outside the deadline: interpreter start-up and
 module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
 uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
 check for signals), which holds the deadline back until it returns, as does review_dispatch_pin's wait for
@@ -487,6 +495,15 @@ def _skip_quoting(command, i, n):
         i += 2
     else:
         raise ValueError("not a quoting opener")
+    return _skip_quoting_from(command, i, n, stack)
+
+
+def _skip_quoting_from(command, i, n, stack):
+    """The walk of _skip_quoting from command[i], inside the contexts already open on `stack` (innermost
+    last, consumed): the index just past the construct that closes the outermost one, or ValueError where
+    _skip_quoting raises it. A caller that has read an opener the walk does not start with (the '(' of a
+    '<(' or '>(' process substitution, which parses like '$(') passes the context it opens and the index
+    past it, so the walk reads the command in place."""
     while stack:
         if i >= n:
             raise ValueError("unterminated quote or substitution")
@@ -7455,6 +7472,47 @@ _RAW_PUSH_DELETE_RE = re.compile(
     + r"|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
     + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
+
+
+class _RawMirrorConfig:
+    """The raw mirror-configuration probe: search() returns the match the single regex `pattern` returns
+    (an option, then 'remote.', then a key run of characters that are neither whitespace nor '=' with a
+    '.mirror' after its first character), or None, at linear cost. The regex reads the whole key run after
+    each option it finds and gives it back one character at a time looking for '.mirror', so a run holding
+    many options and no '.mirror' (git push '-c'remote.'-c'remote. and so on, with no blank to end the run)
+    cost time quadratic in its length: about 3.1 s of CPU for one search of a 180 KB run, against about
+    0.02 s for this probe on a 1 MB run (in-process on a 24-core host with Python 3.14.4, 2026-10-18).
+    Here `option` finds each option once, in order, `key` reads the run after it and `mirror` looks for
+    '.mirror' in that run once; an option whose key starts inside a run already read with no '.mirror'
+    after that earlier key is passed over, because its own run is a tail of that one. `option` matches
+    what the regex's two alternatives match before their shared key run; at a given start at most one
+    alternative can match, and only up to one place, so each option the regex can start from is read with
+    the key it would read. No option match starts inside another, so the runs read do not overlap. Only
+    the start of the leftmost match is read again, by `pattern` itself, for the match it returns.
+    tools/selftest_aiqt_hooks.py holds this probe equal to the regex over a generated corpus."""
+    __slots__ = ("pattern", "option", "key", "mirror")
+
+    def __init__(self, pattern, option, key, mirror):
+        self.pattern = re.compile(pattern)
+        self.option = re.compile(option)
+        self.key = re.compile(key)
+        self.mirror = re.compile(mirror)
+
+    def search(self, text):
+        pos, read_from, read_to = 0, 0, -1
+        while True:
+            found = self.option.search(text, pos)
+            if found is None:
+                return None
+            start = found.end()
+            if not read_from <= start < read_to:
+                run = self.key.match(text, start)
+                read_from, read_to = start, (run.end() if run else start)
+                if self.mirror.search(text, start + 1, read_to):
+                    return self.pattern.match(text, found.start())
+            pos = found.start() + 1
+
+
 # GD-146: the raw-fallback parity for a command-local mirror configuration the parsed path cannot reach
 # (a wrapped or unparseable 'git -c remote.<name>.mirror=true push' / '--config-env=remote.<name>.mirror
 # =ENV push'). Anchored to the OPTION token ('-c' then whitespace and/or a shell quote, or '--config-env'
@@ -7475,10 +7533,14 @@ _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")
 # chased with more regex variants.
 # The PARSED path is complete for parseable commands (the tokenizer normalizes quotes) and network-side
 # branch protection remains the backstop. It parses NO value: a falsy value over-asks on this path
-# (accepted, documented), mirroring the raw scan's over-matching posture.
-_RAW_PUSH_MIRRORCFG_RE = re.compile(
+# (accepted, documented), mirroring the raw scan's over-matching posture. It is a _RawMirrorConfig probe of
+# the regex below, which decides the same at linear cost.
+_RAW_PUSH_MIRRORCFG_RE = _RawMirrorConfig(
     r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
-    r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
+    r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror",
+    r"(?i)(?:^|[\s'\"])(?:-c[\s'\"]+|--config-env[=\s]['\"]*)remote\.",
+    r"(?i)[^\s=]+",
+    r"(?i)\.mirror")
 _RAW_COMMIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 
 # Commit proof contract. Recognizers establish syntax, never authorization.
@@ -8567,9 +8629,11 @@ def _raw_push_segments(command):
             word_start = False
             continue
         if c == "(" and prev_redir:
-            # a '<(' or '>(' process substitution: skip it as the '$(' it parses like, one opaque unit
+            # a '<(' or '>(' process substitution: skip it as the '$(' it parses like, one opaque unit,
+            # read in place (a copy of the rest of the command for each one cost time quadratic in the
+            # length of a command that holds many)
             try:
-                i += _skip_quoting("$" + joined[i:], 0, n - i + 1) - 1
+                i = _skip_quoting_from(joined, i + 1, n, ["paren"])
             except ValueError:
                 break
             prev_redir = False
