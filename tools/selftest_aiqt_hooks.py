@@ -2482,6 +2482,238 @@ def _raw_sequence_failures(count=20000, seed=20261015):
     return out
 
 
+# The single regex the _RawMirrorConfig probe _RAW_PUSH_MIRRORCFG_RE replaced: the reference the differential
+# check holds the probe equal to, over short texts where its quadratic cost does not matter.
+_RAW_MIRROR_REFERENCE = (r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
+                         r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
+# Words and joiners its corpus is drawn from: each option word, its case and near misses, the key and its
+# case, '.mirror' and its near misses, quotes, '=', blanks (a vertical tab and a no-break space among them),
+# whole quoted options, and the two letters the case-folded 'i' also matches (a dotless i, a dotted capital I).
+_RAW_MIRROR_WORDS = (
+    "-c", "-C", "-cx", "--config-env", "--CONFIG-ENV", "--config-envx", "remote.", "REMOTE.", "remote", "Remote",
+    ".mirror", ".MIRROR", ".mirro", "mirror", "remote..mirror", "remote.x.mirror", ".", "origin", "x", "-", "c",
+    "'", '"', "''", " ", "\t", "\n", "\x0b", "\u00a0", "=", "\u0131", "\u0130", "git", "push", "'-c'remote.",
+    "-c 'remote.", "--config-env='remote.")
+_RAW_MIRROR_JOINERS = ("", "", " ", "'", '"', "=", "\n")
+
+
+def _raw_mirror_first_only(text):
+    """A wrong mirror probe for _raw_mirror_failures: it reads only the first option."""
+    probe = aiqt_hooks._RAW_PUSH_MIRRORCFG_RE
+    found = probe.option.search(text)
+    if found is None:
+        return None
+    run = probe.key.match(text, found.end())
+    end = run.end() if run else found.end()
+    return probe.pattern.match(text, found.start()) if probe.mirror.search(text, found.end() + 1, end) else None
+
+
+def _raw_mirror_mismatches(search, texts, reference):
+    """The texts on which search(text) gives another span and text than the reference regex: at most three."""
+    out = []
+    for text in texts:
+        want, got = reference.search(text), search(text)
+        if (want and (want.span(), want.group())) != (got and (got.span(), got.group())):
+            out.append(text)
+            if len(out) == 3:
+                break
+    return out
+
+
+def _raw_mirror_failures(count=20000, seed=20261018):
+    """(dl-linear-mirror) _RAW_PUSH_MIRRORCFG_RE is a _RawMirrorConfig probe of the regex it replaced and
+    returns the match that regex returns (the same span and text, or None), over every corpus word alone and
+    `count` seeded random joins of one to twelve words. The corpus must give the regex both outcomes and hold
+    texts whose match starts at a later option than the first one. Two wrong probes (one reading only the
+    first option, one reading each key run on to the end of the text) must each be caught by the same
+    comparison, so it discriminates."""
+    out = []
+    probe = aiqt_hooks._RAW_PUSH_MIRRORCFG_RE
+    if not isinstance(probe, getattr(aiqt_hooks, "_RawMirrorConfig", ())):
+        return ["(dl-linear-mirror-type) _RAW_PUSH_MIRRORCFG_RE is not a _RawMirrorConfig probe"]
+    reference = re.compile(_RAW_MIRROR_REFERENCE)
+    if probe.pattern.pattern != _RAW_MIRROR_REFERENCE:
+        out.append("(dl-linear-mirror-pattern) the probe's regex is {!r}, not the regex it replaced".format(
+            probe.pattern.pattern))
+    rng = random.Random(seed)
+    texts = list(_RAW_MIRROR_WORDS)
+    for _ in range(count):
+        text = rng.choice(_RAW_MIRROR_WORDS)
+        for _ in range(rng.randint(0, 11)):
+            text += rng.choice(_RAW_MIRROR_JOINERS) + rng.choice(_RAW_MIRROR_WORDS)
+        texts.append(text)
+    hits = later = 0
+    for text in texts:
+        want = reference.search(text)
+        if want:
+            hits += 1
+            later += want.start() != probe.option.search(text).start()
+    if not (0 < hits < len(texts) and later):
+        out.append("(dl-linear-mirror-corpus) the corpus must give the regex both outcomes ({} of {} texts match) "
+                   "and hold a match that starts at a later option ({})".format(hits, len(texts), later))
+    for text in _raw_mirror_mismatches(probe.search, texts, reference):
+        out.append("(dl-linear-mirror) gives {!r} on {!r}, the regex it replaced {!r}".format(
+            probe.search(text), text, reference.search(text)))
+    wrong = (
+        ("first-only", _raw_mirror_first_only),
+        ("whole-text", aiqt_hooks._RawMirrorConfig(
+            _RAW_MIRROR_REFERENCE, probe.option.pattern, r"(?s).+", probe.mirror.pattern).search),
+    )
+    for name, search in wrong:
+        if not _raw_mirror_mismatches(search, texts, reference):
+            out.append("(dl-linear-mirror-red-{}) a wrong mirror probe passes the comparison".format(name))
+    return out
+
+
+# Texts for the in-place walk past a '<(' or '>(' process substitution in _raw_push_segments: nested quotes,
+# substitutions, expansions and escapes inside it, and forms left unterminated.
+_PROCSUBST_TEXTS = (
+    "<(x)", ">(a 'b)' c)", "<(a $(b) \"c)\" `d)`)", "<(a", "<(a " + chr(92) + ")", "<(${x)})", "<((x))",
+    "<(a)b<(c)", "<(a 'b", "<(a \"$(b)", ">(`)", "<(a" + chr(92))
+_PROCSUBST_ALPHABET = ("(", ")", "<(", "'", '"', "`", "$(", "${", "}", chr(92), " ", "x", "\n", ";")
+
+
+def _procsubst_skip_outcome(call):
+    """call()'s result, or ("ValueError", its message) when it raises ValueError."""
+    try:
+        return call()
+    except ValueError as exc:
+        return ("ValueError", str(exc))
+
+
+def _procsubst_skip_failures(count=20000, seed=20261018):
+    """(dl-procsubst-skip) _raw_push_segments walks past a '<(' or '>(' process substitution in place with
+    _skip_quoting_from(text, i + 1, n, ["paren"]); at each '(' of _PROCSUBST_TEXTS and of `count` seeded random
+    texts over _PROCSUBST_ALPHABET that gives the index _skip_quoting gives on the copy "$" + text[i:] it
+    walked before (mapped back to text), or the same ValueError. The corpus must hold both outcomes. Copying
+    the rest of the command for each one cost time quadratic in the length of a command that holds many."""
+    if not callable(getattr(aiqt_hooks, "_skip_quoting_from", None)):
+        return ["(dl-procsubst-skip-missing) aiqt_hooks has no _skip_quoting_from to walk a substitution in place"]
+    out = []
+    rng = random.Random(seed)
+    texts = list(_PROCSUBST_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_PROCSUBST_ALPHABET) for _ in range(rng.randint(1, 12))))
+    closed = raised = 0
+    for text in texts:
+        n = len(text)
+        for i in range(n):
+            if text[i] != "(":
+                continue
+            want = _procsubst_skip_outcome(lambda: aiqt_hooks._skip_quoting("$" + text[i:], 0, n - i + 1) - 1 + i)
+            got = _procsubst_skip_outcome(lambda: aiqt_hooks._skip_quoting_from(text, i + 1, n, ["paren"]))
+            closed += isinstance(want, int)
+            raised += not isinstance(want, int)
+            if got != want and len(out) < 3:
+                out.append("(dl-procsubst-skip) the in-place walk from {!r} at {} gave {!r}, the copy {!r}".format(
+                    text, i, got, want))
+    if not (closed and raised):
+        out.append("(dl-procsubst-skip-corpus) the corpus must hold a substitution that closes ({}) and one that "
+                   "does not ({})".format(closed, raised))
+    return out
+
+
+def _procsubst_walk_calls(walk, command):
+    """[(text, start, stack)] for each _skip_quoting_from call walk(command) makes, recorded by a wrapper
+    installed on that module attribute for the run and restored after it; _skip_quoting reaches the walk
+    through the same attribute, so a call through it is recorded too, with the text it passed."""
+    inner = aiqt_hooks._skip_quoting_from
+    calls = []
+
+    def recording(text, i, n, stack):
+        calls.append((text, i, list(stack)))
+        return inner(text, i, n, stack)
+
+    aiqt_hooks._skip_quoting_from = recording
+    try:
+        walk(command)
+    finally:
+        aiqt_hooks._skip_quoting_from = inner
+    return calls
+
+
+def _procsubst_walk_problems(walk, command):
+    """What walk(command)'s recorded _skip_quoting_from calls (_procsubst_walk_calls) get wrong against the
+    in-place read of a command whose only quoting constructs are its process substitutions: one call for
+    each substitution's '(', in order, each passing `command` ITSELF, compared by object identity, so
+    neither a copy of its tail nor a fresh full-length copy equal in value passes, from just past that
+    '(' with the one open paren context. The caller passes a command the continuation join returns
+    unchanged (no backslash-newline pair), so the walked text and the command can be one object.
+    Phrases, [] for none, at most three."""
+    wants = [i for i in range(1, len(command)) if command[i] == "(" and command[i - 1] in "<>"]
+    calls = _procsubst_walk_calls(walk, command)
+    out = []
+    if len(calls) != len(wants):
+        out.append("made {} _skip_quoting_from call(s) for {} substitution(s)".format(len(calls), len(wants)))
+    for (text, start, stack), i in zip(calls, wants):
+        if text is not command:
+            out.append("walked a copy of {} character(s) for the substitution at {} (want the command "
+                       "object itself in place, {} characters)".format(len(text), i, len(command)))
+        elif (start, stack) != (i + 1, ["paren"]):
+            out.append("walked from {} with contexts {} for the substitution at {} (want from {} with "
+                       "['paren'])".format(start, stack, i, i + 1))
+        if len(out) == 3:
+            break
+    return out
+
+
+def _procsubst_copying_walk(command):
+    """A wrong segments walk for _procsubst_taken_failures: at each process substitution's '(' it walks a
+    copy of the rest of the command prefixed with '$', the call shape the in-place read replaced."""
+    n = len(command)
+    for i in range(1, n):
+        if command[i] == "(" and command[i - 1] in "<>":
+            aiqt_hooks._skip_quoting("$" + command[i:], 0, n - i + 1)
+
+
+def _procsubst_equal_copy_walk(command):
+    """A wrong segments walk for _procsubst_taken_failures: at each process substitution's '(' it walks a
+    fresh full-length copy EQUAL to the command in value, which still allocates per substitution in time
+    quadratic in the command's length. A value comparison and segment equality both pass it. The 1 MB
+    timed row failed it when measured (about 7.9 to 8.2 s of CPU for one protected_line call, over its
+    7-second bound, in-process on a 24-core host with Python 3.14.4, 2026-10-18), but a faster host can
+    bring it under that bound, so the object-identity record is what catches it by design."""
+    n = len(command)
+    for i in range(1, n):
+        if command[i] == "(" and command[i - 1] in "<>":
+            aiqt_hooks._skip_quoting_from((command + " ")[:-1], i + 1, n, ["paren"])
+
+
+def _procsubst_taken_failures():
+    """(dl-procsubst-taken) The in-place walk is TAKEN by the production split: on a command of many
+    adjacent process substitutions ending in a protected force-push, _raw_push_segments calls
+    _skip_quoting_from once per substitution passing the command OBJECT ITSELF, never a copy of its tail
+    nor a fresh full-length copy equal in value (_procsubst_walk_problems compares by identity; the
+    command holds no backslash-newline pair, so the joined text the split walks IS the command,
+    dl-procsubst-taken-joined), and _raw_push_match still matches the force-push segment
+    (dl-procsubst-taken-match). The equivalence
+    check above holds just as well for a split that copies, so only this record pins the call site; the
+    bounded timed rows do not (the copying split stayed under the 1 MB CPU bound when measured). The
+    copying call shape it replaced must be caught by the same record (dl-procsubst-taken-red), and so
+    must a per-substitution full-length copy equal in value, which of the record's comparisons only the
+    identity comparison can see (dl-procsubst-taken-red-equal), so the record discriminates."""
+    if not callable(getattr(aiqt_hooks, "_skip_quoting_from", None)):
+        return ["(dl-procsubst-taken-missing) aiqt_hooks has no _skip_quoting_from to record the walk on"]
+    command = "cat " + "<(x) >(x) " * 1200 + "; git push --force origin main"
+    out = []
+    if aiqt_hooks._join_continuations(command)[0] is not command:
+        out.append("(dl-procsubst-taken-joined) the continuation join must return this fixture (it holds "
+                   "no backslash-newline pair) as the same object, so the split can walk the command "
+                   "itself and the identity record below can read anything else as a copy")
+    for problem in _procsubst_walk_problems(aiqt_hooks._raw_push_segments, command):
+        out.append("(dl-procsubst-taken) _raw_push_segments {}".format(problem))
+    if not aiqt_hooks._raw_push_match(command):
+        out.append("(dl-procsubst-taken-match) _raw_push_match misses the protected force-push after {} "
+                   "process substitutions".format(command.count("(x)")))
+    if not _procsubst_walk_problems(_procsubst_copying_walk, command):
+        out.append("(dl-procsubst-taken-red) a walk that copies the rest of the command for each substitution "
+                   "passes the call record")
+    if not _procsubst_walk_problems(_procsubst_equal_copy_walk, command):
+        out.append("(dl-procsubst-taken-red-equal) a walk that passes a fresh full-length copy, equal to the "
+                   "command in value, for each substitution passes the call record")
+    return out
+
+
 # Commands for the continuation-join fast path: with no backslash-newline pair (backslashes, newlines and
 # quoting apart from each other) and with pairs at top level, inside quotes, substitutions, an expansion and
 # comments, including pairs the walk keeps.
@@ -2769,6 +3001,20 @@ _DEADLINE_SHAPES = {
     "subst_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, '; git commit -m "$(id)"')}),
     "breadth_push_after_unbal": lambda n, base: ("Bash", {"command": _repeat(
         "git add x ", n, "; git commit -a -m x; git push origin '")}),
+    # One key run of quoted '-c' mirror options with no '.mirror' and no blank, which the single
+    # mirror-configuration regex read in time quadratic in its length (about 0.8 s of CPU at 64 KB and 6.2
+    # to 6.5 s at 180 KB for one call of the push backstop alone, in-process on a 24-core host with Python
+    # 3.14.4, 2026-10-18), then a force-push to a protected branch.
+    "mirror_cfg_run_after": lambda n, base: ("Bash", {"command": "git push " + _repeat(
+        "'-c'remote.", n - 9, "; git push --force origin main")}),
+    # A run of adjacent process substitutions, which the push backstop's segment split walked by copying
+    # the rest of the command for each one, in time quadratic in the length of the run (about 3.4 s of
+    # CPU for one call of the copying split alone at 1 MB, in-process on a 24-core host with Python
+    # 3.14.4, 2026-10-18, against about 0.11 s for the in-place walk), then a force-push to a protected
+    # branch. The bounds here are not what pins the in-place walk (the copying split stayed under the
+    # 1 MB CPU bound when measured); the call record (dl-procsubst-taken) does.
+    "procsubst_run_after": lambda n, base: ("Bash", {"command": "cat " + _repeat(
+        "<(x) >(x) ", n - 4, "; git push --force origin main")}),
     "write_content": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": "a" * n}),
     "write_secretish": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": _repeat("a=", n)}),
     "write_deep_path": lambda n, base: ("Write", {"file_path": base + _repeat("/a", n - len(base)),
@@ -2802,7 +3048,8 @@ _DEADLINE_CASES = {
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
     "orch_yield_tool": ("wakeup_long",),
-    "protected_line": ("git_words_unbal_dq", "push_force_after"),
+    "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
+                       "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
     "write_scope_guard": ("write_content", "write_deep_path"),
@@ -2818,7 +3065,8 @@ _DEADLINE_PLAIN_CASES = {
 _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
-    ("protected_line", "push_force_after")))
+    ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
+    ("protected_line", "procsubst_run_after")))
 # The (handler, shape) cases whose detach must still be noted outside registry scope, each within its bound.
 _DEADLINE_NOTE_CASES = frozenset((
     ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options")))
@@ -5117,6 +5365,9 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
     failures.extend(_raw_sequence_failures())
+    failures.extend(_raw_mirror_failures())
+    failures.extend(_procsubst_skip_failures())
+    failures.extend(_procsubst_taken_failures())
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
     child_tmp = tmp / "deadline"
