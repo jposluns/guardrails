@@ -2451,7 +2451,11 @@ def self_test():
           "(seq, status, id and check_ref each driven unconditionally by fault injection "
           "at the production call sites, seq, status and id additionally through the "
           "measured window between the decoder's and the renderer's recursion limits "
-          "where this host has one, a skipped window case being reported as a named NOT "
+          "where this host has one (the window cases MAY NOT RUN: a host whose render "
+          "limit is not below its decode limit skips them and this suite still exits 0, "
+          "an omission the aggregate runner's RESULT line does not reflect, so the "
+          "named NOT RUN line printed beside this PASS is the only disclosure), a "
+          "skipped window case being reported as a named NOT "
           "RUN line, and the placeholder substitution itself proven directly), never an "
           "escaped RecursionError")
     return 0

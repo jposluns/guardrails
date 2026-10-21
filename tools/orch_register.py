@@ -294,7 +294,14 @@ def _declared_family(root, path):
     declarations resolve to the same register path (the declared id family is then ambiguous,
     so there is no single gate context to validate in): the register gate evaluates declared
     surfaces only. RESIDUAL: the identity comparison is point-in-time; a hard link created
-    after this check is not caught here and is left to the register gate."""
+    after this check is not caught here and is left to the register gate. RESIDUAL: the
+    named too-deeply-nested refusal below covers this appender's own registry read (the
+    register gate and the record-drift gate carry their own); the hook script
+    (aiqt_hooks.py) reads the registry and the register anchor catching ValueError only,
+    so a registry or anchor nested too deeply for the JSON decoder there (a
+    RecursionError) is handled by that script's top-level dispatcher handler, which fails
+    closed in blocking modes and warns in fail-open modes, never by a named per-read
+    refusal."""
     registry = None
     found = False
     for rel in REGISTRY_FILES:
@@ -1285,9 +1292,18 @@ def cmd_append(a, _waits=0):
                 print("append: {} seq {} was appended and is in the register, but {}".format(
                     a.id, landed_seq, "; ".join(close_failures)), file=sys.stderr)
             elif retried:
+                # the retried append's verdict is only ABOVE this line when that call
+                # RETURNED; a retried call that raised (the next-id refusal included) is
+                # still unwinding through this finally, so its verdict is reported after
+                # this line, wherever that exception is handled
                 print("append: {} (the descriptor belonged to this call's superseded "
-                      "lock-wait attempt; the retried append reported its own verdict "
-                      "above)".format("; ".join(close_failures)), file=sys.stderr)
+                      "lock-wait attempt; {})".format(
+                          "; ".join(close_failures),
+                          "the retried append raised instead of returning, so its "
+                          "verdict is carried by that still unwinding exception and "
+                          "is reported after this line" if escaping else
+                          "the retried append reported its own verdict above"),
+                      file=sys.stderr)
             else:
                 print("append: refused, {}".format("; ".join(close_failures)),
                       file=sys.stderr)
@@ -1823,10 +1839,17 @@ def self_test():
         fifo_close_reg = repo / "fifo-close.jsonl"
         os.mkfifo(str(fifo_close_reg))
         fifo_close_id = os.lstat(str(fifo_close_reg))
-        close_fired = {"n": 0}
+        close_fired = {"n": 0, "again": 0}
+        app_close_failed = set()
         real_app_close, real_app_fstat = os.close, os.fstat
 
         def app_failing_close(close_fd):
+            # a second close of a descriptor number whose close already failed is the
+            # regression the "attempted exactly once" guarantee forbids (the number can
+            # be reissued by then, so a retry can close an unrelated file): count it so
+            # the vector can assert zero
+            if close_fd in app_close_failed:
+                close_fired["again"] += 1
             try:
                 st_closed = real_app_fstat(close_fd)
             except OSError:
@@ -1835,6 +1858,7 @@ def self_test():
             if st_closed is not None and (st_closed.st_dev, st_closed.st_ino) == \
                     (fifo_close_id.st_dev, fifo_close_id.st_ino):
                 close_fired["n"] += 1
+                app_close_failed.add(close_fd)
                 raise OSError(5, "injected close failure")
 
         def close_fail_append():
@@ -1858,6 +1882,10 @@ def self_test():
             if close_fired["n"] == 0:
                 failures.append("append-close-failure-named: the injected close failure "
                                 "never fired, so the vector proved nothing")
+        if close_fired["again"]:
+            failures.append("append-close-failure-named: the failed close was attempted "
+                            "again ({} extra attempt(s)); each owned descriptor's close "
+                            "is attempted exactly once".format(close_fired["again"]))
         if not stat.S_ISFIFO(os.lstat(str(fifo_close_reg)).st_mode):
             failures.append("append-close-failure-named: the refusal changed the register "
                             "entry")
@@ -1870,7 +1898,15 @@ def self_test():
         real_lc_close, real_lc_fstat, real_lc_lstat = os.close, os.fstat, os.lstat
 
         def landed_close_injector(target_reg, fired):
+            failed_fds = set()
+
             def failing_close(close_fd):
+                # a second close of a descriptor number whose close already failed is
+                # the regression the "attempted exactly once" guarantee forbids (the
+                # number can be reissued by then, so a retry can close an unrelated
+                # file): count it so each vector can assert zero
+                if close_fd in failed_fds:
+                    fired["again"] += 1
                 try:
                     st_closed = real_lc_fstat(close_fd)
                 except OSError:
@@ -1885,12 +1921,13 @@ def self_test():
                 if (st_closed.st_dev, st_closed.st_ino) == \
                         (st_reg.st_dev, st_reg.st_ino):
                     fired["n"] += 1
+                    failed_fds.add(close_fd)
                     raise OSError(5, "injected close failure")
             return failing_close
 
         declare(mistakes_register="landed-close.jsonl")
         landed_close_reg = repo / "landed-close.jsonl"
-        landed_fired = {"n": 0}
+        landed_fired = {"n": 0, "again": 0}
 
         def landed_close_append():
             try:
@@ -1916,6 +1953,10 @@ def self_test():
             if not _lines(landed_close_reg):
                 failures.append("landed-close-failure-named: the landed row is not in the "
                                 "register")
+        if landed_fired["again"]:
+            failures.append("landed-close-failure-named: the failed close was attempted "
+                            "again ({} extra attempt(s)); each owned descriptor's close "
+                            "is attempted exactly once".format(landed_fired["again"]))
         vector_cleanup("landed-close-failure-named", landed_close_reg.unlink)
         vector_cleanup("landed-close-failure-named",
                        Path(str(landed_close_reg) + ".anchor").unlink)
@@ -1926,7 +1967,7 @@ def self_test():
         # body's success
         declare(mistakes_register="landed-close-handler.jsonl")
         handler_reg = repo / "landed-close-handler.jsonl"
-        handler_fired = {"n": 0}
+        handler_fired = {"n": 0, "again": 0}
 
         def handler_close_append():
             try:
@@ -1952,6 +1993,11 @@ def self_test():
             if handler_fired["n"] == 0:
                 failures.append("landed-close-failure-in-handler: the injected close "
                                 "failure never fired, so the vector proved nothing")
+        if handler_fired["again"]:
+            failures.append("landed-close-failure-in-handler: the failed close was "
+                            "attempted again ({} extra attempt(s)); each owned "
+                            "descriptor's close is attempted exactly once".format(
+                                handler_fired["again"]))
         vector_cleanup("landed-close-failure-in-handler", handler_reg.unlink)
         vector_cleanup("landed-close-failure-in-handler",
                        Path(str(handler_reg) + ".anchor").unlink)
@@ -3311,6 +3357,115 @@ def self_test():
             failures.append("lock-wait-starts-over: both rows should land in order with a "
                             "clean chain, got inner {!r}, outer exit {}: {} rows {}".format(
                                 wait["inner"], rc, err.strip(), wait_ids))
+        # a close failure on the stale descriptor of a SUPERSEDED lock-wait attempt names
+        # the superseded attempt and is never called refused: the retried call carries the
+        # verdict, so when it RETURNED the message says that verdict was reported above
+        # and the exit becomes 2, and when it RAISED the message says the verdict is
+        # carried by the still unwinding exception (reported after this line), which
+        # keeps propagating instead of being replaced by exit 2
+        declare(mistakes_register="superseded-close.jsonl")
+        sup_reg = repo / "superseded-close.jsonl"
+        accepted("superseded-close-seed", sup_reg, "MR-1", bootstrap=True)
+        accepted("superseded-close-second-seed", sup_reg, "MR-2")
+        real_sup_close, real_sup_fstat = os.close, os.fstat
+
+        def superseded_scenario(name, inner_rid, inner_status, outer_rid, outer_status):
+            st_stale = os.lstat(str(sup_reg))
+            fired = {"n": 0, "again": 0, "inner": None}
+            stale_failed = set()
+
+            def stale_failing_close(close_fd):
+                # a second close of a descriptor number whose close already failed is
+                # the regression the "attempted exactly once" guarantee forbids: count
+                # it so the scenario can assert zero
+                if close_fd in stale_failed:
+                    fired["again"] += 1
+                try:
+                    st_closed = real_sup_fstat(close_fd)
+                except OSError:
+                    st_closed = None
+                real_sup_close(close_fd)
+                if st_closed is not None and (st_closed.st_dev, st_closed.st_ino) == \
+                        (st_stale.st_dev, st_stale.st_ino):
+                    fired["n"] += 1
+                    stale_failed.add(close_fd)
+                    raise OSError(5, "injected close failure")
+
+            committed = {"done": False}
+
+            def commit_then_fail_closes(lock_fd, op):
+                # while the outer append waits for its lock, a cooperating appender
+                # commits, so the file the outer call locked is stale and it starts
+                # over; only then is the close failure armed (on the stale file's
+                # identity), so the cooperating append's own closes stay real
+                if not committed["done"]:
+                    committed["done"] = True
+                    fired["inner"] = append(sup_reg, inner_rid, inner_status)
+                    os.close = stale_failing_close
+                return real_flock(lock_fd, op)
+
+            fcntl.flock = commit_then_fail_closes
+            try:
+                got = alarm_bounded(name,
+                                    lambda: append(sup_reg, outer_rid, outer_status))
+            finally:
+                fcntl.flock = real_flock
+                os.close = real_sup_close
+            if fired["inner"] is None or fired["inner"][0] != 0:
+                failures.append("{}: the cooperating commit should land cleanly, got "
+                                "{!r}".format(name, fired["inner"]))
+            if fired["n"] == 0:
+                failures.append("{}: the injected close failure never fired, so the "
+                                "vector proved nothing".format(name))
+            if fired["again"]:
+                failures.append("{}: the failed close was attempted again ({} extra "
+                                "attempt(s)); each owned descriptor's close is attempted "
+                                "exactly once".format(name, fired["again"]))
+            return got
+
+        sup_got = superseded_scenario("superseded-close-failure-named", "MR-1", "accepted",
+                                      "MR-2", "accepted")
+        if sup_got is not None:
+            sup_rc, sup_err = sup_got
+            if (sup_rc != 2 or "superseded lock-wait attempt" not in sup_err
+                    or "reported its own verdict above" not in sup_err
+                    or "could not be closed" not in sup_err or "refused" in sup_err):
+                failures.append("superseded-close-failure-named: want exit 2 naming the "
+                                "superseded attempt beside the close failure (never "
+                                "'refused'), got exit {!r}: {}".format(
+                                    sup_rc, sup_err.strip()))
+            sup_ids = [(json.loads(l).get("id"), json.loads(l).get("status"))
+                       for l in _lines(sup_reg)]
+            if sup_ids != [("MR-1", "proposed"), ("MR-2", "proposed"),
+                           ("MR-1", "accepted"), ("MR-2", "accepted")]:
+                failures.append("superseded-close-failure-named: both rows should land "
+                                "in order past the stale close failure, got {}".format(
+                                    sup_ids))
+        # the retried call RAISES here: the cooperating commit takes the proposal id this
+        # call wanted, so the retried call's next-id refusal (a sys.exit) is still
+        # unwinding when the stale descriptor's close fails; the close failure must say
+        # the verdict follows with that exception, never that it was reported above (the
+        # refusal prints after this message), and the exception's own verdict (exit 1
+        # here) stays, never replaced by exit 2
+        raising_got = superseded_scenario("superseded-close-failure-while-raising",
+                                          "MR-3", "proposed", "MR-3", "proposed")
+        if raising_got is not None:
+            r_rc, r_err = raising_got
+            if (r_rc != 1 or "superseded lock-wait attempt" not in r_err
+                    or "must take the next id" not in r_err
+                    or "still unwinding" not in r_err
+                    or "reported its own verdict above" in r_err
+                    or "could not be closed" not in r_err
+                    or "append: refused" in r_err):
+                failures.append("superseded-close-failure-while-raising: want the retried "
+                                "call's own refusal (exit 1) with the close failure "
+                                "naming the superseded attempt and the still unwinding "
+                                "verdict, got exit {!r}: {}".format(r_rc, r_err.strip()))
+        vector_cleanup("superseded-close-failure-while-raising", sup_reg.unlink)
+        vector_cleanup("superseded-close-failure-while-raising",
+                       Path(str(sup_reg) + ".anchor").unlink)
+        # the vectors below continue on the commit register, so restore its declaration
+        declare(mistakes_register="commit.jsonl")
         # a landed row's commit read that git cannot launch, or that times out, is
         # cannot-evaluate: exit 2 naming the read, never a traceback, nothing written
         real_c_run = subprocess.run
@@ -5185,16 +5340,28 @@ def self_test():
           "the appender's shared validation names the violation through a placeholder at "
           "exit 1, both driven unconditionally by fault injection at the production "
           "rendering sites and additionally through the measured window between the "
-          "decoder's and the renderer's recursion limits where this host has one, a "
+          "decoder's and the renderer's recursion limits where this host has one (the "
+          "window cases MAY NOT RUN: a host whose render limit is not below its decode "
+          "limit skips them and this suite still exits 0, an omission the aggregate "
+          "runner's RESULT line does not reflect, so the named NOT RUN line printed "
+          "beside this PASS is the only disclosure), a "
           "skipped window case being reported as a named NOT RUN line, never a silent "
           "omission), never an escaped RecursionError; a registry nested too deeply for "
           "the JSON decoder is the same named refusal (exit 2), never a traceback; a "
           "descriptor close failure on the appender's unwind is exit 2 with the close "
-          "attempted exactly once and each injection's firing asserted, never an escaped "
+          "attempted exactly once (a repeat attempt on a descriptor whose close failed "
+          "is counted by the injectors and asserted zero) and each injection's firing "
+          "asserted, never an escaped "
           "OSError (after a refusal it is a named refusal; after a LANDED row the message "
           "says the row is in the register, never refused, and the exit stays 2 even when "
           "the caller invokes the append inside its own exception handler, the escaping "
-          "exception being tracked explicitly, never read from ambient exception state); "
+          "exception being tracked explicitly, never read from ambient exception state; "
+          "on a SUPERSEDED lock-wait attempt's stale descriptor the message names the "
+          "superseded attempt, never refused, the exit becoming 2 when the retried "
+          "append returned with both rows landed in order, while a retried append that "
+          "raised keeps its own verdict, probed at the next-id refusal whose exit 1 "
+          "survives the close failure, the message then saying that verdict is carried "
+          "by the still unwinding exception, never that it was reported above); "
           "the declaration check refuses a dangling symbolic link at a declared register "
           "path by name; and every "
           "clean append is re-read with its last row and "
