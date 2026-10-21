@@ -3875,7 +3875,10 @@ def _git_is_mutating(sub, args):
             return False
         if any(a in _GIT_CONFIG_WRITE_FLAGS for a in args):
             return True
-        return len([a for a in args if not a.startswith("-")]) >= 2
+        operands = [a for a in args if not a.startswith("-")]
+        if operands and operands[0] == "edit":
+            return True  # the subcommand spelling of --edit opens the configuration in an editor
+        return len(operands) >= 2
     if sub == "worktree":
         return not args or args[0] != "list"
     if sub == "notes":
@@ -17243,8 +17246,8 @@ _RWH_SYMREF_LONG = ("--delete", "--quiet", "--short", "--recurse", "--no-recurse
 # subcommand) fails closed while a hold is live instead of passing as read-only. A listed verb
 # with mutating forms (branch, tag, config, stash, notes, worktree, symbolic-ref) still goes
 # through the mutation classifier and the dedicated ref-write readers, which recognize those
-# forms. fetch, pull and push are NOT here: an explicit refspec reaches any ref of the repository,
-# the held branch included, and --update-head-ok moves a checked-out HEAD.
+# forms. fetch, pull, push and send-pack are NOT here: an explicit refspec reaches any ref of the
+# repository, the held branch included, and --update-head-ok moves a checked-out HEAD.
 _RWH_READ_ONLY_VERBS = frozenset((
     "annotate", "blame", "branch", "cat-file", "check-attr", "check-ignore", "check-mailmap",
     "check-ref-format", "cherry", "config", "count-objects", "describe", "diff", "diff-files",
@@ -17254,17 +17257,171 @@ _RWH_READ_ONLY_VERBS = frozenset((
     "whatchanged", "worktree"))
 # Subcommands that can write ANY ref of the repository they bind to, from any of its worktrees
 # (an explicit refspec names the held branch; fetch and pull can carry --update-head-ok, which
-# lifts git's own checked-out-branch refusal): while the target repository has a live hold these
-# deny whatever worktree they run from.
-_RWH_REPO_REF_WRITERS = frozenset(("fetch", "pull", "push"))
-# The git global options (before the subcommand) that keep a read-only verb read-only. -C is read
-# separately (its operand feeds the hold set and the target resolution); -c and --config-env can
-# redefine any verb through an alias or configuration, --git-dir/--work-tree move the repository,
-# --exec-path changes what runs, and an unmodelled option is not guessed: any of those drops the
-# read-only shortcut, so the command is judged against the hold set instead (a deny only while a
-# hold is live).
-_RWH_READ_PREFIX_OPTS = frozenset((
-    "-P", "--no-pager", "--no-optional-locks", "--no-replace-objects", "--literal-pathspecs"))
+# lifts git's own checked-out-branch refusal, and send-pack is push's plumbing, limited only by
+# the receiving side's own checked-out-branch refusal, which configuration can relax): while the
+# target repository has a live hold these deny whatever worktree they run from.
+_RWH_REPO_REF_WRITERS = frozenset(("fetch", "pull", "push", "send-pack"))
+# The per-verb CLOSED sets of read-only options for the hold's read-only grammar: a dash-leading
+# token the verb's set does not name drops the read-only shortcut, so the command is judged
+# against the hold set instead (with no live hold nothing changes; while a hold is live a held or
+# uncertain target is withheld, a stated over-refusal for read spellings the sets do not model).
+# The sets name NOTHING that writes a file (--output and -o spellings are absent), runs a program
+# named in the command or in configuration (-O/--open-files-in-pager, --upload-pack, --ext-diff,
+# --textconv, --show-signature, tag -v, and the --format/--pretty/--sort families wherever a
+# signature placeholder or atom could run the signing program, are absent), or edits
+# configuration. A listed option may also carry an =-attached value: appending a value to a
+# read-only option never turns it into a write. Shared building blocks first.
+_RWH_DIFF_FORMAT_OPTS = frozenset((
+    "-p", "-u", "--patch", "-s", "--no-patch", "--raw", "--stat", "--compact-summary",
+    "--numstat", "--shortstat", "--summary", "--name-only", "--name-status", "--check",
+    "--full-index", "--abbrev", "--no-abbrev", "--unified", "--inter-hunk-context",
+    "--function-context", "-W", "--color", "--no-color", "--color-words", "--word-diff",
+    "--word-diff-regex", "--color-moved", "--no-color-moved", "--color-moved-ws", "--text", "-a",
+    "--binary", "-R", "--exit-code", "--quiet", "--diff-algorithm", "--minimal", "--patience",
+    "--histogram", "--anchored", "--indent-heuristic", "--no-indent-heuristic",
+    "--ignore-space-at-eol", "--ignore-cr-at-eol", "--ignore-space-change", "-b",
+    "--ignore-all-space", "-w", "--ignore-blank-lines", "-I", "--find-renames", "-M",
+    "--find-copies", "-C", "--find-copies-harder", "--no-renames", "--irreversible-delete", "-D",
+    "--break-rewrites", "-B", "--relative", "--no-relative", "--stat-width", "--stat-name-width",
+    "--stat-count", "-z"))
+_RWH_LOG_WALK_OPTS = frozenset((
+    "-n", "--max-count", "--skip", "--since", "--until", "--after", "--before",
+    "--since-as-filter", "--author", "--committer", "--grep", "--grep-reflog", "--all-match",
+    "--invert-grep", "-i", "--regexp-ignore-case", "-E", "--extended-regexp", "-F",
+    "--fixed-strings", "-P", "--perl-regexp", "--basic-regexp", "--merges", "--no-merges",
+    "--min-parents", "--max-parents", "--no-min-parents", "--no-max-parents", "--first-parent",
+    "--exclude-first-parent-only", "--full-history", "--dense", "--sparse", "--simplify-merges",
+    "--ancestry-path", "--topo-order", "--date-order", "--author-date-order", "--reverse",
+    "--boundary", "--cherry", "--cherry-pick", "--cherry-mark", "--left-right", "--left-only",
+    "--right-only", "--not", "--all", "--branches", "--tags", "--remotes", "--glob", "--exclude",
+    "--exclude-hidden", "--single-worktree", "--date", "--relative-date", "--oneline", "--graph",
+    "--decorate", "--no-decorate", "--decorate-refs", "--decorate-refs-exclude",
+    "--abbrev-commit", "--no-abbrev-commit", "--parents", "--children", "--follow", "--no-walk",
+    "--do-walk", "-g", "--walk-reflogs", "--source", "--log-size", "--merge"))
+_RWH_BLAME_OPTS = frozenset((
+    "-p", "--porcelain", "--line-porcelain", "--incremental", "-t", "-l", "-s", "-e",
+    "--show-email", "-f", "--show-name", "-n", "--show-number", "--root", "-w", "-L", "-M", "-C",
+    "--abbrev", "--since", "--date", "--first-parent", "--reverse", "-b", "--color-lines",
+    "--color-by-age", "--minimal", "--show-stats", "--ignore-rev", "--ignore-revs-file",
+    "--contents"))
+_RWH_READ_ONLY_OPTS = {
+    "annotate": _RWH_BLAME_OPTS,
+    "blame": _RWH_BLAME_OPTS,
+    "branch": frozenset((
+        "--list", "-l", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "-q",
+        "--quiet", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+        "--show-current", "--color", "--no-color", "-i", "--ignore-case", "--column",
+        "--no-column", "--abbrev", "--no-abbrev", "--omit-empty")),
+    "cat-file": frozenset((
+        "-t", "-s", "-e", "-p", "--allow-unknown-type", "--buffer", "--batch", "--batch-check",
+        "--batch-all-objects", "--unordered", "-z", "-Z")),
+    "check-attr": frozenset(("-a", "--all", "--cached", "-z", "--stdin", "--source")),
+    "check-ignore": frozenset((
+        "-q", "--quiet", "-v", "--verbose", "--stdin", "-z", "-n", "--non-matching",
+        "--no-index")),
+    "check-mailmap": frozenset(("--stdin",)),
+    "check-ref-format": frozenset((
+        "--normalize", "--allow-onelevel", "--no-allow-onelevel", "--refspec-pattern",
+        "--branch")),
+    "cherry": frozenset(("-v", "--abbrev")),
+    "config": frozenset((
+        "--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list", "--null", "-z",
+        "--name-only", "--show-origin", "--show-scope", "--type", "--bool", "--int",
+        "--bool-or-int", "--path", "--expiry-date", "--default", "--global", "--system",
+        "--local", "--worktree", "--file", "-f", "--blob", "--includes", "--no-includes",
+        "--fixed-value", "--all", "--url", "--value")),
+    "count-objects": frozenset(("-v", "--verbose", "-H", "--human-readable")),
+    "describe": frozenset((
+        "--all", "--tags", "--contains", "--abbrev", "--candidates", "--exact-match", "--long",
+        "--match", "--exclude", "--always", "--first-parent", "--debug", "--broken", "--dirty")),
+    "diff": _RWH_DIFF_FORMAT_OPTS | frozenset((
+        "--cached", "--staged", "--merge-base", "--no-index", "-0", "-1", "-2", "-3", "--base",
+        "--ours", "--theirs")),
+    "diff-files": _RWH_DIFF_FORMAT_OPTS | frozenset((
+        "-0", "-1", "-2", "-3", "--base", "--ours", "--theirs", "-c", "--cc")),
+    "diff-index": _RWH_DIFF_FORMAT_OPTS | frozenset(("--cached", "--merge-base", "-m")),
+    "diff-tree": _RWH_DIFF_FORMAT_OPTS | frozenset((
+        "-r", "-t", "--root", "--no-commit-id", "-m", "-c", "--cc", "--combined-all-paths",
+        "--always", "-v")),
+    "for-each-ref": frozenset((
+        "--count", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+        "--ignore-case", "--omit-empty", "--exclude", "--include-root-refs")),
+    "grep": frozenset((
+        "--cached", "--no-index", "--untracked", "--recurse-submodules", "-v", "--invert-match",
+        "-i", "--ignore-case", "-w", "--word-regexp", "-a", "--text", "-I", "--full-name", "-E",
+        "--extended-regexp", "-G", "--basic-regexp", "-P", "--perl-regexp", "-F",
+        "--fixed-strings", "-n", "--line-number", "--column", "-l", "--files-with-matches",
+        "--name-only", "-L", "--files-without-match", "-z", "--null", "-o", "--only-matching",
+        "-c", "--count", "--max-depth", "--max-count", "-m", "-h", "-H", "--heading", "--break",
+        "-p", "--show-function", "-W", "--function-context", "-A", "--after-context", "-B",
+        "--before-context", "-C", "--context", "-f", "-e", "--and", "--or", "--not", "-q",
+        "--quiet", "--all-match", "--threads")),
+    "help": frozenset(("-a", "--all", "-g", "--guides", "-c", "--config", "-v", "--verbose")),
+    "log": _RWH_DIFF_FORMAT_OPTS | _RWH_LOG_WALK_OPTS,
+    "ls-files": frozenset((
+        "-c", "--cached", "-d", "--deleted", "-m", "--modified", "-o", "--others", "-i",
+        "--ignored", "-s", "--stage", "-u", "--unmerged", "-k", "--killed", "-z", "-t", "-v",
+        "-f", "--exclude", "-x", "--exclude-from", "-X", "--exclude-per-directory",
+        "--exclude-standard", "--full-name", "--recurse-submodules", "--error-unmatch",
+        "--directory", "--no-empty-directory", "--eol", "--sparse", "--format", "--abbrev",
+        "--debug", "--resolve-undo")),
+    "ls-remote": frozenset((
+        "--heads", "-h", "--tags", "-t", "--refs", "-q", "--quiet", "--symref", "--get-url",
+        "--exit-code")),
+    "ls-tree": frozenset((
+        "-d", "-r", "-t", "-l", "--long", "-z", "--name-only", "--name-status", "--object-only",
+        "--full-name", "--full-tree", "--abbrev", "--format")),
+    "merge-base": frozenset((
+        "-a", "--all", "--octopus", "--independent", "--is-ancestor", "--fork-point")),
+    "name-rev": frozenset((
+        "--tags", "--refs", "--exclude", "--all", "--stdin", "--annotate-stdin", "--name-only",
+        "--no-undefined", "--always")),
+    "notes": frozenset(("--ref",)),
+    "rev-list": _RWH_LOG_WALK_OPTS | frozenset((
+        "--count", "--objects", "--no-object-names", "--object-names", "--filter",
+        "--filter-provided-objects", "--missing", "--header", "--timestamp", "--abbrev",
+        "--quiet", "--disk-usage", "--use-bitmap-index")),
+    "rev-parse": frozenset((
+        "--verify", "-q", "--quiet", "--short", "--abbrev-ref", "--symbolic",
+        "--symbolic-full-name", "--all", "--branches", "--tags", "--remotes", "--glob",
+        "--exclude", "--disambiguate", "--not", "--default", "--prefix", "--revs-only",
+        "--no-revs", "--flags", "--no-flags", "--sq", "--sq-quote", "--show-toplevel",
+        "--show-prefix", "--show-cdup", "--git-dir", "--absolute-git-dir", "--git-common-dir",
+        "--git-path", "--is-inside-git-dir", "--is-inside-work-tree", "--is-bare-repository",
+        "--is-shallow-repository", "--show-superproject-working-tree", "--show-object-format",
+        "--path-format", "--local-env-vars", "--resolve-git-dir", "--show-ref-format")),
+    "shortlog": frozenset((
+        "-n", "--numbered", "-s", "--summary", "-e", "--email", "-c", "--committer", "-w",
+        "--all", "--branches", "--tags", "--remotes", "--since", "--until", "--after",
+        "--before", "--author", "--merges", "--no-merges", "--first-parent")),
+    "show": _RWH_DIFF_FORMAT_OPTS | _RWH_LOG_WALK_OPTS,
+    "show-branch": frozenset((
+        "-a", "--all", "-r", "--remotes", "--topo-order", "--date-order", "--current",
+        "--sparse", "--more", "--list", "--independent", "--merge-base", "--no-name",
+        "--sha1-name", "--topics", "--color", "--no-color", "-g", "--reflog")),
+    "show-ref": frozenset((
+        "--head", "--heads", "--tags", "--branches", "-d", "--dereference", "-s", "--hash",
+        "--verify", "--exists", "--abbrev", "-q", "--quiet", "--exclude-existing")),
+    "stash": _RWH_DIFF_FORMAT_OPTS | _RWH_LOG_WALK_OPTS | frozenset((
+        "--include-untracked", "-u", "--only-untracked")),
+    "status": frozenset((
+        "-s", "--short", "-b", "--branch", "-sb", "--porcelain", "--long", "-v", "--verbose",
+        "-z", "--null", "-uno", "-unormal", "-uall", "--untracked-files", "--ignored",
+        "--ignore-submodules", "--no-renames", "--find-renames", "--ahead-behind",
+        "--no-ahead-behind", "--show-stash", "--column", "--no-column")),
+    "symbolic-ref": frozenset(("-q", "--quiet", "--short", "--recurse", "--no-recurse")),
+    "tag": frozenset((
+        "-l", "--list", "-n", "--contains", "--no-contains", "--merged", "--no-merged",
+        "--points-at", "--color", "--no-color", "-i", "--ignore-case", "--column", "--no-column",
+        "--omit-empty")),
+    "var": frozenset(("-l", "--list")),
+    "version": frozenset(("--build-options",)),
+    "whatchanged": _RWH_DIFF_FORMAT_OPTS | _RWH_LOG_WALK_OPTS,
+    "worktree": frozenset(("--porcelain", "-z", "-v", "--verbose")),
+}
+# The history-walking verbs also take a bare -<n> count shorthand (git log -1).
+_RWH_COUNT_VERBS = frozenset(("log", "show", "whatchanged", "shortlog", "rev-list", "stash"))
+_RWH_COUNT_RE = re.compile(r"-\d+")
 
 
 def _rwh_real(path):
@@ -17281,31 +17438,54 @@ def _rwh_inside(child, ancestor):
     (both already resolved by _rwh_real, so this is a pure string test with a component
     boundary): a worktree nested under another worktree sits inside the enclosing tree on disk,
     where a whole-tree mutation of the enclosing tree (git clean -ffdx removes a nested worktree
-    the way the denied worktree-remove would) can delete or rewrite it."""
+    the way the denied worktree-remove would) can delete or rewrite it. The caller passes the
+    target repository's TOP LEVEL as ancestor, never the -C directory alone: a whole-tree
+    mutation run from a subdirectory still sweeps the whole worktree (git clean -ffdx with a :/
+    or .. pathspec reaches it), so the deeper directory proves nothing."""
     if child == ancestor:
         return False
     prefix = ancestor if ancestor.endswith(os.sep) else ancestor + os.sep
     return child.startswith(prefix)
 
 
-def _rwh_read_prefix_ok(eff):
-    """Whether the git global options before the subcommand keep a read-only verb read-only: only
-    -C with its operand (the hold set and the target resolution already model it) and the
-    enumerated neutral flags pass; -c and --config-env (an alias or configuration override can
-    turn any verb into any command), --git-dir/--work-tree, --exec-path and every unmodelled
-    option drop the read-only shortcut, so the command is judged against the hold set instead
-    (fail closed, a deny only while a hold is live)."""
-    i = _command_word_index(eff) + 1
-    n = len(eff)
-    while i < n:
-        token = eff[i]
-        if not token.startswith("-"):
-            return True
-        if token == "-C":
-            i += 2
+def _rwh_read_only_form(tokens):
+    """Whether one git segment is the CLOSED LITERAL READ-ONLY GRAMMAR a live hold still lets
+    through: no leading assignment or wrapper of any kind (the first token is the literal word
+    git; a leading GIT_CONFIG_*, GIT_EXTERNAL_DIFF or any other assignment can redefine what the
+    verb runs, so every assignment drops the pass), no git global option at all except a literal
+    -C directory (-c/--config-env, --git-dir/--work-tree, --exec-path, -P/--no-pager and every
+    other global spelling drop it), a subcommand on the enumerated read-only allowlist in a
+    non-mutating form outside the dedicated ref-write readers, and only options the verb's closed
+    per-verb read-only set names (judged up to the first option boundary, after which every token
+    is an operand). Anything else is judged against the hold set: with no live hold it still
+    passes; while a hold is live a held or uncertain target is withheld, a stated over-refusal
+    for read spellings the grammar does not model."""
+    if not tokens or tokens[0] != "git":
+        return False
+    i, n = 1, len(tokens)
+    while i < n and tokens[i].startswith("-"):
+        if tokens[i] != "-C" or i + 1 >= n:
+            return False
+        value = tokens[i + 1]
+        if value == "" or _rwh_opaque_path(value):
+            return False
+        i += 2
+    if i >= n:
+        return False
+    sub = tokens[i]
+    args = tokens[i + 1:]
+    if sub not in _RWH_READ_ONLY_VERBS or _rwh_special(sub, args) or _git_is_mutating(sub, args):
+        return False
+    allowed = _RWH_READ_ONLY_OPTS.get(sub)
+    if allowed is None:
+        return False  # a verb with no modelled option set fails closed
+    pre, _post, _had = _split_pre_post(args)
+    for token in pre:
+        if not token.startswith("-") or token == "-":
+            continue  # an operand: a ref, a path, stdin, or an action word such as 'list'
+        if token.split("=", 1)[0] in allowed:
             continue
-        if token in _RWH_READ_PREFIX_OPTS:
-            i += 1
+        if sub in _RWH_COUNT_VERBS and _RWH_COUNT_RE.fullmatch(token):
             continue
         return False
     return True
@@ -17338,6 +17518,22 @@ def _rwh_view(directory, views):
                 view = None
     views[key] = view
     return view
+
+
+def _rwh_toplevel(directory):
+    """The physically resolved top level of the worktree enclosing directory, or None when git
+    cannot report one (a bare repository, an unreadable tree), which the caller fails closed
+    while a hold is live: the enclosing-tree test must run against the whole worktree a mutation
+    can sweep, never against a possibly deeper -C directory alone."""
+    p = _review_git(directory, "rev-parse", "--show-toplevel")
+    if p is None or p.returncode != 0:
+        return None
+    text = p.stdout.decode("utf-8", "surrogateescape")
+    if text.endswith("\n"):
+        text = text[:-1]
+    if not text or text.startswith("-"):
+        return None
+    return _rwh_real(os.path.join(directory, text))
 
 
 def _rwh_head(workdir):
@@ -17427,8 +17623,8 @@ def _rwh_holds(common, cache, notes):
     """The review holds of the repository whose common git directory is common, read once per check:
     ("absent", []) with no marker directory (the inert path for adopters who write no markers),
     ("ok", live) with the well-formed unexpired markers as (marker, path) pairs, or ("bad", detail)
-    when the directory or an entry in it cannot be read as a marker, which withholds mutating git
-    commands only. An expired marker is ignored with a note; a live marker whose recorded head differs
+    when the directory or an entry in it cannot be read as a marker, which withholds git commands
+    outside the read-only grammar. An expired marker is ignored with a note; a live marker whose recorded head differs
     from the held worktree's current HEAD adds the drift note (the in-flight review is invalidated;
     re-dispatch per rvwpin.4) without denying, which also catches a move made outside the session,
     after the fact."""
@@ -17638,6 +17834,10 @@ def _rwh_ref_chain(workdir, name):
                     value = p.stdout.decode("utf-8", "surrogateescape").strip()
                     if value and value != name:
                         chain.append(value)
+                elif p.returncode != 1:
+                    # -q answers 1 for a direct or absent ref; any other code is a git failure,
+                    # so whether the ref is symbolic is unknown and the caller fails closed
+                    return None
             break
         value = p.stdout.decode("utf-8", "surrogateescape").strip()
         if not value or value == name or value in chain:
@@ -17649,13 +17849,15 @@ def _rwh_ref_chain(workdir, name):
 
 def _rwh_bad_text(detail):
     return ("AIQT rule rvwpin (fail-closed): the review-hold state cannot be read: {}; which worktrees "
-            "a live review pins is unknown, so this mutating git command is withheld until an operator "
-            "repairs or removes the marker directory. Read-only commands are unaffected.".format(detail))
+            "a live review pins is unknown, so this git command is withheld until an operator repairs "
+            "or removes the marker directory. Commands in the enumerated read-only form, and non-git "
+            "commands, are unaffected.".format(detail))
 
 
 def _rwh_deny_text(marker, path):
-    return ("AIQT rule rvwpin (review-in-flight-pins-its-artefact): this command mutates the worktree "
-            "{} that a live review hold pins (dispatch {}, held at {}, marker {}). A review's findings "
+    return ("AIQT rule rvwpin (review-in-flight-pins-its-artefact): this command can modify the "
+            "worktree {} that a live review hold pins (dispatch {}, held at {}, marker {}), or is "
+            "outside the enumerated read-only form a live hold lets through. A review's findings "
             "are meaningful only against the state it observed, so the held worktree is not modified "
             "until the review returns or is abandoned. Make the change on a separate worktree or "
             "revision and re-dispatch the review against the new state once it has settled (rvwpin.4); "
@@ -17664,10 +17866,12 @@ def _rwh_deny_text(marker, path):
 
 
 def _rwh_enclosing_text(marker, path):
-    return ("AIQT rule rvwpin (review-in-flight-pins-its-artefact): this command's target encloses "
-            "the worktree {} on disk, and a live review hold pins that worktree (dispatch {}, held "
+    return ("AIQT rule rvwpin (review-in-flight-pins-its-artefact): the worktree this command's "
+            "target belongs to encloses the worktree {} on disk, and a live review hold pins the "
+            "enclosed worktree (dispatch {}, held "
             "at {}, marker {}); a whole-tree mutation of an enclosing tree (git clean -ffdx removes "
-            "a nested worktree the way the denied worktree-remove would) can delete or rewrite the "
+            "a nested worktree the way the denied worktree-remove would, from a subdirectory too) "
+            "can delete or rewrite the "
             "held directory. Make the change on a separate worktree or revision and re-dispatch the "
             "review against the new state once it has settled (rvwpin.4); the dispatcher removes "
             "the marker when the review ends.".format(
@@ -18032,10 +18236,14 @@ def _rwh_decide(data):
     segment: exactly one segment, no wrapper or reserved word before git (a bare
     command/exec/builtin/env/sudo prefix is peeled by the shared peel, as everywhere in this file),
     the command word the literal word git, and no $(, backquote or heredoc operator anywhere in the
-    raw text. That one plain segment passes only when its subcommand is on the ENUMERATED read-only
-    allowlist (_RWH_READ_ONLY_VERBS) in a read-only form with no -c/--config-env, --git-dir/
-    --work-tree or unmodelled global option before it (read-only git so judged is never withheld by
-    a hold; a verb outside the allowlist, read-tree or bisect included, is treated as mutating), or
+    raw text. That one plain segment passes only when it is the CLOSED LITERAL READ-ONLY GRAMMAR
+    (_rwh_read_only_form: no leading assignment or wrapper of any kind, the literal word git
+    first, no global option at all except a literal -C directory, a verb on the ENUMERATED
+    read-only allowlist (_RWH_READ_ONLY_VERBS) in a non-mutating form, and only options from the
+    verb's closed per-verb read-only set, so an option that writes a file (--output), runs a
+    program (-O, --upload-pack) or is simply unmodelled drops the pass; read-only git so judged is
+    never withheld by a hold, and a verb outside the allowlist, read-tree or bisect included, is
+    treated as mutating), or
     when its target is CERTAIN and resolves outside every held worktree: only literal -C moves
     resolved physically, no
     --git-dir/--work-tree or -c/--config-env override, no GIT_ variable assigned, exported or unset
@@ -18044,9 +18252,11 @@ def _rwh_decide(data):
     GIT_NAMESPACE, GIT_REPLACE_REF_BASE, GIT_GRAFT_FILE, GIT_SHALLOW_FILE; exactly that list, a
     disclosed limit for other inherited variables such as GIT_CONFIG_*) set in the hook's own
     environment, and the resolved repository's configuration setting no core.worktree. A certain
-    target that IS a held worktree, or whose directory ENCLOSES one on disk (a whole-tree mutation
-    of an enclosing tree can delete a nested held worktree), denies outright; `git fetch`, `git
-    pull` and `git push` targeting a repository with a live hold deny from any of its worktrees
+    target that IS a held worktree, or whose repository TOP LEVEL (rev-parse --show-toplevel,
+    never the -C directory alone; a top level git cannot report fails closed) ENCLOSES one on
+    disk (a whole-tree mutation of an enclosing tree can delete a nested held worktree, from a
+    subdirectory too), denies outright; `git fetch`, `git pull`, `git push` and `git send-pack`
+    targeting a repository with a live hold deny from any of its worktrees
     (an explicit refspec reaches the held branch, and --update-head-ok lifts git's own
     checked-out-branch refusal); `git worktree remove/move` of a held worktree (by name shorthand
     or path, before resolution) and `git update-ref` or `git symbolic-ref` writes of the held
@@ -18090,16 +18300,16 @@ def _rwh_decide(data):
         idx = _command_word_index(eff)
         if idx < len(eff) and eff[idx] == "git":
             simple = eff
-    if simple is not None:
-        sub, args = _git_subcommand_rest(simple)
-        if sub in _RWH_READ_ONLY_VERBS and not _rwh_special(sub, args) and \
-                not _git_is_mutating(sub, args) and _rwh_read_prefix_ok(simple):
-            # an ENUMERATED read-only subcommand with no configuration or repository override is
-            # never withheld by a hold, bad marker state included; every other verb (one outside
-            # the allowlist included, however read-only it looks: an unmodelled verb such as
-            # read-tree or checkout-index mutates the tree in place) and every -c/--config-env
-            # spelling fall through and are judged against the hold set
-            return ("note", " ".join(notes)) if notes else ("allow", None)
+    if simple is not None and _rwh_read_only_form(segments[0][0]):
+        # the CLOSED LITERAL READ-ONLY GRAMMAR (the literal word git first with no leading
+        # assignment or wrapper, a literal -C directory as the only global option, an ENUMERATED
+        # read-only subcommand in a non-mutating form, and only options from its closed per-verb
+        # read-only set) is never withheld by a hold, bad marker state included; everything else
+        # (a leading assignment, any other global option, an unmodelled verb such as read-tree or
+        # checkout-index however read-only it looks, or a verb option outside the closed set,
+        # --output, -O and --upload-pack included) falls through and is judged against the hold
+        # set
+        return ("note", " ".join(notes)) if notes else ("allow", None)
     set_state, set_payload = _rwh_set_state(
         _rwh_hold_dirs(command, segments if segments is not None else [], cwd if cwd_ok else None),
         views, holds, cw_cache, notes)
@@ -18133,7 +18343,7 @@ def _rwh_decide(data):
                         hit = _rwh_symbolic_ref_hit(args, t_gitdir, t_live, views)
                     if hit is not None:
                         return hit
-                    if sub not in _RWH_READ_ONLY_VERBS or _git_is_mutating(sub, args):
+                    if not _rwh_read_only_form(segments[0][0]):
                         if sub in _RWH_REPO_REF_WRITERS and t_live:
                             marker, path = t_live[0]
                             return ("deny", _rwh_ref_writer_text(sub, marker, path))
@@ -18145,12 +18355,27 @@ def _rwh_decide(data):
                         for s_marker, s_path in s_live:
                             if s_path not in seen_markers:
                                 reach.append((s_marker, s_path))
+                        top = False  # the target's top level, resolved once, on first need
                         for marker, path in reach:
                             held_view = _rwh_view(marker["workdir"], views)
                             if held_view is not None and held_view[0] == t_gitdir:
                                 return ("deny", _rwh_deny_text(marker, path))
                             held_real = _rwh_real(marker["workdir"])
-                            if held_real is not None and _rwh_inside(held_real, target):
+                            if held_real is None:
+                                continue
+                            if top is False:
+                                # the enclosing test runs against the target repository's top
+                                # level, never the -C directory alone: a whole-tree mutation run
+                                # from a subdirectory (git clean -ffdx with a :/ or .. pathspec)
+                                # still sweeps the whole worktree
+                                top = _rwh_toplevel(target)
+                            if top is None:
+                                return ("unverifiable", "AIQT rule rvwpin: the top level of the "
+                                        "worktree this git command targets cannot be resolved "
+                                        "while a review hold is live, so a mutation enclosing a "
+                                        "held worktree cannot be ruled out; run it with a "
+                                        "readable non-bare target, or end the hold first.")
+                            if _rwh_inside(held_real, top):
                                 return ("deny", _rwh_enclosing_text(marker, path))
                     return ("note", " ".join(notes)) if notes else ("allow", None)
     return ("unverifiable", "AIQT rule rvwpin: this command names git while a review hold is live "
@@ -18172,15 +18397,23 @@ def review_workdir_hold(data):
     has a live hold, ANY command whose raw text carries a git word (git, a git-<name> executable,
     a path ending in /git), inside quotes, substitutions, heredoc bodies or option values included,
     denies with an UNVERIFIABLE: prefix, EXCEPT one plain git segment (no second segment, wrapper
-    or reserved word; no $(, backquote or heredoc operator anywhere) whose subcommand is on the
-    ENUMERATED read-only allowlist in a read-only form with no -c/--config-env or other
-    configuration or repository override before it (a verb outside the allowlist, read-tree,
-    checkout-index, bisect or sparse-checkout included, is treated as mutating), or whose CERTAIN
+    or reserved word; no $(, backquote or heredoc operator anywhere) that is the CLOSED LITERAL
+    READ-ONLY GRAMMAR: no leading assignment of any kind, the literal word git first, no global
+    option at all except a literal -C directory, a subcommand on the ENUMERATED read-only
+    allowlist in a non-mutating form (a verb outside the allowlist, read-tree, checkout-index,
+    bisect or sparse-checkout included, is treated as mutating), and only options from the verb's
+    closed per-verb read-only set, which names nothing that writes a file (--output), runs a
+    program named in the command or in configuration (-O, --upload-pack, --ext-diff, --textconv,
+    the --format/--pretty/--sort families) or edits configuration (git config edit included); or
+    whose CERTAIN
     literal target resolves outside every held worktree (by git's absolute git directory with
     physically resolved paths, never by path string) and does not enclose one on disk. A certain
-    target that is a held worktree, or whose directory encloses one (a whole-tree mutation of an
-    enclosing tree can delete a nested held worktree), DENIES-and-educates (make the change on a
-    separate revision, rvwpin.4); `git fetch`, `git pull` and `git push` targeting a repository
+    target that is a held worktree, or whose repository top level (rev-parse --show-toplevel,
+    never the -C directory alone; a top level git cannot report fails closed) encloses one (a
+    whole-tree mutation of an enclosing tree can delete a nested held worktree, from a
+    subdirectory of the enclosing tree too), DENIES-and-educates (make the change on a
+    separate revision, rvwpin.4); `git fetch`, `git pull`, `git push` and `git send-pack`
+    targeting a repository
     with a live hold deny from any of its worktrees (an explicit refspec reaches the held branch,
     and --update-head-ok lifts git's own checked-out-branch refusal); a `git worktree remove/move`
     of the held worktree (by git's last-components name shorthand or exact path before any
@@ -18195,9 +18428,10 @@ def review_workdir_hold(data):
     read-only form; an expired marker is ignored with a note; and a drifted head (the held worktree
     moved outside the session) is surfaced with a note, never a deny. NO-ASK posture: block or note
     only; one plain read-only git and non-git commands pass (a dry-run spelling of a mutating verb,
-    such as 'git clean -n', is read as mutating, and a wrapped or quoted read-only git denies while
-    a hold is live, each a stated safe over-deny). A crash reaches main's PreToolUse fail-closed
-    exit 2.
+    such as 'git clean -n', is read as mutating; a wrapped or quoted read-only git, a read with a
+    leading assignment or a global option other than a literal -C, and a read option outside the
+    closed per-verb set each deny while a hold is live, stated safe over-denies). A crash reaches
+    main's PreToolUse fail-closed exit 2.
     Hookless dispatchers and resync tools run it as a preflight: `aiqt_hooks.py review_workdir_hold`
     with the payload on stdin."""
     if data.get("hook_event_name") != PRETOOL:

@@ -1701,20 +1701,23 @@ def _rwh_cases(tmp):
     _rdp_git(main, "symbolic-ref", "--delete", "refs/heads/alias")
     _rdp_git(main, "symbolic-ref", "--delete", "refs/heads/alias2")
     _rdp_git(main, "branch", "-D", "sparebr")
-    # a held worktree nested inside another worktree: a mutating command whose target encloses the
-    # held directory on disk can delete or rewrite it (git clean -ffdx removes a nested worktree
-    # the way the denied worktree-remove would), so an enclosing target denies; a subdirectory
-    # beside the nested hold and a sibling worktree pass
+    # a held worktree nested inside another worktree: a mutating command whose target repository's
+    # TOP LEVEL encloses the held directory on disk can delete or rewrite it (git clean -ffdx
+    # removes a nested worktree the way the denied worktree-remove would, and run from a
+    # subdirectory a :/ or .. pathspec still sweeps the whole tree), so the enclosing test is
+    # judged against rev-parse --show-toplevel, never the -C directory alone, and a subdirectory
+    # target denies with or without a pathspec; a sibling worktree passes
     nest = main / "nested"
     _rdp_git(main, "worktree", "add", "-q", "--detach", str(nest), tip)
     marker("rev-n", workdir=str(nest))
     en = "git -C " + str(main) + " clean -ffdx"
+    es = "git -C " + str(main / "sub") + " clean -ffdx"
     check("rwh/nested-held-worktree-ancestor-denies-red-on-revert",
           [kind(base, en), kind(base, "git -C " + str(main) + " reset --hard " + tip),
-           kind(base, "git -C " + str(main / "sub") + " clean -ffdx"),
+           kind(base, es), kind(base, es + " :/"), kind(base, es + " .."),
            kind(base, "git -C " + str(base / "other") + " clean -ffdx"),
            _rwh_without_hold(lambda: kind(base, en))],
-          ["deny", "deny", "allow", "allow", "allow"])
+          ["deny", "deny", "deny", "deny", "deny", "allow", "allow"])
     (holds / "rev-n.json").unlink()
     _rdp_git(main, "worktree", "remove", "--force", str(nest))
     # while a hold is live only the enumerated read-only subcommands pass the shortcut: a verb
@@ -1732,6 +1735,104 @@ def _rwh_cases(tmp):
            kind(free, ro[0]), kind(free, ro[4]),
            _rwh_without_hold(lambda: kind(held, ro[0]))],
           ["deny"] * 6 + ["unverifiable", "deny", "allow", "allow", "allow"])
+    # a leading assignment of any kind drops the read-only shortcut: a GIT_ override carried in
+    # the command (GIT_EXTERNAL_DIFF, the GIT_CONFIG_* family) can make a listed read verb run a
+    # program or re-point its repository, so those fail closed on the touched environment, and
+    # any other assignment leaves the command judged against the hold set, where the held target
+    # denies; the same assignment against the unheld free repository passes
+    ep = ["GIT_EXTERNAL_DIFF=/bin/true git -C " + str(held) + " diff " + seed,
+          "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=/bin/true "
+          "git -C " + str(held) + " status",
+          "GIT_CONFIG_PARAMETERS=\"'core.fsmonitor=/bin/true'\" git -C " + str(held) + " status",
+          "X=1 git -C " + str(held) + " status"]
+    check("rwh/held-assignment-prefix-denies-red-on-revert",
+          [kind(base, c) for c in ep] +
+          [kind(base, "X=1 git -C " + str(free) + " status"),
+           _rwh_without_hold(lambda: kind(base, ep[0]))],
+          ["unverifiable", "unverifiable", "unverifiable", "deny", "allow", "allow"])
+    # an option outside the verb's closed read-only set drops the shortcut: the diff family's
+    # --output writes a file inside the held worktree, and grep -O and ls-remote --upload-pack
+    # run a program named in the command, so each is judged against the hold set and the held
+    # target denies; the same --output against an unheld sibling worktree passes
+    vo = ["git -C " + str(held) + " diff --output=zf " + seed,
+          "git -C " + str(held) + " log -p --output=zf -1",
+          "git -C " + str(held) + " show --output=zf",
+          "git -C " + str(held) + " stash list -p --output=zf",
+          "git -C " + str(held) + " grep -O/bin/true x",
+          "git -C " + str(held) + " ls-remote --upload-pack=/bin/true " + str(main)]
+    check("rwh/held-write-or-program-option-denies-red-on-revert",
+          [kind(base, c) for c in vo] +
+          [kind(base, "git -C " + str(base / "other") + " diff --output=zf " + seed),
+           _rwh_without_hold(lambda: kind(base, vo[0]))],
+          ["deny"] * 6 + ["allow", "allow"])
+    # any git global option other than a literal -C drops the shortcut (a held target then
+    # denies; a -c configuration override is an uncertain target and fails closed), and the
+    # grammar check is what carries the decision: with it patched open, the -c core.fsmonitor
+    # spelling would pass as read-only, so this leg goes red when the check is removed
+    go = ["git -p -C " + str(held) + " log -1",
+          "git --exec-path=/usr/lib/git-core -C " + str(held) + " status",
+          "git -P -C " + str(held) + " status",
+          "git --no-pager -C " + str(held) + " log -1"]
+    fs = "git -c core.fsmonitor=/bin/true -C " + str(held) + " status"
+    saved_form = aiqt_hooks._rwh_read_only_form
+    aiqt_hooks._rwh_read_only_form = lambda tokens: True
+    try:
+        open_grammar_got = kind(base, fs)
+    finally:
+        aiqt_hooks._rwh_read_only_form = saved_form
+    check("rwh/held-global-option-denies-red-on-revert",
+          [kind(base, c) for c in go] + [kind(base, fs), open_grammar_got,
+           kind(base, "git -P -C " + str(free) + " status"),
+           kind(held, "git log -1"), kind(held, "git log -1x"),
+           _rwh_without_hold(lambda: kind(base, go[0]))],
+          ["deny"] * 4 + ["unverifiable", "allow", "allow", "allow", "deny", "allow"])
+    # fetch, pull, push and send-pack can write any ref of the repository they target (send-pack
+    # is push's plumbing, limited only by the receiving side's own refusal, which configuration
+    # can relax), so from a sibling worktree of a held repository each denies; the same pull
+    # against the unheld free repository passes
+    rw = ["git -C " + str(base / "other") + " push . +" + seed + ":refs/heads/review",
+          "git -C " + str(base / "other") + " pull . main",
+          "git -C " + str(base / "other") + " send-pack --force " + str(main) + " " + seed +
+          ":refs/heads/review"]
+    check("rwh/sibling-ref-writer-denies-red-on-revert",
+          [kind(base, c) for c in rw] +
+          [kind(base, "git -C " + str(free) + " pull . main"),
+           _rwh_without_hold(lambda: kind(base, rw[2]))],
+          ["deny", "deny", "deny", "allow", "allow"])
+    # git config edit (the subcommand spelling of --edit) opens the configuration in an editor,
+    # a write; the --edit flag spelling already denied, and the --get read form still passes
+    ce = "git -C " + str(held) + " config edit"
+    check("rwh/held-config-edit-denies-red-on-revert",
+          [kind(base, ce), kind(base, "git -C " + str(held) + " config --edit"),
+           kind(base, "git -C " + str(held) + " config --get user.name"),
+           _rwh_without_hold(lambda: kind(base, ce))],
+          ["deny", "deny", "allow", "allow"])
+    # a symbolic-ref probe that fails with a fatal code leaves the written ref's chain unknown,
+    # which fails closed while a hold is live, never read as a direct ref; the unpatched control
+    # shows the allow comes back once git answers
+    class _RwhFatal:
+        returncode = 128
+        stdout = b""
+        stderr = b""
+    saved_probe = aiqt_hooks._review_git
+
+    def _fatal_symref(repo, *args, **kw):
+        if args and args[0] == "symbolic-ref":
+            return _RwhFatal()
+        return saved_probe(repo, *args, **kw)
+    aiqt_hooks._review_git = _fatal_symref
+    try:
+        fatal_got = kind(base, "git -C " + str(main) + " update-ref refs/heads/unrelated " + seed)
+    finally:
+        aiqt_hooks._review_git = saved_probe
+    check("rwh/ref-chain-fatal-code-fails-closed",
+          [fatal_got,
+           kind(base, "git -C " + str(main) + " update-ref refs/heads/unrelated " + seed)],
+          ["unverifiable", "allow"])
+    # every allowlisted verb carries a closed read-only option set: a verb present in one set but
+    # not the other would either fail closed forever or skip the option check
+    check("rwh/read-only-option-table-covers-allowlist",
+          sorted(set(aiqt_hooks._RWH_READ_ONLY_OPTS) ^ set(aiqt_hooks._RWH_READ_ONLY_VERBS)), [])
 
     # ---------- allow cases, each naming the over-broad implementation it catches ----------
     # catches: matching on "git in the held path" instead of on the enumerated read-only forms
