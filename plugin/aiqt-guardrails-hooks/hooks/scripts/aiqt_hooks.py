@@ -15553,8 +15553,11 @@ def citation_read_recorder(data):
 # a command substitution in a double-quoted string; the expansion of each here-document with an unquoted
 # delimiter in such a command is named as not read, and so is each message or body file a lexing of a
 # split-delimiter command names (_CITECHK_SPLIT_UNREAD: the file is never read or judged, since that
-# lexing's reading of the command is not bash's). Where the walk through such a string meets what it does
-# not follow as bash does (_citechk_substituted_ops), the command is read both ways, and so is a command
+# lexing's reading of the command is not bash's), and so is a git commit or gh pr create or edit that the
+# kind search finds in a here-document's body such a lexing read (_CITECHK_SWALLOWED: the lexer takes the
+# rest of the command as that body, while bash can still run it). Where the walk through such a string
+# meets what it does not follow as bash does (_citechk_substituted_ops), the command is read both ways, and
+# so is a command
 # whose two lexings differ, or of which only one lexes (_citechk_commands), unless a backslash-newline splits
 # a here-document delimiter in it, when it is scanned as one that does not lex. Read both ways, a command is
 # lexed, with a read attempted of every message and body file that a lexing that lexed names (one that
@@ -15608,6 +15611,15 @@ _CITECHK_EXPANDED_BOTH = ("its delimiter is unquoted, so bash expands parameters
 _CITECHK_SPLIT_UNREAD = ("a backslash-newline splits a here-document delimiter in this command, so the "
                          "command is scanned only as written and this file, which a lexing of it names, was "
                          "not read: no citation in it was checked")
+# Why a git commit or gh pr create or edit that the kind search finds in a here-document's body a lexing of
+# a split-delimiter command read is named as not read: the lexer reads the split delimiter as one no line
+# can match and takes the rest of the command as that body, while bash can end the here-document at its own
+# delimiter and run the command, whose message or body files and standard input only a lexed reading could
+# name, and the scan of the command as written reads them only as text.
+_CITECHK_SWALLOWED = ("a backslash-newline splits a here-document delimiter in this command, so a lexing "
+                      "reads the rest of the command as that here-document's body and this command, which "
+                      "bash can still run, was scanned only as text: no message or body file it names was "
+                      "read and no standard input it reads was seen")
 # Why standard input (-F -) is named as not read where it is not the command's own here-document: a pipe,
 # a file or descriptor redirection, or a redirection of the command's group supplies it, and this check
 # reads only the command's text and the files it names.
@@ -16173,11 +16185,17 @@ def _citechk_commands(command, cwd, deadline):
     evaluated. This holds with or without a backslash-newline in the command, which is what the walk alone
     needs before it runs, except where a backslash-newline splits a here-document delimiter: that command
     is scanned as one that does not lex, as above, before the lexings are compared, and each message or
-    body file a lexing that lexed names is named as not read (_CITECHK_SPLIT_UNREAD; once, however many
-    lexings or options name it), never read or judged, since no lexing's reading of the command is bash's,
-    and standard input that -F - names there is named as not read too (_CITECHK_STDIN_UNSEEN) unless it is
-    the command's own here-document, whose text the scan as written already reads; so a citation only such
-    a file or stream holds is not judged, but the note and the row say it was not read. A command is found after any reserved words
+    body file a lexing that lexed names is named as not read (_CITECHK_SPLIT_UNREAD; once per option
+    spelling and path as the command writes it, however many lexings name it: two spellings that name one
+    file give two entries, and one spelling that names a file in each of two repositories gives one), never
+    read or judged, since no lexing's reading of the command is bash's, standard input that -F - names
+    there is named as not read too (_CITECHK_STDIN_UNSEEN) unless it is the command's own here-document,
+    whose text the scan as written already reads, and a git commit or gh pr create or edit that the kind
+    search (_citechk_kind) finds in a here-document's body a lexing read is named as not read as well
+    (_CITECHK_SWALLOWED: the lexer reads a split delimiter as one no line can match and takes the rest of
+    the command, which bash can still run, as that body; a spelling that search misses there, such as a git
+    word quotes split, is not named); so a citation only such a file or stream holds is not judged, but the
+    note and the row say it was not read. A command is found after any reserved words
     that begin its segment (_CITECHK_LEADING), so one
     inside a brace group, after '!', 'if' or 'then', or after time -- or coproc is read; a redirection of
     the group as a whole (after its '}') is not the command's own. A message or body file resolves against
@@ -16202,15 +16220,27 @@ def _citechk_commands(command, cwd, deadline):
         out = _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
         # The scan as written cannot read a message or body file, so each one a lexing that lexed names is
         # kept as a not-read entry (never evaluated: no lexing's reading of the command is bash's), named
-        # once however many lexings or options name it, on the scan's item where the kind search found
-        # one, else as the lexed command's own item.
-        found = []  # the entries already named, so a later lexing or option adds only entries new to it
+        # once per option spelling and path as the command writes it, however many lexings name it, on the
+        # scan's item where the kind search found one, else as the lexed command's own item. A commit or pr
+        # command that the kind search finds in a here-document's body a lexing read is kept the same way
+        # (the lexer reads a split delimiter as one no line can match, so the rest of the command, which
+        # bash can still run, is that body to it): the scan as written reads its message or body files and
+        # its standard input only as text, so the entry says they were not read.
+        found = set()  # the entries already named, so a later lexing or option adds only entries new to
+        # it: a set, so many distinct entries cost time that grows with their number, not its square
         for segments, heredocs, _spans in readings:
-            for item in _citechk_items(segments, heredocs, cwd, "raw", deadline, evaluate=False):
+            items = _citechk_items(segments, heredocs, cwd, "raw", deadline, evaluate=False)
+            for _index, _before, body in heredocs:
+                kind = _citechk_kind(body)
+                if kind is not None:
+                    items.append({"cmd": kind, "parse": "raw", "texts": [],
+                                  "unread": [("{} in a here-document's body".format(kind.replace("-", " ")),
+                                              _CITECHK_SWALLOWED)], "repo": cwd, "base": None})
+            for item in items:
                 unread = []
                 for entry in item["unread"]:
                     if entry not in found:
-                        found.append(entry)
+                        found.add(entry)
                         unread.append(entry)
                 if not unread:
                     continue
@@ -16253,7 +16283,8 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True):
     a read attempted of each message and body file it names (one that cannot be read named in unread).
     With evaluate False (the split-delimiter fallback, _citechk_commands), nothing is read: each message or
     body file the lexing names is named in unread with _CITECHK_SPLIT_UNREAD instead, standard input is
-    named with _CITECHK_STDIN_UNSEEN (taken once, at the first -F -, as when it is evaluated) unless it is
+    named with _CITECHK_STDIN_UNSEEN (taken once, at the first option that names it, whatever its
+    spelling, as when it is evaluated) unless it is
     the command's own here-document, whose text the scan of the command as written already reads, and an
     inline value, whose text that scan also reads, earns no entry."""
     stdin = {}  # segment index: (redirects before it, body) of its last here-document
@@ -17070,7 +17101,8 @@ def citation_read_check(data):
     a cited file's directory whose toplevel is not probed; at most _CITECHK_TOPS_SHOWN named, the rest
     counted), a missing session id, a body file that cannot be read, a body on standard input it cannot
     see, a message or body file a lexing of a command with a split here-document delimiter names
-    (_CITECHK_SPLIT_UNREAD, never read or judged), the expansion of a
+    (_CITECHK_SPLIT_UNREAD, never read or judged), a commit or pr command the kind search finds in a
+    here-document's body a lexing of such a command read (_CITECHK_SWALLOWED), the expansion of a
     here-document with an unquoted delimiter in a command that does not lex or that is read both ways
     (_citechk_commands; the note says why it was), a command longer than _CITECHK_COMMAND_MAX characters,
     whatever its text names, which is neither lexed nor scanned (_citechk_too_long; that bound is checked

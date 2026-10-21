@@ -4598,7 +4598,10 @@ def _hook_variant(tmp, name, text, old, new):
     """The hook's function name, whose source is text, with the one occurrence of old in that text
     replaced by new (None where old does not occur exactly once): written to a module under tmp and
     loaded, its code bound to the hook's own globals, so it calls the hook's other functions and reads its
-    constants as the original does."""
+    constants as the original does. types.FunctionType binds no default argument values on its own, so the
+    variant's defaults (and keyword-only defaults) are carried over from the loaded module's function; a
+    call that omits an argument then takes the default the variant's source gives it, as the original
+    does."""
     import importlib.util
     import types
     if text.count(old) != 1:
@@ -4608,7 +4611,10 @@ def _hook_variant(tmp, name, text, old, new):
     spec = importlib.util.spec_from_file_location(path.stem, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return types.FunctionType(getattr(module, name).__code__, aiqt_hooks.__dict__, name)
+    loaded = getattr(module, name)
+    variant = types.FunctionType(loaded.__code__, aiqt_hooks.__dict__, name, loaded.__defaults__)
+    variant.__kwdefaults__ = loaded.__kwdefaults__
+    return variant
 
 
 def _citecheck_show_cases(tmp):
@@ -5749,16 +5755,24 @@ def _citecheck_step_cases(tmp):
     # <<E\, a newline and OF, <<\, a newline and EOF, and <<-\, a newline and EOF are the unquoted EOF, so
     # bash expands the body, and the command is scanned as one that does not lex, with that expansion named,
     # with or without a $ in the body. A message or body file such a command names is kept: each one a
-    # lexing that lexed names is named as not read, once however many lexings or options name it (the file
-    # and file-twice vectors), never read, judged or silently dropped (the file vector, whose msg.txt holds
+    # lexing that lexed names is named as not read, once per option spelling and path as written, however
+    # many lexings name it (the file and file-twice
+    # vectors), never read, judged or silently dropped (the file vector, whose msg.txt holds
     # the only citation), on the raw scan's own item, or as the lexed command's
     # item where the kind search finds no command in the text, as where quotes split its git word (the
     # file-kindless vector); -F - whose here-document lies in the scanned text earns no such entry (the mid
     # and quoted vectors), while -F - or --body-file - that a pipe or a file redirection feeds is named as
     # read from standard input, which this scan cannot see (the stdin-pipe, stdin-redirect and stdin-gh
-    # vectors). The lexer reads each split delimiter at an operator it reads as one
+    # vectors), once at the first option that names it, whatever its spelling (the stdin-mixed vector, which
+    # names it with -F - and --file - and gets the first spelling's entry only; the taken-once rule decides
+    # it, shown by its variant below). The lexer reads each split delimiter at an operator it reads as one
     # that holds a newline, which no line matches, so it would take the rest of the command as that body: a
-    # later command is scanned too, and so is one after a split delimiter that bash reads as quoted (<<E\, a
+    # later command is scanned too, and a git commit or gh pr create that lies after the split delimiter,
+    # which each lexing reads as that body, is named as not read by the kind search over each body a lexing
+    # read, never allowed silently (the after-file, after-pipe and after-gh vectors, whose message file,
+    # piped standard input or body file no reading of the command reads, and the later vectors, whose -m
+    # citation the scanned text still judges; the variant below, without that search, allows the first
+    # three silently), and so is one after a split delimiter that bash reads as quoted (<<E\, a
     # newline and 'OF'; <<$\, a newline and 'EOF'; <<"E"\, a newline and OF; <<"E\, a newline and OF"), for
     # which no expansion is named, or after a split '<<' inside $((...)), which the lexer reads as an
     # operator and bash as a shift. Inside single quotes bash keeps the backslash-newline and also runs the
@@ -5810,6 +5824,11 @@ def _citecheck_step_cases(tmp):
                           ("stdin-redirect", "git commit -F - < msg.txt; cat <<E\\\n'OF'\nx\nEOF\n"),
                           ("stdin-gh", "cat msg.txt | gh pr create --title t --body-file -; "
                                        "cat <<E\\\n'OF'\nx\nEOF\n"),
+                          ("stdin-mixed", "cat msg.txt | git commit -F - --file -; cat <<E\\\n'OF'\nx\nEOF\n"),
+                          ("after-file", "cat <<\"E\\\nOF\"\nx\nEOF\ngit commit -F msg.txt\n"),
+                          ("after-pipe", "cat <<\"E\\\nOF\"\nx\nEOF\ncat msg.txt | git commit -F -\n"),
+                          ("after-gh", "cat <<\"E\\\nOF\"\nx\nEOF\n"
+                                       "gh pr create --title t --body-file msg.txt\n"),
                           ("later", "cat <<E\\\nOF\nx\nEOF\n" + later),
                           ("quoted", "git commit -F - <<E\\\n'OF'\nsee tools/a.py:1\nEOF\n"),
                           ("later-quoted", "cat <<E\\\n'OF'\nx\nEOF\n" + later),
@@ -5896,8 +5915,17 @@ def _citecheck_step_cases(tmp):
 
     def stdin_unread(name):
         return ["{} -: it is read from standard input, which this check cannot see".format(name)]
+    reason_swallowed = ("a backslash-newline splits a here-document delimiter in this command, so a lexing "
+                        "reads the rest of the command as that here-document's body and this command, which "
+                        "bash can still run, was scanned only as text: no message or body file it names was "
+                        "read and no standard input it reads was seen")
+
+    def swallowed(kind):
+        return ["{} in a here-document's body: {}".format(kind, reason_swallowed)]
     by_raw = [("raw", None, ["tools/a.py:1"], ["command text"], named("EOF"))]
+    by_later = [("raw", None, ["tools/a.py:1"], ["command text"], named("EOF") + swallowed("git commit"))]
     by_quoted = [("raw", None, ["tools/a.py:1"], ["command text"], [])]
+    by_quoted_later = [("raw", None, ["tools/a.py:1"], ["command text"], swallowed("git commit"))]
     by_file = ("warn", [("lexed", None, ["tools/a.py:1"], ["-F msg.txt"], [])], False, None)
     by_text = ("warn", [("raw", None, [], ["command text"], named("EOF"))], True, None)
     in_ticks, hash_in_ticks, braces = "a backslash inside backticks", "a '#' inside backticks", \
@@ -5916,11 +5944,17 @@ def _citecheck_step_cases(tmp):
            "stdin-redirect": ("warn", [("raw", None, [], ["command text"], stdin_unread("-F"))], False, None),
            "stdin-gh": ("warn", [("raw", None, [], ["command text"], stdin_unread("--body-file"))],
                         False, None),
-           "later": ("warn", by_raw, True, None), "quoted": ("warn", by_quoted, False, None),
-           "later-quoted": ("warn", by_quoted, False, None), "later-ansi-c": ("warn", by_quoted, False, None),
-           "later-quoted-part": ("warn", by_quoted, False, None),
-           "later-in-double-quotes": ("warn", by_quoted, False, None), "later-arith": ("warn", by_quoted, False, None),
-           "later-in-single-quotes": ("warn", by_quoted, False, None), "look-alike-single": by_file,
+           "stdin-mixed": ("warn", [("raw", None, [], ["command text"], stdin_unread("-F"))], False, None),
+           "after-file": ("warn", [("raw", None, [], ["command text"], swallowed("git commit"))], False, None),
+           "after-pipe": ("warn", [("raw", None, [], ["command text"], swallowed("git commit"))], False, None),
+           "after-gh": ("warn", [("raw", None, [], ["command text"], swallowed("gh pr create"))], False, None),
+           "later": ("warn", by_later, True, None), "quoted": ("warn", by_quoted, False, None),
+           "later-quoted": ("warn", by_quoted_later, False, None),
+           "later-ansi-c": ("warn", by_quoted_later, False, None),
+           "later-quoted-part": ("warn", by_quoted_later, False, None),
+           "later-in-double-quotes": ("warn", by_quoted_later, False, None),
+           "later-arith": ("warn", by_quoted_later, False, None),
+           "later-in-single-quotes": ("warn", by_quoted_later, False, None), "look-alike-single": by_file,
            "look-alike-double": by_file, "look-alike-comment": by_file, "look-alike-body": by_file,
            "look-alike-escaped": ("warn", [("lexed", None, ["tools/a.py:1"], ["-m value"], [])], False, None),
            "look-alike-collision": by_file, "look-alike-after-subst": by_file, "look-alike-many": by_file,
@@ -6103,6 +6137,73 @@ def _citecheck_step_cases(tmp):
             aiqt_hooks._citechk_commands = original
     check("citeledger/check-split-fallback-variant", first_lexing_only,
           ("allow", [("raw", None, [], ["command text"], [])], False, None))
+    # The kind search over each here-document body a lexing read decides the after-file, after-pipe and
+    # after-gh vectors: their git commit or gh pr create lies after the split delimiter, so each lexing
+    # reads it as the here-document's body and names no file, and only that search names it. Under a
+    # variant of _citechk_commands without the search, each of the three allows with no entry at all, the
+    # silent allow the naming guards against.
+    no_search = _hook_variant(base, "_citechk_commands",
+                              _hook_functions("_citechk_commands").get("_citechk_commands", ""),
+                              "kind = _citechk_kind(body)", "kind = None")
+    if no_search is None:
+        swallowed_variant = "no variant: the body search does not occur exactly once in _citechk_commands"
+    else:
+        original = aiqt_hooks._citechk_commands
+        aiqt_hooks._citechk_commands = no_search
+        try:
+            swallowed_variant = {name: read_split(commands[name], "swallowed-variant-" + name)
+                                 for name in ("after-file", "after-pipe", "after-gh")}
+        finally:
+            aiqt_hooks._citechk_commands = original
+    silent = ("allow", [("raw", None, [], ["command text"], [])], False, None)
+    check("citeledger/check-split-swallowed-variant", swallowed_variant,
+          {"after-file": silent, "after-pipe": silent, "after-gh": silent})
+    # Standard input is taken once in the fallback, at the first option that names it, whatever its
+    # spelling, as when it is evaluated: the stdin-mixed vector names it with -F - and --file - and gets
+    # the first spelling's entry only. Under a variant of _citechk_items that takes it at every option, the
+    # same command gets both spellings' entries.
+    retaken = _hook_variant(base, "_citechk_items", _hook_functions("_citechk_items").get("_citechk_items", ""),
+                            'if value == "-":\n                    if taken:\n                        continue',
+                            'if value == "-":\n                    if False:\n                        continue')
+    if retaken is None:
+        taken_once = "no variant: the taken flag does not occur exactly once in _citechk_items"
+    else:
+        original = aiqt_hooks._citechk_items
+        aiqt_hooks._citechk_items = retaken
+        try:
+            taken_once = read_split(commands["stdin-mixed"], "split-variant-stdin-mixed")
+        finally:
+            aiqt_hooks._citechk_items = original
+    check("citeledger/check-split-stdin-taken-variant", taken_once,
+          ("warn", [("raw", None, [], ["command text"], stdin_unread("-F") + stdin_unread("--file"))],
+           False, None))
+    # The fallback names each entry once through a set, so a split-delimiter command that names many
+    # distinct message files costs time that grows with their number, not with its square: the set-backed
+    # call must take at most a tenth of the time of a variant whose found is list-backed (its membership
+    # test scans the entries already named), on one command naming 16,000 distinct files, and both must
+    # name the same entries in the same order. The set-backed figure is the fastest of three runs against
+    # one run of the variant, as check-linear-patterns times its patterns (measured here: about 0.07 s
+    # set-backed and 2.4 s list-backed in one process).
+    many = "git commit " + " ".join("-F f{:05d}".format(i) for i in range(16000)) + " <<E\\\nOF\nx\nEOF\n"
+
+    def dedup_entries(commands_call):
+        began = time.process_time()
+        entries = [entry for item in commands_call(many, root, time.monotonic() + 1000.0)
+                   for entry in item["unread"]]
+        return time.process_time() - began, entries
+    listed = _hook_variant(base, "_citechk_commands",
+                           _hook_functions("_citechk_commands").get("_citechk_commands", ""),
+                           "found = set()", 'found = type("", (list,), {"add": list.append})()')
+    if listed is None:
+        dedup = "no variant: the set does not occur exactly once in _citechk_commands"
+    else:
+        runs = [dedup_entries(aiqt_hooks._citechk_commands) for _ in range(3)]
+        slow_time, slow_entries = dedup_entries(listed)
+        entries = runs[0][1]
+        dedup = (len(entries), entries[1][0], entries[-1][0], entries == slow_entries,
+                 min(run[0] for run in runs) * 10 <= slow_time)
+    check("citeledger/check-split-fallback-dedup-cost", dedup,
+          (16001, "-F f00000", "-F f15999", True, True))
     # A command after the reserved words that begin its segment is read: in a brace group, after '!', 'if'
     # or 'then', after 'do', after 'time -p', after a '--' that follows time or its -p, and after coproc,
     # with the NAME bash reads before a compound command. Where bash runs another command, none is read: a
