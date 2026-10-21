@@ -1067,8 +1067,12 @@ values included, is denied with the reason prefixed `UNVERIFIABLE:`, EXCEPT one 
 exactly one segment, no wrapper or reserved word before git (a bare `command`, `exec`, `builtin`,
 `env` or `sudo` prefix is peeled by the shared peel), the command word the literal word `git`, and
 no `$(`, backquote or heredoc operator anywhere in the raw text. That one plain segment passes
-only when its subcommand is read-only under the existing read-only rules (read-only git is never
-withheld by a hold), or when its target is CERTAIN and resolves outside every held worktree: its
+only when its subcommand is on the ENUMERATED read-only allowlist in a read-only form, with no
+`-c`/`--config-env` (an alias or configuration override can turn any verb into any command),
+`--git-dir`/`--work-tree` or other unmodelled global option before the subcommand (read-only git
+so judged is never withheld by a hold; a verb outside the allowlist, `read-tree`,
+`checkout-index`, `bisect` or `sparse-checkout` included, is treated as mutating), or when its
+target is CERTAIN and resolves outside every held worktree: its
 only directory moves literal `-C` operands resolved physically (`os.path.realpath`), no
 `--git-dir`/`--work-tree` or `-c`/`--config-env` override, no `GIT_` variable assigned, exported
 or unset in the command, none of the inherited variables GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
@@ -1079,15 +1083,27 @@ does not block certainty, a disclosed limit), and the resolved repository's conf
 no `core.worktree`. A certain target that is a held worktree is denied; identity is compared by
 git's absolute git directory on physically resolved paths, never by path string, so a symlinked
 alias of the held worktree (`-C link/..` included) is the same worktree and a sibling path that
-merely shares a prefix is not. `git worktree remove` and `git worktree move` of the held worktree
+merely shares a prefix is not. A certain target whose directory ENCLOSES a held worktree on disk
+(the held worktree nested under the target, as with worktrees kept in a subdirectory of the main
+checkout) is denied too: a whole-tree mutation of the enclosing tree (`git clean -ffdx` removes a
+nested worktree the way the denied `worktree remove` would) can delete or rewrite the held
+directory, so every mutating verb there is withheld, a safe over-deny for the verbs that cannot
+reach it. `git fetch`, `git pull` and `git push` whose certain target is any worktree of a
+repository with a live hold are denied outright: an explicit refspec reaches any ref of that
+repository, the held branch included, and `--update-head-ok` lifts git's own checked-out-branch
+refusal. `git worktree remove` and `git worktree move` of the held worktree
 are denied by name shorthand or exact path BEFORE any path resolution (git prefers the
 registered-worktree name over an ordinary directory carrying the same name) and by resolved
 identity after it, and `git update-ref` or `git symbolic-ref` writes of the held worktree's HEAD,
 of its cross-worktree ref paths (`worktrees/<id>/HEAD`, `main-worktree/HEAD`) or of any ref in its
 symbolic HEAD chain (the checked-out branch included; a delete in any accepted spelling, `--del`,
 clustered `-qd` and clusters whose `m` consumes a reason included) are denied from any worktree of
-the repository; a `worktree remove`/`move` operand that resolves to no worktree, a symbolic-ref
-option cluster whose written operand cannot be determined, and an update-ref batch are denied as
+the repository. `update-ref` dereferences a symbolic ref by default, so the written ref is
+resolved through its own symbolic chain in the target repository and a different chain that
+converges on the held branch is denied too; `--no-deref` writes the named ref itself and is judged
+on that name alone. A `worktree remove`/`move` operand that resolves to no worktree, an update-ref
+or symbolic-ref option cluster whose written operand cannot be determined, an update-ref batch,
+and a written ref whose symbolic chain git cannot be asked about are denied as
 `UNVERIFIABLE:` while a hold is live. STATED OVER-DENIAL: while a hold-set repository is held, a
 wrapped or quoted read-only git (`timeout 5 git status`, `sh -c 'git worktree list'`, `env X=1 git
 worktree list`) is DENIED, not passed: the raw-text rule classifies no shell bodies, so only the
@@ -1114,12 +1130,12 @@ Limits:
 - Indirect git is not seen: an alias, a shell function, a script, or git configured to run programs
   (a `post-checkout` hook, `core.fsmonitor`). A relative `cd` resolved through `CDPATH` can land in
   a repository the hold set does not name.
-- The held BRANCH is pinned only against the ref writes named above: from another worktree of the
-  same repository, `git push . <rev>:<held-branch>`, a `git fetch` into the held branch, or a
-  `git switch --ignore-other-worktrees` checkout followed by a commit can still move it, as can a
-  push from another repository; these surface after the fact as the drift note. Plumbing that
-  rewrites the files or index without a recognized mutating verb (`checkout-index`, `read-tree`,
-  `filter-branch`) is likewise not denied.
+- The held BRANCH is pinned against the ref writes named above and against `fetch`/`pull`/`push`
+  anywhere in the held repository, but from another worktree of the same repository a
+  `git switch --ignore-other-worktrees` checkout followed by a commit, or a `git branch -f` (which
+  git itself refuses while the branch is checked out), can still move it, as can a push from
+  another repository naming this one by URL or path operand (the operand is not a `-C` move, so it
+  joins no hold set); these surface after the fact as the drift note.
 - File edits inside a held worktree (the Write and Edit tools, `sed -i`, `cp`) are covered by the
   rule but not by this hook; extending the write-scope hook is a separate follow-on.
 - Marker accuracy is the adopter's: a missing marker, an early removal, a wrong `workdir`, or a
@@ -1128,14 +1144,21 @@ Limits:
 - The marker directory can be written by the assistant, so a determined actor can remove a hold;
   the same suite-level limit the honest-limits section below discloses for the pack's other
   machine-local state.
-- A held branch tip moved by `git branch -f`, a push into the held worktree's checked-out branch,
-  and a mutating verb outside the recognized set (`checkout-index`, `read-tree`, `filter-branch`)
-  are not matched; safe over-denies (a repository-level write such as `push` or `tag` targeted into
+- A held branch tip moved by `git branch -f` from another worktree (which git itself refuses while
+  the branch is checked out) is not matched; safe over-denies (a verb outside the enumerated
+  read-only allowlist however read-only its form, a `-c`/`--config-env` or unmodelled global
+  option on a read verb, `fetch`/`pull`/`push` targeting any worktree of a held repository, every
+  mutating verb whose target directory encloses a held worktree, a repository-level write such as
+  `tag` targeted into
   the held worktree, a path that literally contains `$`, a backquote, a glob or brace character or
   a leading `~`, a `cd` in a pipeline or subshell read as making the working directory unknown, a
   `cd` destination that cannot be entered read as the directory it started from, and a worktree
   name or override the hook cannot resolve while a hold is live) are taken instead of
-  under-blocking. The `review-holds` directory itself is resolved through the filesystem, so a
+  under-blocking. A held worktree nested under a worktree of a DIFFERENT repository is protected
+  only where the command's hold set names the held repository (the session cwd or a literal
+  operand): a mutation bound to the enclosing foreign repository alone reads no marker of the
+  nested one, a disclosed residual of per-repository marker discovery. The `review-holds`
+  directory itself is resolved through the filesystem, so a
   symlinked directory is followed; only its entries are opened without following links.
 
 ## Platforms without hooks

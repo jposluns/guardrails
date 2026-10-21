@@ -17237,6 +17237,34 @@ _RWH_ENV_WORDS = frozenset(("export", "unset", "declare", "typeset", "local", "r
 # outside it, an ambiguous abbreviation, or an unexpected value leaves the written operand
 # undetermined, which denies while a hold is live rather than guessing the operand.
 _RWH_SYMREF_LONG = ("--delete", "--quiet", "--short", "--recurse", "--no-recurse")
+# The git subcommands a live hold still lets through as the one plain read-only segment: an
+# ENUMERATED allowlist, never the complement of the mutating set, so a verb this file does not
+# model (bisect, read-tree, checkout-index, sparse-checkout, filter-branch, a new or external
+# subcommand) fails closed while a hold is live instead of passing as read-only. A listed verb
+# with mutating forms (branch, tag, config, stash, notes, worktree, symbolic-ref) still goes
+# through the mutation classifier and the dedicated ref-write readers, which recognize those
+# forms. fetch, pull and push are NOT here: an explicit refspec reaches any ref of the repository,
+# the held branch included, and --update-head-ok moves a checked-out HEAD.
+_RWH_READ_ONLY_VERBS = frozenset((
+    "annotate", "blame", "branch", "cat-file", "check-attr", "check-ignore", "check-mailmap",
+    "check-ref-format", "cherry", "config", "count-objects", "describe", "diff", "diff-files",
+    "diff-index", "diff-tree", "for-each-ref", "grep", "help", "log", "ls-files", "ls-remote",
+    "ls-tree", "merge-base", "name-rev", "notes", "rev-list", "rev-parse", "shortlog", "show",
+    "show-branch", "show-ref", "stash", "status", "symbolic-ref", "tag", "var", "version",
+    "whatchanged", "worktree"))
+# Subcommands that can write ANY ref of the repository they bind to, from any of its worktrees
+# (an explicit refspec names the held branch; fetch and pull can carry --update-head-ok, which
+# lifts git's own checked-out-branch refusal): while the target repository has a live hold these
+# deny whatever worktree they run from.
+_RWH_REPO_REF_WRITERS = frozenset(("fetch", "pull", "push"))
+# The git global options (before the subcommand) that keep a read-only verb read-only. -C is read
+# separately (its operand feeds the hold set and the target resolution); -c and --config-env can
+# redefine any verb through an alias or configuration, --git-dir/--work-tree move the repository,
+# --exec-path changes what runs, and an unmodelled option is not guessed: any of those drops the
+# read-only shortcut, so the command is judged against the hold set instead (a deny only while a
+# hold is live).
+_RWH_READ_PREFIX_OPTS = frozenset((
+    "-P", "--no-pager", "--no-optional-locks", "--no-replace-objects", "--literal-pathspecs"))
 
 
 def _rwh_real(path):
@@ -17246,6 +17274,41 @@ def _rwh_real(path):
         return os.path.realpath(path)
     except (OSError, ValueError):
         return None
+
+
+def _rwh_inside(child, ancestor):
+    """Whether the physically resolved path child lies STRICTLY inside the directory ancestor
+    (both already resolved by _rwh_real, so this is a pure string test with a component
+    boundary): a worktree nested under another worktree sits inside the enclosing tree on disk,
+    where a whole-tree mutation of the enclosing tree (git clean -ffdx removes a nested worktree
+    the way the denied worktree-remove would) can delete or rewrite it."""
+    if child == ancestor:
+        return False
+    prefix = ancestor if ancestor.endswith(os.sep) else ancestor + os.sep
+    return child.startswith(prefix)
+
+
+def _rwh_read_prefix_ok(eff):
+    """Whether the git global options before the subcommand keep a read-only verb read-only: only
+    -C with its operand (the hold set and the target resolution already model it) and the
+    enumerated neutral flags pass; -c and --config-env (an alias or configuration override can
+    turn any verb into any command), --git-dir/--work-tree, --exec-path and every unmodelled
+    option drop the read-only shortcut, so the command is judged against the hold set instead
+    (fail closed, a deny only while a hold is live)."""
+    i = _command_word_index(eff) + 1
+    n = len(eff)
+    while i < n:
+        token = eff[i]
+        if not token.startswith("-"):
+            return True
+        if token == "-C":
+            i += 2
+            continue
+        if token in _RWH_READ_PREFIX_OPTS:
+            i += 1
+            continue
+        return False
+    return True
 
 
 def _rwh_view(directory, views):
@@ -17501,20 +17564,87 @@ def _rwh_worktree_path(args):
             operands[1] if len(operands) > 1 else None)
 
 
-def _rwh_update_ref_name(args):
-    """The ref a git update-ref invocation writes, or None when it cannot be read from the argv
-    (a --stdin batch, a -m whose message swallows the operand position, or no operand at all)."""
+def _rwh_update_ref_parse(args):
+    """(name, deref) for a git update-ref argv: the ref it writes or deletes, and whether git
+    dereferences a symbolic ref to the ref its chain points at (the default; --no-deref writes or
+    deletes the named ref itself). name is None when the written ref cannot be read, which the
+    callers fail closed while a hold is live: a --stdin batch, a long option outside update-ref's
+    modelled set (--no-deref, --create-reflog), a short cluster carrying a character outside d/m,
+    or no operand. FAIL-CLOSED on options: m consumes its reason attached (the rest of its
+    cluster) or separated (the next argv token), so a clustered -dm or -md never leaves the
+    reason read as the written ref. Over-reading only over-holds, never under-blocks."""
+    deref = True
+    unknown = False
+    operands = []
     i, n = 0, len(args)
     while i < n:
         token = args[i]
-        if token == "-m":
-            i += 2
-            continue
-        if token.startswith("-"):
+        if token == "--":
+            operands.extend(args[i + 1:])
+            break
+        if token == "--no-deref":
+            deref = False
             i += 1
             continue
-        return token
-    return None
+        if token == "--create-reflog":
+            i += 1
+            continue
+        if token.startswith("--"):
+            unknown = True  # --stdin batches; any other long spelling leaves the operand unread
+            i += 1
+            continue
+        if token.startswith("-") and len(token) > 1:
+            cluster = token[1:]
+            j, m = 0, len(cluster)
+            while j < m:
+                ch = cluster[j]
+                if ch == "m":
+                    if j + 1 == m:
+                        i += 1  # a separated reason: the next token is the -m value, not a ref
+                    break       # an attached reason is the rest of the cluster, not options
+                if ch != "d":
+                    unknown = True
+                j += 1
+            i += 1
+            continue
+        operands.append(token)
+        i += 1
+    if unknown or not operands:
+        return (None, deref)
+    return (operands[0], deref)
+
+
+def _rwh_ref_chain(workdir, name):
+    """Every ref the ref called name points through symbolically in the repository workdir binds
+    to, nearest first (name itself excluded): [] for a direct or absent ref, None when git cannot
+    be asked, which the caller fails closed. A dereferencing update-ref of ANY ref in that chain
+    writes the ref the chain ends at, so a different symbolic ref that converges on the held
+    branch moves the held HEAD without naming it. Walked one level at a time with --no-recurse;
+    on a git too old to know --no-recurse, the recursive answer (the terminal ref alone) is the
+    fallback, which still catches a converging chain. Bounded like _rwh_head_chain: a longer or
+    cyclic chain is git misuse, and stopping early only under-extends an additively read list."""
+    chain = []
+    ref = name
+    for _ in range(16):
+        p = _review_git(workdir, "symbolic-ref", "--no-recurse", ref)
+        if p is None:
+            return None
+        if p.returncode != 0:
+            if not chain:
+                p = _review_git(workdir, "symbolic-ref", "-q", ref)
+                if p is None:
+                    return None
+                if p.returncode == 0:
+                    value = p.stdout.decode("utf-8", "surrogateescape").strip()
+                    if value and value != name:
+                        chain.append(value)
+            break
+        value = p.stdout.decode("utf-8", "surrogateescape").strip()
+        if not value or value == name or value in chain:
+            break
+        chain.append(value)
+        ref = value
+    return chain
 
 
 def _rwh_bad_text(detail):
@@ -17531,6 +17661,27 @@ def _rwh_deny_text(marker, path):
             "revision and re-dispatch the review against the new state once it has settled (rvwpin.4); "
             "the dispatcher removes the marker when the review ends.".format(
                 marker["workdir"], marker["dispatch_id"], marker["head"][:12], path))
+
+
+def _rwh_enclosing_text(marker, path):
+    return ("AIQT rule rvwpin (review-in-flight-pins-its-artefact): this command's target encloses "
+            "the worktree {} on disk, and a live review hold pins that worktree (dispatch {}, held "
+            "at {}, marker {}); a whole-tree mutation of an enclosing tree (git clean -ffdx removes "
+            "a nested worktree the way the denied worktree-remove would) can delete or rewrite the "
+            "held directory. Make the change on a separate worktree or revision and re-dispatch the "
+            "review against the new state once it has settled (rvwpin.4); the dispatcher removes "
+            "the marker when the review ends.".format(
+                marker["workdir"], marker["dispatch_id"], marker["head"][:12], path))
+
+
+def _rwh_ref_writer_text(sub, marker, path):
+    return ("AIQT rule rvwpin (review-in-flight-pins-its-artefact): git '{}' can write any ref of "
+            "the repository it targets (an explicit refspec reaches the held branch, and "
+            "--update-head-ok lifts git's own checked-out-branch refusal), and that repository has "
+            "a live review hold (dispatch {}, worktree {} held at {}, marker {}). Run it from a "
+            "separate clone, or end the hold first; the dispatcher removes the marker when the "
+            "review ends.".format(sub, marker["dispatch_id"], marker["workdir"],
+                                  marker["head"][:12], path))
 
 
 def _rwh_wt_suffix(workdir, operand):
@@ -17601,22 +17752,35 @@ def _rwh_chain_hit(name, marker, path, views):
     return None
 
 
-def _rwh_update_ref_hit(args, live, views):
-    """A deny for a `git update-ref` naming any ref in a held worktree's symbolic HEAD chain, or
-    that worktree's HEAD through git's cross-worktree ref paths, any of which moves the held HEAD
-    without entering the worktree; ("unverifiable", ...) for a batch or an argv with no readable ref
+def _rwh_update_ref_hit(args, target, live, views):
+    """A deny for a `git update-ref` whose written or deleted ref, or any ref that ref points
+    through symbolically when git dereferences it (the default; --no-deref writes the named ref
+    itself), is a held worktree's HEAD through git's cross-worktree ref paths or any ref in the
+    held symbolic HEAD chain, any of which moves the held HEAD without entering the worktree; the
+    written ref's own chain is resolved in the repository the command binds to (target), so a
+    different symbolic ref that converges on the held branch is caught too. ("unverifiable", ...)
+    for a batch, an argv whose written ref cannot be read, or a chain git cannot be asked about,
     while a hold is live; None otherwise."""
     if not live:
         return None
-    name = _rwh_update_ref_name(args)
+    name, deref = _rwh_update_ref_parse(args)
     if name is None:
         return ("unverifiable", "AIQT rule rvwpin: the refs this git 'update-ref' writes cannot be "
                 "read from its argv while a review hold is live; name one ref per plain call, or end "
                 "the hold first.")
+    names = [name]
+    if deref:
+        chain = _rwh_ref_chain(target, name)
+        if chain is None:
+            return ("unverifiable", "AIQT rule rvwpin: the ref this git 'update-ref' dereferences "
+                    "cannot be resolved while a review hold is live; retry once the repository "
+                    "answers, or end the hold first.")
+        names.extend(chain)
     for marker, path in live:
-        hit = _rwh_chain_hit(name, marker, path, views)
-        if hit is not None:
-            return hit
+        for ref_name in names:
+            hit = _rwh_chain_hit(ref_name, marker, path, views)
+            if hit is not None:
+                return hit
     return None
 
 
@@ -17868,20 +18032,30 @@ def _rwh_decide(data):
     segment: exactly one segment, no wrapper or reserved word before git (a bare
     command/exec/builtin/env/sudo prefix is peeled by the shared peel, as everywhere in this file),
     the command word the literal word git, and no $(, backquote or heredoc operator anywhere in the
-    raw text. That one plain segment passes only when its subcommand is read-only under the
-    existing read-only rules (read-only git is never withheld by a hold), or when its target is
-    CERTAIN and resolves outside every held worktree: only literal -C moves resolved physically, no
+    raw text. That one plain segment passes only when its subcommand is on the ENUMERATED read-only
+    allowlist (_RWH_READ_ONLY_VERBS) in a read-only form with no -c/--config-env, --git-dir/
+    --work-tree or unmodelled global option before it (read-only git so judged is never withheld by
+    a hold; a verb outside the allowlist, read-tree or bisect included, is treated as mutating), or
+    when its target is CERTAIN and resolves outside every held worktree: only literal -C moves
+    resolved physically, no
     --git-dir/--work-tree or -c/--config-env override, no GIT_ variable assigned, exported or unset
     in the command, none of the _RDP_AMBIENT_GIT names (GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
     GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_QUARANTINE_PATH,
     GIT_NAMESPACE, GIT_REPLACE_REF_BASE, GIT_GRAFT_FILE, GIT_SHALLOW_FILE; exactly that list, a
     disclosed limit for other inherited variables such as GIT_CONFIG_*) set in the hook's own
     environment, and the resolved repository's configuration setting no core.worktree. A certain
-    target that IS a held worktree denies outright; `git worktree remove/move` of a held worktree
-    (by name shorthand or path, before resolution) and `git update-ref` or `git symbolic-ref`
-    writes of the held HEAD, its cross-worktree paths or any ref in its symbolic chain deny from
-    any worktree of the repository, and a symbolic-ref option cluster whose written operand cannot
-    be determined is fail-closed. An unreadable or malformed marker state in any consulted
+    target that IS a held worktree, or whose directory ENCLOSES one on disk (a whole-tree mutation
+    of an enclosing tree can delete a nested held worktree), denies outright; `git fetch`, `git
+    pull` and `git push` targeting a repository with a live hold deny from any of its worktrees
+    (an explicit refspec reaches the held branch, and --update-head-ok lifts git's own
+    checked-out-branch refusal); `git worktree remove/move` of a held worktree (by name shorthand
+    or path, before resolution) and `git update-ref` or `git symbolic-ref` writes of the held
+    HEAD, its cross-worktree paths or any ref in its symbolic chain deny from any worktree of the
+    repository, with update-ref's written ref resolved through its own symbolic chain in the
+    target repository unless --no-deref is given (a converging chain moves the held HEAD without
+    naming it), and an update-ref or symbolic-ref option cluster whose written operand cannot be
+    determined, or a chain git cannot be asked about, is fail-closed. An unreadable or malformed
+    marker state in any consulted
     repository denies git-word commands other than the one read-only form; an expired marker is
     ignored with a note; a live marker whose recorded head differs from its worktree's HEAD notes
     the drift without denying."""
@@ -17918,8 +18092,13 @@ def _rwh_decide(data):
             simple = eff
     if simple is not None:
         sub, args = _git_subcommand_rest(simple)
-        if sub is not None and not _rwh_special(sub, args) and not _git_is_mutating(sub, args):
-            # read-only git is never withheld by a hold, bad marker state included
+        if sub in _RWH_READ_ONLY_VERBS and not _rwh_special(sub, args) and \
+                not _git_is_mutating(sub, args) and _rwh_read_prefix_ok(simple):
+            # an ENUMERATED read-only subcommand with no configuration or repository override is
+            # never withheld by a hold, bad marker state included; every other verb (one outside
+            # the allowlist included, however read-only it looks: an unmodelled verb such as
+            # read-tree or checkout-index mutates the tree in place) and every -c/--config-env
+            # spelling fall through and are judged against the hold set
             return ("note", " ".join(notes)) if notes else ("allow", None)
     set_state, set_payload = _rwh_set_state(
         _rwh_hold_dirs(command, segments if segments is not None else [], cwd if cwd_ok else None),
@@ -17949,16 +18128,30 @@ def _rwh_decide(data):
                     if sub == "worktree":
                         hit = _rwh_worktree_hit(args, target, t_live, views)
                     elif sub == "update-ref":
-                        hit = _rwh_update_ref_hit(args, t_live, views)
+                        hit = _rwh_update_ref_hit(args, target, t_live, views)
                     elif sub == "symbolic-ref":
                         hit = _rwh_symbolic_ref_hit(args, t_gitdir, t_live, views)
                     if hit is not None:
                         return hit
-                    if _git_is_mutating(sub, args):
-                        for marker, path in t_live:
+                    if sub not in _RWH_READ_ONLY_VERBS or _git_is_mutating(sub, args):
+                        if sub in _RWH_REPO_REF_WRITERS and t_live:
+                            marker, path = t_live[0]
+                            return ("deny", _rwh_ref_writer_text(sub, marker, path))
+                        # the holds reached here: the target repository's, plus the session
+                        # repository's (a held worktree nested under the target can belong to a
+                        # repository the target's common directory does not name)
+                        reach = list(t_live)
+                        seen_markers = {p for _m, p in t_live}
+                        for s_marker, s_path in s_live:
+                            if s_path not in seen_markers:
+                                reach.append((s_marker, s_path))
+                        for marker, path in reach:
                             held_view = _rwh_view(marker["workdir"], views)
                             if held_view is not None and held_view[0] == t_gitdir:
                                 return ("deny", _rwh_deny_text(marker, path))
+                            held_real = _rwh_real(marker["workdir"])
+                            if held_real is not None and _rwh_inside(held_real, target):
+                                return ("deny", _rwh_enclosing_text(marker, path))
                     return ("note", " ".join(notes)) if notes else ("allow", None)
     return ("unverifiable", "AIQT rule rvwpin: this command names git while a review hold is live "
             "in a repository it can reach, and it is not one plain git segment whose read-only "
@@ -17979,16 +18172,25 @@ def review_workdir_hold(data):
     has a live hold, ANY command whose raw text carries a git word (git, a git-<name> executable,
     a path ending in /git), inside quotes, substitutions, heredoc bodies or option values included,
     denies with an UNVERIFIABLE: prefix, EXCEPT one plain git segment (no second segment, wrapper
-    or reserved word; no $(, backquote or heredoc operator anywhere) whose subcommand is read-only
-    under the existing read-only rules or whose CERTAIN literal target resolves outside every held
-    worktree (by git's absolute git directory with physically resolved paths, never by path
-    string). A certain target that is a held worktree DENIES-and-educates (make the change on a
-    separate revision, rvwpin.4); a `git worktree remove/move` of the held worktree (by git's
-    last-components name shorthand or exact path before any resolution, or by resolved identity)
+    or reserved word; no $(, backquote or heredoc operator anywhere) whose subcommand is on the
+    ENUMERATED read-only allowlist in a read-only form with no -c/--config-env or other
+    configuration or repository override before it (a verb outside the allowlist, read-tree,
+    checkout-index, bisect or sparse-checkout included, is treated as mutating), or whose CERTAIN
+    literal target resolves outside every held worktree (by git's absolute git directory with
+    physically resolved paths, never by path string) and does not enclose one on disk. A certain
+    target that is a held worktree, or whose directory encloses one (a whole-tree mutation of an
+    enclosing tree can delete a nested held worktree), DENIES-and-educates (make the change on a
+    separate revision, rvwpin.4); `git fetch`, `git pull` and `git push` targeting a repository
+    with a live hold deny from any of its worktrees (an explicit refspec reaches the held branch,
+    and --update-head-ok lifts git's own checked-out-branch refusal); a `git worktree remove/move`
+    of the held worktree (by git's last-components name shorthand or exact path before any
+    resolution, or by resolved identity)
     and a `git update-ref` or `git symbolic-ref` write of its HEAD, its cross-worktree
     worktrees/<id>/HEAD and main-worktree/HEAD paths, or any ref in its symbolic HEAD chain (the
-    checked-out branch included, deletions in any accepted spelling; an option cluster whose
-    written operand cannot be determined is fail-closed) deny from any worktree of the repository.
+    checked-out branch included, deletions in any accepted spelling; update-ref's written ref is
+    resolved through its own symbolic chain unless --no-deref is given, so a converging chain is
+    caught; an option cluster whose written operand cannot be determined, or a chain git cannot
+    be asked about, is fail-closed) deny from any worktree of the repository.
     An unreadable or malformed marker state denies git-word commands other than the one plain
     read-only form; an expired marker is ignored with a note; and a drifted head (the held worktree
     moved outside the session) is surfaced with a note, never a deny. NO-ASK posture: block or note

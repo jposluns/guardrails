@@ -1673,12 +1673,73 @@ def _rwh_cases(tmp):
     _rdp_git(main, "branch", "-D", "sparebr")
     check("rwh/symbolic-ref-chain-and-spellings-denies-red-on-revert", sd_got,
           ["deny"] * 7 + ["unverifiable", "allow", "allow", "allow"])
+    # update-ref option clusters: m consumes its reason attached or separated, so -dm reason REF
+    # deletes REF, never a ref named by the reason; a cluster character outside d/m leaves the
+    # written operand undetermined (fail closed), and the same cluster on an unheld ref passes
+    uc = "git -C " + str(main) + " update-ref -dm reason refs/heads/review"
+    check("rwh/update-ref-cluster-denies-red-on-revert",
+          [kind(base, uc),
+           kind(base, "git -C " + str(main) + " update-ref -mreason -d refs/heads/review"),
+           kind(base, "git -C " + str(main) + " update-ref -dz refs/heads/review"),
+           kind(base, "git -C " + str(main) + " update-ref -dm reason refs/heads/unrelated"),
+           _rwh_without_hold(lambda: kind(base, uc))],
+          ["deny", "deny", "unverifiable", "allow", "allow"])
+    # update-ref dereferences a symbolic ref by default, so writing or deleting through a chain
+    # that converges on the held branch moves the held HEAD without naming it; --no-deref writes
+    # the symbolic ref itself (not the held branch), and an unrelated chain passes
+    _rdp_git(main, "branch", "sparebr")
+    _rdp_git(main, "symbolic-ref", "refs/heads/alias", "refs/heads/review")
+    _rdp_git(main, "symbolic-ref", "refs/heads/alias2", "refs/heads/sparebr")
+    ua = "git -C " + str(main) + " update-ref refs/heads/alias " + seed
+    check("rwh/update-ref-symref-convergence-denies-red-on-revert",
+          [kind(base, ua),
+           kind(base, "git -C " + str(main) + " update-ref -d refs/heads/alias"),
+           kind(base, "git -C " + str(main) + " update-ref --no-deref refs/heads/alias " + seed),
+           kind(base, "git -C " + str(main) + " update-ref refs/heads/alias2 " + seed),
+           _rwh_without_hold(lambda: kind(base, ua))],
+          ["deny", "deny", "allow", "allow", "allow"])
+    _rdp_git(main, "symbolic-ref", "--delete", "refs/heads/alias")
+    _rdp_git(main, "symbolic-ref", "--delete", "refs/heads/alias2")
+    _rdp_git(main, "branch", "-D", "sparebr")
+    # a held worktree nested inside another worktree: a mutating command whose target encloses the
+    # held directory on disk can delete or rewrite it (git clean -ffdx removes a nested worktree
+    # the way the denied worktree-remove would), so an enclosing target denies; a subdirectory
+    # beside the nested hold and a sibling worktree pass
+    nest = main / "nested"
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(nest), tip)
+    marker("rev-n", workdir=str(nest))
+    en = "git -C " + str(main) + " clean -ffdx"
+    check("rwh/nested-held-worktree-ancestor-denies-red-on-revert",
+          [kind(base, en), kind(base, "git -C " + str(main) + " reset --hard " + tip),
+           kind(base, "git -C " + str(main / "sub") + " clean -ffdx"),
+           kind(base, "git -C " + str(base / "other") + " clean -ffdx"),
+           _rwh_without_hold(lambda: kind(base, en))],
+          ["deny", "deny", "allow", "allow", "allow"])
+    (holds / "rev-n.json").unlink()
+    _rdp_git(main, "worktree", "remove", "--force", str(nest))
+    # while a hold is live only the enumerated read-only subcommands pass the shortcut: a verb
+    # outside the set that mutates the held tree in place (bisect, read-tree, checkout-index,
+    # sparse-checkout), fetch (an explicit refspec with --update-head-ok moves the held branch,
+    # from inside the held worktree or from a sibling), and a -c override on any verb (an alias
+    # can hide any mutation) each fail closed; the same shapes in the unheld free repository pass
+    ro = ["git bisect start " + tip + " " + seed, "git read-tree -u --reset " + seed,
+          "git checkout-index -f -a", "git sparse-checkout set sub", "git fetch",
+          "git fetch --update-head-ok . +" + seed + ":refs/heads/review",
+          "git -c alias.zz=reset zz --hard " + seed]
+    check("rwh/held-unlisted-verb-or-config-denies-red-on-revert",
+          [kind(held, c) for c in ro] +
+          [kind(main, "git fetch . +" + seed + ":refs/heads/review"),
+           kind(free, ro[0]), kind(free, ro[4]),
+           _rwh_without_hold(lambda: kind(held, ro[0]))],
+          ["deny"] * 6 + ["unverifiable", "deny", "allow", "allow", "allow"])
 
     # ---------- allow cases, each naming the over-broad implementation it catches ----------
-    # catches: matching on "git in the held path" instead of on the mutating forms
+    # catches: matching on "git in the held path" instead of on the enumerated read-only forms
+    # (fetch is NOT among them: an explicit refspec reaches the held branch, so it is covered by
+    # rwh/held-unlisted-verb-or-config-denies-red-on-revert above)
     check("rwh/held-read-only-allows", [kind(held, c) for c in (
         "git status", "git log --oneline", "git diff", "git show", "git rev-parse HEAD",
-        "git fetch")], ["allow"] * 6)
+        "git branch", "git stash list", "git config --get user.name")], ["allow"] * 8)
     # catches: holding per repository instead of per worktree (same common dir, different git dir)
     check("rwh/other-worktree-allows",
           kind(base, "git -C " + str(base / "other") + " checkout " + seed), "allow")
