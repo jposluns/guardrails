@@ -73,11 +73,17 @@ snapshot, never read as the table not existing yet; at the branch tip the merge-
 declaring too, so a branch that renamed or removed a table both sides had declared (its own config and
 file no longer carry the declared form) fails closed rather than shedding the branch's own row
 obligations, while a branch forked before the table was declared, where neither the branch tip's config
-nor the merge-base's declares it, still reads as not-yet, unless the merge-base's config declares a
-table at the same path under a locator the pre-merge target's config no longer declares: that is a
+nor the merge-base's declares it, still reads as not-yet, unless a declaration at the same path was
+withdrawn on the pre-merge target's first-parent history between the merge-base (judged against its own
+first parent, so a withdrawal commit the branch synced into itself, making it the merge-base, is
+included) and the target, under a locator the target's config no longer declares: that is a
 withdrawal re-declared at the path, and an unlocatable branch-tip table there fails closed (exit 2)
-rather than reading as not-yet, so a branch that left any file at the old path (a stub, a copy, or a
-row added in place under the old locator) cannot shed its rows either. A declared table's file ABSENT
+rather than reading as not-yet, so a branch whose merge-base is the withdrawal commit or predates it
+cannot shed rows it left at the old path (a stub, a copy, or a row added in place under the old
+locator); a merge-base strictly after the withdrawal step leaves the withdrawal outside that span and
+still reads as not-yet (rows such a branch left at the old path are outside the gate, like rows added
+while the declaration was withdrawn), and a merge-base not reachable along the target's first parents
+leaves the span unevaluable, exit 2. A declared table's file ABSENT
 at the branch tip while it existed at the merge-base, while the merge-base's or the pre-merge target's
 config declares a table at that path (the path alone, whatever locator), fails closed the
 same way (exit 2): the branch itself moved or deleted the declared file, and rows it re-added under
@@ -85,14 +91,15 @@ another path are invisible to this declaration, so reading the table as absent w
 own row obligations. Only a file genuinely absent at a snapshot (at the branch tip, only when it was
 also absent at the merge-base, or neither the merge-base's nor the pre-merge target's config declares
 a table at its path), or an existing
-file whose applicable configs had not yet declared the table and whose path carries no such
-withdrawn-then-re-declared state, is skippable. A snapshot's
+file whose applicable configs had not yet declared the table and whose path carries no withdrawal in
+that evaluable first-parent span, is skippable. A snapshot's
 config declared the table when it declares the same path, format, and header cells (Markdown) or array
 name (TOML); a declaration of another table at the same path (another array, another header) does not
 count, so a new table added beside a declared one reads as not-yet at the snapshots that did not declare
 it, while the earlier declaration stays in force for its own table; at the branch tip that beside
 reading holds only while the earlier declaration IS still in force at the pre-merge target, and once it
-is not (a withdraw-then-re-declare), the unlocatable rule above fails closed instead. For a TOML table, rows
+is not (a withdraw-then-re-declare whose withdrawal step lies in that first-parent span), the
+unlocatable rule above fails closed instead. For a TOML table, rows
 are the declared
 top-level array, which must be an array of tables whose key fields are present strings or integers, compared
 by parsed value so key order and layout do not matter. A row's identity is the tuple of its `key` columns; a
@@ -109,8 +116,9 @@ valid and declares no tables: the first parent's config is read and FULLY valida
 the same parser and shape checks as the working config (shared code, not a second looser copy), so a
 first-parent config that is present but is not a valid schema-version-1 or schema-version-2 config fails
 closed, whatever the working config's version, because the declarations it may carry cannot be known.
-Declarations come from the working config and the first parent's config only; the branch tip's config and
-the merge-base's are read solely to decide whether an unlocatable branch-tip table, or a declared file
+Declarations come from the working config and the first parent's config only; the branch tip's config,
+the merge-base's, and the configs along the pre-merge target's first-parent span are read solely to
+decide whether an unlocatable branch-tip table, or a declared file
 absent at the branch tip while present at the merge-base, fails closed, never to add obligations. R1 needs only the post-merge commit and its first
 parent, so a version-2 config declaring only tables is evaluable on a single-parent (squash) commit with
 no --branch-ref and no --base-ref (an explicit --base-ref cannot be validated without a branch graph, so
@@ -144,15 +152,18 @@ Exit convention:
      the compiler raises), a missing, duplicate or misshapen declared table, a declared
      table that cannot be located at the first parent or the branch tip while the file exists there and
      that snapshot's config declared it (at the branch tip a declaration in the merge-base's config
-     counts too, and a merge-base declaration of a table at the same path under a locator the pre-merge
-     target's config no longer declares fails the unlocatable table closed the same way), a declared
+     counts too, a withdrawal at the path on the pre-merge target's first-parent history between the
+     merge-base and the target under a locator the target's config no longer declares fails the
+     unlocatable table closed the same way, and so does a merge-base unreachable along the target's
+     first parents, which leaves that span unevaluable), a declared
      table's file absent at the branch tip while it existed at the merge-base
      while the merge-base's or the pre-merge target's config declares a table at that path, a duplicate
      row key in any snapshot, a missing key column, a CR in a table line or in a header-matching line of
      any compared snapshot, a line directly after a table's rows that carries a pipe without starting
      with one, an explicit --base-ref on a single-parent commit with no branch ref, a
      first-parent config that is not a valid version-1 or version-2 config, a branch-tip or merge-base
-     config that is not a valid version-1 or version-2 config when a declared table cannot be located at
+     config, or one at a commit of that first-parent span,
+     that is not a valid version-1 or version-2 config when a declared table cannot be located at
      the branch tip, a merge-base config that is not one when a declared table's file is absent at the
      branch tip while present at the merge-base (the only cases that read either of those snapshots'
      configs), a declared TOML array
@@ -182,30 +193,44 @@ scope. A carriage return in a header-matching line of any compared snapshot fail
 the loss it blocks would have been benign line-ending normalization, and an unlocatable declared table at
 the first parent or the branch tip fails closed the same way, an over-deny when the unlocatable form was
 benign; at the branch tip that includes a table only the merge-base's config declared (the branch renamed
-or removed it), an over-deny when the branch had added no rows to it, and a table at a path the
-merge-base's config declares under a locator the pre-merge target's config no longer declares (a
-withdrawal re-declared at the path) fails closed there too, whatever file the branch left at the path,
+or removed it), an over-deny when the branch had added no rows to it, and a table at a path where a
+declaration was withdrawn on the pre-merge target's first-parent history between the merge-base (judged
+against its own first parent) and the target, under a locator the target's config no longer declares (a
+withdrawal re-declared at the path), fails closed there too, whatever file the branch left at the path,
 an over-deny when that leftover (a stub, a copy, or the unchanged old table) carries no rows the branch
-added. A declared table's file absent at
+added, as does a merge-base unreachable along the target's first parents, which leaves that span
+unevaluable, an over-deny whenever no withdrawal in fact happened there; a merge-base strictly after the
+withdrawal step leaves the withdrawal outside that span, so a leftover at the old path then still reads
+as not-yet and rows it carries are outside the gate, like rows added while the declaration was
+withdrawn. A declared table's file absent at
 the branch tip while it existed at the merge-base fails closed too when the merge-base's or the
 pre-merge target's config declares a table at that PATH; that decision keys on the path alone, whatever
-header cells, TOML array name or format the declarations carry, so a withdrawal and a later
-re-declaration under a changed locator, however each step landed (directly on the target or through
-gated merges), never makes the absence, or an unlocatable leftover at the path, read as the table not
-yet existing, and a branch forked before
-those steps that moved the declared file cannot shed the rows it added under the new path, whether it
-deleted the old file or left a stub, a copy, or an in-place edit there. The path-keyed absent-file
-decision and that withdrawn-locator rule together
-over-refuse exactly these sequences, each exit 2: a branch that moved or deleted the declared file, or
+header cells, TOML array name or format the declarations carry, and reads no history, so while either of
+those configs declares a table at the path, a withdrawal and a later re-declaration under a changed
+locator, however each step landed (directly on the target or through gated merges), does not make the
+absence read as the table not yet existing, and a branch forked before those steps that moved the
+declared file cannot shed the rows it added under the new path by deleting the old file; when NEITHER
+config declares a table at the path (the re-declaration arriving only in the merge's own working config
+while the branch's merge-base sits inside the withdrawal window), the absence still reads as the file
+genuinely absent, so in that geometry a leftover at the old path is refused (the unlocatable rule walks
+the span) while a deletion is not, a disclosed asymmetry; rows re-added under another path are invisible
+to this declaration either way. The path-keyed absent-file
+decision and that withdrawn-locator span rule together
+over-refuse these sequences, each exit 2: a branch that moved or deleted the declared file, or
 left any file at its path, and
 merges in after the declaration at that path was withdrawn and re-declared under a changed header, TOML
-array name or format; a branch that moved or deleted the file while no table was declared at its path
+array name or format, when its merge-base is the withdrawal step or predates it (the deleted-file form
+also needs the merge-base's or the pre-merge target's config to declare a table at the path); a branch
+that moved or deleted the file while no table was declared at its path
 (before any was, or during a withdrawal window),
-merging in after the pre-merge target declared or re-declared one there; and a merge whose working
+merging in after the pre-merge target declared or re-declared one there; a merge whose working
 config re-declares a
-table at a path the merge-base's config declared while integrating a branch that moved or deleted the
-file (its exit: merge that branch while the declaration at the path is withdrawn, then re-declare in a
-later commit). A branch-side deletion of
+table at a path the merge-base's config declared, or at a path whose declaration was withdrawn in that
+span, while integrating a branch that moved, deleted or left any file at the old path
+(its exit: merge that branch while the declaration at the path is withdrawn, then re-declare in a
+later commit); and a gated merge whose merge-base is not reachable along the pre-merge target's first
+parents while a declared table is unlocatable at the branch tip with no applicable snapshot
+declaration. A branch-side deletion of
 the declared file cannot be told from such a move and is refused the same way, an over-deny for a
 deletion with no replacement (or a move the branch added no rows to). The in-band exit is to withdraw or
 narrow the declaration at that path in an earlier, separate commit, land that withdrawal on the target
@@ -1108,9 +1133,10 @@ def _require_locatable(rows, text, declared_by, decl, where):
     so it is exit 2 naming the file, the snapshot, and the declaring config; when no applicable config
     declared the table (it was declared only later), absence from the existing file is genuinely not-yet
     and None passes through (at the branch tip the caller first fails closed, through
-    _require_declared_path, when the merge-base's config declares a table at the path under a locator
-    the pre-merge target's config no longer declares, so this not-yet pass-through never covers a
-    withdraw-then-re-declare at the path).
+    _require_declared_path, when a declaration at the path was withdrawn on the pre-merge target's
+    first-parent history between the merge-base and the target under a locator the target's config no
+    longer declares, so this not-yet pass-through covers a withdraw-then-re-declare at the path only
+    when the withdrawal step lies outside that span).
     """
     if rows is None and text is not None and declared_by:
         raise GateError(
@@ -1267,7 +1293,8 @@ def _table_locator(spec):
     config carries a declaration with this locator; a declaration of a DIFFERENT table at the same path
     (another TOML array, another header) is not a declaration of this one. The absent-file decision does
     NOT use this locator: it keys on the path alone (_absent_file_declared); and the unlocatable
-    branch-tip decision adds a path-scoped bound of its own (_require_declared_path)."""
+    branch-tip decision adds a path-scoped first-parent-history bound of its own
+    (_require_declared_path)."""
     return (spec.path, spec.table_format, spec.header_cells, spec.array)
 
 
@@ -1293,9 +1320,11 @@ def _absent_file_declared(decl, mergebase_locators, base_locators):
     return None
 
 
-def _require_declared_path(decl, mergebase_locators, base_locators, where):
-    """Fail closed on an unlocatable branch-tip table whose path the merge-base's config declares a
-    table at under a locator the pre-merge target's config no longer declares.
+def _require_declared_path(root, config_rel, target, mergebase, mergebase_locators,
+                           decl, base_locators, where):
+    """Fail closed on an unlocatable branch-tip table at a path where a declaration was withdrawn
+    on the pre-merge target's first-parent history between the merge-base and the target, under a
+    locator the target's config no longer declares.
 
     Reached only when neither the branch tip's config nor the merge-base's declares the unlocatable
     table itself (the full _table_locator), where it would otherwise read as not yet existing at the
@@ -1303,28 +1332,78 @@ def _require_declared_path(decl, mergebase_locators, base_locators, where):
     under a changed header, TOML array name or format at the same path it would shed the rows a branch
     forked before those steps holds under the old locator whenever ANY file sits at the path (a stub
     left behind by a move, a copy, or a row added in place under the old header), exactly as the
-    absent-file decision (_require_tip_file) guards the deleted-file form; so the state "the
-    merge-base's config declares a table at this path and the pre-merge target's config no longer
-    declares that locator" fails closed instead. A new table declared at a path whose earlier
-    declaration is still in force at the pre-merge target passes through: that config still declares
-    the merge-base's locator, so the new declaration reads as not-yet, like any adoption. The in-band
-    exit is to restore the declared table at the path on the branch tip (merging the target in or
+    absent-file decision (_require_tip_file) guards the deleted-file form. The withdrawal is found by
+    walking the target's FIRST-PARENT history from the target back to the merge-base and comparing
+    each commit's config against its own first parent's, the merge-base itself included, so a branch
+    that synced the withdrawal commit into itself (making that commit the merge-base, which then
+    declares nothing at the path) is still caught; a step that dropped a locator at the path that the
+    target's config no longer declares and that is not the unlocatable declaration's own locator
+    fails closed. A merge-base not reachable along the target's first parents leaves that span
+    unevaluable and fails closed too. A new table declared at a path whose earlier declaration is
+    still in force at the target passes through (no step withdrew it), and so does an adoption with
+    no withdrawal at the path anywhere in the span; a merge-base strictly AFTER the withdrawal step
+    (the branch synced to a later commit inside the withdrawal window) leaves the withdrawal outside
+    the span and still reads as not-yet, so rows such a branch left at the old path are outside the
+    gate, like rows added while the declaration was withdrawn. The walk reads one config snapshot
+    per span commit plus the merge-base's first parent, and runs only once a branch-tip table is
+    unlocatable with no applicable declaration, so an ordinary merge never pays it. The in-band exit
+    is to restore the declared table at the path on the branch tip (merging the target in or
     rebasing) before the gated merge.
     """
-    if any(locator[0] == decl.path and locator not in base_locators
-           for locator in mergebase_locators):
-        raise GateError(
-            "{}: the file exists and the declared table ({}) cannot be located, and the merge-base's "
-            "config declares a table at this path that the pre-merge target's config no longer "
-            "declares; a withdrawn declaration re-declared at the same path fails closed rather than "
-            "reading as the table not yet existing".format(where, decl.header or decl.array))
+    if config_rel is None:
+        return
+    decl_locator = _table_locator(decl)
+    at_path = {mergebase: frozenset(locator for locator in mergebase_locators
+                                    if locator[0] == decl.path)}
+
+    def path_locators(commit):
+        if commit not in at_path:
+            label = ("the pre-merge target" if commit == target else
+                     "commit {} on the pre-merge target's first-parent history".format(commit))
+            at_path[commit] = frozenset(
+                locator for locator in
+                _snapshot_decl_locators(root, config_rel, commit, label)
+                if locator[0] == decl.path)
+        return at_path[commit]
+
+    chain = []
+    commit = target
+    while commit != mergebase:
+        chain.append(commit)
+        parents = _parents(root, commit)
+        if not parents:
+            raise GateError(
+                "{}: the file exists and the declared table ({}) cannot be located, and the "
+                "merge-base is not reachable along the pre-merge target's first parents, so "
+                "whether a declaration at this path was withdrawn and re-declared there cannot "
+                "be evaluated".format(where, decl.header or decl.array))
+        commit = parents[0]
+    chain.append(mergebase)
+    for index, span_commit in enumerate(chain):
+        if index + 1 < len(chain):
+            parent = chain[index + 1]
+        else:
+            parents = _parents(root, span_commit)
+            if not parents:
+                break
+            parent = parents[0]
+        for locator in path_locators(parent) - path_locators(span_commit):
+            if locator != decl_locator and locator not in base_locators:
+                raise GateError(
+                    "{}: the file exists and the declared table ({}) cannot be located, and a "
+                    "table declared at this path was withdrawn on the pre-merge target's "
+                    "first-parent history since the merge-base under a locator the pre-merge "
+                    "target's config no longer declares; a withdrawn declaration re-declared at "
+                    "the same path fails closed rather than reading as the table not yet "
+                    "existing".format(where, decl.header or decl.array))
 
 
 def _snapshot_decl_locators(root, config_rel, commit, label):
     """Locators (_table_locator) of the tables one snapshot's own config declares, read ONLY to decide
-    whether an unlocatable branch-tip table (_require_locatable, with the merge-base's locators also
-    bounding _require_declared_path) or a declared file absent at the branch
-    tip while present at the merge-base (_require_tip_file) fails closed, never to add obligations.
+    whether an unlocatable branch-tip table (_require_locatable, with _require_declared_path reading
+    further snapshots along the pre-merge target's first-parent history) or a declared file absent at
+    the branch tip while present at the merge-base (_require_tip_file) fails closed, never to add
+    obligations.
     The branch tip's config and the merge-base's are both read for the unlocatable decision, and the
     merge-base's (beside the first parent's declarations, by path alone: _absent_file_declared) for the
     absent-file one: a table only the merge-base's config declared is one the
@@ -1333,8 +1412,8 @@ def _snapshot_decl_locators(root, config_rel, commit, label):
     invalid config at that snapshot fails closed here (exit 2), since whether the table was declared
     there then cannot be known. The reads are lazy: they happen only once a branch-tip table was found
     unlocatable in an existing file, or its declared file absent at the branch tip while present at the
-    merge-base, so an ordinary merge never pays them, and an invalid config at either snapshot is
-    refused only on those paths."""
+    merge-base, so an ordinary merge never pays them, and an invalid config at any snapshot read this
+    way is refused only on those paths."""
     if config_rel is None:
         return frozenset()
     return frozenset(_table_locator(spec) for spec in
@@ -1349,8 +1428,9 @@ def _compare_tables(root, decls, base_decl_locators, config_rel, target, graph, 
     (when the branch tip's own config did, or the merge-base's config did, both read lazily: a branch
     that renamed or removed a table the merge-base's config declared must fail closed rather than shed
     its own branch rows, while a branch forked before the table was declared, where neither config
-    declares it, still reads as not-yet, unless the merge-base's config declares a table at the path
-    under a locator the first parent's config no longer declares, a withdraw-then-re-declare at the
+    declares it, still reads as not-yet, unless a declaration at the path was withdrawn on the first
+    parent's first-parent history between the merge-base and that first parent under a locator its
+    config no longer declares, a withdraw-then-re-declare at the
     path that fails closed too: _require_declared_path). A declared file ABSENT at the branch tip
     while it existed at
     the merge-base fails closed the same way when the merge-base's or the first parent's config declares
@@ -1418,7 +1498,8 @@ def _compare_tables(root, decls, base_decl_locators, config_rel, target, graph, 
                                else "the merge-base's config" if locator in mergebase_locators
                                else None)
                 if declared_by is None:
-                    _require_declared_path(decl, mergebase_locators, base_decl_locators,
+                    _require_declared_path(root, config_rel, target, mergebase_commit,
+                                           mergebase_locators, decl, base_decl_locators,
                                            branch_where)
                 branch_parsed = _require_locatable(
                     branch_parsed, branch_text, declared_by, decl, branch_where)
@@ -2338,12 +2419,20 @@ def _self_test_isolated():
           "declaration of the same table, at the branch tip under the "
           "merge-base's declaration too (so a branch-side rename of a "
           "declared table cannot shed the branch's own rows), an "
-          "unlocatable branch-tip table at a path the merge-base's config "
-          "declares under a locator the pre-merge target's config no longer "
-          "declares (so a branch that left a stub, a copy or an in-place "
-          "row at the old path after a withdraw-then-re-declare cannot "
-          "shed its rows either, while a new table declared at a path whose "
-          "earlier declaration is still in force reads as not-yet), a declared "
+          "unlocatable branch-tip table at a path where a declaration was "
+          "withdrawn on the pre-merge target's first-parent history between "
+          "the merge-base (judged against its own first parent, so a synced "
+          "withdrawal commit as the merge-base is caught) and the target "
+          "under a locator the target's config no longer declares (refusing "
+          "any file left at the old path after such a withdraw-then-re-declare, "
+          "a stub, an in-place row, or the unchanged old table, the form a "
+          "copy leaves, with the re-declaration carried by the pre-merge "
+          "target or by the merge's own working config alike, while a new "
+          "table declared at a path whose earlier declaration is still in "
+          "force, and an adoption with no withdrawal at the path in that "
+          "span, a synced branch included, both read as not-yet, and a "
+          "merge-base unreachable along the target's first parents is "
+          "refused as unevaluable), a declared "
           "table's file absent at the branch tip while it existed at the "
           "merge-base when the merge-base's or the pre-merge target's config "
           "declares a table at that path, keyed on the path alone (so a "
@@ -3728,7 +3817,9 @@ def _v2_self_test_cases(directory):
                    _quiet_run_refusal(uloc, uloc_config, True, m_kstip, None, None),
                    "done.md at branch tip: the file exists and that snapshot's config declares the "
                    "table")
-    with _swapped("_table_locator", lambda spec: spec):
+    with _swapped("_table_locator",
+                  lambda spec: (spec.path, spec.table_format, spec.header_cells, spec.array,
+                                spec.key, spec.edit)):
         expect_refusal("the key-stable branch declaration is still caught by the merge-base's "
                        "declaration once the whole declaration must match (mutant)",
                        _quiet_run_refusal(uloc, uloc_config, True, m_kstip, None, None),
@@ -3952,11 +4043,12 @@ def _v2_self_test_cases(directory):
     # at the pre-merge target (here the merge itself adopts the new one, since one config cannot
     # declare two tables in one file), that reads as not-yet, like any adoption. But a target commit
     # that REPLACED the old declaration with the new one withdrew and re-declared at the path, and the
-    # unlocatable branch-tip table then fails closed (the merge-base's config declares a table at the
-    # path that the pre-merge target's config no longer declares), because the not-yet read would shed
-    # rows such a branch holds under the old locator. The mutant reverts to the locator-only decision
-    # and passes the replaced form; the naive variant refuses on the merge-base's path alone and
-    # over-refuses the still-in-force control.
+    # unlocatable branch-tip table then fails closed (a step on the pre-merge target's first-parent
+    # history since the merge-base withdrew a locator at the path that the pre-merge target's config
+    # no longer declares), because the not-yet read would shed rows such a branch holds under the old
+    # locator. The mutant reverts to the locator-only decision and passes the replaced form; the
+    # naive variant refuses on the merge-base's path alone and over-refuses the still-in-force
+    # control.
     locr_tip_new = _v2_branch_commit(locr, "v2-loc-tip-new", locr_base,
                                      {".aiqt/record-sections.toml":
                                           "schema-version = 2\n\n" + toml_decl.format("done")
@@ -3974,11 +4066,13 @@ def _v2_self_test_cases(directory):
                    "branch tip (a withdraw-then-re-declare at the path)",
                    _quiet_run_refusal(locr, locr_config, True, m_loc_tip, None, None),
                    "done.md at branch tip: the file exists and the declared table "
-                   "(| id | pr | closed | note | owner |) cannot be located, and the merge-base's "
-                   "config declares a table at this path that the pre-merge target's config no "
-                   "longer declares")
+                   "(| id | pr | closed | note | owner |) cannot be located, and a table declared "
+                   "at this path was withdrawn on the pre-merge target's first-parent history "
+                   "since the merge-base under a locator the pre-merge target's config no longer "
+                   "declares")
     with _swapped("_require_declared_path",
-                  lambda decl, mergebase_locators, base_locators, where: None):
+                  lambda root_path, config_rel, target_commit, mergebase_commit,
+                         mergebase_locators, decl, base_locators, where: None):
         expect("the replaced-declaration branch tip reads as not-yet once the decision reverts to "
                "the locators alone (mutant)",
                _quiet_run(locr, locr_config, True, m_loc_tip, None, None), 0)
@@ -3988,7 +4082,8 @@ def _v2_self_test_cases(directory):
            "reads as not-yet at the branch tip",
            _quiet_run(locr, locr_config, True, m_loc_beside, None, None), 0)
 
-    def declared_path_always(decl, mergebase_locators, base_locators, where):
+    def declared_path_always(root_path, config_rel, target_commit, mergebase_commit,
+                             mergebase_locators, decl, base_locators, where):
         if any(locator[0] == decl.path for locator in mergebase_locators):
             raise GateError("{}: a table was declared at this path".format(where))
 
@@ -4288,10 +4383,10 @@ def _v2_self_test_cases(directory):
     # too, not only a deletion: a stub left behind by the move, or a row added in place under the old
     # header, leaves the file present and the re-declared table unlocatable at the branch tip, where a
     # locator-keyed decision would read it as not yet existing and pass the dropped row. The
-    # unlocatable decision therefore fails closed on the same state the absent-file decision guards
-    # (the merge-base's config declares a table at the path that the pre-merge target's config no
-    # longer declares); the mutant restores the locator-only decision and passes each drop silently,
-    # and the paired control shows the same in-place row caught while the declaration is in force.
+    # unlocatable decision therefore fails closed on the withdrawal found along the pre-merge
+    # target's first-parent history since the merge-base; the mutant restores the locator-only
+    # decision and passes each drop silently, and the paired control shows the same in-place row
+    # caught while the declaration is in force.
     route_stub = _v2_branch_commit(route, "v2-route-stub", route_base,
                                    {"done.md": "# Done log\n\nMoved to done2.md.\n",
                                     "done2.md": md(row_y, row_x2),
@@ -4304,11 +4399,12 @@ def _v2_self_test_cases(directory):
                    "the withdrawn locator at the path",
                    _quiet_run_refusal(route, route_config, True, m_route_stub, None, None),
                    "done.md at branch tip: the file exists and the declared table "
-                   "(| id | pr | closed | notes |) cannot be located, and the merge-base's config "
-                   "declares a table at this path that the pre-merge target's config no longer "
-                   "declares")
+                   "(| id | pr | closed | notes |) cannot be located, and a table declared at this "
+                   "path was withdrawn on the pre-merge target's first-parent history since the "
+                   "merge-base under a locator the pre-merge target's config no longer declares")
     with _swapped("_require_declared_path",
-                  lambda decl, mergebase_locators, base_locators, where: None):
+                  lambda root_path, config_rel, target_commit, mergebase_commit,
+                         mergebase_locators, decl, base_locators, where: None):
         expect("the stubbed move's dropped branch row passes once the decision reverts to the "
                "locators alone (mutant: the gap this rule closes)",
                _quiet_run(route, route_config, True, m_route_stub, None, None), 0)
@@ -4322,11 +4418,12 @@ def _v2_self_test_cases(directory):
                    "refused through the withdrawn locator at the path",
                    _quiet_run_refusal(route, route_config, True, m_route_inplace, None, None),
                    "done.md at branch tip: the file exists and the declared table "
-                   "(| id | pr | closed | notes |) cannot be located, and the merge-base's config "
-                   "declares a table at this path that the pre-merge target's config no longer "
-                   "declares")
+                   "(| id | pr | closed | notes |) cannot be located, and a table declared at this "
+                   "path was withdrawn on the pre-merge target's first-parent history since the "
+                   "merge-base under a locator the pre-merge target's config no longer declares")
     with _swapped("_require_declared_path",
-                  lambda decl, mergebase_locators, base_locators, where: None):
+                  lambda root_path, config_rel, target_commit, mergebase_commit,
+                         mergebase_locators, decl, base_locators, where: None):
         expect("the in-place branch row passes once the decision reverts to the locators alone "
                "(mutant)",
                _quiet_run(route, route_config, True, m_route_inplace, None, None), 0)
@@ -4336,6 +4433,136 @@ def _v2_self_test_cases(directory):
     expect("control: the same in-place row dropped against a target that kept the declaration is "
            "caught as a finding",
            _quiet_run(route, route_config, True, m_route_inplace_caught, None, None), 1)
+
+    # A branch that SYNCED the withdrawal commit into itself makes that commit the merge-base, whose
+    # config declares nothing at the path, so a decision keyed on the merge-base's locators alone
+    # reads the leftover as not yet existing and passes the dropped row silently. The first-parent
+    # walk compares the merge-base against its own first parent and still finds the withdrawal; the
+    # no-op mutant restores the locator-keyed read and shows each refusal load-bearing.
+    route_sync_cfg = _v2_branch_commit(route, "v2-route-sync-cfg", route_inplace,
+                                       {".aiqt/record-sections.toml": withdrawn_cfg},
+                                       "the sync resolves the config to the withdrawn form")
+    route_sync_tip = _v2_synthetic_merge(route, route_sync_cfg, [route_inplace, route_mw],
+                                         "the in-place branch syncs the withdrawing target")
+    m_route_sync_inplace = _v2_synthetic_merge(route, route_rd, [route_mrd, route_sync_tip],
+                                               "resolver keeps the target side, branch row gone")
+    _selftest_git(route, ["checkout", "-q", route_rd])
+    expect_refusal("an in-place row whose branch synced the withdrawal commit (the merge-base) is "
+                   "still refused through the first-parent walk",
+                   _quiet_run_refusal(route, route_config, True, m_route_sync_inplace, None, None),
+                   "done.md at branch tip: the file exists and the declared table "
+                   "(| id | pr | closed | notes |) cannot be located, and a table declared at this "
+                   "path was withdrawn on the pre-merge target's first-parent history since the "
+                   "merge-base under a locator the pre-merge target's config no longer declares")
+    with _swapped("_require_declared_path",
+                  lambda root_path, config_rel, target_commit, mergebase_commit,
+                         mergebase_locators, decl, base_locators, where: None):
+        expect("the synced in-place row's drop passes once the walk is removed (mutant)",
+               _quiet_run(route, route_config, True, m_route_sync_inplace, None, None), 0)
+    route_stub_sync = _v2_synthetic_merge(route, route_stub, [route_stub, route_mw],
+                                          "the stubbed move syncs the withdrawing target")
+    m_route_sync_stub = _v2_synthetic_merge(route, route_rd, [route_mrd, route_stub_sync],
+                                            "resolver keeps the target side, branch row gone")
+    _selftest_git(route, ["checkout", "-q", route_rd])
+    expect_refusal("a stub whose branch synced the withdrawal commit (the merge-base) is still "
+                   "refused through the first-parent walk",
+                   _quiet_run_refusal(route, route_config, True, m_route_sync_stub, None, None),
+                   "done.md at branch tip: the file exists and the declared table "
+                   "(| id | pr | closed | notes |) cannot be located, and a table declared at this "
+                   "path was withdrawn on the pre-merge target's first-parent history since the "
+                   "merge-base under a locator the pre-merge target's config no longer declares")
+    with _swapped("_require_declared_path",
+                  lambda root_path, config_rel, target_commit, mergebase_commit,
+                         mergebase_locators, decl, base_locators, where: None):
+        expect("the synced stub's dropped branch row passes once the walk is removed (mutant)",
+               _quiet_run(route, route_config, True, m_route_sync_stub, None, None), 0)
+
+    # The merge's OWN working config can carry the re-declaration while the pre-merge target carries
+    # only the withdrawal; the walk then finds the withdrawal on the step into the pre-merge target
+    # and refuses the in-place leftover exactly as the absent-file decision refuses the moved file
+    # in the same geometry (m_route_mbonly below).
+    m_route_inplace_mbonly = _v2_synthetic_merge(
+        route, route_rd, [route_mw, route_inplace],
+        "the re-declaring merge integrates the in-place branch")
+    _selftest_git(route, ["checkout", "-q", route_rd])
+    expect_refusal("a merge whose working config re-declares at the path refuses the in-place "
+                   "leftover through the withdrawal on the target's first-parent history",
+                   _quiet_run_refusal(route, route_config, True, m_route_inplace_mbonly,
+                                      None, None),
+                   "done.md at branch tip: the file exists and the declared table "
+                   "(| id | pr | closed | notes |) cannot be located, and a table declared at this "
+                   "path was withdrawn on the pre-merge target's first-parent history since the "
+                   "merge-base under a locator the pre-merge target's config no longer declares")
+    with _swapped("_require_declared_path",
+                  lambda root_path, config_rel, target_commit, mergebase_commit,
+                         mergebase_locators, decl, base_locators, where: None):
+        expect("the re-declaring merge's in-place drop passes once the walk is removed (mutant)",
+               _quiet_run(route, route_config, True, m_route_inplace_mbonly, None, None), 0)
+
+    # The walk is bounded by WITHDRAWALS in the span: a table adopted at a path that never carried a
+    # declaration reads as not-yet even for a branch synced into the target's history (its merge-base
+    # then sits on the target with the adoption ahead of it), while a naive rule keyed on the
+    # pre-merge target's own declaration at the path would refuse that adoption.
+    fresh_decl = ('[[table]]\npath = "fresh.md"\nformat = "markdown"\nheader = "| f | note |"\n'
+                  'key = ["f"]\nedit = "frozen"\n')
+    fresh_table = "# Fresh\n\n| f | note |\n| --- | --- |\n| F1 | first |\n"
+    route_fresh_b = _v2_branch_commit(route, "v2-route-fresh-b", route_base,
+                                      {"fresh.md": "# Fresh\n\nprose, no table yet\n"},
+                                      "branch adds a prose file at a never-declared path")
+    route_fresh_sync_tree = _v2_branch_commit(
+        route, "v2-route-fresh-sync", route_fresh_b,
+        {".aiqt/record-sections.toml": renamed_cfg + "\n" + other_decl,
+         "done.md": ("# Done log\n\n" + renamed_header + "\n" + delimiter + "\n" + row_y + "\n")},
+        "the sync resolves to the re-declared target state")
+    route_fresh_tip = _v2_synthetic_merge(route, route_fresh_sync_tree,
+                                          [route_fresh_b, route_mrd],
+                                          "the prose branch syncs the re-declared target")
+    route_fresh_t = _v2_branch_commit(route, "v2-route-fresh-t", route_mrd,
+                                      {".aiqt/record-sections.toml":
+                                           renamed_cfg + "\n" + other_decl + "\n" + fresh_decl,
+                                       "fresh.md": fresh_table},
+                                      "target adopts a table at the prose file's path")
+    m_route_fresh = _v2_synthetic_merge(route, route_fresh_t, [route_fresh_t, route_fresh_tip],
+                                        "merge keeps the target side")
+    _selftest_git(route, ["checkout", "-q", route_fresh_t])
+    expect("control: a table adopted at a path with no withdrawal in the span reads as not-yet at "
+           "the branch tip, a synced branch included",
+           _quiet_run(route, route_config, True, m_route_fresh, None, None), 0)
+
+    def span_target_keyed(root_path, config_rel, target_commit, mergebase_commit,
+                          mergebase_locators, decl, base_locators, where):
+        if any(locator[0] == decl.path for locator in base_locators):
+            raise GateError("{}: the pre-merge target declares a table at this path".format(where))
+
+    with _swapped("_require_declared_path", span_target_keyed):
+        expect("the adoption control fails under a rule keyed on the pre-merge target's "
+               "declaration alone (naive variant)",
+               _quiet_run(route, route_config, True, m_route_fresh, None, None), 2)
+
+    # And the walk FAILS CLOSED when the merge-base is not reachable along the pre-merge target's
+    # first parents (the branch forked from a side branch the target integrated as a second parent):
+    # the span cannot be read there, so whether a withdrawal happened in it cannot be known.
+    route_side = _v2_branch_commit(route, "v2-route-side", route_base,
+                                   {"s.txt": "s\n"}, "a side branch from before the withdrawal")
+    route_offpath_b = _v2_branch_commit(route, "v2-route-offpath", route_side,
+                                        {"done.md": md(row_y, row_x2)},
+                                        "forked from the side branch, adds a row in place")
+    route_offpath_t = _v2_synthetic_merge(route, route_mrd, [route_mrd, route_side],
+                                          "the target integrates the side branch second-parent")
+    m_route_offpath = _v2_synthetic_merge(route, route_rd, [route_offpath_t, route_offpath_b],
+                                          "resolver keeps the target side, branch row gone")
+    _selftest_git(route, ["checkout", "-q", route_rd])
+    expect_refusal("a merge-base unreachable along the target's first parents fails the "
+                   "unlocatable branch tip closed as unevaluable",
+                   _quiet_run_refusal(route, route_config, True, m_route_offpath, None, None),
+                   "done.md at branch tip: the file exists and the declared table "
+                   "(| id | pr | closed | notes |) cannot be located, and the merge-base is not "
+                   "reachable along the pre-merge target's first parents")
+    with _swapped("_require_declared_path",
+                  lambda root_path, config_rel, target_commit, mergebase_commit,
+                         mergebase_locators, decl, base_locators, where: None):
+        expect("the unreachable-merge-base drop passes once the walk is removed (mutant)",
+               _quiet_run(route, route_config, True, m_route_offpath, None, None), 0)
 
     # The path key covers every locator change, not Markdown headers alone: a TOML table withdrawn
     # and re-declared under another ARRAY NAME at the same path, each step through a gated merge,
@@ -4417,10 +4644,12 @@ def _v2_self_test_cases(directory):
                    "is refused through the withdrawn locator at the path",
                    _quiet_run_refusal(pathk, pathk_config, True, m_pathk_stub, None, None),
                    "notes.toml at branch tip: the file exists and the declared table (archive) "
-                   "cannot be located, and the merge-base's config declares a table at this path "
-                   "that the pre-merge target's config no longer declares")
+                   "cannot be located, and a table declared at this path was withdrawn on the "
+                   "pre-merge target's first-parent history since the merge-base under a locator "
+                   "the pre-merge target's config no longer declares")
     with _swapped("_require_declared_path",
-                  lambda decl, mergebase_locators, base_locators, where: None):
+                  lambda root_path, config_rel, target_commit, mergebase_commit,
+                         mergebase_locators, decl, base_locators, where: None):
         expect("the TOML stub's dropped branch row passes once the decision reverts to the "
                "locators alone (mutant)",
                _quiet_run(pathk, pathk_config, True, m_pathk_stub, None, None), 0)
