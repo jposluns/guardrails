@@ -238,9 +238,10 @@ def imported_series_active(manifest_data):
     1). The doctor driver (the roster and C-IMPORTED-SCHEMA) reads this ONE flag, and
     classify_containment derives it internally from the manifest for the containment registration and
     every other consumer (the write guard, _opf_write_guard.plan_write_scope, included), so they
-    cannot disagree on the imported managed set."""
-    return (_opf_store.homes_generation(manifest_data) >= 2
-            and _opf_store.imported_series_declared(manifest_data))
+    cannot disagree on the imported managed set. The body delegates to the store-level predicate
+    _opf_store.imported_series_active, the one the ledger readers outside this module derive their
+    imported release-row switch from, so the doctor and those readers share one definition."""
+    return _opf_store.imported_series_active(manifest_data)
 
 
 def imported_content_checks_landed():
@@ -5429,10 +5430,10 @@ def self_test():
                           for f in _h1_run.findings))
             # The pure flag over its arms, the support threshold sampled just below, at, and just
             # above IMPORTED_SPEC_VERSION: True only for the 2.0.0 / homes = 2 pair with both
-            # tooling gates raised (red when either arm, or the threshold, moves). The store-level
-            # twin (_opf_store.imported_series_active), which the ledger readers outside this module
-            # derive the imported-row switch from, is reconciled row by row against this flag so the
-            # two composed predicates cannot drift.
+            # tooling gates raised (red when either arm, or the threshold, moves). This flag delegates
+            # to the store-level predicate (_opf_store.imported_series_active) that the ledger readers
+            # outside this module derive the imported-row switch from; both names are read on every row,
+            # so a copy that replaced the delegation would be held to the same table.
             _pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
             _flag_rows = (
                 (2, "1.3.0", _pair, True), (2, "1.3.1", _pair, True), (2, "1.2.99", _pair, False),
@@ -6469,11 +6470,15 @@ def self_test():
         # WHOLE STORE, end to end: a fully ACTIVE store (both tooling gates raised, the 2.0.0 pair, every
         # imported leaf present and empty, a declared VERSION view) whose ledger and prior carry an
         # admitted imported row, with the changelog tiling all three releases, grades VALID with no
-        # finding and no cant. Every composed ledger reader is on this path: C-VERSION-LEDGER, the
-        # changelog gates, the view planner behind C-VIEW-DRIFT, and the history checks, so the vector is
-        # red when ANY of them keeps the default switch. The roster is patched to the imported checks
-        # landed so far (the imported-valid-row-reaches-valid idiom), so the pending imported checks do
-        # not mask the readers' verdicts.
+        # finding and no cant under a REDUCED imported-check roster. Every composed ledger reader is on
+        # this path: C-VERSION-LEDGER, the changelog gates, the view planner behind C-VIEW-DRIFT, and the
+        # history checks, so the vector is red when ANY of them keeps the default switch. The roster is
+        # patched to the imported checks landed so far (the imported-valid-row-reaches-valid idiom), so
+        # the pending imported checks do not mask the readers' verdicts. The vector therefore pins the
+        # readers' integration, not whole-store acceptance under the production roster: with the shipped
+        # IMPORTED_CHECKS the same store grades CANNOT-EVALUATE because C-IMPORTED-IDS,
+        # C-IMPORTED-PROVENANCE and C-IMPORTED-SEGREGATION do not run, and acceptance under the full
+        # roster remains an activation requirement.
         _e2e_cl = make_changelog(["1.1.0", "1.0.0", "0.9.0"])
         _e2e_dig = freeze_digests(_e2e_cl, ["1.1.0", "1.0.0", "0.9.0"])
         _e2e = clean_machine()

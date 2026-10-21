@@ -406,8 +406,8 @@ def imported_series_active(manifest_data):
     optional imported release-row flag (spec 6.1, 14.3) is admitted exactly when this flag holds, so
     every version-ledger reader outside the doctor (the view planner, the changelog gates, the
     changelog drafter) derives its imported-row switch from this ONE predicate; the doctor's own
-    activation flag composes the same two arms and the opf-check self-test reconciles the two, so no
-    ledger reader can disagree with the doctor about when the flag is admitted."""
+    activation flag (_opf_check.imported_series_active) delegates to it, so every reader that derives
+    its switch here agrees with the doctor about when the flag is admitted."""
     return homes_generation(manifest_data) >= 2 and imported_series_declared(manifest_data)
 
 

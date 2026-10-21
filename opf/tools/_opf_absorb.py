@@ -782,7 +782,8 @@ def self_test():
     enabled/enriched, done not declared + note, malformed done index, freeze-digest, freeze-digest
     fail-closed on a broken ledger and on an unledgered covers token, exit-map). The imported
     release-row switch (spec 6.1, 14.3): the drafter refuses an imported historical row at the default
-    switch and drafts over it when the caller (or the store's own activation, end to end) admits it."""
+    switch and drafts over it when the caller (or the store's own activation, end to end) admits it; the
+    freeze-digest assist digests over it on an active store and refuses it on a dormant one."""
     import tempfile
     import shutil
 
@@ -1157,7 +1158,8 @@ def self_test():
         # the reused U5 reader) and threaded into the drafter. On a store declaring the 2.0.0 / homes = 2
         # pair with BOTH tooling gates raised, a ledger carrying an imported historical row drafts OK;
         # the SAME store at the shipped constants refuses it fail-closed (the declaration alone admits
-        # nothing). Red when evaluate drops the switch, or hard-wires it on.
+        # nothing). The freeze-digest mode reads the same ledger, so it gets the same active and dormant
+        # pair. Red when either mode's call in evaluate drops the switch, or hard-wires it on.
         version_disk_imp = version_disk.replace(
             "[[release]]\n",
             "[[release]]\n"
@@ -1174,16 +1176,22 @@ def self_test():
         r_impd = evaluate(imp_root, "unreleased")
         check("disk-imported-row-dormant-cannot-eval",
               r_impd.status == CANNOT_EVALUATE and any("not admitted" in f for f in r_impd.findings))
+        r_impfd = evaluate(imp_root, "1.0.0", mode="freeze-digest")
+        check("disk-imported-row-dormant-freeze-digest-cannot-eval",
+              r_impfd.status == CANNOT_EVALUATE and any("not admitted" in f for f in r_impfd.findings))
         _imp_saved_gates = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
         _opf_store.SUPPORTED_HOMES = 2
         _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
         try:
             r_impa = evaluate(imp_root, "unreleased")
+            r_impfa = evaluate(imp_root, "1.0.0", mode="freeze-digest")
         finally:
             _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _imp_saved_gates
         check("disk-imported-row-active-draft-ok",
               r_impa.status == OK
               and r_impa.draft == "## unreleased\n\n### Added\n- a feature (WL-2)\n")
+        check("disk-imported-row-active-freeze-digest-ok",
+              r_impfa.status == OK and r_impfa.draft == freeze_of(cl_disk, "1.0.0"))
 
         # run() maps a store-level status to the process exit code through EXIT.
         check("disk-run-ok-exit-0",
