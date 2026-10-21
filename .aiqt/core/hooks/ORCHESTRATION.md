@@ -251,15 +251,19 @@ are allowed) or it fails closed; the match is word-anchored at the start, never 
 and `not-attended` do not match. A JSON marker must be exactly `{"mode": "<attended|unattended...>"}` (parsed
 strict-exact with a duplicate-key-rejecting hook and no extra keys) or it fails closed. A recognized mode
 whose value begins with the `unattended` token arms the ask blocker's unattended deny; a recognized
-attended-family mode does not disarm it: where the registry declares a backlog enumerator, a blocking
-question is judged against the same fresh enumeration the yield guard uses (ctx kind `ask`, the schedule
-path's cap-bounded posture with no wake-naming requirement, counted by its own `ask_denials`/`ask_basis`
-pair in `turn-state.json`) and is denied while actionable items are neither dispatched (waiting on a live
+attended-family mode does not disarm it: for a session within the live scope (the yield guard's gate, so
+a co-located worker a holder-scoped lease does not name never inherits the global backlog), where the
+registry declares a backlog enumerator, a blocking question is judged against the same fresh enumeration
+the yield guard uses (ctx kind `ask`, no wake-naming requirement, counted by its own
+`ask_denials`/`ask_basis` pair in `turn-state.json`, which genuine human input resets exactly as it
+resets the schedule pair) and is denied while actionable items are neither dispatched (waiting on a live
 tracked task) nor blocked by a human decision recorded in the pending-decisions record; the deny names the
 items and the two exits (dispatch them, or record them as blocked by this decision, then re-issue the
-question), and the ask blocker's manifest residue carries the full contract and its residuals (a mode
-change after the question is asked, work the enumerator does not list, and question tools other than
-AskUserQuestion stay out of its view). The reader fails CLOSED to the
+question) and is never cap-relieved, since both exits stay available; only the cannot-evaluate denies (an
+enumerator error, a declared non-object enumerator, or an unreadable item proof source) carry the schedule
+path's three-denial cap on an unchanged basis, and the ask blocker's manifest residue carries the full
+contract and its residuals (a mode change after the question is asked, work the enumerator does not list,
+and question tools other than AskUserQuestion stay out of its view). The reader fails CLOSED to the
 guards-armed (`unattended`) posture, never silently disarming, when a marker IS present but cannot yield a
 recognized value: every outcome of reading the mode path other than not found or a decoded text (a mode path
 holding a NUL character, or one that is not strict UTF-8 (a lone surrogate, which is also how a

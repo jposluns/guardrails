@@ -11954,7 +11954,8 @@ def _orch_mode_detail(reg, root):
         string beginning with attended or unattended (a scalar, an array, an object with extra keys, or an
         object whose `mode` is absent, non-string, or an unrecognized value all fail closed here);
       - "attended" when a recognized attended marker is present: a non-None value that does NOT contain
-        `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard allows the ask.
+        `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard judges the ask against
+        the fresh backlog (_orch_ask_attended) rather than taking the unattended deny.
     Soundness rules the reader enforces (each closing a fail-open leg an incremental scan leaked):
       1. A leading byte-order mark is stripped ONCE at the top, so every later check sees BOM-free text and a
          BOM-prefixed declaration OR JSON marker is classified rather than missed.
@@ -12251,7 +12252,11 @@ def _orch_enumerate(reg, root):
     agent's context), via the fixed argv array the registry declares (no shell string)."""
     spec = reg.get("enumerator")
     if not isinstance(spec, dict):
-        return ("NO_ENUMERATOR", "the registry declares no enumerator")
+        # a DECLARED enumerator that is not an object is a configuration error, named as such so the
+        # deny tells the operator what to fix; both shapes stay NO_ENUMERATOR (same status, same basis)
+        return ("NO_ENUMERATOR",
+                "the registry declares no enumerator" if "enumerator" not in reg
+                else "the declared enumerator is not an object (a configuration error)")
     argv = spec.get("argv")
     if not isinstance(argv, list) or not argv or not all(
             isinstance(a, str) and a for a in argv):
@@ -12466,12 +12471,14 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
 def decide_yield(ctx):
     """The PURE decision core. ctx keys: kind, escape, loop_signal, counter, enum_status, enum_detail,
     actionable, waiting, blocked, cannot_evaluate, proposed, wake_named, schedule_denials, basis_unchanged.
-    kind is "stop", "schedule_idle", or "ask" (the attended blocking-question binding: it shares the
-    schedule path's cap-bounded fail-closed posture, because a blocking question parks the run exactly as
-    a scheduled idle does, but it has NO wake-naming requirement, since a question names no recheck wake,
-    and its actionable deny names the question's two exits: dispatch the items, or record them as blocked
-    by this decision, then re-issue). Returns (verdict, reason, disposition) with verdict
-    ALLOW | ALLOW_WITH_FINDINGS | DENY."""
+    kind is "stop", "schedule_idle", or "ask" (the attended blocking-question binding: a blocking
+    question parks the run exactly as a scheduled idle does, but it has NO wake-naming requirement,
+    since a question names no recheck wake, and its cap relief covers the CANNOT-EVALUATE denies only
+    (a whole-enumerator failure or an unreadable item proof source, states the session may be unable to
+    repair); its ACTIONABLE deny is never cap-relieved, because that deny names two exits that are
+    always available (dispatch the items, or record them as blocked by this decision, then re-issue),
+    so repeating the question changes nothing a cap should relieve). Returns
+    (verdict, reason, disposition) with verdict ALLOW | ALLOW_WITH_FINDINGS | DENY."""
     kind = ctx["kind"]
     capped = kind in ("schedule_idle", "ask")  # the cap-relieved kinds; "stop" takes the loop bound
     disposition = ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
@@ -12570,14 +12577,15 @@ def decide_yield(ctx):
                     "for a genuine block.".format(len(cannot_items), named_cannot), disposition)
         return ("ALLOW", "no actionable item remains; the disposition table is the enumeration",
                 disposition)
-    if capped and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
+    # The cap relieves the ACTIONABLE deny for the schedule kind only. The ask kind gets no relief
+    # here: its actionable deny names two exits that are always available (dispatch, or record the
+    # blocker then re-issue), so re-asking an unchanged question is not a farmed guard, it is the
+    # deny working; relief for "ask" exists only on the cannot-evaluate paths above.
+    if kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
             and ctx["basis_unchanged"]:
         return ("ALLOW_WITH_FINDINGS",
-                "{} {} denials on an unchanged basis; {} with findings"
-                .format(ctx["schedule_denials"],
-                        "schedule" if kind == "schedule_idle" else "ask",
-                        "yielding" if kind == "schedule_idle"
-                        else "the question proceeds"), disposition)
+                "{} schedule denials on an unchanged basis; yielding with findings"
+                .format(ctx["schedule_denials"]), disposition)
     named = ctx["actionable"][:_ORCH_MAX_NAMED]
     more = len(ctx["actionable"]) - len(named)
     listing = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in named)
@@ -13247,19 +13255,34 @@ def _orch_ask_attended(data, reg, root):
     """cntdef at the attended-ask boundary: an attended-family mode never disarms the backlog judgement.
     A blocking question parks the session on its answer exactly as a scheduled idle parks it on a timer,
     so it is judged against the same FRESH enumeration the yield guard uses (ctx kind "ask": the shared
-    decision core with the schedule-cap semantics and no wake-naming requirement, since a question names
-    no recheck wake). The question is DENIED while granted open items are actionable, neither dispatched
-    (waiting on a live tracked task) nor blocked by a human decision recorded in the declared
-    pending-decisions record (the stop guard's blocker grammar; fresh external evidence and a not-before
-    time also block); the deny names up to _ORCH_MAX_NAMED items and the two ways forward (dispatch them,
-    or record them as blocked by this decision, then re-issue the question). An enumerator error or an
-    unreadable item proof source is a cannot-evaluate DENY, bounded by _ORCH_SCHEDULE_CAP ask denials on
-    an unchanged basis, after which the question is allowed with findings (a guard that can be farmed
-    trains its own bypass); the ask counters (ask_denials/ask_basis in turn-state.json) are this
-    binding's own, so neither cap-relieved binding's denials relieve the other. A registry that declares
-    NO enumerator leaves this judgement out of scope (allow); the operator escape sentinel releases the
-    deny exactly as in the yield guard; a deny whose counter cannot be saved stands and says so."""
-    if not isinstance(reg.get("enumerator"), dict):
+    decision core, with no wake-naming requirement, since a question names no recheck wake, and with the
+    schedule cap narrowed to the cannot-evaluate denies). It is session-scoped exactly as the yield guard is: a session that is not within
+    the live scope (a bounded co-located worker a holder-scoped lease does not name, CX-M3) does not
+    inherit the global backlog, so the judgement allows there. The question is DENIED while granted open
+    items are actionable, neither dispatched (waiting on a live tracked task) nor blocked by a human
+    decision recorded in the declared pending-decisions record (the stop guard's blocker grammar; fresh
+    external evidence and a not-before time also block); the deny names up to _ORCH_MAX_NAMED items and
+    the two ways forward (dispatch them, or record them as blocked by this decision, then re-issue the
+    question), and it is NEVER cap-relieved: those two exits are always available, so the fourth
+    unchanged question is denied exactly as the first. An enumerator error or an unreadable item proof
+    source is a cannot-evaluate DENY, bounded by _ORCH_SCHEDULE_CAP ask denials on an unchanged basis,
+    after which the question is allowed with findings (a guard that can be farmed trains its own bypass;
+    cannot-evaluate is a state the session may be unable to repair, which the actionable deny is not);
+    the ask counters (ask_denials/ask_basis in turn-state.json) are this binding's own, so neither
+    cap-relieved binding's denials relieve the other, and genuine human input resets them
+    (orch_prompt_stamp) exactly as it resets the schedule pair. A registry that declares NO enumerator
+    key leaves this judgement out of scope (allow); a DECLARED enumerator that is not an object is a
+    configuration error, judged through the same fresh-enumeration path (_orch_enumerate reports it as
+    not enumerable), so it denies as cannot-evaluate with a guard-events row exactly as in the yield
+    guard, never a silent allow; the operator escape sentinel releases the deny exactly as in the yield
+    guard; a deny whose counter cannot be saved stands and says so."""
+    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    if not scope:
+        # the same scope gate as the yield guard: a non-holder session never inherits the backlog.
+        # In this attended branch the mode record reads live, so _orch_scope_live is never 'cannot'
+        # here: it is False only through the holder-scoped lease check.
+        return _allow()
+    if "enumerator" not in reg:
         return _allow()  # no declared backlog enumerator: the attended backlog judgement is out of scope
     ctx, ts, basis = _orch_build_ctx(reg, root, "ask", data)
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
@@ -17336,6 +17359,10 @@ def orch_prompt_stamp(data):
         ts["stop_denials"] = 0
         ts["schedule_denials"] = 0
         ts.pop("schedule_basis", None)
+        # the ask pair resets on genuine human input exactly as the schedule pair does: the human has
+        # spoken, so earlier ask denials never carry relief (or a stale basis) into the next question
+        ts["ask_denials"] = 0
+        ts.pop("ask_basis", None)
         unsaved = _orch_save_turn_state(root, ts)
         if unsaved is None:
             if scope == "cannot":

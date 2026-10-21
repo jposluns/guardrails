@@ -9357,6 +9357,114 @@ def _main_isolated(report_path=None):
         check("ask/attended-no-registry-allows", _verdict(ask_att("tu-a12")), "allow")
         _hreg["enumerator"] = _henum
         _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        # the actionable deny is never cap-relieved: the fourth unchanged question is denied exactly
+        # as the first (its two exits, dispatch or record-then-re-issue, are always available), and
+        # every one of the four denials is counted
+        h.set_items([item("A-8")])
+        h.set_turn_state({})
+        check("ask/attended-actionable-fourth-call-still-denies",
+              [_verdict(ask_att("tu-b{}".format(i))) for i in range(4)], ["deny"] * 4)
+        check("ask/attended-actionable-four-denials-counted", h.turn_state().get("ask_denials"), 4)
+        # the cannot-evaluate cap is intact: four sequential questions against an enumerator error are
+        # denied three times, then the fourth is relieved with findings on the unchanged basis
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-enum-error-fourth-call-relieves",
+              [_verdict(ask_att("tu-c{}".format(i))) for i in range(4)],
+              ["deny", "deny", "deny", "warn"])
+
+        # a cap-relieved question past open work writes its forced_unresolved record
+        def forced_ask_rows():
+            fx = hsd / "forced-exit.jsonl"
+            if not fx.exists():
+                return 0
+            return sum(1 for row in fx.read_text(encoding="utf-8").splitlines()
+                       if json.loads(row).get("event") == "ask-guard")
+
+        _hforced = forced_ask_rows()
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-cap-allow-records-forced-exit",
+              (_verdict(ask_att("tu-c4")), forced_ask_rows() - _hforced), ("warn", 1))
+        h.enum_exit.write_text("0", encoding="utf-8")
+        # an open item whose proof source is unreadable (the declared pending-decisions record is gone)
+        # is an item-level cannot-evaluate: denied, naming the item and the re-issue exit; at the cap
+        # on the unchanged basis the question is relieved with findings
+        h.pending.unlink()
+        h.set_items([item("H-1", blocker={"kind": "human-decision", "ref": "D-9"})])
+        h.set_turn_state({})
+        att_res = ask_att("tu-d1")
+        check("ask/attended-item-cannot-evaluate-denies", _verdict(att_res), "deny")
+        check("ask/attended-item-cannot-evaluate-reissue-exit",
+              "unreadable (cannot-evaluate)" in ask_reason(att_res) and "H-1" in ask_reason(att_res)
+              and "re-issue the question" in ask_reason(att_res), True)
+        h.set_turn_state({"ask_denials": 3, "ask_basis": h.turn_state().get("ask_basis")})
+        check("ask/attended-item-cannot-evaluate-cap-allows-findings",
+              _verdict(ask_att("tu-d2")), "warn")
+        h.pending.write_text("D-9: deferred to the maintainer\n", encoding="utf-8")
+        # a deny whose counter cannot be saved STANDS (never fails open) and says so
+        h.set_items([item("A-9")])
+        h.set_turn_state({})
+        _hsave = aiqt_hooks._orch_save_turn_state
+        try:
+            aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
+            att_res = ask_att("tu-e1")
+        finally:
+            aiqt_hooks._orch_save_turn_state = _hsave
+        check("ask/attended-counter-unsaved-deny-stands", _verdict(att_res), "deny")
+        check("ask/attended-counter-unsaved-says-so",
+              "could not be written to turn-state.json" in ask_reason(att_res), True)
+        # the deny names at most ten actionable items, then the remaining count
+        h.set_items([item("N{:02d}".format(i)) for i in range(1, 12)])
+        h.set_turn_state({})
+        att_res = ask_att("tu-f1")
+        check("ask/attended-names-ten-items-and-more",
+              ("N10" in ask_reason(att_res), "N11" in ask_reason(att_res),
+               "; and 1 more" in ask_reason(att_res)), (True, False, True))
+        # genuine human input resets the ask pair exactly as it resets the schedule pair
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "X", "schedule_denials": 2,
+                          "stop_denials": 1})
+        aiqt_hooks.orch_prompt_stamp(h.payload("UserPromptSubmit",
+                                               extra={"prompt": "take the blue theme"}))
+        _hts = h.turn_state()
+        check("ask/human-input-resets-ask-counters",
+              (_hts.get("ask_denials"), "ask_basis" in _hts), (0, False))
+        # ask denials never relieve a scheduling call (the counter isolation's other direction)
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/ask-count-never-relieves-schedule",
+              _verdict(aiqt_hooks.orch_yield_tool(h.payload(
+                  "PreToolUse", "ScheduleWakeup", {"prompt": "recheck later"},
+                  extra={"tool_use_id": "tu-g1"}))), "deny")
+        h.enum_exit.write_text("0", encoding="utf-8")
+        # a DECLARED enumerator that is not an object is a configuration error: denied as
+        # cannot-evaluate, naming the shape, with a guard-events row (never a silent allow)
+        _hreg = json.loads(_hregp.read_text(encoding="utf-8"))
+        _hreg["enumerator"] = ["not", "an", "object"]
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_items([item("A-10")])
+        h.set_turn_state({})
+        _hev = hsd / "guard-events.jsonl"
+        _hev_count = len(_hev.read_text(encoding="utf-8").splitlines()) if _hev.exists() else 0
+        att_res = ask_att("tu-h1")
+        check("ask/attended-malformed-enumerator-denies",
+              (_verdict(att_res), "not enumerable" in ask_reason(att_res)
+               and "not an object" in ask_reason(att_res)), ("deny", True))
+        _hev_rows = _hev.read_text(encoding="utf-8").splitlines() if _hev.exists() else []
+        check("ask/attended-malformed-enumerator-logs-event",
+              any(json.loads(row).get("kind") == "ask-guard"
+                  and json.loads(row).get("decision") == "deny"
+                  for row in _hev_rows[_hev_count:]), True)
+        _hreg["enumerator"] = _henum
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        # a session outside the live scope (a holder-scoped lease that does not name it) never
+        # inherits the global backlog: the judgement allows there, exactly as the yield guard does
+        _hreg["lease"]["holder_is_session_id"] = True
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_items([item("A-11")])
+        h.set_turn_state({})
+        check("ask/attended-nonholder-session-allows", _verdict(ask_att("tu-i1")), "allow")
+        _hreg["lease"].pop("holder_is_session_id")
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
 
         # ---------- component 3: the truncation guard ----------
         t = Fixture(tmp, "trunc")
