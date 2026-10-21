@@ -9,6 +9,15 @@ The optional .aiqt/release-cut.toml has exactly five fields:
   base-changelog-sha256 = "<SHA-256 of the complete comparison-base blob>"
 Initialization instead requires operation = "initialize", previous-version = "",
 and base-changelog-sha256 = "absent", against proven absence only.
+The optional .aiqt/pending-fixes.toml binds a hand-kept pending-fix list to one
+cut: schema = 1, release = "<the version being cut>", and a fix array of
+tables, each carrying an id and a state from open, done and deferred; a
+deferred item also carries a nonempty rationale and target. Appending a
+release identity is refused while any listed item is open, naming each open
+item. A present record that is malformed, unreadable, a symlink, or bound to
+another release cannot be evaluated; an absent record changes nothing. The
+list is hand-kept, so it shows currency for the items it names, never
+completeness of what is wrong.
 
 A declaration is author-controlled intent, not authorization or readiness.
 This reusable pack author tool is opt-in for adopters of this changelog schema.
@@ -78,13 +87,16 @@ from _semver import _parse  # noqa: E402
 
 CHANGELOG = "changelog.toml"
 DECLARATION = ".aiqt/release-cut.toml"
-PATHS = (CHANGELOG, DECLARATION)
+PENDING = ".aiqt/pending-fixes.toml"
+PATHS = (CHANGELOG, DECLARATION, PENDING)
 TIMEOUT = 30
 OID = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 DECL_KEYS = {
     "schema", "operation", "previous-version", "next-version",
     "base-changelog-sha256",
 }
+PENDING_KEYS = {"schema", "release", "fix"}
+PENDING_STATES = ("open", "done", "deferred")
 
 
 class CannotEvaluate(ValueError):
@@ -172,8 +184,37 @@ def parse_declaration(raw, label="declaration"):
     return dict(data)
 
 
+def parse_pending(raw, label="pending fixes"):
+    """Accept absent or TOML bytes for the optional pending-fix record; validate the whole record."""
+    if raw is None:
+        return None
+    data = document(raw, label)
+    require(isinstance(data, dict) and set(data) == PENDING_KEYS,
+            label + ": expected exactly the schema, release and fix fields")
+    require(type(data["schema"]) is int and data["schema"] == 1,
+            label + ": unsupported schema (expected integer 1)")
+    version(data["release"], label + ": release")
+    require(isinstance(data["fix"], list), label + ": fix must be an array of tables")
+    identifiers = set()
+    for index, item in enumerate(data["fix"]):
+        where = "{}: fix[{}]".format(label, index)
+        require(isinstance(item, dict), where + ": expected table")
+        require(item.get("state") in PENDING_STATES,
+                where + ": state must be open, done or deferred")
+        keys = {"id", "state", "rationale", "target"} if item["state"] == "deferred" else {"id", "state"}
+        require(set(item) == keys,
+                where + ": a deferred item carries exactly id, state, rationale and target;"
+                " an open or done item exactly id and state")
+        for key in keys - {"state"}:
+            require(isinstance(item[key], str) and bool(item[key]),
+                    where + ": " + key + " must be a nonempty string")
+        require(item["id"] not in identifiers, where + ": duplicate fix id")
+        identifiers.add(item["id"])
+    return dict(data)
+
+
 def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
-                        base_decl, head_decl):
+                        base_decl, head_decl, base_pending=None, head_pending=None):
     """Return (exit_code, detail). Only the caller can prove that None is absence."""
     try:
         base = ([] if base_changelog_bytes_or_absent is None else
@@ -181,6 +222,8 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
         head = parse_changelog(head_changelog_bytes, "head changelog")
         base_decl = parse_declaration(base_decl, "base declaration")
         head_decl = parse_declaration(head_decl, "head declaration")
+        base_pending = parse_pending(base_pending, "base pending fixes")
+        head_pending = parse_pending(head_pending, "head pending fixes")
     except (CannotEvaluate, RecursionError) as exc:
         return 2, "cannot evaluate: " + str(exc)
     # Parse every document before deciding policy, including present stale declarations.
@@ -207,6 +250,14 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
     )
     if not authorized:
         return 1, "missing, unchanged or mismatched release declaration"
+    if head_pending is not None:
+        # The record proves currency only for the one cut it names, never completeness.
+        if head_pending["release"] != after[-1]:
+            return 2, ("cannot evaluate: pending fixes: record is bound to release "
+                       + head_pending["release"] + ", not to the appended " + after[-1])
+        open_items = [item["id"] for item in head_pending["fix"] if item["state"] == "open"]
+        if open_items:
+            return 1, "pending fixes still open: " + ", ".join(open_items)
     # Diagnostics must remain total even when a policy guard is mutated away.
     return 0, "release transition accepted"
 
@@ -531,7 +582,7 @@ def local_report(root, protected=None, before=None):
     comparisons.extend((name, snapshot_base, binding["head_tree"]) for name in names)
     for name, base_tree, head_tree in comparisons:
         try:
-            base = ((None, None) if base_tree is None else
+            base = ((None,) * len(PATHS) if base_tree is None else
                     tuple(tree_blob(root, base_tree, path) for path in PATHS))
             if name == "HEAD" or name.startswith("commit:"):
                 candidate = tuple(tree_blob(root, head_tree, path) for path in PATHS)
@@ -539,13 +590,16 @@ def local_report(root, protected=None, before=None):
                 candidate = index_snapshot(root)
             else:
                 candidate = tuple(working_blob(root, path) for path in PATHS)
-            code, detail = evaluate_transition(base[0], candidate[0], base[1], candidate[1])
+            code, detail = evaluate_transition(base[0], candidate[0], base[1], candidate[1],
+                                               base[2], candidate[2])
             results.append({
                 "snapshot": name, "code": code, "detail": detail,
                 "base_changelog_sha256": digest(base[0]),
                 "head_changelog_sha256": digest(candidate[0]),
                 "base_declaration_sha256": digest(base[1]),
                 "head_declaration_sha256": digest(candidate[1]),
+                "base_pending_fixes_sha256": digest(base[2]),
+                "head_pending_fixes_sha256": digest(candidate[2]),
             })
         except (OSError, ValueError, RecursionError) as exc:
             results.append({"snapshot": name, "code": 2, "detail": str(exc)})
@@ -574,6 +628,15 @@ def fixture_declaration(base, previous="1.0.0", following="1.1.0", **changes):
     return ("\n".join(key + " = " + json.dumps(value) for key, value in data.items()) + "\n").encode()
 
 
+def fixture_pending(release="1.1.0", *items):
+    text = "schema = 1\nrelease = " + json.dumps(release) + "\n"
+    if not items:
+        return (text + "fix = []\n").encode()
+    for item in items:
+        text += "\n[[fix]]\n" + "".join(key + " = " + json.dumps(value) + "\n" for key, value in item)
+    return text.encode()
+
+
 def test_cases():
     """Transition policy, local ancestry, PR merge binding and explicit push refs."""
     base = fixture_changelog(["1.0.0"])
@@ -582,9 +645,10 @@ def test_cases():
     history = fixture_declaration(base, **{"base-changelog-sha256": "f" * 64})
     cases = {}
 
-    def add(name, expected, before=base, after=base, old=None, new=None, tweak=None):
+    def add(name, expected, before=base, after=base, old=None, new=None,
+            fixes=None, base_fixes=None, tweak=None):
         require(name not in cases, "duplicate self-test ID: " + name)
-        cases[name] = (expected, before, after, old, new, tweak)
+        cases[name] = (expected, before, after, old, new, fixes, base_fixes, tweak)
 
     add("ordinary-content", 0)
     add("notes", 0, after=fixture_changelog(["1.0.0"], "curated note"))
@@ -636,6 +700,26 @@ def test_cases():
     add("declaration-only", 1, new=declaration)
     add("declaration-delete", 1, old=history)
     add("bad-base-order", 1, before=fixture_changelog(["1.1.0", "1.0.0"]))
+    open_fix = fixture_pending("1.1.0", (("id", "loose-end"), ("state", "open")))
+    done_fix = fixture_pending("1.1.0", (("id", "loose-end"), ("state", "done")))
+    deferred_fix = fixture_pending("1.1.0", (("id", "loose-end"), ("state", "deferred"),
+                                             ("rationale", "waiting on the next cycle"),
+                                             ("target", "1.2.0")))
+    add("pending-open", 1, after=cut, new=declaration, fixes=open_fix)
+    add("pending-open-second", 1, after=cut, new=declaration,
+        fixes=fixture_pending("1.1.0", (("id", "groundwork"), ("state", "done")),
+                              (("id", "loose-end"), ("state", "open"))))
+    add("pending-open-initialize", 1, before=None,
+        new=fixture_declaration(None, following="1.0.0"),
+        fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "open"))))
+    add("pending-bound-elsewhere", 2, after=cut, new=declaration,
+        fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "done"))))
+    add("pending-done", 0, after=cut, new=declaration, fixes=done_fix)
+    add("pending-deferred", 0, after=cut, new=declaration, fixes=deferred_fix)
+    add("pending-empty", 0, after=cut, new=declaration, fixes=fixture_pending())
+    add("pending-open-no-cut", 0, fixes=open_fix)
+    add("pending-progress", 0, base_fixes=open_fix, fixes=done_fix)
+    add("pending-symlink", 2, tweak="pending-symlink")
     bad_logs = {
         "toml": b"[",
         "utf8": b"\xff",
@@ -669,6 +753,26 @@ def test_cases():
     for label, raw in bad_declarations.items():
         add("head-decl-" + label, 2, new=raw)
         add("base-decl-" + label, 2, old=raw)
+    bad_pending = {
+        "toml": b"[", "utf8": b"\xff", "empty": b"",
+        "schema": done_fix.replace(b"schema = 1", b"schema = 2"),
+        "boolean": done_fix.replace(b"schema = 1", b"schema = true"),
+        "release": done_fix.replace(b'"1.1.0"', b'"01.1.0"'),
+        "unknown": done_fix + b"extra = 1\n",
+        "state": done_fix.replace(b'"done"', b'"fixed"'),
+        "blank-id": done_fix.replace(b'"loose-end"', b'""'),
+        "duplicate-id": done_fix + b'\n[[fix]]\nid = "loose-end"\nstate = "done"\n',
+        "missing-fix": b'schema = 1\nrelease = "1.1.0"\n',
+        "typed-fix": b'schema = 1\nrelease = "1.1.0"\nfix = 7\n',
+        "typed-item": b'schema = 1\nrelease = "1.1.0"\nfix = [7]\n',
+        "extra-field": done_fix + b'target = "1.2.0"\n',
+        "missing-rationale": deferred_fix.replace(b'rationale = "waiting on the next cycle"\n', b""),
+        "missing-target": deferred_fix.replace(b'target = "1.2.0"\n', b""),
+        "blank-rationale": deferred_fix.replace(b'"waiting on the next cycle"', b'""'),
+    }
+    for label, raw in bad_pending.items():
+        add("head-fix-" + label, 2, fixes=raw)
+        add("base-fix-" + label, 2, base_fixes=raw)
     for name in ("missing-head", "missing-object", "broken-ancestry", "unreadable",
                  "head-symlink", "head-gitlink", "working-symlink", "working-directory",
                  "parent-symlink", "unmerged-index", "unresolved-base", "ambiguous-base",
@@ -739,7 +843,7 @@ def fixture_environment(home):
 
 
 def fixture_repo(parent, name, case, env):
-    expected, before, after, old, new, tweak = case
+    expected, before, after, old, new, fixes, base_fixes, tweak = case
     root = parent / name
     root.mkdir()
 
@@ -753,8 +857,8 @@ def fixture_repo(parent, name, case, env):
                 name + ": fixture git failed: " + result.stderr.decode("utf-8", "replace"))
         return result.stdout.strip().decode("ascii")
 
-    def write(log, decl):
-        for path, data in ((CHANGELOG, log), (DECLARATION, decl)):
+    def write(log, decl, pending=None):
+        for path, data in ((CHANGELOG, log), (DECLARATION, decl), (PENDING, pending)):
             target = root / path
             if data is None:
                 target.unlink(missing_ok=True)
@@ -775,12 +879,12 @@ def fixture_repo(parent, name, case, env):
     (root / "seed.txt").write_text("fixture\n", encoding="utf-8")
     (root / ".aiqt").mkdir()
     if tweak in ("root", "push-root"):
-        write(after, new)
+        write(after, new, fixes)
         head = commit("initialized")
         command("update-ref", "refs/remotes/origin/main", head)
         command("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
         return root
-    write(before, old)
+    write(before, old, base_fixes)
     base = commit("base")
     command("update-ref", "refs/remotes/origin/main", base)
     command("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
@@ -793,13 +897,13 @@ def fixture_repo(parent, name, case, env):
         # The target advanced, but the candidate declares against the old tracking tip.
         write(fixture_changelog(["1.0.0", "1.1.0"]), None)
         first_parent = commit("advanced target")
-    write(after, new)
+    write(after, new, fixes)
     (root / "consumer.txt").write_text("ordinary consumer edit\n", encoding="utf-8")
     if tweak == "squash":
         # A preparation commit exists, but the reviewed endpoint is one squashed commit.
-        write(after, old)
+        write(after, old, base_fixes)
         commit("preparation")
-        write(after, new)
+        write(after, new, fixes)
     head = commit("candidate")
     tree = command("rev-parse", head + "^{tree}")
     if binding_fixture:
@@ -854,7 +958,7 @@ def fixture_repo(parent, name, case, env):
                   fixture_declaration(after, previous="1.1.0", following="1.2.0"))
             head = commit("second declared cut")
         elif tweak == "push-repaired":
-            write(before, old)
+            write(before, old, base_fixes)
             head = commit("revert undeclared cut")
         elif tweak in ("push-base-second-parent", "push-base-unrelated"):
             other = command("commit-tree", tree, payload=b"other root\n")
@@ -882,6 +986,9 @@ def fixture_repo(parent, name, case, env):
             (root / CHANGELOG).symlink_to("seed.txt")
         if tweak == "head-symlink":
             commit("symlink changelog")
+    elif tweak == "pending-symlink":
+        (root / PENDING).symlink_to("seed.txt")
+        commit("symlink pending fixes")
     elif tweak == "parent-symlink":
         (root / ".aiqt").rmdir()
         (root / "outside").mkdir()
@@ -2539,6 +2646,15 @@ def _self_test_isolated(red_on_revert):
                 check("staged-hidden-snapshots",
                       [(r["snapshot"], r["code"]) for r in report["snapshots"]]
                       == [("HEAD", 0), ("index", 1), ("working", 0)])
+            if case_id in ("pending-open", "pending-open-second", "pending-open-initialize"):
+                check(case_id + "-names-open-items",
+                      any("pending fixes still open: " in row["detail"]
+                          and "loose-end" in row["detail"] and "groundwork" not in row["detail"]
+                          for row in report["snapshots"]))
+            if case_id == "pending-bound-elsewhere":
+                check(case_id + "-binding",
+                      any("bound to release 1.0.0, not to the appended 1.1.0" in row["detail"]
+                          for row in report["snapshots"]))
             if case_id == "unreadable":
                 check("unreadable-read-boundary",
                       any("injected unreadable working file" in row["detail"]
@@ -2606,6 +2722,15 @@ def _self_test_isolated(red_on_revert):
                  'for parent, revision in binding["transitions"][-1:]:', "push-noop-undeclared", 0),
                 ("ci-event", 'require(event in ("pull_request", "push"),',
                  "require(True,", "event-dispatch", 0),
+                ("pending-open-items", "if open_items:", "if False:", "pending-open", 0),
+                ("pending-binding", 'if head_pending["release"] != after[-1]:', "if False:",
+                 "pending-bound-elsewhere", 0),
+                ("pending-head-input",
+                 'head_pending = parse_pending(head_pending, "head pending fixes")',
+                 "head_pending = None", "head-fix-toml", 0),
+                ("pending-base-input",
+                 'base_pending = parse_pending(base_pending, "base pending fixes")',
+                 "base_pending = None", "base-fix-toml", 0),
             )
             parser_bytes = (script.parents[1] / "opf" / "tools" / "_semver.py").read_bytes()
             for name, old, new, case_id, mutated_code in mutations:
