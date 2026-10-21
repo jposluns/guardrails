@@ -12,12 +12,16 @@ and base-changelog-sha256 = "absent", against proven absence only.
 The optional .aiqt/pending-fixes.toml binds a hand-kept pending-fix list to one
 cut: schema = 1, release = "<the version being cut>", and a fix array of
 tables, each carrying an id and a state from open, done and deferred; a
-deferred item also carries a nonempty rationale and target. Appending a
+deferred item also carries a rationale and target. Every id, rationale and
+target must be a string holding a non-whitespace character. Appending a
 release identity is refused while any listed item is open, naming each open
-item. A present record that is malformed, unreadable, a symlink, or bound to
-another release cannot be evaluated; an absent record changes nothing. The
-list is hand-kept, so it shows currency for the items it names, never
-completeness of what is wrong.
+item; a cut that removes a record still listing open items is refused the
+same way, naming them. A present record that is malformed, unreadable, or a
+symlink cannot be evaluated on any transition; the release binding is checked
+only on a cut, where a record bound to another release cannot be evaluated.
+When neither snapshot holds a record, nothing changes. The list is hand-kept,
+so it shows currency for the items it names, never completeness of what is
+wrong.
 
 A declaration is author-controlled intent, not authorization or readiness.
 This reusable pack author tool is opt-in for adopters of this changelog schema.
@@ -206,8 +210,8 @@ def parse_pending(raw, label="pending fixes"):
                 where + ": a deferred item carries exactly id, state, rationale and target;"
                 " an open or done item exactly id and state")
         for key in keys - {"state"}:
-            require(isinstance(item[key], str) and bool(item[key]),
-                    where + ": " + key + " must be a nonempty string")
+            require(isinstance(item[key], str) and bool(item[key].strip()),
+                    where + ": " + key + " must be a nonblank string")
         require(item["id"] not in identifiers, where + ": duplicate fix id")
         identifiers.add(item["id"])
     return dict(data)
@@ -258,6 +262,13 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
         open_items = [item["id"] for item in head_pending["fix"] if item["state"] == "open"]
         if open_items:
             return 1, "pending fixes still open: " + ", ".join(open_items)
+    elif base_pending is not None:
+        # Removing the record does not resolve its items: a cut that deletes a
+        # record still listing open items is refused like one that leaves them open.
+        removed_open = [item["id"] for item in base_pending["fix"] if item["state"] == "open"]
+        if removed_open:
+            return 1, ("pending fixes still open: " + ", ".join(removed_open)
+                       + " (record removed, not resolved)")
     # Diagnostics must remain total even when a policy guard is mutated away.
     return 0, "release transition accepted"
 
@@ -712,6 +723,9 @@ def test_cases():
     add("pending-open-initialize", 1, before=None,
         new=fixture_declaration(None, following="1.0.0"),
         fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "open"))))
+    add("pending-done-initialize", 0, before=None,
+        new=fixture_declaration(None, following="1.0.0"),
+        fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "done"))))
     add("pending-bound-elsewhere", 2, after=cut, new=declaration,
         fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "done"))))
     add("pending-done", 0, after=cut, new=declaration, fixes=done_fix)
@@ -719,6 +733,8 @@ def test_cases():
     add("pending-empty", 0, after=cut, new=declaration, fixes=fixture_pending())
     add("pending-open-no-cut", 0, fixes=open_fix)
     add("pending-progress", 0, base_fixes=open_fix, fixes=done_fix)
+    add("pending-open-removed", 1, after=cut, new=declaration, base_fixes=open_fix)
+    add("pending-done-removed", 0, after=cut, new=declaration, base_fixes=done_fix)
     add("pending-symlink", 2, tweak="pending-symlink")
     bad_logs = {
         "toml": b"[",
@@ -758,9 +774,12 @@ def test_cases():
         "schema": done_fix.replace(b"schema = 1", b"schema = 2"),
         "boolean": done_fix.replace(b"schema = 1", b"schema = true"),
         "release": done_fix.replace(b'"1.1.0"', b'"01.1.0"'),
-        "unknown": done_fix + b"extra = 1\n",
+        "unknown": b"extra = 1\n" + done_fix,
+        "item-unknown": done_fix + b"extra = 1\n",
         "state": done_fix.replace(b'"done"', b'"fixed"'),
         "blank-id": done_fix.replace(b'"loose-end"', b'""'),
+        "typed-id": done_fix.replace(b'"loose-end"', b"7"),
+        "space-id": done_fix.replace(b'"loose-end"', b'" "'),
         "duplicate-id": done_fix + b'\n[[fix]]\nid = "loose-end"\nstate = "done"\n',
         "missing-fix": b'schema = 1\nrelease = "1.1.0"\n',
         "typed-fix": b'schema = 1\nrelease = "1.1.0"\nfix = 7\n',
@@ -769,6 +788,8 @@ def test_cases():
         "missing-rationale": deferred_fix.replace(b'rationale = "waiting on the next cycle"\n', b""),
         "missing-target": deferred_fix.replace(b'target = "1.2.0"\n', b""),
         "blank-rationale": deferred_fix.replace(b'"waiting on the next cycle"', b'""'),
+        "space-rationale": deferred_fix.replace(b'"waiting on the next cycle"', b'" "'),
+        "space-target": deferred_fix.replace(b'"1.2.0"', b'" "'),
     }
     for label, raw in bad_pending.items():
         add("head-fix-" + label, 2, fixes=raw)
@@ -2646,7 +2667,8 @@ def _self_test_isolated(red_on_revert):
                 check("staged-hidden-snapshots",
                       [(r["snapshot"], r["code"]) for r in report["snapshots"]]
                       == [("HEAD", 0), ("index", 1), ("working", 0)])
-            if case_id in ("pending-open", "pending-open-second", "pending-open-initialize"):
+            if case_id in ("pending-open", "pending-open-second", "pending-open-initialize",
+                           "pending-open-removed"):
                 check(case_id + "-names-open-items",
                       any("pending fixes still open: " in row["detail"]
                           and "loose-end" in row["detail"] and "groundwork" not in row["detail"]
@@ -2731,6 +2753,19 @@ def _self_test_isolated(red_on_revert):
                 ("pending-base-input",
                  'base_pending = parse_pending(base_pending, "base pending fixes")',
                  "base_pending = None", "base-fix-toml", 0),
+                ("pending-removed", "elif base_pending is not None:",
+                 "elif False:", "pending-open-removed", 0),
+                ("pending-top-keys",
+                 "require(isinstance(data, dict) and set(data) == PENDING_KEYS,",
+                 "require(isinstance(data, dict) and set(data) >= PENDING_KEYS,",
+                 "head-fix-unknown", 0),
+                ("pending-item-strings",
+                 "require(isinstance(item[key], str) and bool(item[key].strip()),",
+                 "require(True,", "head-fix-typed-id", 0),
+                ("pending-item-blank",
+                 "require(isinstance(item[key], str) and bool(item[key].strip()),",
+                 "require(isinstance(item[key], str) and bool(item[key]),",
+                 "head-fix-space-id", 0),
             )
             parser_bytes = (script.parents[1] / "opf" / "tools" / "_semver.py").read_bytes()
             for name, old, new, case_id, mutated_code in mutations:

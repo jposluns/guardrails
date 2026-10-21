@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5b7700426cae69e134ff244ddf83911f8f244f8268d57d11c47389d032aa59b1"
+tree-sha256 = "909bcdae2a797364693ad53485585287530892ac14015953d088bceb44ff1dd1"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 430014
-sha256 = "0410b4cdbe8086b8c2de8e59eb2ed89ee2873a247dca609d77422fa475d79267"
+bytes = 430874
+sha256 = "c6daf5c7b363b240d33e07c94be83834f9fbb3c1aa951595ffdc9e403edb937e"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -821,8 +821,8 @@ sha256 = "7854ba7c7fa8221a2b408deaf73505b492ff2d39f67d5addac1b20ed98ac2ba6"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 668637
-sha256 = "3e4429221cd04413c2337b7ab9718f671fa27f30bc0ed27e682d1a4e41cb8b52"
+bytes = 669382
+sha256 = "98808fda48c744d7f21bec4b0007955e3536349c3a93c0c1fbabbc0faa56daab"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2356,8 +2356,8 @@ sha256 = "b9ab84064341340be432438f6a2e7a6c914b0b64ea56249edd9b22b83d09b6a1"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 388362
-sha256 = "0b224ef0705adcf1a74b59d187b224bdb1a6ac49722e32f49134118d01cf15d8"
+bytes = 389107
+sha256 = "10962bf5cb2c1f39f7fc3af84fc078ae3a2177c01b5beab67d60b49c332a3fee"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3171,8 +3171,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 444721
-sha256 = "ab6cc33024cc1a716b931cc5576c3daf1ca0f811e1b7fa49e4e4dc3fb69bfe06"
+bytes = 445466
+sha256 = "c1d62c311b3377eb9372a51ac03074bf270dadd33db3145f1aeca484d6bc1055"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3516,8 +3516,8 @@ sha256 = "7243ff533bed682037100c39ad41dfe3da39bbe1b4b0a81452417d07a25ddd95"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 166686
-sha256 = "d4d5efc443d76636cfafc9d3298aff158926bd04315178f394e8f4e18e8ed629"
+bytes = 168972
+sha256 = "f4d7f38e9205d526333a45d3639cb400ee721b6cd1be5c10d3c0a6116ec5fdbc"
 
 [[sources]]
 path = "tools/check_release_delta.py"
