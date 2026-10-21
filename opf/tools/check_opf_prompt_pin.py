@@ -38,17 +38,30 @@ Checks, each a named guard:
                   quote is a finding because pairing cannot be trusted there
   required-rule   a fixed list of section 16.1 and section 9.2 sentences appears verbatim
                   (whitespace-insensitively) in both the specification and the prompt
-  journal-grading the prompt carries the step 8 heading exactly once, outside fenced code, and
-                  that step (the heading to the next column-0 heading of level one to three)
-                  carries exactly one list item on `.working/journals/` (its bullet line and the
-                  lines indented deeper than the bullet, up to a blank or whitespace-only line);
-                  that item carries every named clause of JOURNAL_GRADING
-                  (whitespace-insensitively) and nothing in step 8 carries a clause of
-                  JOURNAL_GRADING_DENIED, so the item's store-path conclusion stays limited to a
-                  store that has not started an adoption, it keeps what the specification says of
-                  a store that has, and it keeps the rule that the upgrade check counts every
-                  journal entry; a fenced-code delimiter or an indented heading inside step 8 is
-                  an unsupported form and a finding, refused rather than read around
+  journal-grading the prompt carries the step 8 heading exactly once, outside fenced code
+                  (fences are tracked by opening character and run length, closed only by a line
+                  holding nothing but a run of the same character at least that long, with an
+                  unclosed fence open to the end of the document, never by a delimiter-parity
+                  count, which a longer run or the other fence character defeats), and that step
+                  (the heading to the next column-0 heading of level one to three) carries
+                  exactly one list item on `.working/journals/` (its bullet line and the lines
+                  indented deeper than the bullet, up to a blank or whitespace-only line); that
+                  item carries every named clause of JOURNAL_GRADING (whitespace-insensitively)
+                  and nothing in step 8 carries a clause of JOURNAL_GRADING_DENIED, so the item's
+                  store-path conclusion stays limited to a store that has not started an
+                  adoption, it keeps what the specification says of a store that has, and it
+                  keeps the rule that the upgrade check counts every journal entry; every line of
+                  step 8 must take one of a closed set of shapes (a blank or whitespace-only
+                  line, a column-0 space-led ATX heading of level one to six, a `- ` list bullet
+                  or a continuation line at an indent an open list item supports, or a plain
+                  paragraph line), and any other shape (a fence delimiter, a tab, an HTML comment
+                  opener anywhere in a line, a line opening with <, a setext underline or
+                  thematic break, an alternate list marker or blockquote opener, indented code,
+                  an indented or malformed heading) is an unsupported form and a finding, refused
+                  by name rather than read around, because Markdown renders each of those forms
+                  away from what this space-and-line scan reads; the closed set deliberately
+                  over-refuses, so a prompt that legitimately needs a refused form inside step 8
+                  must extend this gate first
 
   check_opf_prompt_pin.py                    verify the shipped prompt beside this tool (../spec)
   check_opf_prompt_pin.py --self-test        synthetic trees assert each guard's exact status and
@@ -499,38 +512,148 @@ def _is_fence(line):
     return line.lstrip(" ").startswith(("```", "~~~"))
 
 
+_FENCE_OPEN_RE = re.compile(r" *(`{3,}|~{3,})")
+
+
+def _open_fence_before(lines, stop):
+    """The fence still open at the start of line index stop, as (character, run length), or None.
+    Fences are tracked the way Markdown closes them, never by delimiter parity: a run of three or
+    more backticks or tildes opens a fence, and only a line holding nothing but a run of the SAME
+    character at least as LONG closes it, so a longer opening run or the other character is not
+    closed by a bare three-backtick line, and an unclosed fence stays open to the end. Leading
+    spaces are accepted on both delimiters, broader than Markdown's three-space bound, so a
+    deeper-indented near-delimiter still flips the state here and the mismatch is refused rather
+    than read around."""
+    state = None
+    for line in lines[:stop]:
+        if state is None:
+            match = _FENCE_OPEN_RE.match(line)
+            if match is not None:
+                run = match.group(1)
+                state = (run[0], len(run))
+        else:
+            char, length = state
+            body = line.strip()
+            if body and body == char * len(body) and len(body) >= length:
+                state = None
+    return state
+
+
+def _step_shapes(step):
+    """Refuse every line of step 8 that is not one of the closed set of shapes the shipped prompt
+    places there: a blank or whitespace-only line, a column-0 ATX heading of one to six number
+    signs then a space (levels one to three never reach here, because they end the step), a `- `
+    list bullet at an indent an open list item supports, a continuation line of an open list
+    item, or a plain paragraph line. Every other shape is refused by name, because Markdown
+    renders those forms (fenced or indented code, raw HTML and comments, setext underlines and
+    thematic breaks, blockquotes, alternate list markers, tab-shifted indentation) away from what
+    this space-and-line scan reads, so reading around them could pass step 8 text that never
+    renders or miss a form that renders as something else. The closed set deliberately
+    over-refuses (an emphasis-opening or plus-led paragraph line is refused too): a prompt that
+    legitimately needs a refused form inside step 8 must extend this gate first."""
+    lists = []  # content indents of the open list items, outermost first
+    in_paragraph = False
+    for line in step:
+        _require("\t" not in line, "journal-grading",
+                 "step 8 carries a tab, an unsupported character here: tabs move Markdown's "
+                 "column counting away from this scan's space-only indent reading")
+        _require("<!--" not in line, "journal-grading",
+                 "step 8 carries an HTML comment opener, an unsupported form: rendered output "
+                 "drops comment content, so text this scan reads there would never render")
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if not stripped:
+            in_paragraph = False
+            continue
+        _require(not _is_fence(line), "journal-grading",
+                 "step 8 carries a fenced-code delimiter, an unsupported form: text inside a "
+                 "fence is literal, so this scan could read an item where none renders")
+        if stripped.startswith("#"):
+            _require(indent == 0, "journal-grading",
+                     "step 8 carries an indented heading, an unsupported form: Markdown renders "
+                     "it as a heading, but this scan would read it as ordinary step text")
+            _require(re.match(r"#{1,6} ", line) is not None, "journal-grading",
+                     "step 8 carries a number-sign line that is not a space-led ATX heading of "
+                     "level one to six (a bare run, a run past six, or a tab or other character "
+                     "after the run), an unsupported form: Markdown can still render it as a "
+                     "heading this scan cannot place")
+            lists = []
+            in_paragraph = False
+            continue
+        _require(not stripped.startswith("<"), "journal-grading",
+                 "step 8 carries a line opening with <, an unsupported form: raw HTML renders "
+                 "away from what this scan reads")
+        body = stripped.rstrip()
+        _require(stripped.startswith("- ")
+                 or not (set(body) <= {"-"} or set(body) <= {"="}), "journal-grading",
+                 "step 8 carries a dash-only or equals-only line, an unsupported form: a setext "
+                 "underline turns the paragraph above it into a heading that would end step 8, "
+                 "and a thematic break is not step text")
+        _require(stripped[0] not in ">*+", "journal-grading",
+                 "step 8 opens a line with {!r}, an unsupported form: a blockquote or an "
+                 "alternate list marker renders as a block this scan does not read".format(
+                     stripped[0]))
+        if stripped.startswith("- "):
+            while lists and lists[-1] > indent:
+                lists.pop()
+            _require(indent <= 3 or (bool(lists) and indent <= lists[-1] + 3),
+                     "journal-grading",
+                     "step 8 carries a list bullet indented {} space(s) with no open list item "
+                     "that deep, which Markdown renders as indented code, not a list "
+                     "item".format(indent))
+            lists.append(indent + 2)
+            in_paragraph = True
+            continue
+        if indent == 0:
+            # A column-0 paragraph line; where it follows a blank line it starts a new block,
+            # which closes every open list item.
+            if not in_paragraph:
+                lists = []
+            in_paragraph = True
+            continue
+        if in_paragraph:
+            # A paragraph accepts a continuation line at any indent (indented code cannot
+            # interrupt a paragraph), so this line renders as ordinary step text.
+            continue
+        while lists and lists[-1] > indent:
+            lists.pop()
+        _require(bool(lists), "journal-grading",
+                 "step 8 carries an indented line that starts a block outside any open list "
+                 "item, an unsupported form: at four or more spaces Markdown renders it as "
+                 "indented code, and this prompt places no shallower stray indented paragraph")
+        _require(indent <= lists[-1] + 3, "journal-grading",
+                 "step 8 carries a line indented {} space(s) after a blank line, four or more "
+                 "past the open list item's content indent of {}, which Markdown renders as "
+                 "indented code, not step text".format(indent, lists[-1]))
+        in_paragraph = True
+
+
 def _journal_item(prompt_text):
     """(normalized step 8 list item on `.working/journals/`, normalized step 8 text). The step
     runs from its fixed heading to the next column-0 heading of level three or above; the item is
     its bullet line and every following line indented deeper than the bullet, ending before the
     first blank or whitespace-only line or line indented no deeper than the bullet. This parser
-    reads neither fenced code nor indented headings, so it refuses what it cannot place instead of
-    reading around it: the heading must sit outside fenced code (an even count of fence delimiters
-    must precede it), and a fence delimiter or an indented heading-shaped line inside the step is
-    a finding, because fenced text is literal and Markdown renders a heading indented by up to
-    three spaces where this scan would read ordinary step text. Exactly one heading and exactly
-    one item, or a finding."""
+    is not a Markdown parser, so it refuses what it cannot place instead of reading around it:
+    the heading must sit outside fenced code (_open_fence_before tracks fences by opening
+    character and run length, so a mismatched pair cannot hide the heading behind an even
+    delimiter count), and every line of the step must take a shape of the closed grammar in
+    _step_shapes, which over-refuses by design. Exactly one heading and exactly one item, or a
+    finding."""
     lines = prompt_text.split("\n")
     heads = [i for i, line in enumerate(lines) if line == _STEP8_HEAD]
     _require(len(heads) == 1, "journal-grading",
              "the prompt must carry the heading {!r} exactly once; found {}".format(
                  _STEP8_HEAD, len(heads)))
-    _require(sum(1 for line in lines[:heads[0]] if _is_fence(line)) % 2 == 0,
-             "journal-grading",
-             "an odd count of fence delimiters precedes the step 8 heading, so the heading sits "
-             "inside fenced code, where it is literal text, not a heading")
+    open_fence = _open_fence_before(lines, heads[0])
+    _require(open_fence is None, "journal-grading",
+             "a fence of {!r} opened before the step 8 heading and no later line holds a run of "
+             "that character at least that long alone, so the heading sits inside fenced code, "
+             "where it is literal text, not a heading".format(
+                 open_fence[0] * open_fence[1] if open_fence else ""))
     end = next((i for i in range(heads[0] + 1, len(lines)) if re.match(r"#{1,3} ", lines[i])),
                len(lines))
     step = lines[heads[0] + 1:end]
-    for line in step:
-        stripped = line.lstrip(" ")
-        _require(not _is_fence(line), "journal-grading",
-                 "step 8 carries a fenced-code delimiter, an unsupported form: text inside a "
-                 "fence is literal, so this scan could read an item where none renders")
-        _require(stripped == line or not re.match(r"#{1,6} ", stripped),
-                 "journal-grading",
-                 "step 8 carries an indented heading, an unsupported form: Markdown renders it "
-                 "as a heading, but this scan would read it as ordinary step text")
+    _step_shapes(step)
     starts = [i for i, line in enumerate(step) if line.lstrip(" ").startswith(_JOURNAL_ITEM_LEAD)]
     _require(len(starts) == 1, "journal-grading",
              "step 8 must carry exactly one list item opening {!r}; found {}".format(
@@ -986,6 +1109,55 @@ def _vectors():
                          _STEP8_HEAD + "\n\n" + "#" * level + " Later phases\n\n")
         return build
 
+    def fence_mismatch(opener):
+        # A fence whose opener a bare three-backtick line cannot close (a longer run, or the
+        # tilde character), left open just before the heading: the delimiter count is even, but
+        # the heading is literal text inside the still-open fence.
+        def build(base):
+            root = _build_tree(base)
+            _edit_prompt(root, _STEP8_HEAD, opener + "text\n```\n\n" + _STEP8_HEAD)
+        return build
+
+    def journal_item_indented_code(base):
+        # The item re-indented by two more spaces after a new paragraph: with no list item open
+        # that deep, Markdown renders the bullet as indented code, so no list item renders.
+        root = _build_tree(base)
+        reindented = "\n".join("  " + line if line.strip() else line
+                               for line in _FIXTURE_JOURNAL_ITEM.split("\n"))
+        _edit_prompt(root, _STEP8_HEAD + "\n\n" + _FIXTURE_JOURNAL_ITEM,
+                     _STEP8_HEAD + "\n\nThe upgrade checks these locations.\n\n" + reindented)
+
+    def journal_item_in_html_comment(base):
+        # The whole item inside an HTML comment block: nothing of it renders.
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_JOURNAL_ITEM, "<!--\n" + _FIXTURE_JOURNAL_ITEM + "\n-->")
+
+    def journal_conclusion_in_html_comment(base):
+        # Only the required store-path conclusion wrapped in an inline HTML comment: this scan's
+        # text still carries the clause, but rendered output drops it.
+        root = _build_tree(base)
+        _edit_prompt(root, "so in a homes-1 origin store that has not started an adoption a "
+                     "journal entry is a store path, not machine-local data.",
+                     "<!-- so in a homes-1 origin store that has not started an adoption a "
+                     "journal entry is a store path, not machine-local data. -->")
+
+    def setext_heading(marker):
+        # A paragraph plus a setext underline just after the step 8 heading: Markdown renders a
+        # heading there, where a space-and-line scan reads two ordinary text lines.
+        def build(base):
+            root = _build_tree(base)
+            _edit_prompt(root, _STEP8_HEAD + "\n\n",
+                         _STEP8_HEAD + "\n\nLater phases\n" + marker * 12 + "\n\n")
+        return build
+
+    def journal_step9_heading_tab(base):
+        # A tab instead of the space after the number-sign run: Markdown still renders the
+        # heading, so step 9 begins there, but a space-only step-end scan reads past it and
+        # finds the item inside step 8.
+        root = _build_tree(base)
+        _edit_prompt(root, _FIXTURE_JOURNAL_ITEM + "\n\n" + _FIXTURE_STEP9_HEAD,
+                     "###\tStep 9: fresh initialization\n\n" + _FIXTURE_JOURNAL_ITEM)
+
     return [
         ("valid-tree", VALID, None, None, valid),
         ("spec-one-byte-edit", INVALID, "table-drift", "_check_drift", spec_edited),
@@ -1070,6 +1242,22 @@ def _vectors():
          "_check_journal_grading", item_after_heading(1)),
         ("journal-item-after-level-two-heading", INVALID, "journal-grading",
          "_check_journal_grading", item_after_heading(2)),
+        ("journal-step8-heading-fence-longer-run", INVALID, "journal-grading",
+         "_check_journal_grading", fence_mismatch("````")),
+        ("journal-step8-heading-fence-tilde-mismatch", INVALID, "journal-grading",
+         "_check_journal_grading", fence_mismatch("~~~")),
+        ("journal-item-indented-code", INVALID, "journal-grading", "_check_journal_grading",
+         journal_item_indented_code),
+        ("journal-item-in-html-comment", INVALID, "journal-grading", "_check_journal_grading",
+         journal_item_in_html_comment),
+        ("journal-conclusion-in-html-comment", INVALID, "journal-grading",
+         "_check_journal_grading", journal_conclusion_in_html_comment),
+        ("journal-setext-underline-dashes", INVALID, "journal-grading",
+         "_check_journal_grading", setext_heading("-")),
+        ("journal-setext-underline-equals", INVALID, "journal-grading",
+         "_check_journal_grading", setext_heading("=")),
+        ("journal-step9-heading-tab", INVALID, "journal-grading", "_check_journal_grading",
+         journal_step9_heading_tab),
     ]
 
 
