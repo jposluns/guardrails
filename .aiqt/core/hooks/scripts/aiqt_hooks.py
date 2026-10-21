@@ -12475,9 +12475,11 @@ def decide_yield(ctx):
     question parks the run exactly as a scheduled idle does, but it has NO wake-naming requirement,
     since a question names no recheck wake, and its cap relief covers the CANNOT-EVALUATE denies only
     (a whole-enumerator failure or an unreadable item proof source, states the session may be unable to
-    repair); its ACTIONABLE deny is never cap-relieved, because that deny names two exits that are
-    always available (dispatch the items, or record them as blocked by this decision, then re-issue),
-    so repeating the question changes nothing a cap should relieve). Returns
+    repair) and only while NO item is actionable; its ACTIONABLE deny is never cap-relieved, because
+    that deny names two exits that are always available (dispatch the items, or record them as blocked
+    by this decision, then re-issue), so repeating the question changes nothing a cap should relieve,
+    and a backlog holding both an actionable item and a cannot-evaluate item keeps that actionable
+    deny, which then also names the held items in one reason). Returns
     (verdict, reason, disposition) with verdict ALLOW | ALLOW_WITH_FINDINGS | DENY."""
     kind = ctx["kind"]
     capped = kind in ("schedule_idle", "ask")  # the cap-relieved kinds; "stop" takes the loop bound
@@ -12494,7 +12496,11 @@ def decide_yield(ctx):
                 "findings rather than re-firing".format(ctx["counter"]), disposition)
     if ctx["enum_status"] != "ok":
         if capped:
-            if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
+            # the ask kind's cap relief needs an EMPTY actionable set: actionable work keeps the
+            # deny whatever the count (a failed enumeration yields no items, so on this path the
+            # set is empty by construction; the condition pins that invariant in the pure core)
+            if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"] \
+                    and (kind != "ask" or not ctx["actionable"]):
                 if kind == "ask":
                     return ("ALLOW_WITH_FINDINGS",
                             "{} ask denials on an unchanged basis; a guard that can be farmed "
@@ -12525,8 +12531,11 @@ def decide_yield(ctx):
     # ITEM-LEVEL cannot-evaluate (an unreadable proof source for a specific item) is missing evidence: the
     # schedule path DENIES (never licenses an idle), and (FIX 1) the stop path DENIES too, because an
     # unconfirmable blocker cannot confirm exhaustion (ignorance refuses the wind-down); the operator
-    # escape is the release.
-    if ctx.get("cannot_evaluate", []) and capped:
+    # escape is the release. For the ask kind this branch, its cap relief included, applies only while
+    # NO item is actionable: a backlog holding both an actionable item and a cannot-evaluate item falls
+    # through to the actionable deny below, which names the held items too, so held work never relieves
+    # a question past dispatchable work.
+    if ctx.get("cannot_evaluate", []) and capped and (kind != "ask" or not ctx["actionable"]):
         if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
             return ("ALLOW_WITH_FINDINGS",
                     "{} {} denials on an unchanged basis; {} with findings"
@@ -12580,7 +12589,8 @@ def decide_yield(ctx):
     # The cap relieves the ACTIONABLE deny for the schedule kind only. The ask kind gets no relief
     # here: its actionable deny names two exits that are always available (dispatch, or record the
     # blocker then re-issue), so re-asking an unchanged question is not a farmed guard, it is the
-    # deny working; relief for "ask" exists only on the cannot-evaluate paths above.
+    # deny working; relief for "ask" exists only on the cannot-evaluate paths above, and those grant
+    # it only while no item is actionable, so this deny is reached whenever one is.
     if kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
             and ctx["basis_unchanged"]:
         return ("ALLOW_WITH_FINDINGS",
@@ -12592,13 +12602,24 @@ def decide_yield(ctx):
     if more > 0:
         listing += "; and {} more".format(more)
     if kind == "ask":
+        held = ctx.get("cannot_evaluate", [])
+        held_note = ""
+        if held:
+            # the mixed backlog names BOTH sets in one reason: the actionable items above carry the
+            # two exits, and the held items are named so the operator knows what to repair
+            named_held = ", ".join(i for i, _c, _p in held[:_ORCH_MAX_NAMED])
+            if len(held) > _ORCH_MAX_NAMED:
+                named_held += "; and {} more".format(len(held) - _ORCH_MAX_NAMED)
+            held_note = (" Additionally, a proof source for {} open item(s) is unreadable "
+                         "(cannot-evaluate): {}; fix the source, or release through the "
+                         "operator-owned escape sentinel.".format(len(held), named_held))
         return ("DENY",
                 "AIQT rule cntdef: {} granted open item(s) are actionable while this attended session "
                 "raises a blocking question that would idle them: {}. Two ways forward: DISPATCH the "
                 "actionable items (each then waits on a live tracked task), or RECORD each as blocked "
                 "by this decision (a human-decision blocker on the item plus a matching row in the "
                 "pending-decisions record); then re-issue the question. A fired timer or an existing "
-                "cron is neither.".format(len(ctx["actionable"]), listing), disposition)
+                "cron is neither.{}".format(len(ctx["actionable"]), listing, held_note), disposition)
     return ("DENY",
             "AIQT rules setcmp/cntdef: {} granted open item(s) are actionable: {}. Two legal exits: "
             "do one of them, or record a proven blocker on each (a live tracked-task ref, a matching "
@@ -13264,9 +13285,12 @@ def _orch_ask_attended(data, reg, root):
     external evidence and a not-before time also block); the deny names up to _ORCH_MAX_NAMED items and
     the two ways forward (dispatch them, or record them as blocked by this decision, then re-issue the
     question), and it is NEVER cap-relieved: those two exits are always available, so the fourth
-    unchanged question is denied exactly as the first. An enumerator error or an unreadable item proof
-    source is a cannot-evaluate DENY, bounded by _ORCH_SCHEDULE_CAP ask denials on an unchanged basis,
-    after which the question is allowed with findings (a guard that can be farmed trains its own bypass;
+    unchanged question is denied exactly as the first, and a backlog holding both an actionable item
+    and a cannot-evaluate item keeps that actionable deny, which then also names the held items in one
+    reason (held work never relieves a question past dispatchable work). An enumerator error or an
+    unreadable item proof source is a cannot-evaluate DENY, bounded by _ORCH_SCHEDULE_CAP ask denials
+    on an unchanged basis ONLY while no item is actionable, after which the question is allowed with
+    findings (a guard that can be farmed trains its own bypass;
     cannot-evaluate is a state the session may be unable to repair, which the actionable deny is not);
     the ask counters (ask_denials/ask_basis in turn-state.json) are this binding's own, so neither
     cap-relieved binding's denials relieve the other, and genuine human input resets them

@@ -259,9 +259,12 @@ the yield guard uses (ctx kind `ask`, no wake-naming requirement, counted by its
 resets the schedule pair) and is denied while actionable items are neither dispatched (waiting on a live
 tracked task) nor blocked by a human decision recorded in the pending-decisions record; the deny names the
 items and the two exits (dispatch them, or record them as blocked by this decision, then re-issue the
-question) and is never cap-relieved, since both exits stay available; only the cannot-evaluate denies (an
+question) and is never cap-relieved, since both exits stay available (a backlog holding both an actionable
+item and a cannot-evaluate item keeps that deny, which then also names the held items, so held work never
+buys relief past dispatchable work); only the cannot-evaluate denies (an
 enumerator error, a declared non-object enumerator, or an unreadable item proof source) carry the schedule
-path's three-denial cap on an unchanged basis, and the ask blocker's manifest residue carries the full
+path's three-denial cap on an unchanged basis, and only while no item is actionable, and the ask blocker's
+manifest residue carries the full
 contract and its residuals (a mode change after the question is asked, work the enumerator does not list,
 and question tools other than AskUserQuestion stay out of its view). The reader fails CLOSED to the
 guards-armed (`unattended`) posture, never silently disarming, when a marker IS present but cannot yield a
