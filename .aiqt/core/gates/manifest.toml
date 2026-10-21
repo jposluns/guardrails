@@ -471,7 +471,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "It checks the frozen clause inventory: every rule corpus-id has a clause row, each clause-id follows the corpus-id.ordinal scheme with an ordinal strictly above the cumulative maximum ever used for that corpus-id, each clause canonical text is a unique byte-exact substring within its source line window with a matching whole-file digest, and no tombstoned or retired id is resurrected. Its linkage to a single corpus rule is arguable, so none is claimed here."
+residue = "It checks the frozen clause inventory: every rule corpus-id has a clause row, each clause-id follows the corpus-id.ordinal scheme with an ordinal strictly above the cumulative maximum ever used for that corpus-id, each clause canonical text is a unique byte-exact substring within its source line window with a matching whole-file digest, no tombstoned or retired id is resurrected, and every sentence or clause of every corpus rule body (the rule sources under .aiqt/core/rules/; the body is the text after the frontmatter and after the first-line title heading, which is never checked, so an obligation written only as the title passes) lies inside a clause row's canonical text or is named, with a reason, in .aiqt/core/clause-exemptions.toml, a required file whose absence, or a missing exempt key, is a cannot-evaluate. Coverage is positional, not semantic: a row covers a sentence whatever obligation it names, and a reviewer, not the gate, judges an exemption's reason. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "placement"
