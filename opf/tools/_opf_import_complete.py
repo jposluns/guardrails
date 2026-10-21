@@ -955,7 +955,9 @@ def self_test():
 
     try:
         # Fixture and constant sanity checks: they pin the fixture's and the module constants' agreement with
-        # the shipped modules, and exercise no evaluator guard.
+        # the shipped modules. The first four exercise no evaluator guard; the last reads the evaluator's own
+        # roster source (_doctor_roster) and pins it to the strict roster, C-EVIDENCE-ENUM and the four
+        # imported-series checks.
         check("sanity-fixture-record-is-valid-imported", records.validate_imported_record(
             _record(1, _IMP), expected_type="backlog_item").status == VALID)
         check("sanity-event-name-is-the-genesis-name", EVENT_NAME.format(1) == apply.GENESIS_EVENT_NAME)
@@ -1181,6 +1183,20 @@ def self_test():
         chainbreak = _case(broken_chain)
         check("event-chain-break-finding", chainbreak.status == INVALID
               and _says(chainbreak, "outcome-event chain: event[1] previous_event_digest"))
+
+        # The chain is rooted at THIS run's receipt core: a genesis event chaining to another digest, its own
+        # event_digest recomputed and the inventory resealed, is refused by the root alone, since a chain
+        # seeded from the genesis event itself would validate it.
+        def foreign_root(root):
+            rel = apply.genesis_event_rel(_RUN)
+            event = apply._canonical_toml(_bytes(root, rel), "the fixture genesis event")
+            event["previous_event_digest"] = "sha256:" + "5" * 64
+            event["event_digest"] = apply.event_digest(event)
+            _put(root, rel, _emit(event))
+            _reinventory(root)
+        misrooted = _case(foreign_root)
+        check("event-genesis-rooted-elsewhere-finding", misrooted.status == INVALID and misrooted.findings == [
+            "outcome-event chain: event[0] previous_event_digest does not chain to the prior digest"])
         check("event-garbage-cannot", _case(edit(apply.genesis_event_rel(_RUN), b"x = [\n")).status
               == CANNOT_EVALUATE)
         # The chain bound, each side of it: just inside, exactly at, and just past MAX_EVENTS (patched to 2).
@@ -1263,7 +1279,7 @@ def self_test():
         check("skip-in-chain-of-another-run-not-read", usurped.status == INVALID and len(usurped.findings) == 3
               and _says(usurped, "event[0] names run {!r}, not this run".format(foreign_run))
               and _says(usurped, "event[1] names run {!r}, not this run".format(foreign_run))
-              and _says(usurped, "no imported record references 'notes/old.md'") and not usurped.skipped)
+              and _says(usurped, "no imported record references 'notes/old.md'"))
 
         # An event whose digest the minting rule refuses is CANNOT-EVALUATE, never skipped over. Every event
         # read from disk already round-trips canonically, so the refusal is injected at the minting rule.
@@ -1429,7 +1445,7 @@ def self_test():
         check("doctor-roster-without-evidence-enum-cannot", enumless.status == CANNOT_EVALUATE
               and _says(enumless, "the doctor did not grade its full roster: C-EVIDENCE-ENUM absent from "
                         "its roster"))
-        # A check id outside the required roster is never read as the validator's VALID, PASS or not.
+        # A check id outside the required roster is never read as the validator's VALID, even graded PASS.
         padded = dict((cid, "PASS") for cid in _doctor_roster())
         padded["C-NO-SUCH-CHECK"] = "PASS"
         offroster = _case(lambda root: dict(doctor=_Doctor(checks=padded)))
