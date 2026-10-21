@@ -38,7 +38,7 @@ CIA_FACETS = {"SECC", "SECI", "SECA", "SECP"}  # SECC=Confidentiality SECI=Integ
 # The global known-facet set: any rule may carry ANY of these as a `secondary` tag, cross-family (an aiqt
 # rule may tag a security facet and vice versa). Security codes are namespaced (SEC*) so none collides with
 # an AIQT facet (e.g. SECI vs the AIQT INTEG). The secondary element rules (known-facet, differs-from-
-# primary, no-repeat) come from the Architect's recorded decision (design-of-record: secondary = any known
+# primary, no-repeat) come from the maintainer's recorded decision (design-of-record: secondary = any known
 # facet), NOT spec section 4, which only types `secondary` as a sequence of facet-code strings.
 KNOWN_FACETS = set().union(*TIER_FACETS.values()) | CIA_FACETS
 # Keys allowed for EVERY rule family. secondary is NOT here: spec section 4 forbids it on the apex and

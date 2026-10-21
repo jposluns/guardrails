@@ -125,5 +125,7 @@ sources (NIST OSCAL catalogs, the ATLAS techniques CSV, the version-pinned CWE X
 deterministically; the AI RMF and ISO id sets are read from the published documents. The two ISO manifests carry the id plus the short
 clause/Annex TITLE only (a navigational pointer to a licensed copy), never the clause body text.
 
+## Deferred frameworks
+
 Not yet vendored (their keys stay inert until a manifest lands): Google SAIF (deferred pending a licence
 determination) and OWASP SCVS (no authoritative source). Each returns atomically with its manifest.
