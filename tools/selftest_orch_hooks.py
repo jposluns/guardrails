@@ -9425,7 +9425,32 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-redirect-mid-wrapper-nohup-notes",
                  _fg("timeout 5 > /dev/null nohup long_job"), "warn"),
                 ("trunc/oos-redirect-quoted-target-setsid-notes", _fg("> 'nohup' setsid long_job"), "warn"),
-                ("trunc/oos-dup-spaced-target-setsid-notes", _fg("2>& 1 setsid long_job"), "warn"),
+                # a dup target that is not a number: the blank after `>&` must not end the redirect hold
+                ("trunc/oos-dup-spaced-target-setsid-notes", _fg(">& /dev/null setsid long_job"), "warn"),
+                # A here-string `<<<` is a redirect whose word is its target, never a here-document opener:
+                # the command after the word is still read, and the lines after it are code, not a body.
+                # The escaped `\<` row is the control: bash reads `\<` as a word and `<<EOF` as a real
+                # here-document, so only an unquoted `<` before `<<` stops the opener.
+                ("trunc/oos-here-string-first-setsid-notes", _fg("<<< word setsid long_job"), "warn"),
+                ("trunc/oos-here-string-first-no-space-setsid-notes", _fg("<<<word setsid long_job"), "warn"),
+                ("trunc/oos-here-string-mid-wrapper-setsid-notes", _fg("nice <<< word setsid long_job"),
+                 "warn"),
+                ("trunc/oos-here-string-next-line-detach-notes", _fg("cat <<< word\nlong_job &"), "warn"),
+                ("trunc/oos-here-string-target-detacher-name-allows", _fg("<<< nohup long_job"), "allow"),
+                ("trunc/oos-escaped-lt-heredoc-body-allows", _fg("\\<<<EOF\nsetsid x\nEOF"), "allow"),
+                # The noclobber redirect `>|` is one operator, not a redirect then a pipe: its target named
+                # like a detacher is a filename, and the command after its target is still read. A pipe after
+                # the target still starts a command.
+                ("trunc/oos-noclobber-target-detacher-name-allows", _fg(">| nohup long_job"), "allow"),
+                ("trunc/oos-noclobber-trailing-detacher-name-allows", _fg("echo hi >| nohup"), "allow"),
+                ("trunc/oos-noclobber-first-setsid-notes", _fg(">| /tmp/f setsid long_job"), "warn"),
+                ("trunc/oos-noclobber-fd-first-setsid-notes", _fg("2>| /tmp/e setsid long_job"), "warn"),
+                ("trunc/oos-noclobber-then-pipe-nohup-notes", _fg("echo hi >| /tmp/f | nohup long_job"),
+                 "warn"),
+                # A named descriptor written directly before its operator is part of the redirect; a brace
+                # word with a blank after it is the command itself.
+                ("trunc/oos-named-fd-first-setsid-notes", _fg("{fd}> /tmp/x setsid long_job"), "warn"),
+                ("trunc/oos-brace-word-command-allows", _fg("{fd} setsid long_job"), "allow"),
                 # setsid waits under -w, --wait, or any unique prefix of --wait; --w is the shortest such
                 # prefix (just inside the bound), while `--` ends the options and --waitx is no prefix
                 # (both just outside, so each still notes).
@@ -9435,7 +9460,8 @@ def _main_isolated(report_path=None):
                 # Documented limit: a here-document inside a double-quoted command substitution (the
                 # commit-message form) is read as double-quoted text, so a body whose double quotes toggle
                 # that reading exposes a body `&` to an extra note; a body that leaves the reading
-                # balanced stays silent. The extra note errs toward noting, never toward a silent detach.
+                # balanced stays silent. The same misreading can also hide a detach: a body that leaves a
+                # quote open ends the scan inside it, and that case stays silent (the residue discloses both).
                 ("trunc/oos-commit-heredoc-amp-exposed-notes",
                  _fg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\""), "warn"),
                 ("trunc/oos-commit-heredoc-amp-allows",
@@ -9458,8 +9484,9 @@ def _main_isolated(report_path=None):
         check("trunc/oos-malformed-input-allows", _verdict(aiqt_hooks.orch_truncation_guard(_oos_bad)),
               "allow")
         # REGISTRY-REQUIRED MODE (opt-in, AIQT_ORCH_REQUIRE_REGISTRY): an ABSENT registry DENIES instead
-        # of leaving the guard inert, with a reason naming the mode and its repair; an explicit off value
-        # keeps the default inert allow, and a PRESENT registry behaves identically in both modes.
+        # of the default no-registry outcome (no deny, a readable foreground detach draws only the note),
+        # with a reason naming the mode and its repair; an explicit off value keeps that default outcome,
+        # and a PRESENT registry behaves identically in both modes.
         _rr = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
         _rr_old = os.environ.get(_rr)
         try:

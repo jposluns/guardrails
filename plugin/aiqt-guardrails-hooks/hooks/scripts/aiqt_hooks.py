@@ -13372,6 +13372,8 @@ _ORCH_NOTE_COMMAND_PREFIXES = frozenset((
 # One run of plain word characters: no blank, quote, escape, expansion or shell metacharacter.
 _ORCH_NOTE_WORD_RE = re.compile(r"[^\s;&|()<>'\"\\$`]+")
 _ORCH_NOTE_NUMBER_RE = re.compile(r"[0-9][0-9.]*[smhd]?")
+# A named descriptor written directly before a redirect operator ({fd}> file): part of the redirect.
+_ORCH_NOTE_NAMED_FD_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
 def _orch_setsid_waits(command, i):
@@ -13422,10 +13424,13 @@ def _orch_note_scan(command, bash_word_starts):
     as `))`, which is how bash tells it from a nested subshell. A redirect operator and its target operand
     are passed over without disturbing the pending command position (next_command), so a leading
     `2> /dev/null` does not hide the command word after its target and a spaced redirect target named like
-    a detacher is not read as one. A setsid, nohup or disown in command position (at the start of a
-    command, after an operator or a reserved word such as then or do, or after a wrapper such as env,
-    nice, sudo or timeout and its options, numbers and assignments) is reported, setsid only without -w or
-    --wait (or a unique prefix of --wait, of which --w is the shortest).
+    a detacher is not read as one. The same holds for a here-string `<<<`, whose word is a redirect target
+    and never a here-document delimiter, for the noclobber redirect `>|`, read as one operator and not as a
+    redirect then a pipe, and for a named descriptor written directly before its operator ({fd}> file). A
+    setsid, nohup or disown in command position (at the start of a command, after an operator or a
+    reserved word such as then or do, or after a wrapper such as env, nice, sudo or timeout and its
+    options, numbers and assignments) is reported, setsid only without -w or --wait (or a unique prefix of
+    --wait, of which --w is the shortest).
 
     Known misses, each also disclosed in the manifest residue: a detacher after a backtick or after a
     backslash-newline line continuation is not read in command position; a command substitution inside
@@ -13467,7 +13472,8 @@ def _orch_note_scan(command, bash_word_starts):
             prev_dup, word_start = False, False
             i += 1
             continue
-        if redirect_target and not (ch in "<> \t" or (ch == "&" and prev_dup)):
+        if redirect_target and not (ch in "<> \t" or (ch == "&" and prev_dup)
+                                    or (ch == "|" and command[i - 1] == ">")):
             redirect_target = False  # the redirect's target operand starts at this character
         if ch == "#" and word_start:
             nl = command.find("\n", i)
@@ -13532,7 +13538,8 @@ def _orch_note_scan(command, bash_word_starts):
                 command_position = next_command = False
                 i = end + 1
                 continue
-        if ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i):
+        if (ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i)
+                and not (prev_dup and command[i - 1] == "<")):  # the `<<` that ends a `<<<` opens nothing
             parsed = _parse_heredoc_delim(command, i + 2, n)
             if parsed is not None:
                 heredocs.append((parsed[1], parsed[2]))
@@ -13552,12 +13559,13 @@ def _orch_note_scan(command, bash_word_starts):
                 next_command = bool(
                     _ENV_ASSIGN_RE.match(word) or word.startswith("-")
                     or (at_break and (base in _ORCH_NOTE_COMMAND_PREFIXES
-                                      or _ORCH_NOTE_NUMBER_RE.fullmatch(word))))
+                                      or _ORCH_NOTE_NUMBER_RE.fullmatch(word)))
+                    or (end < n and command[end] in "<>" and _ORCH_NOTE_NAMED_FD_RE.fullmatch(word)))
                 command_position = False
                 prev_dup, word_start = False, False
                 i = end
                 continue
-        if ch in ";|":
+        if ch in ";|" and not redirect_target:
             command_position = next_command = True
         elif ch == "(":
             groups.append(next_command)
@@ -13568,9 +13576,10 @@ def _orch_note_scan(command, bash_word_starts):
                 command_position = False
             else:
                 command_position = next_command = True  # a case pattern's `)`: a command follows
-        elif ch in "<>":
+        elif ch in "<>|":
             # a redirect: the operand that follows is its target, not a command, so the pending command
             # position (next_command) must survive the operator, any blanks, and the whole target operand
+            # (a `|` reaches here only as the second character of the noclobber redirect `>|`)
             command_position = False
             redirect_target = True
         elif command_position:
