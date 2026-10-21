@@ -45,7 +45,11 @@ Exit convention (matches the repo's gates):
      exists, is drift too
   2  malformed input or a harness error (fail-closed): no opf/tools/ directory (opf/ absent included),
      an opf/tools/ entry that cannot be checked (an OSError other than a missing entry: a directory
-     that cannot be searched), a temporary directory that cannot be created, copy failed, a symlink
+     that cannot be searched), an argument the gate does not recognise (--ci-job=VALUE included: the
+     job name follows --ci-job as its own argument), a sweep that did not run exactly the legs it must
+     run (that job's own legs under --ci-job, every leg otherwise; a sweep that ran no leg included),
+     refused with no sweep result trusted and the OK line never printed,
+     a temporary directory that cannot be created, copy failed, a symlink
      anywhere in opf/ that resolves outside the isolated copy (the copy keeps every symlink as the link
      itself, never its target, and is refused when one leaves it, so no symlink the copy holds
      reaches outside it), no interpreter, a per-leg bound that cannot be derived, any other exception
@@ -65,7 +69,9 @@ Exit convention (matches the repo's gates):
 One bound is DELIBERATELY SHORTER than the work its leg is sanctioned to do: opf-tooling-selftest's,
 below the budget opf.py grants its own blocked-isolation leg, because a bound above that budget would not
 fit the CI job (see _LEG_CEILING_S); its trip is reported as the bound tripping (exit 2), never as a
-failure the leg reported. A run under load heavier than the recorded ceilings' can trip a healthy leg's
+failure the leg reported. That bound is re-derived on every run from the copied sources' declared
+waits, so it moves with them: on this tree it is 3615 s, risen from 1458 s (3 x the leg's 486 s
+ceiling) when opf.py's declared waits grew, and still below that blocked-isolation budget. A run under load heavier than the recorded ceilings' can trip a healthy leg's
 bound and exit 2 (see _LOAD_HEADROOM).
 --self-test follows the same convention: 1 only for a definite failure (the real opf/ does not verify,
 registration drift, the flipped copy is NOT caught, or a self-test check fails, which it reports by
@@ -202,17 +208,21 @@ _SUBSET = [
 #     opf-tooling-selftest leg that slow, 3 x 486 = 1458 s would cover it by 109.3 s.
 #   * adopt-apply's self-test took 812.8 s inside a loaded opf.py --self-test run (opf.py runs the
 #     same _opf_adopt_apply.self_test in-process), about 99 times this table's 8.2 s. Were the
-#     standalone opf-adopt-apply-selftest leg that slow, slowdown under load would be far from uniform,
-#     and the leg would trip its 60 s bound: exit 2, a loud refusal to evaluate, never a false pass.
+#     standalone opf-adopt-apply-selftest leg that slow, slowdown under load would be far from uniform;
+#     on this tree its bound is 2880 s (its declared waits, 2820 s, plus the 60 s launch margin), so a
+#     run at that reported figure would finish inside its bound, and one slower still would trip it:
+#     exit 2, a loud refusal to evaluate, never a false pass.
 # MEASURED against the second figure on 2026-10-15, at this table's opf/ tree, plain, on a shared
 # 24-CPU host, each run against a copy of opf/ alone as the gate runs it: inside one opf.py
 # --self-test run (446.6 s end to end, exit 0, load5 about 25) adopt-apply's self-test took 7.4 s,
 # and four standalone runs of it, two just before and two just after, took 7.7 to 7.9 s (load5 24.2 to
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
-# The multiplier is capped by the job fit (_job_worst_case_s against the 21600 s default job limit):
-# on this table the worst case is 20616 s at 3 and 22812 s at 4, and the largest multiplier that fits
-# is 3.455.
+# The multiplier is capped by the job fit (_job_worst_case_s against each CI job's 21600 s default
+# limit): on this tree the whole roster's worst case is 39967 s at 3 (no one job fits it: the premise
+# of the split), the per-job worst cases are 20471 s (A) and 20446 s (B) at 3 and 20653 s (A) and
+# 23402 s (B) at 4, and the largest multiplier that fits both jobs is 3.395 (at 3.396, job B's worst
+# case is 21602.32 s, over its limit).
 # The multiplier does NOT cover the one loaded run measured against it, and cannot. One --self-test
 # run on 2026-10-15, at the revision carrying this table, at load5 about 50 (between 42 and 61 while it
 # ran), passed (exit 0) with three legs past their ceilings by unequal factors: opf-doctor-selftest
@@ -221,19 +231,23 @@ _SUBSET = [
 # 1140 s bound only because its declared-wait term sets that bound (3 x 69 = 207 s alone would have
 # killed it). That is one run at one load, REPORTED by its account and not reproduced here. Covering it
 # on the headroom term alone needs a multiplier above 299.3 / 69 = 4.33768... (so 4.338 to three
-# places, since 4.337 x 69 = 299.253 falls short of 299.3), above 4, where the job worst case is
-# already 22812 s, over the 21600 s limit. So the multiplier stays 3, and a run under such
-# load CAN exit 2 on a healthy leg: each leg whose bound is the headroom term alone (on this table
-# opf-homes-selftest 273 s, opf-tooling-selftest 1458 s, opf-adopt-selftest 456 s and
-# opf-oplock-selftest 324 s) trips its bound once it runs more than 3 times its ceiling. That exit 2 is
+# places, since 4.337 x 69 = 299.253 falls short of 299.3); the multiplier is one constant for every
+# leg, and at 4.338 job B's worst case is about 24609 s, over its 21600 s limit (job A's, the job that
+# holds this leg, would be about 20715 s). So the multiplier stays 3, and a run under such
+# load CAN exit 2 on a healthy leg: each leg whose bound is the headroom term alone (on this tree
+# opf-homes-selftest 273 s, opf-adopt-selftest 456 s, opf-adopt-state-selftest and
+# opf-adopt-complete-selftest 1800 s each, and opf-oplock-selftest 324 s) trips its bound once it runs
+# more than 3 times its ceiling. That exit 2 is
 # reported as the bound tripping, never as a pass and never as a finding.
 # DELIBERATE SHORTER DEADLINE: opf-tooling-selftest. READ FROM SOURCE (opf/tools/opf.py, the watchdog
 # regression runner's budgets), opf.py --self-test grants its blocked-isolation leg ALONE
 # 31 * _deadline_case_budget(180) = 31 * (180 + 5 + 1) = 5766 s (31 isolation cases, each its 180 s
 # timeout, the 5 s fixture cleanup grace and the 1 s receipt allowance), so the whole self-test grants
-# itself more; this leg's bound (1458 s on this table, 3 x its 486 s ceiling) sits far below that. A
-# bound above it, 5766 + 60 = 5826 s, counts in both sweeps and in the negative leg: 3 x (5826 - 1458)
-# = 13104 s more, a job worst case of 33720 s, over the 21600 s limit. So this bound takes the
+# itself more; this leg's bound (3615 s on this tree: its declared waits, 3554.012 s rounded up to
+# 3555 s, plus the 60 s launch margin; it rose with those waits from the former 1458 s, 3 x its 486 s
+# ceiling) sits far below that. A
+# bound above it, 5766 + 60 = 5826 s, counts in both sweeps and in the negative leg: 3 x (5826 - 3615)
+# = 6633 s more, a job A worst case of 27104 s, over the 21600 s limit. So this bound takes the
 # kill-timeout rule's exception (AGENTS.md): a deliberately shorter deadline, above the leg's recorded
 # run and cutting a longer run short on purpose, with reaching it attributed to the deadline (LEG BOUND
 # EXCEEDED, exit 2; the self-test's negative leg, under the same bound, reports its trip as cannot
@@ -286,10 +300,11 @@ _DRAIN_MARGIN_S = 10
 # it adds nothing while the two stay equal; it keeps the lower limit explicit should the launch margin
 # change. The self-test discriminates it all the same: it passes _leg_bounds a launch margin one second
 # below the floor and requires every leg whose other terms then sit below the floor to be raised to
-# exactly the floor. At the former 120 s floor this table's job worst case is 22276 s at a headroom of
-# 3, over the job limit, and no single multiplier both covers the reported 1348.7 s figure above (that
-# needs a multiplier above 1348.7 / 486 = 2.77510..., so 2.776 to three places, since 2.775 x 486 =
-# 1348.65 falls short) and fits the job (that allows at most 2.687).
+# exactly the floor. At the former 120 s floor, job B's worst case on this tree is 21986 s at a
+# headroom of 3, over its 21600 s job limit (that floor raises thirteen of job B's legs and none of
+# job A's; at the 60 s floor job B's worst case is 20446 s). The reported 1348.7 s opf.py figure above
+# is covered at any multiplier on this tree: that leg's bound is set by its declared waits (3615 s),
+# not by the headroom term.
 _MIN_LEG_BOUND_S = 60
 # The names the isolated copy of opf/ leaves out (bytecode artefacts). _materialize copies through
 # _COPY_IGNORE, and the whole-roster check refuses a script it would leave out through the same
@@ -307,6 +322,10 @@ _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 # two jobs' worst cases overlap, so _partition_fault names either shape and the fit check and the
 # --ci-job runs refuse on it (fail-closed). A leg moved between jobs updates this table in the same
 # change, under the fit check's per-job arithmetic.
+# LIMIT: nothing here checks WHICH --ci-job value each workflow job passes. The workflow is read only
+# for each job's time limit (_ci_job_limit_s), and the CI-parity gate compares the union of every
+# job's commands, so a workflow job that ran the other job's --ci-job value would pass both; what
+# holds the pairing is review of the two steps in the workflow file itself.
 _CI_JOB_LEGS = {
     "opf-closure-a": frozenset({
         "opf-homes-selftest",
@@ -378,7 +397,9 @@ _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, be
 #     plain, on a shared 24-CPU host, load5 18.1 at its start and 18.2 at its end): one run at one
 #     load, never a bound. The after-launch fault vectors were added after that run; beyond their
 #     deadlines above, their work (four launches, and one throwaway opf/ copy and bound scan through
-#     _run_closure) is NOT measured into the 12.8 s.
+#     _run_closure) is NOT measured into the 12.8 s. The per-job sweep vectors were added after it
+#     too: they launch no process and hold no deadline, and their work (a few throwaway opf/ copies
+#     and bound scans through run() and main()) is NOT measured into the 12.8 s either.
 # 311 + 38.4 = 349.4 s, rounded up to 350 s.
 _VECTOR_ALLOWANCE_S = 350
 
@@ -1246,7 +1267,13 @@ def _report(results):
     there can end its own leg), so the report says so rather than blame the environment. A killed leg
     whose cleanup did not complete (row[6], the named faults from _kill_and_reap: an unreaped leader, a
     pipe still held by an escaped descendant) is reported as CLEANUP INCOMPLETE by name, and never reads
-    as clean either."""
+    as clean either. A sweep that ran NO leg proves nothing: an empty results list is refused (2), and
+    the OK line is printed only after at least one leg's clean row (the caller separately requires the
+    swept legs to be exactly the legs the sweep owes)."""
+    if not results:
+        print("STANDALONE CLOSURE: NOT EVALUATED (the sweep ran no leg; an empty sweep proves nothing "
+              "and never reads as clean)", file=sys.stderr)
+        return 2
     failed = [row for row in results if row[4] and row[1] is not None and row[1] > 0]
     signalled = [row for row in results if row[4] and row[1] is not None and row[1] < 0]
     unlaunched = [row for row in results if not row[4]]
@@ -1307,7 +1334,9 @@ def _report(results):
 def run(root, ceilings=None, legs=None):
     """Materialize opf/ alone and run the subset in isolation. legs restricts the sweep to those leg
     names (one CI job's part of _CI_JOB_LEGS; main() checks the partition before passing one), None
-    runs every leg; the registration checks and the bound scan always cover the whole roster.
+    runs every leg; the registration checks and the bound scan always cover the whole roster. The
+    sweep must then have run exactly the legs it owes (legs, or every leg when None): any other swept
+    set, an empty one included, is refused (2) before any row is reported, never read as clean.
     Returns 0 (closure holds), 1 (a subset gate
     failed: closure broken; or registration drift, named, found before opf/ is copied, any bound is
     derived or any leg runs), or 2 (harness error, no opf/tools/ directory, an opf/tools/ entry that
@@ -1335,7 +1364,9 @@ def _run_closure(root, ceilings=None, legs=None):
     from it, opf.py included, is drift; drift in the roster itself is named even when there is no
     opf/tools/, and with a clean roster no opf/tools/ is cannot evaluate (2). Only those checks' own
     assertions (_registration_drift) are a definite finding here. A copy refused for a symlink that
-    resolves outside it (_materialize) is cannot evaluate (2), named with each such link. Any other
+    resolves outside it (_materialize) is cannot evaluate (2), named with each such link. A sweep
+    whose swept legs are not exactly the legs it owes (_job_legs over legs; an empty sweep included)
+    is refused, cannot evaluate (2), naming the missing and unexpected legs, no row reported. Any other
     exception or a SystemExit, from a registration check (an opf/tools/ entry that cannot be checked
     included), the copy, the bound scan, the legs or the report of their results (a leg result it
     cannot read included), an AssertionError included, is a harness fault: named, cannot evaluate (2),
@@ -1380,6 +1411,21 @@ def _run_closure(root, ceilings=None, legs=None):
             return 2, None, stopped
         results = (_run_subset(opf_root, tmp, bounds) if legs is None
                    else _run_subset(opf_root, tmp, bounds, legs))
+        # The sweep must have run exactly the legs it owes, in roster order: a filter that dropped a
+        # leg (every leg included) or swept one another job holds would otherwise still reach the OK
+        # line. Refused before any row is reported, so no sweep result is trusted (fail-closed).
+        expected = _job_legs(legs)
+        swept = [row[0] for row in results]
+        if swept != expected:
+            missing = [name for name in expected if name not in swept]
+            unexpected = [name for name in swept if name not in expected]
+            detail = ("missing: {}; unexpected: {}".format(
+                ", ".join(missing) or "none", ", ".join(unexpected) or "none")
+                if missing or unexpected else "the legs were swept repeatedly or out of roster order")
+            stopped = ("the sweep ran {} leg(s), not exactly the {} leg(s) it must run ({}); no sweep "
+                       "result is trusted (cannot evaluate)".format(len(swept), len(expected), detail))
+            print("error: " + stopped, file=sys.stderr)
+            return 2, None, stopped
         return _report(results), results, None
     except (Exception, SystemExit) as exc:
         stopped = "harness fault before, around or after the legs ({})".format(_fault_text(exc))
@@ -3405,6 +3451,113 @@ def _harness_routing_self_test():
           "exception escaping the closure legs as a harness fault, exit 2")
 
 
+def _ci_job_sweep_self_test():
+    """A --ci-job sweep runs exactly its job's legs, and anything else is refused, never the OK line.
+    For each CI job, run() with that job's legs and main() with its --ci-job argument sweep each of
+    the job's legs once, in roster order, and exit 0 (the control showing the strict check passes a
+    correct sweep); a filter that drops every leg and one that ignores the restriction (the two
+    mutant filters a sweep check must catch) are each refused (exit 2) with the missing or unexpected
+    legs named and no OK line; a report over no rows is refused the same way (_report); and main()
+    refuses an unrecognized argument (--ci-job=VALUE), a value naming no job, a repeated --ci-job and
+    a partition holding a leg in no job, each before any leg runs. Every leg runs as a recording stub
+    launching nothing (subprocess.Popen is a raiser throughout), so the wiring held is run()'s and
+    main()'s own."""
+    launches = []
+
+    def clean_leg(_opf_root, script, *_args, **_kwargs):
+        launches.append(script)
+        return 0, "", 0.1, True, []
+
+    real_run_subset = _run_subset
+
+    def drop_every_leg(_opf_root, _run_dir, _bounds, _legs=None):
+        return []
+
+    def ignore_the_job(opf_root, run_dir, bounds, _legs=None):
+        return real_run_subset(opf_root, run_dir, bounds)
+
+    def refuse(_argv, **_kwargs):
+        raise OSError("launch refused by the ci-job sweep vector")
+
+    broken = dict(_CI_JOB_LEGS)
+    broken["opf-closure-b"] = frozenset(broken["opf-closure-b"] - {"opf-prompt-pack"})
+    scripts = dict((job, [script for name, script, _args in _SUBSET if name in _CI_JOB_LEGS[job]])
+                   for job in _CI_JOBS)
+    every_script = [script for _name, script, _args in _SUBSET]
+    ok_line = "STANDALONE CLOSURE: OK"
+    tmp = Path(tempfile.mkdtemp(prefix="opf-closure-jobs-"))
+    real_popen = subprocess.Popen
+    subprocess.Popen = refuse
+    try:
+        _throwaway_opf(tmp)
+        cases = []
+        for job in _CI_JOBS:
+            job_legs = _CI_JOB_LEGS[job]
+            unexpected = ", ".join(name for name, _script, _args in _SUBSET
+                                   if name not in job_legs)
+            cases.extend((
+                ("run-" + job, {"_run_one": clean_leg},
+                 lambda legs=job_legs: run(tmp, None, legs), None, 0, (ok_line,), (), scripts[job]),
+                ("run-{}-swept-nothing".format(job),
+                 {"_run_one": clean_leg, "_run_subset": drop_every_leg},
+                 lambda legs=job_legs: run(tmp, None, legs), None, 2,
+                 ("ran 0 leg(s), not exactly the {} leg(s)".format(len(job_legs)),
+                  "missing: " + ", ".join(_job_legs(job_legs))), (ok_line,), []),
+                ("run-{}-ignored-the-job".format(job),
+                 {"_run_one": clean_leg, "_run_subset": ignore_the_job},
+                 lambda legs=job_legs: run(tmp, None, legs), None, 2,
+                 ("not exactly the {} leg(s)".format(len(job_legs)), "unexpected: " + unexpected),
+                 (ok_line,), every_script),
+                ("main-" + job, {"_run_one": clean_leg, "repo_root": lambda: tmp}, main,
+                 ["--ci-job", job], 0, (ok_line,), (), scripts[job])))
+        cases.extend((
+            ("main-broken-partition",
+             {"_run_one": clean_leg, "repo_root": lambda: tmp, "_CI_JOB_LEGS": broken}, main,
+             ["--ci-job", "opf-closure-b"], 2,
+             ("the CI job partition is broken", "opf-prompt-pack: in 0 CI jobs"), (ok_line,), []),
+            ("main-unrecognized-argument", {"_run_one": clean_leg, "repo_root": lambda: tmp}, main,
+             ["--ci-job=opf-closure-a"], 2,
+             ("unrecognized argument '--ci-job=opf-closure-a'",), (ok_line,), []),
+            ("main-value-naming-no-job", {"_run_one": clean_leg, "repo_root": lambda: tmp}, main,
+             ["--ci-job", "opf-closure-c"], 2, ("--ci-job must name one of",), (ok_line,), []),
+            ("main-repeated-ci-job", {"_run_one": clean_leg, "repo_root": lambda: tmp}, main,
+             ["--ci-job", "opf-closure-a", "--ci-job", "opf-closure-b"], 2,
+             ("--ci-job given more than once",), (ok_line,), [])))
+        for label, rebound, call, argv, want_code, want, refused, want_launches in cases:
+            del launches[:]
+            out = io.StringIO()
+            saved_argv = sys.argv
+            if argv is not None:
+                sys.argv = [sys.argv[0]] + argv
+            try:
+                with _swapped(**rebound):
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                        code = _under_test("ci-job-sweep: " + label, call)
+            finally:
+                sys.argv = saved_argv
+            said = out.getvalue()
+            if (code != want_code or not all(w in said for w in want)
+                    or any(r in said for r in refused) or launches != want_launches):
+                raise _CheckFailure("closure/ci-job-sweep: {} (exit {}, want {}; launches {!r}): "
+                                    "{!r}".format(label, code, want_code, launches, said[-2000:]))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = _under_test("ci-job-sweep: empty-report", _report, [])
+        said = out.getvalue()
+        if code != 2 or ok_line in said or "the sweep ran no leg" not in said:
+            raise _CheckFailure("closure/ci-job-sweep: empty-report (exit {}, want 2): {!r}".format(
+                code, said))
+    finally:
+        subprocess.Popen = real_popen
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("RED a --ci-job sweep through run() and main(): each job's sweep runs exactly its legs in "
+          "roster order and exits 0; a filter that drops every leg or ignores the job's legs -> "
+          "refused, exit 2, the missing or unexpected legs named, never the OK line; a report over no "
+          "rows -> refused, exit 2, never the OK line; an unrecognized argument (--ci-job=VALUE), a "
+          "value naming no job, a repeated --ci-job and a partition holding a leg in no job -> each "
+          "refused by main(), exit 2, no leg run")
+
+
 def _raiser(exc):
     """A phase that raises exc (the fast-phase routing vectors)."""
     def phase():
@@ -3535,6 +3688,7 @@ def _fast_vectors(root):
     _negative_verdict_self_test()
     _verdict_routing_self_test()
     _harness_routing_self_test()
+    _ci_job_sweep_self_test()
     _check_routing_self_test()
     _cleanup_doubles_self_test()
     required = _bounds_self_test(root)
@@ -3548,7 +3702,8 @@ def self_test_main(job=None):
     _CI_JOB_LEGS key, already validated by main()) restricts the positive leg's sweep to that job's
     legs and runs the negative leg only in the job that holds opf-tooling-selftest (_closure_legs);
     None sweeps every leg and runs the flip. The fast phase always covers the whole roster, the
-    partition and every job's fit. The bound and
+    partition and every job's fit, and holds each job's sweep through run() and main() to exactly
+    that job's legs over stubbed leg runners (_ci_job_sweep_self_test). The bound and
     verdict legs run first and fast: the per-leg bounds cover each leg's table-derived need (the floor
     term included, shown raising bounds under a launch margin lowered below it) and fit the CI job,
     time-scaled stub legs show a flat bound below the recorded work killing a correct leg while
@@ -3603,17 +3758,35 @@ def self_test_main(job=None):
 
 
 def main():
+    # Every argument must be recognised and consumed: an unknown one (--ci-job=VALUE included, since
+    # the job name follows --ci-job as its own argument) is refused with nothing run, never silently
+    # ignored, because an ignored --ci-job spelling would sweep every leg where CI meant one job's.
     argv = sys.argv[1:]
     job = None
-    if "--ci-job" in argv:
-        where = argv.index("--ci-job")
-        value = argv[where + 1] if where + 1 < len(argv) else None
-        if value not in _CI_JOB_LEGS:
-            print("error: --ci-job must name one of {} (got {!r}); nothing was run (cannot "
-                  "evaluate)".format(", ".join(_CI_JOBS), value), file=sys.stderr)
+    self_test = False
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "--self-test":
+            self_test = True
+        elif argument == "--ci-job":
+            value = argv[index + 1] if index + 1 < len(argv) else None
+            if job is not None:
+                print("error: --ci-job given more than once; nothing was run (cannot evaluate)",
+                      file=sys.stderr)
+                return 2
+            if value not in _CI_JOB_LEGS:
+                print("error: --ci-job must name one of {} (got {!r}); nothing was run (cannot "
+                      "evaluate)".format(", ".join(_CI_JOBS), value), file=sys.stderr)
+                return 2
+            job = value
+            index += 1
+        else:
+            print("error: unrecognized argument {!r} (this gate takes --self-test and --ci-job "
+                  "<job>); nothing was run (cannot evaluate)".format(argument), file=sys.stderr)
             return 2
-        job = value
-    if "--self-test" in argv:
+        index += 1
+    if self_test:
         return self_test_main(job)
     if job is None:
         return run(repo_root())

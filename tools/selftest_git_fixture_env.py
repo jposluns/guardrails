@@ -1056,9 +1056,12 @@ CONFIG_MEMBER_BOUNDS = {
     ("opf/tools/check_opf_init.py", "--self-test"): 1800,
     # The closure gate's self-test runs as TWO registered members since the closure CI work was
     # split between two CI jobs (--ci-job: the gate partitions its legs between the jobs, and the
-    # flip runs in the job whose legs hold opf-tooling-selftest). Each half sweeps a strict subset
-    # of the legs the measured pre-split runs swept, plus the same fast vectors, so each half's
-    # work is below the whole self-test's; both keep the whole self-test's 3600 s entry as a
+    # flip runs in the job whose legs hold opf-tooling-selftest). Each half sweeps only its own part
+    # of the current roster, plus the same fast vectors, so each half's sweep is a proper part of the
+    # whole self-test's over the same tree; that is NOT a subset of what the measured pre-split runs
+    # below swept, since the second job holds two legs (opf-adopt-state-selftest and
+    # opf-adopt-complete-selftest) absent from the tree those runs measured. Both halves keep the
+    # whole self-test's 3600 s entry as a
     # deliberate shorter deadline rather than a bound sized from a run of its own.
     # Sized outside SIZING (no config-lane time of this member is known: the lane runs below
     # reached the 1200 s default, so they have no known length and none is fed to the formula).
