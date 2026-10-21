@@ -116,7 +116,8 @@ unless it is ONE cleanly-lexed simple command whose command word is the literal,
 (no separator, grouping, loop, conditional, function definition, heredoc, here-string, substitution,
 backtick or comment; redirects limited to a literal descriptor duplication or a plain literal file
 target) AND whose argv is the EXACT declared argv or a recognized 'gh pr merge' naming an explicit
-separated -R/--repo target outside the declared repos scope. Where that discovery finds NO
+-R/--repo target outside the declared repos scope in one of the three read spellings (the
+separated '-R VALUE' / '--repo VALUE', or '--repo=VALUE'). Where that discovery finds NO
 declaration or no merge member, the guard stays INERT for merge spellings whatever the shape (the
 disclosed scope residual: a command that would enter a declaring checkout from elsewhere is not
 seen), and a non-git
@@ -17280,14 +17281,16 @@ def _main_isolated(monitor):
         def mpnote(label, command, cwd, want_substr):
             # Assert the allow-note's own message, not only the decision: two advisory outcomes
             # (the no-work-tree note and the unreadable-body note) share the allow-note decision,
-            # so a decision expectation alone cannot tell which note fired.
+            # so a decision expectation alone cannot tell which note fired. The complete shape is
+            # judged through _reduce_result too, so a deny-bearing or otherwise malformed object
+            # carrying the expected message can never read as the note.
             code, obj, _stderr = aiqt_hooks.merge_path_guard(
                 {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                  "tool_input": {"command": command}, "cwd": cwd})
-            note = (obj or {}).get("systemMessage", "")
-            if code != 0 or want_substr not in note:
-                failures.append("{}: expected an exit-0 note carrying {!r}, got exit {} with: "
-                                "{!r}".format(label, want_substr, code, note))
+            note = (obj or {}).get("systemMessage", "") if isinstance(obj, dict) else ""
+            if _reduce_result(code, obj) != "allow-note" or want_substr not in note:
+                failures.append("{}: expected an allow-note carrying {!r}, got exit {} with: "
+                                "{!r}".format(label, want_substr, code, obj))
 
         def ppdecide(cwd):
             data = {"hook_event_name": "SessionStart"}
@@ -17760,11 +17763,12 @@ def _main_isolated(monitor):
             mpexpect("(mp-a20) a multi-line wrapper body whose words never spell a gh merge in order "
                      "still allows (the ordered walk discriminates)", "allow",
                      "bash -c 'git merge main\ngit push'", mpd)
-            # a descriptor redirection's '&' belongs to ONE command, never to a separator: it is
-            # blanked before the chunk split, so it cannot scatter one command's words across
-            # chunks and hide the spelling from the scan. The detection is additive only: mp-a33c
-            # keeps the exact-argv 2>&1 allow, and mp-k9 pins that no shape is newly authorized
-            # where nothing declares
+            # a descriptor redirection's '&' belongs to ONE command, never to a separator, and so
+            # does the '|' of the '>|' forced-clobber redirect: both are blanked before the chunk
+            # split, so they cannot scatter one command's words across chunks and hide the
+            # spelling from the scan. The detection is additive only: mp-a33c keeps the
+            # exact-argv 2>&1 allow, and mp-k9* pin that no shape is newly authorized where
+            # nothing declares
             mpexpect("(mp-d62) a 2>&1 between the merge words cannot split the scan: DENIES",
                      "deny", "gh pr 2>&1 merge --admin 3", mpd)
             mpexpect("(mp-d62b) the same spelling inside a bash -c body DENIES too", "deny",
@@ -17775,9 +17779,81 @@ def _main_isolated(monitor):
                      "gh pr >&2 merge --admin 3", mpd)
             mpexpect("(mp-d62e) an &>file spelling cannot split the scan either", "deny",
                      "gh pr &>log merge --admin 3", mpd)
+            mpexpect("(mp-d62f) a <&- descriptor close cannot split the scan either", "deny",
+                     "gh pr <&- merge --admin 3", mpd)
+            mpexpect("(mp-d62g) an &>>file spelling cannot split the scan either", "deny",
+                     "gh pr &>>log merge --admin 3", mpd)
+            mpexpect("(mp-d66) a >|file redirect between the merge words cannot split the scan: "
+                     "DENIES", "deny", "gh pr >|log merge --admin 3", mpd)
+            mpexpect("(mp-d66b) a >|file redirect between 'gh' and 'pr' cannot split it either",
+                     "deny", "gh >|log pr merge --admin 3", mpd)
+            mpexpect("(mp-d66c) the >|file spelling inside a bash -c body DENIES too", "deny",
+                     "bash -c 'gh pr >|log merge --admin 3'", mpd)
+            mpexpect("(mp-d66d) a >|file redirect between 'gh api' and the merge endpoint DENIES "
+                     "too", "deny", "gh api >|log -X PUT repos/owner/repo/pulls/3/merge", mpd)
+            # a ';', '|' or '&' inside a quoted or escaped word (a quoted redirect target, a
+            # quoted header or field value, an escaped separator) is part of ONE command's word
+            # in bash, never a separator: the chunk split is quote- and escape-aware, so such a
+            # character cannot scatter the merge words across chunks and hide the spelling.
+            # mp-a40 keeps the exact-argv allow with a quoted separator-bearing redirect target
+            # (awareness only merges chunks), and the mp-k* twins pin inertness with no
+            # declaration
+            mpexpect("(mp-d67) a ';' inside a quoted redirect target cannot split the scan: "
+                     "DENIES", "deny", "gh pr >'a;b' merge --admin 3", mpd)
+            mpexpect("(mp-d67b) a '|' inside a quoted redirect target cannot split it either",
+                     "deny", "gh >'a|b' pr merge --admin 3", mpd)
+            mpexpect("(mp-d67c) an '&' inside a double-quoted redirect target cannot split it "
+                     "either", "deny", 'gh pr 2>"x&y" merge --admin 3', mpd)
+            mpexpect("(mp-d67d) the quoted-target spelling inside a bash -c body DENIES too",
+                     "deny", "bash -c 'gh pr >\"a;b\" merge --admin 3'", mpd)
+            mpexpect("(mp-d67e) a ';' inside a quoted gh api header value cannot split the scan",
+                     "deny", "gh api -X PUT -H 'a;b' repos/owner/repo/pulls/3/merge", mpd)
+            mpexpect("(mp-d67f) the quoted gh api header inside a bash -c body DENIES too",
+                     "deny",
+                     "bash -c \"gh api -X PUT -H 'a;b' repos/owner/repo/pulls/3/merge\"", mpd)
+            mpexpect("(mp-d68) an escaped ';' in a redirect target cannot split the scan: DENIES",
+                     "deny", "gh pr >a\\;b merge --admin 3", mpd)
+            mpexpect("(mp-d68b) the escaped-separator spelling inside a bash -c body DENIES too",
+                     "deny", "bash -c 'gh pr >a\\;b merge --admin 3'", mpd)
+            mpexpect("(mp-d68c) an escaped ';' in a gh api header value cannot split the scan",
+                     "deny", "gh api -X PUT -H a\\;b repos/owner/repo/pulls/3/merge", mpd)
+            mpexpect("(mp-a40) the exact declared argv with a quoted separator-bearing literal "
+                     "redirect target still allows (the aware split only merges chunks, and the "
+                     "real lexer still judges the redirect)", "allow",
+                     "gh pr merge --auto >'a;b'", mpg)
             mpexpect("(mp-k9) the blanked spelling stays inert with no declaration (detection is "
                      "additive; nothing is newly authorized)", "allow",
                      "gh pr 2>&1 merge --admin 3", mpn)
+            mpexpect("(mp-k9b) the <&- spelling stays inert with no declaration too", "allow",
+                     "gh pr <&- merge --admin 3", mpn)
+            mpexpect("(mp-k9c) the &>>file spelling stays inert with no declaration too", "allow",
+                     "gh pr &>>log merge --admin 3", mpn)
+            mpexpect("(mp-k10) the >|file spelling stays inert with no declaration", "allow",
+                     "gh pr >|log merge --admin 3", mpn)
+            mpexpect("(mp-k10b) the gh..pr >|file spelling stays inert too", "allow",
+                     "gh >|log pr merge --admin 3", mpn)
+            mpexpect("(mp-k10c) the wrapped >|file spelling stays inert too", "allow",
+                     "bash -c 'gh pr >|log merge --admin 3'", mpn)
+            mpexpect("(mp-k10d) the gh api >|file spelling stays inert too", "allow",
+                     "gh api >|log -X PUT repos/owner/repo/pulls/3/merge", mpn)
+            mpexpect("(mp-k11) the quoted ';' redirect target stays inert with no declaration",
+                     "allow", "gh pr >'a;b' merge --admin 3", mpn)
+            mpexpect("(mp-k11b) the quoted '|' target stays inert too", "allow",
+                     "gh >'a|b' pr merge --admin 3", mpn)
+            mpexpect("(mp-k11c) the double-quoted '&' target stays inert too", "allow",
+                     'gh pr 2>"x&y" merge --admin 3', mpn)
+            mpexpect("(mp-k11d) the wrapped quoted target stays inert too", "allow",
+                     "bash -c 'gh pr >\"a;b\" merge --admin 3'", mpn)
+            mpexpect("(mp-k11e) the quoted gh api header stays inert too", "allow",
+                     "gh api -X PUT -H 'a;b' repos/owner/repo/pulls/3/merge", mpn)
+            mpexpect("(mp-k11f) the wrapped quoted gh api header stays inert too", "allow",
+                     "bash -c \"gh api -X PUT -H 'a;b' repos/owner/repo/pulls/3/merge\"", mpn)
+            mpexpect("(mp-k12) the escaped ';' target stays inert with no declaration", "allow",
+                     "gh pr >a\\;b merge --admin 3", mpn)
+            mpexpect("(mp-k12b) the wrapped escaped target stays inert too", "allow",
+                     "bash -c 'gh pr >a\\;b merge --admin 3'", mpn)
+            mpexpect("(mp-k12c) the escaped gh api header stays inert too", "allow",
+                     "gh api -X PUT -H a\\;b repos/owner/repo/pulls/3/merge", mpn)
             # read-only and scope spellings: every merge spelling denies, only the literal -R/--repo
             # out-of-scope read allows
             mpexpect("(mp-d32) --disable-auto beside a method flag DENIES", "deny",
@@ -18065,7 +18141,8 @@ def _main_isolated(monitor):
                      "DENIES too (a here-document is never part of the one simple command shape)",
                      "deny", "gh pr merge --auto; bash <<'EOF'\ngh pr view 4\nEOF", mpg)
             # separator-only lines: an empty segment carrying a REAL separator (a spelling bash
-            # itself refuses) is no longer dropped before the single-segment test, while a blank
+            # rejects with a syntax error at that separator, though any complete earlier line
+            # still runs) is no longer dropped before the single-segment test, while a blank
             # line still is, so a trailing newline keeps the exact-argv allow
             mpexpect("(mp-d63) a ';' alone on the next line after the exact declared argv DENIES "
                      "(the separator-only segment no longer vanishes before the shape test)",
@@ -18160,6 +18237,9 @@ def _main_isolated(monitor):
                      "the same compound under a merge-less declaration, which stays inert)",
                      "gh pr merge 3 && echo merged", mpb,
                      "PRESENT but could not be read")
+            mpreason("(mp-d14d) the bad-declaration deny names the checkout's toplevel it fails "
+                     "closed for, like the strict-shape denies (mp-d64*)",
+                     "gh pr merge 3", mpb, "mpbad'")
             mpexpect("(mp-a13) malformed declaration leaves a non-merge command alone", "allow",
                      "git status", mpb)
             mp_badreg.write_text(json.dumps({"version": True, "merge": {"argv": ["x"]}}),
@@ -18321,6 +18401,21 @@ def _main_isolated(monitor):
                 mpexpect(label, want, tool=tool, tool_input=ti, cwd=cwd)
             mcp("(mp-m1) MCP merge_pull_request on the declared repo DENIES", "deny",
                 "mcp__github__merge_pull_request", {"owner": "owner", "repo": "repo"}, mpd)
+            # the MCP deny names the resolved toplevel it enforces, like the Bash denies
+            # (mp-d64*): run from a subdirectory, so the quoted path must end at the toplevel
+            _mp_mcp = aiqt_hooks.merge_path_guard(
+                {"hook_event_name": "PreToolUse",
+                 "tool_name": "mcp__github__merge_pull_request",
+                 "tool_input": {"owner": "o", "repo": "r"}, "cwd": str(mp_gh / "sub")})
+            _mp_mcp_reason = ((_mp_mcp[1] or {}).get("hookSpecificOutput", {})
+                              .get("permissionDecisionReason", ""))
+            if mpdecide({"hook_event_name": "PreToolUse",
+                         "tool_name": "mcp__github__merge_pull_request",
+                         "tool_input": {"owner": "o", "repo": "r"},
+                         "cwd": str(mp_gh / "sub")}) != "deny" \
+                    or "mpgh'" not in _mp_mcp_reason:
+                failures.append("(mp-m10) the MCP deny must name the resolved toplevel, got: "
+                                "{!r}".format(_mp_mcp_reason))
             mcp("(mp-m2) MCP merge tool with no readable owner/repo DENIES (governed fail-safe)",
                 "deny", "mcp__github__merge_pull_request", {}, mpd)
             mcp("(mp-m3) MCP merge tool on another repo allows (scope discriminates)", "allow",

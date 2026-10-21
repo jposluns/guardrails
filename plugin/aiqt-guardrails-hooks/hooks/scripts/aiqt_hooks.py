@@ -11166,22 +11166,33 @@ _MERGE_VALUE_LONGS = frozenset((
 # earlier never-executes-its-arguments allowlist was removed: printf -v evaluates an array subscript in
 # its target argument, and proving which commands never execute an argument is shell-semantics
 # modelling this guard no longer performs). The scan is an ordered word walk per command chunk (the
-# text between ; | and & separators): each word is searched once from the end of the previous match,
+# text between unquoted, unescaped ; | and & separators): each word is searched once from the end of
+# the previous match,
 # so the whole reading is linear and carries NO gap bound (any amount of whitespace or filler between
 # the words still matches; an earlier bounded-gap regex silently stopped matching past its bound). A
 # NEWLINE does not split a chunk: a quoted wrapper-body string can carry a real newline inside ONE
 # inner command (a multi-line graphql query), so splitting there hid the merge; where a newline really
 # separates two inner commands, the merged chunk can only ADD a match, the disclosed over-deny
 # direction for text this guard already cannot parse. A DESCRIPTOR-REDIRECTION spelling ('2>&1',
-# '>&2', '<&-', '&>file', '&>>file') does not split a chunk either: its '&' belongs to one command's
-# redirect, never to a command separator, so those spellings are blanked (replaced with a space)
-# BEFORE the split; otherwise 'gh pr 2>&1 merge' would scatter one command's words across two chunks
-# and hide the spelling. Blanking is purely ADDITIVE for detection: it can only merge text into one
-# chunk (more matches, the disclosed over-deny direction), never authorize a shape; where a
+# '>&2', '<&-', '&>file', '&>>file') does not split a chunk either, and neither does the '>|'
+# forced-clobber redirect: their '&' and '|' belong to one command's redirect operator, never to a
+# command separator, so those spellings are blanked (replaced with a space) BEFORE the split;
+# otherwise 'gh pr 2>&1 merge' or 'gh pr >|log merge' would scatter one command's words across two
+# chunks and hide the spelling. Blanking is purely ADDITIVE for detection: it can only merge text
+# into one chunk (more matches, the disclosed over-deny direction), never authorize a shape; where a
 # declaration arms the rule, the single-simple-command read still judges every redirect through the
-# real lexer.
-_RAW_REDIRECT_NEUTRAL_RE = re.compile(r"\d*[<>]&|&>>?")
-_RAW_CHUNK_SPLIT_RE = re.compile(r"[;|&]")
+# real lexer. The split itself is QUOTE- and ESCAPE-AWARE (_raw_chunk_split): a ';', '|' or '&'
+# inside a quoted or escaped word (a quoted redirect target, a quoted header or field value,
+# '>a\;b') is part of one command's word in bash, so splitting there scattered the merge words
+# across chunks and hid the spelling too. Awareness can only MERGE chunks (fewer splits, more
+# matches, the same over-deny direction), never hide a spelling a finer chunk carried. The scan
+# regex consumes a backslash escape, a single-quoted string, or a double-quoted string (with its
+# escapes), so only its single-character [;|&] alternative marks a real separator; an UNCLOSED
+# quote leaves its characters unconsumed, so a later separator still splits there, and bash refuses
+# the whole unclosed-quote command with a syntax error, so nothing runs from the lost chunk. Escape
+# decoding inside $'...' stays the disclosed boundary shared with _dequoted_text.
+_RAW_REDIRECT_NEUTRAL_RE = re.compile(r"\d*[<>]&|&>>?|\d*>\|")
+_RAW_CHUNK_SCAN_RE = re.compile(r"\\.|'[^']*'|\"(?:\\.|[^\"\\])*\"|[;|&]", re.DOTALL)
 _RAW_GH_RE = re.compile(r"(?i)\bgh\b")
 _RAW_PR_RE = re.compile(r"(?i)\bpr\b")
 _RAW_MERGE_RE = re.compile(r"(?i)\bmerge\b")
@@ -11640,7 +11651,9 @@ def _merge_simple_gh(command):
     separator (';', '&&', '||', '|', '|&', '&', or a newline between commands; a BLANK-LINE empty
     segment, whose separator is the bare newline, is skipped so a trailing newline stays the one
     command, but an empty segment carrying a REAL separator - a leading ';', a ';' or '&' alone on
-    a line, spellings bash itself refuses - refuses the shape with that separator named); the
+    a line, spellings bash rejects with a syntax error at that separator, though any complete
+    line BEFORE the stray separator still runs, so this refusal is the safe over-deny - refuses
+    the shape with that separator named); the
     segment must carry a command word; that word must be the literal,
     unquoted word 'gh', BOTH as the decoded first token AND as the raw spelling at the start of
     the segment, so a wrapper, an assignment prefix, a path spelling (/usr/bin/gh), a quote or an
@@ -11668,10 +11681,11 @@ def _merge_simple_gh(command):
             segments.append(cand)
         elif cand.sep_after:
             # an empty segment carrying a real separator (a leading ';', a ';' or '&' alone on
-            # a line) is never part of one clean simple command: bash itself refuses these
-            # spellings, so the shape refuses them too rather than letting the separator-only
-            # segment vanish before the single-segment test. Only blank-line empty segments
-            # (separator '': a bare newline) are skipped.
+            # a line) is never part of one clean simple command: bash rejects such a stray
+            # separator with a syntax error (any complete line before it still runs, so this is
+            # the safe over-deny), and the shape refuses it too rather than letting the
+            # separator-only segment vanish before the single-segment test. Only blank-line
+            # empty segments (separator '': a bare newline) are skipped.
             return "a command separator ({!r})".format(cand.sep_after), None
     if len(segments) != 1 or segments[0].sep_after:
         seps = [seg.sep_after for seg in segments if seg.sep_after]
@@ -11704,11 +11718,29 @@ def _merge_simple_gh(command):
     return None, seg
 
 
+def _raw_chunk_split(text):
+    """The command chunks of text, split ONLY at a ';', '|' or '&' outside every quote and escape:
+    _RAW_CHUNK_SCAN_RE consumes backslash escapes and quoted strings as it walks, so a separator
+    character inside them (part of one command's word in bash) never ends a chunk, only the bare
+    [;|&] alternative does. Those bare matches are the scan's only single-character ones (an escape
+    is two characters, a quoted string at least two), which is how they are told apart here. Linear
+    in the text, and never raises."""
+    chunks = []
+    start = 0
+    for match in _RAW_CHUNK_SCAN_RE.finditer(text):
+        if match.end() - match.start() == 1:
+            chunks.append(text[start:match.start()])
+            start = match.end()
+    chunks.append(text[start:])
+    return chunks
+
+
 def _merge_raw_hit(text):
     """True when the raw merge backstop sees a gh pr-merge or gh api merge spelling in text: within one
-    chunk (no ; | or & between them; a newline does not split, see _RAW_CHUNK_SPLIT_RE, and neither
-    does the '&' of a descriptor redirection such as 2>&1, >&2, <&- or &>file, blanked first via
-    _RAW_REDIRECT_NEUTRAL_RE because it belongs to one command, not to a separator), 'gh' then 'pr'
+    chunk (no unquoted, unescaped ; | or & between them; a newline does not split, see
+    _raw_chunk_split, and neither does the '&' or '|' of a redirect spelling such as 2>&1, >&2, <&-,
+    &>file or >|file, blanked first via _RAW_REDIRECT_NEUTRAL_RE because it belongs to one command,
+    not to a separator), 'gh' then 'pr'
     then 'merge' as words in order, or 'gh'
     then 'api' then a merge endpoint or mutation name, with no bound on the gaps. Backslash-newline
     pairs are dropped first, so a line continuation inside a wrapper body cannot split a pair of words
@@ -11717,7 +11749,7 @@ def _merge_raw_hit(text):
     words may sit."""
     text = text.replace("\\\n", "")
     text = _RAW_REDIRECT_NEUTRAL_RE.sub(" ", text)
-    for chunk in _RAW_CHUNK_SPLIT_RE.split(text):
+    for chunk in _raw_chunk_split(text):
         start = _RAW_GH_RE.search(chunk)
         if start is None:
             continue
@@ -11731,8 +11763,9 @@ def _merge_raw_hit(text):
 
 
 _MERGE_BAD_DECL_REASON = (
-    "AIQT rule artbr1 (branch-and-merge-on-green): .aiqt/operations.json is PRESENT but could not be "
-    "read ({}), so this guard cannot tell which merge path the repository requires. It fails closed and "
+    "AIQT rule artbr1 (branch-and-merge-on-green): .aiqt/operations.json at the checkout '{1}' is "
+    "PRESENT but could not be read ({0}), so this guard cannot tell which merge path the repository "
+    "requires. It fails closed and "
     "denies this merge-shaped call rather than let a corrupted or unreadable declaration silently disarm "
     "the merge gate. Repair .aiqt/operations.json (version 1, members merge/prepush only), then retry.")
 _MERGE_BAD_DECL_BANNER = (
@@ -11781,8 +11814,10 @@ def merge_path_guard(data):
     never silently disarm the merge gate.
     DISCOVERY, for every Bash command whose raw or de-quoted text ANYWHERE carries a merge spelling
     (_merge_raw_hit, line continuations joined first: gh..pr..merge as ordered words within one
-    ;|&-split chunk, with descriptor-redirection spellings (2>&1, >&2, <&-, &>file) blanked before
-    the split so their '&' never scatters one command's words across chunks, or gh..api.. followed
+    chunk, the chunks split only at a ';', '|' or '&' outside every quote and escape, with
+    descriptor-redirection spellings (2>&1, >&2, <&-, &>file, &>>file) and the '>|' redirect
+    blanked before the split so neither a redirect's '&' or '|' nor a separator character inside
+    a quoted or escaped word scatters one command's words across chunks, or gh..api.. followed
     by a merge REST endpoint or merge-mutation name, in the
     command text, a quoted string, a shell-string or eval body, a here-document body or plain prose
     alike): the declaration is read from the git toplevel of the SESSION CWD alone. Where no
@@ -11885,7 +11920,7 @@ def merge_path_guard(data):
         if status == "absent":
             return _allow()
         if status == "bad":
-            return _deny(_MERGE_BAD_DECL_REASON.format(payload),
+            return _deny(_MERGE_BAD_DECL_REASON.format(payload, root),
                          _MERGE_BAD_DECL_BANNER.format(tool_name))
         cfg = payload["merge"]
         if cfg is None or tool_name.rpartition("__")[2] not in cfg["mcp_tools"]:
@@ -11903,12 +11938,13 @@ def merge_path_guard(data):
                     "fail-safe)".format(tool_name))
         declared = " ".join(cfg["argv"])
         return _deny(
-            "AIQT rule artbr1 (branch-and-merge-on-green): this repository declares its merge path in "
-            ".aiqt/operations.json, and this call is {}, which bypasses it. The protected line "
+            "AIQT rule artbr1 (branch-and-merge-on-green): the checkout at '{}' declares its merge "
+            "path in .aiqt/operations.json, and this call is {}, which bypasses it. The protected line "
             "integrates only through the declared merge command; run '{}' instead, so the declared gate "
-            "decides the merge.".format(what, declared),
-            "AIQT guardrail: denied {} in a repository whose .aiqt/operations.json declares the merge "
-            "command '{}' (rule artbr1); run the declared command instead.".format(what, declared))
+            "decides the merge.".format(root, what, declared),
+            "AIQT guardrail: denied {} in the checkout at '{}', whose .aiqt/operations.json declares "
+            "the merge command '{}' (rule artbr1); run the declared command instead."
+            .format(what, root, declared))
     if tool_name != "Bash":
         return _allow()  # out of scope (defensive; the matcher governs)
     command = (data.get("tool_input") or {}).get("command")
@@ -11936,7 +11972,7 @@ def merge_path_guard(data):
                 "so no .aiqt/operations.json can have opted a checkout in")
         status, payload = _load_operations(root)
         if status == "bad":
-            return _deny(_MERGE_BAD_DECL_REASON.format(payload),
+            return _deny(_MERGE_BAD_DECL_REASON.format(payload, root),
                          _MERGE_BAD_DECL_BANNER.format("Bash"))
         cfg = payload["merge"] if status == "ok" else None
         if cfg is None:
@@ -12017,7 +12053,7 @@ def merge_path_guard(data):
     for r in roots:
         status, payload = _load_operations(r)
         if status == "bad":
-            return _deny(_MERGE_BAD_DECL_REASON.format(payload),
+            return _deny(_MERGE_BAD_DECL_REASON.format(payload, r),
                          _MERGE_BAD_DECL_BANNER.format("Bash"))
         if status == "ok" and payload["merge"] is not None:
             declared_here = True
