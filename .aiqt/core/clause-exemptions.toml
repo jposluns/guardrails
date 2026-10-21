@@ -19,7 +19,7 @@ reason = "Scope note on the rule itself; no obligation of its own."
 
 [[exempt]]
 corpus-id = "citint"
-text = "This rule narrows the reference-capture rule (refcap) to the reviewed commit: refcap requires the\nspecific reference to be captured at the moment the claim is made, never reconstructed later from\nmemory, and the obligations above scope that capture to a file opened this session at the commit\nunder review."
+text = "This rule narrows the reference-capture rule (refcap) to the reviewed commit: refcap requires the\nspecific reference captured when the claim is made, never reconstructed from memory, and the\nobligations above scope that capture to a file opened this session at the commit under review."
 reason = "Cross-reference explaining how citint.1 to citint.3 narrow the reference-capture rule (refcap); no obligation of its own."
 
 [[exempt]]
@@ -44,12 +44,12 @@ reason = "Example illustrating cntprd.2; no obligation of its own."
 
 [[exempt]]
 corpus-id = "cntprd"
-text = "This is the companion of the measured-and-estimated-figures-stay-separate rule, on an orthogonal axis:\nthat rule keeps a figure's grade, whether it was measured or estimated, attached to it, while this one\nkeeps a figure's definition, the predicate that selected it, attached to it, and a sound figure carries\nboth."
+text = "This complements the measured-and-estimated-figures-stay-separate rule on an orthogonal axis:\nthat rule attaches a figure's grade, measured or estimated; this one attaches its definition, the\npredicate that selected it; a sound figure carries both."
 reason = "Cross-reference to the measured-and-estimated-figures-stay-separate rule (estsep); no obligation of its own."
 
 [[exempt]]
 corpus-id = "cntprd"
-text = "It is distinct from the completeness-claim-enumerates-its-set rule, which governs completion-class\nquantifiers over a whole set and already holds that a count the assistant holds is not that set's\nauthoritative index; this rule governs any reported count, whether or not it claims completeness."
+text = "It differs from the\ncompleteness-claim-enumerates-its-set rule, which governs completion-class quantifiers over a whole\nset and already holds that the assistant's count is not that set's authoritative index; this rule governs any\nreported count, claiming completeness or not."
 reason = "Scope note separating this rule from the completeness-claim rule (setcmp); no obligation of its own."
 
 [[exempt]]
@@ -119,7 +119,7 @@ reason = "Scope carve-out naming what estsep.1 permits; a permission, not an obl
 
 [[exempt]]
 corpus-id = "estsep"
-text = "What it forbids is the unlabelled blend: an estimate\nfolded into a measured total and the whole presented as if it were measured."
+text = "It forbids the unlabelled blend: an estimate\nfolded into a measured total, the whole presented as measured."
 reason = "Restates estsep.1; it adds no obligation."
 
 [[exempt]]
@@ -129,7 +129,7 @@ reason = "Summary of estsep.2; it adds no obligation."
 
 [[exempt]]
 corpus-id = "estsep"
-text = "A\nfigure that carries its grade honestly is sound however uncertain it is; a figure that hides its grade\nmisreports precision it does not have."
+text = "A figure that\ncarries its grade honestly is sound however uncertain; one that hides it misreports precision it does\nnot have."
 reason = "Rationale for estsep.2; no obligation of its own."
 
 [[exempt]]
@@ -149,7 +149,7 @@ reason = "Closing restatement of obsbeh.1; it adds no obligation."
 
 [[exempt]]
 corpus-id = "obsbeh"
-text = "A claim that a shared or external resource has failed, or that you are blocked because it has, is a\nbehavioural claim about that resource's live state, and a symptom seen only in your own dependent work, a\nkilled worker or a rejected payload, is not that observation and cannot tell a resource-wide failure from a\nself-caused local condition such as your own footprint or a malformed request."
+text = "A claim that a shared or external resource has failed, or that you are blocked because it has, is a\nbehavioural claim about the resource's live state; a symptom seen only in your own dependent work, a killed\nworker or a rejected payload, is not that observation and cannot tell a resource-wide failure from a\nself-caused local condition such as your own footprint or a malformed request."
 reason = "Classifies a resource-failure claim as a behavioural claim and names what does not count as observing it; the obligation it triggers is obsbeh.10."
 
 [[exempt]]
@@ -179,17 +179,17 @@ reason = "Opens the disclosed-residual paragraph of vfxcmt.3 to vfxcmt.11; no ob
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "It does not catch a declaration whose author omitted a path the change semantically needs, the under-scoped-declaration residual the equality check cannot reach because a planned-but-uncommitted path is absent from both the commit and the declaration and so leaves no divergence to surface, an undeclared context file, a submodule whose own working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than the review intends, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to that revision."
+text = "It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual: a planned-but-uncommitted path, absent from both the commit and the declaration, leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it."
 reason = "Disclosed residuals of vfxcmt.3 to vfxcmt.11; the closing clause restates vfxcmt.10 (the verifier reads the declared revision)."
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "Base derivation reads the commit's raw parent headers with replacement-ref and graft resolution disabled, so a replacement ref, a grafts entry, or a commit-graph cache cannot rewrite the parent the base is taken against; in a shallow or partial clone where a parent object the derivation needs is absent, the reconciliation is a cannot-evaluate rather than a review against a wrong or empty base."
+text = "Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, so no replacement ref, grafts entry, or commit-graph cache can rewrite the parent the base is taken against; in a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base."
 reason = "Restates vfxcmt.7 and its cannot-evaluate case inside the disclosure paragraph; it adds no obligation."
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "These bounds are disclosed here rather than implied covered."
+text = "These bounds are disclosed here, not implied covered."
 reason = "Disclosure note; no obligation of its own."
 
 [[exempt]]

@@ -3976,6 +3976,12 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_adopt_apply.py": "Apply-shell refusal, evidence and journal vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_discover.py": "Read-only source-discovery vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_hook.py": "Pure enable-hook merge vectors over synthetic registration bytes.",
+    "opf/tools/_opf_adopt_state.py": ("Containment vectors over temporary product trees in a replaced "
+                                       "environment (private empty HOME, no system git config, C locale, "
+                                       "umask 022); its fixtures commit through plumbing only "
+                                       "(_opf_adopt_apply._selftest_git_commit and the S16 add, "
+                                       "write-tree, commit-tree, update-ref helper), never a hook."),
+    "opf/tools/_opf_adopt_complete.py": "Completion-check vectors over temporary post-apply filesystem fixtures.",
     "opf/tools/_opf_import_batch.py": "Pure batch parsing, canonical emission and digest vectors over in-memory bytes.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
