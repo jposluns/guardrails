@@ -9,7 +9,9 @@ roadmap = ["windows"]            # not supported at this release
 
 # Allowances for the forbidden code spans (3.1 "per-file allowlisted code spans"). The enforced sets
 # are the zero-width characters U+200B, U+200C, U+200D, U+2060, U+FEFF and the complete Unicode
-# Bidi_Control set U+061C, U+200E, U+200F, U+202A..U+202E, U+2066..U+2069. EMPTY at genesis: no shipped
+# Bidi_Control set U+061C, U+200E, U+200F, U+202A..U+202E, U+2066..U+2069. The gate also refuses a
+# literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR, and no row here can clear either one:
+# write the escape text instead. EMPTY at genesis: no shipped
 # file legitimately carries these characters today. Each future row must bind: the exact repo-relative
 # path, the file's current raw-byte sha256 (stale digest = fail-closed), the byte start/end of the
 # span, the exact permitted codepoints ("U+200B" form), and a rationale. Narrow, non-overlapping,

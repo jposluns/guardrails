@@ -487,7 +487,7 @@ reason = "test-code"
 path = "opf/tools/_opf_emit.py"
 function = "self_test"
 form = "call"
-count = 3
+count = 5
 class = "EXEMPT"
 reason = "test-code"
 
@@ -684,10 +684,18 @@ class = "EXEMPT"
 reason = "test-code"
 
 [[site]]
+path = "opf/tools/_opf_record.py"
+function = "_self_test_units"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
 path = "opf/tools/_opf_schema.py"
 function = "self_test"
 form = "call"
-count = 11
+count = 15
 class = "EXEMPT"
 reason = "test-code"
 
@@ -879,7 +887,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
-function = "flip_t79.narrow"
+function = "flip_t84.narrow"
 form = "call"
 count = 1
 class = "EXEMPT"
@@ -895,6 +903,14 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
+function = "t22_homes2_claim_reserves"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
 function = "t2_round_trip"
 form = "call"
 count = 1
@@ -903,7 +919,31 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
-function = "t74_live_holder_rule"
+function = "t74_never_seize_dead_run_release"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t79_kill_after_reserve"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t80_two_runs_never_same_id"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
+function = "t81_cross_kind_reservations"
 form = "call"
 count = 1
 class = "EXEMPT"
@@ -1076,6 +1116,44 @@ count = 3
 class = "EXEMPT"
 reason = "test-code"
 
+# the self-test seam that reads tomllib._parser to rebind and restore parse_key for the injected
+# key-depth and parse-class cases (_host_parse_refusal)
+[[site]]
+path = "tools/check_python_floor.py"
+function = "_host_parse_refusal"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test seam that reads tomllib._parser to damage parse_key results (_malformed_host_refusal)
+[[site]]
+path = "tools/check_python_floor.py"
+function = "_malformed_host_refusal"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test seam that reads tomllib._parser to rebind and restore parse_key for the injected
+# key-depth and parse-class cases (_parse_refusal)
+[[site]]
+path = "tools/check_python_host_pin.py"
+function = "_parse_refusal"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test seam that reads tomllib._parser to damage parse_key results (_malformed_refusal)
+[[site]]
+path = "tools/check_python_host_pin.py"
+function = "_malformed_refusal"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 [[site]]
 path = "tools/check_portability.py"
 function = "_self_test_main_isolated"
@@ -1146,6 +1224,14 @@ path = "tools/check_version_monotonicity.py"
 function = "self_test_main"
 form = "alias"
 count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/gen_agents.py"
+function = "self_test_main"
+form = "alias"
+count = 1
 class = "EXEMPT"
 reason = "test-code"
 
