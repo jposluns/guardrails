@@ -15,39 +15,55 @@ MODES (auto-detected from GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH; overridable for 
   - push (to main): scan the messages of the newly landed commits (before..after). The post-merge tripwire,
     the authoritative check on the text that actually landed (a title/body edit after the PR check, or a
     merge-dialog edit of the squash message, is caught only here). Fires after publication -> drives removal.
-  - --pre-push --repo <abs> --body-file <abs> --base <40-hex sha> [--title <text>]: the LOCAL,
-    pre-publication mode, run by tools/push_branch.py BEFORE a first push leaves the machine (the one
-    mode that is prevention rather than detection). Every input is explicit (no ambient default): the
-    repository root, the drafted PR body file (composed with --title when one is given, the same
-    one-blob rule as the CI mode), and the base SHA. Channels: the body file, the changelog.toml
-    release items added in base..HEAD (parsed with tomllib at both revisions, a multiset difference),
-    the commit messages in base..HEAD, and the current branch name.
-  - --self-test: run embedded fail-cases in memory (CI invokes this alongside the real run).
+  - --pre-push --repo <abs> --body-file <abs> --base <40-hex sha> [--title <text>] [--head <40-hex sha>]
+    [--branch <name>]: the LOCAL, pre-publication mode, run by tools/push_branch.py BEFORE a first push
+    leaves the machine (the one mode that is prevention rather than detection). Every input is explicit
+    (no ambient default): the repository root (and it must BE the root: a subdirectory would read the
+    changelog as absent), the drafted PR body file (composed with --title when one is given, the same
+    one-blob rule as the CI mode), and the base SHA, which must be a proper ancestor of the scanned
+    commit, so the scanned range is exactly the non-empty range the push adds. --head and --branch, when
+    given, bind the scan to the exact commit and branch name the helper resolved once and will push;
+    without them HEAD and the current branch are resolved here. Channels: the body file, every string
+    added to the parsed changelog.toml in base..head (keys and values alike, a multiset difference), the
+    commit messages in base..head, and the branch name. On a clean run it prints `body sha256:`, the
+    digest of the exact body bytes it scanned, for the helper to reprint.
+  - --self-test (honoured only as the SOLE argument): run embedded fail-cases in memory (CI invokes this
+    alongside the real run). Mixed with anything else it is an unknown argument and the run fails closed,
+    so it can never stand in for a requested production scan.
 
 ATTRIBUTION LAYER (pre-merge and pre-push phases; the post-merge push scan keeps its landed-message
 denylist scope). Three narrow patterns, nothing broader: a trailer-shaped `*-by:` line at line start
 whose value names an AI identity, a generated/written/drafted with/by/using phrase followed within a
-bounded window by an AI identity, and an AI vendor address. The identity set is single-sourced: the
-pattern is byte-identical to AI_IDENTITY_RE in the commit-identity hook
-(.aiqt/core/hooks/scripts/aiqt_hooks.py), and the self-test extracts the hook's pattern from its source
-and fails on any drift. A bare product mention ("fix the Claude adapter's matcher") is NOT attribution
-and stays silent by design.
+bounded window by an AI identity (matched against the original line, and the complete identity must end
+inside the window), and an AI vendor address bounded so a longer domain is not read as the vendor's. The
+identity set is defined in TWO PLACES kept byte-identical by a test: this gate's AI_IDENTITY_PATTERN and
+AI_IDENTITY_RE in the commit-identity hook (.aiqt/core/hooks/scripts/aiqt_hooks.py); the self-test
+extracts the hook's pattern from its source and fails on any drift, including a changed compile-call
+shape, so divergence is caught whenever the self-test runs. A bare product mention ("fix the Claude
+adapter's matcher") is NOT attribution and stays silent by design.
 
 HONEST SCOPE. Like check_leaks, this catches ACCIDENTAL reintroduction of internal terms/host specifics; it
 is not an exfiltration control, and deliberate obfuscation (mid-word splits, zero-width, homoglyphs) can
 evade the hash layer. The attribution layer is the same honesty: paraphrased attribution ("drafted with an
-assistant") and AI names outside the shared identity set are a disclosed residual, and a push made without
-tools/push_branch.py never runs the pre-push mode at all. It never echoes the matching text, token,
-codename, or a malformed field value (it reports the channel and, for a commit, the short SHA).
+assistant"), AI names outside the shared identity set, and attribution split across lines ("Generated
+with" ending one line, the name opening the next) are a disclosed residual; and the layer has a disclosed
+false-positive cost, because a bounded textual window cannot read intent: an authorship phrase followed
+within the window by an unrelated AI name, or a `*-by:` trailer whose value merely mentions one, fires
+(the self-test documents these). A push made without tools/push_branch.py never runs the pre-push mode at
+all. It never echoes the matching text, token, codename, or a malformed field value (it reports the
+channel and, for a commit, the short SHA).
 
 FAIL-CLOSED. A missing/unreadable/malformed/empty denylist, missing/unreadable/malformed event JSON, a PR
 event missing or mistyping a required field, a revision field that is not a canonical 40-hex SHA, a
 branch-creation push whose complete range cannot be established, an unresolvable commit range, or an event
 kind whose channel set cannot be established -> exit 2. In --pre-push mode, additionally: an unknown,
-repeated or valueless argument, a missing required argument, a relative --repo or --body-file, a body file
-that is missing, a symlink, not a regular file, over MAX_BODY_BYTES or not UTF-8, an empty --title, a
---base that is not a canonical non-zero 40-hex SHA, a changelog.toml that does not parse or has an
-unexpected shape at either revision, a detached HEAD, or any git failure -> exit 2, and
+repeated or valueless argument, a missing required argument, a relative --repo or --body-file, a --repo
+that is not the repository root, a body file that is missing, a symlink, not a regular file, over
+MAX_BODY_BYTES or not UTF-8, an empty --title or --branch, a --base or --head that is not a canonical
+non-zero 40-hex SHA, a --head that does not name a commit in the repository, a --base that is not a
+proper ancestor of the scanned commit (base equal to it included: an empty range scans nothing and is
+never clean), a changelog.toml that does not parse or has an unexpected shape at either revision, a
+changelog.toml that exists at base but not at head, a detached HEAD, or any git failure -> exit 2, and
 tools/push_branch.py refuses the push on it. A finding -> exit 1. Clean -> exit 0. Missing input
 is never read as clean. A confidentiality gate that cannot load its codename denylist does not run:
 absent/empty is exit 2, stricter than the file gate, because here there is no compensating repo-wide file
@@ -67,6 +83,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import hashlib
 import json
 import os
 import re
@@ -83,25 +100,35 @@ _ZERO_SHA = "0" * 40
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")   # a canonical git object id (the zero-SHA also matches)
 
 # --- the AI-attribution layer (pre-merge and pre-push phases) -------------------------------------
-# AI_IDENTITY_PATTERN is byte-identical to AI_IDENTITY_RE in the commit-identity hook
-# (.aiqt/core/hooks/scripts/aiqt_hooks.py), which owns the identity set; the self-test extracts the
-# hook's pattern from its source (AST, never an import of that module) and fails on any drift, so
-# the gate and the hook cannot diverge silently.
+# AI_IDENTITY_PATTERN is kept byte-identical to AI_IDENTITY_RE in the commit-identity hook
+# (.aiqt/core/hooks/scripts/aiqt_hooks.py). These are TWO COPIES under a parity test, not one shared
+# runtime definition: the self-test extracts the hook's pattern from its source (AST, never an
+# import of that module) and fails on any drift, a changed compile-call shape included, so the gate
+# and the hook cannot diverge silently past a self-test run.
 AI_IDENTITY_PATTERN = (
     r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
     r"|@anthropic\.com|@openai\.com")
 AI_IDENTITY_RE = re.compile(AI_IDENTITY_PATTERN)
 # A trailer-shaped line: a `*-by:` key at line start (any leading blanks), so prose that merely
 # QUOTES a trailer key mid-sentence never matches; the finding needs an AI identity in the value.
+# A value that merely MENTIONS an AI name also fires: a documented false-positive cost.
 _AI_TRAILER_RE = re.compile(r"^[ \t]*[A-Za-z][A-Za-z0-9-]*-by[ \t]*:[ \t]*(?P<value>.*)$",
                             re.IGNORECASE)
 # An authorship verb bound to with/by/using; the AI identity must then match INSIDE the bounded
-# window right after the phrase, so a later unrelated mention on the same line is never bound to it.
+# window right after the phrase, against the ORIGINAL line: the complete identity must end within
+# the window, so a mention far down the line is not bound to the phrase, and a longer word cut at
+# the window edge is never read as the shorter identity it begins with. A nearer mention that is
+# unrelated ("generated by the protobuf compiler, used by the Claude adapter") still fires: a
+# bounded textual window cannot read intent, a documented false-positive cost.
 _AI_PHRASE_RE = re.compile(r"(?i)\b(?:generated|written|drafted)[ \t]+(?:with|by|using)\b")
 _AI_PHRASE_WINDOW = 60
 # An AI vendor address names the vendor as a party wherever it appears (its usual carrier is a
-# generated Co-authored-by trailer, but the address alone is already attribution).
-_AI_ADDRESS_RE = re.compile(r"(?i)@(?:anthropic|openai)\.com")
+# generated Co-authored-by trailer, but the address alone is already attribution). The lookahead
+# requires the domain to END at .com, so a longer domain that merely begins with the vendor's
+# (@anthropic.community) is not read as the vendor's. The shared identity pattern above keeps its
+# boundary-free address alternatives to stay byte-identical with the hook, so through the trailer
+# and phrase layers such a longer domain can still fire: a documented false-positive cost.
+_AI_ADDRESS_RE = re.compile(r"(?i)@(?:anthropic|openai)\.com(?![a-z0-9-])")
 # The pre-push phase runs locally before anything is published; pre-merge is the CI backstop for a
 # body edited after the push. The post-merge scan deliberately keeps its landed-message scope.
 _ATTRIBUTION_PHASES = ("pre-merge", "pre-push")
@@ -164,8 +191,10 @@ def scan_attribution(channels):
     """channels = [(label, text)]. The narrow AI-attribution layer (see the module docstring): a
     `*-by:` trailer line whose value names an AI identity, a generated/written/drafted with/by/using
     phrase with an AI identity inside the window right after it, and an AI vendor address. Returns
-    finding strings, never echoing the matched text. The window is a slice, so an identity that only
-    STARTS inside it does not match: the whole name must land inside (tested at both edges)."""
+    finding strings, never echoing the matched text. The identity is matched against the ORIGINAL
+    line, never a slice of it, and the complete match must end inside the window: a name that only
+    starts inside does not fire, and a longer word cut at the window edge ("claudette", "gpt-4o")
+    can never be read as the shorter identity it begins with (tested at both edges)."""
     findings = []
     for label, text in channels:
         for line in text.splitlines():
@@ -173,7 +202,10 @@ def scan_attribution(channels):
             if trailer and AI_IDENTITY_RE.search(trailer.group("value")):
                 findings.append("{}: AI attribution (trailer)".format(label))
             for phrase in _AI_PHRASE_RE.finditer(line):
-                if AI_IDENTITY_RE.search(line[phrase.end():phrase.end() + _AI_PHRASE_WINDOW]):
+                identity = AI_IDENTITY_RE.search(line, phrase.end())
+                # The leftmost identity match at or after the phrase decides: matches never overlap,
+                # so when it ends past the window no later match can end inside the window either.
+                if identity and identity.end() <= phrase.end() + _AI_PHRASE_WINDOW:
                     findings.append("{}: AI attribution (generated-with phrase)".format(label))
                     break
             if _AI_ADDRESS_RE.search(line):
@@ -270,7 +302,8 @@ def read_body_file(path_text):
     """The drafted PR body for --pre-push: an absolute, non-symlink, regular file of at most
     MAX_BODY_BYTES, strict UTF-8. Anything else fails closed; a missing or unreadable body is never
     read as an empty (clean) one. An empty FILE is a valid empty body, matching how the CI mode
-    treats a JSON-null body."""
+    treats a JSON-null body. Returns (text, sha256 hex of the exact bytes read), so the digest the
+    helper prints can only describe the bytes this gate scanned."""
     if not isinstance(path_text, str) or not os.path.isabs(path_text):
         raise FailClosed("--body-file must be an absolute path")
     if os.path.islink(path_text):
@@ -285,34 +318,61 @@ def read_body_file(path_text):
     if len(data) > MAX_BODY_BYTES:
         raise FailClosed("--body-file is over MAX_BODY_BYTES ({} bytes)".format(MAX_BODY_BYTES))
     try:
-        return data.decode("utf-8")
+        return data.decode("utf-8"), hashlib.sha256(data).hexdigest()
     except UnicodeError:
         raise FailClosed("--body-file is not valid UTF-8")
 
 
-def _release_items(doc, which):
-    """The release item strings of one parsed changelog.toml document; any shape surprise fails
-    closed rather than scanning a subset and reading the rest as clean."""
+def _require_changelog_shape(doc, which):
+    """The shape guard for one parsed changelog.toml document, kept as strict as it was when only
+    release items were collected: the document is a table, release (when present) is an array of
+    tables, and items (when present in a release) is an array of strings."""
     if not isinstance(doc, dict):
         raise FailClosed("changelog.toml at {} is not a table".format(which))
     releases = doc.get("release", [])
     if not isinstance(releases, list):
         raise FailClosed("changelog.toml at {}: release is not an array of tables".format(which))
-    items = []
     for release in releases:
         if not isinstance(release, dict):
             raise FailClosed("changelog.toml at {}: a release entry is not a table".format(which))
         entry_items = release.get("items", [])
         if not isinstance(entry_items, list) or not all(isinstance(i, str) for i in entry_items):
             raise FailClosed("changelog.toml at {}: items is not an array of strings".format(which))
-        items += entry_items
-    return items
+
+
+def _document_strings(doc):
+    """Every string in one parsed document: keys and values, nested tables and arrays included,
+    walked iteratively so document depth cannot raise RecursionError here. A non-string scalar (an
+    integer, float, boolean or date) carries no text to scan."""
+    strings, stack = [], [doc]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            strings.append(node)
+        elif isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                strings.append(key)
+                stack.append(value)
+    return strings
 
 
 def changelog_added_items(base_text, head_text):
-    """The changelog.toml release items present at head but not at base, as a MULTISET difference
-    (an item added a second time is an addition), sorted for stable output. None stands for a
-    revision whose tree has no changelog.toml (no items there). A parse error fails closed."""
+    """The strings present in changelog.toml at head but not at base, as a MULTISET difference over
+    EVERY string in each parsed document, keys and values alike (a string added a second time is an
+    addition), sorted for stable output. Scanning every string rather than a named subset means a
+    leak in any parsed field, a misspelled or unexpected one included, is scanned, never silently
+    ignored; only TOML comments are outside the parse. None stands for a revision whose tree has no
+    changelog.toml, with each absence defined explicitly: absent at both revisions is a repository
+    without a changelog (nothing added); absent only at base means the file is new and every string
+    at head is an addition; present at base but deleted at head fails closed (a deletion is never
+    read as clean). A parse error fails closed."""
+    if base_text is None and head_text is None:
+        return []
+    if head_text is None:
+        raise FailClosed("changelog.toml exists at base but not at head: a deleted changelog is "
+                         "never read as clean")
     counts = []
     for which, text in (("base", base_text), ("head", head_text)):
         if text is None:
@@ -325,46 +385,69 @@ def changelog_added_items(base_text, head_text):
             # nesting, and parsing a pathological document can exhaust memory; each is the same verdict
             # here: the changelog revision cannot be evaluated, so the gate fails closed.
             raise FailClosed("changelog.toml at {} does not parse ({})".format(which, type(exc).__name__))
-        counts.append(Counter(_release_items(doc, which)))
+        _require_changelog_shape(doc, which)
+        counts.append(Counter(_document_strings(doc)))
     return sorted((counts[1] - counts[0]).elements())
 
 
 def _rev_file_text(rev, rel, root):
     """rel's text at revision rev, or None when rev's tree has no rel. Presence is decided by
     ls-tree (exit 0 with empty output means absent), so absence is never conflated with another git
-    failure, which stays fail-closed through _run_git."""
+    failure, which stays fail-closed through _run_git. The caller guarantees root is the repository
+    root (run_pre_push enforces it), so ls-tree's working-directory-relative path reading cannot
+    silently drop the file."""
     listing = _run_git(["ls-tree", "-z", rev, "--", rel], root)
     if not listing.strip("\0").strip():
         return None
     return _run_git(["show", "{}:{}".format(rev, rel)], root)
 
 
-def pre_push_channels(repo, base, body, title):
+def pre_push_channels(repo, base, body, title, head=None, branch=None):
     """Build the pre-push channel list over the repository at repo: the composed title+body (one
-    blob, the CI rule), the changelog items added in base..HEAD, the commit messages in base..HEAD,
-    and the current branch name. A detached HEAD fails closed: the helper pushes the current branch,
-    so without one there is nothing this mode can bind the scan to."""
-    head = _run_git(["rev-parse", "--verify", "HEAD^{commit}"], repo).strip()
-    if not _SHA_RE.match(head):
-        raise FailClosed("cannot resolve HEAD to a canonical 40-hex SHA")
-    branch = _run_git(["symbolic-ref", "--short", "HEAD"], repo).strip()
-    if not branch:
-        raise FailClosed("cannot establish the current branch (detached HEAD)")
+    blob, the CI rule), every string added to the parsed changelog.toml in base..head, the commit
+    messages in base..head, and the branch name. head and branch, when given, come from
+    tools/push_branch.py, which resolves both ONCE and pushes exactly that commit to exactly that
+    branch, so the scan and the push are bound to the same commit even if HEAD moves in between;
+    without them HEAD and the current branch are resolved here (a detached HEAD fails closed: the
+    push targets a branch, so without one there is nothing to bind the scan to). base must be a
+    proper ancestor of the scanned commit, so the scanned range is exactly the non-empty range the
+    push adds; an empty range (base equal to the commit) or an unrelated base fails closed rather
+    than scanning no commits and reading that as clean."""
+    if head is None:
+        head = _run_git(["rev-parse", "--verify", "HEAD^{commit}"], repo).strip()
+        if not _SHA_RE.match(head):
+            raise FailClosed("cannot resolve HEAD to a canonical 40-hex SHA")
+    else:
+        resolved = _run_git(["rev-parse", "--verify", head + "^{commit}"], repo).strip()
+        if resolved != head:
+            raise FailClosed("--head does not name a commit in this repository")
+    if branch is None:
+        branch = _run_git(["symbolic-ref", "--short", "HEAD"], repo).strip()
+        if not branch:
+            raise FailClosed("cannot establish the current branch (detached HEAD)")
+    if base == head:
+        raise FailClosed("--base equals the scanned commit: the push would add no commits, and an "
+                         "empty range is never read as clean")
+    try:
+        _run_git(["merge-base", "--is-ancestor", base, head], repo)
+    except FailClosed:
+        raise FailClosed("--base is not a proper ancestor of the scanned commit (the scanned "
+                         "base..head range must be exactly what the push adds)")
     channels = [("commit {}".format(sha), msg) for sha, msg in commit_messages(base, head, repo)]
     channels.append(("PR body file", (title + "\n\n" + body) if title is not None else body))
     added = changelog_added_items(_rev_file_text(base, "changelog.toml", repo),
                                   _rev_file_text(head, "changelog.toml", repo))
     for number, item in enumerate(added, 1):
-        channels.append(("changelog item added #{}".format(number), item))
+        channels.append(("changelog string added #{}".format(number), item))
     channels.append(("branch name", branch))
     return channels
 
 
 def parse_pre_push_argv(argv):
     """Strict flag parsing for --pre-push: exactly --repo, --body-file, --base and optionally
-    --title, each with one value, each at most once. Anything else fails closed (an unknown flag
-    silently skipped could drop a channel)."""
-    opts = {"repo": None, "body-file": None, "base": None, "title": None}
+    --title, --head and --branch, each with one value, each at most once. Anything else fails closed
+    (an unknown flag silently skipped could drop a channel)."""
+    opts = {"repo": None, "body-file": None, "base": None, "title": None, "head": None, "branch": None}
     arguments = list(argv)
     while arguments:
         flag = arguments.pop(0)
@@ -389,23 +472,42 @@ def require_base(value):
     return value
 
 
+def require_head(value):
+    """The explicit --head, the exact commit the helper will push: the same canonical rule as
+    --base, for the same reason."""
+    if not isinstance(value, str) or not _SHA_RE.match(value) or value == _ZERO_SHA:
+        raise FailClosed("--head is not a canonical non-zero 40-hex SHA")
+    return value
+
+
 def run_pre_push(argv):
     opts = parse_pre_push_argv(argv)
     if not os.path.isabs(opts["repo"]) or not os.path.isdir(opts["repo"]):
         raise FailClosed("--repo must be an absolute path to an existing directory")
     repo = Path(opts["repo"])
+    toplevel = _run_git(["rev-parse", "--show-toplevel"], repo).strip()
+    if not toplevel or os.path.realpath(toplevel) != os.path.realpath(str(repo)):
+        raise FailClosed("--repo must be the repository root: from a subdirectory the changelog "
+                         "would read as absent (and therefore clean) under ls-tree's "
+                         "working-directory-relative paths")
     base = require_base(opts["base"])
+    head = require_head(opts["head"]) if opts["head"] is not None else None
+    branch = opts["branch"]
+    if branch is not None and not branch.strip():
+        raise FailClosed("--branch, when given, must be non-empty")
     title = opts["title"]
     if title is not None and not title.strip():
         raise FailClosed("--title, when given, must be non-empty")
-    body = read_body_file(opts["body-file"])
+    body, body_digest = read_body_file(opts["body-file"])
     hashes, maxn = require_denylist(repo)
-    findings = all_findings(pre_push_channels(repo, base, body, title), "pre-push", hashes, maxn)
+    findings = all_findings(pre_push_channels(repo, base, body, title, head, branch),
+                            "pre-push", hashes, maxn)
     if findings:
         print("FAIL: {} possible finding(s) in pre-push channels".format(len(findings)))
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
+    print("body sha256: {}".format(body_digest))
     print(_SCOPE.format(phase="pre-push", scanned=_SCANNED["pre-push"]))
     return 0
 
@@ -413,17 +515,19 @@ def run_pre_push(argv):
 _SCANNED = {
     "pre-merge": "the commit messages in base..head, the composed PR title+body, and the PR head ref",
     "post-merge": "the messages of the newly landed commits (before..after)",
-    "pre-push": "the PR body file (composed with any --title), the changelog items added in "
-                "base..HEAD, the commit messages in base..HEAD, and the current branch name",
+    "pre-push": "the PR body file (composed with any --title), every string added to the parsed "
+                "changelog.toml in base..head (keys and values; TOML comments are not parsed, so "
+                "not scanned), the commit messages in base..head, and the branch name",
 }
 _SCOPE = ("PASS ({phase}): scanned STRUCTURAL patterns and the hashed codename denylist, plus (pre-merge "
           "and pre-push only) the narrow AI-attribution patterns (a *-by: trailer naming an AI, a "
           "generated/written/drafted with/by/using phrase naming an AI, an AI vendor address), across "
           "{scanned}. NOT CHECKED here: file contents (check_leaks + gitleaks own those), "
-          "reviews/comments/issues, paraphrased attribution or AI names outside the shared identity set, "
-          "other branches/tags. The CI phases detect accidental reintroduction in text push has already "
-          "made public (not an exfiltration control; they cannot un-expose pushed text); only the "
-          "pre-push mode runs before publication, and only over the channels it is handed.")
+          "reviews/comments/issues, paraphrased attribution, AI names outside the shared identity set, "
+          "attribution split across lines, other branches/tags. The CI phases detect accidental "
+          "reintroduction in text push has already made public (not an exfiltration control; they cannot "
+          "un-expose pushed text); only the pre-push mode runs before publication, and only over the "
+          "channels it is handed.")
 
 
 def run(event_name, event):
@@ -440,7 +544,7 @@ def run(event_name, event):
 
 
 def main(argv):
-    if "--self-test" in argv:
+    if argv == ["--self-test"]:        # honoured only as the sole argument, never mixed into a real run
         return self_test()
     try:
         if argv and argv[0] == "--pre-push":
@@ -458,15 +562,20 @@ def _hook_identity_pattern():
     """AI_IDENTITY_RE's pattern string as the commit-identity hook defines it, extracted from the
     AST of .aiqt/core/hooks/scripts/aiqt_hooks.py (never imported: it is a large event-hook module,
     and the gate must not execute it). Self-test only; a hook source without the assignment is a
-    self-test failure, never a silent pass."""
+    self-test failure, never a silent pass. The call must be exactly one positional string constant
+    with no other arguments: a flags argument on either side would change matching while leaving the
+    pattern strings equal, so any other call shape fails the parity test instead of passing it."""
     import ast
     source = (ROOT / ".aiqt" / "core" / "hooks" / "scripts" / "aiqt_hooks.py").read_text(encoding="utf-8")
     for node in ast.walk(ast.parse(source)):
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "AI_IDENTITY_RE"
-                and isinstance(node.value, ast.Call) and node.value.args
-                and isinstance(node.value.args[0], ast.Constant)
-                and isinstance(node.value.args[0].value, str)):
+                and isinstance(node.value, ast.Call)):
+            if (len(node.value.args) != 1 or node.value.keywords
+                    or not isinstance(node.value.args[0], ast.Constant)
+                    or not isinstance(node.value.args[0].value, str)):
+                raise AssertionError("the hook's AI_IDENTITY_RE is no longer a single-string compile "
+                                     "call; pattern-string parity alone cannot prove equal matching")
             return node.value.args[0].value
     raise AssertionError("AI_IDENTITY_RE assignment not found in the hooks source")
 
@@ -580,7 +689,8 @@ def self_test():
     # a generated trailer usually carries the vendor address too: both classes are reported
     both = scan_attribution([("ch", "Co-authored-by: Claude <noreply@anthropic.com>")])
     _expect(sorted(both) == ["ch: AI attribution (trailer)", "ch: AI attribution (vendor address)"], both)
-    # 12. attribution narrowness: product mentions, quoted keys, human or lookalike values stay silent
+    # 12. attribution narrowness: product mentions, quoted keys, human or lookalike values, longer
+    # domains that merely begin with a vendor's, and line-split attribution all stay silent
     for quiet in ("as a Skill you upload to Claude or a portable instruction file for other "
                   "assistants (ChatGPT, Copilot, Gemini)",
                   "fix the Claude adapter's matcher",
@@ -589,11 +699,28 @@ def self_test():
                   "Co-authored-by: Jane Doe <jane@example.org>",
                   "Co-authored-by: Claudette <c@example.org>",                        # word boundary
                   "benchmarks against gpt-4o show parity",
+                  "Write to ops@anthropic.community for access",     # the domain must END at .com
+                  "Generated with\nClaude Code",     # line-split attribution: a disclosed residual
                   ""):
         _expect(scan_attribution([("ch", quiet)]) == [], quiet)
-    # 13. phrase-window boundaries: an identity that ENDS exactly at the window edge matches; one
-    # letter past the edge, or starting past it, does not (the window is a slice of the line, so a
-    # partial name at the cut can never match). The filler is non-word so only the window decides.
+    # 12b. documented precision residuals: a bounded textual window and a trailer value scan cannot
+    # read intent, so an authorship phrase followed inside the window by an unrelated AI name, and a
+    # trailer whose value merely mentions an AI name, fire as findings. Each is a disclosed false
+    # positive, asserted here so a change to this behavior is a deliberate one.
+    for text, kind in (
+            ("Code generated by the protobuf compiler, used by the Claude adapter.",
+             "generated-with phrase"),
+            ("Fixtures generated using the OpenAI-compatible endpoint of our own server.",
+             "generated-with phrase"),
+            ("The checklist was written by a copilot of the flight crew.",
+             "generated-with phrase"),
+            ("Reported-by: Jane Doe, who maintains the Gemini adapter", "trailer")):
+        _expect(scan_attribution([("ch", text)]) == ["ch: AI attribution ({})".format(kind)], text)
+    # 13. phrase-window boundaries: the identity is matched against the ORIGINAL line and the whole
+    # match must END inside the window, so a name ending exactly at the edge matches; one whose last
+    # letter is past the edge, or that starts past it, does not; and a longer word cut at the edge
+    # ("claudette", "gpt-4o") never reads as the shorter identity it begins with. The filler is
+    # non-word so only the window decides.
     inside = "generated with" + "." * (_AI_PHRASE_WINDOW - 6) + "claude"    # ends exactly at the edge
     _expect(len(inside) - len("generated with") == _AI_PHRASE_WINDOW, "fixture arithmetic")
     _expect(scan_attribution([("ch", inside)]) == ["ch: AI attribution (generated-with phrase)"], inside)
@@ -601,24 +728,45 @@ def self_test():
     _expect(scan_attribution([("ch", straddle)]) == [], straddle)
     outside = "generated with" + "." * _AI_PHRASE_WINDOW + "claude"          # starts outside
     _expect(scan_attribution([("ch", outside)]) == [], outside)
+    cut = "generated with" + "." * (_AI_PHRASE_WINDOW - 6) + "claudette"     # "claude" ends at the edge
+    _expect(scan_attribution([("ch", cut)]) == [], cut)
+    gpt_cut = "generated with" + "." * (_AI_PHRASE_WINDOW - 5) + "gpt-4o"    # "gpt-4" ends at the edge
+    _expect(scan_attribution([("ch", gpt_cut)]) == [], gpt_cut)
     # 14. the phase wiring: attribution runs pre-merge and pre-push, never post-merge
     ch = [("commit abc1234", "Co-authored-by: Claude <c@example.org>")]
     _expect(all_findings(ch, "pre-merge", hashes, maxn) == ["commit abc1234: AI attribution (trailer)"])
     _expect(all_findings(ch, "pre-push", hashes, maxn) == ["commit abc1234: AI attribution (trailer)"])
     _expect(all_findings(ch, "post-merge", hashes, maxn) == [])
-    # 15. the identity set is single-sourced: the gate's pattern is byte-identical to the hook's
+    # 15. the identity set: two copies kept byte-identical by this parity test (the gate's pattern
+    # against the hook's, extracted from the hook's source)
     _expect(_hook_identity_pattern() == AI_IDENTITY_PATTERN,
             "AI_IDENTITY_PATTERN drifted from the commit-identity hook's AI_IDENTITY_RE")
-    # 16. changelog delta: a multiset difference over release items, fail-closed on parse/shape
+    # 16. changelog delta: a multiset difference over EVERY string in the parsed document (keys and
+    # values), fail-closed on parse/shape and on a changelog deleted at head
     base_toml = 'title = "t"\n[[release]]\nitems = ["kept item"]\n'
     head_toml = 'title = "t"\n[[release]]\nitems = ["kept item", "new: drafted using ChatGPT"]\n'
     added = changelog_added_items(base_toml, head_toml)
     _expect(added == ["new: drafted using ChatGPT"], added)
-    _expect(scan_attribution([("changelog item added #1", added[0])])
-            == ["changelog item added #1: AI attribution (generated-with phrase)"])
+    _expect(scan_attribution([("changelog string added #1", added[0])])
+            == ["changelog string added #1: AI attribution (generated-with phrase)"])
     _expect(changelog_added_items(head_toml, base_toml) == [])      # a removal adds nothing
-    _expect(changelog_added_items(None, base_toml) == ["kept item"])  # file new at head
-    _expect(changelog_added_items(base_toml, None) == [])           # file absent at head
+    # a misspelled items key is still scanned: the key and its string value are both additions
+    mis_head = base_toml + 'item = "notes drafted using ChatGPT"\n'
+    _expect(changelog_added_items(base_toml, mis_head) == ["item", "notes drafted using ChatGPT"])
+    # a release field other than items (a second release's title here) is scanned too
+    title_head = base_toml + '[[release]]\ntitle = "alpha bravo drafted using ChatGPT"\n'
+    added = changelog_added_items(base_toml, title_head)
+    _expect(added == ["alpha bravo drafted using ChatGPT", "title"], added)
+    _expect(scan_channels([("changelog string added #1", added[0])], hashes, maxn)
+            == ["changelog string added #1: internal codename (hash match)"])
+    _expect(changelog_added_items(None, base_toml)                  # file new at head: all strings added
+            == ["items", "kept item", "release", "t", "title"])
+    _expect(changelog_added_items(None, None) == [])                # a repository without a changelog
+    try:
+        changelog_added_items(base_toml, None)                      # deleted at head: never clean
+        raise AssertionError("expected FailClosed for a changelog deleted at head")
+    except FailClosed:
+        pass
     dup_head = 'title = "t"\n[[release]]\nitems = ["kept item", "kept item"]\n'
     _expect(changelog_added_items(base_toml, dup_head) == ["kept item"], "multiset, not set")
     for bad_base, bad_head in ((base_toml, "not toml ["), ("= bad", head_toml),
@@ -630,18 +778,21 @@ def self_test():
             raise AssertionError("expected FailClosed for changelog {!r}/{!r}".format(bad_base, bad_head))
         except FailClosed:
             pass
-    # 17. the body file: fail-closed set, and the size bound just inside / at / just over
+    # 17. the body file: fail-closed set, the size bound just inside / at / just over, and the
+    # digest of the exact bytes read returned beside the text
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         good = root / "body.md"
         good.write_text("hello", encoding="utf-8")
-        _expect(read_body_file(str(good)) == "hello")
+        text, digest = read_body_file(str(good))
+        _expect(text == "hello" and digest == hashlib.sha256(b"hello").hexdigest(), digest)
         (root / "empty.md").write_bytes(b"")
-        _expect(read_body_file(str(root / "empty.md")) == "")       # empty body is a valid empty text
+        text, digest = read_body_file(str(root / "empty.md"))      # empty body is a valid empty text
+        _expect(text == "" and digest == hashlib.sha256(b"").hexdigest(), digest)
         (root / "inside.md").write_bytes(b"a" * (MAX_BODY_BYTES - 1))
         (root / "at.md").write_bytes(b"a" * MAX_BODY_BYTES)
-        _expect(len(read_body_file(str(root / "inside.md"))) == MAX_BODY_BYTES - 1)
-        _expect(len(read_body_file(str(root / "at.md"))) == MAX_BODY_BYTES)
+        _expect(len(read_body_file(str(root / "inside.md"))[0]) == MAX_BODY_BYTES - 1)
+        _expect(len(read_body_file(str(root / "at.md"))[0]) == MAX_BODY_BYTES)
         (root / "over.md").write_bytes(b"a" * (MAX_BODY_BYTES + 1))
         (root / "binary.md").write_bytes(b"\xff\xfe\x00")
         (root / "link.md").symlink_to(good)
@@ -656,12 +807,18 @@ def self_test():
                 raise AssertionError("expected FailClosed for body file {!r}".format(bad))
             except FailClosed:
                 pass
-    # 18. --pre-push argv and --base validation fail closed on every malformed shape
+    # 18. --pre-push argv and --base/--head validation fail closed on every malformed shape
     parsed = parse_pre_push_argv(["--repo", "/r", "--body-file", "/b", "--base", forty])
-    _expect(parsed == {"repo": "/r", "body-file": "/b", "base": forty, "title": None}, parsed)
+    _expect(parsed == {"repo": "/r", "body-file": "/b", "base": forty, "title": None,
+                       "head": None, "branch": None}, parsed)
+    parsed = parse_pre_push_argv(["--repo", "/r", "--body-file", "/b", "--base", forty,
+                                  "--head", forty, "--branch", "feat/x"])
+    _expect(parsed["head"] == forty and parsed["branch"] == "feat/x", parsed)
     for argv in (["--repo", "/r"],                                   # missing required flags
                  ["--repo", "/r", "--body-file", "/b", "--base", forty, "--bogus", "x"],
                  ["--repo", "/r", "--repo", "/r2", "--body-file", "/b", "--base", forty],
+                 ["--repo", "/r", "--body-file", "/b", "--base", forty,
+                  "--head", forty, "--head", forty],                 # repeated optional flag
                  ["--repo", "/r", "--body-file", "/b", "--base"],    # valueless flag
                  ["positional"]):
         try:
@@ -670,20 +827,40 @@ def self_test():
         except FailClosed:
             pass
     _expect(require_base(forty) == forty)
+    _expect(require_head(forty) == forty)
     for bad in ("HEAD", "a" * 39, "a" * 41, "A" * 40, _ZERO_SHA, 5, None, ""):
         try:
             require_base(bad)
             raise AssertionError("expected FailClosed for base {!r}".format(bad))
         except FailClosed:
             pass
+        try:
+            require_head(bad)
+            raise AssertionError("expected FailClosed for head {!r}".format(bad))
+        except FailClosed:
+            pass
+    # 19. --self-test is honoured only as the sole argument: mixed into a --pre-push invocation it
+    # is an unknown argument and the run fails closed (its stderr line is captured and asserted)
+    import contextlib
+    import io
+    sink = io.StringIO()
+    with contextlib.redirect_stderr(sink):
+        mixed = main(["--pre-push", "--self-test"])
+    _expect(mixed == 2,
+            "--self-test mixed into a production invocation must fail closed, never run fixtures")
+    _expect("fail-closed" in sink.getvalue(), "the mixed invocation must report fail-closed")
     print("SELF-TEST PASS: scanner reuse, composed title/body boundary catch, no-echo, and leak-allow "
           "ignored; the fail-closed paths hold (malformed PR fields, empty title/ref, a non-40-hex "
           "base/head/before/after, a branch-creation push, an unknown event kind); a branch-deletion push "
           "yields no channels; malformed denylist metadata (maxn 0, duplicate, over-cap, oversized, "
           "trailing tokens) is rejected; a non-JSON NaN constant fails closed; the attribution layer "
           "fires on trailers, bounded generated-with phrases and vendor addresses, stays silent on bare "
-          "mentions, runs pre-merge and pre-push only, and matches the hook's identity set; and the "
-          "pre-push inputs (argv, --base, body file, changelog delta) each fail closed when malformed")
+          "mentions, longer vendor-lookalike domains and identities cut at the window edge, carries its "
+          "documented false-positive cases, runs pre-merge and pre-push only, and matches the hook's "
+          "identity set (two copies under a parity test); the changelog delta covers every parsed string "
+          "and fails closed on a deletion at head; the pre-push inputs (argv, --base, --head, body file, "
+          "changelog delta) each fail closed when malformed; and --self-test mixed into a production "
+          "invocation is rejected")
     return 0
 
 

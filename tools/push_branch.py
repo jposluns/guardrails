@@ -1,39 +1,58 @@
 #!/usr/bin/env python3
-"""First-push helper: run the pre-push message/metadata check and the push in ONE process, so the
-check GATES the push rather than merely preceding it.
+"""First-push helper: run the pre-push message/metadata check and the push in ONE process, bound to
+ONE commit and ONE branch, so the check GATES exactly what the push publishes.
 
-The failure this closes: a check run on its own line, with `git push` on the next line of the same
+The failures this closes: a check run on its own line, with `git push` on the next line of the same
 command or script, can pass control to the push while the check failed (a separate step is not
-sequencing that preserves the gate's failure). Here the push is reachable only through this process,
-after it has OBSERVED exit 0 from the check it launched itself; a finding (exit 1) and a
-cannot-evaluate (exit 2 or anything else) both refuse the push.
+sequencing that preserves the gate's failure); and a check and a push that each resolve HEAD for
+themselves can disagree when a commit, reset or checkout lands in between, publishing text that was
+never scanned. Here the helper resolves the commit SHA and the branch name ONCE, hands both to the
+check it launches itself (--head/--branch), and pushes that exact SHA by name only after it has
+OBSERVED exit 0 from that check; a finding (exit 1) and a cannot-evaluate (exit 2 or anything else)
+both refuse the push. The check also requires --base to be a proper ancestor of that SHA, so the
+scanned range is exactly the non-empty range the push adds (an empty or unrelated range refuses).
 
   push_branch.py --body-file <abs path> --base <40-hex sha> [--title <text>] [--remote <name>]
   push_branch.py --self-test
 
 The check is tools/check_msg_leaks.py --pre-push (the script beside this one), over the repository
 containing the current working directory: the drafted PR body file (composed with --title when one
-is given), the changelog.toml release items added in base..HEAD, the commit messages in base..HEAD,
-and the current branch name, against the hashed leak denylist, the STRUCTURAL patterns and the
+is given), every string added to the parsed changelog.toml in base..head, the commit messages in
+base..head, and the branch name, against the hashed leak denylist, the STRUCTURAL patterns and the
 narrow AI-attribution layer. Every input is explicit; there is no ambient default for the body or
-the base. On a pass this prints the body file's sha256, so the body later given to the PR can be
-compared against the same bytes, then runs `git push --set-upstream <remote> HEAD:refs/heads/<branch>`
-for the branch HEAD is on and returns the push's own exit status.
+the base. On a pass the check prints the sha256 of the exact body bytes it scanned; this helper
+reprints that digest and never rereads the body itself, so the digest it prints can only describe
+bytes the check scanned, and the body later given to the PR can be compared against them. It then
+runs `git push <remote> <sha>:refs/heads/<branch>` for the commit and branch it resolved before the
+check. A push that exits non-zero is reported and mapped to exit 2 (the helper's cannot-evaluate
+verdict), not passed through as the push's own exit status. After a successful push the branch's
+upstream is set in a separate step (a SHA-sourced push sets none itself); if that convenience step
+fails, the completed, scanned push is still reported with exit 0 and the line says so.
 
-FAIL-CLOSED: an unknown, repeated or valueless argument, a working directory outside a git
-repository, a detached HEAD, any non-zero exit from the check, and an unreadable body file after the
-check each refuse the push (nothing is pushed), exit 2 (exit 1 when the check itself found
-something). The refusal is printed; the check's own output is passed through.
+FAIL-CLOSED: an unknown, repeated or valueless argument (--self-test mixed with anything else
+included: it is honoured only as the sole argument), a working directory outside a git repository,
+a HEAD that does not resolve to a commit, a detached HEAD, a branch name git itself rejects, any
+non-zero exit from the check, a check that cannot be launched, and a passing check that does not
+report the scanned-body digest each refuse the push (nothing is pushed), exit 2 (exit 1 when the
+check exits 1). The check's output is reprinted, then the refusal is printed. A check that crashes
+with exit 1 is indistinguishable here from a finding and is labelled as one; either way nothing is
+pushed.
 
-HONEST SCOPE. This helper gates only pushes made THROUGH it: a plain `git push`, an IDE push, or any
-later push bypasses it entirely, and the CI scan after the PR opens is the backstop there. A body
-edited between this run and the PR creation is caught only by comparing the printed digest or by the
-CI run on the edited event. The check's own residuals (paraphrased attribution, unlisted AI names,
-obfuscated denylist terms) carry over.
+HONEST SCOPE. This helper gates only pushes made THROUGH it: a plain `git push`, an IDE push, or
+any push made without it bypasses it entirely (a later push is gated only when it is again made
+through this helper), and the CI scan after the PR opens is the backstop there. Without --title the
+eventual PR title is not scanned before the push; the CI pre-merge run is its first scan. A body
+edited between this run and the PR creation is caught only by comparing the printed digest or by
+the CI run on the edited event. The check's own residuals (paraphrased attribution, AI names
+outside the shared identity set, obfuscated denylist terms, changelog text outside the parsed
+strings, such as TOML comments) carry over.
 
 The --self-test builds throwaway git repositories and a bare remote under a scrubbed fixture
-environment (tools/_git_fixture_env.py) and asserts, for every finding shape and fail-closed shape,
-that the helper exits non-zero AND the remote gained no ref, and that a clean branch pushes.
+environment (tools/_git_fixture_env.py) and asserts, for each finding channel and a broad set of
+fail-closed shapes, that the helper exits non-zero AND the remote gained no ref, and that a clean
+branch pushes; it also drives the check directly for shapes reachable only there (a subdirectory
+--repo, a --head bound to a commit other than the checkout, a detached HEAD), and drives a copy of
+this helper against stub checks for the digest-missing and unexpected-exit refusals.
 """
 import sys
 
@@ -51,6 +70,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import hashlib
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -58,6 +78,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 HERE = Path(__file__).resolve()
 CHECK = HERE.parent / "check_msg_leaks.py"
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")   # a canonical commit id: resolved once, scanned, then pushed
+# The digest line the check prints for the exact body bytes it scanned; the helper reprints it and
+# never rereads the body, so the printed digest cannot describe bytes the check did not scan.
+_BODY_DIGEST_RE = re.compile(r"^body sha256: ([0-9a-f]{64})$", re.MULTILINE)
 # A branch name a push could write through this helper must be a single plain ref component chain:
 # check-ref-format validates it below before it is spliced into the refspec.
 
@@ -76,6 +100,21 @@ def _toplevel():
     except (OSError, ValueError):
         return None
     return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _head_commit(toplevel):
+    """The commit HEAD names, resolved ONCE and returned as a canonical SHA; None on any failure.
+    The check scans exactly this commit and the push publishes exactly this commit, so a commit or
+    checkout between the check and the push cannot change what is published to unscanned text."""
+    try:
+        proc = subprocess.run(["git", "-C", toplevel, "rev-parse", "--verify", "HEAD^{commit}"],
+                              capture_output=True, encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    if proc.returncode != 0:
+        return None
+    sha = proc.stdout.strip()
+    return sha if _SHA_RE.match(sha) else None
 
 
 def _current_branch(toplevel):
@@ -121,8 +160,10 @@ def parse_argv(argv):
 
 
 def run_push(argv):
-    """The gated first push. The check runs as a child of THIS process; the push is reachable only
-    after this process observed the check's exit 0, so a failed check cannot be sequenced around."""
+    """The gated first push. The helper resolves the commit and the branch once, the check (run as
+    a child of THIS process) scans exactly that commit and branch name, and the push publishes
+    exactly that commit to exactly that branch, so a failed check cannot be sequenced around and a
+    commit or checkout between the check and the push cannot change what is published."""
     opts, problem = parse_argv(argv)
     if problem is not None:
         _refuse(problem)
@@ -131,18 +172,10 @@ def run_push(argv):
     if not toplevel:
         _refuse("the working directory is not inside a git repository")
         return 2
-    check_argv = [sys.executable, "-I", "-B", str(CHECK), "--pre-push", "--repo", toplevel,
-                  "--body-file", opts["body-file"], "--base", opts["base"]]
-    if opts["title"] is not None:
-        check_argv += ["--title", opts["title"]]
-    try:
-        check = subprocess.run(check_argv)       # output passes through; the exit is the verdict
-    except OSError as exc:
-        _refuse("could not launch the pre-push check ({})".format(type(exc).__name__))
+    head = _head_commit(toplevel)
+    if not head:
+        _refuse("cannot resolve HEAD to a commit")
         return 2
-    if check.returncode != 0:
-        _refuse("the pre-push check did not pass (exit {})".format(check.returncode))
-        return 1 if check.returncode == 1 else 2
     branch = _current_branch(toplevel)
     if not branch:
         _refuse("cannot establish the current branch (detached HEAD)")
@@ -150,23 +183,44 @@ def run_push(argv):
     if not _valid_branch(toplevel, branch):
         _refuse("the current branch name is not a valid branch ref")
         return 2
+    check_argv = [sys.executable, "-I", "-B", str(CHECK), "--pre-push", "--repo", toplevel,
+                  "--body-file", opts["body-file"], "--base", opts["base"],
+                  "--head", head, "--branch", branch]
+    if opts["title"] is not None:
+        check_argv += ["--title", opts["title"]]
     try:
-        digest = hashlib.sha256(Path(opts["body-file"]).read_bytes()).hexdigest()
-    except OSError as exc:
-        _refuse("the body file became unreadable after the check ({})".format(type(exc).__name__))
+        check = subprocess.run(check_argv, capture_output=True, encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        _refuse("could not launch the pre-push check ({})".format(type(exc).__name__))
         return 2
-    print("pre-push check passed; body sha256: {}".format(digest))
-    pushed = subprocess.run(["git", "-C", toplevel, "push", "--set-upstream", opts["remote"],
-                             "HEAD:refs/heads/" + branch])
+    sys.stdout.write(check.stdout)       # the check's output is reprinted; its exit is the verdict
+    sys.stderr.write(check.stderr)
+    if check.returncode != 0:
+        _refuse("the pre-push check did not pass (exit {})".format(check.returncode))
+        return 1 if check.returncode == 1 else 2
+    digest = _BODY_DIGEST_RE.search(check.stdout)
+    if digest is None:
+        _refuse("the check passed but did not report the scanned-body digest")
+        return 2
+    print("pre-push check passed; body sha256: {}".format(digest.group(1)))
+    pushed = subprocess.run(["git", "-C", toplevel, "push", opts["remote"],
+                             head + ":refs/heads/" + branch])
     if pushed.returncode != 0:
         print("push exited non-zero ({})".format(pushed.returncode))
         return 2
+    upstream = subprocess.run(["git", "-C", toplevel, "branch",
+                               "--set-upstream-to=" + opts["remote"] + "/" + branch, branch],
+                              capture_output=True, encoding="utf-8")
+    if upstream.returncode != 0:
+        print("push completed; upstream not set (the local branch or its remote-tracking ref "
+              "changed after the push)")
+        return 0
     print("push completed; upstream set")
     return 0
 
 
 def main(argv):
-    if "--self-test" in argv:
+    if argv == ["--self-test"]:        # honoured only as the sole argument, never mixed into a real run
         return self_test()
     return run_push(argv)
 
@@ -177,9 +231,10 @@ def _expect(condition, message, failures):
 
 
 def self_test():
-    """Hermetic end-to-end vectors over throwaway repositories and a bare remote: every finding
-    shape refuses the push and leaves the remote without the ref; every fail-closed shape does the
-    same with exit 2; a clean branch (an empty body included) pushes and prints the body digest."""
+    """Hermetic end-to-end vectors over throwaway repositories and a bare remote: each finding
+    channel refuses the push and leaves the remote without the ref; each exercised fail-closed
+    shape does the same with exit 2; a clean branch (an empty body included) pushes, prints the
+    digest of the scanned body, and gets its upstream set."""
     import tempfile
     from _git_fixture_env import git_fixture_env
     from check_leaks import term_hash
@@ -195,10 +250,14 @@ def self_test():
         return subprocess.run(["git", "-C", str(cwd), *args], env=git_fixture_env(),
                               capture_output=True, encoding="utf-8").returncode
 
-    def helper(args, cwd, **env_overrides):
-        return subprocess.run([sys.executable, "-I", "-B", str(HERE), *args], cwd=str(cwd),
-                              env=git_fixture_env(**env_overrides), capture_output=True,
-                              encoding="utf-8")
+    def helper(args, cwd, script=None, **env_overrides):
+        return subprocess.run([sys.executable, "-I", "-B", str(script or HERE), *args],
+                              cwd=str(cwd), env=git_fixture_env(**env_overrides),
+                              capture_output=True, encoding="utf-8")
+
+    def check_direct(args, cwd):
+        return subprocess.run([sys.executable, "-I", "-B", str(CHECK), *args], cwd=str(cwd),
+                              env=git_fixture_env(), capture_output=True, encoding="utf-8")
 
     failures = []
     with tempfile.TemporaryDirectory() as d:
@@ -232,16 +291,22 @@ def self_test():
             fixture_git(["commit", "-q", "-m", message], repo)
 
         def ref_exists(name):
-            return fixture_git_rc(["rev-parse", "--verify", "--quiet",
-                                   "refs/heads/" + name], origin) == 0
+            rc = fixture_git_rc(["rev-parse", "--verify", "--quiet", "refs/heads/" + name], origin)
+            if rc not in (0, 1):                 # 1 is absence; anything else is an inspection error
+                raise AssertionError("ref inspection failed for {} (exit {})".format(name, rc))
+            return rc == 0
 
-        # 1. clean branch, clean body: the push happens, the digest is printed
+        # 1. clean branch, clean body: the push happens, the digest of the scanned bytes is printed
+        #    (once by the check, once by this helper), and the upstream is set by the config step
         branch_with_commit("feat-clean")
         done = helper(["--body-file", str(clean_body), "--base", base], repo)
         _expect(done.returncode == 0, ("clean push", done.returncode, done.stdout, done.stderr), failures)
         _expect(ref_exists("feat-clean"), "clean push must create the remote ref", failures)
         digest = hashlib.sha256(clean_body.read_bytes()).hexdigest()
-        _expect("body sha256: " + digest in done.stdout, "digest line missing on a clean push", failures)
+        _expect(done.stdout.count("body sha256: " + digest) == 2,
+                "the digest must be printed by the check and reprinted by the helper", failures)
+        up = fixture_git(["rev-parse", "--abbrev-ref", "feat-clean@{upstream}"], repo).strip()
+        _expect(up == "origin/feat-clean", ("upstream", up), failures)
 
         # 2. an empty body file is a valid empty body: still clean
         empty_body = tmp / "body-empty.md"
@@ -264,10 +329,23 @@ def self_test():
         branch_with_commit("feat-changelog", changelog='title = "t"\n[[release]]\nitems = '
                            '["base item", "notes drafted using ChatGPT"]\n')
         finding_vectors.append(("feat-changelog", ["--body-file", str(clean_body), "--base", base]))
+        # a changelog leak OUTSIDE the items array: a second release's title, scanned because every
+        # parsed string is scanned
+        branch_with_commit("feat-chlog-title", changelog='title = "t"\n[[release]]\nitems = '
+                           '["base item"]\n[[release]]\ntitle = "notes drafted using ChatGPT"\n')
+        finding_vectors.append(("feat-chlog-title", ["--body-file", str(clean_body), "--base", base]))
+        # a misspelled items key: its string value is still scanned, never silently ignored
+        branch_with_commit("feat-chlog-field", changelog='title = "t"\n[[release]]\nitems = '
+                           '["base item"]\nitem = "mentions alpha bravo"\n')
+        finding_vectors.append(("feat-chlog-field", ["--body-file", str(clean_body), "--base", base]))
         branch_with_commit("feat-msg", message="touch alpha bravo")
         finding_vectors.append(("feat-msg", ["--body-file", str(clean_body), "--base", base]))
         branch_with_commit("alpha-bravo-fix")
         finding_vectors.append(("alpha-bravo-fix", ["--body-file", str(clean_body), "--base", base]))
+        # the title channel: a leaky --title refuses even with a clean body and branch
+        branch_with_commit("feat-title")
+        finding_vectors.append(("feat-title", ["--body-file", str(clean_body), "--base", base,
+                                               "--title", "touch alpha bravo"]))
         for name, args in finding_vectors:
             fixture_git(["checkout", "-q", name], repo)
             done = helper(args, repo)
@@ -275,6 +353,11 @@ def self_test():
             _expect("REFUSED" in done.stdout, (name, "refusal line missing"), failures)
             _expect("body sha256" not in done.stdout, (name, "digest printed on a refusal"), failures)
             _expect(not ref_exists(name), (name, "a finding must not push"), failures)
+        # the control for the title vector: the same branch with a clean title pushes
+        done = helper(["--body-file", str(clean_body), "--base", base, "--title", "a clean title"],
+                      repo)
+        _expect(done.returncode == 0, ("clean title", done.returncode, done.stdout, done.stderr), failures)
+        _expect(ref_exists("feat-title"), "a clean titled push must create the remote ref", failures)
 
         # fail-closed: each refuses with exit 2 and the remote gains no ref
         branch_with_commit("feat-failclosed")
@@ -282,23 +365,58 @@ def self_test():
         link_body.symlink_to(clean_body)
         binary_body = tmp / "body-binary.md"
         binary_body.write_bytes(b"\xff\xfe\x00")
+        # body-rel.md EXISTS relative to the working directory, so the relative-body vector fails
+        # only through the absolute-path guard, never through absence
+        (repo / "body-rel.md").write_text("A normal body.\n", encoding="utf-8")
         for label, args in (
-                ("relative body", ["--body-file", "body-clean.md", "--base", base]),
+                ("relative body", ["--body-file", "body-rel.md", "--base", base]),
                 ("missing body", ["--body-file", str(tmp / "absent.md"), "--base", base]),
                 ("symlink body", ["--body-file", str(link_body), "--base", base]),
                 ("non-UTF-8 body", ["--body-file", str(binary_body), "--base", base]),
                 ("non-SHA base", ["--body-file", str(clean_body), "--base", "HEAD"]),
+                ("zero-SHA base", ["--body-file", str(clean_body), "--base", "0" * 40]),
+                ("nonexistent base", ["--body-file", str(clean_body), "--base", "b" * 40]),
+                ("empty title", ["--body-file", str(clean_body), "--base", base, "--title", ""]),
                 ("unknown flag", ["--body-file", str(clean_body), "--base", base, "--force", "x"]),
+                ("repeated flag", ["--body-file", str(clean_body), "--body-file", str(clean_body),
+                                   "--base", base]),
                 ("valueless flag", ["--body-file", str(clean_body), "--base"]),
+                ("mixed self-test flag", ["--self-test", "--base", base]),
                 ("missing required", ["--base", base])):
             done = helper(args, repo)
             _expect(done.returncode == 2, (label, done.returncode, done.stdout, done.stderr), failures)
             _expect("REFUSED" in done.stdout, (label, "refusal line missing"), failures)
             _expect(not ref_exists("feat-failclosed"), (label, "a refusal must not push"), failures)
+        # the push range must be exactly what the push adds: a base equal to the pushed commit (an
+        # empty range: nothing would be scanned) and a base that is not an ancestor both refuse
+        own_head = fixture_git(["rev-parse", "HEAD"], repo).strip()
+        done = helper(["--body-file", str(clean_body), "--base", own_head], repo)
+        _expect(done.returncode == 2, ("base equals HEAD", done.returncode, done.stdout, done.stderr),
+                failures)
+        _expect(not ref_exists("feat-failclosed"), "an empty range must not push", failures)
+        unrelated = fixture_git(["rev-parse", "refs/heads/feat-clean"], repo).strip()
+        done = helper(["--body-file", str(clean_body), "--base", unrelated], repo)
+        _expect(done.returncode == 2, ("non-ancestor base", done.returncode, done.stdout, done.stderr),
+                failures)
+        _expect(not ref_exists("feat-failclosed"), "a non-ancestor base must not push", failures)
         branch_with_commit("feat-badtoml", changelog="not toml [")
         done = helper(["--body-file", str(clean_body), "--base", base], repo)
         _expect(done.returncode == 2, ("bad changelog", done.returncode, done.stderr), failures)
         _expect(not ref_exists("feat-badtoml"), "a malformed changelog must not push", failures)
+        # a changelog deleted on the branch: present at base, absent at head, never read as clean
+        fixture_git(["checkout", "-q", "main"], repo)
+        fixture_git(["checkout", "-q", "-b", "feat-chlog-del"], repo)
+        fixture_git(["rm", "-q", "changelog.toml"], repo)
+        fixture_git(["commit", "-q", "-m", "a clean message"], repo)
+        done = helper(["--body-file", str(clean_body), "--base", base], repo)
+        _expect(done.returncode == 2, ("deleted changelog", done.returncode, done.stdout, done.stderr),
+                failures)
+        _expect(not ref_exists("feat-chlog-del"), "a deleted changelog must not push", failures)
+        # a push that fails (an unknown remote here) is reported and mapped to exit 2
+        branch_with_commit("feat-badremote")
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "nosuch"], repo)
+        _expect(done.returncode == 2, ("bad remote", done.returncode, done.stdout, done.stderr), failures)
+        _expect("push exited non-zero" in done.stdout, "a failed push must be reported", failures)
         fixture_git(["checkout", "-q", "--detach", "main"], repo)
         done = helper(["--body-file", str(clean_body), "--base", base], repo)
         _expect(done.returncode == 2, ("detached HEAD", done.returncode, done.stderr), failures)
@@ -309,18 +427,81 @@ def self_test():
         done = helper(["--body-file", str(clean_body), "--base", base], norepo,
                       GIT_CEILING_DIRECTORIES=str(tmp))
         _expect(done.returncode == 2, ("outside a repository", done.returncode, done.stderr), failures)
+        # a repository whose HEAD does not resolve to a commit (no commit yet) refuses before the check
+        unborn = tmp / "unborn"
+        fixture_git(["init", "-q", "-b", "main", str(unborn)], tmp)
+        done = helper(["--body-file", str(clean_body), "--base", base], unborn)
+        _expect(done.returncode == 2, ("unborn HEAD", done.returncode, done.stdout, done.stderr), failures)
+        _expect("cannot resolve HEAD to a commit" in done.stdout,
+                "the helper itself must refuse an unresolvable HEAD", failures)
+
+        # a passing check that reports no digest, and a check with an unexpected exit status, must
+        # both refuse: drive a COPY of this helper against stub checks (the copy resolves its check
+        # beside itself, so the stub stands in without touching the real one)
+        stub = tmp / "stub"
+        stub.mkdir()
+        (stub / "push_branch.py").write_bytes(HERE.read_bytes())
+        (stub / "check_msg_leaks.py").write_text(
+            'import sys\nprint("PASS (stub): no digest line")\nsys.exit(0)\n', encoding="utf-8")
+        branch_with_commit("feat-stub")
+        done = helper(["--body-file", str(clean_body), "--base", base], repo,
+                      script=stub / "push_branch.py")
+        _expect(done.returncode == 2, ("missing digest", done.returncode, done.stdout), failures)
+        _expect("did not report the scanned-body digest" in done.stdout,
+                "a digestless pass must name the refusal", failures)
+        _expect(not ref_exists("feat-stub"), "a digestless pass must not push", failures)
+        (stub / "check_msg_leaks.py").write_text('import sys\nsys.exit(3)\n', encoding="utf-8")
+        done = helper(["--body-file", str(clean_body), "--base", base], repo,
+                      script=stub / "push_branch.py")
+        _expect(done.returncode == 2, ("check exit 3", done.returncode, done.stdout), failures)
+        _expect("(exit 3)" in done.stdout, "an unexpected check status must be named", failures)
+        _expect(not ref_exists("feat-stub"), "an unexpected check status must not push", failures)
+
+        # shapes reachable only by driving the check directly
+        # --repo must be the repository root: from a subdirectory the changelog would read as absent
+        done = check_direct(["--pre-push", "--repo", str(repo / "tools"), "--body-file",
+                             str(clean_body), "--base", base], repo)
+        _expect(done.returncode == 2, ("subdir repo", done.returncode, done.stdout, done.stderr),
+                failures)
+        _expect("repository root" in done.stderr, "the subdir refusal must name the root rule", failures)
+        # --head binds the scan to the exact commit the helper pushes, not to the checkout: with a
+        # clean branch checked out, scanning the leaky commit's SHA still finds its leak
+        leaky = fixture_git(["rev-parse", "refs/heads/feat-msg"], repo).strip()
+        fixture_git(["checkout", "-q", "feat-clean"], repo)
+        done = check_direct(["--pre-push", "--repo", str(repo), "--body-file", str(clean_body),
+                             "--base", base, "--head", leaky, "--branch", "feat-msg"], repo)
+        _expect(done.returncode == 1, ("bound head", done.returncode, done.stdout, done.stderr),
+                failures)
+        # a --head that names no commit in the repository fails closed
+        done = check_direct(["--pre-push", "--repo", str(repo), "--body-file", str(clean_body),
+                             "--base", base, "--head", "c" * 40, "--branch", "feat-msg"], repo)
+        _expect(done.returncode == 2, ("unknown head", done.returncode, done.stderr), failures)
+        # an empty --branch fails closed, named as such (the flag is accepted but its value is not)
+        done = check_direct(["--pre-push", "--repo", str(repo), "--body-file", str(clean_body),
+                             "--base", base, "--head", leaky, "--branch", ""], repo)
+        _expect(done.returncode == 2, ("empty branch", done.returncode, done.stderr), failures)
+        _expect("--branch" in done.stderr, "the empty-branch refusal must name the flag", failures)
+        # without --branch the check resolves the current branch itself, so a detached HEAD fails closed
+        fixture_git(["checkout", "-q", "--detach", "main"], repo)
+        done = check_direct(["--pre-push", "--repo", str(repo), "--body-file", str(clean_body),
+                             "--base", base], repo)
+        _expect(done.returncode == 2, ("check detached", done.returncode, done.stderr), failures)
     if failures:
         print("SELF-TEST FAIL ({} failure(s)):".format(len(failures)))
         for failure in failures:
             print("  " + failure)
         return 1
-    print("SELF-TEST PASS: a clean branch (an empty body included) pushes and prints the body "
-          "digest; every finding shape (an attribution trailer in the body, a denylist term in the "
-          "body, a changelog item added in base..HEAD, a commit message in the range, the branch "
-          "name) refuses with exit 1 and no remote ref; and every fail-closed shape (a relative, "
-          "missing, symlinked or non-UTF-8 body, a non-SHA base, an unknown or valueless flag, a "
-          "missing required flag, a malformed changelog, a detached HEAD, a non-repository working "
-          "directory) refuses with exit 2 and no remote ref")
+    print("SELF-TEST PASS: a clean branch (an empty body or a clean title included) pushes, prints "
+          "the scanned-body digest twice (check and helper) and gets its upstream set; every finding "
+          "channel (an attribution trailer in the body, a denylist term in the body, a changelog "
+          "string added in base..HEAD, inside or outside the items array, a commit message in the "
+          "range, the branch name, a leaky --title) refuses with exit 1 and no remote ref; and every "
+          "exercised fail-closed shape (a relative, missing, symlinked or non-UTF-8 body, a non-SHA, "
+          "zero-SHA or nonexistent base, a base equal to the pushed commit or not its ancestor, an "
+          "empty title, an unknown, repeated or valueless flag, --self-test mixed with other "
+          "arguments, a malformed or deleted changelog, a failed push, a detached HEAD, an unborn "
+          "HEAD, a non-repository working directory, a subdirectory --repo, an unknown --head, a "
+          "digestless check pass, an unexpected check exit) refuses with exit 2 and no remote ref")
     return 0
 
 
