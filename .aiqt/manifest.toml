@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e9a7735bb38bd6fd52ac4329a833ac125d69df7813c0041ed226f9ec5a2d772d"
+tree-sha256 = "3c4d4e8e0675dd09fce58170255a0d9d0e2d36f5c72f23d518e1ff3cc435af1f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3827,7 +3827,7 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
 bytes = 28378
-sha256 = "34aa848a624136547883ed7c6d7f1078142ba7a49b483613f8b94c4cca152676"
+sha256 = "bc0599fe784a7027ee3dd7dcc99b8c7fe2a6c19d8872c95e478f095b3a8e5484"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

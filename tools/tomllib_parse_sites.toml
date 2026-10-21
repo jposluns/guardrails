@@ -56,7 +56,7 @@ reason = "test-code"
 path = "opf/tools/_opf_adopt_apply.py"
 function = "_self_test_checks"
 form = "call"
-count = 17
+count = 18
 class = "EXEMPT"
 reason = "test-code"
 
