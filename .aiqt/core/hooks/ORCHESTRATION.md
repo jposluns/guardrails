@@ -51,7 +51,10 @@ the doctor and the resume audit report and arm from it):
   checks. It allows silently, except that a readable foreground command that detaches work (a bare
   `&`, or a `setsid` without `-w`, a `nohup` or a `disown` in command position) is allowed with a
   note naming the tracked background mechanism (`run_in_background`, or a foreground wait); its scan
-  skips here-document bodies and arithmetic, which the in-scope deny still reads as code. A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
+  skips here-document bodies opened at the outer quoting level and arithmetic, which the in-scope
+  deny still reads as code (a here-document inside a double-quoted command substitution, the
+  commit-message form, is still read as double-quoted text, so a body `&` there can draw an extra
+  note), and passes over a redirect operator and its target without losing the command position. A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
   `.aiqt` directory the guard's process lacks search (execute) permission on, such as mode `0600`
   or `0000` for a process those modes bind; a `.aiqt` of mode `0100` evaluates normally for its owner
   where `O_PATH` exists (Linux), because the `O_PATH` open needs no read permission, and for a process

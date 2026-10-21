@@ -9370,7 +9370,7 @@ def _main_isolated(report_path=None):
         # The same no-registry fixture: (check id, tool_input, reduced verdict). A foreground command that
         # detaches work notes ("warn"); the controls stay the silent allow ("allow"). Each control carries an
         # ampersand or a detach word that a scan ignoring quotes, comments, here-document bodies, arithmetic,
-        # command position, setsid -w or the background flag would note.
+        # command position (redirect targets included), setsid -w or the background flag would note.
         for check_id, tool_input, want in (
                 ("trunc/oos-detach-no-space-notes", _fg("long_job&"), "warn"),
                 ("trunc/oos-detach-loop-end-notes", _fg('for d in a b; do run_one "$d"; done &'), "warn"),
@@ -9410,6 +9410,36 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-setsid-wait-long-allows", _fg("setsid --wait long_job"), "allow"),
                 ("trunc/oos-detach-word-argument-allows", _fg("git log --grep setsid"), "allow"),
                 ("trunc/oos-detach-word-redirect-target-allows", _fg("echo hi > nohup"), "allow"),
+                # A redirect operator and its target operand leave the pending command position alone, with
+                # a blank between operator and target or not: a leading redirect must not hide the real
+                # command word behind its target, and a spaced redirect target named like a detacher is a
+                # filename, not a command (bash runs long_job in `> nohup long_job`).
+                ("trunc/oos-redirect-target-detacher-name-allows", _fg("> nohup long_job"), "allow"),
+                ("trunc/oos-redirect-first-setsid-notes", _fg("2> /dev/null setsid -f long_job"), "warn"),
+                ("trunc/oos-redirect-first-nohup-notes", _fg("> /tmp/log nohup long_job"), "warn"),
+                ("trunc/oos-redirect-stdin-first-setsid-notes", _fg("< /dev/null setsid long_job"), "warn"),
+                ("trunc/oos-redirect-first-no-space-setsid-notes", _fg("2>/dev/null setsid long_job"), "warn"),
+                ("trunc/oos-redirect-target-no-space-detacher-notes", _fg(">nohup setsid long_job"), "warn"),
+                ("trunc/oos-redirect-pair-first-setsid-notes",
+                 _fg("> /dev/null 2> /tmp/e setsid long_job"), "warn"),
+                ("trunc/oos-redirect-mid-wrapper-nohup-notes",
+                 _fg("timeout 5 > /dev/null nohup long_job"), "warn"),
+                ("trunc/oos-redirect-quoted-target-setsid-notes", _fg("> 'nohup' setsid long_job"), "warn"),
+                ("trunc/oos-dup-spaced-target-setsid-notes", _fg("2>& 1 setsid long_job"), "warn"),
+                # setsid waits under -w, --wait, or any unique prefix of --wait; --w is the shortest such
+                # prefix (just inside the bound), while `--` ends the options and --waitx is no prefix
+                # (both just outside, so each still notes).
+                ("trunc/oos-setsid-wait-prefix-allows", _fg("setsid --w long_job"), "allow"),
+                ("trunc/oos-setsid-double-dash-notes", _fg("setsid -- long_job"), "warn"),
+                ("trunc/oos-setsid-wait-nonprefix-notes", _fg("setsid --waitx long_job"), "warn"),
+                # Documented limit: a here-document inside a double-quoted command substitution (the
+                # commit-message form) is read as double-quoted text, so a body whose double quotes toggle
+                # that reading exposes a body `&` to an extra note; a body that leaves the reading
+                # balanced stays silent. The extra note errs toward noting, never toward a silent detach.
+                ("trunc/oos-commit-heredoc-amp-exposed-notes",
+                 _fg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\""), "warn"),
+                ("trunc/oos-commit-heredoc-amp-allows",
+                 _fg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\""), "allow"),
                 ("trunc/oos-plain-allows", _fg("python3 build.py"), "allow"),
                 ("trunc/oos-unbalanced-allows", _fg("echo 'oops & bg"), "allow"),
                 ("trunc/oos-background-allows",
@@ -9503,8 +9533,9 @@ def _main_isolated(report_path=None):
         check("trunc/rib-omitted-foreground-detach-denies", raw({"tool_input": {"command": "sleep 5 &"}}),
               "deny")
         # Registry scope, the disclosed residual: BY DEFAULT (this run pops AIQT_ORCH_REQUIRE_REGISTRY) with NO
-        # registry file the guard is inert (malformed input
-        # included), while a PRESENT but unreadable or invalid registry keeps it active (fail-closed).
+        # registry file the guard denies nothing (malformed input included; a readable foreground detach
+        # draws only the note), while a PRESENT but unreadable or invalid registry keeps it active
+        # (fail-closed).
         check("trunc/malformed-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
             {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
              "tool_input": None})), "allow")
@@ -13510,7 +13541,9 @@ def _main_isolated(report_path=None):
           "ALLOWS-WITH-NOTE (reducer 'warn') any other shell syntax or reserved word, DENIES-and-educates a "
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
           "producer's full output and exit status) and a "
-          "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment "
+          "foreground bare-& detach (historically an ASK for both), allows-with-note a readable foreground "
+          "detach where no registry is found (naming the tracked background mechanism; redirect operands "
+          "keep their command position pending), while dropping a word-start `#` comment "
           "and failing a scan that ends inside an open quote toward a deny with its own reason (a quote the "
           "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
           "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "

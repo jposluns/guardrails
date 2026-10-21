@@ -13376,8 +13376,8 @@ _ORCH_NOTE_NUMBER_RE = re.compile(r"[0-9][0-9.]*[smhd]?")
 
 def _orch_setsid_waits(command, i):
     """True when the options after a setsid word that ends at index i include -w or --wait (or a unique
-    prefix of --wait), so setsid waits for its command. The option words are read up to the first word
-    that is not an option, or up to `--`."""
+    prefix of --wait, of which --w is the shortest), so setsid waits for its command. The option words are
+    read up to the first word that is not an option, or up to `--`."""
     n = len(command)
     while True:
         while i < n and command[i] in " \t":
@@ -13389,7 +13389,7 @@ def _orch_setsid_waits(command, i):
         if word == "--" or not word.startswith("-") or word == "-":
             return False
         if word.startswith("--"):
-            if len(word) > 3 and "--wait".startswith(word):
+            if len(word) >= 3 and "--wait".startswith(word):
                 return True
         elif "w" in word[1:]:
             return True
@@ -13412,14 +13412,26 @@ def _orch_arith_closes(command):
 
 def _orch_note_scan(command, bash_word_starts):
     """The scan behind the note outside registry scope. It reads quotes, escapes and `#` comments exactly
-    as _orch_foreground_scan does (bash_word_starts selects the same comment rule), and adds three things
-    that scan does not model. A here-document body is skipped as data, quoted delimiter or not, so an `&`
-    or an apostrophe in it neither notes nor shifts the quote state. An arithmetic expansion $(( ... )) or
-    arithmetic command (( ... )) is skipped, so a bitwise `&` in it does not note; it counts as arithmetic
-    only when its two opening parentheses close as `))`, which is how bash tells it from a nested
-    subshell. A setsid, nohup or disown in command position (at the start of a command, after an operator
-    or a reserved word such as then or do, or after a wrapper such as env, nice, sudo or timeout and its
-    options, numbers and assignments) is reported, setsid only without -w or --wait.
+    as _orch_foreground_scan does (bash_word_starts selects the same comment rule), and adds four things
+    that scan does not model. A here-document body opened at the outer quoting level is skipped as data,
+    quoted delimiter or not, so an `&` or an apostrophe in it neither notes nor shifts the quote state;
+    one opened inside a double-quoted command substitution (the commit-message form) is NOT recognized and
+    is read as double-quoted text, whose own double quotes toggle that reading, so a body `&` there can
+    draw an extra note. An arithmetic expansion $(( ... )) or arithmetic command (( ... )) is skipped, so
+    a bitwise `&` in it does not note; it counts as arithmetic only when its two opening parentheses close
+    as `))`, which is how bash tells it from a nested subshell. A redirect operator and its target operand
+    are passed over without disturbing the pending command position (next_command), so a leading
+    `2> /dev/null` does not hide the command word after its target and a spaced redirect target named like
+    a detacher is not read as one. A setsid, nohup or disown in command position (at the start of a
+    command, after an operator or a reserved word such as then or do, or after a wrapper such as env,
+    nice, sudo or timeout and its options, numbers and assignments) is reported, setsid only without -w or
+    --wait (or a unique prefix of --wait, of which --w is the shortest).
+
+    Known misses, each also disclosed in the manifest residue: a detacher after a backtick or after a
+    backslash-newline line continuation is not read in command position; a command substitution inside
+    skipped arithmetic is skipped with it; a `<<` inside the old-style $[ ... ] arithmetic reads as a
+    here-document opener and skips the lines after it; a redirect target written as an arithmetic
+    expansion drops the pending command position.
 
     Returns "detach" when it meets a bare `&` control operator, else the first such command word it met
     (setsid, nohup or disown), else None. A scan that ends inside an open quote returns the same, never a
@@ -13427,6 +13439,7 @@ def _orch_note_scan(command, bash_word_starts):
     it keeps _orch_foreground_detach_kind."""
     in_single = in_double = escaped = False
     prev_dup = False
+    redirect_target = False  # between a redirect operator and the start of its target operand
     word_start = True
     command_position = next_command = True  # next_command: the position the next word takes after a blank
     groups = []  # next_command saved at each unquoted `(`, restored at its `)`
@@ -13454,6 +13467,8 @@ def _orch_note_scan(command, bash_word_starts):
             prev_dup, word_start = False, False
             i += 1
             continue
+        if redirect_target and not (ch in "<> \t" or (ch == "&" and prev_dup)):
+            redirect_target = False  # the redirect's target operand starts at this character
         if ch == "#" and word_start:
             nl = command.find("\n", i)
             if nl == -1:
@@ -13472,7 +13487,8 @@ def _orch_note_scan(command, bash_word_starts):
             if ch == "\n":
                 command_position = next_command = True
             elif ch in " \t":
-                command_position = next_command
+                if not redirect_target:  # a blank before a redirect's target does not restore position
+                    command_position = next_command
             else:
                 command_position = next_command = False  # any other space is a word character to bash
             i += 1
@@ -13553,7 +13569,10 @@ def _orch_note_scan(command, bash_word_starts):
             else:
                 command_position = next_command = True  # a case pattern's `)`: a command follows
         elif ch in "<>":
-            command_position = False  # the next word is the redirect's target, not a command
+            # a redirect: the operand that follows is its target, not a command, so the pending command
+            # position (next_command) must survive the operator, any blanks, and the whole target operand
+            command_position = False
+            redirect_target = True
         elif command_position:
             command_position = next_command = False
         prev_dup = ch in (">", "<", "|")
@@ -14114,7 +14133,7 @@ def orch_truncation_guard(data):
     unreadable, or invalid keeps it active. OUT-OF-SCOPE NOTE: in that no-registry case a readable
     foreground command (run_in_background false or omitted, command a string) that detaches work, by a
     bare `&` or by a setsid (without -w), nohup or disown command (_orch_foreground_note_kind, a scan that
-    also skips here-document bodies and arithmetic), is allowed WITH A NOTE naming the tracked background
+    also skips outer-level here-document bodies, arithmetic and redirect operands), is allowed WITH A NOTE naming the tracked background
     mechanism; every other call there is the silent allow, malformed input included. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
     off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
