@@ -902,14 +902,33 @@ def _init_route_violations(source):
     return violations
 
 
+# The invoke callable the lifecycle-wrapped leg runs; _suite stashes it because the OPF git
+# lifecycle helper takes a no-argument callback.
+_SUITE_INVOKE = [None]
+
+
 def _suite(invoke):
-    """Isolate fixture configuration and restore the caller even on failure."""
+    """Isolate fixture configuration and restore the caller even on failure. The whole run sits
+    inside the OPF git lifecycle (_opf_oplock._st_with_git_lifecycle), whose PATH git wrapper
+    reasserts the system-config pins after a production helper strips every GIT_* variable (the
+    init operation mutex's rev-parse does), so no git call the fixtures or the driven init make
+    reads the host's system configuration."""
     import tempfile
     from unittest.mock import patch
-    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
-        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                        GIT_CONFIG_NOSYSTEM="1"):
-            return _suite_isolated(invoke)
+    import _opf_oplock
+    _SUITE_INVOKE[0] = invoke
+    try:
+        with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+            with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                            GIT_CONFIG_NOSYSTEM="1"):
+                return _opf_oplock._st_with_git_lifecycle(_suite_lifecycle)
+    finally:
+        _SUITE_INVOKE[0] = None
+
+
+def _suite_lifecycle():
+    """The lifecycle-wrapped leg of _suite: run the vectors over the stashed invoke callable."""
+    return _suite_isolated(_SUITE_INVOKE[0])
 
 
 def _suite_isolated(invoke):

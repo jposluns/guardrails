@@ -22210,6 +22210,7 @@ def _retained_close_offpath_self_test():
     import check_opf_prompt_pack
     import check_opf_upgrade
     import _opf_adopt_observe
+    import _opf_oplock
     this = sys.modules[__name__]
     tools = os.path.dirname(os.path.abspath(__file__))
     real_open, real_dup, real_pipe, real_close, real_fstat = os.open, os.dup, os.pipe, os.close, os.fstat
@@ -22552,7 +22553,11 @@ def _retained_close_offpath_self_test():
                     mock.patch.object(this, "_init_untracked", lambda *args: None), \
                     mock.patch.object(this, "_init_unignored", lambda *args: None), \
                     mock.patch.object(this, "_init_no_prior_store", lambda *args: None):
-                return _cmd_init(["--root", str(fresh)])
+                # The OPF git lifecycle's PATH wrapper reasserts the system-config pins after the
+                # init operation mutex's rev-parse strips every GIT_* variable, so this in-process
+                # init never reads the host's system configuration.
+                return _opf_oplock._st_with_git_lifecycle(
+                    lambda: _cmd_init(["--root", str(fresh)]))
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             if cmd_init() != EXIT_OK:
