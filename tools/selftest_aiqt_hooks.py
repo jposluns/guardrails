@@ -4072,84 +4072,121 @@ def _deadline_enclosing_restore_failures():
 
 
 def _deadline_rearm_failures():
-    """(dl-rearm-once) A caller timer re-armed by the restore whose expiry falls due before the restore has
-    finished is delivered once. A one-shot 30-second caller timer with a handler that raises. Stand-ins for
-    aiqt_hooks.signal and aiqt_hooks.time, installed before the take, tie each step to an event of the run
-    rather than to a time window, so no scheduling delay can send the restore down another path or let the
-    expiry go unobserved. The take's cancel of the caller's timer records what that timer had left. The
-    window's clock returns the real time at its first read (the take) and, at every later read, that time
-    plus the recorded value less 3 ms, so the restore finds exactly 3 ms left however long the run takes.
-    The restore's re-arm (a setitimer call from _DeadlineWindow._twice with an interval) then waits, once it
-    has returned and with the mask still held, until that timer's expiry is pending (up to 1 s). The restore
-    must re-arm the timer once, with the 3 ms left (to within a microsecond) and no interval, and its expiry
-    must come pending in the restore; the caller's handler must then run exactly once, its exception must
-    leave the with statement, and the caller must get back its handler with the timer inactive."""
+    """(dl-rearm-once, dl-rearm-delayed-exit) A caller timer re-armed by the restore whose expiry falls due
+    before the restore has finished is delivered once, however long the run is delayed at any step. A caller
+    handler that raises, with no real caller timer behind it: stand-ins for aiqt_hooks.signal and
+    aiqt_hooks.time, installed before the take, report a one-shot 30-second caller timer at the take's
+    cancel, arm no real timer for the window's own deadline, and report the restore's cancel of that timer
+    as still running, so no timer exists that a scheduling delay could expire and no delay can send the
+    restore down its discard path. The window's clock returns the real time at its first read (the take)
+    and, at every later read, that time plus the reported 30 seconds less 3 ms, so the restore finds exactly
+    3 ms left however long the run takes. The one real timer in the run is the restore's re-arm (a setitimer
+    call from _DeadlineWindow._twice with an interval), armed with the mask still held; the stand-in then
+    waits, once it has returned, until that timer's expiry is pending (the one remaining time bound: up to
+    1 s for the kernel to expire the 3 ms timer). The restore must re-arm the timer once, with the 3 ms left
+    (to within a microsecond) and no interval, and its expiry must come pending in the restore, with no
+    discard (SIG_IGN) installed along the way; the caller's handler must then run exactly once, its
+    exception must leave the with statement, and the caller must get back its handler with the timer
+    inactive.
+    dl-rearm-once runs this under a 5-second window with no delay beyond the trace stage itself.
+    dl-rearm-delayed-exit repeats it under a 0.05-second window with 0.25 seconds slept at the entry of
+    __exit__, past the deadline the window would otherwise have armed for real: it stands in for a
+    scheduling delay at the exit, and fails if the fixture's independence from real timers is lost."""
     out = []
-    calls = []
-    taken = []
-    rearms = []
     take = aiqt_hooks._DeadlineWindow._take.__code__
     twice = aiqt_hooks._DeadlineWindow._twice.__code__
+    exit_code = aiqt_hooks._DeadlineWindow.__exit__.__code__
 
-    def raising(signum, frame):
-        calls.append(signum)
-        raise _CallerAlarm("caller alarm")
+    def run(seconds, delay):
+        calls = []
+        taken = []
+        rearms = []
+        discards = []
 
-    def signal_stand_in():
-        names = types.SimpleNamespace(**vars(signal))
+        def raising(signum, frame):
+            calls.append(signum)
+            raise _CallerAlarm("caller alarm")
 
-        def setitimer(*args):
-            timer = signal.setitimer(*args)
-            caller = sys._getframe(1).f_code
-            if caller is take and args[1:] == (0,):
-                taken.append(timer)
-            elif caller is twice and len(args) == 3:
-                waited = time.monotonic() + 1.0
-                while signal.SIGALRM not in signal.sigpending() and time.monotonic() < waited:
-                    time.sleep(1e-3)
-                rearms.append((args[1], args[2], signal.SIGALRM in signal.sigpending()))
-            return timer
-        names.setitimer = setitimer
-        return names
+        def signal_stand_in():
+            names = types.SimpleNamespace(**vars(signal))
 
-    def time_stand_in():
-        names = types.SimpleNamespace(**vars(time))
-        reads = []
+            def setitimer(*args):
+                caller = sys._getframe(1).f_code
+                if caller is take and args[1:] == (0,):
+                    signal.setitimer(*args)
+                    taken.append((30.0, 0.0))  # the reported caller timer: no real one backs it
+                    return taken[0]
+                if caller is take and len(args) == 2:
+                    return (0.0, 0.0)  # the window's own timer is never really armed
+                if caller is twice and args[1:] == (0,):
+                    signal.setitimer(*args)
+                    return (seconds / 2, 0.0)  # the window's timer reads as still running
+                timer = signal.setitimer(*args)
+                if caller is twice and len(args) == 3:
+                    waited = time.monotonic() + 1.0
+                    while signal.SIGALRM not in signal.sigpending() and time.monotonic() < waited:
+                        time.sleep(1e-3)
+                    rearms.append((args[1], args[2], signal.SIGALRM in signal.sigpending()))
+                return timer
 
-        def monotonic():
-            if not reads:
-                reads.append(time.monotonic())
-                return reads[0]
-            return reads[0] + taken[0][0] - 0.003
-        names.monotonic = monotonic
-        return names
+            def installing(*args):
+                if sys._getframe(1).f_code is twice and args[1:] == (signal.SIG_IGN,):
+                    discards.append(args)
+                return signal.signal(*args)
+            names.setitimer = setitimer
+            names.signal = installing
+            return names
 
-    window = aiqt_hooks._DeadlineWindow(5.0)
-    signal.signal(signal.SIGALRM, raising)
-    signal.setitimer(signal.ITIMER_REAL, 30.0)
-    escaped = None
-    try:
+        def time_stand_in():
+            names = types.SimpleNamespace(**vars(time))
+            reads = []
+
+            def monotonic():
+                if not reads:
+                    reads.append(time.monotonic())
+                    return reads[0]
+                return reads[0] + taken[0][0] - 0.003
+            names.monotonic = monotonic
+            return names
+
+        window = aiqt_hooks._DeadlineWindow(seconds)
+        tracer, at = _window_tracer(window, (lambda frame: frame.f_code is exit_code,
+                                             lambda: time.sleep(delay)))
+        signal.signal(signal.SIGALRM, raising)
+        escaped = None
         try:
-            aiqt_hooks.signal, aiqt_hooks.time = signal_stand_in(), time_stand_in()
-            with window:
-                pass
-        except _CallerAlarm:
-            escaped = "the caller's exception"
-        except BaseException as exc:
-            escaped = type(exc).__name__
+            try:
+                aiqt_hooks.signal, aiqt_hooks.time = signal_stand_in(), time_stand_in()
+                with window:
+                    sys.settrace(tracer)
+            except _CallerAlarm:
+                escaped = "the caller's exception"
+            except BaseException as exc:
+                escaped = type(exc).__name__
+            finally:
+                sys.settrace(None)
+                aiqt_hooks.signal = signal
+                aiqt_hooks.time = time
+            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
         finally:
-            aiqt_hooks.signal = signal
-            aiqt_hooks.time = time
-        handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, signal.SIG_DFL)
-    if not (len(rearms) == 1 and abs(rearms[0][0] - 0.003) < 1e-6 and rearms[0][1:] == (0.0, True)
-            and escaped == "the caller's exception" and calls == [signal.SIGALRM] and handler is raising
-            and timer == (0.0, 0.0) and not window.armed):
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        if (at and len(rearms) == 1 and abs(rearms[0][0] - 0.003) < 1e-6 and rearms[0][1:] == (0.0, True)
+                and not discards and escaped == "the caller's exception" and calls == [signal.SIGALRM]
+                and handler is raising and timer == (0.0, 0.0) and not window.armed):
+            return ""
+        return ("got stage at {!r}, re-arms {!r} (left, interval, pending after the wait), discards {}, "
+                "escaped {}, caller deliveries {}, handler {!r}, timer {!r}".format(
+                    at, rearms, len(discards), escaped, len(calls), handler, timer))
+
+    problem = run(5.0, 0.0)
+    if problem:
         out.append("(dl-rearm-once) a re-armed caller timer falling due during the restore must be delivered "
-                   "once, got re-arms {!r} (left, interval, pending after the wait), escaped {}, caller "
-                   "deliveries {}, handler {!r}, timer {!r}".format(rearms, escaped, len(calls), handler, timer))
+                   "once, " + problem)
+    problem = run(0.05, 0.25)
+    if problem:
+        out.append("(dl-rearm-delayed-exit) a re-armed caller timer must be delivered once however late the "
+                   "exit runs, " + problem)
     return out
 
 
