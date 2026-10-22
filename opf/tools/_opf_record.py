@@ -133,10 +133,13 @@ _opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_vers
 SUPPORTED_HOMES is 1, every subcommand refuses a store declaring homes 2 before any reconciliation or
 write (_probe_homes), so the shipped verb claims through homes 1 only. A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
-migration to carry it (spec 4.2). The refusal names the path and the operator's remedy (a store is at
-homes 2 only when it is created there, spec 4.2, so the journal holds no history of this store: move
-it out of the store by hand, keeping it, and re-run); this tooling only probes, no-follow, that the
-path exists, and never reads, moves, archives or removes it (spec 15).
+migration to carry it (spec 4.2). The refusal names the path and a remedy conditional on what the
+operator knows, because this tooling reads no legacy journal (spec 15) and so cannot tell whose
+history the journal holds: a store created at homes 2 gets the journal moved out of the store by
+hand, kept, and a re-run; a homes-2 declaration written over a homes-1 store breaks spec 4.2 itself,
+the journal may hold that store's only recovery record, and the operator leaves it in place and gets
+a maintainer decision. This tooling only probes, no-follow, that the path exists, and never reads,
+moves, archives or removes it (spec 15).
 
 Exit contract: 0 recorded and doctor-VALID, or carrying only that pending cannot-evaluate (uncommitted);
 2 refusal or cannot-evaluate, with recovery text where the working tree changed. Exit 1 is not used (it
@@ -2132,10 +2135,14 @@ def _reconcile_journal(ctx):
 
 def _refuse_legacy_journal(ctx):
     """A legacy .aiqt/record/journal present on a homes-2 store is refused and never recovered: homes 2
-    has no homes migration to carry it (spec 4.2). The refusal names the path and the remedy, which is
-    the operator's and needs no tooling: a store is at homes 2 only when it is created there (spec 4.2),
-    so the journal holds no history of this store; the operator moves it out of the store by hand,
-    keeping it, and re-runs. The only access here is of one kind, the no-follow existence probe of the
+    has no homes migration to carry it (spec 4.2). The refusal states only what this probe establishes,
+    that the journal exists: this tooling reads no legacy journal (spec 15), so it cannot tell whose
+    history the journal holds, and the remedy it names is conditional on what the operator knows. A
+    store created at homes 2 never ran a homes-1 history of its own, so the operator moves the journal
+    out of the store by hand, keeping it, and re-runs. A homes-2 declaration written over a homes-1
+    store breaks spec 4.2 itself, and the journal may hold that store's only recovery record, so the
+    operator leaves it in place and gets a maintainer decision; this refusal cannot tell the two cases
+    apart, so it states both. The only access here is of one kind, the no-follow existence probe of the
     path itself, used only to refuse (spec 15): the journal is never read, moved, archived or removed
     here."""
     try:
@@ -2147,9 +2154,12 @@ def _refuse_legacy_journal(ctx):
         raise RecordError("a legacy record journal {0} is present on a homes-2 store. This tooling never "
                           "reads, recovers, archives, moves or removes it: homes 2 has no homes migration "
                           "(spec 4.2), and on a homes-2 store OPF reads no artefact from a former .aiqt/ "
-                          "location (spec 15). A store is at homes 2 only when it is created there "
-                          "(spec 4.2), so {0} holds no history of this store. Remedy: move {0} out of the "
-                          "store by hand, keeping it, and re-run. Nothing written (fail-closed)".format(
+                          "location (spec 15). Because it reads no legacy journal, this tooling cannot "
+                          "tell whose history {0} holds. Remedy: if this store was created at homes 2, "
+                          "move {0} out of the store by hand, keeping it, and re-run; if the homes-2 "
+                          "declaration was written over a homes-1 store, that declaration breaks spec "
+                          "4.2 and {0} may hold the store's only recovery record, so leave it in place "
+                          "and get a maintainer decision. Nothing written (fail-closed)".format(
                               JOURNAL_REL))
 
 

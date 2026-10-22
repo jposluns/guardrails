@@ -97,14 +97,25 @@ Each case runs on its own copy of that template; the root is removed in a finall
       points on both sides of COMPLETE (flip: a recovery that enumerates only grammar-named
       transactions)
   T20 a legacy .aiqt/record/journal on a homes-2 store is refused with the exact refusal text, which
-      names the path and the operator's remedy (the journal holds no history of this store, so move it
-      out of the store by hand, keeping it, and re-run), and is never recovered: every working-tree
-      byte outside .git unchanged (content and mode bits), no typed journal home created, and nothing
-      at or beneath the legacy path opened, listed, followed or read through the calls the access
-      recorder wraps, the only exempt kind the no-follow existence probe of the path itself (flips:
-      probe the generation as 1, under which the legacy journal is reconciled in place; an earlier
-      refusal text, whose remedy no current tool can carry out; a refusal that reads the journal
-      first; a refusal that leaves a store write outside .aiqt)
+      names the path and a remedy conditional on what the operator knows (the tooling reads no legacy
+      journal, so it cannot tell whose history the journal holds: a store created at homes 2 gets the
+      journal moved out of the store by hand and kept, and a homes-2 declaration written over a
+      homes-1 store leaves the journal in place for a maintainer decision), and is never recovered:
+      every working-tree byte outside .git unchanged (content and mode bits), no typed journal home
+      created, and nothing at or beneath the legacy path opened, listed, followed or read through the
+      calls the access recorder wraps, the only exempt kind the no-follow existence probe of the path
+      itself (flips: probe the generation as 1, under which the legacy journal is reconciled in place;
+      an earlier refusal text, whose remedy no current tool can carry out; the replaced refusal text,
+      which asserted the journal holds no history of this store and named the move unconditionally; a
+      refusal that reads the journal first; a refusal that leaves a store write outside .aiqt). The
+      created-at-homes-2 branch of the remedy is carried out: a clean store with a planted legacy
+      journal is refused, the journal is moved out of the store by hand and kept, and the re-run
+      records with the store doctor-VALID (flips: a refusal keyed to the journal's former parent,
+      under which the carried-out remedy still refuses; the replaced unconditional text). A torn
+      sibling, built on the open transaction a killed run left, draws the SAME refusal (the tool
+      cannot tell the two cases apart), which states both branches, with the journal and its open
+      transaction left in place and every byte unchanged (flips: the replaced unconditional text; a
+      refusal that itself moves the journal aside)
   T21 a direct homes-2 _publish, its reservation published first under the same held capability and
       run id, lands ONE capability-bound transaction in .working/journals/record/journal under that run
       id with its projection at txn_record("record", <rid>), the operands rewritten, and nothing under
@@ -2965,14 +2976,18 @@ def flip_t19_legacy():
 
 
 # The exact refusal a legacy record journal on a homes-2 store draws: the path, why it is never recovered,
-# and the operator's remedy.
+# and a remedy conditional on what the operator knows (the tooling reads no legacy journal, so it cannot
+# tell whose history the journal holds, and it states both branches).
 LEGACY_JOURNAL_REFUSAL = (
     "opf record create: refused: a legacy record journal .aiqt/record/journal is present on a homes-2 "
     "store. This tooling never reads, recovers, archives, moves or removes it: homes 2 has no homes "
     "migration (spec 4.2), and on a homes-2 store OPF reads no artefact from a former .aiqt/ location "
-    "(spec 15). A store is at homes 2 only when it is created there (spec 4.2), so .aiqt/record/journal "
-    "holds no history of this store. Remedy: move .aiqt/record/journal out of the store by hand, "
-    "keeping it, and re-run. Nothing written (fail-closed); exit 2\n")
+    "(spec 15). Because it reads no legacy journal, this tooling cannot tell whose history "
+    ".aiqt/record/journal holds. Remedy: if this store was created at homes 2, move .aiqt/record/journal "
+    "out of the store by hand, keeping it, and re-run; if the homes-2 declaration was written over a "
+    "homes-1 store, that declaration breaks spec 4.2 and .aiqt/record/journal may hold the store's only "
+    "recovery record, so leave it in place and get a maintainer decision. Nothing written (fail-closed); "
+    "exit 2\n")
 
 
 @contextlib.contextmanager
@@ -3032,12 +3047,12 @@ def _legacy_journal_access(root, seen):
 
 def t20_homes2_legacy_refused(fx):
     """A legacy .aiqt/record/journal found on a homes-2 store is refused with the exact refusal text, which
-    names the path and the operator's remedy, and is never recovered: every byte of the store's working
-    tree outside .git stays unchanged, compared by content and mode bits (snapshot; the T15 leftover
-    lock included), no typed journal home is created, and nothing at or beneath the legacy path is
-    opened, listed, followed or read through the calls _legacy_journal_access wraps: the only access
-    kind exempted is the no-follow existence probe of the path itself (the exemption is by kind, not a
-    count of one)."""
+    names the path and a remedy conditional on what the operator knows, and is never recovered: every
+    byte of the store's working tree outside .git stays unchanged, compared by content and mode bits
+    (snapshot; the T15 leftover lock included), no typed journal home is created, and nothing at or
+    beneath the legacy path is opened, listed, followed or read through the calls
+    _legacy_journal_access wraps: the only access kind exempted is the no-follow existence probe of
+    the path itself (the exemption is by kind, not a count of one)."""
     env = fx.env
     root = fx.case("t20-homes2-legacy")
     proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
@@ -3075,6 +3090,24 @@ def flip_t20_remedy():
     return patch.object(record, "_refuse_legacy_journal", unremedied)
 
 
+def flip_t20_unconditional():
+    """The replaced refusal text: it stated as fact that a homes-2 store's legacy journal holds no
+    history of this store, which the probe cannot establish (the tooling reads no legacy journal, so
+    it cannot tell whose history the journal holds), and named the move-aside remedy unconditionally.
+    Only the exact-text assertion turns it red."""
+    def unconditional(ctx):
+        if journal._lstat_contained(ctx.root_fd, record.JOURNAL_REL) is not None:
+            raise record.RecordError("a legacy record journal {0} is present on a homes-2 store. This "
+                                     "tooling never reads, recovers, archives, moves or removes it: "
+                                     "homes 2 has no homes migration (spec 4.2), and on a homes-2 store "
+                                     "OPF reads no artefact from a former .aiqt/ location (spec 15). A "
+                                     "store is at homes 2 only when it is created there (spec 4.2), so "
+                                     "{0} holds no history of this store. Remedy: move {0} out of the "
+                                     "store by hand, keeping it, and re-run. Nothing written "
+                                     "(fail-closed)".format(record.JOURNAL_REL))
+    return patch.object(record, "_refuse_legacy_journal", unconditional)
+
+
 def flip_t20_read():
     """A refusal that first reads the legacy journal (its lock owner and transactions), then refuses with
     the exact text, every byte unchanged: only the access recorder turns it red."""
@@ -3100,6 +3133,89 @@ def flip_t20_write():
         (Path(ctx.res.store_root) / LEASE).write_bytes(b"")
         original(ctx)
     return patch.object(record, "_refuse_legacy_journal", writing)
+
+
+def t20_homes2_legacy_remedy(fx):
+    """The created-at-homes-2 branch of the remedy, carried out: a clean store (no record run ever
+    journaled on it) with a planted legacy journal is refused with the exact text and every byte
+    unchanged; the operator's move takes the journal out of the store, kept intact; the re-run then
+    records, and the store is doctor-VALID. The tool itself never performs the move: the journal is
+    still at the legacy path after the refusal, and the test does the move by hand."""
+    env = fx.env
+    root = fx.case("t20-homes2-remedy")
+    planted = Path(root) / record.JOURNAL_REL
+    planted.mkdir(parents=True)
+    with _self_test_homes2_active(root):
+        before = snapshot(root)
+        result = record_cli(env, root, CREATE)
+        assert result == (2, "", LEGACY_JOURNAL_REFUSAL), ("T20 the exact refusal text", result)
+        assert snapshot(root) == before, "T20 the refusal changes no working-tree byte outside .git"
+        assert planted.is_dir(), "T20 the refusal leaves the journal at the legacy path"
+        kept = Path(str(root) + "-kept-legacy-journal")
+        os.rename(str(planted), str(kept))   # the operator's move, out of the store, keeping it
+        assert kept.is_dir(), "T20 the moved journal is kept"
+        recorded(record_cli(env, root, CREATE))
+        rc, out, err = cli(env, ["doctor", "--root", str(root)])
+        assert rc == 0 and "store integrity: VALID" in out, ("T20 doctor VALID after the remedy", rc,
+                                                             out[-1600:], err[-800:])
+
+
+def flip_t20_parent():
+    """A refusal keyed to the legacy journal's parent directory once the journal itself is gone: the
+    carried-out move leaves the parent behind, so the re-run still refuses. Only the remedy vector's
+    re-run success turns it red."""
+    original = record._refuse_legacy_journal
+
+    def parent_keyed(ctx):
+        original(ctx)
+        parent_rel = record.JOURNAL_REL.rsplit("/", 1)[0]
+        if journal._lstat_contained(ctx.root_fd, parent_rel) is not None:
+            raise record.RecordError("a former legacy journal home {} is present on a homes-2 store; "
+                                     "refusing".format(parent_rel))
+    return patch.object(record, "_refuse_legacy_journal", parent_keyed)
+
+
+def t20_homes2_legacy_torn(fx):
+    """The branch the refusal cannot rule out: the legacy journal holds this store's own open
+    transaction (a run killed mid-apply left it, with its lock and lease), so moving it aside would
+    discard the store's only rollback record. The SAME exact refusal is drawn (the tool reads no
+    legacy journal, so it cannot tell the two cases apart), it states both branches, and the journal,
+    its open transaction included, is left in place with every working-tree byte outside .git
+    unchanged."""
+    env = fx.env
+    root = fx.case("t20-homes2-torn")
+    proc = child(env, root, CREATE, kill="after-apply-0")
+    assert proc.returncode == 137, ("T20 the child is killed mid-apply", proc.returncode,
+                                    proc.stderr[-800:])
+    opened = journal_states(root)
+    assert opened and any(s == "open" for s in opened.values()), ("T20 the torn journal holds an open "
+                                                                  "transaction", opened)
+    with _self_test_homes2_active(root):
+        before = snapshot(root)
+        result = record_cli(env, root, CREATE)
+        assert result == (2, "", LEGACY_JOURNAL_REFUSAL), ("T20 the same exact refusal text", result)
+        assert "if this store was created at homes 2, move" in result[2], \
+            ("T20 the refusal states the move-aside branch", result[2])
+        assert "so leave it in place and get a maintainer decision" in result[2], \
+            ("T20 the refusal states the leave-in-place branch", result[2])
+        assert snapshot(root) == before, "T20 every working-tree byte outside .git is unchanged"
+        assert journal_states(root) == opened, "T20 the open transaction is left in place as found"
+
+
+def flip_t20_move():
+    """A refusal that itself carries out the move it names: the journal is relocated out of the store
+    before the exact text is raised. Only the left-in-place assertions (the snapshot and the open
+    transaction still at the legacy path) turn it red."""
+    original = record._refuse_legacy_journal
+
+    def moving(ctx):
+        try:
+            original(ctx)
+        except record.RecordError:
+            store = Path(ctx.res.store_root)
+            os.rename(str(store / record.JOURNAL_REL), str(store) + "-flip-moved-journal")
+            raise
+    return patch.object(record, "_refuse_legacy_journal", moving)
 
 
 def t21_homes2_publish(fx):
@@ -8942,7 +9058,12 @@ TESTS = (
     ("T19-record-run-id-grammar", t19_run_id_grammar, flip_t19),
     ("T19-legacy-name-recovery", t19_legacy_name_recovery, flip_t19_legacy),
     ("T20-homes2-legacy-journal-refused", t20_homes2_legacy_refused, (flip_t20, flip_t20_remedy,
+                                                                      flip_t20_unconditional,
                                                                       flip_t20_read, flip_t20_write)),
+    ("T20-homes2-legacy-remedy-carried-out", t20_homes2_legacy_remedy, (flip_t20_parent,
+                                                                        flip_t20_unconditional)),
+    ("T20-homes2-legacy-torn-left-in-place", t20_homes2_legacy_torn, (flip_t20_unconditional,
+                                                                      flip_t20_move)),
     ("T21-homes2-publish-typed", t21_homes2_publish, flip_t21),
     ("T22-homes2-claim-reserves", t22_homes2_claim_reserves, (flip_t22_refuse, flip_t22_noreserve,
                                                               flip_t22_validator,
