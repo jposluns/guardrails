@@ -65,11 +65,28 @@ can read with certainty; every other spelling refuses toward a finding, never to
       The credit is therefore withdrawn for the WHOLE FILE where the raw text or any dequoted word
       spells extdebug, where any dequoted word on its own names DEBUG or SIGDEBUG
       (case-insensitively), where a record's resolved command word is source or '.' (a sourced
-      file runs in THIS shell, where it can turn extdebug on or install the trap unseen; the sh
-      family runs a child shell, which cannot reach this shell's save), where a record's command
-      word holds a '$' or a backquote or stands unresolvable behind a wrapper's option words (a
+      file runs in THIS shell, where it can turn extdebug on or install the trap unseen), where a
+      record's resolved command word is any other member of E1's refused set, read from the ONE
+      shared roster so the two grammars cannot drift apart (eval and builtin can reach source,
+      shopt or trap under a name no source or trap scan resolves: builtin source lib.sh resolves
+      to builtin, never to source; alias, unalias and enable re-bind what a later word runs;
+      set, exec and function defer or hide state the same roster refuses for E1; the sh family
+      runs a child shell that cannot reach this shell's save but withdraws with the rest of the
+      set, an over-refusal, disclosed; trap is judged by its own stricter branch below, and the
+      set's reserved words stay with the command-word resolver: a plain one is consumed as syntax
+      before any command word resolves, a block closer such as fi runs nothing, and a quoted one
+      names an ordinary command), where a record's command
+      word holds an expansion character ('$', a backquote, '{', '*', '?' or '[': a parameter,
+      brace or pathname expansion such as ${t}p, tr{ap,} or tra[p] can resolve to trap or shopt
+      at run time; a literal command word merely containing such a character withdraws too, an
+      over-refusal, disclosed) or stands unresolvable behind a wrapper's option words (a
       built or hidden command word can resolve to trap at run time; substitution bodies are
-      scanned as their own contexts), or where the word trap stands in any record's dequoted words
+      scanned as their own contexts), where a record's resolved command word is shopt and any
+      later word holds an expansion character (an option-name operand built at run time, such as
+      extdeb{ug,}, spells extdebug in text the extdebug scans never decode; shopt with only
+      literal operands is left to those scans, so shopt -s nullglob keeps the credit, and an
+      operand that merely contains such a character withdraws, an over-refusal, disclosed), or
+      where the word trap stands in any record's dequoted words
       except as a trap command whose every condition is its own plain literal name other than
       DEBUG (one optional SIG prefix stripped, compared case-insensitively; a condition spelled
       quoted, escaped, variable-driven or in any other form this reader cannot resolve to a
@@ -77,17 +94,22 @@ can read with certainty; every other spelling refuses toward a finding, never to
       withdraws too: an ERR or signal action can install a DEBUG trap when it fires). A file
       whose only trap is a plainly spelled EXIT, ERR or signal trap keeps the credit, and a
       comment mentioning trap, source or DEBUG does too (comments lex to no words); a file that
-      merely mentions DEBUG as a word, sources a helper, or builds a command word keeps no credit,
+      merely mentions DEBUG as a word, sources a helper, builds a command word, or runs any
+      refused-set word (an eval, builtin or alias whose use is entirely harmless included) keeps
+      no credit,
       and a comment or string spelling extdebug, a prose argument spelled trap, a quoted condition
       name, a printing trap -p DEBUG, and a trap inside a plain ( ) subshell or a command
       substitution, which runs where it cannot reach the save, all withdraw it (over-refusals,
       disclosed; the plain assignment save is still the credited fix, in a file that shows none
       of these routes). RESIDUAL, stated
       exactly, the same stance as E1's: a DEBUG trap or extdebug the file does not show (installed
-      by BASH_ENV, inherited through a parent's BASHOPTS, an exported shell function; SHELLOPTS
+      by BASH_ENV, inherited through a parent's BASHOPTS, which was observed in bash 5.3 to
+      enable debugging only where a debugger start file is installed and to warn and disable it
+      otherwise, so treating it as reachable everywhere errs toward withdrawal, or an exported
+      shell function; SHELLOPTS
       cannot carry extdebug, because bash rejects set -o extdebug, observed in bash 5.3) or
-      spelled only in text this reader never decodes (an ANSI-C $'...' spelling of the word, trap
-      text or a command word assembled at run time from fragments the file never spells plainly)
+      spelled only in text this reader never decodes (an ANSI-C $'...' spelling of the word, or
+      trap action text assembled at run time from fragments the file never spells plainly)
       is not modelled. The
       `declare -a NAME=("${PIPESTATUS[@]}")` spelling earns NO credit, in any file (a disclosed
       over-refusal): `declare` is a COMMAND word, and a redefinition can reach it through spellings
@@ -1067,12 +1089,53 @@ def _e2_runs_unseen_text(argv, raw):
     return base in _E2_SOURCE_WORDS
 
 
+# The members of the pipefail grammar's refused set that the shared-set rule below does NOT judge,
+# each covered elsewhere: source and '.' withdraw through _e2_runs_unseen_text above; trap is
+# admitted only where _e2_record_trap_safe below PROVES it leaves the DEBUG condition alone (so a
+# plainly spelled EXIT or ERR trap keeps the credit); and the set's reserved words stay with the
+# command-word resolver, because a PLAIN reserved word is consumed as syntax before any command
+# word resolves, a block closer (fi, done, esac) or the list word in runs nothing where it stands,
+# and a QUOTED spelling names an ordinary command, which cannot reach this shell's option, alias
+# or trap state. Everything else in the shared set withdraws through _e2_refused_command_word.
+_E2_SHARED_SET_EXEMPT = frozenset((
+    "source", ".", "trap",
+    "if", "then", "else", "elif", "fi", "while", "until", "for", "select", "do", "done",
+    "case", "esac", "in"))
+
+
+def _e2_refused_command_word(argv, raw):
+    """True when this record's resolved command word is in the pipefail grammar's own refused set
+    (_E1_REFUSED_WORDS, the ONE shared roster, so the two grammars cannot drift apart), minus the
+    members _E2_SHARED_SET_EXEMPT routes to their own branches. The withdrawal closes the wrapped
+    spellings of sourcing a source or trap scan never resolves: builtin source lib.sh and
+    builtin . lib.sh resolve to builtin, never to source (bash still sources), eval runs text this
+    reader never sees, and alias (with unalias and enable) re-binds what a later word runs; the
+    resolution already skips the bare wrappers, so command builtin source resolves to builtin and
+    withdraws too. set and function resolve and withdraw with the rest of the set; command, exec
+    and time are themselves on the wrapper roster, so the resolution skips them and judges the
+    word behind them, and a plain coproc is consumed as a reserved word (a quoted coproc
+    spelling resolves here and withdraws).
+    Over-refusals, disclosed: the sh family runs a CHILD shell, which cannot reach this shell's
+    save, and a plain set line (set -x) reaches no trap, but both are in the shared set and
+    withdraw, erring toward withdrawal, never toward keeping the credit."""
+    _cmd_i, base, _opens, _opaque = _command_word(argv, raw)
+    return base in _E1_REFUSED_WORDS and base not in _E2_SHARED_SET_EXEMPT
+
+
+# Characters through which a word's run-time spelling can differ from its text: parameter and
+# command substitution ('$', '`'), brace expansion ('{') and pathname expansion ('*', '?', '[').
+_E2_EXPANSION_CHARS = "$`{*?["
+
+
 def _e2_command_word_unbounded(argv, raw):
     """True when this record's command word cannot be bounded to a literal name: the resolved
-    command word holds a '$' or a backquote (a parameter expansion such as ${t}p or $t can resolve
-    to trap or shopt at run time), or no command word resolves at all behind a wrapper's option
-    words (opaque). A '$' or backquote in an ARGUMENT word does not withdraw: an argument never
-    becomes the command bash runs, and the credited save line itself holds a '$'. Fails toward
+    command word holds an expansion character (a parameter expansion such as ${t}p or $t, a brace
+    expansion such as tr{ap,}, or a pathname expansion such as tra[p] can resolve to trap or shopt
+    at run time), or no command word resolves at all behind a wrapper's option words (opaque). An
+    expansion character in an ARGUMENT word does not withdraw here: an argument never becomes the
+    command bash runs, and the credited save line itself holds a '$' (shopt operands are the one
+    exception, judged by _e2_shopt_args_unbounded below). A literal command word that merely
+    contains such a character withdraws too, an over-refusal, disclosed. Fails toward
     withdrawal, never toward keeping the credit."""
     cmd_i, _base, _opens, opaque = _command_word(argv, raw)
     if opaque:
@@ -1080,7 +1143,21 @@ def _e2_command_word_unbounded(argv, raw):
     if cmd_i is None:
         return False
     word = argv[cmd_i]
-    return "$" in word or "`" in word
+    return any(c in word for c in _E2_EXPANSION_CHARS)
+
+
+def _e2_shopt_args_unbounded(argv, raw):
+    """True when this record's resolved command word is shopt and any later dequoted word holds an
+    expansion character: shopt reaches the option that makes bash skip the save, and an option
+    operand built at run time (extdeb{ug,}, extdeb[u]g, $o, a substitution, an ANSI-C spelling)
+    spells its name in text the extdebug scans never decode, so the record withdraws. A shopt
+    whose every word is literal is left to those scans (shopt -s nullglob keeps the credit, and a
+    literal extdebug operand already withdraws there); an operand that merely contains such a
+    character withdraws even where it expands to an inert name, an over-refusal, disclosed."""
+    cmd_i, base, _opens, _opaque = _command_word(argv, raw)
+    if base != "shopt":
+        return False
+    return any(any(c in w for c in _E2_EXPANSION_CHARS) for w in argv[cmd_i + 1:])
 
 
 def _e2_debug_word(argv):
@@ -1151,11 +1228,19 @@ def _e2_file_credit(text):
     over-refusal), in which any dequoted word on its own names DEBUG or SIGDEBUG case-insensitively
     (_e2_debug_word: a file that merely mentions the word keeps no credit, disclosed), in which a
     record's command word is source or '.' (_e2_runs_unseen_text: the sourced text runs in this
-    shell and is never seen here), in which a record's command word holds a '$' or a backquote or
+    shell and is never seen here), in which a record's resolved command word is any other
+    non-exempt member of the pipefail grammar's refused set (_e2_refused_command_word, reading the
+    ONE shared roster: builtin, eval and alias can reach source, shopt or trap under a name no
+    other scan resolves; the sh family and a plain set withdraw with the set, over-refusals,
+    disclosed), in which a record's command word holds an expansion character ('$', a backquote,
+    '{', '*', '?' or '[') or
     stands unresolvable behind a wrapper's option words (_e2_command_word_unbounded: a built
     command word can resolve to trap or shopt; the value words of an array assignment NAME=( ... )
     are data to bash, never a command word, the credited array save's own "${PIPESTATUS[@]}"
-    included, so only the word-level checks judge them), or in which the word trap stands in any
+    included, so only the word-level checks judge them), in which a shopt record carries an
+    expansion character in any later word (_e2_shopt_args_unbounded: a built operand can spell
+    extdebug in text the extdebug scans never decode; shopt with only literal words is left to
+    those scans), or in which the word trap stands in any
     record's dequoted words except as a trap command _e2_record_trap_safe proves leaves DEBUG
     alone (a printing trap -p DEBUG, and a trap inside a plain ( ) subshell or a command
     substitution, which runs where it cannot reach the save, withdraw here too, disclosed). A
@@ -1165,10 +1250,13 @@ def _e2_file_credit(text):
     still the credited fix in a file that shows none of these routes. Substitution bodies are
     scanned as their own contexts, so a withdrawing spelling inside $( ) or backquotes withdraws
     too. RESIDUAL, stated exactly: a DEBUG trap or extdebug the file does not show (installed by
-    BASH_ENV, inherited through a parent's BASHOPTS, an exported shell function; SHELLOPTS cannot
+    BASH_ENV, inherited through a parent's BASHOPTS, which was observed in bash 5.3 to enable
+    debugging only where a debugger start file is installed and to warn and disable it otherwise,
+    so treating the route as reachable everywhere errs toward withdrawal, or an exported shell
+    function; SHELLOPTS cannot
     carry extdebug, because bash rejects set -o extdebug, observed in bash 5.3) or spelled only in
-    text this reader never decodes (an ANSI-C $'...' spelling of the word, trap text or a command
-    word assembled at run time from fragments the file never spells plainly) is not modelled."""
+    text this reader never decodes (an ANSI-C $'...' spelling of the word, or trap action text
+    assembled at run time from fragments the file never spells plainly) is not modelled."""
     if "extdebug" in text:
         return False
     hooks = _hooks()
@@ -1198,7 +1286,11 @@ def _e2_file_credit(text):
             if not is_array_value:
                 if _e2_runs_unseen_text(argv, raw):
                     return False
+                if _e2_refused_command_word(argv, raw):
+                    return False
                 if _e2_command_word_unbounded(argv, raw):
+                    return False
+                if _e2_shopt_args_unbounded(argv, raw):
                     return False
             if any(_E2_TRAP_WORD_RE.search(w) for w in argv) \
                     and not _e2_record_trap_safe(argv, raw):
@@ -1896,16 +1988,18 @@ def run(root):
 
 
 # --- self-test ---------------------------------------------------------------------------------------
-# Every refuse case (R1..R114 with R24 retired, plus Rb1) runs against the real gate (exit 1) AND
+# Every refuse case (R1..R125 with R24 retired, plus Rb1) runs against the real gate (exit 1) AND
 # against a mutant that never reports (exit 0), so each case is shown to discriminate; targeted
 # mutants additionally pin the mid-pipeline stage index, the closed-form PIPESTATUS reader (its
 # canonical-decimal index, its refusal of the declare -a head, the stage-text heredoc layer and the
 # next-record adjacency
 # layer, each alone), the whole-file pipefail credit and its line grammar, the whole-file
 # PIPESTATUS-read credit (re-admitted whole, its trap reader trusted and distrusted alone, with
-# the extdebug route shown independent of the trap route, and its source, unbounded-command-word,
+# the extdebug route shown independent of the trap route, and its source, shared-refused-set,
+# unbounded-command-word, shopt-operand,
 # DEBUG-word and dequoted-extdebug branches each stubbed alone; the two-layer fixtures R106,
-# R110/R111 and R92/R93/R101/R102 stand under either of their layers' mutants alone and fall only
+# R110/R111, R92/R93/R101/R102 and R75/R84 stand under either of their layers' mutants alone and
+# fall only
 # under both together), the enable line's option
 # vocabulary, the unresolved-token rule, the command-start guard, the pre-token continuation skip
 # (layered with that guard), the ionice wrapper entry, and one roster member each for the builtin
@@ -1916,7 +2010,7 @@ def run(root):
 # forced-credit mutant alone (the dropped-off-events mutant wraps only set's option reader, which
 # R79's shopt path never consults). Every control (C1..C25 with C12/C14/C15/C17/C19/C21 retired and
 # C26/C27 converted to the
-# refusals R66/R67, plus C3a-C3c, C23b and C28..C37) runs against the real gate (exit 0) and names
+# refusals R66/R67, plus C3a-C3c, C23b and C28..C38) runs against the real gate (exit 0) and names
 # the over-broad implementation it catches; where that implementation is a patchable predicate, the
 # over-broad mutant is also run and must reach the named wrong exit. Every cannot-evaluate case
 # X1..X15 must exit 2 AND print the diagnostic of its OWN check (asserted by a substring no other
@@ -2143,18 +2237,63 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
         if _e2_runs_unseen_text(argv, raw) != want:
             failures.append("_e2_runs_unseen_text({!r}, {!r}) expected {!r}".format(argv, raw,
                                                                                     want))
-    # The unbounded-command-word branch: a '$' or backquote in the COMMAND word, or a wrapper's
-    # option words hiding it, withdraws; the same characters in an argument, or an assignment-only
-    # record (the credited save itself), keep the credit.
+    # The unbounded-command-word branch: an expansion character ('$', backquote, brace or glob) in
+    # the COMMAND word, or a wrapper's option words hiding it, withdraws; the same characters in an
+    # argument, or an assignment-only record (the credited save itself), keep the credit, and a
+    # command word of ordinary punctuation (./helper.sh) is still a literal name.
     for argv, raw, want in ((["${t}p", "x", "ERR"], "${t}p 'x' ERR", True),
                             (["$t", "x", "ERR"], '"$t" \'x\' ERR', True),
                             (["`get`", "x"], "`get` x", True),
+                            (["tr{ap,}", "x", "ERR"], "tr{ap,} 'x' ERR", True),
+                            (["tra[p]", "x", "ERR"], "tra[p] 'x' ERR", True),
+                            (["tra?", "x"], "tra? x", True),
+                            (["tr*", "x"], "tr* x", True),
                             (["command", "-p", "ls"], "command -p ls", True),
                             (["tool", "write", "--row", "7"], "tool write --row 7", False),
+                            (["./helper.sh"], "./helper.sh", False),
                             (["rc=${PIPESTATUS[0]}"], "rc=${PIPESTATUS[0]}", False),
+                            (["echo", "x{y,z}"], "echo x{y,z}", False),
                             (["echo", "$x"], "echo $x", False)):
         if _e2_command_word_unbounded(argv, raw) != want:
             failures.append("_e2_command_word_unbounded({!r}, {!r}) expected {!r}".format(
+                argv, raw, want))
+    # The shared refused-set branch: a resolved command word from the pipefail grammar's roster
+    # withdraws, behind the bare wrappers too; the exempt members (source, '.', trap, the reserved
+    # words), an ordinary command, an assignment-only record and the refused name as mere argument
+    # data keep this branch quiet (their own branches judge them).
+    for argv, raw, want in ((["builtin", "source", "lib.sh"], "builtin source lib.sh", True),
+                            (["builtin", ".", "lib.sh"], "builtin . lib.sh", True),
+                            (["command", "builtin", "source", "l"], "command builtin source l",
+                             True),
+                            (["eval", "source lib.sh"], "eval 'source lib.sh'", True),
+                            (["alias", "s=source"], "alias s=source", True),
+                            (["eval", "x"], "ev\"\"al x", True),
+                            (["unalias", "-a"], "unalias -a", True),
+                            (["enable", "-n", "trap"], "enable -n trap", True),
+                            (["set", "-x"], "set -x", True),
+                            (["sh", "lib.sh"], "sh lib.sh", True),
+                            (["source", "lib.sh"], "source lib.sh", False),
+                            ([".", "lib.sh"], ". lib.sh", False),
+                            (["trap", "x", "EXIT"], "trap 'x' EXIT", False),
+                            (["fi"], "fi", False),
+                            (["tool", "write"], "tool write", False),
+                            (["echo", "eval"], "echo eval", False),
+                            (["e=eval"], "e=eval", False)):
+        if _e2_refused_command_word(argv, raw) != want:
+            failures.append("_e2_refused_command_word({!r}, {!r}) expected {!r}".format(
+                argv, raw, want))
+    # The shopt-operand branch: an expansion character in any word after a resolved shopt command
+    # word withdraws; literal operands, and the same characters under another command word, keep
+    # this branch quiet.
+    for argv, raw, want in ((["shopt", "-s", "extdeb{ug,}"], "shopt -s extdeb{ug,}", True),
+                            (["shopt", "-s", "extdeb[u]g"], "shopt -s extdeb[u]g", True),
+                            (["shopt", "-s", "$o"], "shopt -s $o", True),
+                            (["shopt", "-s", "nullglob"], "shopt -s nullglob", False),
+                            (["shopt", "-s", "expand_aliases"], "shopt -s expand_aliases", False),
+                            (["echo", "x{y,z}"], "echo x{y,z}", False),
+                            (["rc=${PIPESTATUS[0]}"], "rc=${PIPESTATUS[0]}", False)):
+        if _e2_shopt_args_unbounded(argv, raw) != want:
+            failures.append("_e2_shopt_args_unbounded({!r}, {!r}) expected {!r}".format(
                 argv, raw, want))
     # The standing-DEBUG-word branch: the name on its own, in any case and with one SIG prefix,
     # withdraws; an option word, a longer name and an assignment spelling do not.
@@ -2383,7 +2522,7 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
             return r
 
         try:
-            # --- refuse cases R1..R114 (exit 1; R24 retired), each re-run against never-report ---
+            # --- refuse cases R1..R125 (exit 1; R24 retired), each re-run against never-report ---
             refuse = [
                 ("R1", CFG, "set -e\ntool write --row 7 | tail -1\ntool write --row 8\n",
                  "the seed: a row writer piped into tail under set -e"),
@@ -2732,6 +2871,52 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("R114", CFG, "shopt -s extdeb\\ug\ntool write | tail -1\nrc=${PIPESTATUS[0]}\n",
                  "an escaped extdebug spelling is invisible to the raw-text scan but dequotes to "
                  "the option name, so the dequoted-word check alone withdraws the credit"),
+                # --- the shared refused set: wrapped sourcing no source scan resolves ---
+                ("R115", CFG, "builtin source ./lib.sh\ntool write | tail -1\n"
+                              "rc=${PIPESTATUS[0]}\n",
+                 "builtin source still sources in this shell but resolves to the command word "
+                 "builtin, never to source; the shared refused set withdraws the read credit"),
+                ("R116", CFG, "builtin . ./lib.sh\ntool write | tail -1\nrc=${PIPESTATUS[0]}\n",
+                 "builtin with the dot command sources the same way under the builtin command "
+                 "word; the shared refused set withdraws the read credit"),
+                ("R117", CFG, "command builtin source ./lib.sh\ntool write | tail -1\n"
+                              "rc=${PIPESTATUS[0]}\n",
+                 "a command wrapper before builtin source is skipped as a bare wrapper, so the "
+                 "record still resolves to builtin and the shared refused set withdraws"),
+                ("R118", CFG, "eval 'source ./lib.sh'\ntool write | tail -1\nrc=${PIPESTATUS[0]}\n",
+                 "an eval can run a source this reader never sees as a command word; eval is in "
+                 "the shared refused set and withdraws the read credit"),
+                ("R119", CFG, "shopt -s expand_aliases\nalias s=source\ns ./lib.sh\n"
+                              "tool write | tail -1\nrc=${PIPESTATUS[0]}\n",
+                 "an alias of source lets a later unremarkable word source text this reader "
+                 "never sees; alias is in the shared refused set and withdraws the read credit"),
+                ("R120", CFG, "s() { builtin source ./lib.sh; }\ns\ntool write | tail -1\n"
+                              "rc=${PIPESTATUS[0]}\n",
+                 "a function body wrapping builtin source is scanned record by record, so the "
+                 "body's builtin command word withdraws the read credit through the shared "
+                 "refused set"),
+                # --- command and shopt words built by brace or pathname expansion ---
+                ("R121", CFG, "tr{ap,} false DEB{UG,}\ntool write | tail -1\n"
+                              "rc=${PIPESTATUS[0]}\n",
+                 "a brace-built command word (tr{ap,} runs trap) installs a DEBUG trap no trap "
+                 "scan sees, and the brace-built condition spells no DEBUG word; the expansion "
+                 "character in the command word alone withdraws the read credit"),
+                ("R122", CFG, "tra[p] false DEB[U]G\ntool write | tail -1\nrc=${PIPESTATUS[0]}\n",
+                 "a glob-built command word (tra[p] can resolve to trap through a matching file "
+                 "name) is not bounded to a literal name; the expansion character in the command "
+                 "word alone withdraws the read credit"),
+                ("R123", CFG, "sho{pt,} -s extdeb{ug,}\ntool write | tail -1\n"
+                              "rc=${PIPESTATUS[0]}\n",
+                 "a brace-built shopt command word turns extdebug on while spelling neither "
+                 "shopt nor extdebug; the expansion character in the command word alone "
+                 "withdraws the read credit"),
+                ("R124", CFG, "shop[t] -s extdeb[u]g\ntool write | tail -1\nrc=${PIPESTATUS[0]}\n",
+                 "a glob-built shopt command word is not bounded to a literal name; the "
+                 "expansion character in the command word alone withdraws the read credit"),
+                ("R125", CFG, "shopt -s extdeb{ug,}\ntool write | tail -1\nrc=${PIPESTATUS[0]}\n",
+                 "a plainly spelled shopt with a brace-built operand turns extdebug on while "
+                 "spelling extdebug in no raw text or dequoted word; the expansion character in "
+                 "the shopt operand alone withdraws the read credit"),
             ]
             roots = {}
             for name, config, body, note in refuse:
@@ -2799,9 +2984,6 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("R72", "_e2_exempt", _octal_blind,
                  "an index reader that converts 010 as decimal must wrongly credit the octal "
                  "spelling"),
-                ("R75", "_E2_ARRAY_RE", _declare_admitting_re,
-                 "a read set re-admitting the declare -a head must wrongly credit the aliased "
-                 "declare"),
                 ("R76", "WRAPPERS", frozenset(w for w in WRAPPERS if w != "ionice"),
                  "without the wrapper entry the producer behind ionice is never resolved"),
                 ("R80", "_e2_next_record_adjacent",
@@ -2818,9 +3000,6 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("R88", "_e1_command_line", lambda line: True,
                  "a grammar blind to command-token plainness must wrongly credit the quoted command "
                  "word"),
-                ("R84", "_E2_ARRAY_RE", _declare_admitting_re,
-                 "a read set re-admitting the declare -a head must wrongly credit the read beside "
-                 "the posix-mode alias path and the BASH_ALIASES write"),
                 ("R86", "_E2_ARRAY_RE", _declare_admitting_re,
                  "a read set re-admitting the declare -a head must wrongly credit the read beside "
                  "callback text"),
@@ -2869,6 +3048,39 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("R114", "_e2_extdebug_word", lambda argv: False,
                  "a credit blind to the dequoted extdebug spelling must wrongly credit the read "
                  "beside the escaped spelling"),
+                ("R115", "_e2_refused_command_word", lambda argv, raw: False,
+                 "a credit blind to the shared refused set must wrongly credit the read beside "
+                 "builtin source"),
+                ("R116", "_e2_refused_command_word", lambda argv, raw: False,
+                 "a credit blind to the shared refused set must wrongly credit the read beside "
+                 "builtin with the dot command"),
+                ("R117", "_e2_refused_command_word", lambda argv, raw: False,
+                 "a credit blind to the shared refused set must wrongly credit the read beside "
+                 "the command-wrapped builtin source"),
+                ("R118", "_e2_refused_command_word", lambda argv, raw: False,
+                 "a credit blind to the shared refused set must wrongly credit the read beside "
+                 "the eval that sources"),
+                ("R119", "_e2_refused_command_word", lambda argv, raw: False,
+                 "a credit blind to the shared refused set must wrongly credit the read beside "
+                 "the alias of source"),
+                ("R120", "_e2_refused_command_word", lambda argv, raw: False,
+                 "a credit blind to the shared refused set must wrongly credit the read beside "
+                 "the function body wrapping builtin source"),
+                ("R121", "_e2_command_word_unbounded", lambda argv, raw: False,
+                 "a credit blind to unbounded command words must wrongly credit the read beside "
+                 "the brace-built trap word"),
+                ("R122", "_e2_command_word_unbounded", lambda argv, raw: False,
+                 "a credit blind to unbounded command words must wrongly credit the read beside "
+                 "the glob-built trap word"),
+                ("R123", "_e2_command_word_unbounded", lambda argv, raw: False,
+                 "a credit blind to unbounded command words must wrongly credit the read beside "
+                 "the brace-built shopt word"),
+                ("R124", "_e2_command_word_unbounded", lambda argv, raw: False,
+                 "a credit blind to unbounded command words must wrongly credit the read beside "
+                 "the glob-built shopt word"),
+                ("R125", "_e2_shopt_args_unbounded", lambda argv, raw: False,
+                 "a credit blind to built shopt operands must wrongly credit the read beside the "
+                 "brace-built extdebug operand"),
             ]
             for name, attr, weak, why in targeted:
                 real = getattr(this, attr)
@@ -2882,8 +3094,9 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                                     "({})".format(name, attr, rc, why))
 
             # The two withdrawal routes are independent layers: a trap reader trusting every trap
-            # re-admits the trap-only file (R106, flipped above) but must NOT re-admit the
-            # bare-extdebug file, whose refusal rests on the raw spelling alone.
+            # must NOT re-admit the bare-extdebug file, whose refusal rests on the raw spelling
+            # alone (the trap-only file R106 stands under that same trust through its standing
+            # DEBUG word, shown by the two-layer checks just below).
             real_trap_safe = this._e2_record_trap_safe
             this._e2_record_trap_safe = lambda argv, raw: True
             try:
@@ -2996,6 +3209,42 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                     failures.append("{} under BOTH the declare-admitting and unbounded-command "
                                     "mutants: expected exit 0 (the fixture is held by exactly "
                                     "those two layers), got {}".format(name, rc))
+
+            # R75 and R84 are each held by TWO independent layers: the declare -a head's exclusion
+            # from the closed read set, and the shared refused set (R75's alias command word,
+            # R84's set command word). Each mutant alone must leave the refusal standing; only
+            # weakening both together flips the file clean.
+            real_refused = this._e2_refused_command_word
+            for name in ("R75", "R84"):
+                this._E2_ARRAY_RE = _declare_admitting_re
+                try:
+                    rc, _text = _run_quiet(roots[name])
+                finally:
+                    this._E2_ARRAY_RE = real_array_re
+                if rc != 1:
+                    failures.append("{} under the declare-admitting read set alone: expected exit "
+                                    "1 (the refused command word alone must still withdraw), got "
+                                    "{}".format(name, rc))
+                this._e2_refused_command_word = lambda argv, raw: False
+                try:
+                    rc, _text = _run_quiet(roots[name])
+                finally:
+                    this._e2_refused_command_word = real_refused
+                if rc != 1:
+                    failures.append("{} under the refused-set mutant alone: expected exit 1 (the "
+                                    "declare -a head must still earn no credit), got {}".format(
+                                        name, rc))
+                this._E2_ARRAY_RE = _declare_admitting_re
+                this._e2_refused_command_word = lambda argv, raw: False
+                try:
+                    rc, _text = _run_quiet(roots[name])
+                finally:
+                    this._E2_ARRAY_RE = real_array_re
+                    this._e2_refused_command_word = real_refused
+                if rc != 0:
+                    failures.append("{} under BOTH the declare-admitting and refused-set mutants: "
+                                    "expected exit 0 (the fixture is held by exactly those two "
+                                    "layers), got {}".format(name, rc))
 
             # Roster-member mutants: dropping one protected name must flip its OWN fixture clean,
             # proving each fixture pins exactly that member (a sibling rule cannot mask its removal).
@@ -3216,6 +3465,12 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                         "reach this shell's save)")
             c37 = _case("C37", CFG, "tool write --debug | tail -1\nrc=${PIPESTATUS[0]}\n", 0,
                         "catches 'read any word containing debug as the DEBUG name'")
+            # C38: a shopt whose every word is literal is left to the extdebug scans, so an inert
+            # option beside the credited read keeps it: the shopt-operand withdrawal is scoped to
+            # operands an expansion character makes unreadable, never to every shopt.
+            c38 = _case("C38", CFG, "shopt -s nullglob\ntool write | tail -1\n"
+                                    "rc=${PIPESTATUS[0]}\n", 0,
+                        "catches 'withdraw the read credit from every shopt'")
 
             # The C33 mutant is SPECIFIC to the double-quote continuation branch: it behaves as the
             # real decoder everywhere, and only a segment whose double-quoted span holds a
@@ -3261,6 +3516,17 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("C37", c37, "_e2_debug_word",
                  lambda argv: any("debug" in w.lower() for w in argv),
                  "read any word containing the letters debug as the DEBUG name", 1),
+                ("C34", c34, "_e2_refused_command_word",
+                 lambda argv, raw: _command_word(argv, raw)[1] in _E1_REFUSED_WORDS,
+                 "read the shared refused set without its trap carve-out (EXIT trap)", 1),
+                ("C35", c35, "_e2_refused_command_word",
+                 lambda argv, raw: _command_word(argv, raw)[1] in _E1_REFUSED_WORDS,
+                 "read the shared refused set without its trap carve-out (ERR trap)", 1),
+                ("C4", c4, "_e2_refused_command_word", lambda argv, raw: True,
+                 "withdraw the read credit from every command word", 1),
+                ("C38", c38, "_e2_shopt_args_unbounded",
+                 lambda argv, raw: _command_word(argv, raw)[1] == "shopt",
+                 "withdraw the read credit from every shopt", 1),
             ]
             for name, root_dir, attr, broad, label, wrong_rc in overbroad:
                 real = getattr(this, attr)
@@ -3781,7 +4047,7 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: the refuse cases R1-R114 (R24 retired) and Rb1 (the seed, substitution "
+    print("SELF-TEST PASS: the refuse cases R1-R125 (R24 retired) and Rb1 (the seed, substitution "
           "bodies, AND lists, if conditions, |&, bare wrappers including ionice, absolute paths, "
           "every enable outside the standalone column-1 closed form (piped, backgrounded, "
           "conditional, wrapped, coproc'd, continued, a final stage, sharing its line, spelled "
@@ -3797,6 +4063,10 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
           "keyword), the withdrawn whole-file read credit beside extdebug and DEBUG traps "
           "(combined beside the scalar and the array save, and each visible half alone), the "
           "withdrawn read credit beside sourced text (source, dot and a heredoc-fed source), "
+          "the shared refused set's wrapped sourcing routes (builtin source, builtin dot, "
+          "command builtin source, an eval that sources, an alias of source and a function body "
+          "wrapping builtin source), brace- and glob-built trap and shopt command words, a "
+          "brace-built shopt operand, "
           "variable-built and printf-assembled trap command words, a variable-built ERR trap, a "
           "standing DEBUG word and the escaped extdebug spelling, every "
           "read outside the closed E2 "
@@ -3814,7 +4084,8 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
           "file credit, a line-grammar-blind credit, a vocabulary-blind enable reader, an "
           "octal-blind index reader, a read set re-admitting the declare -a head, a re-admitted "
           "whole-file read credit, a trap reader trusting every trap (with the extdebug route "
-          "shown to withdraw on its own under that trust), the source, unbounded-command-word, "
+          "shown to withdraw on its own under that trust), the source, shared-refused-set, "
+          "unbounded-command-word, shopt-operand, "
           "DEBUG-word and dequoted-extdebug branches each stubbed alone, "
           "an adjacency-blind and a heredoc-blind read-identity "
           "reader, a same-spelling plainness resolver, a continuation-blind pre-token skip layered "
@@ -3825,13 +4096,14 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
           "together (R79 is run under the forced-credit mutant alone: the dropped-off-events mutant "
           "wraps only set's option reader, which R79's shopt path never consults), and the "
           "two-layer fixtures R106 (trap reader plus standing DEBUG word), R110/R111 (unbounded "
-          "command word plus standing DEBUG word) and "
-          "R92/R93/R101/R102 (declare -a head plus unbounded command word) each stand under either "
+          "command word plus standing DEBUG word), "
+          "R92/R93/R101/R102 (declare -a head plus unbounded command word) and R75/R84 (declare "
+          "-a head plus refused command word) each stand under either "
           "layer's mutant alone and fall only under both together; the controls "
           "C1-C25 (C12, C14, C15, C17 and C19 retired; C21's declare -a save became the refusal "
           "R100 when that head left the closed read set; C26/C27 became "
           "the refusals R66/R67 when control flow left the closed credit grammar) plus C23b and "
-          "C28-C37 (no config, undeclared producers, the accepted pipefail spellings, the closed "
+          "C28-C38 (no config, undeclared producers, the accepted pipefail spellings, the closed "
           "PIPESTATUS reads including the plain whole-array save, the canonical two-digit index, "
           "the "
           "quoted scalar, tab-indented and semicolon-terminated reads, a double-quoted line "
@@ -3841,7 +4113,8 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
           "redirect, an unrelated shopt, a clean dir/** walk, bare env and ionice wrappers, a clean "
           "find, quoted 'select' command names with and without a plain same-spelled argument, "
           "plainly spelled EXIT and ERR traps beside the credited reads, a child script run by its "
-          "dotted path, and a --debug option word beside the credited read) "
+          "dotted path, a --debug option word beside the credited read, and a literal inert shopt "
+          "beside the credited read) "
           "each stay clean and the patchable ones catch their over-broad mutants; and the "
           "cannot-evaluate cases X1-X15 (unmatched selectors, unparseable shell beside a plain, "
           "path-qualified or quote-split declared command, sh -c/bash -c/dash -c/zsh -c/ksh -c/eval "
