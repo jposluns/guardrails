@@ -17755,7 +17755,7 @@ def _main_isolated(monitor):
             # text, so the unordered presence read now GOVERNS it: mp-d71e pins the deny in the
             # declaring checkout and mp-k15e the inert no-declaration control (the residual that
             # remains is a spelling that reaches the argv from a file or an earlier session, with
-            # no merge word in this command's own text)
+            # no 'merge' letters anywhere in this command's own text)
             # here-strings and quoted here-documents beside a directory change: in the declaring
             # checkout the unlexable construct cannot discard a directory-change reading, because
             # the compound shape itself denies, with the construct named
@@ -18163,6 +18163,45 @@ def _main_isolated(monitor):
                      "deny", 'a=(merge 3); gh pr "${a[@]}"', mpd)
             mpexpect("(mp-d71e) the merge word fed through xargs to 'gh pr' DENIES too", "deny",
                      "echo merge 3 | xargs gh pr", mpd)
+            # the api half reads 'merge' by SUBSTRING presence, never as one endpoint token: a
+            # REST endpoint whose merge, pulls or merges part travels in an assignment, loop word
+            # list, 'set --' list or xargs -I feed spells the letters literally in the one
+            # command text and is seen (an earlier api branch required the whole endpoint in one
+            # token and let each of these run the declared repository's REST merge unseen). The
+            # mp-k16* twins pin inertness with no declaration
+            mpexpect("(mp-d72) an assignment carrying the endpoint's merge part DENIES in the "
+                     "declaring checkout", "deny",
+                     "e=merge; gh api -X PUT repos/owner/repo/pulls/3/$e", mpd)
+            mpexpect("(mp-d72b) a for-loop word list carrying the endpoint's merge part DENIES "
+                     "too", "deny",
+                     "for e in merge; do gh api -X PUT repos/owner/repo/pulls/3/$e; done", mpd)
+            mpexpect("(mp-d72c) a 'set --' list carrying the endpoint's merge part DENIES too",
+                     "deny", 'set -- merge; gh api -X PUT repos/owner/repo/pulls/3/"$1"', mpd)
+            mpexpect("(mp-d72d) the endpoint's merge part fed through xargs -I DENIES too",
+                     "deny", "echo merge | xargs -I{} gh api -X PUT repos/owner/repo/pulls/3/{}",
+                     mpd)
+            mpexpect("(mp-d72e) an assignment carrying the endpoint's pulls part DENIES too (the "
+                     "trailing literal merge is read wherever the rest of the endpoint sits)",
+                     "deny", "p=pulls; gh api -X PUT repos/owner/repo/$p/3/merge", mpd)
+            mpexpect("(mp-d72f) an assignment carrying the branch-merge endpoint's merges part "
+                     "DENIES too", "deny",
+                     "e=merges; gh api -X POST repos/owner/repo/$e -f base=main -f head=x", mpd)
+            # these two spell the whole endpoint or mutation name in one literal token, so the
+            # one-token read also matched them; they pin the api half against a revert to the
+            # ordered branch, which read the endpoint only AFTER the 'api' word and missed both
+            mpexpect("(mp-d72g) the whole literal endpoint fed through xargs to 'gh api' DENIES",
+                     "deny", "echo repos/owner/repo/pulls/3/merge | xargs gh api -X PUT", mpd)
+            mpexpect("(mp-d72h) an assignment carrying a merge mutation name before 'gh api' "
+                     "DENIES", "deny",
+                     'm=mergePullRequest; gh api graphql -f query="mutation { $m(input:{}) }"',
+                     mpd)
+            # the substring read needs no whole word either: an affix-strip expansion whose
+            # operand embeds the five letters in a longer token spells them literally (the
+            # earlier whole-word read let ${m#x} over xmerge carry the merge verb unseen)
+            mpexpect("(mp-d73) an affix-strip expansion over xmerge DENIES in the declaring "
+                     "checkout", "deny", "m=xmerge; gh pr ${m#x} 3", mpd)
+            mpexpect("(mp-d73b) an affix-strip expansion over merge_ DENIES too", "deny",
+                     "m=merge_; gh pr ${m%_} 3", mpd)
             mpexpect("(mp-k13) the expansion spelling stays inert with no declaration", "allow",
                      "gh pr ${x:+;} merge 5", mpn)
             mpexpect("(mp-k13b) the command-substitution spelling stays inert too", "allow",
@@ -18191,6 +18230,27 @@ def _main_isolated(monitor):
                      'a=(merge 3); gh pr "${a[@]}"', mpn)
             mpexpect("(mp-k15e) the xargs spelling stays inert too", "allow",
                      "echo merge 3 | xargs gh pr", mpn)
+            mpexpect("(mp-k16) the api merge-part assignment stays inert with no declaration",
+                     "allow", "e=merge; gh api -X PUT repos/owner/repo/pulls/3/$e", mpn)
+            mpexpect("(mp-k16b) the api merge-part for-loop stays inert too", "allow",
+                     "for e in merge; do gh api -X PUT repos/owner/repo/pulls/3/$e; done", mpn)
+            mpexpect("(mp-k16c) the api merge-part 'set --' list stays inert too", "allow",
+                     'set -- merge; gh api -X PUT repos/owner/repo/pulls/3/"$1"', mpn)
+            mpexpect("(mp-k16d) the api merge-part xargs -I feed stays inert too", "allow",
+                     "echo merge | xargs -I{} gh api -X PUT repos/owner/repo/pulls/3/{}", mpn)
+            mpexpect("(mp-k16e) the api pulls-part assignment stays inert too", "allow",
+                     "p=pulls; gh api -X PUT repos/owner/repo/$p/3/merge", mpn)
+            mpexpect("(mp-k16f) the api merges-part assignment stays inert too", "allow",
+                     "e=merges; gh api -X POST repos/owner/repo/$e -f base=main -f head=x", mpn)
+            mpexpect("(mp-k16g) the whole-endpoint xargs feed stays inert too", "allow",
+                     "echo repos/owner/repo/pulls/3/merge | xargs gh api -X PUT", mpn)
+            mpexpect("(mp-k16h) the mutation-name assignment stays inert too", "allow",
+                     'm=mergePullRequest; gh api graphql -f query="mutation { $m(input:{}) }"',
+                     mpn)
+            mpexpect("(mp-k17) the xmerge affix-strip spelling stays inert with no declaration",
+                     "allow", "m=xmerge; gh pr ${m#x} 3", mpn)
+            mpexpect("(mp-k17b) the merge_ affix-strip spelling stays inert too", "allow",
+                     "m=merge_; gh pr ${m%_} 3", mpn)
             # read-only and scope spellings: every merge spelling denies, only the literal -R/--repo
             # out-of-scope read allows
             mpexpect("(mp-d32) --disable-auto beside a method flag DENIES", "deny",
