@@ -9493,9 +9493,11 @@ def _main_isolated(report_path=None):
         h.set_turn_state({})
         check("ask/attended-holder-session-denies", _verdict(ask_att("tu-i2")), "deny")
         # the session-id and holder-token checks run only for a NON-EMPTY lease classified fresh or
-        # cannot-evaluate; every other lease shape (empty, path-less, stale, future-dated past the
-        # tolerated skew) skips the holder check and falls through to the live-mode scope source,
-        # which keeps EVERY session in scope, an id-less caller included (erring toward denying).
+        # cannot-evaluate under a declared max_age_hours, or, with no horizon declared, for every
+        # non-empty lease whatever its mtime; every other lease shape (empty, path-less, stale past a
+        # declared horizon, future-dated past the tolerated skew under a declared usable horizon)
+        # skips the holder check and falls through to the live-mode scope source, which keeps EVERY
+        # session in scope, an id-less caller included (erring toward denying).
         # First the off side: an id-less caller under a fresh holder-scoped lease is a non-holder
         def ask_att_idless(tool_use_id):
             _hp = h.payload("PreToolUse", "AskUserQuestion",
@@ -9527,6 +9529,33 @@ def _main_isolated(report_path=None):
         os.utime(h.lease, (_hnow - 24 * 3600 - 600, _hnow - 24 * 3600 - 600))
         h.set_turn_state({})
         check("ask/attended-stale-lease-keeps-judgement-on", _verdict(ask_att("tu-i7")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-stale-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i7a")), "deny")
+        # a stale lease that can be stat'ed but not read is never opened (the age gate skips the
+        # holder check before any read), so the live mode record keeps the judgement on even though
+        # the lease names the caller: only a non-empty fresh or cannot-evaluate lease that cannot be
+        # read is off. A privileged run reads a mode-0 file anyway, so there the seam supplies the
+        # kernel's EACCES for an open of the lease.
+        h.lease.write_text("holder: s1\n", encoding="utf-8")
+        os.utime(h.lease, (_hnow - 24 * 3600 - 600, _hnow - 24 * 3600 - 600))
+        _hlease_path = str(h.lease)
+
+        def _hopen_unreadable(file, *args, **kwargs):
+            if file == _hlease_path:
+                raise PermissionError(13, "Permission denied", _hlease_path)
+            return open(file, *args, **kwargs)
+        os.chmod(h.lease, 0)
+        try:
+            if os.geteuid() == 0:
+                aiqt_hooks.open = _hopen_unreadable
+            h.set_turn_state({})
+            check("ask/attended-unreadable-stale-lease-keeps-judgement-on",
+                  _verdict(ask_att("tu-i7b")), "deny")
+        finally:
+            aiqt_hooks.__dict__.pop("open", None)
+            os.chmod(h.lease, 0o644)
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
         # the future boundary from both sides: a lease mtime within the tolerated clock skew still
         # reads fresh (the holder check runs, allow for the unnamed session); one past the skew is
         # the future-dated shape that skips the holder check (judgement on)
@@ -9537,6 +9566,41 @@ def _main_isolated(report_path=None):
         os.utime(h.lease, (_hnow + 900, _hnow + 900))
         h.set_turn_state({})
         check("ask/attended-future-lease-keeps-judgement-on", _verdict(ask_att("tu-i9")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-future-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i9a")), "deny")
+        # the future-dated skip needs a declared usable horizon: with max_age_hours omitted or null
+        # the age classifier is never consulted, so the same future-dated lease runs the holder check
+        # and an unnamed or id-less caller is out of scope (allow), while the session the lease names
+        # stays judged (deny, so these allows come from the holder check, not an earlier allow); an
+        # unusable horizon reads cannot-evaluate whatever the mtime, so the holder check runs there too
+        _hreg["lease"].pop("max_age_hours")
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-no-horizon-future-lease-nonholder-allows",
+              _verdict(ask_att("tu-i9b")), "allow")
+        h.set_turn_state({})
+        check("ask/attended-no-horizon-future-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i9c")), "allow")
+        h.lease.write_text("holder: s1\n", encoding="utf-8")
+        os.utime(h.lease, (_hnow + 900, _hnow + 900))
+        h.set_turn_state({})
+        check("ask/attended-no-horizon-future-lease-holder-denies",
+              _verdict(ask_att("tu-i9d")), "deny")
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        os.utime(h.lease, (_hnow + 900, _hnow + 900))
+        _hreg["lease"]["max_age_hours"] = None
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-null-horizon-future-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i9e")), "allow")
+        _hreg["lease"]["max_age_hours"] = 0
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-unusable-horizon-future-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i9f")), "allow")
+        _hreg["lease"]["max_age_hours"] = 24
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
         h.lease.write_text("holder: selftest\n", encoding="utf-8")
         # a holder-scoped lease that declares NO path never reaches the holder check either: the
         # live mode record keeps the judgement on
@@ -9545,6 +9609,20 @@ def _main_isolated(report_path=None):
         _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
         h.set_turn_state({})
         check("ask/attended-pathless-lease-keeps-judgement-on", _verdict(ask_att("tu-i10")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-pathless-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i10a")), "deny")
+        # an empty or a non-string path declares no path either
+        _hreg["lease"]["path"] = ""
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-empty-path-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i10b")), "deny")
+        _hreg["lease"]["path"] = 7
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-non-string-path-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i10c")), "deny")
         _hreg["lease"] = _hlease_decl
         _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
         h.lease.write_text("holder: selftest\n", encoding="utf-8")

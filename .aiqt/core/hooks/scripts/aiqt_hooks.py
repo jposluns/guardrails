@@ -13352,13 +13352,16 @@ def _orch_ask_attended(data, reg, root):
     the live scope (a bounded co-located worker a holder-scoped lease does not name, CX-M3) does not
     inherit the global backlog, so the judgement allows there. Under a holder-scoped lease
     (holder_is_session_id) the judgement is off for EVERY session, the orchestrator included, where no
-    holder can be confirmed: a lease file that is absent or unreadable, and, for a NON-EMPTY lease the
-    age classifier reads as fresh or cannot-evaluate (the only shapes the session-id and holder-token
-    checks run on), a call that carries no session id or a lease that names no session. Every other
-    lease shape skips the holder check and falls through to the live-mode scope source: an empty
-    lease, a lease that declares no path, a lease stale past max_age_hours, and a lease future-dated
-    past the tolerated clock skew; a live mode record then keeps every session in scope there, an
-    id-less caller included, so the judgement stays on (erring toward denying). The question is
+    holder can be confirmed: a lease file that cannot be stat'ed, and, for a NON-EMPTY lease the
+    session-id and holder-token checks run on (one the age classifier reads as fresh or cannot-evaluate
+    under a declared max_age_hours, or, with no horizon declared, every non-empty lease whatever its
+    mtime), a lease that cannot be read, a call that carries no session id, or a lease that names no
+    session. Every other lease shape skips the holder check and falls through to the live-mode scope
+    source: an empty lease, a lease that declares no path (an absent, empty or non-string path), a
+    lease stale past a declared max_age_hours, and a lease future-dated past the tolerated clock skew
+    under a declared usable max_age_hours (an unusable one reads cannot-evaluate whatever the mtime,
+    so the holder check runs); a live mode record then keeps every session in scope there, an id-less
+    caller included, so the judgement stays on (erring toward denying). The question is
     DENIED while granted open
     items are actionable, neither dispatched (waiting on a live tracked task) nor blocked by a human
     decision recorded in the declared pending-decisions record (the stop guard's blocker grammar; fresh

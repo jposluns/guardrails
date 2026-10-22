@@ -253,13 +253,16 @@ strict-exact with a duplicate-key-rejecting hook and no extra keys) or it fails 
 whose value begins with the `unattended` token arms the ask blocker's unattended deny; a recognized
 attended-family mode does not disarm it: for a session within the live scope (the yield guard's gate, so
 a co-located worker a holder-scoped lease does not name never inherits the global backlog; under such a
-lease the judgement is off for every session where no holder can be confirmed, a lease file that is
-absent or unreadable, and, for a non-empty lease classified fresh or cannot-evaluate (the only shapes
-the session-id and holder-token checks run on), a call that carries no session id or a lease that names
-no session, while every other lease shape, an empty lease, a lease that declares no path, a lease stale
-past `max_age_hours` or a lease future-dated past the tolerated clock skew, skips the holder check and
-a live mode record then keeps every session in scope, an id-less caller included, the judgement staying
-on there, erring toward denying), where the
+lease the judgement is off for every session where no holder can be confirmed, a lease file that cannot
+be stat'ed, and, for a non-empty lease the session-id and holder-token checks run on (one classified
+fresh or cannot-evaluate under a declared `max_age_hours`, or, with no horizon declared, every non-empty
+lease whatever its mtime), a lease that cannot be read, a call that carries no session id or a lease
+that names no session, while every other lease shape, an empty lease, a lease that declares no path (an
+absent, empty or non-string path), a lease stale past a declared `max_age_hours` or a lease future-dated
+past the tolerated clock skew under a declared usable `max_age_hours` (an unusable one is cannot-evaluate
+whatever the mtime, so the holder check runs), skips the holder check and a live mode record then keeps
+every session in scope, an id-less caller included, the judgement staying on there, erring toward
+denying), where the
 registry declares a backlog enumerator, a blocking question is judged against the same fresh enumeration
 the yield guard uses (ctx kind `ask`, no wake-naming requirement, counted by its own
 `ask_denials`/`ask_basis` pair in `turn-state.json`, which genuine human input resets exactly as it
