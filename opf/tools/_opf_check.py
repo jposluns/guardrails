@@ -483,7 +483,7 @@ class _Report:
     check that never registered `ran` is routed to CANNOT-EVALUATE naming it, so a silently-skipped check is
     never a pass."""
     __slots__ = ("findings", "cannot", "residuals", "checks", "triage", "_current", "by_check",
-                 "unattributed", "required", "migration_incomplete")
+                 "unattributed", "required", "migration_incomplete", "toml_reads")
 
     def __init__(self):
         self.findings = []
@@ -496,6 +496,7 @@ class _Report:
         self.unattributed = []            # no-current findings/cants + duplicate-ran / unknown-id internal faults
         self.required = REQUIRED_CHECKS   # the closed roster; homes 2 or an imported series widens it
         self.migration_incomplete = []    # bounded adoption-state paths: reported, never a status change
+        self.toml_reads = {}              # relpath -> the raw bytes _read_toml read (the first read per path)
 
     def require_homes(self, homes, imported=False):
         # Bind the roster to the store's homes generation and imported-series activation once the manifest
@@ -650,9 +651,11 @@ def _rel(*parts):
 def _read_toml(root_fd, relpath, rep):
     """Read a contained TOML file beneath root_fd. Returns (data, "ok"|"absent"|"error"); on a StoreError
     (unreadable, unparseable, a refused symlink) it records a CANNOT-EVALUATE naming the input and returns
-    (None, "error"). Absence is (None, "absent") and left to the caller to grade."""
+    (None, "error"). Absence is (None, "absent") and left to the caller to grade. The bytes of a file read
+    are kept on the report (the first read per path), so the canonical-bytes leg proves the bytes the checks
+    graded and never reads them again (the manifest is read once per run)."""
     try:
-        data = _read_toml_contained(root_fd, relpath)
+        found = _read_toml_contained(root_fd, relpath, with_raw=True)
     except StoreError as exc:
         rep.cant("cannot read {}: {}".format(relpath, exc))
         return None, "error"
@@ -662,8 +665,10 @@ def _read_toml(root_fd, relpath, rep):
         # rather than escaping validate_store. Mirrors U7's _read_toml guard (guard-input-soundness; B5).
         rep.cant("cannot read {} ({})".format(relpath, exc))
         return None, "error"
-    if data is None:
+    if found is None:
         return None, "absent"
+    raw, data = found
+    rep.toml_reads.setdefault(relpath, raw)
     return data, "ok"
 
 
@@ -2910,6 +2915,71 @@ def _adoption_state(root_fd, machine_rel, in_repo, rep):
         return None
 
 
+def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep):
+    """C-CONTAINMENT's canonical-bytes leg, run by the driver right after _check_containment and attributed
+    to the same check: every TOML file in the machine store must be the canonical emission of its own
+    parsed content, the byte-reproduction rule each sanctioned writer re-proves before a rewrite (spec 5.7,
+    9.2). A hand edit that leaves the content readable (an appended comment, re-flowed formatting) is
+    therefore a finding here, at the next doctor run and over a pre-commit snapshot, rather than passing
+    until the next write refuses it. A file an earlier emitter wrote with a literal U+2028 or U+2029 inside
+    a basic string passes, as it does for the writers (_opf_emit.matches_store_bytes). A file a check
+    already read through _read_toml is proven from those same bytes (rep.toml_reads) and never read again,
+    so the run's one manifest read stays its only one; a file no check read is read here. The walk covers
+    only the machine store, never the evidence homes or the journals beside it, and never a valid
+    [unmanaged] declaration or the legacy imports staging, which _check_containment grades. A file that
+    cannot be read or parsed gets no verdict from this leg: the check that reads it grades it, and
+    _check_containment grades a stray as unregistered; init.toml, which no check reads, is still not graded
+    for readability, as before. It proves serialization only: a hand edit that leaves canonical bytes is not
+    detected here."""
+    skipped = tuple(classify_containment(manifest_data, machine_rel).valid_unmanaged) + (
+        _legacy_import_staging(machine_rel)[0],)
+
+    def walk(reldir, depth):
+        if depth > _CONTAINMENT_MAX_DEPTH:
+            rep.cant("C-CONTAINMENT: directory nesting under {!r} exceeds the containment-walk ceiling of "
+                     "{}; its TOML files are not proven canonical (fail-closed)".format(
+                         _safe_display(reldir), _CONTAINMENT_MAX_DEPTH))
+            return
+        subdirs, files = _list_dir(root_fd, reldir, rep)
+        if subdirs is None and files is None:
+            return
+        for f in files:
+            full = reldir + "/" + f
+            if not f.endswith(".toml") or _under_any(full, skipped):
+                continue
+            raw = rep.toml_reads.get(full)
+            try:
+                if raw is None:
+                    found = _read_toml_contained(root_fd, full, with_raw=True)
+                else:
+                    # The bytes a check already graded, parsed afresh (never the shared model a check may
+                    # hold), so a file is never read twice in one run.
+                    found = raw, _opf_store._parse_store_toml(full, raw)
+            except (StoreError, _journal.JournalError):
+                found = None
+            if found is None:
+                continue     # unreadable, unparseable or gone: graded elsewhere (see the docstring)
+            raw, model = found
+            try:
+                fresh = _opf_emit.emit_checked(model).encode("utf-8")
+            except _opf_emit.EmitError as exc:
+                rep.finding("C-CONTAINMENT: machine-store file {!r} holds content the canonical emitter "
+                            "cannot write ({}), so no sanctioned writer produced it (spec 5.7/9.2)".format(
+                                full, _safe_display(str(exc))))
+                continue
+            if not _opf_emit.matches_store_bytes(raw, fresh):
+                rep.finding("C-CONTAINMENT: machine-store file {!r} is not in canonical emitted form (it "
+                            "carries comments or non-canonical serialization, which no sanctioned writer "
+                            "produces); restore it from the integration base and redo the change through "
+                            "opf (spec 5.7/9.2)".format(full))
+        for d in subdirs:
+            full = reldir + "/" + d
+            if not _under_any(full, skipped):
+                walk(full, depth + 1)
+
+    walk(machine_rel, 0)
+
+
 def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, *, in_repo=None):
     """C-CONTAINMENT: recursively walk `.working/`, matching every regular file against the managed set
     (the ledgers, the enabled non-ledger type indexes, per-record bodies, the archive tree, declared
@@ -3870,6 +3940,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # which C-MANIFEST alone does not guarantee (it accepts the reserved 2.0.0 / homes = 2 declaration
     # today, spec 4.2).
     _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, in_repo=in_repo)
+    _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep)
 
     # --- C-VIEW-DRIFT: byte-level drift of every declared deterministic view (spec 5.8/10) ------------
     rep.ran("C-VIEW-DRIFT")
@@ -4737,6 +4808,36 @@ def self_test():
         junk = run(clean_machine(), working={"junk.md": "x\n"})
         check("undeclared-file-invalid", junk.status == INVALID)
         check("undeclared-file-named", any("C-CONTAINMENT" in f for f in junk.findings))
+        # The canonical-bytes leg: a machine-store TOML file that still parses but is not the canonical
+        # emission of its own content (a comment appended to the manifest, a trailing blank line in a nested
+        # archive file) is a named C-CONTAINMENT finding, while a file holding a literal U+2028 inside a basic
+        # string, the spelling an earlier emitter wrote, still passes. Flip: dropping the leg's call from the
+        # driver turns both findings VALID.
+        _canon = "is not in canonical emitted form"
+        _cm = clean_machine()
+        _cm["manifest.toml"] = _opf_emit.emit(_cm["manifest.toml"]) + "# a hand comment\n"
+        _cmr = run(_cm)
+        check("canonical-manifest-comment-invalid", _cmr is not None and _cmr.status == INVALID)
+        check("canonical-manifest-comment-named",
+              _cmr is not None and _cmr.checks.get("C-CONTAINMENT") == "FINDING"
+              and len(_cmr.findings) == 1 and "'.working/toml/manifest.toml'" in _cmr.findings[0]
+              and _canon in _cmr.findings[0])
+        _ca = clean_machine()
+        _ca["archive/2026/worklog.toml"] = _opf_emit.emit(_ca["archive/2026/worklog.toml"]) + "\n"
+        _car = run(_ca)
+        check("canonical-archive-blank-line-named",
+              _car is not None and _car.status == INVALID
+              and any("'.working/toml/archive/2026/worklog.toml'" in m and _canon in m
+                      for m in _car.by_check.get("C-CONTAINMENT", [])))
+        _cl = clean_machine()
+        _cl_dn = dict(dn(1, "BI-1"), summary="done" + chr(0x2028) + "now")
+        _cl_text = _opf_emit.emit(idx([_cl_dn]))
+        _cl["done.index.toml"] = _cl_text.replace("\\u2028", chr(0x2028))
+        _cl_obs = copy.deepcopy(clean_prior())
+        _cl_obs["prior"]["digests"]["DN-1"] = _record_digest(_cl_dn)
+        _clr = run(_cl, obs=_cl_obs)
+        check("canonical-prior-separator-spelling-valid",
+              _cl["done.index.toml"] != _cl_text and _clr is not None and _clr.status == VALID)
         # A partial import SUBSTANTIATED by an active imports/<run-id> run triages stray paths (VALID):
         # the stray junk and the active run interior both land in triage, never a finding (codex-2).
         RUNID = "imp-20260601T000000Z-0123456789abcdef"
@@ -4820,10 +4921,10 @@ def self_test():
         gone = "imports/{}/candidate/backlog_item.index.toml".format(RUNID)
         real_reader = _read_toml_contained
 
-        def vanishing_reader(fd, relpath):
+        def vanishing_reader(fd, relpath, **kwargs):
             if relpath.endswith(gone):
                 return None
-            return real_reader(fd, relpath)
+            return real_reader(fd, relpath, **kwargs)
 
         globals()["_read_toml_contained"] = vanishing_reader
         try:
