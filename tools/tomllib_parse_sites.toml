@@ -638,7 +638,7 @@ reason = "test-code"
 path = "opf/tools/_opf_observe.py"
 function = "self_test_isolated"
 form = "call"
-count = 1
+count = 4
 class = "EXEMPT"
 reason = "test-code"
 
