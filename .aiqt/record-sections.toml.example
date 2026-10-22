@@ -1,11 +1,46 @@
 # Adopter example: record-section preservation gate (tools/check_record_sections.py).
-# An adopter declares the Markdown record files whose newly added column-zero H2 sections a merge must
-# preserve, and the heading pattern that selects them. Replace the example record below with the real
-# record files and patterns for your project. A branch-owned section may instead carry opt-out-marker as
-# an exact whole line inside that section to declare it superseded rather than dropped.
-schema-version = 1
+# An adopter declares the record surfaces a merge must preserve. Replace the examples below with the real
+# record files for your project. Schema version 2 supports two record kinds; a schema-version 1 config
+# (opt-out-marker plus [[record]] only) keeps its exact version-1 behaviour.
+#
+# [[record]]: Markdown record files whose newly added column-zero H2 sections a merge must preserve, with
+# the heading pattern that selects them. A branch-owned section may instead carry opt-out-marker as an
+# exact whole line inside that section to declare it superseded rather than dropped. In a version-2 config,
+# [[record]] entries and opt-out-marker are declared together or not at all.
+#
+# [[table]]: append-only tables whose rows are keyed on the declared columns. Every row key present at the
+# post-merge commit's first parent (R1) or newly introduced on the branch (R2) must survive the merge, and
+# with edit = "frozen" a surviving row must keep its parsed cell values unchanged (R3), compared cell for
+# cell after trimming surrounding ASCII spaces and tabs (Markdown) or by typed TOML value (an integer
+# never equals a boolean or a float, and floats and datetimes compare by exact repr, floats by sign too, so
+# -0.0 for 0.0, -nan for nan, or a re-offset instant is an edit), against the first parent
+# and, for rows the branch introduced, against the branch tip; edit = "key-stable" allows in-place
+# corrections of non-key cells. A Markdown row is a |-prefixed line that must also END with an unescaped
+# pipe: a GFM-style row without the trailing pipe is refused, and so is a line directly after the rows
+# that carries a pipe without starting with one (an indented row, or a row without its leading pipe);
+# end the table with a blank line. Reordering, mid-table insertion, re-padding
+# (the header line included) and
+# TOML reformatting are allowed; a duplicate key in any snapshot, a carriage return in a table line or
+# in a header-matching line of any compared snapshot (a CRLF table), a declared table that cannot be
+# located in a file that exists at the first parent or the branch tip while that snapshot's config
+# declared the same table (at the branch tip the merge-base's config counts too, so a branch that
+# renames or removes a declared table cannot shed its own row obligations), and a declared table's file
+# absent at the branch tip while it existed at the merge-base and the merge-base's config declared the
+# table (so a branch that moves or deletes the declared file cannot shed them either; a branch forked
+# before the file existed still passes), fail closed. For the
+# merge-base's rows an unlocatable table reads as absent, which can
+# only add branch-owned row obligations, never remove one. Rows have no
+# deletion opt-out: supersede a row with a new row, or correct it in place under key-stable.
+schema-version = 2
 opt-out-marker = "<!-- aiqt-record-section: superseded -->"
 
 [[record]]
 path = "docs/decision-log.md"
 heading-pattern = '^## [0-9]{4}-[0-9]{2}-[0-9]{2}(?: .+)?$'
+
+[[table]]
+path = "docs/done-log.md"
+format = "markdown"                    # or "toml" with array = "<top-level array name>"
+header = "| id | pr | closed | note |" # matched cell for cell after trimming; table = header, delimiter row, |-lines
+key = ["id", "pr"]                     # row identity; must be unique per snapshot
+edit = "frozen"                        # or "key-stable": non-key cells may be corrected in place
