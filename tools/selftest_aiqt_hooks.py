@@ -3026,7 +3026,7 @@ _DEADLINE_SHAPES = {
     "wakeup_long": lambda n, base: ("ScheduleWakeup", {"prompt": "p" * n, "delaySeconds": 60, "reason": "r"}),
     "fg_detach_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "long_job &")}),
     "fg_arith_open": lambda n, base: ("Bash", {"command": _repeat("$((", n)}),
-    "fg_heredocs_amp": lambda n, base: ("Bash", {"command": _repeat("cat <<'E'\na & b's\nE\n", n)}),
+    "fg_heredocs_amp": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na & b's\nE\n", n)}),
     "fg_heredoc_ops_open": lambda n, base: ("Bash", {"command": _repeat("cat <<A ", n, "\nx & y")}),
     "fg_subshells": lambda n, base: ("Bash", {"command": "(" * (n // 2 - 2) + "true" + ")" * (n // 2 - 2)}),
     "fg_setsid_options": lambda n, base: ("Bash", {"command": "setsid" + _repeat(" -c", n - 6)}),
@@ -3071,9 +3071,11 @@ _DEADLINE_DENY_CASES = frozenset((
 _DEADLINE_NOTE_CASES = frozenset((
     ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options")))
 # The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
-# bound: the arithmetic opener carries no `&` or detacher; the quoted-heredoc `&`, the unterminated heredoc
-# body and the balanced subshells are all skipped or carry no outer detach, so none draws a note. Pinning the
-# outcome keeps these timing shapes from passing a scanner that mistook one for a detach.
+# bound: the arithmetic opener carries no `&` or detacher; the plain-delimiter heredoc bodies (their `&`
+# and apostrophe are skipped data; a quoted delimiter would note, and its early note would also cut the
+# timing short), the unterminated heredoc body and the balanced subshells are all skipped or carry no outer
+# detach, so none draws a note. Pinning the outcome keeps these timing shapes from passing a scanner that
+# mistook one for a detach.
 _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredocs_amp"),
     ("orch_truncation_guard", "fg_heredoc_ops_open"), ("orch_truncation_guard", "fg_subshells")))

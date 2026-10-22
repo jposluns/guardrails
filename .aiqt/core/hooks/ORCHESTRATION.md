@@ -52,21 +52,26 @@ the doctor and the resume audit report and arm from it):
   `&`, or a `setsid` without `-w`, a `nohup` or a `disown` in command position) is allowed with a
   note naming the tracked background mechanism (`run_in_background`, or a foreground wait); its scan
   skips here-document bodies opened at the outer quoting level and arithmetic, which the in-scope
-  deny still reads as code (an ANSI-C `$'...'` delimiter is decoded where every escape resolves to
-  one printable ASCII character, where bash and the scanner agree, so its body is skipped too; a
-  here-document inside a double-quoted command substitution, the commit-message form, is still read
-  as double-quoted text, so a body `&` there can draw an extra note), and passes over a redirect
+  deny still reads as code (a here-document inside a double-quoted command substitution, the
+  commit-message form, is still read as double-quoted text, so a body `&` there can draw an extra
+  note), and passes over a redirect
   operator and its target without losing the command position (a here-string `<<<`, the noclobber
   `>|`, a named descriptor such as `{fd}>`, a redirect between `setsid` and its wait option, and a
-  `${...}` parameter expansion that is the whole redirect target, read as one word with only a
-  nested `${` raising the depth (a literal `{` in a default does not nest, as in bash), all
+  `${...}` parameter expansion that is the whole redirect target, read as one word when it is
+  provably simple (only a name and literal characters up to the first `}`; a literal `{` in a
+  default does not nest, as in bash), all
   included; a number or `{fd}` before `&>` is a word to bash, never an fd prefix, and is read as
-  one). A span the scan would skip but cannot read with certainty draws the same note instead of a
-  silent skip, and never a block: a here-document delimiter it cannot decode or parse (a control
-  escape, a NUL from any escape form, a byte above 0x7F, an unknown escape, a quote left open), and
-  a `${...}` redirect target left unclosed or holding a `$(...)` or backtick command substitution.
+  one). The scan skips a here-document body or a `${...}` redirect target silently ONLY when the
+  span is provably simple: a delimiter that is one plain word with no backslash and no quote, and a
+  target holding nothing beyond a name and literal characters. Every other such span draws the same
+  note instead of a silent skip, and never a block: a quoted, ANSI-C or escaped delimiter spelling,
+  a delimiter continued with a backslash-newline, a quote left open or no delimiter word at all, and
+  a `${...}` target left unclosed or holding any quote, backslash, `$`, backquote, `<` or `>` (a
+  command or process substitution, however nested or quoted, is behind one of those characters).
   Outside registry scope this scan only ever notes; where it is unsure it over-notes rather than
-  misses, and no input makes it deny or crash. A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
+  misses. No command content makes the scan deny or raise; the guard's fail-closed paths around it
+  stay (a malformed payload still denies, and the dispatcher's 8-second deadline, disclosed in the
+  manifest residue, still exits 2). A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
   `.aiqt` directory the guard's process lacks search (execute) permission on, such as mode `0600`
   or `0000` for a process those modes bind; a `.aiqt` of mode `0100` evaluates normally for its owner
   where `O_PATH` exists (Linux), because the `O_PATH` open needs no read permission, and for a process
