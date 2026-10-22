@@ -38,9 +38,14 @@ Checks, each a named guard:
                   quote is a finding because pairing cannot be trusted there
   required-rule   a fixed list of section 16.1 and section 9.2 sentences appears verbatim
                   (whitespace-insensitively) in both the specification and the prompt
-  journal-grading the prompt carries no carriage return anywhere (CommonMark reads a lone CR as
-                  a line ending, so a CR could move a heading, fence, underline or clause between
-                  what renders and what any byte reading sees; refused by name), and the step 8
+  journal-grading the prompt carries no C0 control character other than LF and TAB, and no
+                  U+0085, U+2028 or U+2029, anywhere (line models disagree over those characters:
+                  CommonMark reads a lone CR as a line ending, marko also reads a form feed as
+                  one, Python's splitlines also breaks on the vertical tab, the C0 information
+                  separators, U+0085, U+2028 and U+2029, and CommonMark substitutes U+FFFD for
+                  NUL, so any of them could move a heading, fence, underline or clause between
+                  what renders and what another reading of the same bytes sees; the refusal
+                  names the character it finds), and the step 8
                   journal rule is judged on the vendored CommonMark parse (opf/tools/_vendor/
                   marko, loaded fail-closed with its provenance checked through
                   _commonmark_headings), never on a hand-written line model: the step 8 heading
@@ -61,10 +66,13 @@ Checks, each a named guard:
                   its raw source carries it. Rendered text is what a renderer shows: never a link
                   or image destination or title, raw HTML, a link reference definition or
                   code-block content, with inline code wrapped in single backticks, the spelling
-                  every clause quotes. The rule deliberately over-refuses (a heading spelled with
+                  every clause quotes; image alt text, which HTML rendering shows only as an
+                  attribute, earns no required-clause credit, while the denied-clause scan still
+                  reads it. The rule deliberately over-refuses (a heading spelled with
                   trailing spaces or a closing hash run, a clause re-spelled with another
                   code-span delimiter run or shown only inside a code block, raw HTML that hides
-                  nothing, and a CR whose rendering is harmless all fail), so a prompt whose step
+                  nothing, and a refused control character whose rendering is harmless all
+                  fail), so a prompt whose step
                   8 legitimately needs a refused form must extend this gate first; a parser that
                   cannot load, raises, or returns a parse that does not cover the prompt is
                   CANNOT-EVALUATE under journal-parse, never a fallback line reading
@@ -515,26 +523,57 @@ def _check_required_rules(spec_norm, prompt_norm):
                  "required rule {!r} is not restated in the prompt".format(name))
 
 
-def _check_prompt_cr(prompt_text):
-    """A carriage return anywhere in the prompt is refused by name, before the parse: CommonMark
-    reads a lone CR as a line ending, so a CR can end a line that any byte reading sees as one
-    line, moving a heading, fence, underline or clause between what renders and what a scan of
-    the bytes sees. The shipped prompt is LF-only, so nothing legitimate is refused."""
-    _require("\r" not in prompt_text, "journal-grading",
-             "the prompt carries a carriage return (first at offset {}), an unsupported line "
-             "ending: CommonMark reads a lone CR as a line ending, so text around it can render "
-             "away from what a byte reading sees".format(prompt_text.find("\r")))
+# Every C0 control character except LF and TAB, plus U+0085, U+2028 and U+2029. Line models
+# disagree over these characters: CommonMark reads a lone CR as a line ending, marko also reads a
+# form feed as one, Python's splitlines also breaks on the vertical tab, the C0 information
+# separators, U+0085, U+2028 and U+2029, and CommonMark substitutes U+FFFD for NUL, so any of
+# them can move a heading, fence, underline or clause between what one reading of the bytes sees
+# and what another renders.
+_REFUSED_CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x85" + chr(0x2028) + chr(0x2029) + "]")
+_REFUSED_CONTROL_NAMES = {
+    "\r": "a carriage return (U+000D)",
+    "\f": "a form feed (U+000C)",
+    "\x0b": "a vertical tab (U+000B)",
+    "\x00": "a NUL (U+0000)",
+    "\x85": "a next-line control (U+0085)",
+    chr(0x2028): "a line separator (U+2028)",
+    chr(0x2029): "a paragraph separator (U+2029)",
+}
+
+
+def _check_prompt_controls(prompt_text):
+    """Every C0 control character except LF and TAB, plus U+0085, U+2028 and U+2029, is refused
+    anywhere in the prompt, before the parse, and the refusal names the character it finds: line
+    models disagree over these characters (CommonMark reads a lone CR as a line ending, marko
+    also reads a form feed as one, Python's splitlines also breaks on the vertical tab, the C0
+    information separators, U+0085, U+2028 and U+2029, and CommonMark substitutes U+FFFD for
+    NUL), so any of them can move a heading, fence, underline or clause between what one reading
+    of the bytes sees and what another renders. The refusal is by presence, not by effect. The
+    shipped prompt carries none of these characters, so nothing legitimate is refused."""
+    match = _REFUSED_CONTROL_RE.search(prompt_text)
+    found = match.group(0) if match else "\r"
+    _require(match is None, "journal-grading",
+             "the prompt carries {} at offset {}, a refused control character: every C0 control "
+             "except LF and TAB, plus U+0085, U+2028 and U+2029, is refused because line models "
+             "disagree over it, so text around it can render away from what another reading of "
+             "the same bytes sees".format(
+                 _REFUSED_CONTROL_NAMES.get(
+                     found, "the C0 control U+{:04X}".format(ord(found))),
+                 match.start() if match else -1))
 
 
 def _journal_markdown(prompt_text):
     """The vendored CommonMark parse this gate judges step 8 on: the pinned marko under
     opf/tools/_vendor, loaded and provenance-checked by _commonmark_headings (version and import
     origin, fail-closed), parsed fresh per call with no extensions. The prompt is parsed exactly
-    as read (the carriage-return refusal has already run, and marko's remaining preprocessing
+    as read (the control-character refusal has already run, and marko's remaining preprocessing
     substitutions are length-preserving), so every node's source span indexes prompt_text, which
     the covering-span requirement below pins. A parser that cannot load, raises, or returns a
     document whose span does not cover the text is CANNOT-EVALUATE, never a silent pass or a
-    fallback line reading."""
+    fallback line reading. No pre-parse size ceiling applies here beyond the 16 MiB prompt-read
+    bound: the 1 MiB ceiling the changelog adapter enforces before its own parses is not applied
+    to the prompt, and marko's parse is worst-case superlinear on crafted input, so this gate
+    bounds what an oversized prompt can pass, never how long one takes to parse."""
     try:
         marko = _commonmark_headings._load_marko()
         document = _commonmark_headings._new_parser(marko).parse(prompt_text)
@@ -629,21 +668,26 @@ def _check_step8_html(marko, section):
                  "drops or transforms raw HTML, so nothing inside it is rendered prompt text")
 
 
-def _visible_text(marko, node):
+def _visible_text(marko, node, image_alt=False):
     """The text a CommonMark renderer shows for node, as this gate credits it: rendered text only,
     never a link or image destination or title, raw HTML, a link reference definition or
     code-block content (fenced and indented code render literally, but text shown only as code is
     not the prompt stating a rule, and no heading or list this gate judges can act from inside
-    one). Inline code joins wrapped in single backticks, the spelling every required clause
-    quotes, so a clause re-spelled with another code-span delimiter run does not match and is
-    refused rather than read around. Block children contribute a line break, which the
-    whitespace-insensitive comparison reads as a space, so adjacent blocks never glue together
-    without a separator, while a clause can still match across them exactly as it matches across
-    the wrapped lines of one paragraph."""
+    one). Image alt text is excluded by default too: HTML rendering shows it only as an
+    attribute, so it earns no required-clause credit, while the denied-clause scan opts in with
+    image_alt=True because text renderers and screen readers do show it, keeping the denial as
+    wide as the credit is narrow. Inline code joins wrapped in single backticks, the spelling
+    every required clause quotes, so a clause re-spelled with another code-span delimiter run
+    does not match and is refused rather than read around. Block children contribute a line
+    break, which the whitespace-insensitive comparison reads as a space, so adjacent blocks never
+    glue together without a separator, while a clause can still match across them exactly as it
+    matches across the wrapped lines of one paragraph."""
     if isinstance(node, str):
         return node
     if isinstance(node, (marko.block.FencedCode, marko.block.CodeBlock, marko.block.HTMLBlock,
                          marko.block.LinkRefDef, marko.inline.InlineHTML)):
+        return ""
+    if isinstance(node, marko.inline.Image) and not image_alt:
         return ""
     if isinstance(node, marko.inline.CodeSpan):
         return "`{}`".format(node.children) if isinstance(node.children, str) else ""
@@ -656,7 +700,7 @@ def _visible_text(marko, node):
         return ""
     parts = []
     for child in children:
-        parts.append(_visible_text(marko, child))
+        parts.append(_visible_text(marko, child, image_alt))
         if isinstance(child, marko.block.BlockElement):
             parts.append("\n")
     return "".join(parts)
@@ -680,15 +724,18 @@ def _journal_item_node(marko, section):
 
 def _check_journal_grading(prompt_text):
     """Judge the step 8 journal rule on the vendored CommonMark parse, never on a line model: the
-    heading, the step's extent, the item and every clause are taken from what marko renders, so an
-    indentation, fence, setext, list or lazy-continuation reading cannot differ between this gate
-    and a renderer. The required clauses must appear in the item's rendered text; the denied
-    clause is refused where the step's rendered text or the step's raw source carries it, so an
-    unqualified conclusion is refused even where only a renderer, or only a byte reading, would
-    show it (a denied clause inside a code block is caught by the raw scan; one assembled only by
-    rendering, from inline markers the raw bytes interleave, by the rendered scan; raw HTML in
-    the step is refused outright before either scan runs)."""
-    _check_prompt_cr(prompt_text)
+    heading, the step's extent, the item and every clause are taken from what marko renders. The
+    control-character refusal runs first, so LF is the only line ending left and every reading
+    agrees on where lines begin and end; past that, the indentation, fence, setext, list and
+    lazy-continuation reading is marko's, and it matches another renderer only as far as marko
+    conforms to CommonMark. The required clauses must appear in the item's rendered text (image
+    alt text earns no credit there: HTML rendering shows it only as an attribute); the denied
+    clause is refused where the step's rendered text, image alt text included, or the step's raw
+    source carries it, so an unqualified conclusion is refused even where only a renderer, or
+    only a byte reading, would show it (a denied clause inside a code block is caught by the raw
+    scan; one assembled only by rendering, from inline markers the raw bytes interleave, by the
+    rendered scan; raw HTML in the step is refused outright before either scan runs)."""
+    _check_prompt_controls(prompt_text)
     marko, document = _journal_markdown(prompt_text)
     section, step_raw = _step8_section(marko, document, prompt_text)
     _check_step8_html(marko, section)
@@ -697,7 +744,8 @@ def _check_journal_grading(prompt_text):
     for name, clause in JOURNAL_GRADING:
         _require(_normalize(clause) in item_text, "journal-grading",
                  "the step 8 journal item lacks the required clause {!r}".format(name))
-    step_text = _normalize("\n".join(_visible_text(marko, node) for node in section))
+    step_text = _normalize("\n".join(_visible_text(marko, node, image_alt=True)
+                                     for node in section))
     for name, clause in JOURNAL_GRADING_DENIED:
         denied = _normalize(clause)
         _require(denied not in step_text and denied not in _normalize(step_raw),
@@ -1237,9 +1285,33 @@ def _vectors():
 
     def cr_harmless(base):
         # A CR whose rendered reading is harmless (a soft line break outside step 8): still
-        # refused, because the carriage-return refusal is by presence, not by effect, so this
+        # refused, because the control-character refusal is by presence, not by effect, so this
         # fixture discriminates that refusal alone.
         _build_tree(base, extra_text="A note line.\rIts continuation.")
+
+    def ff_hides_step9_heading(base):
+        # A form feed hiding a fence opener and a fence closer: marko reads the form feed as a
+        # line ending, so its parse hides the step 9 heading inside fenced code and keeps the
+        # item in step 8, while CommonMark reads the form feed as paragraph text, renders the
+        # heading, and the item after it sits outside step 8.
+        root = _build_tree(base)
+        _edit_prompt(root, _STEP8_HEAD + "\n\n" + _FIXTURE_JOURNAL_ITEM,
+                     _STEP8_HEAD + "\n\nNote.\f```\n" + _FIXTURE_STEP9_HEAD + "\nx\f```\n\n" +
+                     _FIXTURE_JOURNAL_ITEM)
+
+    def control_hides_step9_heading(control):
+        # The given control character joining a note to the step 9 heading, mirroring the CR
+        # fixture: CommonMark renders one paragraph, so the gate's parse keeps the item in step
+        # 8, while a reading that breaks lines on the character (Python's splitlines does for
+        # the vertical tab, the C0 information separators, U+0085, U+2028 and U+2029) sees a
+        # step 9 heading there, and for NUL the U+FFFD substitution makes rendered text disagree
+        # with the raw bytes. Refused by presence, not by effect.
+        def build(base):
+            root = _build_tree(base)
+            _edit_prompt(root, _FIXTURE_JOURNAL_ITEM + "\n\n" + _FIXTURE_STEP9_HEAD,
+                         "Note." + control + _FIXTURE_STEP9_HEAD + "\n\n" +
+                         _FIXTURE_JOURNAL_ITEM)
+        return build
 
     def conclusion_in_link_destination(base):
         # The required conclusion moved into a link destination: a destination is not rendered
@@ -1303,6 +1375,34 @@ def _vectors():
         _edit_prompt(root, "\n\n" + _FIXTURE_STEP9_HEAD,
                      "\n\nIn short, in a homes-1 origin store a *journal* entry is a store "
                      "path.\n\n" + _FIXTURE_STEP9_HEAD)
+
+    def conclusion_in_image_alt(base):
+        # The required conclusion moved into image alt text: HTML rendering shows alt text only
+        # as an attribute, so the clause no longer renders as prompt text inside the item.
+        root = _build_tree(base)
+        _edit_prompt(root, "so in a homes-1 origin store that has not started an adoption a "
+                     "journal entry is a store path, not machine-local data.",
+                     "![so in a homes-1 origin store that has not started an adoption a "
+                     "journal entry is a store path, not machine-local data.](x.png)")
+
+    def denied_in_image_alt(base):
+        # The denied clause interleaved with emphasis inside image alt text: the raw bytes never
+        # spell it, so only the denied-clause scan, which reads alt text, refuses it; this
+        # fixture holds the denial as wide as it was when alt text earned clause credit.
+        root = _build_tree(base)
+        _edit_prompt(root, "\n\n" + _FIXTURE_STEP9_HEAD,
+                     "\n\n![In short, in a homes-1 origin store a *journal* entry is a store "
+                     "path.](y.png)\n\n" + _FIXTURE_STEP9_HEAD)
+
+    def clause_split_across_blocks(base):
+        # The required conclusion split across two paragraphs of the item between "pa" and "th":
+        # with the block separator each paragraph stays its own line, the whitespace-insensitive
+        # comparison reads the break as a space, and the clause does not match; gluing adjacent
+        # blocks without a separator would re-assemble it, so this fixture discriminates the
+        # separator in _visible_text.
+        root = _build_tree(base)
+        _edit_prompt(root, "journal entry is a store path, not machine-local data.",
+                     "journal entry is a store pa\n\n    th, not machine-local data.")
 
     return [
         ("valid-tree", VALID, None, None, valid),
@@ -1423,8 +1523,22 @@ def _vectors():
          cr_opens_fence),
         ("journal-cr-setext-underline", INVALID, "journal-grading", "_check_journal_grading",
          cr_setext_underline),
-        ("journal-cr-harmless-rendering", INVALID, "journal-grading", "_check_prompt_cr",
+        ("journal-cr-harmless-rendering", INVALID, "journal-grading", "_check_prompt_controls",
          cr_harmless),
+        ("journal-ff-hides-step9-heading", INVALID, "journal-grading", "_check_prompt_controls",
+         ff_hides_step9_heading),
+        ("journal-vt-hides-step9-heading", INVALID, "journal-grading", "_check_prompt_controls",
+         control_hides_step9_heading("\x0b")),
+        ("journal-nul-hides-step9-heading", INVALID, "journal-grading", "_check_prompt_controls",
+         control_hides_step9_heading("\x00")),
+        ("journal-c0-separator-hides-step9-heading", INVALID, "journal-grading",
+         "_check_prompt_controls", control_hides_step9_heading("\x1c")),
+        ("journal-nel-hides-step9-heading", INVALID, "journal-grading", "_check_prompt_controls",
+         control_hides_step9_heading("\x85")),
+        ("journal-ls-hides-step9-heading", INVALID, "journal-grading", "_check_prompt_controls",
+         control_hides_step9_heading(chr(0x2028))),
+        ("journal-ps-hides-step9-heading", INVALID, "journal-grading", "_check_prompt_controls",
+         control_hides_step9_heading(chr(0x2029))),
         ("journal-conclusion-in-link-destination", INVALID, "journal-grading",
          "_check_journal_grading", conclusion_in_link_destination),
         ("journal-conclusion-in-processing-instruction", INVALID, "journal-grading",
@@ -1442,6 +1556,12 @@ def _vectors():
          "_check_journal_grading", denied_in_code_block),
         ("journal-denied-clause-emphasised", INVALID, "journal-grading",
          "_check_journal_grading", denied_emphasised),
+        ("journal-conclusion-in-image-alt", INVALID, "journal-grading",
+         "_check_journal_grading", conclusion_in_image_alt),
+        ("journal-denied-clause-in-image-alt", INVALID, "journal-grading",
+         "_check_journal_grading", denied_in_image_alt),
+        ("journal-clause-split-across-blocks", INVALID, "journal-grading",
+         "_check_journal_grading", clause_split_across_blocks),
     ]
 
 
@@ -1461,6 +1581,9 @@ _JOURNAL_CLAUSE_VECTORS = (
     ("journal-denied-clause-after-blank-line", "unqualified-conclusion"),
     ("journal-denied-clause-in-code-block", "unqualified-conclusion"),
     ("journal-denied-clause-emphasised", "unqualified-conclusion"),
+    ("journal-conclusion-in-image-alt", "non-adopting-conclusion"),
+    ("journal-denied-clause-in-image-alt", "unqualified-conclusion"),
+    ("journal-clause-split-across-blocks", "non-adopting-conclusion"),
 )
 
 
