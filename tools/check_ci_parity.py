@@ -5487,8 +5487,8 @@ def self_test():
     # written through those APIs turns this vector red and forces review
     # against the reader. Every pinned site reads no runner or workflow
     # text under the parity guarantee: the sites parse Python sources for
-    # ast (the F-367 maintenance-pin scan included), read harness, stub
-    # call and Trace2 event logs (the F-367 maintenance probe), write the
+    # ast (the F-367 maintenance-pin scan included), read harness and stub
+    # call logs, write the
     # selftest report, read the config-member timeout control's pid file
     # and /proc stat, split the timeout controls' captured diagnostics,
     # split an in-memory citation string from an in-module table,
@@ -5551,8 +5551,6 @@ def self_test():
         },
         "tools/selftest_git_fixture_env.py": {
             ("_archive_reads_use_caller_env", "read_text"): 1,
-            ("_auto_maintenance_children", "read_text"): 1,
-            ("_auto_maintenance_children", "splitlines"): 1,
             ("_binding_calls", "read_text"): 1,
             ("_caller_env_archive_only", "read_text"): 1,
             ("_calls_any", "read_text"): 1,

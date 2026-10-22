@@ -66,7 +66,7 @@ from selftest_git_fixture_env import (  # noqa: E402
     _scan_contract_failures,
     _scenario_timeout_record, _scrub_scoped_first, _slow_control_record, _snapshot_git_dir,
     _stood_down_wants, _stop_member_group, _sweep_call_sites, _sweep_observed, _system_pin_probe,
-    _timeout_cause, _verdict)
+    _timeout_cause, _trace2_maintenance_children, _verdict)
 
 SUITE_ID = "git-fixture-env-core"
 # check() is the engine choke point: every id this runner records flows into the one
@@ -2318,6 +2318,45 @@ def _opf_lifecycle_graph_checks():
     check("env/opf-lifecycle-bypass-denied", denial, expected_denial)
 
 
+def _trace2_tail_checks(base, probe=_trace2_maintenance_children):
+    """The maintenance probe's trace2 read over seeded files, with a scripted clock and a sleep
+    that can complete the final event, so each leg is deterministic. The red leg's detached child
+    keeps appending after the commit returned, so a read can see an unterminated final event: the
+    probe must wait for it and parse it, fail loudly once the bound is reached (one tick inside the
+    bound, exactly at it, one tick past it), and stay loud on a malformed complete event."""
+    started = json.dumps({"event": "child_start",
+                          "argv": ["git", "maintenance", "run", "--auto"]}).encode("ascii") + b"\n"
+    late = json.dumps({"event": "child_start", "argv": ["git", "gc", "--auto"]}).encode("ascii")
+    head = started + late[:20]
+
+    def probe_trace(name, content, completion, ticks):
+        trace = base / name
+        trace.write_bytes(content)
+        ticks, sleeps = list(ticks), []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if completion is not None:
+                trace.write_bytes(completion)
+        return probe(trace, 1.0, lambda: ticks.pop(0), sleep), len(sleeps)
+
+    check("env/trace2-tail-awaited",
+          probe_trace("trace2-awaited.jsonl", head, started + late + b"\n", (0.0, 0.5, 200.0)),
+          ([["git", "maintenance", "run", "--auto"], ["git", "gc", "--auto"]], 1))
+    bound_legs = []
+    for name, tick in (("inside", 100.999), ("at", 101.0), ("past", 101.001)):
+        got, sleeps = probe_trace("trace2-bound-" + name + ".jsonl", head, None,
+                                  (100.0, tick, 200.0, 200.0))
+        bound_legs.append((name, isinstance(got, str)
+                           and got.startswith("unterminated trace2 event"), sleeps))
+    check("env/trace2-tail-bound", bound_legs,
+          [("inside", True, 1), ("at", True, 0), ("past", True, 0)])
+    got, sleeps = probe_trace("trace2-malformed.jsonl", b'{"event":"child_start",\n' + started,
+                              None, (0.0, 200.0))
+    check("env/trace2-complete-malformed-loud",
+          (isinstance(got, str) and got.startswith("unparseable trace2 event"), sleeps), (True, 0))
+
+
 def _core_lanes(base):
     """Everything outside the three config-injection lanes, in the original suite order; see
     the module docstring. Returns None on completion, 2 for a harness error (cannot evaluate,
@@ -2360,6 +2399,8 @@ def _core_lanes(base):
     red = _auto_maintenance_children(base / "maintenance-red", unpinned)
     check("env/no-auto-maintenance-red",
           red if isinstance(red, str) else bool(red), True)
+    (base / "trace2-tail").mkdir()
+    _trace2_tail_checks(base / "trace2-tail")
 
     # Layer 4, the tripwire leg: the repo-wide scan must report NO unpinned
     # maintenance-capable launch (green), and a planted unpinned fixture commit must be
