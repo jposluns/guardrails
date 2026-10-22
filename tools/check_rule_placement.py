@@ -4,8 +4,18 @@
 Validates the read tree's STRUCTURE and NAMING independently of the generator: every rule file lives in a
 recognized family with a name that both fits its family's derivation shape AND matches what its frontmatter
 derives, none loose or misfiled, the apex is standard, and each vendored external/<source>/ carries its
-provenance. Check-only; never writes.
+provenance. Check-only; never writes (the self-test builds fixtures under a tempdir only).
   check_rule_placement.py [--root DIR]   exit 0 clean, 1 violations, 2 usage/read error
+  check_rule_placement.py --self-test    tempdir fixtures only; assert the probe and gate vectors
+  check_rule_placement.py --execution-report ABS_PATH
+                                         the self-test, also writing its execution report, finalized
+                                         at interpreter exit (tools/_selftest_exit_report.py), as the
+                                         execution gate runs it
+
+An existing .claude/rules that is NOT a real directory (a regular file, a FIFO, a dangling symlink, or
+a symlink even to a directory) exits 2: _standards.dir_present is a three-way probe that refuses a
+wrong-type entry rather than reading it as absent, so this gate can never PASS a wrong-type input as
+"no tree".
 
 Emits the deterministic section 6.6 codes: loose, unknown-family, nested-dir, bad-name,
 tier-code-mismatch, numbered-non-aiqt, apex-nonstandard, frontmatter-drift, missing-provenance. Each
@@ -28,10 +38,19 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import contextlib
+import errno
+import importlib.util
+import io
+import os
 import re
+import tempfile
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
+import _standards  # noqa: E402  (the module itself, so the self-test can patch its probe primitive)
 import gen_rules  # noqa: E402  for MAP_KEYS/SEQ_KEYS rebind under --root
 from gen_rules import parse_source, derive  # noqa: E402
 from _standards import dir_present, map_keys  # noqa: E402
@@ -101,8 +120,12 @@ def check_drift(f, rules):
     return None
 
 
-def main():
-    args = sys.argv[1:]
+def main(argv=None):
+    args = sys.argv[1:] if argv is None else list(argv)
+    if args == ["--self-test"]:
+        return self_test()
+    if len(args) == 2 and args[0] == "--execution-report" and os.path.isabs(args[1]):
+        return self_test(args[1])
     root = None
     i = 0
     while i < len(args):
@@ -110,7 +133,8 @@ def main():
             root = Path(args[i + 1])
             i += 2
         else:
-            print("usage: check_rule_placement.py [--root DIR]", file=sys.stderr)
+            print("usage: check_rule_placement.py [--root DIR | --self-test | "
+                  "--execution-report ABS_PATH]", file=sys.stderr)
             return 2
     root = (root or repo_root_default()).resolve()
     # gen_rules binds MAP_KEYS/SEQ_KEYS at import from ITS OWN repo_root(); derive() (called by
@@ -188,5 +212,237 @@ def main():
     return 0
 
 
+# --- self-test ----------------------------------------------------------------------------------------
+# Proves the three-way _standards.dir_present probe and this gate's use of it, over tempdir fixtures
+# only (never the real repo): a real directory reads present, genuine absence reads absent, a
+# wrong-type entry (a regular file, a FIFO, a dangling symlink, or any symlink where a directory is
+# required) is refused with NotADirectoryError rather than read as absent, and an unreachable path
+# still raises OSError; the gate exits 0 on an absent tree, scans an existing empty directory as a
+# tree, and exits 2 on a wrong-type .claude/rules or .aiqt/standards entry; and each listed probe
+# mutant (a scratch copy of _standards.py with one guard reverted, loaded with importlib) is caught by
+# its named probe vector.
+
+SUITE_ID = "rule-placement-selftest"
+CHECKS_MANIFEST = Path(__file__).resolve().parent / "selftest_checks.toml"
+FAILURES = []
+EXECUTED = []
+_EXECUTED_SET = set()
+
+
+def check(name, ok, detail=""):
+    if name in _EXECUTED_SET:
+        print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
+        sys.exit(2)
+    _EXECUTED_SET.add(name)
+    EXECUTED.append(name)
+    if not ok:
+        FAILURES.append("{}: {!r}".format(name, detail))
+
+
+def _expected_check_ids():
+    try:
+        with open(CHECKS_MANIFEST, "rb") as handle:
+            data = tomllib.load(handle)
+    # ValueError and RecursionError too, as in _standards.load_manifests.
+    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
+              file=sys.stderr)
+        return None
+    for row in data.get("suite", []):
+        if isinstance(row, dict) and row.get("id") == SUITE_ID:
+            ids = row.get("expected-check-ids")
+            if isinstance(ids, list) and ids and all(isinstance(item, str) and item for item in ids):
+                return set(ids)
+            break
+    print("SELF-TEST HARNESS ERROR: missing or malformed suite {!r} in {}".format(
+        SUITE_ID, CHECKS_MANIFEST), file=sys.stderr)
+    return None
+
+
+@contextlib.contextmanager
+def _patched_lstat(module, replacement):
+    original = module._lstat
+    module._lstat = replacement
+    try:
+        yield
+    finally:
+        module._lstat = original
+
+
+def _deny_lstat(path):
+    """An lstat refused as an unreadable parent would refuse it, whoever runs the self-test (a
+    chmod-based fixture is invisible to root)."""
+    raise PermissionError(errno.EACCES, "probe refused by the self-test", str(path))
+
+
+def _probe(module, fixture, paths):
+    """One dir_present outcome: "present", "absent", "refused" (NotADirectoryError), or
+    "error:<type>" for any other OSError."""
+    try:
+        if fixture == "unreachable":
+            with _patched_lstat(module, _deny_lstat):
+                present = module.dir_present(paths["dir"])
+        else:
+            present = module.dir_present(paths[fixture])
+    except NotADirectoryError:
+        return "refused"
+    except OSError as exc:
+        return "error:" + type(exc).__name__
+    return "present" if present else "absent"
+
+
+def _probe_paths(base):
+    """The probe fixtures, one per outcome class, under the self-test's tempdir."""
+    paths = {
+        "absent-path": base / "missing",
+        "dir": base / "realdir",
+        "regular-file": base / "regular.txt",
+        "dangling-symlink": base / "dangling",
+        "symlink-to-dir": base / "dirlink",
+        "symlink-to-file": base / "filelink",
+        "fifo": base / "fifo",
+    }
+    paths["dir"].mkdir()
+    paths["regular-file"].write_text("not a directory\n", encoding="utf-8")
+    paths["dangling-symlink"].symlink_to(base / "no-such-target")
+    paths["symlink-to-dir"].symlink_to(paths["dir"])
+    paths["symlink-to-file"].symlink_to(paths["regular-file"])
+    os.mkfifo(paths["fifo"])
+    return paths
+
+
+def _entry_fixture(path, kind):
+    """One synthetic entry: absent (None), an empty directory, a regular file, a dangling symlink, or
+    a symlink to a real sibling directory."""
+    if kind is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "dir":
+        path.mkdir()
+    elif kind == "file":
+        path.write_text("not a directory\n", encoding="utf-8")
+    elif kind == "dangling":
+        path.symlink_to(path.with_name("no-such-target"))
+    elif kind == "dirlink":
+        target = path.with_name("real-" + path.name)
+        target.mkdir()
+        path.symlink_to(target)
+
+
+def _root_fixture(base, name, rules=None, standards=None):
+    root = base / name
+    root.mkdir()
+    _entry_fixture(root / ".claude" / "rules", rules)
+    _entry_fixture(root / ".aiqt" / "standards", standards)
+    return root
+
+
+def _gate(argv):
+    """Run main(argv) in process with both streams captured: (exit code, stdout, stderr)."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = main(argv)
+    return code, out.getvalue(), err.getvalue()
+
+
+def _load_probe_mutant(source, directory, number):
+    """Write one mutated copy of _standards.py to the scratch directory and load it with importlib."""
+    path = directory / "standards_mutant_{}.py".format(number)
+    path.write_text(source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("standards_mutant_{}".format(number), path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def self_test(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band.
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
+    saved_map_keys, saved_seq_keys = gen_rules.MAP_KEYS, gen_rules.SEQ_KEYS
+    with tempfile.TemporaryDirectory(prefix="rule-placement-selftest-") as tmp:
+        base = Path(tmp)
+        try:
+            # 1. a unit vector per probe outcome: present, genuinely absent, each wrong type refused,
+            # and an unreachable path still an OSError (never read as absent).
+            paths = _probe_paths(base)
+            for cid, fixture, want in (
+                    ("probe/absent-reads-false", "absent-path", "absent"),
+                    ("probe/directory-reads-true", "dir", "present"),
+                    ("probe/regular-file-refused", "regular-file", "refused"),
+                    ("probe/dangling-symlink-refused", "dangling-symlink", "refused"),
+                    ("probe/symlink-to-dir-refused", "symlink-to-dir", "refused"),
+                    ("probe/symlink-to-file-refused", "symlink-to-file", "refused"),
+                    ("probe/fifo-refused", "fifo", "refused"),
+                    ("probe/unreachable-raises", "unreachable", "error:PermissionError")):
+                got = _probe(_standards, fixture, paths)
+                check(cid, got == want, got)
+
+            # 2. the gate over synthetic --root trees: absence still passes, an existing empty
+            # directory still reads as a tree (scanned, not "no tree"), and a wrong-type
+            # .claude/rules or .aiqt/standards exits 2.
+            for cid, rules_kind, want_code, want_text in (
+                    ("gate/absent-tree-passes", "absent", 0, "PASS: no .claude/rules/ tree"),
+                    ("gate/empty-directory-reads-tree", "dir", 0,
+                     "PASS: rule placement conforms to the taxonomy"),
+                    ("gate/regular-file-exits-2", "file", 2, "cannot read"),
+                    ("gate/dangling-symlink-exits-2", "dangling", 2, "cannot read"),
+                    ("gate/symlink-to-directory-exits-2", "dirlink", 2, "cannot read")):
+                root = _root_fixture(base, "gate-" + rules_kind,
+                                     rules=None if rules_kind == "absent" else rules_kind)
+                code, out, err = _gate(["--root", str(root)])
+                check(cid, code == want_code and want_text in out + err, (code, out, err))
+            root = _root_fixture(base, "gate-standards-file", rules="dir", standards="file")
+            code, out, err = _gate(["--root", str(root)])
+            check("gate/standards-non-directory-exits-2", code == 2 and "cannot read" in err,
+                  (code, out, err))
+
+            # 3. each probe mutant (one guard reverted in a scratch copy of _standards.py) must be
+            # caught by its named probe vector: the mutant's outcome differs from the intact one.
+            source = (Path(__file__).resolve().parent / "_standards.py").read_text(encoding="utf-8")
+            mutant_dir = base / "mutants"
+            mutant_dir.mkdir()
+            number = 0
+            for cid, old, new, fixture, want in (
+                    ("mutant/stat-follows-links-caught", "st = _lstat(path)", "st = os.stat(path)",
+                     "symlink-to-dir", "refused"),
+                    ("mutant/wrong-type-reads-absent-caught", "raise NotADirectoryError(",
+                     "return False and NotADirectoryError(", "regular-file", "refused"),
+                    ("mutant/eacces-reads-absent-caught", "except FileNotFoundError:",
+                     "except OSError:", "unreachable", "error:PermissionError")):
+                number += 1
+                if source.count(old) != 1:
+                    caught, got = False, "mutation anchor found {} times".format(source.count(old))
+                else:
+                    mutant = _load_probe_mutant(source.replace(old, new), mutant_dir, number)
+                    got = _probe(mutant, fixture, paths)
+                    caught = got != want
+                check(cid, caught, got)
+        finally:
+            gen_rules.MAP_KEYS, gen_rules.SEQ_KEYS = saved_map_keys, saved_seq_keys
+
+    # the in-run self-guard: the executed set is exactly this suite's registered set
+    expected = _expected_check_ids()
+    if expected is None:
+        return 2
+    for check_id in sorted(expected - _EXECUTED_SET):
+        FAILURES.append("execution-set/missing: {}".format(check_id))
+    for check_id in sorted(_EXECUTED_SET - expected):
+        FAILURES.append("execution-set/extra: {}".format(check_id))
+    if FAILURES:
+        print("SELF-TEST FAIL: check_rule_placement {} check(s) failed".format(len(FAILURES)))
+        for failure in FAILURES:
+            print("  - " + failure)
+        return 1
+    print("SELF-TEST PASS: check_rule_placement {} checks (dir_present reads a real directory as "
+          "present and genuine absence as absent, refuses a regular file, a FIFO and every symlink "
+          "with NotADirectoryError, and raises OSError on an unreachable path; the gate passes an "
+          "absent tree, scans an existing empty directory as a tree, and exits 2 on a wrong-type "
+          "rules tree or standards dir; 3 probe mutants each caught); execution set reconciled "
+          "against tools/selftest_checks.toml".format(len(EXECUTED)))
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _selftest_exit_report.exit_with(main())

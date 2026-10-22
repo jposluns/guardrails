@@ -8,6 +8,7 @@ them. An id that is not in its manifest cannot ship, so a fabricated mapping is 
 
 Requires Python 3.14 or newer, the floor in .aiqt/core/python-floor.toml.
 """
+import errno
 import os
 import re
 import stat
@@ -164,20 +165,36 @@ class Manifest:
         self.id_set = set(self.ids)
 
 
+# The probe primitive, named so a self-test can refuse it without filesystem permissions (a
+# chmod-based unreadable-parent fixture is invisible to root); the check_rule_placement.py self-test
+# patches it.
+_lstat = os.lstat
+
+
 def dir_present(path):
-    """Fail-closed directory-absence probe. Return True if path is a directory, False if it does not
-    exist. RAISE OSError if it exists but cannot be reached (an unreadable path, or an unreadable
-    ancestor such as a `chmod 0` .aiqt/ parent): the caller must fail closed rather than mistake
-    'cannot tell' for 'absent'. Path.is_dir()/exists() SWALLOW EACCES and return False, so an
-    unreadable input dir would read as an absent (transition-safe) input and pass clean; os.stat raises
-    on EACCES, so we use it. A non-directory returns False (callers treat it as absent, as is_dir did).
-    Pairs with ensure_listable: dir_present catches an unreachable dir, ensure_listable catches a
-    reachable-but-unlistable one."""
+    """Fail-closed three-way directory probe. Return True only when the final component is a real
+    directory by lstat (never following a link there). Return False only on GENUINE absence: no
+    directory entry at the final component (FileNotFoundError; a dangling symlink is a present entry,
+    so it never reads as absent). Anything else RAISES, so a caller can never read 'cannot tell' or
+    'wrong type' as absent. An unreachable path raises OSError as before (an unreadable ancestor such
+    as a `chmod 0` .aiqt/ parent: Path.is_dir()/exists() SWALLOW EACCES and return False, so an
+    unreadable input dir would read as an absent, transition-safe input and pass clean; os.lstat
+    raises on EACCES). An entry that EXISTS but is not a directory raises NotADirectoryError (an
+    OSError, so the callers' existing fail-closed handlers refuse it): a regular file, a FIFO, a
+    device, or ANY symlink, dangling or resolving, because where a directory is required a symlink is
+    refused rather than resolved (the same rule check_site_versions.py and gen_secret_patterns.py
+    apply, and gen_manifest rejects any tracked symlink repo-wide). Pairs with ensure_listable:
+    dir_present catches an unreachable or wrong-type entry, ensure_listable catches a
+    reachable-but-unlistable directory."""
     try:
-        st = os.stat(path)
+        st = _lstat(path)
     except FileNotFoundError:
         return False
-    return stat.S_ISDIR(st.st_mode)
+    if stat.S_ISDIR(st.st_mode):
+        return True
+    kind = "a symlink" if stat.S_ISLNK(st.st_mode) else "a non-directory entry"
+    raise NotADirectoryError(
+        errno.ENOTDIR, "{} where a directory is required".format(kind), str(path))
 
 
 def ensure_listable(directory):
