@@ -282,6 +282,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import _signal
+import ast
 import collections
 import datetime
 import errno
@@ -11036,56 +11037,1078 @@ def _gensrc_match(entries, target, root_c):
     return None
 
 
+# --- gensrc Bash write-sink detector -------------------------------------------------------------------
+# The Bash channel of gensrc_guard. It judges only the write SINKS a command spells literally (a redirect, or
+# an operand of a fixed set of writing programs), resolved against the session cwd carried through literal cd
+# and pushd operands, and never a read: a command that lexes completely and spells no recognized sink is
+# allowed before any registry is read or any git process runs. That is the structural regeneration allowance:
+# a generator (python3 tools/gen_x.py) writes from inside its own process and spells no shell sink. An effect
+# the detector cannot clear is UNCLEARED: it notes only when the command text names a registered target of the
+# session repository (noise control, not a coverage claim), and it denies when that registry is present but
+# unreadable. The open shell grammar cannot be covered whole; the control residue lists what is not caught.
+_GENSRC_MAX_ROOTS = 4    # distinct repository roots judged per Bash command, in command order
+_GENSRC_MAX_DIRS = 32    # distinct sink directories resolved to a root per Bash command (one git rev-parse each)
+_GENSRC_MAX_PY = 65536   # the longest python -c program parsed (ast.parse, never executed)
+# The longest target path resolved, in filesystem-encoded bytes: PATH_MAX on Linux (the largest of the
+# common platforms), so every longer path is one no write syscall accepts and no registered artefact can
+# carry. Such a target is never realpath'd or walked (each is super-linear in the path length): a Write/Edit
+# target over it allows with the unresolvable-target note, and a Bash sink over it is an uncleared effect,
+# the same outcomes those paths reach today, within the decision deadline.
+_GENSRC_MAX_TARGET = 4096
+# One write effect of a Bash command. kind is "sink" (path, an absolute lexically normalized path, is written),
+# "restore" (git restores path from the index or HEAD) or "uncleared" (word is the reason, path is None). word
+# describes the sink for the message; posture is "file" (the path itself), "rcopy" (a recursive copy: a
+# destination directory holding a registered target is uncleared) or "dirdeny" (a git path from another
+# revision: a registered target inside that directory denies too).
+_GensrcEffect = collections.namedtuple("_GensrcEffect", ("kind", "word", "path", "posture"))
+_GENSRC_REDIRECT_SINKS = frozenset((">", ">>", ">|", "&>", "&>>", "<>", ">&"))
+_GENSRC_BARE_WRAPPERS = frozenset(("command", "exec", "builtin", "sudo"))
+_GENSRC_LEADING_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "do", "while", "until"))
+_GENSRC_PYTHON_RE = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
+_GENSRC_OPAQUE_RE = re.compile(r"[$`*?\[{]")
+_GENSRC_GLOB_CHARS = frozenset("*?[")
+_GENSRC_HEREDOC_WORD_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
+_GENSRC_REMOTE_RE = re.compile(r"[^/]*:|rsync://")
+# The writer specs gensrc adds beside the review-dispatch-pin table (_RDP_WRITER_OPTIONS, whose cp, mv and ln
+# specs it reuses by reference), in that table grammar: GNU coreutils 9.7 install, tee and truncate. They are
+# kept apart so review_dispatch_pin, which refuses every program outside its own table, is unchanged.
+_GENSRC_EXTRA_WRITER_OPTIONS = dict((
+    ("install", ("b c C/compare d/directory D g:group m:mode o:owner p/preserve-timestamps s/strip S:suffix "
+                 "t:target-directory T/no-target-directory v Z",
+                 "backup= compare debug directory group: mode: owner: preserve-timestamps preserve-context "
+                 "strip strip-program: suffix: target-directory: no-target-directory verbose context= help "
+                 "version")),
+    ("tee", ("a/append i/ignore-interrupts p", "append ignore-interrupts output-error= help version")),
+    ("truncate", ("c/no-create o/io-blocks r:reference s:size",
+                  "no-create io-blocks reference: size: help version"))))
+# GNU sed 4.9 long options: "=" takes a value only after =, ":" a value after = or as the next word.
+_GENSRC_SED_LONG = dict((
+    ("in-place", "="), ("expression", ":"), ("file", ":"), ("line-length", ":"), ("quiet", ""), ("silent", ""),
+    ("regexp-extended", ""), ("separate", ""), ("unbuffered", ""), ("null-data", ""), ("zero-terminated", ""),
+    ("posix", ""), ("debug", ""), ("sandbox", ""), ("follow-symlinks", ""), ("binary", ""), ("help", ""),
+    ("version", "")))
+# The rsync 3.2 options the detector models; any other option (a batch or log file it would also write, for
+# example) leaves the command uncleared, and so does --files-from.
+_GENSRC_RSYNC_SHORT = frozenset("vqcarRbulLkKHpEAXogDtOJUNiIWxCySnsz8mdFhP046")
+_GENSRC_RSYNC_SHORT_VALUES = frozenset("eBfTM")
+_GENSRC_RSYNC_FLAGS = frozenset((
+    "verbose", "quiet", "checksum", "archive", "recursive", "relative", "backup", "update", "inplace", "append",
+    "append-verify", "dirs", "mkpath", "links", "copy-links", "copy-unsafe-links", "safe-links", "munge-links",
+    "copy-dirlinks", "keep-dirlinks", "hard-links", "perms", "executability", "acls", "xattrs", "owner", "group",
+    "devices", "specials", "times", "atimes", "crtimes", "omit-dir-times", "omit-link-times", "super",
+    "fake-super", "sparse", "preallocate", "dry-run", "whole-file", "one-file-system", "existing",
+    "ignore-existing", "remove-source-files", "delete", "delete-before", "delete-during", "delete-delay",
+    "delete-after", "delete-excluded", "ignore-missing-args", "delete-missing-args", "ignore-errors", "force",
+    "partial", "delay-updates", "prune-empty-dirs", "numeric-ids", "ignore-times", "size-only", "fuzzy",
+    "compress", "cvs-exclude", "from0", "protect-args", "secluded-args", "trust-sender", "stats", "8-bit",
+    "human-readable", "progress", "itemize-changes", "list-only", "implied-dirs", "blocking-io", "ipv4", "ipv6",
+    "help", "version", "open-noatime", "fsync", "motd"))
+_GENSRC_RSYNC_VALUES = frozenset((
+    "rsh", "rsync-path", "filter", "exclude", "include", "exclude-from", "include-from", "temp-dir",
+    "partial-dir", "backup-dir", "suffix", "chmod", "chown", "usermap", "groupmap", "timeout", "contimeout",
+    "bwlimit", "max-size", "min-size", "max-delete", "max-alloc", "modify-window", "compare-dest", "copy-dest",
+    "link-dest", "out-format", "block-size", "compress-level", "compress-choice", "checksum-choice",
+    "checksum-seed", "skip-compress", "port", "sockopts", "password-file", "iconv", "info", "debug",
+    "stop-after", "stop-at", "copy-as", "remote-option", "outbuf", "address"))
+_GENSRC_GIT_GLOBAL_FLAGS = frozenset((
+    "-p", "-P", "--paginate", "--no-pager", "--bare", "--no-replace-objects", "--literal-pathspecs",
+    "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks", "--no-advice",
+    "--no-lazy-fetch", "--exec-path", "--html-path", "--man-path", "--info-path", "--version", "--help", "-v",
+    "-h"))
+_GENSRC_GIT_GLOBAL_VALUES = frozenset(("-c", "--namespace", "--config-env", "--attr-source", "--list-cmds"))
+_GENSRC_CHECKOUT_FLAGS = frozenset((
+    "-q", "--quiet", "-f", "--force", "-m", "--merge", "--ours", "--theirs", "-p", "--patch", "--overlay",
+    "--no-overlay", "--ignore-skip-worktree-bits", "--progress", "--no-progress", "--recurse-submodules",
+    "--no-recurse-submodules", "--pathspec-file-nul", "-l", "-d", "--detach", "--guess", "--no-guess", "-t",
+    "--track", "--no-track", "--ignore-other-worktrees"))
+_GENSRC_RESTORE_FLAGS = frozenset((
+    "-S", "--staged", "-W", "--worktree", "-q", "--quiet", "--ours", "--theirs", "-m", "--merge",
+    "--ignore-unmerged", "--ignore-skip-worktree-bits", "--overlay", "--no-overlay", "--progress",
+    "--no-progress", "-p", "--patch", "--recurse-submodules", "--no-recurse-submodules", "--pathspec-file-nul"))
+# Value options: a separate value is the next word, except for the =-only --conflict and --track.
+_GENSRC_CHECKOUT_VALUES = frozenset(("-b", "-B", "--orphan", "--conflict", "--track"))
+_GENSRC_RESTORE_VALUES = frozenset(("-s", "--source", "--conflict", "-U", "--unified", "--inter-hunk-context"))
+_GENSRC_EQ_ONLY = frozenset(("--conflict", "--track"))
+
+
+def _gensrc_writer_spec(name):
+    """The option spec _writer_options_parse reads for a sink writer: the gensrc install, tee and truncate
+    specs, or the review-dispatch-pin cp, mv and ln specs, looked up at call time because _RDP_WRITER_OPTIONS
+    is defined later in this module; None for any other program."""
+    if name in _GENSRC_EXTRA_WRITER_OPTIONS:
+        return _GENSRC_EXTRA_WRITER_OPTIONS[name]
+    if name in ("cp", "mv", "ln"):
+        return _RDP_WRITER_OPTIONS[name]
+    return None
+
+
+def _gensrc_lex(command):
+    """Lex command with the shared _lex_command in partial mode: (segments, complete). When that lex stops,
+    it is retried ONCE with every unquoted heredoc delimiter (<<WORD or <<-WORD, WORD made of letters, digits,
+    _, . and -) rewritten to its quoted form, so the body is skipped as literal data and a redirect on the
+    opening line after the delimiter (cat <<EOF >> X) is still judged; the retry is used only when it
+    completes. A command or process substitution inside such a body is then not seen (a disclosed residual)."""
+    segments, complete, _in_progress = _lex_command(command, partial=True)
+    if complete:
+        return segments, True
+    n = len(command)
+    out = []
+    i = 0
+    changed = False
+    while i < n:
+        at = command.find("<<", i)
+        if at < 0:
+            break
+        if command.startswith("<<<", at):
+            out.append(command[i:at + 3])
+            i = at + 3
+            continue
+        parsed = _parse_heredoc_delim(command, at + 2, n)
+        if parsed is None or parsed[0] or not _GENSRC_HEREDOC_WORD_RE.match(parsed[1]):
+            out.append(command[i:at + 2])
+            i = at + 2
+            continue
+        _quoted, delim, strip_tabs, next_i = parsed
+        out.append(command[i:at + 2] + ("-" if strip_tabs else "") + "\x27" + delim + "\x27")
+        i = next_i
+        changed = True
+    if not changed:
+        return segments, False
+    out.append(command[i:])
+    again, done, _in_progress = _lex_command("".join(out), partial=True)
+    if done:
+        return again, True
+    return segments, False
+
+
+def _gensrc_resolve(word, opaque, tilde, base):
+    """Resolve one sink word to an absolute, lexically normalized path: (path, None), or (None, reason) when
+    it cannot be judged. A word formed with an unquoted expansion, substitution, glob or brace (opaque) cannot,
+    except a clean leading tilde (~ or ~/x with nothing else opaque), which expands with os.path.expanduser; a
+    .. component cannot (the shell resolves it logically, the filesystem physically); a relative word with no
+    known working directory cannot."""
+    if not word or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in word):
+        return None, "a sink whose target is empty or carries a control character"
+    if opaque:
+        if not (tilde and _LITERAL_TILDE_RE.match(word)) or _GENSRC_OPAQUE_RE.search(word):
+            return None, "a sink whose target is opaque (a variable, substitution, glob or brace)"
+        word = os.path.expanduser(word)
+    if ".." in word.replace("\\", "/").split("/"):
+        return None, "a sink whose target has a .. component"
+    if os.path.isabs(word):
+        path = os.path.normpath(word)
+    elif base is None:
+        return None, "a relative sink after a working-directory change the guard cannot resolve"
+    else:
+        path = os.path.normpath(os.path.join(base, word))
+    if len(os.fsencode(path)) > _GENSRC_MAX_TARGET:
+        return None, ("a sink whose target is longer than any path a write syscall accepts (over {} bytes)"
+                      .format(_GENSRC_MAX_TARGET))
+    return path, None
+
+
+def _gensrc_add(effects, kind, what, word, opaque, tilde, base, posture="file"):
+    """Resolve one sink or restore word (_gensrc_resolve) and append its effect. An unresolvable SINK appends
+    an uncleared effect carrying the reason; an unresolvable restore is dropped (a restore is never denied).
+    A device path (/dev, /proc) is no file sink."""
+    path, why = _gensrc_resolve(word, opaque, tilde, base)
+    if path is None:
+        if kind == "sink":
+            effects.append(_GensrcEffect("uncleared", why, None, None))
+        return
+    if not _DEV_PROC_TARGET_RE.match(path):
+        effects.append(_GensrcEffect(kind, what, path, posture))
+
+
+def _gensrc_flags(word, args, aop, atl):
+    """(opaque, tilde) for an operand or option-value word of args, read from the argv_opaque and
+    argv_leading_tilde flags of every argv word equal to it or ending with it (a value glued to its option,
+    -tDIR)."""
+    hits = [k for k, tok in enumerate(args) if tok == word or (word and tok.endswith(word))]
+    return any(aop[k] for k in hits), any(atl[k] for k in hits)
+
+
+def _gensrc_peel(argv):
+    """Peel a segment argv down to the program it runs: (index, chdir, outputs, fault). index is the argv
+    position of the program word (len(argv) when none remains), past leading VAR=value words, leading
+    reserved words ({, !, if, then, ...), the env, nice, timeout and time wrappers with their
+    _GATE_WRAPPER_GRAMMAR option grammar (and the timeout duration operand), and the bare command, exec,
+    builtin and sudo words. chdir is True under env -C/--chdir (the working directory is then unknown);
+    outputs lists the (argv index, value) of each time -o/--output file, itself a sink; fault is a reason
+    when a wrapper carries an option outside that grammar (any option on a bare wrapper), else None."""
+    n = len(argv)
+    i = 0
+    chdir = False
+    outputs = []
+    while i < n:
+        if _ENV_ASSIGN_RE.match(argv[i]) or argv[i] in _GENSRC_LEADING_RESERVED:
+            i += 1
+            continue
+        word = _gate_word(argv[i])
+        if word in _GENSRC_BARE_WRAPPERS:
+            i += 1
+            if i < n and argv[i] == "--":
+                i += 1
+            elif i < n and argv[i].startswith("-"):
+                return i, chdir, outputs, "an option of {} the guard does not model".format(word)
+            continue
+        grammar = _GATE_WRAPPER_GRAMMAR.get(word)
+        if grammar is None:
+            return i, chdir, outputs, None
+        value_opts, flag_opts = grammar
+        i += 1
+        while i < n:
+            tok = argv[i]
+            if word == "env" and _ENV_ASSIGN_RE.match(tok):
+                i += 1
+                continue
+            if tok == "--":
+                i += 1
+                break
+            if not tok.startswith("-") or (tok == "-" and word != "env"):
+                break
+            name, eq, value = tok.partition("=")
+            at = i
+            if tok in value_opts:
+                if i + 1 >= n:
+                    return i, chdir, outputs, "an option of {} with no value".format(word)
+                name, value, at = tok, argv[i + 1], i + 1
+                i += 2
+            elif tok.startswith("--") and eq and name in value_opts:
+                i += 1
+            elif not tok.startswith("--") and len(tok) > 2 and tok[:2] in value_opts:
+                name, value = tok[:2], tok[2:]
+                i += 1
+            elif tok in flag_opts or (word == "nice" and tok[1:].isdigit()):
+                i += 1
+                continue
+            else:
+                return i, chdir, outputs, "an option of {} the guard does not model".format(word)
+            if name in ("-C", "--chdir"):
+                chdir = True
+            elif word == "time" and name in ("-o", "--output"):
+                outputs.append((at, value))
+        if word == "timeout":
+            i += 1
+    return i, chdir, outputs, None
+
+
+def _gensrc_cd(prog, argv, aop, atl, base):
+    """The working directory after a literal cd or pushd segment (argv starts at the command word), or None
+    when it cannot be resolved: popd, a bare cd, cd -, more than one operand, or an opaque operand other than
+    a clean leading tilde. A literal operand resolves lexically (absolute, or joined onto base and
+    normalized, never touching the filesystem), under the _GENSRC_MAX_TARGET length bound."""
+    if prog == "popd":
+        return None
+    operands = [k for k in range(1, len(argv)) if not argv[k].startswith("-")]
+    if len(operands) == 1 and aop[operands[0]]:
+        path, _why = _gensrc_resolve(argv[operands[0]], True, atl[operands[0]], base)
+        return path
+    if len(operands) != 1:
+        return None                                   # no operand (HOME/rotate) or ambiguous
+    word = argv[operands[0]]
+    if not word or word == "-":
+        return None                                   # 'cd -' returns to an unknowable OLDPWD
+    if os.path.isabs(word):
+        path = os.path.normpath(word)
+    elif base is None:
+        return None                                   # a relative cd with no cwd to anchor it
+    else:
+        path = os.path.normpath(os.path.join(base, word))
+    return None if len(os.fsencode(path)) > _GENSRC_MAX_TARGET else path
+
+
+def _gensrc_sed(args):
+    """GNU sed options read in getopt order until --: (inplace, file indices) or None for an option it does
+    not model. In place is -i, -iSUFFIX, a short cluster holding i (the rest of the cluster after i is the
+    suffix) or --in-place[=SUFFIX]; -e, -f, -l and their long forms take a value; the files are the operands,
+    minus the first (the script) when no -e or -f is given. A long option may be a unique prefix."""
+    inplace = False
+    script = False
+    operands = []
+    i = 0
+    ended = False
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if ended or tok == "-" or not tok.startswith("-"):
+            operands.append(i - 1)
+            continue
+        if tok == "--":
+            ended = True
+            continue
+        if tok.startswith("--"):
+            key, eq, _value = tok[2:].partition("=")
+            names = [name for name in _GENSRC_SED_LONG if name == key] or [
+                name for name in _GENSRC_SED_LONG if name.startswith(key)]
+            if len(names) != 1 or (eq and not _GENSRC_SED_LONG[names[0]]):
+                return None
+            key = names[0]
+            if key == "in-place":
+                inplace = True
+            elif _GENSRC_SED_LONG[key] == ":":
+                if not eq:
+                    if i >= len(args):
+                        return None
+                    i += 1
+                script = script or key in ("expression", "file")
+            continue
+        body = tok[1:]
+        for k, ch in enumerate(body):
+            if ch == "i":
+                inplace = True
+                break
+            if ch in "efl":
+                if not body[k + 1:]:
+                    if i >= len(args):
+                        return None
+                    i += 1
+                script = script or ch in "ef"
+                break
+            if ch not in "nrEsuz":
+                return None
+    if not script:
+        operands = operands[1:]
+    return inplace, operands
+
+
+def _gensrc_perl(args):
+    """perl switches read until the first operand or --: (inplace, file indices) or None for a switch it does
+    not model. -i[EXT] anywhere in a switch cluster is in place; -e/-E take the rest of the cluster or the
+    next word as the program, and then every operand is a file; without them the first operand is the script
+    and the rest are files. -0, -l, -F, -x, -C, -d, -D, -I, -M and -m take the rest of their cluster."""
+    inplace = False
+    has_e = False
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":
+            i += 1
+            break
+        if not tok.startswith("-") or tok == "-":
+            break
+        i += 1
+        body = tok[1:]
+        for k, ch in enumerate(body):
+            if ch == "i":
+                inplace = True
+                break
+            if ch in "eE":
+                has_e = True
+                if not body[k + 1:]:
+                    i += 1
+                break
+            if ch in "0lFxCdDIMm":
+                break
+            if ch not in "anpsStTuUvwWXcg":
+                return None
+    files = list(range(i, len(args)))
+    return inplace, (files if has_e else files[1:])
+
+
+def _gensrc_rsync(args):
+    """rsync options read until --: (operand indices, recursive, dry) or None for an option outside the
+    modelled set (_GENSRC_RSYNC_*), --files-from included. A no- prefix negates a modelled flag."""
+    operands = []
+    recursive = dry = ended = False
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if ended or tok == "-" or not tok.startswith("-"):
+            operands.append(i - 1)
+            continue
+        if tok == "--":
+            ended = True
+            continue
+        if tok.startswith("--"):
+            key, eq, _value = tok[2:].partition("=")
+            bare = key[3:] if key.startswith("no-") else key
+            if key in _GENSRC_RSYNC_VALUES:
+                if not eq:
+                    i += 1
+            elif eq or bare not in _GENSRC_RSYNC_FLAGS:
+                return None
+            recursive = recursive or key in ("archive", "recursive")
+            dry = dry or key in ("dry-run", "list-only")
+            continue
+        body = tok[1:]
+        for k, ch in enumerate(body):
+            if ch in _GENSRC_RSYNC_SHORT_VALUES:
+                if not body[k + 1:]:
+                    i += 1
+                break
+            if ch not in _GENSRC_RSYNC_SHORT:
+                return None
+            recursive = recursive or ch in "ar"
+            dry = dry or ch == "n"
+    return operands, recursive, dry
+
+
+def _gensrc_dest(effects, what, dest, sources, into, no_target, parents, posture, flags, base):
+    """Append the paths a copy-like command writes: the destination itself under -T (no_target), or when it
+    is neither known to be a directory (into is True for -t and for ln with one operand) nor an existing one;
+    otherwise the destination joined to the last component of each source (x/. merges into the destination
+    itself), or to the whole source under cp --parents. flags(word) gives (opaque, tilde)."""
+    opaque, tilde = flags(dest)
+    dpath, why = _gensrc_resolve(dest, opaque, tilde, base)
+    if dpath is None:
+        effects.append(_GensrcEffect("uncleared", why, None, None))
+        return
+    if _DEV_PROC_TARGET_RE.match(dpath):
+        return
+    if no_target or not (into or os.path.isdir(dpath)):
+        effects.append(_GensrcEffect("sink", what, dpath, posture))
+        return
+    for src in sources:
+        if flags(src)[0]:
+            effects.append(_GensrcEffect("uncleared", "a copy into a directory from an opaque source", None,
+                                         None))
+            continue
+        tail = src.lstrip("/") if parents else (src.rstrip("/").rsplit("/", 1)[-1] or ".")
+        if ".." in tail.split("/"):
+            effects.append(_GensrcEffect("uncleared", "a sink whose target has a .. component", None, None))
+            continue
+        joined = os.path.normpath(os.path.join(dpath, tail))
+        if len(os.fsencode(joined)) > _GENSRC_MAX_TARGET:
+            effects.append(_GensrcEffect(
+                "uncleared", "a sink whose target is longer than any path a write syscall accepts (over {} "
+                "bytes)".format(_GENSRC_MAX_TARGET), None, None))
+            continue
+        effects.append(_GensrcEffect("sink", what, joined, posture))
+
+
+def _gensrc_python_sinks(code):
+    """The constant write targets of a python -c program, parsed with ast.parse and NEVER executed: (sinks,
+    faults). sinks lists (destination, source or None) for open() and io.open() with a constant path (the
+    first argument or file=) and a constant mode holding w, a, x or +; Path(<constant>).write_text,
+    .write_bytes and .open(<write mode>); and shutil.copy, copy2, copyfile and move with a constant
+    destination (a constant source names the file a directory destination receives). faults lists a reason
+    for a program over _GENSRC_MAX_PY characters or one that does not parse, a computed path or mode in a
+    write-shaped open, and a write_text, write_bytes or shutil copy whose path is computed."""
+    if len(code) > _GENSRC_MAX_PY:
+        return [], ["a python -c program over {} characters".format(_GENSRC_MAX_PY)]
+    try:
+        tree = ast.parse(code, mode="exec")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return [], ["a python -c program that does not parse"]
+    sinks, faults = [], []
+
+    def const(node):
+        return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+    def arg(call, index, name):
+        for keyword in call.keywords:
+            if keyword.arg == name:
+                return keyword.value
+        return call.args[index] if len(call.args) > index else None
+
+    def judge_open(mode_node, target):
+        if mode_node is None:
+            return
+        mode = const(mode_node)
+        if mode is None:
+            faults.append("a python open with a computed mode")
+        elif any(ch in mode for ch in "wax+"):
+            if target is None:
+                faults.append("a python open for writing on a computed path")
+            else:
+                sinks.append((target, None))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (isinstance(func, ast.Name) and func.id == "open") or (
+                isinstance(func, ast.Attribute) and func.attr == "open" and isinstance(func.value, ast.Name)
+                and func.value.id == "io"):
+            target_node = arg(node, 0, "file")
+            judge_open(arg(node, 1, "mode"), None if target_node is None else const(target_node))
+            continue
+        if not isinstance(func, ast.Attribute):
+            continue
+        owner = func.value
+        is_path = isinstance(owner, ast.Call) and (
+            (isinstance(owner.func, ast.Name) and owner.func.id in ("Path", "PosixPath"))
+            or (isinstance(owner.func, ast.Attribute) and owner.func.attr in ("Path", "PosixPath")))
+        path_const = const(owner.args[0]) if is_path and len(owner.args) == 1 and not owner.keywords else None
+        if func.attr == "open" and is_path:
+            judge_open(arg(node, 0, "mode"), path_const)
+        elif func.attr in ("write_text", "write_bytes"):
+            if path_const is None:
+                faults.append("a python write_text or write_bytes on a computed path")
+            else:
+                sinks.append((path_const, None))
+        elif (func.attr in ("copy", "copy2", "copyfile", "move") and isinstance(owner, ast.Name)
+              and owner.id == "shutil"):
+            dst = arg(node, 1, "dst")
+            src = arg(node, 0, "src")
+            if dst is None or const(dst) is None:
+                faults.append("a python shutil copy or move to a computed path")
+            else:
+                sinks.append((const(dst), None if src is None else const(src)))
+    return sinks, faults
+
+
+def _gensrc_git_effects(argv, pi, aop, atl, base, effects):
+    """The working-tree paths of git checkout and git restore (decision b), git at argv[pi]. A global -C DIR
+    re-bases the paths; --git-dir, --work-tree, a leading GIT_DIR= or GIT_WORK_TREE= word and a global option
+    it does not model leave the command uncleared. A path restored from the index or HEAD is a restore; from
+    any other revision (git checkout REV -- P, git restore -s/--source REV P) a sink with posture dirdeny. git
+    checkout without -- naming any operand, pathspec magic, a glob, --pathspec-from-file and an unmodelled
+    option are uncleared; git restore --staged without -W/--worktree writes no working-tree file and is not
+    judged. Every other git subcommand is not judged here (git-discard governs whole-tree operations)."""
+    if any(tok.startswith(("GIT_DIR=", "GIT_WORK_TREE=")) for tok in argv[:pi]):
+        effects.append(_GensrcEffect("uncleared", "a git repository named through GIT_DIR or GIT_WORK_TREE",
+                                     None, None))
+        return
+    n = len(argv)
+    i = pi + 1
+    while i < n:
+        tok = argv[i]
+        name = tok.split("=", 1)[0]
+        if tok == "-C":
+            if i + 1 >= n:
+                return
+            base, _why = _gensrc_resolve(argv[i + 1], aop[i + 1], atl[i + 1], base)
+            i += 2
+            continue
+        if name in ("--git-dir", "--work-tree"):
+            effects.append(_GensrcEffect("uncleared", "a git --git-dir or --work-tree option", None, None))
+            return
+        if tok in _GENSRC_GIT_GLOBAL_VALUES:
+            i += 2
+            continue
+        if (("=" in tok and (name in _GENSRC_GIT_GLOBAL_VALUES or name == "--exec-path"))
+                or tok in _GENSRC_GIT_GLOBAL_FLAGS or (tok.startswith("-c") and len(tok) > 2)):
+            i += 1
+            continue
+        if tok.startswith("-"):
+            effects.append(_GensrcEffect("uncleared", "a git global option the guard does not model", None,
+                                         None))
+            return
+        break
+    if i >= n or argv[i] not in ("checkout", "restore"):
+        return
+    sub = argv[i]
+    flags = _GENSRC_CHECKOUT_FLAGS if sub == "checkout" else _GENSRC_RESTORE_FLAGS
+    values = _GENSRC_CHECKOUT_VALUES if sub == "checkout" else _GENSRC_RESTORE_VALUES
+    positional, paths, seen = [], [], set()
+    source = None
+    dashdash = False
+    i += 1
+    while i < n:
+        tok = argv[i]
+        i += 1
+        if dashdash:
+            paths.append(i - 1)
+            continue
+        if tok == "--":
+            dashdash = True
+            continue
+        if not tok.startswith("-") or tok == "-":
+            positional.append(i - 1)
+            continue
+        name, eq, value = tok.partition("=")
+        if name == "--pathspec-from-file":
+            effects.append(_GensrcEffect("uncleared", "git --pathspec-from-file", None, None))
+            return
+        if eq and name in values:
+            pass
+        elif tok in values and tok not in _GENSRC_EQ_ONLY:
+            if i >= n:
+                return
+            name, value = tok, argv[i]
+            i += 1
+        elif not tok.startswith("--") and len(tok) > 2 and tok[:2] in values:
+            name, value = tok[:2], tok[2:]
+        elif tok in flags:
+            seen.add(tok)
+            continue
+        elif not tok.startswith("--") and all("-" + ch in flags for ch in tok[1:]):
+            seen.update("-" + ch for ch in tok[1:])
+            continue
+        else:
+            effects.append(_GensrcEffect("uncleared", "an option of git {} the guard does not model".format(sub),
+                                         None, None))
+            return
+        if name in ("-s", "--source"):
+            source = value
+    if sub == "restore":
+        if seen & {"-S", "--staged"} and not seen & {"-W", "--worktree"}:
+            return
+        words = positional + paths
+        other = source is not None and source not in ("HEAD", "@")
+    else:
+        if not dashdash:
+            if positional:
+                effects.append(_GensrcEffect("uncleared", "a git checkout without -- that names an operand",
+                                             None, None))
+            return
+        if len(positional) > 1:
+            effects.append(_GensrcEffect("uncleared", "a git checkout with more than one revision", None, None))
+            return
+        words = paths
+        other = bool(positional) and argv[positional[0]] not in ("HEAD", "@")
+    what = "git {} from {}".format(sub, "another revision" if other else "the index or HEAD")
+    for k in words:
+        word = argv[k]
+        if word.startswith(":") or _GENSRC_GLOB_CHARS & set(word):
+            effects.append(_GensrcEffect("uncleared", "git pathspec magic or a glob", None, None))
+            continue
+        _gensrc_add(effects, "sink" if other else "restore", what, word, aop[k], atl[k], base, "dirdeny")
+
+
+def _gensrc_program_effects(prog, argv, pi, aop, atl, base, effects):
+    """Append the write effects of the program at argv[pi] (prog, its lowercased basename) by the sink list:
+    the operands of tee and truncate; the files of an in-place sed or perl; the destination of cp, mv, ln and
+    install (and each operand of install -d); the local destination of rsync; the of= value of dd; the
+    literal program of python or python3 -c (_gensrc_python_sinks), a stdin-fed interpreter being uncleared;
+    and git checkout or restore (_gensrc_git_effects). An option the guard does not model on one of these
+    programs is uncleared; every other program spells no sink here."""
+    args, oa, ta = argv[pi + 1:], aop[pi + 1:], atl[pi + 1:]
+
+    def flags(word):
+        return _gensrc_flags(word, args, oa, ta)
+
+    def unclear(why):
+        effects.append(_GensrcEffect("uncleared", why, None, None))
+
+    if prog in ("tee", "truncate"):
+        parsed = _writer_options_parse(_gensrc_writer_spec(prog), args)
+        if parsed is None:
+            unclear("an option of {} the guard does not model".format(prog))
+            return
+        for word in parsed[1]:
+            if word != "-" or prog == "truncate":
+                _gensrc_add(effects, "sink", "a {} operand".format(prog), word, *flags(word), base)
+    elif prog in ("sed", "gsed", "perl"):
+        parsed = _gensrc_perl(args) if prog == "perl" else _gensrc_sed(args)
+        if parsed is None:
+            unclear("an option of {} the guard does not model".format(prog))
+        elif parsed[0]:
+            for k in parsed[1]:
+                _gensrc_add(effects, "sink", "an in-place {} file".format(prog), args[k], oa[k], ta[k], base)
+    elif prog in ("cp", "mv", "ln", "install"):
+        parsed = _writer_options_parse(_gensrc_writer_spec(prog), args)
+        if parsed is None:
+            unclear("an option of {} the guard does not model".format(prog))
+            return
+        options, operands, targets, _values = parsed
+        what = "the {} destination".format(prog)
+        if prog == "install" and "directory" in options:
+            for word in operands:
+                _gensrc_add(effects, "sink", "an install -d directory", word, *flags(word), base)
+            return
+        if targets:
+            dest, sources, into = targets[-1], operands, True
+        elif len(operands) >= 2:
+            dest, sources, into = operands[-1], operands[:-1], False
+        elif prog == "ln" and len(operands) == 1:
+            dest, sources, into = ".", operands, True
+        else:
+            return
+        posture = "rcopy" if prog == "cp" and options & {"recursive", "archive"} else "file"
+        _gensrc_dest(effects, what, dest, sources, into, "no-target-directory" in options,
+                     prog == "cp" and "parents" in options, posture, flags, base)
+    elif prog == "rsync":
+        parsed = _gensrc_rsync(args)
+        if parsed is None:
+            unclear("an option of rsync the guard does not model (or --files-from)")
+            return
+        operands, recursive, dry = parsed
+        if dry or len(operands) < 2 or _GENSRC_REMOTE_RE.match(args[operands[-1]]):
+            return
+        dest = args[operands[-1]]
+        posture = "rcopy" if recursive else "file"
+        merged = [args[k] for k in operands[:-1] if args[k].endswith("/")]
+        named = [args[k] for k in operands[:-1] if not args[k].endswith("/")]
+        if merged:
+            _gensrc_dest(effects, "the rsync destination", dest, [], True, True, False, posture, flags, base)
+        if named:
+            _gensrc_dest(effects, "the rsync destination", dest, named, False, False, False, posture, flags,
+                         base)
+    elif prog == "dd":
+        for k, tok in enumerate(args):
+            if tok.startswith("of="):
+                _gensrc_add(effects, "sink", "the dd of= file", tok[3:], oa[k], ta[k], base)
+    elif prog == "git":
+        _gensrc_git_effects(argv, pi, aop, atl, base, effects)
+    elif _GENSRC_PYTHON_RE.match(prog):
+        code_at = None
+        k = 0
+        while k < len(args):
+            tok = args[k]
+            if tok in ("-V", "--version", "-h", "--help", "-m") or tok == "-" or not tok.startswith("-"):
+                if tok == "-" or not tok.startswith("-"):
+                    if tok == "-":
+                        unclear("a stdin-fed interpreter program")
+                    return
+                return
+            if tok in ("-W", "-X"):
+                k += 2
+                continue
+            body = tok[1:]
+            if body.startswith(("W", "X")):
+                k += 1
+                continue
+            cut = body.find("c")
+            if cut >= 0:
+                if not all(ch in "bBdEIOPqRsSuv" for ch in body[:cut]):
+                    unclear("an option of python the guard does not model")
+                    return
+                code_at = (k, body[cut + 1:]) if body[cut + 1:] else (k + 1, None)
+                break
+            if not all(ch in "bBdEIOPqRsSuv" for ch in body):
+                unclear("an option of python the guard does not model")
+                return
+            k += 1
+        if code_at is None:
+            unclear("a stdin-fed interpreter program")
+            return
+        at, code = code_at
+        if at >= len(args):
+            return
+        if oa[at]:
+            unclear("a python -c program formed with an expansion or substitution")
+            return
+        sinks, faults = _gensrc_python_sinks(args[at] if code is None else code)
+        for why in faults:
+            unclear(why)
+        for dst, src in sinks:
+            _gensrc_dest(effects, "a python -c write", dst, [] if src is None else [src], False,
+                         src is None, False, "file", lambda _word: (False, False), base)
+
+
+def _bash_write_effects(segments, cwd):
+    """The write effects (_GensrcEffect) of lexed Bash segments in command order. The working directory starts
+    at cwd (None when the session cwd is unknown) and follows literal cd and pushd segments (_gensrc_cd); a
+    cd in a pipeline element or a background job changes nothing (a subshell), a segment ending in ( saves
+    the directory and one ending in ) restores it, and popd, cd -, a bare cd or an opaque operand leave it
+    unknown, so a later relative sink is uncleared. Each segment contributes every output redirect (>, >>,
+    >|, &>, &>>, <> and >& to a file, never only the last; a /dev or /proc target or a descriptor is no
+    sink, an opaque target is uncleared), the time -o output, and its peeled program effects
+    (_gensrc_program_effects); env -C makes that segment working directory unknown."""
+    effects = []
+    base = cwd
+    stack = []
+    prev = ""
+    for seg in segments:
+        argv, aop, atl = seg.argv, seg.argv_opaque, seg.argv_leading_tilde
+        pi, chdir, outputs, fault = _gensrc_peel(argv)
+        seg_base = None if chdir else base
+        for red in seg.redirects:
+            if red.op not in _GENSRC_REDIRECT_SINKS or red.target_class in ("descriptor", "file-dev"):
+                continue
+            if red.target_class == "opaque" and not red.target_leading_tilde:
+                effects.append(_GensrcEffect(
+                    "uncleared", "a redirect whose target is opaque (a variable, substitution, glob, brace, .. "
+                    "component or relative dev or proc path)", None, None))
+                continue
+            _gensrc_add(effects, "sink", "a {} redirect".format(red.op), red.target,
+                        red.target_class == "opaque", red.target_leading_tilde, seg_base)
+        if fault is not None:
+            effects.append(_GensrcEffect("uncleared", fault, None, None))
+        else:
+            for at, value in outputs:
+                _gensrc_add(effects, "sink", "the time -o output", value, aop[at], atl[at], seg_base)
+            if pi < len(argv) and not aop[pi]:
+                prog = _gate_word(argv[pi])
+                if prog in ("cd", "pushd", "popd"):
+                    if prev not in ("|", "|&") and seg.sep_after not in ("|", "|&", "&"):
+                        base = _gensrc_cd(prog, argv[pi:], aop[pi:], atl[pi:], seg_base)
+                else:
+                    _gensrc_program_effects(prog, argv, pi, aop, atl, seg_base, effects)
+        if seg.sep_after == "(":
+            stack.append(base)
+        elif seg.sep_after == ")":
+            base = stack.pop() if stack else None
+        prev = seg.sep_after
+    return effects
+
+
+def _gensrc_target_root(target):
+    """The canonical (realpath) scrubbed git toplevel of an absolute, already-realpath target, found from
+    the target itself when it is an existing directory, else from its nearest existing ancestor directory
+    (_wrtscp_nearest_existing_dir, then _recovery_toplevel with every ambient GIT_* removed): the repository
+    whose registry governs the target. None when it sits outside every git work tree or cannot be resolved."""
+    try:
+        anchor = target if os.path.isdir(target) else _wrtscp_nearest_existing_dir(target)
+        if anchor is None:
+            return None
+        top = _recovery_toplevel(anchor)
+        return None if top is None else os.path.realpath(top)
+    except (OSError, ValueError):
+        return None
+
+
+def _gensrc_holds(entries, directory, root_c):
+    """The first registry entry, shaped as _gensrc_match returns it, whose real path is the already-realpath
+    directory or lies inside it; None when none does; _GENSRC_MATCH_FAULT on a resolution or containment
+    fault. An authoring-scoped entry counts only where the authoring marker is present, as in _gensrc_match."""
+    marker = None
+    for _kind, entry_target, sources, regenerate, scope in entries:
+        try:
+            entry_c = os.path.realpath(os.path.join(root_c, entry_target))
+        except (OSError, ValueError):
+            return _GENSRC_MATCH_FAULT
+        verdict = _gensrc_within(entry_c, directory)
+        if verdict == "err":
+            return _GENSRC_MATCH_FAULT
+        if verdict != "in":
+            continue
+        if scope is None:
+            return (entry_target, sources, regenerate, None)
+        if marker is None:
+            marker = _gensrc_authoring_marker(root_c)
+        if marker[0] != "absent":
+            return (entry_target, sources, regenerate, marker)
+    return None
+
+
+def _gensrc_mentions(entries, command, root_c):
+    """The first registry entry target the raw command text names, or None: a file entry by its basename and
+    a tree entry by its repository-relative path, each bounded by characters that cannot continue a path
+    word (so GEN.md.bak and gen-extra name neither GEN.md nor gen/). An authoring-scoped entry counts only
+    where the authoring marker is present. This is the noise filter for uncleared Bash effects, not a
+    coverage claim."""
+    marker = None
+    for kind, entry_target, _sources, _regenerate, scope in entries:
+        name = posixpath.basename(entry_target) if kind == "file" else entry_target.rstrip("/")
+        if not name or not re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_.-])", command):
+            continue
+        if scope is not None:
+            if marker is None:
+                marker = _gensrc_authoring_marker(root_c)
+            if marker[0] == "absent":
+                continue
+        return entry_target
+    return None
+
+
+def _gensrc_bash(data):
+    """The Bash channel verdict of gensrc_guard: ("allow",), ("note", message) or ("deny", reason, banner);
+    gensrc_guard turns it into the decision. A payload with no object tool_input or no readable command
+    string DENIES fail-closed (the detector cannot read it). The command is lexed (_gensrc_lex) and its write
+    effects collected (_bash_write_effects); a complete lex with no effect ALLOWS before any registry read or
+    git call (reads are never judged). Each sink and restore path is canonicalized and judged against the
+    registry at the toplevel of its OWN repository (_gensrc_target_root), the first _GENSRC_MAX_ROOTS distinct
+    roots in command order, under at most _GENSRC_MAX_DIRS distinct directories. A present but unreadable
+    registry DENIES a sink into its repository (a restore is never denied, so the repair stays open); a sink
+    onto a registered target DENIES naming its sources and regenerate command (a present malformed authoring
+    marker on an authoring-scoped match DENIES naming the marker); a git path from another revision also
+    DENIES a registered target inside that directory; a restore of a registered target notes. Uncleared
+    effects (and an incomplete lex, and roots past the budget) DENY when the session repository registry is
+    present but unreadable, note when the command names one of its registered targets (_gensrc_mentions),
+    and allow silently otherwise. The first deny wins, then the joined notes. A fault inside the detector
+    (OSError, ValueError, RecursionError, MemoryError) DENIES fail-closed."""
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or not command.strip():
+        return ("deny",
+                "AIQT rule gensrc (generated-artefact-source-only, fail-closed): the Bash payload carried no "
+                "readable command string, so the generated-artefact write-sink detector cannot read it and "
+                "denies the call.",
+                "AIQT guardrail: denied a Bash call with no readable command (rule gensrc, fail-closed).")
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or any(ord(ch) < 0x20 for ch in cwd):
+        cwd = None
+    try:
+        segments, complete = _gensrc_lex(command)
+        effects = _bash_write_effects(segments, cwd)
+        if complete and not effects:
+            return ("allow",)
+        why = [eff.word for eff in effects if eff.kind == "uncleared"]
+        if not complete:
+            why.append("a command the lexer cannot finish (a here-string, process substitution, fd-variable "
+                       "redirect or unbalanced quote stops it)")
+        anchors = {}
+        resolved = {}
+        roots = collections.OrderedDict()
+        overflow = False
+        for eff in effects:
+            if eff.kind == "uncleared":
+                continue
+            pair = resolved.get(eff.path)
+            if pair is None:
+                # One realpath and isdir per DISTINCT path, so a command repeating one target (a long run
+                # of redirects to the same file) resolves it once and stays linear.
+                real = os.path.realpath(eff.path)
+                pair = (real, real if os.path.isdir(real) else os.path.dirname(real))
+                resolved[eff.path] = pair
+            real, key = pair
+            if key not in anchors:
+                if len(anchors) >= _GENSRC_MAX_DIRS:
+                    overflow = overflow or eff.kind == "sink"
+                    continue
+                anchors[key] = _gensrc_target_root(real)
+            root_c = anchors[key]
+            if root_c is None:
+                continue
+            if root_c not in roots:
+                if len(roots) >= _GENSRC_MAX_ROOTS:
+                    overflow = overflow or eff.kind == "sink"
+                    continue
+                roots[root_c] = []
+            roots[root_c].append((eff, real))
+        if overflow:
+            why.append("sinks into more than {} distinct repository roots or under more than {} distinct "
+                       "directories in one command (only those are judged)"
+                       .format(_GENSRC_MAX_ROOTS, _GENSRC_MAX_DIRS))
+        notes = []
+        for root_c, items in roots.items():
+            status, payload = _load_gensrc_registry(root_c)
+            if status == "absent":
+                continue
+            if status == "bad":
+                sink = next((pair for pair in items if pair[0].kind == "sink"), None)
+                if sink is None:
+                    continue
+                return ("deny",
+                        "AIQT rule gensrc (generated-artefact-source-only): this Bash command writes {} ({}) in "
+                        "{}, whose .aiqt/gensrc.json registry is PRESENT but could not be read ({}), so this "
+                        "guard cannot tell whether the target is a generated artefact. It fails closed and "
+                        "denies the command rather than let a corrupted or unreadable registry silently disable "
+                        "the generated-artefact protection. Repair or regenerate the registry first: python3 "
+                        "tools/gen_gensrc.py and a git restore of .aiqt/gensrc.json spell no judged sink and "
+                        "stay allowed.".format(sink[1], sink[0].word, root_c, payload),
+                        "AIQT guardrail: denied a Bash write because {}/.aiqt/gensrc.json is present but "
+                        "unreadable/malformed, a fail-closed cannot-evaluate (rule gensrc); regenerate or repair "
+                        "the registry, then retry.".format(root_c))
+            for eff, real in items:
+                if _gensrc_within(real, root_c) != "in":
+                    if eff.kind == "sink":
+                        why.append("a sink whose real path leaves its own resolved toplevel")
+                    continue
+                match = _gensrc_match(payload, real, root_c)
+                if match is None and eff.kind == "sink" and eff.posture != "file" and os.path.isdir(real):
+                    held = _gensrc_holds(payload, real, root_c)
+                    if held is not None and held is not _GENSRC_MATCH_FAULT and eff.posture == "rcopy":
+                        why.append("a recursive copy into a directory that holds a registered target")
+                        continue
+                    match = held
+                if match is _GENSRC_MATCH_FAULT:
+                    if eff.kind == "sink":
+                        why.append("a registry entry that cannot be resolved for containment")
+                    continue
+                if match is None:
+                    continue
+                entry_target, sources, regenerate, marker = match
+                if eff.kind == "restore":
+                    notes.append("{} restores the committed bytes of the generated artefact {} ({}); regenerate "
+                                 "with {} and run its --check so source and derivative still agree."
+                                 .format(eff.word, entry_target, root_c, regenerate))
+                    continue
+                if marker is not None and marker[0] == "bad":
+                    return ("deny",
+                            "AIQT rule gensrc (generated-artefact-source-only): this Bash command writes {} ({}), "
+                            "the authoring-only generated artefact {} ({}/.aiqt/gensrc.json, scope authoring), "
+                            "and the authoring marker .aiqt/authoring.toml is PRESENT but malformed ({}), so this "
+                            "guard cannot tell the pack authoring tree from an adopter tree. It fails closed and "
+                            "denies the command. Repair .aiqt/authoring.toml (exactly format-version = 1 and role "
+                            "= pack-authoring-repository), or remove it if this is not the pack authoring "
+                            "repository, then retry.".format(real, eff.word, entry_target, root_c, marker[1]),
+                            "AIQT guardrail: denied a Bash write to the authoring-only artefact {} because "
+                            ".aiqt/authoring.toml is present but malformed, a fail-closed cannot-evaluate (rule "
+                            "gensrc); repair or remove the marker, then retry.".format(entry_target))
+                return ("deny",
+                        "AIQT rule gensrc (generated-artefact-source-only): this Bash command writes {} ({}), which "
+                        "is the generated artefact {} of {}/.aiqt/gensrc.json or lies inside it; it is changed only "
+                        "through its source, so a hand-edit is denied. Edit {} and regenerate with {} instead; "
+                        "source and derivative land in the same change. Reads and generator runs that spell no "
+                        "shell sink are never judged.".format(
+                            real, eff.word, entry_target, root_c, ", ".join(sources), regenerate),
+                        "AIQT guardrail: denied a Bash write to the generated artefact {} (rule gensrc): edit the "
+                        "source and regenerate ({}).".format(entry_target, regenerate))
+        if why:
+            session = None if cwd is None else _recovery_toplevel(cwd)
+            if session is not None:
+                session_c = os.path.realpath(session)
+                status, payload = _load_gensrc_registry(session_c)
+                reasons = "; ".join(sorted(set(why)))
+                if status == "bad":
+                    return ("deny",
+                            "AIQT rule gensrc (generated-artefact-source-only): the guard could not clear every "
+                            "write this Bash command makes ({}), and the .aiqt/gensrc.json registry of the session "
+                            "repository {} is PRESENT but could not be read ({}), so it cannot tell whether such a "
+                            "write lands on a generated artefact. It fails closed and denies the command. Repair or "
+                            "regenerate the registry first (python3 tools/gen_gensrc.py, or a git restore of "
+                            ".aiqt/gensrc.json), then retry.".format(reasons, session_c, payload),
+                            "AIQT guardrail: denied a Bash command with an uncleared write because "
+                            ".aiqt/gensrc.json is present but unreadable/malformed (rule gensrc, fail-closed).")
+                named = _gensrc_mentions(payload, command, session_c) if status == "ok" else None
+                if named is not None:
+                    notes.append("This command names the generated artefact {}, and the guard could not clear "
+                                 "every write it makes ({}), so it is allowed unjudged; if it writes {}, edit its "
+                                 "source and regenerate instead.".format(named, reasons, named))
+        if notes:
+            return ("note", "AIQT guardrail (rule gensrc, generated-artefact-source-only): " + " ".join(notes)
+                    + " The CI drift gate remains the backstop.")
+        return ("allow",)
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        return ("deny",
+                "AIQT rule gensrc (generated-artefact-source-only, fail-closed): the Bash write-sink detector "
+                "faulted while reading this command ({}: {}), so it cannot clear it and denies it. Split the "
+                "command into simpler steps and retry; a generated artefact changes only through its source "
+                "and its regenerate command.".format(type(exc).__name__, exc),
+                "AIQT guardrail: denied a Bash command the generated-artefact detector could not evaluate "
+                "(rule gensrc, fail-closed).")
+
+
 def gensrc_guard(data):
-    """gensrc (integ/generated-artefact-source-only), PreToolUse on Write|Edit|MultiEdit: DENY-and-educate a
-    Write/Edit/MultiEdit that hand-edits a generated artefact registered in the per-repo
-    .aiqt/gensrc.json, read AT DECISION TIME. A REGISTRY-DRIVEN PATH guard, not a content judge: it
-    fires only when the file_path resolves onto a kind=file or kind=tree registry entry. Coverage is
-    exactly the registry, so an ABSENT registry is the inert ALLOW by design; kind=block entries are
-    EXCLUDED (a path guard cannot see which lines an edit touches); Bash is EXCLUDED by design
-    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. A Write, Edit or
+    """gensrc (integ/generated-artefact-source-only), PreToolUse on Write|Edit|MultiEdit|Bash: DENY-and-educate a
+    write onto a generated artefact registered in a .aiqt/gensrc.json, read AT DECISION TIME. A REGISTRY-DRIVEN
+    PATH guard, not a content judge, on two channels: the Write/Edit/MultiEdit file_path, and the write sinks a
+    Bash command spells literally (_gensrc_bash, which also documents the Bash postures). The registry consulted
+    is the one at the scrubbed git toplevel of the TARGET (_gensrc_target_root: its nearest existing ancestor
+    directory, every ambient GIT_* removed; NOT _gen_common.repo_root, which falls back to cwd and would fabricate
+    a root), not of the session cwd, so a write into a sibling repository or store is judged against that
+    repository registry. Coverage is exactly the registry, so an ABSENT registry is the inert ALLOW by design;
+    kind=block entries are EXCLUDED (a path guard cannot see which lines an edit touches). A Write, Edit or
     MultiEdit to a sibling settings file such as .claude/settings.local.json is not judged either (no generator
     writes it, so no registry entry names it; that it holds only personal settings is a convention, not
     enforced), yet it can change hook behaviour for later sessions; the settings precedence Claude Code gives
-    it is not verified by this pack. NO-ASK posture:
-    a CONFIRMED registry match DENIES and names the source to edit and the regenerate command (a reachable
-    correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES, fail-closed (round-2 finding
-    8): a corrupted registry must not silently disable the generated-artefact protection, so a cannot-read of
-    a PRESENT .aiqt/gensrc.json is a cannot-evaluate resolved to the safe (deny) outcome for this protective
-    guard. The remaining cannot-evaluate branches (each routed through _gensrc_fail_ask: an unreadable
-    tool_name (an empty string, a list, a bool), a non-dict tool_input, a missing or unreadable file_path, a
-    control character in file_path, no session cwd, a non-git session, an unresolvable target or repo root, a
-    target outside the repo or a containment fault, a registry entry that cannot be resolved for containment)
-    are NOT confirmed generated-artefact edits, have no "edit the source" action to name, and are outside any
-    expected coverage, so they ALLOW with an informational note rather than block a legitimate edit; a
-    genuinely-ABSENT registry is likewise the inert ALLOW (adopters author their own). An entry scoped
-    "authoring" (gen_gensrc marks the tools/gen_hooks.py AUTHORING_ONLY_REL targets) is honoured only in the
-    pack authoring tree: on its match the guard reads .aiqt/authoring.toml at the repo root, an ABSENT marker
-    skips the entry silently (an adopter's own .claude/settings.json is theirs), the exact marker honours it,
-    and a PRESENT-but-malformed marker denies fail-closed (_gensrc_authoring_marker). The CI
-    generated-artefact drift gate remains the authoritative backstop. Besides a confirmed registry match, the
-    guard denies fail-closed in exactly four cases: a missing tool_name (the shared fail-closed contract), a
-    PRESENT-but-unreadable/malformed registry, a PRESENT-but-malformed authoring marker on a matching
-    authoring-scoped entry, and a mis-wired event (a hard block, exit 2). The repo root is
-    the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
-    _gen_common.repo_root, which falls back to cwd and would fabricate a root)."""
+    it is not verified by this pack. Regeneration stays
+    open structurally: a Bash command that spells no recognized sink (python3 tools/gen_x.py) is allowed before
+    any registry read. NO-ASK posture: a CONFIRMED registry match DENIES and names the source to edit and the
+    regenerate command (a reachable correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES,
+    fail-closed (round-2 finding 8): a corrupted registry must not silently disable the generated-artefact
+    protection. For Write/Edit/MultiEdit the remaining cannot-evaluate branches (each routed through
+    _gensrc_fail_ask: an unreadable tool_name (an empty string, a list, a bool), a non-dict tool_input, a missing
+    or unreadable file_path, a control character in file_path, a relative file_path with no session cwd, an
+    unresolvable target, a target outside every git work tree, a target whose real path leaves its own toplevel
+    or a containment fault, a registry entry that cannot be resolved for containment) are NOT confirmed
+    generated-artefact edits and ALLOW with an informational note rather than block a legitimate edit. An entry
+    scoped "authoring" (gen_gensrc marks the tools/gen_hooks.py AUTHORING_ONLY_REL targets) is honoured only in
+    the pack authoring tree: on its match the guard reads .aiqt/authoring.toml at the repo root, an ABSENT marker
+    skips the entry silently (an adopter own .claude/settings.json is theirs), the exact marker honours it, and a
+    PRESENT-but-malformed marker denies fail-closed (_gensrc_authoring_marker). The CI generated-artefact drift
+    gate remains the authoritative backstop. Besides a confirmed registry match, the guard denies fail-closed on
+    a missing tool_name (the shared fail-closed contract), a PRESENT-but-unreadable/malformed registry, a
+    PRESENT-but-malformed authoring marker on a matching authoring-scoped entry, the Bash payload and detector
+    faults _gensrc_bash lists, and a mis-wired event (a hard block, exit 2)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gensrc_guard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
     tool_name = data.get("tool_name")
     if tool_name is None:
-        # A missing field cannot be matched. This is one of four fail-closed denies, with a present but
-        # unreadable/malformed registry, a present but malformed authoring marker on an authoring-scoped
-        # match, and a mis-wired event (the hard block above).
+        # A missing field cannot be matched: the shared fail-closed deny, beside a present but unreadable/malformed
+        # registry, a present but malformed authoring marker on an authoring-scoped match, the Bash payload and
+        # detector faults, and a mis-wired event (the hard block above).
         return _deny_missing_tool_name("gensrc")
     if not isinstance(tool_name, str) or not tool_name:
-        # A present-but-unreadable tool_name (an empty string, a list, a bool) cannot be matched against
-        # the scope set; allow with a warning systemMessage rather than silently allow. The fail-closed
-        # denies are a MISSING tool_name, a present but unreadable/malformed registry, a present but
-        # malformed authoring marker on an authoring-scoped match, and a mis-wired event.
+        # A present-but-unreadable tool_name (an empty string, a list, a bool) cannot be matched against the scope
+        # set; allow with a warning systemMessage rather than silently allow.
         return _gensrc_fail_ask("the tool_name was unreadable")
+    if tool_name == "Bash":
+        verdict = _gensrc_bash(data)
+        if verdict[0] == "deny":
+            return _deny(verdict[1], verdict[2])
+        if verdict[0] == "note":
+            return _allow_note(verdict[1])
+        return _allow()
     if tool_name not in _GENSRC_TOOLS:
-        return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit)
+        return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit/Bash)
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
         return _gensrc_fail_ask("the {} payload carried no readable tool_input".format(tool_name))
@@ -11097,15 +12120,35 @@ def gensrc_guard(data):
     # never crashes.
     if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in file_path):
         return _gensrc_fail_ask("the {} payload file_path contains a control character".format(tool_name))
-    cwd = data.get("cwd")
-    if not isinstance(cwd, str) or not cwd:
-        return _gensrc_fail_ask("the payload carried no session cwd, so the repo root cannot be resolved")
-    # The scrubbed rev-parse primitive (every ambient GIT_* removed), so an ambient decoy repo cannot
-    # redirect the registry read; None means the cwd is outside any git work tree (a non-git session).
-    root = _recovery_toplevel(cwd)
-    if root is None:
-        return _gensrc_fail_ask("the session cwd is outside any resolvable git work tree")
-    status, payload = _load_gensrc_registry(root)
+    # A relative file_path can only arrive via MultiEdit (abs-paths does not cover it); joining it onto cwd
+    # matches the platform own resolution, so the session cwd is needed only then. Canonicalize to a realpath
+    # for the match; a resolution fault (a symlink loop, an unresolvable path) is an unresolvable target ->
+    # allow with a warning systemMessage, NOT an uncaught crash the dispatcher would turn into an exit-2 deny.
+    if _is_absolute(file_path):
+        joined = file_path
+    else:
+        cwd = data.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            return _gensrc_fail_ask("the payload carried a relative file_path and no session cwd, so the target "
+                                    "cannot be resolved")
+        joined = os.path.join(cwd, file_path)
+    # A target longer than any path a write syscall accepts cannot be written or registered; resolving it
+    # anyway (realpath, then the ancestor walk) costs time super-linear in its length, so it is treated as
+    # the unresolvable target it is, within the decision deadline.
+    if len(os.fsencode(joined)) > _GENSRC_MAX_TARGET:
+        return _gensrc_fail_ask("the target path is over {} bytes, longer than any path a write syscall "
+                                "accepts, so it cannot be resolved".format(_GENSRC_MAX_TARGET))
+    try:
+        target = os.path.realpath(joined)
+    except (OSError, ValueError):
+        return _gensrc_fail_ask("the target could not be resolved (an unresolvable path)")
+    # The registry of the TARGET own repository: the scrubbed toplevel of its nearest existing ancestor
+    # (every ambient GIT_* removed, so an ambient decoy repo cannot redirect the registry read); None means the
+    # target is outside every git work tree.
+    root_c = _gensrc_target_root(target)
+    if root_c is None:
+        return _gensrc_fail_ask("the target is outside any resolvable git work tree")
+    status, payload = _load_gensrc_registry(root_c)
     if status == "absent":
         return _allow()  # the inert boundary: no registry, no coverage (adopters author their own)
     if status == "bad":
@@ -11113,36 +12156,27 @@ def gensrc_guard(data):
         # PROTECTIVE guard, so it fails CLOSED (DENY), never allow-note. Allow-noting it let a crippled or
         # corrupted .aiqt/gensrc.json disable the generated-artefact restriction outright (garble the
         # registry, then hand-edit any generated file). Only a genuinely-ABSENT registry (adopters author
-        # their own) and a non-git session, where no generated-file protection is expected, stay allow /
-        # allow-note; a PRESENT registry that cannot be read denies and names the (Bash-side) fix.
+        # their own) and a target outside every work tree, where no generated-file protection is expected, stay
+        # allow / allow-note; a PRESENT registry that cannot be read denies and names the (Bash-side) fix.
         return _deny(
             "AIQT rule gensrc (generated-artefact-source-only): the .aiqt/gensrc.json registry is PRESENT "
             "but could not be read ({}), so this guard cannot tell whether the target is a generated "
             "artefact. It fails closed and denies the edit rather than let a corrupted or unreadable "
             "registry silently disable the generated-artefact protection. Regenerate or repair "
-            ".aiqt/gensrc.json (its generator runs through Bash, which this guard does not cover), then "
-            "retry.".format(payload),
+            ".aiqt/gensrc.json (python3 tools/gen_gensrc.py, or a git restore of it, through Bash: neither "
+            "spells a sink this guard judges), then retry.".format(payload),
             "AIQT guardrail: denied a {} because .aiqt/gensrc.json is present but unreadable/malformed, a "
             "fail-closed cannot-evaluate (rule gensrc); regenerate or repair the registry, then retry."
             .format(tool_name))
     entries = payload
     if not entries:
         return _allow()  # a registry of only block entries has nothing this path guard can match
-    # A relative file_path can only arrive via MultiEdit (abs-paths does not cover it); joining it onto
-    # cwd matches the platform's own resolution. Canonicalize both to realpaths for the match; a
-    # resolution fault (a symlink loop, an unresolvable path) is an unresolvable target -> allow with a
-    # warning systemMessage, NOT an uncaught crash the dispatcher would turn into an exit-2 hard DENY.
-    try:
-        target = os.path.realpath(file_path if _is_absolute(file_path) else os.path.join(cwd, file_path))
-        root_c = os.path.realpath(root)
-    except (OSError, ValueError):
-        return _gensrc_fail_ask("the target or repo root could not be resolved (an unresolvable path)")
     within = _gensrc_within(target, root_c)
     if within != "in":
-        # "out" (proven outside) OR "err" (a containment fault) both allow with a warning systemMessage: an
-        # uncleared target cannot be judged against the registry of THIS repo, so it must never read as a
-        # silent allow.
-        return _gensrc_fail_ask("the target canonicalizes outside the resolved repo, or the containment "
+        # "out" (proven outside: the real path left the toplevel found from it) OR "err" (a containment fault)
+        # both allow with a warning systemMessage: an uncleared target cannot be judged against this registry,
+        # so it must never read as a silent allow.
+        return _gensrc_fail_ask("the target canonicalizes outside its own resolved repo, or the containment "
                                 "check could not be cleared, so it cannot be judged against the registry "
                                 "of this repo")
     match = _gensrc_match(entries, target, root_c)
@@ -11163,7 +12197,7 @@ def gensrc_guard(data):
             "PRESENT but malformed ({}), so this guard cannot tell the pack authoring tree from an adopter "
             "tree. It fails closed and denies the edit. Repair .aiqt/authoring.toml (exactly format-version = "
             "1 and role = \"pack-authoring-repository\"), or remove it if this is not the pack authoring "
-            "repository, through Bash, which this guard does not judge, then retry."
+            "repository (removing or rewriting the marker spells no sink this guard judges), then retry."
             .format(file_path, entry_target, marker[1]),
             "AIQT guardrail: denied a {} to the authoring-only artefact {} because .aiqt/authoring.toml is "
             "present but malformed, a fail-closed cannot-evaluate (rule gensrc); repair or remove the marker, "
@@ -16881,12 +17915,13 @@ _RDP_WRITER_OPTIONS = dict((
     ("rmdir", ("p v h V", "ignore-fail-on-non-empty parents verbose help version"))))
 
 
-def _rdp_writer_parse(name, args):
-    """The words args of the writer name (_RDP_WRITER_OPTIONS) as its option parser reads them, options and
-    operands in any order until --: (options, operands, targets, values), options the long names given,
-    targets the -t values, values the (name, value) pairs of every other option given a value; None when
-    the program is not in the table or a word is no option of it (an unknown, ambiguous or misused one)."""
-    spec = _RDP_WRITER_OPTIONS.get(name)
+def _writer_options_parse(spec, args):
+    """The words args as the option parser of the writer whose spec is a (short, long) pair in the
+    _RDP_WRITER_OPTIONS grammar reads them, options and operands in any order until --: (options, operands,
+    targets, values), options the long names given, targets the -t values, values the (name, value) pairs of
+    every other option given a value; None when spec is None or a word is no option of it (an unknown,
+    ambiguous or misused one). Shared by review_dispatch_pin (_rdp_writer_parse) and the gensrc Bash
+    detector (_gensrc_writer_spec), each with its own table."""
     if spec is None:
         return None
     short = dict((token[0], (token[2:] or token[0], token[1:2] == ":")) for token in spec[0].split())
@@ -16932,6 +17967,14 @@ def _rdp_writer_parse(name, args):
                 (targets if key == "target-directory" else values).append((key, value))
                 break
     return (options, operands, [value for _key, value in targets], values)
+
+
+def _rdp_writer_parse(name, args):
+    """The words args of the writer name (_RDP_WRITER_OPTIONS) as its option parser reads them, options and
+    operands in any order until --: (options, operands, targets, values), options the long names given,
+    targets the -t values, values the (name, value) pairs of every other option given a value; None when
+    the program is not in the table or a word is no option of it (an unknown, ambiguous or misused one)."""
+    return _writer_options_parse(_RDP_WRITER_OPTIONS.get(name), args)
 
 
 def _rdp_writer_reaches(name, parsed, words, relation):

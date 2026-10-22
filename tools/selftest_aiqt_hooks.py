@@ -96,8 +96,13 @@ missing tool_name or an absent target field fails closed. Every secret fixture i
 It also covers the generated-artefact edit guard (gensrc_guard, gensrc): a Write/Edit/MultiEdit whose
 file_path resolves onto a kind=file or kind=tree entry of the per-repo .aiqt/gensrc.json (read at
 decision time) DENIES and names the source to edit, while a source edit, an unregistered path, and a
-kind=block entry ALLOW, Bash is out of scope, and component-boundary matching means gen-extra/ and
-GEN.md.bak do not match gen/ and GEN.md. A PRESENT registry it cannot read (unreadable, malformed, or
+kind=block entry ALLOW, and component-boundary matching means gen-extra/ and GEN.md.bak do not match gen/
+and GEN.md. The registry is the one at the toplevel of the TARGET repository. On Bash (the gb cases) a
+literal write sink onto a registered target (a redirect, tee, an in-place sed or perl, the destination of
+cp, mv, ln, install or rsync, truncate, dd of=, time -o, a python -c write, a git path from another
+revision) DENIES, reads and generator runs ALLOW before any registry read, a git restore from the index or
+HEAD notes, an uncleared write notes only when the command names a registered target, and an unreadable
+command or a detector fault denies. A PRESENT registry it cannot read (unreadable, malformed, or
 unknown-version, or a malformed entry) DENIES, fail closed; the other cannot-evaluate branches (an
 unresolvable repo root, a non-contained target, an unreadable payload field) ALLOW with a note; an absent
 registry is the inert ALLOW, and a missing tool_name also denies. An entry scoped "authoring" (the shipped
@@ -3033,7 +3038,7 @@ _DEADLINE_CASES = {
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after"),
-    "gensrc_guard": ("write_content", "write_deep_path"),
+    "gensrc_guard": ("write_content", "write_deep_path", "redirects_many", "heredocs", "nest_parens"),
     "git_discard": ("git_segments_reset", "nest_parens"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens"),
@@ -16258,14 +16263,16 @@ def _main_isolated(monitor):
         # present-but-unreadable registry cases (gs-i*, gs-q, ...) and the mis-wired event (gs-s).
         gexpect("(gs-k) a missing tool_name DENIES (fail-closed contract)", "deny",
                 file_path=os.path.join(gr, "GEN.md"), cwd=gr, with_tool=False)
-        # ALLOW with a note: no session cwd, so the root cannot be resolved.
-        gexpect("(gs-l) a missing cwd allows with a note (root cannot be resolved)", "allow-note",
+        # DENY: the registry is found from the TARGET, so an absolute registered target denies with no session
+        # cwd at all (target-rooted; gs-l2 below covers the relative file_path that does need a cwd).
+        gexpect("(gs-l) a missing cwd still DENIES an absolute registered target (target-rooted)", "deny",
                 tool="Write", file_path=os.path.join(gr, "GEN.md"), with_cwd=False)
         # ALLOW with a note: a target outside the repo cannot be cleared against this repo registry.
         gexpect("(gs-m) a target outside the repo allows with a note (non-contained)", "allow-note",
                 tool="Write", file_path=str(tmp / "outside.md"), cwd=gr)
-        # ALLOW: Bash is out of scope by design (defensive branch; the matcher excludes it too).
-        gexpect("(gs-n) Bash is out of scope (allow)", "allow",
+        # DENY: a Bash payload with no readable command cannot be read by the write-sink detector, so it fails
+        # closed (the gb block covers the Bash channel itself).
+        gexpect("(gs-n) a Bash payload with no command DENIES fail-closed", "deny",
                 tool="Bash", file_path=os.path.join(gr, "GEN.md"), cwd=gr)
         # ALLOW with a note: payload cannot-evaluate cases (non-dict tool_input, missing file_path).
         gexpect("(gs-o) a non-dict tool_input allows with a note", "allow-note",
@@ -16425,12 +16432,12 @@ def _main_isolated(monitor):
         try:
             aiqt_hooks._gensrc_fail_ask = lambda _detail: (0, {"systemMessage": " \t\n"}, None)
             _gs_ws = gdecide({"hook_event_name": "PreToolUse", "tool_name": "Write",
-                              "tool_input": {"file_path": _gs_inj_fp}})
+                              "tool_input": {"file_path": "GEN.md"}})
             aiqt_hooks._gensrc_fail_ask = lambda _detail: (
                 0, {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"},
                     "systemMessage": "explicit allow with a note"}, None)
             _gs_xn = gdecide({"hook_event_name": "PreToolUse", "tool_name": "Write",
-                              "tool_input": {"file_path": _gs_inj_fp}})
+                              "tool_input": {"file_path": "GEN.md"}})
         finally:
             aiqt_hooks._gensrc_fail_ask = _real_fail_ask
         try:
@@ -16543,6 +16550,19 @@ def _main_isolated(monitor):
                            "is a convention, not enforced", "the two apply the same size bound"):
             if _gs_phrase not in _gs_residue:
                 failures.append("(gs-res-local) the residue must state: {!r}".format(_gs_phrase))
+
+        # (gs-res-bash) The residue states the Bash channel as the gb cases prove it: the sinks are judged, reads
+        # and generator runs are allowed structurally, restores note, the residuals and the OPF boundary are
+        # disclosed, the registry is target-rooted, and Bash is no longer said to be excluded.
+        for _gs_phrase in ("the write sinks a Bash command spells literally", "READS ARE NEVER JUDGED",
+                           "structural regeneration allowance", "DISCLOSED RESIDUALS (not caught)",
+                           "OPF BOUNDARY", "of the TARGET", "they restore committed bytes, so they ALLOW",
+                           "The mention filter is noise control, not a coverage claim",
+                           "a fault inside the Bash detector itself"):
+            if _gs_phrase not in _gs_residue:
+                failures.append("(gs-res-bash) the residue must state the Bash channel: {!r}".format(_gs_phrase))
+        if "Bash is EXCLUDED by design" in _gs_residue or "git toplevel of the SESSION cwd" in _gs_residue:
+            failures.append("(gs-res-bash-stale) the residue still says Bash is excluded or the root is the session cwd")
 
         # === gs-auth: an authoring-scoped registry entry never blocks an adopter's own settings ==========
         # The fixtures hold the REAL .aiqt/gensrc.json bytes this repository ships (tools/gen_gensrc.py scopes
@@ -16735,6 +16755,304 @@ def _main_isolated(monitor):
             os.remove(str(_gs_marker))
         except OSError as exc:
             failures.append("(gs-auth-f-setup) could not plant a marker at the size bound: {}".format(exc))
+
+        # === gb: the gensrc Bash write-sink detector (gensrc_guard on a Bash call) ========================
+        # Judged by the STRUCTURED decision (gdecide). Each case is (label, expected, command, cwd); {gr} is
+        # replaced by the registry repo path and {bN} by the budget repos. The commands are inspected, never
+        # executed. gr carries a real gen/ directory (a tree-entry root that exists, so a copy into it joins the
+        # source basename) and gr3 a malformed registry; four empty repos exercise the 4-root budget.
+        try:
+            os.makedirs(os.path.join(gr, "gen"), exist_ok=True)
+            gs_reg3.write_text("{ not json", encoding="utf-8")
+            gb_extra = [str(_gs_init("gbroot{}".format(n))) for n in range(1, 5)]
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the gensrc Bash fixtures: {}".format(exc), file=sys.stderr)
+            return 2
+
+        def bdata(command, cwd):
+            data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+            if cwd is not None:
+                data["cwd"] = cwd
+            return data
+
+        def bexpect(label, want, command, cwd):
+            command = command.replace("{gr}", gr)
+            for n, root in enumerate(gb_extra, 1):
+                command = command.replace("{b%d}" % n, root)
+            got = gdecide(bdata(command, cwd))
+            if got != want:
+                failures.append("{}: expected {}, got {} for {!r}".format(label, want, got, command))
+
+        def breason(command, cwd):
+            _code, _obj, _err = aiqt_hooks.gensrc_guard(bdata(command.replace("{gr}", gr), cwd))
+            try:
+                return _obj["hookSpecificOutput"]["permissionDecisionReason"]
+            except (TypeError, KeyError):
+                return ""
+
+        # The target length bound, tested at both ends: a path of exactly 4096 bytes (the bound) is judged
+        # normally, and one a byte over is never resolved (no write syscall accepts it).
+        _gb_deep_at = os.path.join(gr, "gen", "a" * (4095 - len(os.fsencode(os.path.join(gr, "gen")))))
+        _gb_deep_over = _gb_deep_at + "a"
+        _gb_cases = [
+            # incident reproduction: Bash routing, the redirect sink, the heredoc retry and target-rooting
+            ("(gb-01) the incident append to a registered file denies", "deny",
+             "printf '%s\\n' '- X1 [ ] t' >> {gr}/GEN.md", gr),
+            ("(gb-02) a relative append denies", "deny", "echo x >> GEN.md", gr),
+            ("(gb-03) a heredoc append with the redirect first denies", "deny", "cat >> {gr}/GEN.md <<EOF\nl\nEOF", gr),
+            ("(gb-04) a heredoc append with the redirect after the delimiter denies (lex retry)", "deny",
+             "cat <<EOF >> {gr}/GEN.md\nl\nEOF", gr),
+            ("(gb-05) a write from another repo is judged by the target repo registry", "deny",
+             "printf x >> {gr}/GEN.md", gr2),
+            # regeneration stays open: no sink, no registry read
+            ("(gb-10) a generator run allows silently", "allow", "python3 tools/gen_x.py", gr),
+            ("(gb-11) an isolated generator check allows silently", "allow", "python3 -I -B tools/gen_x.py --check", gr),
+            ("(gb-12) cd, regenerate and git add allows silently", "allow",
+             "cd {gr} && python3 tools/gen_x.py && git add GEN.md", gr),
+            # a sink on a generator run is judged like any other: no regenerate-text allowance
+            ("(gb-13) a generator redirected onto its own output denies", "deny", "python3 tools/gen_x.py > GEN.md", gr),
+            ("(gb-14) a generator run then an append denies", "deny", "python3 tools/gen_x.py && printf x >> GEN.md", gr),
+            ("(gb-15) appending the regenerate text itself denies", "deny", "echo \"python3 tools/gen_x.py\" >> GEN.md", gr),
+            # reads are never judged
+            ("(gb-r1) cat allows", "allow", "cat GEN.md", gr),
+            ("(gb-r2) grep allows", "allow", "grep a GEN.md", gr),
+            ("(gb-r3) an input redirect allows", "allow", "wc -l < GEN.md", gr),
+            ("(gb-r4) diff allows", "allow", "diff GEN.md src.toml", gr),
+            ("(gb-r5) git diff allows", "allow", "git diff -- GEN.md", gr),
+            ("(gb-r6) sed without -i allows", "allow", "sed -n 1p GEN.md", gr),
+            ("(gb-r7) copying a registered file away allows", "allow", "cp GEN.md /tmp/c", gr),
+            ("(gb-r8) a python read allows", "allow", "python3 -c \"print(open('GEN.md').read())\"", gr),
+            ("(gb-r9) a descriptor duplication allows", "allow", "ls 2>&1", gr),
+            ("(gb-r10) a /dev/null redirect allows", "allow", "ls > /dev/null", gr),
+            # every output redirect kind
+            ("(gb-k1) a truncating colon redirect denies", "deny", ": > GEN.md", gr),
+            ("(gb-k2) a clobber redirect denies", "deny", "echo >| GEN.md", gr),
+            ("(gb-k3) a both-streams redirect denies", "deny", "ls &> GEN.md", gr),
+            ("(gb-k4) a both-streams append denies", "deny", "ls &>> GEN.md", gr),
+            ("(gb-k5) a stderr redirect denies", "deny", "ls 2> GEN.md", gr),
+            ("(gb-k6) a read-write fd redirect denies", "deny", "exec 3<> GEN.md", gr),
+            ("(gb-k7) a csh-style redirect to a file denies", "deny", "ls >& GEN.md", gr),
+            ("(gb-k8) a registered first redirect denies (every redirect counts)", "deny", "echo a > GEN.md > /tmp/x", gr),
+            # tee, sed and perl
+            ("(gb-t1) tee denies", "deny", "echo x | tee GEN.md", gr),
+            ("(gb-t2) tee -a denies", "deny", "tee -a GEN.md < src.toml", gr),
+            ("(gb-t3) tee --append -- denies", "deny", "tee --append -- GEN.md < src.toml", gr),
+            ("(gb-t4) sed -i denies", "deny", "sed -i s/a/b/ GEN.md", gr),
+            ("(gb-t5) sed -iSUFFIX denies", "deny", "sed -i.bak s/a/b/ GEN.md", gr),
+            ("(gb-t6) sed --in-place= with -e denies", "deny", "sed --in-place=.b -e s/a/b/ GEN.md", gr),
+            ("(gb-t7) a sed cluster holding i denies", "deny", "sed -ni p GEN.md", gr),
+            ("(gb-t8) perl -pi -e denies", "deny", "perl -pi -e s/a/b/ GEN.md", gr),
+            ("(gb-t9) perl -i.bak -pe denies", "deny", "perl -i.bak -pe s/a/b/ GEN.md", gr),
+            ("(gb-t10) sed without -i allows", "allow", "sed s/a/b/ GEN.md", gr),
+            ("(gb-t11) perl without -i allows", "allow", "perl -ne print GEN.md", gr),
+            ("(gb-t12) sed -i on a source allows", "allow", "sed -i s/a/b/ src.toml", gr),
+            ("(gb-t13) sed --in-pl (a unique long prefix) denies", "deny", "sed --in-pl s/a/b/ GEN.md", gr),
+            ("(gb-t14) truncate denies", "deny", "truncate -s0 GEN.md", gr),
+            ("(gb-t15) dd of= denies", "deny", "dd if=/dev/zero of=GEN.md count=1", gr),
+            ("(gb-t16) dd reading a registered file allows", "allow", "dd if=GEN.md of=/tmp/x", gr),
+            ("(gb-t17) time -o denies", "deny", "/usr/bin/time -o GEN.md true", gr),
+            # cp, mv, ln, install and rsync destinations
+            ("(gb-c1) cp onto a file denies", "deny", "cp a GEN.md", gr),
+            ("(gb-c2) cp into a tree directory joins the basename and denies", "deny", "cp a gen/", gr),
+            ("(gb-c3) cp -t into a tree denies", "deny", "cp -t gen a", gr),
+            ("(gb-c4) cp --parents into a tree denies", "deny", "cp --parents x gen", gr),
+            ("(gb-c5) mv onto a file denies", "deny", "mv a GEN.md", gr),
+            ("(gb-c6) ln -sf onto a file denies", "deny", "ln -sf a GEN.md", gr),
+            ("(gb-c7) install -m onto a file denies", "deny", "install -m644 a GEN.md", gr),
+            ("(gb-c8) install -d inside a tree denies", "deny", "install -d gen/sub", gr),
+            ("(gb-c9) a recursive copy into a tree denies", "deny", "cp -r src/ gen/", gr),
+            ("(gb-c10) cp onto GEN.md.bak allows (equality, not prefix)", "allow", "cp a GEN.md.bak", gr),
+            ("(gb-c11) cp under gen-extra allows (component boundary)", "allow", "cp a gen-extra/x", gr),
+            ("(gb-c12) a recursive merge into the root names no target, so it allows silently", "allow",
+             "cp -r src/. .", gr),
+            ("(gb-c13) the same merge naming GEN.md notes", "allow-note", "cp -r src/. . && ls GEN.md", gr),
+            ("(gb-c14) cp -T onto a tree root denies", "deny", "cp -T a gen", gr),
+            ("(gb-c15) an unknown cp option naming no target allows silently", "allow", "cp --frobnicate a b", gr),
+            ("(gb-c16) an unknown cp option naming GEN.md notes", "allow-note", "cp --frobnicate a GEN.md", gr),
+            ("(gb-y1) rsync onto a file denies", "deny", "rsync a GEN.md", gr),
+            ("(gb-y2) rsync -a with a trailing-slash source onto a tree denies", "deny", "rsync -a src/ gen/", gr),
+            ("(gb-y3) a remote rsync destination allows", "allow", "rsync a host:GEN.md", gr),
+            ("(gb-y4) rsync --dry-run allows", "allow", "rsync --dry-run a GEN.md", gr),
+            ("(gb-y5) rsync --files-from naming GEN.md notes", "allow-note", "rsync --files-from=l . GEN.md", gr),
+            # python -c, parsed and never executed
+            ("(gb-p1) python open for write denies", "deny", "python3 -c \"open('GEN.md','w').write('x')\"", gr),
+            ("(gb-p2) python open mode=a denies", "deny", "python3 -c \"open('GEN.md', mode='a')\"", gr),
+            ("(gb-p3) python Path.write_text denies", "deny",
+             "python3 -c \"import pathlib; pathlib.Path('GEN.md').write_text('x')\"", gr),
+            ("(gb-p4) python shutil.copy denies", "deny", "python3 -c \"import shutil; shutil.copy('a','GEN.md')\"", gr),
+            ("(gb-p5) python open for read allows", "allow", "python3 -c \"open('GEN.md')\"", gr),
+            ("(gb-p6) python open on a computed path notes", "allow-note", "python3 -c \"p='GEN.md'; open(p,'w')\"", gr),
+            ("(gb-p7) python -I -c open for write denies", "deny", "python3 -Ic \"open('GEN.md','x')\"", gr),
+            ("(gb-p8) a python program that does not parse and names GEN.md notes", "allow-note",
+             "python3 -c \"open('GEN.md',\"", gr),
+            ("(gb-p9) python Path.open for write into a tree denies", "deny",
+             "python3 -c \"from pathlib import Path; Path('gen/a').open('w')\"", gr),
+            # tree containment and the boundary
+            ("(gb-e1) a redirect into a tree denies", "deny", "echo x > gen/new.md", gr),
+            ("(gb-e2) a redirect under gen-extra allows", "allow", "echo x > gen-extra/x.md", gr),
+            ("(gb-e3) a block target allows (block exclusion)", "allow", "echo x >> CLAUDE.md", gr),
+            # git restore and sink split (decision b)
+            ("(gb-g1) git checkout -- P restores and notes", "allow-note", "git checkout -- GEN.md", gr),
+            ("(gb-g2) git restore P restores and notes", "allow-note", "git restore GEN.md", gr),
+            ("(gb-g3) git checkout HEAD -- P restores and notes", "allow-note", "git checkout HEAD -- GEN.md", gr),
+            ("(gb-g4) git restore --staged alone is not judged", "allow", "git restore --staged GEN.md", gr),
+            ("(gb-g5) git checkout from another revision denies", "deny", "git checkout HEAD~3 -- GEN.md", gr),
+            ("(gb-g6) git restore --source=REV denies", "deny", "git restore --source=v1 GEN.md", gr),
+            ("(gb-g7) git -C into the registry repo with -s REV denies", "deny", "git -C {gr} restore -s main~1 GEN.md", gr2),
+            ("(gb-g8) git checkout REV -- a tree directory denies", "deny", "git checkout v1 -- gen/", gr),
+            ("(gb-g9) git checkout without -- naming GEN.md notes", "allow-note", "git checkout v1 GEN.md", gr),
+            ("(gb-g10) git checkout REV -- the repo root denies (it holds a target)", "deny", "git checkout v1 -- .", gr),
+            ("(gb-g11) git restore -SW --source=REV denies", "deny", "git restore -SW --source=v1 GEN.md", gr),
+            ("(gb-g12) a git branch switch allows silently", "allow", "git checkout main", gr),
+            ("(gb-g13) git --git-dir naming GEN.md notes", "allow-note", "git --git-dir=x checkout v1 -- GEN.md", gr),
+            ("(gb-g14) git pathspec magic naming GEN.md notes", "allow-note", "git checkout v1 -- :/GEN.md", gr),
+            # wrapper peeling
+            ("(gb-w1) sudo tee denies", "deny", "sudo tee GEN.md", gr),
+            ("(gb-w2) env VAR sed -i denies", "deny", "env A=1 sed -i s/a/b/ GEN.md", gr),
+            ("(gb-w3) timeout cp denies", "deny", "timeout 5 cp a GEN.md", gr),
+            ("(gb-w4) nice -n cp denies", "deny", "nice -n 10 cp a GEN.md", gr),
+            ("(gb-w5) command cp denies", "deny", "command cp a GEN.md", gr),
+            ("(gb-w6) a leading assignment then cp denies", "deny", "A=1 cp a GEN.md", gr),
+            ("(gb-w7) env -C makes the directory unknown, so it notes", "allow-note", "env -C /tmp cp a GEN.md", gr),
+            ("(gb-w8) an unmodelled sudo option naming GEN.md notes", "allow-note", "sudo -u x tee GEN.md", gr),
+            # working-directory tracking
+            ("(gb-d1) cd into the registry repo then append denies", "deny", "cd {gr} && echo x >> GEN.md", gr2),
+            ("(gb-d2) cd into a tree then a relative redirect denies", "deny", "cd gen && echo x > part.md", gr),
+            ("(gb-d3) cd - makes the directory unknown, so it notes", "allow-note", "cd - && echo x >> GEN.md", gr),
+            ("(gb-d4) a subshell cd keeps its redirect outside", "allow", "(cd /tmp && echo x > GEN.md)", gr),
+            ("(gb-d5) a subshell cd is undone after the subshell", "deny", "(cd /tmp) && echo x > GEN.md", gr),
+            ("(gb-d6) a cd in a pipeline changes nothing", "deny", "cd /tmp | true; echo x > GEN.md", gr),
+            ("(gb-d7) a cd in a background job changes nothing", "deny", "cd /tmp & echo x > GEN.md", gr),
+            ("(gb-d8) a relative sink with no session cwd naming GEN.md allows silently (no session repo)",
+             "allow", "echo x > GEN.md", None),
+            ("(gb-d9) an absolute sink with no session cwd still denies", "deny", "echo x > {gr}/GEN.md", None),
+            # the cannot-evaluate posture (decision d): the mention filter
+            ("(gb-m1) an opaque redirect naming nothing allows silently", "allow", "echo x > \"$F\"", gr),
+            ("(gb-m2) an opaque redirect in a command naming GEN.md notes", "allow-note", "F=GEN.md; echo x > \"$F\"", gr),
+            ("(gb-m3) the same with no registry allows silently", "allow", "F=GEN.md; echo x > \"$F\"", gr2),
+            ("(gb-m4) an unfinished lex naming GEN.md notes", "allow-note", "cat <<< x > GEN.md", gr),
+            ("(gb-m5) a mention bounded by a path character is no mention", "allow", "F=GEN.md.bak; echo x > \"$F\"", gr),
+            # the target length bound: a sink over 4,096 bytes is never resolved (no write syscall accepts it)
+            ("(gb-n1) a sink of exactly 4096 bytes is judged at the bound (a tree member, so it denies)", "deny",
+             "echo x > " + _gb_deep_at, gr),
+            ("(gb-n2) a sink one byte over the bound is uncleared and notes (the command names gen)", "allow-note",
+             "echo x > " + _gb_deep_over, gr),
+            ("(gb-n3) an over-long sink naming no registered target allows silently", "allow",
+             "echo x > /x/" + "a" * 4200, gr),
+            ("(gb-n4) a copy whose joined destination is over the bound is uncleared and notes", "allow-note",
+             "cp -t gen " + "a" * 4200, gr),
+            # pinned residuals: each allows, so a future coverage claim must update the residue
+            ("(gb-x1) eval spells no sink", "allow", "eval \"echo x > GEN.md\"", gr),
+            ("(gb-x2) an sh -c string spells no sink", "allow", "sh -c 'echo x > GEN.md'", gr),
+            ("(gb-x3) an invoked script spells no sink", "allow", "./fix.sh", gr),
+            ("(gb-x4) a heredoc-fed interpreter naming GEN.md notes only", "allow-note",
+             "python3 - <<EOF\nopen('GEN.md','w')\nEOF", gr),
+            ("(gb-x5) deleting a generated file is not judged", "allow", "rm GEN.md", gr),
+            # registry states
+            ("(gb-s1) no registry allows", "allow", "echo x >> GEN.md", gr2),
+            ("(gb-s2) a malformed registry denies a sink into its repo", "deny", "echo x >> GEN.md", gr3),
+            ("(gb-s3) a malformed registry leaves the registry generator open", "allow", "python3 tools/gen_gensrc.py", gr3),
+            ("(gb-s4) a malformed registry leaves a git restore of it open", "allow", "git checkout -- .aiqt/gensrc.json", gr3),
+            ("(gb-s5) a malformed registry does not judge a sink elsewhere", "allow", "echo x > /tmp/y", gr3),
+            ("(gb-s6) a malformed session registry denies an uncleared write", "deny", "echo x > \"$F\"", gr3),
+            ("(gb-s7) a target outside every git work tree allows silently", "allow", "echo x >> " + gng + "/GEN.md", gng),
+            # the 4-root budget, in command order
+            ("(gb-b1) the registry repo first among five roots denies", "deny",
+             "echo x > {gr}/GEN.md; echo x > {b1}/f; echo x > {b2}/f; echo x > {b3}/f; echo x > {b4}/f", gr),
+            ("(gb-b2) the registry repo fifth is past the budget and notes", "allow-note",
+             "echo x > {b1}/f; echo x > {b2}/f; echo x > {b3}/f; echo x > {b4}/f; echo x > {gr}/GEN.md", gr),
+            # the authoring scope on the Bash channel (the shipped registry)
+            ("(gb-a1) an adopter tree may write its own .claude/settings.json", "allow",
+             "echo {} > .claude/settings.json", gad),
+            ("(gb-a2) the authoring tree denies a write to .claude/settings.json", "deny",
+             "echo {} > .claude/settings.json", gau),
+            ("(gb-a3) an adopter tree still denies an unscoped registered target", "deny",
+             "echo x >> .claude/RULES-INDEX.md", gad),
+        ]
+        if len({case[0] for case in _gb_cases}) != len(_gb_cases):
+            failures.append("(gb-labels) two gb cases share a label")
+        for _gb_label, _gb_want, _gb_cmd, _gb_cwd in _gb_cases:
+            bexpect(_gb_label, _gb_want, _gb_cmd, _gb_cwd)
+        # (gb-01-names) the incident deny names the source and the regenerate command; (gb-s2-names) the
+        # malformed-registry deny names the registry; (gb-g1-names) the restore note names the regenerate command.
+        _gb_why = breason("printf x >> {gr}/GEN.md", gr)
+        if "src.toml" not in _gb_why or "python3 tools/gen_x.py" not in _gb_why:
+            failures.append("(gb-01-names) the Bash deny must name src.toml and python3 tools/gen_x.py, got {!r}"
+                            .format(_gb_why))
+        _gb_why = breason("echo x >> GEN.md", gr3)
+        if ".aiqt/gensrc.json" not in _gb_why or "PRESENT but could not be read" not in _gb_why:
+            failures.append("(gb-s2-names) the malformed-registry deny must name the registry, got {!r}"
+                            .format(_gb_why))
+        _gb_code, _gb_obj, _gb_err = aiqt_hooks.gensrc_guard(bdata("git restore GEN.md", gr))
+        if "python3 tools/gen_x.py" not in str((_gb_obj or {}).get("systemMessage")):
+            failures.append("(gb-g1-names) the restore note must name the regenerate command, got {!r}"
+                            .format(_gb_obj))
+        # (gb-f*) fail-closed inputs: a Bash payload whose command cannot be read, and a fault inside the
+        # detector, deny (the detector never lets an unread command through).
+        for _gb_n, _gb_input in enumerate(({"command": None}, {"command": ""}, {"command": 7}, {}, "not-a-dict")):
+            _gb_got = gdecide({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": _gb_input,
+                               "cwd": gr})
+            if _gb_got != "deny":
+                failures.append("(gb-f-input-{}) an unreadable Bash command must deny, got {}".format(_gb_n, _gb_got))
+        _gb_real_effects = aiqt_hooks._bash_write_effects
+
+        def _gb_raise(*_a, **_k):
+            raise OSError("injected detector fault (gb-f-fault)")
+
+        try:
+            aiqt_hooks._bash_write_effects = _gb_raise
+            bexpect("(gb-f-fault) a fault inside the detector denies fail-closed", "deny", "echo x > /tmp/y", gr)
+        finally:
+            aiqt_hooks._bash_write_effects = _gb_real_effects
+        # (gs-m2, gs-l2) the Write branch is target-rooted: a registered target denies whatever the session cwd,
+        # and the session cwd is needed only for a relative file_path.
+        gexpect("(gs-m2) Write a registered target from another repo cwd DENIES (target-rooted)", "deny",
+                tool="Write", file_path=os.path.join(gr, "GEN.md"), cwd=gr2)
+        gexpect("(gs-l2) a MultiEdit relative file_path with no cwd allows with a note", "allow-note",
+                tool="MultiEdit", file_path="GEN.md", edits=[{"old_string": "a", "new_string": "b"}],
+                with_cwd=False)
+        # (gs-dp*) the target length bound on the Write channel, at both ends: exactly 4096 bytes is judged
+        # (a tree member, so it denies); one byte over is never resolved and allows with a note.
+        gexpect("(gs-dp1) a Write target of exactly 4096 bytes is judged at the bound", "deny",
+                tool="Write", file_path=_gb_deep_at, cwd=gr)
+        gexpect("(gs-dp2) a Write target one byte over the bound allows with a note", "allow-note",
+                tool="Write", file_path=_gb_deep_over, cwd=gr)
+        # (gb-wire) the manifest matcher covers Bash, and the generated project settings and plugin hooks.json
+        # carry it unchanged (tools/gen_hooks.py renders both).
+        try:
+            _gb_hook = [h for h in load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]
+                        if h.get("id") == "gensrc-edit-guard"][0]
+            _gb_settings = json.loads((repo_root() / ".claude" / "settings.json").read_text(encoding="utf-8"))
+            _gb_plugin = json.loads((repo_root() / "plugin" / "aiqt-guardrails-hooks" / "hooks" / "hooks.json")
+                                    .read_text(encoding="utf-8"))
+            _gb_matchers = {g.get("matcher") for g in _gb_plugin["hooks"]["PreToolUse"]
+                            if any("gensrc_guard" in json.dumps(x) for x in g.get("hooks", []))}
+            if not re.fullmatch(_gb_hook["matcher"], "Bash"):
+                failures.append("(gb-wire) the gensrc-edit-guard matcher must match Bash")
+            if _gb_settings["hooks"]["PreToolUse"][0]["matcher"] != _gb_hook["matcher"]:
+                failures.append("(gb-wire-settings) .claude/settings.json must carry the manifest gensrc matcher")
+            if _gb_matchers != {_gb_hook["matcher"]}:
+                failures.append("(gb-wire-plugin) hooks.json must carry the manifest gensrc matcher, got {!r}"
+                                .format(_gb_matchers))
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+            failures.append("(gb-wire-read) could not read the gensrc wiring: {}".format(exc))
+        # (gb-parse) the extracted option parser is the review-dispatch-pin parser: equal results over sampled
+        # cp, mv and ln words (the rdp vectors elsewhere pin its outcomes), None for a program outside the table,
+        # and the gensrc-only specs parse their own options while the rdp table stays without them.
+        for _gb_name in ("cp", "mv", "ln"):
+            for _gb_args in (["a", "b"], ["-r", "a", "b"], ["-t", "d", "a"], ["--target-directory=d", "a"],
+                             ["-T", "a", "b"], ["--parents", "x", "d"], ["-S", ".b", "a", "b"], ["--frob", "a"],
+                             ["--", "-a", "b"], ["-sf", "a", "b"], ["--no-t", "a", "b"]):
+                if (aiqt_hooks._writer_options_parse(aiqt_hooks._RDP_WRITER_OPTIONS[_gb_name], _gb_args)
+                        != aiqt_hooks._rdp_writer_parse(_gb_name, _gb_args)):
+                    failures.append("(gb-parse-{}) the shared parser disagrees with _rdp_writer_parse on {!r}"
+                                    .format(_gb_name, _gb_args))
+        if aiqt_hooks._rdp_writer_parse("install", ["-d", "x"]) is not None or (
+                aiqt_hooks._writer_options_parse(None, ["a"]) is not None):
+            failures.append("(gb-parse-table) install stays outside the rdp table, and no spec parses nothing")
+        if aiqt_hooks._writer_options_parse(aiqt_hooks._gensrc_writer_spec("install"), ["-d", "x"]) != (
+                {"directory"}, ["x"], [], []):
+            failures.append("(gb-parse-install) the gensrc install spec must read -d as directory")
 
         # === abspth: absolute paths across typed-path tools and the Bash cwd floor (GS-7) ============
         # FAILING-FIRST battery: no abspth coverage existed before GS-7, and every case here is one the
@@ -18154,7 +18472,8 @@ def _main_isolated(monitor):
 
     _bash_guards = [aiqt_hooks.diff_source_pretool, aiqt_hooks.bash_absolute_paths,
                     aiqt_hooks.git_explicit_binding, aiqt_hooks.git_discard, aiqt_hooks.protected_line,
-                    aiqt_hooks.branch_root, aiqt_hooks.gate_weakening, aiqt_hooks.commit_msg_subst]
+                    aiqt_hooks.branch_root, aiqt_hooks.gate_weakening, aiqt_hooks.commit_msg_subst,
+                    aiqt_hooks.gensrc_guard]
     _bash_vectors = [
         "git status", "ls -la", "git diff", "git diff --color=always | grep foo", "/usr/bin/git diff",
         "git checkout -- file.txt", "git reset --hard", "git reset --soft", "git clean -fd",
@@ -18380,10 +18699,12 @@ def _main_isolated(monitor):
           "literal marker inside single-quoted or ANSI-C $'...' quoting is NOT a substitution and ALLOWS "
           "(finding 15); the fallback and unreadable command deny fail-safe. gensrc (gensrc_guard) "
           "DENIES-and-educates a hand-edit of a registered generated artefact (edit the source and "
-          "regenerate) AND a PRESENT-but-unreadable/malformed registry (fail-closed, finding 8), and ALLOWS "
-          "with a note the remaining cannot-evaluate branches (a non-git session, an outside-repo target, a "
-          "malformed payload), the CI drift gate remaining the backstop; a genuinely-absent registry is the "
-          "inert allow and a missing tool_name also denies. secsec (secrets_shift_left) still "
+          "regenerate), by Write/Edit/MultiEdit or by a literal Bash write sink, AND a PRESENT-but-unreadable/"
+          "malformed registry (fail-closed, finding 8); it ALLOWS reads and generator runs before any registry "
+          "read, notes a git restore of a registered path, ALLOWS with a note the remaining cannot-evaluate "
+          "branches (a target outside every work tree, a malformed payload, an uncleared Bash write that "
+          "names a registered target), the CI drift gate remaining the backstop; a genuinely-absent registry "
+          "is the inert allow, and a missing tool_name, an unreadable Bash command and a detector fault deny. secsec (secrets_shift_left) still "
           "DENIES a shaped secret in a Write/Edit/Bash write-form (unchanged by the no-ask work) and "
           "fails closed on a missing tool_name or target field. abspth's typed-path predicate still "
           "DENIES a required-absolute relative/drive-relative/tilde/UNC-less path and ALLOWS an absolute "
