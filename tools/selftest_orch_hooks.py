@@ -57,6 +57,7 @@ import subprocess
 import tempfile
 import shutil
 import threading
+import time
 import datetime
 import hashlib
 from pathlib import Path
@@ -9454,6 +9455,67 @@ def _main_isolated(report_path=None):
               "deny")
         check("trunc/fg-metachar-comment-quote-shift-denies",
               _verdict(bg("echo a;# it's\nsleep 5 & echo done # '", rib=False)), "deny")
+        # The shared '#' comment rule (bash 5.3 reaches the `&` or the pipe in each non-control row below): a
+        # `#` opens a comment only in a certain context, and a `#` whose reading depends on context (right
+        # after a `)`, or after a blank inside an open ${...} or backquote substitution) is cannot-evaluate:
+        # the foreground scan denies it like an unbalanced quote, and the background branch denies it
+        # because a truncating sink could follow it. Each was a silent allow (or an allow-note) at the base
+        # commit. The blank-led `#` rows are CONTROLS: a `#` after a blank with nothing open is a comment
+        # that drops the rest of the line, as it does in bash.
+        check("trunc/fg-subst-glued-hash-detach-denies",
+              _verdict(bg("x=$(true)#;\r# ; sleep 5 &", rib=False)), "deny")
+        check("trunc/fg-param-expansion-hash-detach-denies",
+              _verdict(bg("echo ${x:- #} & sleep 5", rib=False)), "deny")
+        check("trunc/fg-backquote-comment-detach-denies",
+              _verdict(bg("x=`true #` & sleep 5", rib=False)), "deny")
+        check("trunc/fg-subst-spaced-hash-comment-allows",
+              _verdict(bg("x=$(true) # & sleep 5", rib=False)), "allow")
+        check("trunc/bg-subst-glued-hash-head-denies",
+              _verdict(bg("x=$(true)#; python3 build.py | head")), "deny")
+        check("trunc/bg-subst-spaced-hash-head-allows-note",
+              _verdict(bg("x=$(true) #; python3 build.py | head")), "warn")
+        # The lexer vectors of the shared comment rule, run as foreground commands: bash 5.3.9 runs the RUN
+        # or RAN command in each (vectors a and b detach it with a bare `&`), and each `#` is right after a
+        # `)` or at a word start inside an open ${...}, so the foreground scan denies every one as
+        # unbalanced. At the base commit a and b denied as a detach and c to i allowed; the earlier comment
+        # rule allowed all nine.
+        _fg_hash_vectors = (
+            'case x in x)# "\n :;; esac; printf RUN & # "\nwait',
+            'echo ${x:-$(true # "\n)} & printf RUN # "\nwait',
+            "case a in a)# it's\n echo RAN;; esac # '",
+            "echo case; (true)# it's\n echo RAN # '",
+            "echo ${x:-$(echo a # it's\n)}; echo RAN # '",
+            "${ true; # it's\n}; echo RAN # '",
+            "${| true; # it's\n}; echo RAN # '",
+            "f()# it's\n{ echo RAN; }\nf # '",
+            "[[ x =~ (a)#b ]] || echo RAN",
+        )
+        check("trunc/fg-hash-lexer-vectors-deny",
+              [_verdict(bg(v, rib=False)) for v in _fg_hash_vectors], ["deny"] * len(_fg_hash_vectors))
+        check("trunc/fg-hash-lexer-vectors-unbalanced",
+              [aiqt_hooks._orch_foreground_detach_kind(v) for v in _fg_hash_vectors],
+              ["unbalanced"] * len(_fg_hash_vectors))
+        # A backslash-newline changes nothing about the comment rule (bash removes it first): after
+        # `echo a \<newline>` a `#` with nothing open is a comment, so its apostrophe does not hide the
+        # bare `&` on the next line (bash 5.3.9 starts a background job there). Inside a double-quoted
+        # "$(...)" or backquote substitution a `#` after a blank is a comment to bash that runs past the
+        # string's closing quote (bash starts a background job in both), so the scan denies it as
+        # unbalanced; a `#` inside a single-quoted span there, or inside a "${...}", stays text (that last
+        # check is a CONTROL: it allows at fc11d9bc and at dfac8602 as well).
+        check("trunc/fg-continuation-hash-comment-detach-denies",
+              [_verdict(bg("echo a \\\n# it's\nsleep 5 & # '", rib=False)),
+               aiqt_hooks._orch_foreground_detach_kind("echo a \\\n# it's\nsleep 5 & # '")],
+              ["deny", "detach"])
+        check("trunc/fg-dq-subst-hash-denies",
+              [_verdict(bg('echo "$(echo a # "\n)" & sleep 5 # "', rib=False)),
+               aiqt_hooks._orch_foreground_detach_kind('echo "$(echo a # "\n)" & sleep 5 # "')],
+              ["deny", "unbalanced"])
+        check("trunc/fg-dq-backquote-hash-denies",
+              aiqt_hooks._orch_foreground_detach_kind('echo "`echo a # "`" & sleep 5 # "'), "unbalanced")
+        check("trunc/fg-dq-quoted-hash-allows",
+              [_verdict(bg("echo \"$(git log --format='%h #%s' -1)\"", rib=False)),
+               _verdict(bg('echo "${x#y}" "$(basename ${f#x})"', rib=False))],
+              ["allow", "allow"])
         # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
         # that a bare '&' was found (before this fix it reused the bare-& detach reason).
         uq = bg("cat > f <<'EOF'\nthe user's file\nEOF", rib=False)
@@ -10684,6 +10746,77 @@ def _main_isolated(report_path=None):
         # a redirect on the `done` terminator makes its raw not a bare `done`: 'none', not a wrong match.
         check("wl/done-redirect-none",
               clf("while true; do gh x; sleep 1; done >log &"), "none")
+        # The shared '#' comment rule: a `#` after a blank inside an open ${...} is uncertain (an ordinary
+        # ${...} reads it as text, a ${ cmd; } as a comment), so the classifier judges each reading of it on
+        # its own and keeps the strictest answer: the word-text reading, the one bash takes here, is the
+        # canonical poll loop, so it is a 'match' (at the base commit the `#` hid the rest of the line and the
+        # loop read 'none'). A `#` inside a backquote substitution is not enumerated (bash ends that comment
+        # at the closing backquote); there the classifier reads the command's text and finds every word of
+        # the canonical shape, so it is a 'match' too, which is what bash runs. The raw word scan reads its
+        # own segment by the same rule and returns no words for such a `#`; a blank-led `#` with nothing open
+        # stays a comment (a CONTROL: fc11d9bc and dfac8602 return the same words). Where that text holds
+        # quoting it does not decode, the classifier counts the probe as present, the one conjunct it reads
+        # from decoded tokens (fc11d9bc decoded --w$'a'tch to --watch and matched; e2fe8d72 read
+        # 'indeterminate'). An escaped backquote is plain word text to bash outside a backquote substitution
+        # (bash 5.3.9 prints `# for echo \`#), so the raw word scan reads past the '#' after it.
+        check("wl/param-expansion-hash-match",
+              clf("while true; do gh pr checks 42; sleep 30; echo ${x:- #}; done &"), "match")
+        check("wl/backquote-hash-match",
+              clf("while true; do gh pr checks 42; sleep 30; x=`true #`; done &"), "match")
+        check("wl/backquote-hash-no-probe-indeterminate",
+              clf("while true; do sleep 30; x=`true #`; done &"), "indeterminate")
+        check("wl/raw-words-param-expansion-hash-uncertain",
+              aiqt_hooks._orch_raw_unquoted_words("echo ${x:- #} done"), [])
+        check("wl/raw-words-backquote-hash-uncertain",
+              aiqt_hooks._orch_raw_unquoted_words("echo `true # c` done"), [])
+        check("wl/raw-words-spaced-comment-dropped",
+              aiqt_hooks._orch_raw_unquoted_words("echo x # done"), ["echo", "x"])
+        check("wl/backquote-hash-ansi-c-probe-match",
+              clf("echo `#`\nwhile true; do sleep 30; x --w$'a'tch; done &"), "match")
+        check("wl/raw-words-escaped-backquote-hash-word",
+              aiqt_hooks._orch_raw_unquoted_words("echo \\`# done"), ["echo", "done"])
+        # A `#` inside a command substitution a double-quoted word holds is judged by the same rule inside the
+        # substitution skip (_skip_quoting), so the lexer reads it under both readings; the raw word scan reads
+        # it as word text first and as a comment where that does not scan, so a loop header beside that
+        # double-quoted word is still counted. Without that, the header segment read no words and the canonical
+        # loop below read 'indeterminate', where fc11d9bc's lexer and main's both read 'match'.
+        # wl/dq-subst-hash-header-match and wl/raw-words-dq-subst-hash-word-text are REGRESSION GUARDS: they
+        # pass on main by design (main's substitution skip reads no '#' at all) and fail only where the skip's
+        # comment rule stops the scan from reading the header's words again. wl/raw-words-dq-subst-hash-comment
+        # is the one of the three that fails on main (main reads the apostrophe in the comment as a quote).
+        check("wl/dq-subst-hash-header-match",
+              clf('for x in "$(echo a # (b)\n)"; do sleep 5; gh pr checks 1; done &'), "match")
+        check("wl/raw-words-dq-subst-hash-word-text",
+              aiqt_hooks._orch_raw_unquoted_words('for x in "$(echo a # (b)\n)"'), ["for", "x", "in"])
+        check("wl/raw-words-dq-subst-hash-comment",
+              aiqt_hooks._orch_raw_unquoted_words("for x in \"$(echo a # it's\n)\" y"), ["for", "x", "in", "y"])
+        # COST. The poll-loop classifier and the raw word scan read a '#' inside a double-quoted substitution
+        # through the lexer's substitution skip, and the foreground detach scan keeps a comment-rule nesting
+        # stack of its own; each takes time linear in the command's length (COST in the comment above
+        # _nest_track in aiqt_hooks.py), so each must decide these inputs in under 1 s of CPU: a 256 KiB line
+        # of blank-led '#' inside a double-quoted substitution, and a 128 KiB run of open parentheses and
+        # backquote substitutions (the hook self-test's lex-cost inputs). Measured on one host by timing one
+        # call of each with time.process_time, the code before the linear skip and the counted nesting stack
+        # took 14.85 s and 9.25 s in the classifier, 14.84 s in the word scan and 13.90 s in the foreground
+        # scan, and this code at most 0.09 s on any of them (the classifier on the nesting input). The word
+        # scan on the nesting input (0.02 s) and the foreground scan on the comment line (under 0.01 s) stayed
+        # under the bound on both, so neither is checked.
+        _cost_long = 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'
+        _cost_deep = "(" * 56000 + " `a`" * (56000 // 3)
+
+        def _cost_cpu(fn, command):
+            """'under 1 s' when fn(command) takes under 1 s of CPU, else the time it took."""
+            t0 = time.process_time()
+            fn(command)
+            cpu = time.process_time() - t0
+            return "under 1 s" if cpu < 1.0 else "{:.2f} s of CPU on {} characters".format(cpu, len(command))
+
+        check("wl/cost-long-comment-line", _cost_cpu(clf, _cost_long), "under 1 s")
+        check("wl/cost-deep-nesting", _cost_cpu(clf, _cost_deep), "under 1 s")
+        check("wl/raw-words-cost-long-comment-line", _cost_cpu(aiqt_hooks._orch_raw_unquoted_words, _cost_long),
+              "under 1 s")
+        check("trunc/fg-scan-cost-deep-nesting", _cost_cpu(aiqt_hooks._orch_foreground_detach_kind, _cost_deep),
+              "under 1 s")
         # run_in_background true with an inner trailing `done &` is still 'match' (predicate ignores rib).
         check("wl/deny-rib-true-inner-detach", clf(BASE), "match")
         # NEGATIVE fixtures (this control): every one is 'none'.
