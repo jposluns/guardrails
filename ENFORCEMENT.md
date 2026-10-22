@@ -11,13 +11,13 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Gate-linked (class a) | 8 |
 | Gate-linked (class a), partial | 0 |
 | Gate-linked (class c only) | 1 |
-| Gate-linked (class c only), partial | 7 |
+| Gate-linked (class c only), partial | 8 |
 | Hook-linked | 19 |
 | Hook-linked, partial | 3 |
 | Preview only | 2 |
 | Preview only, partial | 0 |
 | Pending | 0 |
-| No control | 92 |
+| No control | 91 |
 
 ## Rules
 
@@ -42,7 +42,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | A current timestamp is read from the clock | `tstamp` | Hook-linked | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
 | Validate an inferred premise before acting | `valinf` | No control | No shipped control cites this rule. |
 | Verify a fix is in its commit | `vfxcmt` | Hook-linked, partial | `hook:review-dispatch-pin`, class c |
-| Anything wrong is fixed first | `actbef` | No control | No shipped control cites this rule. |
+| Anything wrong is fixed first | `actbef` | Gate-linked (class c only), partial | `gate:release-cut`, class c |
 | Attestation lines are harness-owned | `attint` | No control | No shipped control cites this rule. |
 | Branch and merge only on green | `artbr1` | Hook-linked | `hook:protected-line-guard`, class b |
 | Cut branches from the live protected line and re-home after a rewrite | `brnrot` | Gate-linked (class c only), partial | `gate:branch-root`, class c; `hook:branch-root-guard`, class c |
@@ -582,6 +582,20 @@ Technical limits (from the enforcement ledger):
 
 ```
 A byte-identity drift gate over the artefact tools/gen_reference_facts.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.
+```
+
+### `gate:release-cut`
+
+- Platform: `ci`
+- Default: `block`
+- Entry point: `tools/check_release_cut.py`
+- Class: `c`
+- Channel: `repository gate`
+
+Technical limits (from the enforcement ledger):
+
+```
+Checks declared root-changelog release transitions, evaluating HEAD, index and working-file snapshots separately. For pull_request events or when GITHUB_BASE_REF is set, requires that variable to name a resolvable origin tracking branch and a merge HEAD whose raw first parent equals that tracking tip; comparison uses that first parent with object substitution disabled. Missing bindings, non-merge HEADs and mismatched tips fail closed (exit 2). In GitHub Actions only pull_request and push events are supported; push requires --protected equal to refs/remotes/origin/GITHUB_REF_NAME (origin/BRANCH is normalized) and --base equal to the workflow-supplied PUSH_BEFORE value, with the event naming a branch and HEAD equal to its protected tracking tip. The full before OID must precede HEAD on its raw first-parent chain; every transition in that range is evaluated separately, including its declaration. Empty ranges and non-first-parent bases fail closed. An all-zero before is accepted only for a proven root HEAD; new branches with pre-existing history are refused. Every local path requires --protected (a full ref or origin/BRANCH) to resolve to the same commit as origin/HEAD's target, and omitting it selects that target; a local --base must equal the unique merge base of HEAD and that protected tip and then enables the same first-parent range check. A merge base equal to HEAD with a different target is refused; without --base the local tip path checks only the last first-parent transition, and a local --base at the tip is an empty range that fails closed; local runs off the tip without --base, and PR runs, compare endpoints only, so intermediate commits between the base and HEAD are not evaluated. Explicit refs must pass check-ref-format and resolve; origin/HEAD itself is refused as ambiguous. PR runs reject both overrides. Full event-payload authentication, the authority of the workflow environment and of local origin/HEAD configuration, and remote freshness remain outside coverage. Execution-report emission and tools/selftest_checks.toml registration remain deferred; wrapper coverage is not claimed. A matching declaration is author-controlled and does not prove authorization, readiness or semantic release scope. Other version sources, intermediate transitions inside a squash, atomicity of intermediate commits and freshness of unfetched remote refs remain outside coverage. Snapshots are sampled separately, so callers must exclude concurrent writers. Committed and index reads bypass checkout filters; transformed working files can cause refusal. Input-path submodules and symlinks are refused rather than traversed. Safe working-file traversal requires POSIX descriptor-relative no-follow operations. An optional .aiqt/pending-fixes.toml record is sampled the same way and refuses the cut (exit 1) while any item it lists is open, naming each open item; a cut that removes a record still listing open items is refused the same way (exit 1), naming them. A present record that is malformed or a symlink fails closed (exit 2) on every transition, so a malformed base record also blocks the very change that repairs it; the record's release binding is checked only on a cut, where a record bound to another release fails closed (exit 2), and a change that cuts nothing does not read the binding at all. Each id, rationale and target must hold a non-whitespace character; a blank or whitespace-only value fails closed (exit 2). The list is hand-kept and author-controlled, so it shows currency for the items it names, never completeness of what is wrong; when neither snapshot holds a record there is no pending-fix check at all, editing an item to done passes, and a deferred item passes on its recorded rationale and target, whose adequacy is not judged; apart from open items in a record the cut removes and a base record that cannot be parsed, the base record's contents do not affect the verdict. This repository holds no pending-fixes record today, so the pending-fix refusal can fire only after one is committed. Enforcement depends on trusted executable provenance, gate code, repository configuration and protected-branch review.
 ```
 
 ### `gate:renderers-drift`
