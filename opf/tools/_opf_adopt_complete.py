@@ -9,7 +9,7 @@ completion-check failure or cannot-evaluate reports incomplete and retires nothi
 inactive until homes 2) and 4.2 (C-EVIDENCE-ENUM MUST NOT run or read anything on homes 1; the section 14.1
 completion checks carry the evidence digest verification). Check 5 (wiring) verifies the deny-capable
 enforcement surface is installed as planned and runs its four probes through a caller-supplied prober, but
-it is never VALID in this release: the shipped pack carries no deny program and no live probe adapter (the
+it is never VALID in this release: the shipped pack carries deny programs but no live probe adapter (the
 deferred enforcement pack, PR6), so with every other condition met it is CANNOT-EVALUATE naming PR6, and the
 roster this module reports is never green on its own (roster_green requires all six checks VALID).
 
@@ -130,8 +130,8 @@ that disable Actions or this workflow; it does not read the opf/tools/opf.py the
 remote actions the template names by tag (actions/checkout, actions/setup-python) or the runner image; it
 compares against the template beside this evaluator, so a later pack release that changes the template
 leaves a plan whose recorded workflow digest pins the earlier template CANNOT-EVALUATE until it is planned
-again; and it is not a run of CI. Check 5 is CANNOT-EVALUATE until PR6 ships the pack's deny programs and
-their probe adapters (PR6_DENY_PROBES_SHIPPED), so the roster cannot be green in this release on check 5
+again; and it is not a run of CI. Check 5 is CANNOT-EVALUATE until PR6 ships the probe adapters for the
+pack's deny programs (PR6_DENY_PROBES_SHIPPED), so the roster cannot be green in this release on check 5
 alone either; its verdict is only as faithful as the caller's prober, which this module does not
 authenticate (in this release a prober can only be a fixture); a probe asks one representative target per
 probe (the store manifest, one file name under the run's adoption archive, one planned view), not every
@@ -765,16 +765,18 @@ WIRING_PROBES = (("store-write", "denied", "direct", "a direct store write"),
 # The file name the archive-write probe names under this run's adoption archive (a probe asks the surface
 # for its decision; nothing is written there).
 _ARCHIVE_PROBE = "opf-wiring-probe.md"
-# Spec 14.1 check 5 requires the installed pack probed on the live tree. The shipped pack carries no deny
-# program (opf/enforcement holds the CI floor only) and no live probe adapter for any platform; both are the
-# deferred enforcement pack (PR6). This is the one switch for it: while it is False, check 5 is
-# CANNOT-EVALUATE naming PR6 once every other check-5 condition holds, so no prober (a fixture included)
-# makes it VALID. Set it True only in the release that ships PR6's deny programs and probe adapters.
+# Spec 14.1 check 5 requires the installed pack probed on the live tree. The shipped pack carries the deny
+# programs of both probed rows (opf/enforcement/claude/pretooluse_deny.py and
+# opf/enforcement/precommit/pre-commit) but no live probe adapter for any platform, nothing that runs them
+# against the installed tree; that adapter is the deferred enforcement pack (PR6). This is the one switch for
+# it: while it is False, check 5 is CANNOT-EVALUATE naming PR6 once every other check-5 condition holds, so no
+# prober (a fixture included) makes it VALID. Set it True only in the release that ships PR6's probe adapters.
 PR6_DENY_PROBES_SHIPPED = False
-_PR6_DEFERRED = ("the shipped enforcement pack carries no deny program and no live probe adapter for any "
-                 "platform (opf/enforcement holds the CI floor only); spec 14.1 check 5 requires the installed "
-                 "pack probed on the live tree, which is the deferred enforcement pack (PR6), so this check "
-                 "cannot be VALID until PR6 ships")
+_PR6_DEFERRED = ("the shipped enforcement pack carries the deny programs of the probed rows (the Claude Code "
+                 "deny hook and the staged-snapshot pre-commit check) but no live probe adapter for any "
+                 "platform, nothing that runs them against the installed tree; spec 14.1 check 5 requires the "
+                 "installed pack probed on the live tree, which is the deferred enforcement pack (PR6), so this "
+                 "check cannot be VALID until PR6 ships")
 
 
 def _wiring_probes(ev):
@@ -957,16 +959,31 @@ _MOVE_DEST = ".working/archive/moved/adopter/MOVE.md"
 _CONSUMER = "consumer/USES.md"
 _CONSUMER_OLD, _CONSUMER_NEW = b"old consumer\n", b"new consumer\n"
 # The enforcement members install-pack plants beside the CI floor: the pre-commit launchers and the tool entry
-# point both launcher rows bind under the opf/ mirror (_opf_adopt.canonical_plan_bindings), the deny hook and
-# the instruction files. Check 1's destination sweep owns each but the tool entry point, a CI member too.
+# point both launcher rows bind under the opf/ mirror (_opf_adopt.canonical_plan_bindings), the deny hook's
+# registration and the instruction files; _pack adds the deny hook itself. Check 1's destination sweep owns
+# each but the tool entry point, a CI member too.
 _PACK = {"opf/enforcement/precommit/pre-commit": b"#!/bin/sh\nexit 0\n",
          "opf/enforcement/precommit/install.sh": b"#!/bin/sh\nexit 0\n",
          "opf/tools/opf.py": b"tool entry point\n", ".claude/settings.json": b"{}\n",
          "AGENTS.md": b"agents instructions\n", "GEMINI.md": b"gemini instructions\n",
          ".cursor/rules/opf.mdc": b"cursor instructions\n"}
 _HOOK = "opf/enforcement/precommit/pre-commit"   # the pre-commit row's first member
+# The claude-code row's deny program (_opf_adopt.ENFORCEMENT_DENY_MEMBERS), planted with the shipped hook's
+# real bytes, read from the pack beside these tools rather than _PACK_ROOT, which the CI floor vectors
+# repoint at a scratch pack holding that floor alone.
+_DENY_HOOK = schema.ENFORCEMENT_DENY_MEMBERS["claude-code"][0]
+_DENY_HOOK_FILE = Path(__file__).resolve().parent.parent / "enforcement" / "claude" / "pretooluse_deny.py"
+_DENY_HOOK_BYTES = []
 _LIVE = {"legacy/RULES.md": b"old rules\n", "notes/old.md": b"old notes\n", ".working/TODO.md": b"old todo\n",
          "adopter/MOVE.md": b"move me\n"}
+
+
+def _pack():
+    """The fixture's non-CI enforcement members: _PACK with the shipped deny hook's bytes at _DENY_HOOK, the
+    hook read once per run."""
+    if not _DENY_HOOK_BYTES:
+        _DENY_HOOK_BYTES.append(_DENY_HOOK_FILE.read_bytes())
+    return dict(_PACK, **dict([(_DENY_HOOK, _DENY_HOOK_BYTES[0])]))
 
 
 def _ci_floor():
@@ -1052,13 +1069,14 @@ def _fixture(root):
     sources.sort(key=lambda row: row["path"])
     bindings = schema.canonical_plan_bindings()
     workflow, recipe = _ci_floor()
+    pack = _pack()
     for row in bindings["enforcement"]:
         if row["platform"] == "ci":
             row["members"] = [dict(path=_CI_PATH, digest=_digest(workflow)),
                               dict(path=_CI_RECIPE_REL, digest=_digest(recipe))] + [
-                dict(path=m["path"], digest=_digest(_PACK[m["path"]])) for m in row["members"] if m["path"] in _PACK]
+                dict(path=m["path"], digest=_digest(pack[m["path"]])) for m in row["members"] if m["path"] in pack]
         else:
-            row["members"] = [dict(path=m["path"], digest=_digest(_PACK[m["path"]])) for m in row["members"]]
+            row["members"] = [dict(path=m["path"], digest=_digest(pack[m["path"]])) for m in row["members"]]
             row["members"] += [dict(path=path, digest=_digest(data))
                                for platform, path, data in _EXTRA_MEMBERS if platform == row["platform"]]
     init = schema.canonical_op("init-store")
@@ -1144,7 +1162,7 @@ def _fixture(root):
     _put(root, ".working/toml/manifest.toml", manifest)
     _put(root, _CI_PATH, workflow)
     _put(root, _CI_RECIPE_REL, recipe)
-    for rel, data in _PACK.items():
+    for rel, data in pack.items():
         _put(root, rel, data)
     for _platform, rel, data in _EXTRA_MEMBERS:
         _put(root, rel, data)
@@ -1706,6 +1724,28 @@ def self_test():
                       and _says(got, WIRING, "member {!r} is absent".format(member) if label.endswith("absent")
                                 else "member {!r} does not hold its planned bytes".format(member))
                       and sorted(set(p for p, _probe in watched.calls)) == ["claude-code"])
+            # The claude-code row binds the deny hook itself beside its registration
+            # (_opf_adopt.ENFORCEMENT_DENY_MEMBERS), planted with the shipped hook's real bytes, so the hook
+            # absent or drifted reds checks 1 and 5 and leaves that row unprobed, as the registration does.
+            for label, mutate in (("hook-absent", lambda r: _remove(r, _DENY_HOOK)),
+                                  ("hook-drifted", lambda r: _put(r, _DENY_HOOK, b"tampered bytes\n"))):
+                watched = _Surface()
+                got = _case(lambda r, i, m=mutate, w=watched: (m(r), dict(prober=w))[1])
+                check("check-5-member-" + label + "-red", _only(got, pair)
+                      and _says(got, WIRING, "claude-code enforcement surface (deny-hook) is not installed")
+                      and _says(got, WIRING, "member {!r} is absent".format(_DENY_HOOK) if label.endswith("absent")
+                                else "member {!r} does not hold its planned bytes".format(_DENY_HOOK))
+                      and _says(got, AUTHORITY, "planned destination {!r}".format(_DENY_HOOK))
+                      and sorted(set(p for p, _probe in watched.calls)) == ["pre-commit"])
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+                _fixture(root)
+                with open(os.path.join(root, *_DENY_HOOK.split("/")), "rb") as fh:
+                    planted = fh.read()
+                with open(os.path.join(root, *apply.plan_rel(_RUN).split("/")), "rb") as fh:
+                    rows = apply.frozen_plan(fh.read())["enforcement"]
+            check("check-5-fixture-deny-hook-shipped-bytes", planted == _DENY_HOOK_FILE.read_bytes()
+                  and dict(path=_DENY_HOOK, digest=_digest(planted)) in [
+                      m for row in rows if row["platform"] == "claude-code" for m in row["members"]])
             # Instruction members are not the probed surface: their drift moves check 1 only, never check 5.
             check("check-5-instructions-member-not-probed", _only(_case(lambda r, i: _put(
                 r, "AGENTS.md", b"tampered\n")), _red(AUTHORITY)))

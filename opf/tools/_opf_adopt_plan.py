@@ -1607,7 +1607,9 @@ def self_test():
             (self.root / ".claude").mkdir()
             (self.root / ".claude/settings.json").write_bytes(b"{}\n")
             member = self.bindings["enforcement"][2]["members"][0]
-            others = [row for row in self.bindings["enforcement"] if row["platform"] != "claude-code"]
+            # the pack row plants every enforcement member but the registration the hook merge rewrites
+            others = [dict(row, members=row["members"][1:]) if row["platform"] == "claude-code" else row
+                      for row in self.bindings["enforcement"]]
             hook = {"op": "enable-hook", "registration_path": ".claude/settings.json",
                     "plugin_entry": "opf", "old_digest": _digest(b"{}\n"),
                     "new_digest": member["digest"]}
@@ -1665,7 +1667,8 @@ def self_test():
             # into a declared registration file nor repointing a declared consumer. Undeclared, the same
             # hook merge plans (test_hook_replacement_binds_observed_bytes).
             member = self.bindings["enforcement"][2]["members"][0]
-            others = [row for row in self.bindings["enforcement"] if row["platform"] != "claude-code"]
+            others = [dict(row, members=row["members"][1:]) if row["platform"] == "claude-code" else row
+                      for row in self.bindings["enforcement"]]
             hook = {"op": "enable-hook", "registration_path": ".claude/settings.json",
                     "plugin_entry": "opf", "old_digest": _digest(b"{}\n"),
                     "new_digest": member["digest"]}
