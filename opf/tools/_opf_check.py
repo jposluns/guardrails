@@ -412,6 +412,10 @@ _HOMES2_RESIDUALS = (
     "commit holding it in between (before the first commit, or after HEAD) leaves just its reservation, "
     "which no check can tell from an orphaned one, and a deletion already committed in HEAD is visible only "
     "to a doctor run before that commit.",
+    "A worklog number an orphaned reservation holds passes C-NO-DELETION and C-CONTIGUITY here, but no "
+    "release span can cover it, since a span covers only entries that exist and must tile (spec 6.1). The "
+    "release cut reads no reservation and refuses the unreleased tail while such a number stands below the "
+    "highest worklog entry, so a VALID doctor result does not mean the unreleased tail can be cut.",
 )
 # Disclosed only on a report of a homes-1 store that has adopted (its adoption home exists), so a legacy
 # report residuals are unchanged.
@@ -2086,10 +2090,12 @@ def _reserved_numbers(root_fd, rep):
     whether every reservation evaluated. C-NO-DELETION and C-CONTIGUITY skip such a number only where no
     present record carries it and the prior committed snapshot held no record with that id
     (_split_reserved), so this reads each reservation read-only and for that purpose alone. Spec 8.2
-    defines the reservation and the next-ID derivation, not this grading; reading the journals at all is
-    the one exception to the spec 4.2 sentence that doctor excludes journals, and it awaits the homes-2
-    revision of that section (a release dependency). The homes are the allocations/ home under journals/
-    of every kind in _opf_store.JOURNAL_KINDS (read at call time), each derived through
+    defines the reservation and the next-ID derivation, not this grading, and the grading does not reach
+    the release: no span can cover a reserved worklog number that no entry carries (spec 6.1), so the
+    release cut refuses a tail with one below its highest entry however doctor grades it. Reading the
+    journals at all is the one exception to the spec 4.2 sentence that doctor excludes journals, and it
+    awaits the homes-2 revision of that section (a release dependency). The homes are the allocations/
+    home under journals/ of every kind in _opf_store.JOURNAL_KINDS (read at call time), each derived through
     _opf_store.allocation_record, listed and read through the contained no-follow readers; no journal
     frame, projection or run directory is opened. A reservation is judged as the record writer judges
     one: its file name binds a run id of its own kind, and its bytes equal the exact canonical payload
@@ -2289,7 +2295,9 @@ def _check_worklog_contiguous(numbers, rep, skipped=frozenset()):
     so the released spans map to real coverage. A pairwise scan over the sorted present numbers finds the
     first gap; nothing is sized by a declared high-water (F15). A skipped worklog number (an orphaned
     reservation's, or one no usable prior can decide, which the caller reports; _split_reserved) is not
-    reported missing: the scan steps over skipped numbers only."""
+    reported missing: the scan steps over skipped numbers only. That grades the store, not the release: no
+    span can cover a skipped number, so the release cut, which reads no reservation, still refuses a tail
+    with one below its highest entry (disclosed in _HOMES2_RESIDUALS)."""
     nums = sorted(n for n in numbers if isinstance(n, int) and not isinstance(n, bool))
     if not nums:
         return
@@ -4337,7 +4345,7 @@ def self_test():
     import itertools
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from _opf_release import compute_span_digest
+    from _opf_release import compute_span_digest, release_cut
     from _opf_store import resolve_store
 
     try:
@@ -7937,6 +7945,24 @@ def self_test():
         r = h2(h2_manifest(_f6a), {}, pr_product, _f6a_h2_obs)
         check("homes2-wl-start-unreserved-invalid", r is not None and r.status == INVALID
               and nd(r, "does not start at WL-1", "C-CONTIGUITY"))
+        # Doctor VALID does not make the unreleased tail cuttable: over the same version.toml and worklog
+        # (active and archive together) the release cut, which reads no reservation, refuses a tail with a
+        # reserved number below its highest entry, and the homes-2 report says so.
+        r = h2(h2_manifest(_f6a), dict([h2_reservation("record", 1, {"WL": 1})]), pr_product, _f6a_h2_obs)
+        start_cut = release_cut(_f6a["version.toml"], _f6a["worklog.toml"], "1.0.0", TS)
+        check("homes2-wl-start-reserved-cut-refused", r is not None and r.status == VALID
+              and start_cut.status == INVALID and start_cut.version_data is None
+              and any("tail WL-1..WL-3 is not contiguous" in f for f in start_cut.findings))
+        check("homes2-reserved-tail-residual-disclosed", r is not None and any(
+            "a VALID doctor result does not mean the unreleased tail can be cut" in m for m in r.residuals))
+        gap_machine, gap_working = h2_gap(published, orphan)
+        r_gap = h2(gap_machine, gap_working)
+        gap_merged = {"schema": 1, "entry": (gap_machine["archive/2026/worklog.toml"]["entry"]
+                                             + gap_machine["worklog.toml"]["entry"])}
+        gap_cut = release_cut(gap_machine["version.toml"], gap_merged, "1.2.0", TS)
+        check("homes2-reserved-gap-cut-refused", r_gap is not None and r_gap.status == VALID
+              and gap_cut.status == INVALID and gap_cut.version_data is None
+              and any("tail WL-5..WL-6 is not contiguous" in f for f in gap_cut.findings))
 
         # An unreadable or malformed reservation is CANNOT-EVALUATE under C-NO-DELETION, C-CONTIGUITY points
         # to it, and both then grade as though nothing were reserved (never a wider pass).
