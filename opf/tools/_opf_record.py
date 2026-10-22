@@ -907,7 +907,7 @@ def _require_valid_current(row, rtype, ctx, rid, rel):
     verb trusts or overwrites it: a rejection restores the row's recorded `proposed_from`, a proposing
     transition writes the field, and leaving a proposal removes it, so acting on a schema-invalid row (a
     `proposed_from` naming an illegal predecessor, or a stray one on an unqualified status, each a doctor
-    finding) would launder a doctor-INVALID store into a VALID one and erase the evidence (QA4 F1).
+    finding) would launder a doctor-INVALID store into a VALID one and erase the evidence.
     Refused with every byte untouched; the operator repairs the record first (spec 5.7)."""
     rv = _opf_schema.validate_record(row, expected_type=rtype, registered_vendors=ctx.vendors)
     if rv.status != _opf_store.VALID:
@@ -1708,7 +1708,7 @@ def _strict_equal(a, b):
     """The postcondition's comparator: strict, TYPE-AWARE structural equality (_opf_emit._model_equal, the
     round-trip comparator emit_checked already proves itself with), never Python's ==. Ordinary equality
     let a mutation that changed only a value's type (True for 1, 1.0 for 1) read as the allowed delta and
-    publish (codex QA3 F2); here bool is never a bare int, int is never a float, and datetime is never a
+    publish; here bool is never a bare int, int is never a float, and datetime is never a
     date, so such a mutation refuses before anything is written."""
     return _opf_emit._model_equal(a, b)
 
@@ -3454,7 +3454,7 @@ def _self_test_contexts(check, root_fd, now):
     del partial["BI"]
     ctx = ctx_of(partial)
     check("a missing enabled namespace breaks the proof", _counter_state(ctx, ctx.counters.model)[1] != [])
-    # Schema markers are exact integers everywhere this verb reads one (codex QA3 F1's sibling checks):
+    # Schema markers are exact integers everywhere this verb reads one:
     # a bool or float marker (True == 1, 1.0 == 1 under ==) is refused, never read as schema 1.
     for marker in (True, 1.0):
         check("a non-integer index schema marker refuses ({!r})".format(marker), _refuses(
@@ -3710,7 +3710,7 @@ def _self_test_transitions(check, plan, post, full, now):
           and _recorded_pre_proposal(None, bi("done/proposed"), "BI-1", "done/proposed") is None
           and _recorded_pre_proposal(None, dict(bi("done/proposed"), proposed_from=3), "BI-1",
                                      "done/proposed") is None)
-    # -- the current row is validated before it is trusted or overwritten (QA4 F1) ------------------------------
+    # -- the current row is validated before it is trusted or overwritten ---------------------------------------
     check("a rejection refuses a schema-invalid proposed_from on the current row",
           _refuses(lambda: plan(reject, rows=[pbi(pre="open")], counters=counters), "not schema-valid"))
     check("done-with-receipt refuses a schema-invalid proposed_from on the current row",

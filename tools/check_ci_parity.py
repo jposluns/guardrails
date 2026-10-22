@@ -4780,7 +4780,7 @@ def self_test():
                     failures.append(
                         "26 adapted standalone runner: {!r}".format(
                             adapted_diagnostics))
-            # codex qa9 MAJOR-1: the adapter screens the RAW text, so a
+            # Raw-text screen: the adapter screens the RAW text, so a
             # forbidden character cannot vanish in its splitlines() and
             # newline rejoin before extract_local's own screen. A form feed
             # after a comment hides the next line from bash (the gate never
@@ -5092,7 +5092,7 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 misplaced scaffold was not rejected: " + name)
-        # qa8 MAJOR-1 byte fixtures: Python's splitlines() and strip() see
+        # Byte fixtures: Python's splitlines() and strip() see
         # line and word boundaries bash does not (\v, \f, \x85, U+2028,
         # U+00A0 and friends), so the static grammar formerly judged lines
         # bash never ran; one such spelling hid the NOT RUN result line at
@@ -5134,7 +5134,7 @@ def self_test():
                 failures.append(
                     "26 non-ASCII workflow character was not refused: "
                     + name)
-        # qa8 MINOR-1, qa8 MINOR-2 and codex MINOR-3 branch fixtures:
+        # Branch fixtures:
         # if/else/fi state is tracked per block, so a duplicate else, an
         # empty then or else branch, the PATH append in the HOME guard's
         # else branch (where HOME is unproven) and a gitleaks_rc=$? that is
@@ -5165,7 +5165,7 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 branch structure was not rejected: " + name)
-        # codex qa9 MINOR-1: bash runs a function definition as one
+        # Function position: bash runs a function definition as one
         # ordinary, successfully-exiting statement, so a definition inside
         # an if branch both fills the branch and replaces $?; skipped
         # uncounted, a copy of the runner's own run_gate() definition ahead
@@ -5194,7 +5194,7 @@ def self_test():
                 failures.append(
                     "26 in-branch function definition was not refused: "
                     + name)
-        # codex qa10 MINOR-1: bash resolves a function name at invocation
+        # Function order: bash resolves a function name at invocation
         # time, so the unchanged run_gate() definition moved BELOW the
         # first gate line leaves that gate calling an undefined name; bash
         # reports the missing command and continues, recording no gate
@@ -5216,7 +5216,7 @@ def self_test():
                 failures.append(
                     "26 run_gate invocation before its definition was not "
                     "refused: " + name)
-        # claude qa9 MINOR-2 (D1): the FAILED GATES echo expands
+        # Echo position: the FAILED GATES echo expands
         # ${failed_names}, so it is position-checked like the
         # gitleaks-block lines: accepted only in the then branch of the
         # terminal failed check, after the top-level initializer. Relocated
@@ -5232,7 +5232,7 @@ def self_test():
         elif not any(item.code == "unclassified-line"
                      for item in extract_local(relocated_echo).diagnostics):
             failures.append("26 relocated FAILED GATES echo was not refused")
-        # claude qa10 MINOR-1: the FAILED GATES echo is bound to the
+        # Terminal frame: the FAILED GATES echo is bound to the
         # TERMINAL failed-check frame, the one whose header sits in the
         # terminal summary tail. A copied frame mid-roster and a frame
         # nested in the gitleaks failure branch spell the same header, are
@@ -5427,7 +5427,7 @@ def self_test():
             "27 executable stubs prepared before the pool: got {!r}, expected {!r}".format(
                 ordering, want))
 
-    # codex qa10 MAJOR-1: Path.read_text() translates a carriage return
+    # Byte-level reader: Path.read_text() translates a carriage return
     # into a newline (universal newlines) BEFORE any text screen can run,
     # so a forbidden byte planted in a runner ON DISK formerly vanished on
     # its way into the grammar: a CR-hidden gate line read as a clean
@@ -5477,7 +5477,7 @@ def self_test():
                 "28 clean ASCII bytes did not round-trip unchanged "
                 "through the byte-level reader")
 
-    # codex qa10 MAJOR-1 (class closure): every read of runner or workflow
+    # One reader for the whole class: every read of runner or workflow
     # text must go through read_runner_text, the ONE byte-level reader.
     # This structural vector parses this file,
     # tools/selftest_git_fixture_env.py and its four registered suite

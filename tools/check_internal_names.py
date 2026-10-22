@@ -68,10 +68,19 @@ site that is not checked in), the contents of an archive or other non-UTF-8 file
 change that differs from the working-tree copy (it reads the working tree), and the word split or encoded
 (an HTML entity, a zero-width character) so the plain pattern does not match.
 
+REVIEW-ROUND LABEL RULE, WHOLE TRACKED TREE. The review-round label patterns (_REVIEW_LABELS: a reviewer
+family name followed by a QA round number, and a QA round number followed by a severity grade or a finding
+id, both case-insensitive) run inside the role rule above, over the same tracked set with the same
+internal-allow exemption, skips and fail-closed exits, and inside the scoped scan. "QA" alone, "quality", a
+bare grade word, a family name alone and a round number with neither a family name before it nor a grade or
+finding id after it are not matched, so a review label written in another shape (a family name after the
+round number, say) is outside this rule.
+
 Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error or a tracked file the role
 rule cannot evaluate (fail-closed). `--self-test` proves the gate FAILS on a seeded internal name (a
-provenance id, a host path, a hashed codename, the role name in a tracked file outside SCOPE_RELPATHS, and a
-maintainer-decision id of each shape anywhere in the tree) and passes clean generic content, so removing a
+provenance id, a host path, a hashed codename, the role name and a review-round label of each shape in a
+tracked file outside SCOPE_RELPATHS, and a maintainer-decision id of each shape anywhere in the tree) and
+passes clean generic content, so removing a
 layer makes a case fail. It also runs the real scan over a planted fixture repository to prove the tree-wide
 decision-id layer is wired in and fails closed on an unreadable file, an unlistable directory, a FIFO and a
 vanished file. The self-test exits 0 only when
@@ -152,9 +161,23 @@ _PROVENANCE = [
 _ROLE_NAMES = [
     (re.compile(r'\bArchitect\b'), "internal role name"),
 ]
+# Internal REVIEW-ROUND LABEL patterns: a reviewer family name followed by a QA round number, and a QA round
+# number followed by a severity grade or a finding id. A shipped comment or message says what the code guards
+# and why, never which review round asked for it. Case-insensitive, since such labels are written in either
+# case. Each needs the round NUMBER, so "QA" alone in prose, "quality", a bare grade word, a family name alone
+# and a round number with neither a family before it nor a grade after it never match. Like the role-name
+# pattern, these run over every tracked file, this one included; the pattern sources do not match themselves
+# because a family name here is followed by a bar or a parenthesis and "QA" by a bracket.
+_REVIEW_LABELS = [
+    (re.compile(r'\b(?:codex|claude|gemini)[ ]?QA[0-9]+', re.IGNORECASE), "internal review-round label"),
+    (re.compile(r'\bQA[0-9]+[ ]?(?:MAJOR|MEDIUM|MINOR|F[0-9])', re.IGNORECASE), "internal review-round label"),
+]
+# The patterns the tracked-file rule applies to every tracked file (see scan_role_text).
+_TRACKED_RULES = _ROLE_NAMES + _REVIEW_LABELS
 # Reuse the leak gate's structural host/IP/token/account patterns verbatim (imported, never re-typed, so
-# this file stays self-clean the way check_leaks.py does), and add the provenance-id and role-name shapes.
-STRUCTURAL = list(check_leaks.STRUCTURAL) + _PROVENANCE + _ROLE_NAMES
+# this file stays self-clean the way check_leaks.py does), and add the provenance-id, role-name and
+# review-round label shapes.
+STRUCTURAL = list(check_leaks.STRUCTURAL) + _PROVENANCE + _TRACKED_RULES
 
 # Internal maintainer-decision id SHAPE (generic; carries no codename), checked over the WHOLE tree by
 # scan_tree_decision_ids rather than over SCOPE_RELPATHS alone. A D- head that is an ordinal or an upper-case
@@ -344,19 +367,19 @@ def tracked_files(root):
 
 
 def scan_role_text(text):
-    """(line, label) role-name findings in `text`. A line carrying an `internal-allow` marker is exempt; the
-    marker exempts that line only, never the rest of the file."""
+    """(line, label) role-name and review-round label findings in `text`. A line carrying an `internal-allow`
+    marker is exempt; the marker exempts that line only, never the rest of the file."""
     found = []
     for number, line in enumerate(text.splitlines(), 1):
         if "internal-allow" in line:
             continue
-        found += [(number, label) for pattern, label in _ROLE_NAMES if pattern.search(line)]
+        found += [(number, label) for pattern, label in _TRACKED_RULES if pattern.search(line)]
     return found
 
 
 def scan_tracked_roles(root, relpaths):
-    """Return (findings, unevaluable) for the role rule over the tracked `relpaths`, independent of
-    SCOPE_RELPATHS and SKIP_NAMES. A file that is not valid UTF-8 is skipped only under the walk rule this
+    """Return (findings, unevaluable) for the role rule (the role name and the review-round labels) over the
+    tracked `relpaths`, independent of SCOPE_RELPATHS and SKIP_NAMES. A file that is not valid UTF-8 is skipped only under the walk rule this
     gate already applies (a present suffix outside TEXT_SUFFIXES marks a non-text file); any other
     non-UTF-8 file, or a tracked path absent from the working tree, is unevaluable. A tracked path that is
     present but not a readable regular file raises OSError (exit 2) through _read_present_text."""
@@ -409,7 +432,7 @@ def run_gate(root):
     if findings:
         return 1
     print("PASS: no internal provenance vocabulary in the scanned QA-suite surfaces, no internal role "
-          "name in any tracked file, and no maintainer-decision id in the tree")
+          "name or review-round label in any tracked file, and no maintainer-decision id in the tree")
     return 0
 
 
@@ -693,6 +716,56 @@ def _self_test(caller_env=None):
             failures.append("a role-name hit in a SKIP_NAMES basename expected to be skipped by the scoped scan, "
                             "got {}".format(f))
 
+        # 27. DISCRIMINATING (internal review-round labels): a reviewer family name followed by a QA round
+        #     number, and a QA round number followed by a severity grade or a finding id, are each caught by
+        #     the tracked-file rule (scan_role_text) and by the scoped scan, in either case and with or
+        #     without the space. Removing _REVIEW_LABELS, or either of its patterns, leaves hits unflagged;
+        #     making them case-sensitive misses the lower-case hits. The controls stay unflagged: dropping
+        #     the round number flags "QA" alone, dropping the leading word boundary flags a round glued to a
+        #     longer word, and dropping the grade or finding id flags a round number alone. Every vector is
+        #     assembled at runtime, so no contiguous label sits in this source (the rule scans this file).
+        write_hashes([])
+        qa = "QA"
+        review_label = "internal review-round label"
+        label_hits = (
+            "codex " + qa + "32: the finally vector",
+            "Claude" + qa + "9 noted it",
+            "gemini " + qa.lower() + "35",
+            "codex/claude " + qa + "34",
+            qa + "16 MINOR-1: descriptors are closed",
+            qa + "4 MAJOR",
+            qa.lower() + "7 medium",
+            qa + "19 F4: array is preloaded",
+            qa.lower() + "8f2",
+        )
+        label_controls = (
+            "the quality gate passes",
+            "the QA suite and its QA skills",
+            "a MAJOR change, then MINOR-1 and F2",
+            "codex, claude and gemini, each alone",
+            "a mutation vector of round " + qa + "31/" + qa + "32",
+            "a planted " + qa + "15-CAUSE marker and a " + qa.lower() + "15-st-size probe",
+            "vector:codex32-1 and vector:claude32-3",
+            "a glued token non" + qa + "3 F1 and pre" + qa + "16 MINOR",
+        )
+        for text in label_hits:
+            found = scan_role_text(text + "\n")
+            if not found or {item for _number, item in found} != {review_label}:
+                failures.append("review-round label {!r} expected a tracked-rule finding, got {}".format(text, found))
+            state, f = run(text + "\n")
+            if state != "ok" or not any(review_label in x for x in f):
+                failures.append("review-round label {!r} expected a scoped finding, got {} {}".format(text, state, f))
+        for text in label_controls:
+            found = scan_role_text(text + "\n")
+            state, f = run(text + "\n")
+            if found or state != "ok" or f:
+                failures.append("review-round label control {!r} expected no finding, got {} {} {}".format(
+                    text, found, state, f))
+        allowed = label_hits[0] + "  # internal-allow\n"
+        if scan_role_text(allowed):
+            failures.append("an internal-allow line holding a review-round label expected exemption, got {}".format(
+                scan_role_text(allowed)))
+
         # 14-17 run the real gate entry point (run_gate) on a fixture git repository, so the tracked-file
         # enumeration and its wiring into the gate are exercised, not only the helpers. Fixture git calls use
         # the shared hermetic fixture environment (no caller config, no auto-maintenance); only init and add
@@ -714,6 +787,9 @@ def _self_test(caller_env=None):
         (repo / "docs").mkdir()
         (repo / "tools").mkdir()
         (repo / "docs" / "outside.md").write_text("Signed off by the Architect.\n", encoding="utf-8")  # internal-allow
+        # A review-round label of each shape on lines 1 and 2 and a control on line 3, assembled at runtime (case 27).
+        (repo / "docs" / "labels.md").write_text("checked by codex " + qa + "32\n" + qa + "16 MINOR-1 asked for it\n"
+                                                 "the QA suite runs every quality check\n", encoding="utf-8")
         (repo / "tools" / "check_leaks.py").write_text("# the Architect said so\n", encoding="utf-8")  # internal-allow
         (repo / "notes.txt").write_text("Architect kept here  # internal-allow\n"  # internal-allow
                                         "the Architect again\n", encoding="utf-8")  # internal-allow
@@ -742,6 +818,15 @@ def _self_test(caller_env=None):
                         expect, rc, report))
             if any(rel.startswith(("docs/outside", "tools/check_leaks")) for rel in SCOPE_RELPATHS):
                 failures.append("the outside-scope fixture paths must lie outside SCOPE_RELPATHS")
+            # DISCRIMINATING (review-round labels in the whole tracked tree): both label shapes in a tracked file
+            # outside SCOPE_RELPATHS are caught by the real gate and the control line is not. Leaving
+            # _REVIEW_LABELS out of the tracked-file rule drops these findings and fails the case.
+            for expect in ("docs/labels.md:1: " + review_label, "docs/labels.md:2: " + review_label):
+                if rc != 1 or expect not in report:
+                    failures.append("tracked review-round label {!r} expected (exit 1), got rc={} {!r}".format(
+                        expect, rc, report))
+            if "docs/labels.md:3:" in report:
+                failures.append("the review-round label control line expected no finding, got {!r}".format(report))
             # 15. DISCRIMINATING (the allow marker exempts ONE line): line 1 of notes.txt carries the marker
             #     and is exempt; line 2 does not and is caught. A whole-file exemption drops the line-2
             #     finding; ignoring the marker adds a line-1 finding; either fails the case.
@@ -1412,7 +1497,12 @@ def _self_test(caller_env=None):
           "hashed codename each fail (removing a layer fails a case); an internal-allow line is exempt from "
           "the structural layer; the whole capitalized internal role name is caught, while Architecture, "
           "architectural, the lowercase noun, the word inside a longer identifier, an internal-allow line and "
-          "a SKIP_NAMES basename are not in the scoped scan; the real gate run on a fixture git repository "
+          "a SKIP_NAMES basename are not in the scoped scan; a review-round label of each shape (a reviewer "
+          "family name and a QA round number, a QA round number and a grade or finding id) is caught by the "
+          "tracked-file rule and the scoped scan in either case, and by the real gate in a tracked file "
+          "outside SCOPE_RELPATHS, while \"quality\", \"QA\" alone, a bare grade word, a family name alone, a "
+          "round number alone and a round glued to a longer word are not, and an internal-allow line holding "
+          "one is exempt; the real gate run on a fixture git repository "
           "catches the role name in a tracked file outside SCOPE_RELPATHS and in a tracked file whose basename "
           "is in SKIP_NAMES, exempts only the one internal-allow line, scans a binary-attributed file that "
           "decodes as UTF-8, skips a non-UTF-8 file with a non-text suffix and an untracked file, and exits 2 "

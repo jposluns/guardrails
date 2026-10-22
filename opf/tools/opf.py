@@ -5463,7 +5463,7 @@ def _watchdog_completion_case(mode, tree=None):
         assert not kill.called
     elif mode == "overdue-success":
         import time
-        # QA16 F1: an exit first observed after the deadline is TIMEOUT, whatever
+        # An exit first observed after the deadline is TIMEOUT, whatever
         # order the guardian and the collector were scheduled in. The guardian
         # stops itself before supervision; the collector is gated before its
         # first poll; the subject finishes only after the recorded deadline has
@@ -5559,7 +5559,7 @@ def _watchdog_completion_case(mode, tree=None):
                 "an overdue completion was accepted as success: " + repr(outcome))
     elif mode == "launch-ownership":
         import time
-        # QA16 F2 / QA17 F3: fork-to-ownership is uninterruptible by interpreter
+        # Fork-to-ownership is uninterruptible by interpreter
         # construction -- the fork runs on a private launcher thread, where CPython
         # never raises asynchronous signal exceptions -- so a cancellation delivered
         # at ANY caller-side bytecode still reaps the guardian to ECHILD. The old
@@ -5767,7 +5767,7 @@ def _watchdog_completion_case(mode, tree=None):
     elif mode == "fd-hygiene-total":
         import errno
         import time
-        # QA16 MINOR-1 + QA17 F4/MINOR-2: EVERY undeclared caller descriptor is
+        # EVERY undeclared caller descriptor is
         # closed before a subject can run -- a bare pipe, a plain open file, an
         # UNSTARTED sibling call's endpoints (the construction window: there is no
         # publication step left to race), and a started sibling's -- while this
@@ -5826,7 +5826,7 @@ def _watchdog_completion_case(mode, tree=None):
                 os.close(fd)
     elif mode == "nested-keep":
         import time
-        # QA17 F2, migrated to the explicit-contract refusal: a caller descriptor a
+        # Migrated to the explicit-contract refusal: a caller descriptor a
         # NESTED run_bounded thunk relies on is a deterministic ERROR:OSError unless
         # declared through keep_fds, in which case it works -- never a
         # sometimes-working reuse of a stale registry entry.
@@ -5931,7 +5931,7 @@ def _watchdog_completion_case(mode, tree=None):
         # caller thread held at fork time. Construction preloads the whole guardian
         # dependency set, making every guardian-side import a lock-free
         # sys.modules hit; the documented restriction that remains is thunk-side.
-        # QA19 F4: socket.send_fds/recv_fds cold-import array inside their own
+        # Likewise socket.send_fds/recv_fds cold-import array inside their own
         # bodies (importing socket alone does not load it), so the receipt path
         # needs array preloaded too.
         def pop_cold():
@@ -7031,7 +7031,7 @@ def _watchdog_completion_case(mode, tree=None):
                 raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
     elif mode == "escalation-subject":
         import time
-        # QA16 MINOR-2 + QA17 F1: cancelling a wedged guardian is bounded AND kills
+        # Cancelling a wedged guardian is bounded AND kills
         # and observes the receipt-identified subject tree -- freeze the guardian,
         # then the subject's group and pidfd, then the guardian -- never a stranded
         # sleeper the test has to clean up. The same-group descendant must die with
@@ -7291,7 +7291,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(grandchild, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "poll-collected":
         import time
-        # QA19 F1: a guardian failure FIRST collected by poll() -- the layer's
+        # A guardian failure FIRST collected by poll() -- the layer's
         # primary collection path (run_bounded and _run_fixture_process poll on
         # every loop iteration) -- must still get close()'s receipt kill,
         # disappearance proof and loud refusal: poll() records the failure and
@@ -7441,8 +7441,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "close-cancel":
         import time
-        # QA19 F2 + QA20 codex F2 / gemini / claude F2 + QA21 claude
-        # F1/F3/F4 (masked design, fix 2w/2x): a real SIGINT landing anywhere
+        # Masked design: a real SIGINT landing anywhere
         # inside close()'s ownership decision, transfer, collection or
         # cleanup stays PENDING (SIGINT and SIGTERM are blocked as the FIRST
         # statement of close()'s restoring try, and the launcher thread is
@@ -7865,7 +7864,7 @@ def _watchdog_completion_case(mode, tree=None):
         import time
         from contextlib import ExitStack
         caller = os.getpid()
-        # QA19 F3: with no pidfd available the escalation can neither freeze the
+        # With no pidfd available the escalation can neither freeze the
         # guardian nor address the pid-only receipt's subject, so the refusal
         # must say guardian-only/unverified -- never claim a frozen guardian or
         # a killed subject tree it could not address.
@@ -11575,7 +11574,7 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA32 finally vector: swapped pending argument in "
+            "finally vector: swapped pending argument in "
             "the capturing try's own finalbody",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
@@ -11598,7 +11597,7 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA32 default vector: unprotected cleanup in a "
+            "default vector: unprotected cleanup in a "
             "nested def's default after a capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
@@ -11622,7 +11621,7 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA32 as-name vector: capture reuses the handler's "
+            "as-name vector: capture reuses the handler's "
             "bound name",
             lambda handler=capturing.handlers[0]:
                 capture_shape(handler.body, handler.name))
@@ -11665,7 +11664,7 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "claude QA32 nonlocal vector: a nested def rebinds the "
+            "nonlocal vector: a nested def rebinds the "
             "captured name through nonlocal",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
@@ -11694,7 +11693,7 @@ def _watchdog_completion_case(mode, tree=None):
                 else pending, close_report, "report channel close")
             """), "vector:claude32-2-accept")
         leg11_vector_rejected(
-            "claude QA32 inversion vector: inverted conditional "
+            "inversion vector: inverted conditional "
             "pending argument",
             lambda arg=vector_pending_arg("""
                 _cleanup_boundary(
@@ -11703,7 +11702,7 @@ def _watchdog_completion_case(mode, tree=None):
                     "parked launcher release")
                 """): boundary_pending_shape(arg, "vector:claude32-2a"))
         leg11_vector_rejected(
-            "claude QA32 swapped-guard vector: the conditional guards "
+            "swapped-guard vector: the conditional guards "
             "a different name than it passes",
             lambda arg=vector_pending_arg("""
                 _cleanup_boundary(
@@ -11727,7 +11726,7 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "claude QA32 yield vector: call-free suspension after a "
+            "yield vector: call-free suspension after a "
             "capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
@@ -11746,7 +11745,7 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "claude QA32 await vector: call-free suspension after a "
+            "await vector: call-free suspension after a "
             "capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
@@ -11793,7 +11792,7 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA33 decorator vector: a bare decorator applied "
+            "decorator vector: a bare decorator applied "
             "after a capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
@@ -11886,7 +11885,7 @@ def _watchdog_completion_case(mode, tree=None):
         ):
             function, capturing = leg11_vector(source)
             leg11_vector_rejected(
-                "codex/claude QA34 " + label + " vector: a yield in "
+                label + " vector: a yield in "
                 "a nested definition-time default suspends the "
                 "enclosing function",
                 lambda function=function, capturing=capturing,
@@ -12018,7 +12017,7 @@ def _watchdog_completion_case(mode, tree=None):
         # is a named FAILURE, never a silent model mismatch -- a
         # pre-3.14 version tuple must be refused.
         leg11_vector_rejected(
-            "gemini QA35 interpreter vector: leg 11 ran on a "
+            "interpreter vector: leg 11 ran on a "
             "pre-PEP-649 interpreter without failing closed",
             lambda: leg11_interpreter_pinned((3, 13, 0)))
 
@@ -12042,7 +12041,7 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA36 annotation-read vector: reading a nested "
+            "annotation-read vector: reading a nested "
             "def's __annotations__ after a capture evaluates its "
             "deferred annotation",
             lambda function=function, capturing=capturing:
@@ -12145,7 +12144,7 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """
 
-        # ACCEPTED by leg 11 (claude QA37): the PEP 695 lazy read is
+        # ACCEPTED by leg 11: the PEP 695 lazy read is
         # attribute-shaped but spells neither recognized name, and
         # the type parameter's bound is walked by no call scan, so
         # the successor walk accepts the whole shape.
@@ -12160,7 +12159,7 @@ def _watchdog_completion_case(mode, tree=None):
                              "vector:claude37-pep695-read"),
             "interrupted", "vector:claude37-pep695-read")
 
-        # ACCEPTED by leg 11 (codex QA37): the handler is the
+        # ACCEPTED by leg 11: the handler is the
         # RECOGNIZED capture shape -- exactly that recognition
         # exempts its boundary-call arguments from the handler-body
         # call scan, so the indirect reader spelled there is never

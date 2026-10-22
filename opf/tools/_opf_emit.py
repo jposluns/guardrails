@@ -1572,7 +1572,7 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
 
 
 # array is required: socket.send_fds/recv_fds cold-import it inside their own
-# bodies, so importing socket alone does not load it (QA19 F4).
+# bodies, so importing socket alone does not load it.
 _FIXTURE_GUARDIAN_MODULES = (
     "array", "ctypes", "errno", "gc", "json", "pathlib", "resource", "select",
     "signal", "socket", "time", "traceback")
@@ -1686,7 +1686,7 @@ class _FixtureProcess:
     single-threaded caller EVERY thread blocks the pair during the sequence
     and even a PROCESS-directed cancellation -- the real Ctrl-C delivery
     shape, which the kernel may hand to ANY thread with it unblocked -- stays
-    kernel-pending (QA19 F2, QA20, QA21 claude F1). The prior mask is
+    kernel-pending. The prior mask is
     captured by QUERY before the restoring try and the block is the try's
     FIRST statement, restored exactly in the finally (QA21 claude F3): a
     cancellation landing before the block installs disposes NOTHING, not
@@ -1757,7 +1757,7 @@ class _FixtureProcess:
     the named partial accounting. Then the guardian itself is SIGKILLed. On ANY guardian
     failure, escalated or not -- including a failure FIRST collected by
     poll(), which kills the subject AT COLLECTION TIME and records the
-    failure for close() to prove and re-raise (QA19 F1), an UNRESOLVED
+    failure for close() to prove and re-raise, an UNRESOLVED
     collection (guardian reaped, status never validated, no failure
     recorded: treated as a failure of close()'s own, QA20 codex F1), and a
     LOST-OWNERSHIP collection (the guardian disappeared without this
@@ -1768,8 +1768,7 @@ class _FixtureProcess:
     are opened, and only the already-held subject pidfd is signalled (fix
     2y, D2).
 
-    Refusal wording, class-wide (each names ONLY the steps actually taken,
-    QA19 F3 / QA20 claude F3 / fix 2y codex F2):
+    Refusal wording, class-wide (each names ONLY the steps actually taken):
 
       kill state ran               refusal names
       ---------------------------  ------------------------------------------
@@ -1848,7 +1847,7 @@ class _FixtureProcess:
         self._launcher = None
         self._launch_error = None
         # The recorded guardian failure, set at COLLECTION time by whichever
-        # collector reads the failed report first (QA19 F1); close() re-raises
+        # collector reads the failed report first; close() re-raises
         # it after addressing the receipt-identified subject.
         self._failure = None
         self._launch_lock = threading.Lock()
@@ -2186,7 +2185,7 @@ class _FixtureProcess:
         """Record a supervision failure at COLLECTION time, whichever collector
         observed it first: close() must address the receipt-identified subject
         and re-raise the recorded failure even when poll() or start() was the
-        collector that read the failed report (QA19 F1). A recorded failure
+        collector that read the failed report. A recorded failure
         is a RESOLVED collection; the subject-cleanup obligation it creates is
         tracked by `cleaned`, never by `unresolved`."""
         self._failure = failure
@@ -2439,8 +2438,8 @@ class _FixtureProcess:
     def _abandon_unfinished_launch(self):
         """Decide, under the launch lock, who owns an unfinished launch: if the
         launcher has not recorded its result yet, ABANDON the launch to it (the
-        launcher is then the fork's last owner and collects its own fork,
-        QA19 F2) and report True; a result recorded in the meantime keeps this
+        launcher is then the fork's last owner and collects its own fork)
+        and report True; a result recorded in the meantime keeps this
         close() the owner."""
         with self._launch_lock:
             if self._launched.is_set():
@@ -2504,8 +2503,8 @@ class _FixtureProcess:
         # path, because the launcher and its guardian can still use it all. An
         # exception raised INSIDE this coordination -- normally impossible for a
         # masked cancellation, but reachable by a pre-mask interpreter flag or a
-        # non-signal asynchronous exception -- must leave the same owner
-        # (QA19 F2): the launcher for an unrecorded launch (abandoned under the
+        # non-signal asynchronous exception -- must leave the same owner:
+        # the launcher for an unrecorded launch (abandoned under the
         # launch lock before re-raising), or this close(), which finishes
         # collecting before re-raising.
         def release_launcher():
@@ -2660,8 +2659,8 @@ class _FixtureProcess:
 
     def _escalation_refusal(self, failure):
         """Annotate an escalated refusal with ONLY what the escalation
-        actually did (QA19 F3), accounting every observed member (fix 2y,
-        codex F2; a member no census observed -- the disclosed fork-race
+        actually did, accounting every observed member (a member no
+        census observed -- the disclosed fork-race
         and pid-wraparound residual -- can be neither addressed nor
         accounted, per the ruling PD-335-TREE-CLAIM-STALL):
         "subject tree killed" is claimed ONLY when the guardian-anchored
@@ -2889,7 +2888,7 @@ class _FixtureProcess:
                             self._read_report(raw)
                         except ChildStatusUnavailable:
                             pass  # recorded by _read_report; addressed below
-                # HOISTED out of the not-collected gate (QA19 F1): the subject
+                # HOISTED out of the not-collected gate: the subject
                 # kill and exit proof run on ANY guardian failure, including one
                 # FIRST collected by poll() -- the layer's primary collection
                 # path, which killed the subject pin-first at collection time
@@ -3315,7 +3314,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
                 child.close()
             except ChildStatusUnavailable as exc:
                 # close() re-raises a recorded failure the poll above already
-                # reported (QA19 F1) AFTER addressing the receipt-identified
+                # reported AFTER addressing the receipt-identified
                 # subject, possibly ANNOTATED (subject-only kill disclosure,
                 # pid-only receipt): report each refusal once, keeping the
                 # annotated form when one extends the other.
