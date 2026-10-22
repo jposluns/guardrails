@@ -1080,7 +1080,10 @@ configuration (`-O`/`--open-files-in-pager`, `--upload-pack`, `--ext-diff`, `--t
 `--show-signature`, `tag -v`, the `--format`/`--pretty`/`--sort` families, whose signature
 placeholders and atoms can run the signing program) or edits configuration. Read-only git so
 judged is never withheld by a hold; everything else is judged against the hold set, and also
-passes when its target is CERTAIN and resolves outside every held worktree: its
+passes when its target is CERTAIN, resolves outside every held worktree, belongs to a repository
+with NO live hold, and carries no program-running option, no unmodelled global option, no
+relative `-C`/`--git-dir`/`--work-tree`/`cd`/`GIT_`-assignment operand anywhere in the raw text
+and no held path its target does not account for: its
 only directory moves literal `-C` operands resolved physically (`os.path.realpath`), no
 `--git-dir`/`--work-tree` or `-c`/`--config-env` override, no `GIT_` variable assigned, exported
 or unset in the command, none of the inherited variables GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
@@ -1129,25 +1132,51 @@ unmodelled flag, an attached-value short such as `-U5` or `-n5`, a pickaxe `-S`/
 withheld while the hold is live, as is every mutation whose target sits anywhere under a tree
 that encloses a held worktree (a scoped `git clean` in a subdirectory beside the nested hold
 included) and every certain-target command whose repository top level cannot be read (a bare
-repository), and a command whose raw text names a held worktree its resolved target does not
-account for: a held path carried in a program-running option value (`--upload-pack`, grep's `-O`,
-`rebase -x`, `submodule foreach`, `difftool -x`) or in a `-C` chain step that is not the resolved
-target, a SIBLING worktree of the target's own repository the option's program can still reach
-included, is one the one-plain-git-on-a-certain-target reasoning cannot show left untouched, so the
-command is withheld as `UNVERIFIABLE`; a RELATIVE path in such a value or step (it resolves against
-the directory that runs it, and an option value's program runs from the target's tree, not the
-session cwd, which this rule cannot fix) is withheld the same way while a hold is live. The decision
+repository). While the TARGET'S OWN repository has a live hold, EVERY git segment outside the
+read-only grammar is withheld as `UNVERIFIABLE`, whether or not the raw text names the held path:
+a sibling worktree shares the repository's refs, objects and configuration, and a program-running
+option (`--upload-pack`, grep's `-O`, `rebase -x`, `submodule foreach`, `difftool -x`) reaches
+the held worktree without naming it (`git worktree remove held`, `git update-ref` of the held
+branch), shapes this rule does not model case by case; the stated over-refusal is that a plain
+mutation in a sibling worktree that cannot reach the held one (`git -C <sibling> commit`, a
+`worktree remove` of an unheld sibling, an `update-ref` of an unrelated ref) is withheld too
+until the hold ends. While a hold is live in a repository the command reaches only through the
+session or the raw text and the target is an unrelated unheld repository, the segment is withheld
+when it carries ANY program-running option or word of the curated model (`--upload-pack`, `rebase
+-x` with the value attached in any spelling, `grep -O`, `submodule foreach`, `bisect run`,
+`filter-branch`, signing options, a signature placeholder in a format or sort value, a
+`TRANSPORT::ADDRESS` URL, `--help`) or any global option other than a literal `-C` (fail closed),
+because the option's program runs from the target's tree and is not bound to it, whether or not
+its text names the held path; and when its raw text names a held worktree in a `-C` chain step
+that is not the resolved target. A RELATIVE path after `-C`, `--git-dir`, `--work-tree`, `cd`,
+`pushd` or a `GIT_` assignment anywhere in the raw text resolves against whatever directory runs
+it, which this rule cannot fix, so it is resolved against the session cwd AND every directory the
+command walks to (the resolved target included), each landing repository joining the hold set,
+and the command is withheld while any reachable hold is live; this over-refuses every relative
+`-C` spelling while a hold is live, an option value that is no directory included (`git commit -C
+HEAD` and a relative `-C` step naming the resolved target itself are withheld the same way). The
+decision
 weighs every hold the command can reach, the UNION of the hold set, the session repository's holds
 and the target repository's holds deduplicated by marker path, so a session whose own cwd path is
 opaque (a glob or brace character drops it from the hold set) still has its live holds judged. A
-hold known ONLY because the session sits in a held repository, which a one-plain-git command bound
-to a certain unrelated target cannot reach, does NOT withhold that command, so a session in a
-review-held repository can still commit in an unrelated one. Each withholding is a safe over-refusal
+hold known ONLY because the session sits in a held repository does NOT withhold a one-plain-git
+segment whose certain target is an unrelated unheld repository when that segment carries no
+program-running option and no unmodelled global, so a session in a review-held repository can
+still commit in an unrelated one. Each withholding is a safe over-refusal
 taken instead of under-blocking; none fires with no live hold. ALLOW RESIDUAL: the hold set is built
 from literal text, so an operand only an expansion resolves (`git -C "$DIR"`, a leading `~`, a
 glob) names no repository; from a session outside every held repository such a command stays
 allowed even where the expansion would land in a held worktree, and a git reached through an
-opaque program name (a wrapper script, an alias) carries no git word at all. An unreadable or
+opaque program name (a wrapper script, an alias) carries no git word at all. The raw-text scan
+reads only the `-C`, `--git-dir`/`--work-tree`, `cd`/`pushd` and `GIT_`-assignment spellings: a
+directory named another way (`env --chdir=<held>`, a quote-spliced operand such as `-C
+"<prefix>"<rest>`, a `cd` stuck to a short option's value such as `rebase '-xcd <held> && ...'`,
+or a `cd` inside a git `!` alias value) joins no hold set, so from a session outside every held
+repository such a command stays allowed even where it reaches a held worktree; from a session
+inside one, or with any other reachable live hold, the program-running option that carries such a
+value withholds it. A program-running spelling outside the curated model is the same residual:
+the unrelated-repository pass is bounded by that enumeration, not a certified absence of
+programs. An unreadable or
 malformed marker directory, in any consulted repository and including a `review-holds` path that
 exists but is not a directory, denies git-word commands other than the one plain read-only form
 (fail closed); non-git commands pass, and a dry-run spelling of a mutating verb (`git clean -n`,
@@ -1171,13 +1200,13 @@ Limits:
 - A read verb the grammar passes may still write git's on-disk index: `git status` (and other reads)
   refresh the held worktree's index stat cache in the background, a metadata-only write the grammar
   treats as read-only because it changes no tracked content.
-- The held BRANCH is pinned against the ref writes named above and against
-  `fetch`/`pull`/`push`/`send-pack` anywhere in the held repository, but from another worktree of
-  the same repository a
-  `git switch --ignore-other-worktrees` checkout followed by a commit, or a `git branch -f` (which
-  git itself refuses while the branch is checked out), can still move it, as can a push from
+- The held BRANCH is pinned against the ref writes named above, against
+  `fetch`/`pull`/`push`/`send-pack` anywhere in the held repository, and against every other
+  non-read-only git bound to any worktree of the held repository (the repository-wide
+  withholding above), but a push from
   another repository naming this one by URL or path operand (the operand is not a `-C` move, so it
-  joins no hold set); these surface after the fact as the drift note.
+  joins no hold set) can still move it from a session outside every held repository; it surfaces
+  after the fact as the drift note.
 - File edits inside a held worktree (the Write and Edit tools, `sed -i`, `cp`) are covered by the
   rule but not by this hook; extending the write-scope hook is a separate follow-on. A shell
   redirection (`>`, `>>`) is stripped from the one plain git segment before the grammar reads it, so
@@ -1189,13 +1218,19 @@ Limits:
 - The marker directory can be written by the assistant, so a determined actor can remove a hold;
   the same suite-level limit the honest-limits section below discloses for the pack's other
   machine-local state.
-- A held branch tip moved by `git branch -f` from another worktree (which git itself refuses while
-  the branch is checked out) is not matched; safe over-denies (a verb outside the enumerated
+- Safe over-denies (a verb outside the enumerated
   read-only allowlist however read-only its form, a read verb with any leading assignment, with
   any global option other than a literal `-C`, or with an option its closed per-verb read-only
-  set does not name, `fetch`/`pull`/`push`/`send-pack` targeting any worktree of a held
+  set does not name, every git segment outside the read-only grammar bound to ANY worktree of a
+  held repository (`git branch -f`, `git switch --ignore-other-worktrees` and every plain sibling
+  mutation included),
+  `fetch`/`pull`/`push`/`send-pack` targeting any worktree of a held
   repository, every command outside the read-only grammar whose target repository's top level
   encloses a held worktree (a subdirectory target included) or cannot be read at all, a
+  program-running option or unmodelled global option while any reachable hold is live, however
+  unrelated its certain target, a RELATIVE `-C`, `--git-dir`, `--work-tree`, `cd` or
+  `GIT_`-assignment operand anywhere in the raw text while any reachable hold is live (`git
+  commit -C HEAD` included), a
   repository-level write such as
   `tag` targeted into
   the held worktree, a path that literally contains `$`, a backquote, a glob or brace character or

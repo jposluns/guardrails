@@ -17982,6 +17982,49 @@ def _rwh_ref_writer_text(sub, marker, path):
                                   marker["head"][:12], path))
 
 
+def _rwh_repo_hold_text(marker, path):
+    return ("AIQT rule rvwpin: this git command binds to a worktree of a repository with a live "
+            "review hold (dispatch {}, worktree {} held at {}, marker {}), and it is outside the "
+            "enumerated read-only form. A command bound to one worktree of a held repository can "
+            "still reach the held worktree through shared refs, shared configuration or a program "
+            "an option runs from the target's tree, whether or not the raw text names the held "
+            "path, so every such command is withheld, a stated over-refusal for the forms that "
+            "cannot reach it. Run one plain read-only git command, make the change in a repository "
+            "the hold does not pin, or end the hold first; the dispatcher removes the marker when "
+            "the review ends.".format(marker["dispatch_id"], marker["workdir"],
+                                      marker["head"][:12], path))
+
+
+def _rwh_program_text(word):
+    return ("AIQT rule rvwpin: this git command carries {!r}, an option or word that can run a "
+            "program (or a global option this rule does not model), while a review hold is live in "
+            "a repository the session or the command's text reaches. A program named in an option "
+            "value runs from the target's tree and can reach a held worktree the resolved target "
+            "does not account for, whether or not the raw text names the held path, so the command "
+            "is withheld; drop the option, or end the hold first.".format(word))
+
+
+def _rwh_program_word(eff):
+    """The first word of one plain git segment that can make it run a program, or any global
+    option other than a literal -C directory; None when it carries none this model knows. The
+    global scan is CLOSED (only -C passes: -p/--paginate runs the pager and an unmodelled global
+    can re-point or re-define what the verb runs, so any other dash-leading global is returned,
+    fail closed); the subcommand's words are judged by the curated program-option model
+    (_rdp_git_runs_program: --upload-pack, rebase -x, grep -O, submodule foreach, bisect run,
+    filter-branch, signing and signature-format spellings, a TRANSPORT::ADDRESS URL, --help's
+    viewer, with option values consumed first), an enumeration read from git's own option sets,
+    so a program spelling outside it is a disclosed residual, not a certified absence."""
+    i = _command_word_index(eff) + 1
+    n = len(eff)
+    while i < n and eff[i].startswith("-"):
+        if eff[i] != "-C" or i + 1 >= n:
+            return eff[i]
+        i += 2
+    if i >= n:
+        return None
+    return _rdp_git_runs_program(["git"] + list(eff[i:]))
+
+
 def _rwh_wt_suffix(workdir, operand):
     """Whether a worktree operand matches git's name shorthand for workdir: git also accepts a
     worktree named by the last components of its path when they are unique among the registered
@@ -18201,20 +18244,24 @@ def _rwh_hold_dirs(command, segments, cwd):
     literal path assigned to a GIT_ variable anywhere in the command, the raw text included (with
     one level of surrounding quotes stripped, so a quoted `sh -c '...'` body, a heredoc body or an
     eval string still contributes), plus every GIT_-class path in the hook's own environment.
-    Relative operands resolve against the last literal directory the command walked to (best
-    effort). Additive only: each candidate can only ADD a repository whose holds are read, so an
-    over-read never loosens the decision; a spelling this scan cannot read ($, a backquote, a glob
-    or brace character, a leading ~) leaves the candidate out, the disclosed allow residual of a
-    hold set built from literal text. Returns (dirs, raw_dirs, raw_relative): dirs is the whole
-    candidate set; raw_dirs is the subset the RAW-text patterns added (the holds the command's text
-    names directly, as against the session cwd or the ambient environment), which the caller reads
-    to tell a hold a program-running option value or a non-target -C step reaches from a hold it
-    only learned about through the session; raw_relative is True when a raw-text operand was
-    relative, so the directory that runs it (an option value runs from the target's tree, not the
-    session cwd) this scan cannot fix."""
+    Token-scan relative operands resolve against the last literal directory the command walked to
+    (best effort); a RELATIVE raw-text operand resolves against whatever directory runs it, which
+    this scan cannot fix, so it is resolved against EVERY literal directory the command walks to
+    (the session cwd, each accumulated -C step and each cd destination, the resolved target among
+    them), each landing repository joining the hold set. Additive only: each candidate can only ADD
+    a repository whose holds are read, so an over-read never loosens the decision; a spelling this
+    scan cannot read ($, a backquote, a glob or brace character, a leading ~) leaves the candidate
+    out, the disclosed allow residual of a hold set built from literal text. Returns (dirs,
+    raw_dirs, raw_relative): dirs is the whole candidate set; raw_dirs is the subset the RAW-text
+    patterns added (the holds the command's text names directly, as against the session cwd or the
+    ambient environment), which the caller reads to tell a hold a directory step outside the
+    resolved target reaches from a hold it only learned about through the session; raw_relative is
+    True when a raw-text operand was relative, which the caller withholds while a hold is live (the
+    multi-base resolution only widens the hold set, it cannot prove where the operand lands)."""
     dirs = []
     raw_dirs = []
     raw_relative = False
+    bases = []
     seen = set()
 
     def add(value, rel_base):
@@ -18244,6 +18291,8 @@ def _rwh_hold_dirs(command, segments, cwd):
                     resolved = add(value, c_chain)
                     # successive -C operands accumulate: the next relative one resolves here
                     c_chain = resolved if resolved is not None else None
+                    if resolved is not None and resolved not in bases:
+                        bases.append(resolved)
                 i += 1
             elif token in ("--git-dir", "--work-tree") and i + 1 < n:
                 add(tokens[i + 1], c_chain)
@@ -18258,6 +18307,8 @@ def _rwh_hold_dirs(command, segments, cwd):
                 resolved = dest if os.path.isabs(dest) else os.path.join(chain, dest)
                 add(resolved, None)
                 chain = resolved
+                if resolved not in bases:
+                    bases.append(resolved)
             else:
                 chain = None
         elif word == "popd" or word in _RWH_SHELL_STATE_WORDS:
@@ -18268,10 +18319,17 @@ def _rwh_hold_dirs(command, segments, cwd):
             operand = next(g for g in match.groups() if g is not None)
             # a relative raw-text operand resolves against whatever directory runs it, which for an
             # option value or a step the one-plain-git form does not model is the target's tree, not
-            # the session cwd: this scan cannot fix it, so flag it rather than trust the session-cwd
-            # resolution, and the caller withholds while a hold is live
+            # the session cwd: this scan cannot fix it, so it is resolved against EVERY directory
+            # the command walks to (each -C step and cd destination, the resolved target among
+            # them) as well as the session cwd, each landing repository joining the hold set, and
+            # the flag still makes the caller withhold while a hold is live (the widened set shows
+            # more holds; it proves nothing about where the operand lands)
             if operand and not _rwh_opaque_path(operand) and not os.path.isabs(operand):
                 raw_relative = True
+                for rel_base in bases:
+                    stepped = add(operand, rel_base)
+                    if stepped is not None:
+                        raw_dirs.append(stepped)
             resolved = add(operand, cwd)
             if resolved is not None:
                 raw_dirs.append(resolved)
@@ -18367,7 +18425,10 @@ def _rwh_decide(data):
     program (-O, --upload-pack) or is simply unmodelled drops the pass; read-only git so judged is
     never withheld by a hold, and a verb outside the allowlist, read-tree or bisect included, is
     treated as mutating), or
-    when its target is CERTAIN and resolves outside every held worktree: only literal -C moves
+    when its target is CERTAIN, resolves outside every held worktree, and belongs to a repository
+    with NO live hold, and the segment carries no program-running option or unmodelled global
+    (_rwh_program_word) and the raw text names no held path its target does not account for and no
+    relative -C, --git-dir, --work-tree, cd or GIT_-assignment operand: only literal -C moves
     resolved physically, no
     --git-dir/--work-tree or -c/--config-env override, no GIT_ variable assigned, exported or unset
     in the command, none of the _RDP_AMBIENT_GIT names (GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
@@ -18378,7 +18439,14 @@ def _rwh_decide(data):
     target that IS a held worktree, or whose repository TOP LEVEL (rev-parse --show-toplevel,
     never the -C directory alone; a top level git cannot report fails closed) ENCLOSES one on
     disk (a whole-tree mutation of an enclosing tree can delete a nested held worktree, from a
-    subdirectory too), denies outright; `git fetch`, `git pull`, `git push` and `git send-pack`
+    subdirectory too), denies outright; a certain target in a worktree of a HELD repository is
+    withheld for every form outside the read-only grammar, whether or not the raw text names the
+    held path (a sibling worktree shares the repository's refs, objects and configuration, and a
+    program-running option reaches the held worktree without naming it, a stated over-refusal for
+    the sibling forms that cannot reach it); a RELATIVE raw-text operand after -C, --git-dir,
+    --work-tree, cd or a GIT_ assignment is resolved against the session cwd AND every directory
+    the command walks to (the target included), each landing repository joining the hold set, and
+    is withheld while any hold is live; `git fetch`, `git pull`, `git push` and `git send-pack`
     targeting a repository with a live hold deny from any of its worktrees
     (an explicit refspec reaches the held branch, and --update-head-ok lifts git's own
     checked-out-branch refusal); `git worktree remove/move` of a held worktree (by name shorthand
@@ -18484,21 +18552,21 @@ def _rwh_decide(data):
                         # of the whole hold set, the session repository's holds and the target
                         # repository's holds, deduplicated by marker path (the opaque-path residual
                         # drops the session cwd from the hold set, so its holds would otherwise be
-                        # lost when the set is clear). Each hold is weighed by how it entered: the
-                        # target itself and a tree the target encloses are reached by the one-plain-
-                        # git command and deny. A hold the RAW TEXT names (in a program-running
-                        # option value such as --upload-pack, grep -O, rebase -x, submodule foreach
-                        # or difftool -x, or through a -C step that is not the resolved target),
-                        # including a sibling worktree of the target's own repository the option's
-                        # program can still reach, is withheld as UNVERIFIABLE: the certain-target
-                        # reasoning cannot show it untouched. A hold the raw text does NOT name,
-                        # known only because the session sits in a held repository or because it is
-                        # a sibling of the target, is NOT reachable by a one-plain-git command bound
-                        # to a certain target, so it does not withhold the command.
-                        raw_state, raw_payload = _rwh_set_state(
-                            [d for d in raw_dirs if _rwh_real(d) != target],
-                            views, holds, cw_cache, notes)
-                        raw_paths = {p for _m, p in raw_payload} if raw_state == "live" else set()
+                        # lost when the set is clear). The target itself and a tree the target
+                        # encloses are reached by the one-plain-git command and deny. Every
+                        # remaining hold is judged fail closed by how a git command bound to the
+                        # target can still reach it: a hold anywhere in the TARGET'S OWN repository
+                        # withholds every command outside the read-only grammar (a sibling worktree
+                        # shares the repository's refs, objects and configuration, and a
+                        # program-running option reaches it without naming its path, shapes this
+                        # rule does not model case by case); a hold in an UNRELATED repository,
+                        # reached only through the session or the raw text, withholds the command
+                        # when it carries a program-running option or an unmodelled global (the
+                        # option's program runs from the target's tree and is not bound to it), or
+                        # when the raw text names the held path in a value or step the resolved
+                        # target does not account for. Only a segment with none of those passes: a
+                        # plain mutation certain to run inside an unheld unrelated repository, so a
+                        # session in a review-held repository can still commit in an unrelated one.
                         reach, seen_reach = [], set()
                         for marker, path in ((set_payload or []) if set_state == "live" else []) \
                                 + list(s_live) + list(t_live):
@@ -18527,15 +18595,27 @@ def _rwh_decide(data):
                                         "readable non-bare target, or end the hold first.")
                             if _rwh_inside(held_real, top):
                                 return ("deny", _rwh_enclosing_text(marker, path))
+                        if t_live:
+                            marker, path = t_live[0]
+                            return ("unverifiable", _rwh_repo_hold_text(marker, path))
+                        word = _rwh_program_word(simple)
+                        if word is not None:
+                            return ("unverifiable", _rwh_program_text(word))
+                        raw_state, raw_payload = _rwh_set_state(
+                            [d for d in raw_dirs if _rwh_real(d) != target],
+                            views, holds, cw_cache, notes)
+                        raw_paths = {p for _m, p in raw_payload} if raw_state == "live" else set()
+                        for marker, path in reach:
                             if path not in raw_paths:
-                                # a hold the raw text does not name (the session's own hold, or a
-                                # sibling worktree of the target): a one-plain-git command bound to
-                                # the target cannot reach it, so it does not withhold the command
+                                # a hold the raw text does not name, known only because the session
+                                # sits in a held repository: the segment binds to a certain target
+                                # in an unrelated unheld repository and carries no program-running
+                                # option, the one shape this rule reads as unable to reach the hold
                                 continue
                             return ("unverifiable", "AIQT rule rvwpin: this git command's text "
                                     "names a held worktree ({}) that its resolved target does not "
-                                    "account for, so whether the command (a program-running option "
-                                    "or a directory step its one-plain-git form does not model) "
+                                    "account for, so whether the command (a directory step its "
+                                    "one-plain-git form does not model) "
                                     "modifies the held worktree cannot be ruled out while the "
                                     "review hold is live; run one plain 'git -C /absolute/path "
                                     "<subcommand>' naming no held worktree, or end the hold "
@@ -18570,12 +18650,19 @@ def review_workdir_hold(data):
     the --format/--pretty/--sort families) or edits configuration (git config edit included); or
     whose CERTAIN
     literal target resolves outside every held worktree (by git's absolute git directory with
-    physically resolved paths, never by path string) and does not enclose one on disk. A certain
+    physically resolved paths, never by path string), does not enclose one on disk, belongs to a
+    repository with NO live hold, and carries no program-running option, no unmodelled global, no
+    relative -C/--git-dir/--work-tree/cd/GIT_-assignment operand anywhere in the raw text, and no
+    held path its target does not account for. A certain
     target that is a held worktree, or whose repository top level (rev-parse --show-toplevel,
     never the -C directory alone; a top level git cannot report fails closed) encloses one (a
     whole-tree mutation of an enclosing tree can delete a nested held worktree, from a
     subdirectory of the enclosing tree too), DENIES-and-educates (make the change on a
-    separate revision, rvwpin.4); `git fetch`, `git pull`, `git push` and `git send-pack`
+    separate revision, rvwpin.4); a certain target in ANY worktree of a held repository is
+    withheld for every form outside the read-only grammar, whether or not the raw text names the
+    held path (a sibling worktree shares the repository's refs, objects and configuration, and a
+    program-running option reaches the held worktree without naming it), a stated over-refusal
+    for the sibling forms that cannot reach it; `git fetch`, `git pull`, `git push` and `git send-pack`
     targeting a repository
     with a live hold deny from any of its worktrees (an explicit refspec reaches the held branch,
     and --update-head-ok lifts git's own checked-out-branch refusal); a `git worktree remove/move`
