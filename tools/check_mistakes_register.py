@@ -29,19 +29,21 @@ temporary's path beside the write failure, never swallowed. The anchor write
 never opens an existing entry: a non-regular anchor entry (a symlink, dangling or live, included)
 is refused as cannot-evaluate with its target neither created nor rewritten, and a green advance
 lands by atomic os.replace of an exclusively created temporary in the anchor's directory. Fail-closed: a
-DECLARED register that is absent or unreadable, a broken chain or sequence, a reused id, an illegal
+broken chain or sequence, a reused id, an illegal
 status transition, or a landed row whose commit or repo-relative check_ref does not exist is a
-violation (exit 1); and an append-only AUTHORITY that cannot be read (no computable merge-base, a git
+violation (exit 1); a DECLARED register that is absent or unreadable is cannot-evaluate (exit 2,
+never a silent skip); and an append-only AUTHORITY that cannot be read (no computable merge-base, a git
 failure deciding whether the register is tracked, a malformed or unreadable anchor, an anchor
-entry that exists but is unusable (anchor presence is an explicit lstat whose only absence answer
-is ENOENT: a dangling symlink, a non-regular file, or an lstat failure such as EIO is never read
+entry that exists but is unusable (anchor presence is an explicit lstat whose absence answer is a
+CONFIRMED ENOENT through entry_state: a dangling symlink, a non-regular file, an lstat failure
+such as EIO, or an anchor path whose own chain cannot confirm the absence is never read
 as a missing anchor; the anchor is then read through one non-blocking open that never follows a
 final symlink and whose descriptor must be a regular file, so a live symlink never supplies the
 anchor), or a declared untracked register with no anchor) is a distinct cannot-evaluate
 failure (exit 2), never a
 silent skip nor a HEAD-against-itself self-comparison (chkfcl/grdinp). The LIVE leg resolves its
 validation root from this gate's own installed location (gate_root: the nearest ancestor holding a
-.git entry of ANY type, inspected through entry_state, whose only absence answer is ENOENT) and
+.git entry of ANY type, inspected through entry_state, whose only absence answer is a confirmed ENOENT) and
 requires git itself to confirm that root as a repository toplevel (confirmed_root: rev-parse
 --show-toplevel, realpath-compared) BEFORE any registry or register is read: an unresolvable,
 uninspectable or unconfirmed root is cannot-evaluate (exit 2), never a cwd fallback and never a
@@ -63,11 +65,22 @@ fixture environment, which carries the same config-isolation pins, not under
 git_authority_env(). With a confirmed root but no
 registry, or no declared
 register path, the live leg is NOT APPLICABLE and the self-test carries the assurance in CI; registry
-PRESENCE is an explicit lstat whose only absence answer is ENOENT (a dangling or uninspectable
-registry entry is cannot-evaluate, never NOT APPLICABLE and never a silent fall-through to the
+PRESENCE is an explicit lstat whose ENOENT answer reads as absence only when the absence is
+CONFIRMED down the path's own chain (entry_state: every missing component a plain ENOENT under a
+parent that opens, inspected without following links; a dangling or uninspectable
+registry entry, or a registry path that is unresolvable in any other way, is cannot-evaluate,
+never NOT APPLICABLE and never a silent fall-through to the
 lower-priority registry file), a registry that is PRESENT but not a JSON object is cannot-evaluate
 (exit 2), never NOT APPLICABLE, and a declared register value that is not a non-empty string is
-cannot-evaluate (exit 2), never a skipped surface.
+cannot-evaluate (exit 2), never a skipped surface. The registry and every declared register are
+read through one NON-BLOCKING open whose opened descriptor must prove a regular file before
+anything is read: a FIFO, a directory, a device or a socket at either path is cannot-evaluate
+(exit 2) with a diagnostic naming the file type, never read and never blocked on (the path is
+still followed, so a symlink to a regular file still reads; what it aliases is still
+type-checked). Where the open itself reports ENOENT, only a FINAL name confirmed absent under a
+parent that opens keeps the caller's own absence wording: a dangling symbolic link at the path,
+a missing parent directory, or any other unresolvable path is cannot-evaluate with the cause
+named, never read as an absent file.
   check_mistakes_register.py                   run the live leg
   check_mistakes_register.py --update-anchor   verify, then advance the anchor on green
   check_mistakes_register.py --self-test       synthetic fixtures for every invariant
@@ -172,27 +185,114 @@ def git_authority_env():
 def entry_state(path):
     """The ONE entry-state read behind every absence test in this gate and the appender (registry
     and anchor presence, the .git marker walk, the mkdir ancestor walk, the landed check_ref, and
-    the self-tests' own absence assertions): an explicit os.lstat whose only absence answer is
-    ENOENT. Returns the lstat result when an entry of ANY type is present (a dangling symlink
-    included: presence is the entry, not its target), None only on confirmed absence
-    (FileNotFoundError), and raises CannotEvaluate naming the path and the error for any other
-    failure (EIO, EACCES, ENOTDIR, ...): an uninspectable entry is never read as absent."""
+    the self-tests' own absence assertions): an explicit os.lstat whose ENOENT answer reads as
+    absence only when the absence is CONFIRMED (_absent_down_chain: every missing component of the
+    path is a plain ENOENT under a parent that opens, inspected without following links). Returns
+    the lstat result when an entry of ANY type is present (a dangling symlink
+    included: presence is the entry, not its target), None only on confirmed absence,
+    and raises CannotEvaluate naming the path and the error for any other
+    failure (EIO, EACCES, ENOTDIR, ...) and for an ENOENT the chain cannot confirm (a dangling
+    link on the parent chain, an unopenable parent, an inconsistent re-inspection): an
+    uninspectable entry, and an unresolvable path, is never read as absent."""
     try:
         return os.lstat(str(path))
     except FileNotFoundError:
-        return None
+        if _absent_down_chain(path):
+            return None
+        raise CannotEvaluate("the entry at {} cannot be read as absent: its own lstat reports "
+                             "ENOENT but an entry is present at the final name (the path "
+                             "cannot be inspected consistently)".format(path))
     except OSError as exc:
         raise CannotEvaluate("the entry at {} cannot be inspected ({}); only confirmed absence "
                              "(ENOENT) reads as absent".format(path, exc))
+
+
+def final_entry_state(path):
+    """The no-follow state of PATH's FINAL name, read relative to its parent directory: the
+    parent is opened ONCE (O_PATH, so a parent that is searchable but not readable still
+    answers, the same permission a plain lstat needs) and the final name is inspected with a
+    no-follow stat relative to that descriptor. Returns the stat result when an entry of ANY
+    type is present at the final name (a dangling symlink included: presence is the entry, not
+    its target), None ONLY when that inspection itself reports ENOENT (a confirmed-absent
+    final name under a parent that opened), and raises CannotEvaluate for everything else: a
+    parent that cannot be opened (missing, not a directory, or failing in any other way), a
+    final-name inspection failure other than ENOENT, or a failed close of the parent
+    descriptor (reported by name, never an escaped OSError). So a missing parent directory, a
+    dangling link on the parent chain, or any other unresolvable path never reads as a
+    confirmed-absent entry here."""
+    name = Path(path).name
+    if not name:
+        raise CannotEvaluate("the path {} has no final name to inspect".format(path))
+    try:
+        parent_fd = os.open(str(Path(path).parent),
+                            os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        # the chained cause lets _absent_down_chain tell a parent that is itself MISSING
+        # (climb and confirm it instead) from any other unopenable parent (refuse)
+        raise CannotEvaluate("the parent directory of {} cannot be opened ({}); only a final "
+                             "name confirmed absent under a parent that opens reads as "
+                             "absent".format(path, exc)) from exc
+    try:
+        try:
+            return os.lstat(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise CannotEvaluate("the final name of {} cannot be inspected ({}); only "
+                                 "confirmed absence (ENOENT) reads as absent".format(path, exc))
+    finally:
+        try:
+            os.close(parent_fd)
+        except OSError as exc:
+            # raising here replaces an in-flight refusal and the absent/present answer
+            # alike: a descriptor this read cannot release is a named refusal, never an
+            # escaped OSError and never a trusted answer
+            raise CannotEvaluate("the descriptor opened on the parent directory of {} could "
+                                 "not be closed ({})".format(path, exc))
+
+
+def _absent_down_chain(path):
+    """True ONLY when PATH is CONFIRMED absent without following links: its final name is a
+    plain ENOENT under a parent that opens (final_entry_state), or, climbing one component
+    at a time ONLY while a parent fails to open because it is itself missing (the open's own
+    ENOENT, read from the refusal's chained cause), the first component whose parent does
+    open is such a plain ENOENT, which confirms everything below it absent with it. Returns
+    False when the FINAL name itself holds an entry (a dangling symlink included: present,
+    never absent). Raises CannotEvaluate when the path cannot be confirmed either way: a
+    parent that fails to open for any reason but its own absence, an inspection failure
+    other than ENOENT, or a component that is PRESENT while its child's parent open failed
+    (a dangling link on the chain), so an unresolvable path is never read as absent."""
+    p = Path(path)
+    comps = [p, *p.parents]
+    # comps[-1] is the path's anchor ('/' or '.'), which has no final name to inspect; the
+    # climb therefore stops at comps[-2], whose parent is that anchor
+    for i, comp in enumerate(comps[:-1]):
+        try:
+            state = final_entry_state(comp)
+        except CannotEvaluate as exc:
+            if isinstance(exc.__cause__, FileNotFoundError) and i + 2 < len(comps):
+                continue  # the parent is itself missing: climb and confirm it instead
+            raise
+        if state is None:
+            return True
+        if i == 0:
+            return False
+        raise CannotEvaluate("the path {} cannot be read as absent: {} is present but "
+                             "cannot be opened as the parent directory of the missing "
+                             "components below it".format(path, comp))
+    raise CannotEvaluate("the path {} cannot be read as absent: no component of it could "
+                         "be confirmed one way or the other".format(path))
 
 
 def _read_regular(path, label):
     """Read one authority file as bytes: opened ONCE with READ_FLAGS, refused unless the OPENED
     descriptor is a regular file (fstat), and read from that same descriptor, so an entry
     swapped after an earlier inspection is judged as it was opened and a FIFO never blocks the
-    gate. Every failure raises CannotEvaluate naming label and path: a symlink, live or
-    dangling (ELOOP), an entry that cannot be opened (one gone since its inspection included),
-    a directory, a FIFO or any other non-regular file, and a read error."""
+    gate. Every open, type and read failure raises CannotEvaluate naming label and path: a
+    symlink, live or dangling (ELOOP), an entry that cannot be opened (one gone since its
+    inspection included), a directory, a FIFO or any other non-regular file, and a read
+    error; a failed close of the descriptor propagates as its own OSError (loud, never read
+    as absence)."""
     try:
         fd = os.open(str(path), READ_FLAGS)
     except OSError as exc:
@@ -215,10 +315,104 @@ def _read_regular(path, label):
         os.close(fd)
 
 
+def _nonregular_name(mode):
+    """A plain name for a non-regular file type, for refusal messages."""
+    if stat.S_ISFIFO(mode):
+        return "a FIFO (named pipe)"
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISCHR(mode):
+        return "a character device"
+    if stat.S_ISBLK(mode):
+        return "a block device"
+    return "a non-regular file (mode 0o{:o})".format(stat.S_IFMT(mode))
+
+
+def _read_following(path, label):
+    """Read PATH as bytes, following the path as these reads always have (a symlink to a
+    regular file still reads; what it aliases is still type-checked), without ever blocking
+    on the file type: the open is NON-BLOCKING (a blocking read-only open of a FIFO waits
+    for a writer), and the OPENED descriptor's own fstat must prove a regular file before
+    anything is read (a read of a FIFO descriptor can wait forever). A non-regular file
+    raises CannotEvaluate naming LABEL and the file type (unless the refusal's own close
+    also fails: the close's OSError takes over and the refusal names the descriptor
+    instead, still CannotEvaluate). On Linux a socket (and a device
+    node no driver backs) cannot be opened as a file at all (ENXIO, before any descriptor
+    exists), so that refusal names the type from a stat of the path that FOLLOWS it exactly
+    as the open did (a symlink to a socket is named as a socket, not as the link), falling
+    back to the entry's own lstat when the target cannot be inspected; either is a
+    point-in-time read taken only for the message, never a proof about an opened
+    descriptor. A failure of the OPEN ITSELF propagates as the OSError
+    it is, so each caller keeps its own wording for an unopenable entry, EXCEPT that the
+    open's own ENOENT keeps that treatment only for a path CONFIRMED absent at its final
+    name (the open FOLLOWS the path, so its ENOENT also covers a dangling symbolic link
+    and a missing parent directory): the final name is re-inspected without following
+    links (final_entry_state), an entry still present there is a named CannotEvaluate (a
+    dangling link is never an absent file), an unopenable parent is a named CannotEvaluate
+    through that same helper, and only a confirmed-missing final name re-raises the
+    original FileNotFoundError. An OSError AFTER
+    the open succeeded (from fstat, read or close) raises CannotEvaluate naming the
+    descriptor instead, so an errno such as ENOENT reported by a descriptor step can never
+    read as a confirmed-absent entry to a caller that treats a missing file as empty. O_NONBLOCK
+    stays set on the proven-regular descriptor: reads of a regular file behave the same
+    with or without it."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as exc:
+        if exc.errno == errno.ENXIO:
+            try:
+                mode = os.stat(str(path)).st_mode
+            except OSError:
+                try:
+                    mode = os.lstat(str(path)).st_mode
+                except OSError:
+                    mode = None
+            if mode is not None and not stat.S_ISREG(mode):
+                raise CannotEvaluate(
+                    "{} names {}, not a regular file (the non-blocking open cannot address "
+                    "it, so it was never opened or read)".format(label, _nonregular_name(mode)))
+        if exc.errno == errno.ENOENT:
+            # the open follows the path, so its ENOENT covers more than a missing file:
+            # only a final name confirmed absent under a parent that opens may read as an
+            # absent entry; a dangling symbolic link, a missing parent directory or any
+            # other unresolvable path is a named refusal, never absence
+            entry = final_entry_state(path)
+            if entry is not None:
+                if stat.S_ISLNK(entry.st_mode):
+                    raise CannotEvaluate(
+                        "{} names a dangling symbolic link (an entry is present at the "
+                        "final name but the open found nothing to follow); an unresolvable "
+                        "path is never read as an absent file".format(label))
+                raise CannotEvaluate(
+                    "{} cannot be read consistently (absent at the open but present at the "
+                    "final-name inspection)".format(label))
+        raise
+    try:
+        try:
+            st_mode = os.fstat(fd).st_mode
+            if not stat.S_ISREG(st_mode):
+                raise CannotEvaluate("{} names {}, not a regular file".format(
+                    label, _nonregular_name(st_mode)))
+            chunks = []
+            while True:
+                chunk = os.read(fd, READ_CHUNK)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise CannotEvaluate("{} was opened but cannot be read from its open descriptor "
+                             "({}); a failure after a successful open is never an absent "
+                             "entry".format(label, exc))
+
+
 def gate_root(start):
     """The validation-root CANDIDATE shared by this gate's live leg and the appender: the nearest
     ancestor of START (the installed tool's own directory) holding a .git ENTRY of ANY type,
-    selected through entry_state, so ENOENT is the only absence (a dangling .git symlink is
+    selected through entry_state, so a confirmed ENOENT is the only absence (a dangling .git symlink is
     SELECTED, never walked past, and left for confirmed_root to refuse) and any other inspection
     failure raises CannotEvaluate, never reads as absence and never walks past the marker.
     Returns None when no ancestor holds a .git entry. The candidate is only a MARKER until
@@ -253,13 +447,25 @@ def confirmed_root(root):
         return False
 
 
+def _shown(value):
+    """repr(VALUE) for a violation message, or a fixed placeholder when the value is nested too
+    deeply to render (the JSON decoder accepts more nesting than repr/str can walk on the same
+    stack), so NAMING a malformed row never escapes as a RecursionError of its own."""
+    try:
+        return repr(value)
+    except RecursionError:
+        return "<a value nested too deeply to display>"
+
+
 def verify_lines(lines, root=None, prefix="MR-"):
     """Return a list of violation strings for the raw register lines (empty = clean). prefix is the
     register's id family (MR- for the mistakes register, AT- for an attestations register). The
     landed-row commit read runs git under git_authority_env(), and a launch error or timeout of
     that read raises CannotEvaluate (never read as a missing commit); a landed check_ref whose
-    entry inspection fails with anything but ENOENT raises CannotEvaluate through entry_state (an
-    uninspectable check_ref is never read as absent or present)."""
+    entry inspection fails with anything but a confirmed ENOENT raises CannotEvaluate through
+    entry_state (an uninspectable check_ref is never read as absent or present). Every row value
+    quoted in a violation message renders through _shown, so a value the decoder accepted but
+    repr cannot walk is shown as a placeholder, never an escaped RecursionError."""
     problems, prev_line, ids_born, last_status = [], None, {}, {}
     for n, line in enumerate(lines, 1):
         if not line.strip():
@@ -274,6 +480,11 @@ def verify_lines(lines, root=None, prefix="MR-"):
         except ValueError:
             problems.append("line {}: not a JSON object".format(n))
             continue
+        except RecursionError:
+            # the decoder raises RecursionError, not ValueError, past its nesting limit;
+            # an unparseable row is a named violation, never an escaped traceback
+            problems.append("line {}: nested too deeply for the JSON decoder".format(n))
+            continue
         if not isinstance(row, dict):
             problems.append("line {}: not a JSON object".format(n))
             continue
@@ -283,13 +494,13 @@ def verify_lines(lines, root=None, prefix="MR-"):
             problems.append("line {}: digest chain broken".format(n))
         seq = row.get("seq")
         if not isinstance(seq, int) or isinstance(seq, bool) or seq != n:
-            problems.append("line {}: seq {} is not the line number".format(n, seq))
+            problems.append("line {}: seq {} is not the line number".format(n, _shown(seq)))
         rid = row.get("id")
         status = row.get("status")
         if status not in STATUSES:
-            problems.append("line {}: unknown status {!r}".format(n, status))
+            problems.append("line {}: unknown status {}".format(n, _shown(status)))
         elif not isinstance(rid, str) or not rid.startswith(prefix):
-            problems.append("line {}: id {!r} is not an {} id".format(n, rid, prefix))
+            problems.append("line {}: id {} is not an {} id".format(n, _shown(rid), prefix))
         elif rid in ids_born and status == "proposed":
             problems.append("line {}: id {} reused as a new proposal".format(n, rid))
         elif rid in ids_born:
@@ -332,8 +543,8 @@ def verify_lines(lines, root=None, prefix="MR-"):
                 except (OSError, ValueError):
                     check_ok = False
             if not check_ok:
-                problems.append("line {}: landed row cites check_ref {!r} which is not an existing "
-                                "repo-relative path".format(n, check_ref))
+                problems.append("line {}: landed row cites check_ref {} which is not an existing "
+                                "repo-relative path".format(n, _shown(check_ref)))
         prev_line = line
     return problems
 
@@ -354,7 +565,7 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
     Every git read
     here runs under git_authority_env(), so a caller-supplied git environment never redirects the
     tracked decision or the authority reads, and anchor PRESENCE goes through the shared
-    entry_state (ENOENT-only absence)."""
+    entry_state (confirmed-ENOENT-only absence)."""
     rel = None
     try:
         rel = str(path.resolve().relative_to(Path(root).resolve()))
@@ -403,9 +614,12 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
                 return ["the register is not an append-only extension of its merge-base state"]
             return []
     anchor = Path(str(path) + ".anchor")
-    # Anchor PRESENCE is an EXPLICIT lstat whose only absence answer is ENOENT: the
+    # Anchor PRESENCE is an EXPLICIT lstat whose only absence answer is a CONFIRMED ENOENT
+    # (entry_state; an anchor under a register directory a first append is yet to create
+    # reads as absent only because every missing component is itself confirmed): the
     # missing-anchor allowance covers only an anchor path with NO entry at all. An lstat failure
-    # other than ENOENT (EIO, EACCES, ENOTDIR, ...) leaves the presence question OPEN, and an
+    # other than ENOENT (EIO, EACCES, ENOTDIR, ...) or an ENOENT the chain cannot confirm
+    # leaves the presence question OPEN, and an
     # entry that exists but cannot be used (a symlink, live or dangling, a directory, a FIFO or
     # any other non-regular file) is an authority that cannot be read: each is cannot-evaluate,
     # never the allowance.
@@ -437,6 +651,10 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
     # seq was coerced to 1 and still compared).
     try:
         a = json.loads(raw.decode("utf-8"))
+    except RecursionError:
+        # the decoder raises RecursionError, not ValueError, past its nesting limit; an
+        # anchor that deep is an authority that cannot be read, never an escaped traceback
+        raise CannotEvaluate("the anchor file is nested too deeply for the JSON decoder")
     except ValueError as exc:
         raise CannotEvaluate("the anchor file cannot be read as JSON ({})".format(exc))
     n = a.get("seq") if isinstance(a, dict) else None
@@ -469,7 +687,7 @@ def update_anchor(path, lines):
     exclusive creation's own name); a temporary left under another process id blocks nothing
     and is left in place, and a creation failure that is not EEXIST names the actual error
     instead of blaming a stale temporary. The entry inspection goes through the shared
-    entry_state (ENOENT-only absence). Residuals: an entry planted between the inspection and
+    entry_state (confirmed-ENOENT-only absence). Residuals: an entry planted between the inspection and
     the replace is REPLACED as a whole entry, never followed; concurrent --update-anchor runs
     are not serialized against each other (the last replace wins)."""
     anchor = Path(str(path) + ".anchor")
@@ -525,9 +743,12 @@ def run(root, update=False):
     reg, reg_found = None, False
     for rel in REGISTRY_FILES:
         p = Path(root) / rel
-        # Registry PRESENCE is an explicit lstat whose only absence answer is ENOENT: a
+        # Registry PRESENCE is an explicit lstat whose only absence answer is a CONFIRMED
+        # ENOENT: a
         # dangling symlink or an uninspectable entry SELECTS this registry file and fails
-        # closed, never NOT APPLICABLE and never a silent fall-through to the lower-priority
+        # closed, and an entry whose absence the chain cannot confirm (a dangling parent
+        # included) is cannot-evaluate, never NOT APPLICABLE and never a silent
+        # fall-through to the lower-priority
         # registry file.
         try:
             reg_entry = entry_state(p)
@@ -539,8 +760,21 @@ def run(root, update=False):
         if reg_entry is None:
             continue
         reg_found = True
+        # The registry is read like the registers below: a non-blocking open whose opened
+        # descriptor must prove a regular file, so a FIFO (or any other non-regular file)
+        # at the registry path is refused by name instead of blocking the gate.
         try:
-            reg = json.loads(p.read_text(encoding="utf-8"))
+            reg = json.loads(_read_following(
+                p, "the orchestration registry").decode("utf-8"))
+        except CannotEvaluate as exc:
+            print("error: {}; fail-closed".format(exc))
+            return 2
+        except RecursionError:
+            # the decoder raises RecursionError, not ValueError, past its nesting limit;
+            # a registry that deep is the same named refusal, never an escaped traceback
+            print("error: the orchestration registry is nested too deeply for the JSON "
+                  "decoder; fail-closed")
+            return 2
         except (OSError, ValueError) as exc:
             print("error: cannot read the orchestration registry: {}".format(exc))
             return 2
@@ -568,9 +802,16 @@ def run(root, update=False):
     worst, green = 0, []
     for key, prefix, declared in surfaces:
         path = Path(declared) if os.path.isabs(declared) else Path(root) / declared
+        # The same non-blocking open and regular-file proof as the registry read above: a
+        # declared register that is a FIFO, a directory, a device or a socket is refused
+        # with a diagnostic naming the file type, never read and never blocked on.
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
+            lines = _read_following(
+                path, "the declared " + key).decode("utf-8").splitlines()
+        except CannotEvaluate as exc:
+            print("error: {}; fail-closed".format(exc))
+            return 2
+        except (OSError, ValueError) as exc:
             print("error: the DECLARED {} is unreadable ({}); fail-closed".format(key, exc))
             return 2
         try:
@@ -616,6 +857,8 @@ def self_test():
     import contextlib
     import io
     import shutil
+    import signal
+    import socket
     import tempfile
     import threading
     # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
@@ -720,6 +963,152 @@ def self_test():
         dup_row = "{" + ", ".join(
             json.dumps(k) + ": " + json.dumps(v) for k, v in dup_fields) + "}"
         _case("duplicate-key-fails", [dup_row], False)
+        # a row nested too deeply for the JSON decoder (balanced or not) is a NAMED
+        # violation, never an escaped RecursionError that would crash the gate with a
+        # traceback instead of failing the register; the depth is far beyond what any
+        # plausible interpreter stack lets the decoder parse
+        for deep_name, deep_line in (
+                ("deep-nesting-unbalanced-named", "[" * 2000000),
+                ("deep-nesting-balanced-named", "[" * 2000000 + "]" * 2000000)):
+            try:
+                deep_problems = verify_lines([deep_line], prefix="MR-")
+            except RecursionError:
+                failures.append(deep_name + ": the decoder's RecursionError escaped "
+                                "instead of naming the row as a violation")
+            else:
+                if not any("nested too deeply" in p for p in deep_problems):
+                    failures.append("{}: want a violation naming the nesting, got {!r}"
+                                    .format(deep_name, deep_problems[:3]))
+        # a row the decoder ACCEPTS can still carry a value nested too deeply for repr/str
+        # to render into a violation message (the decoder's recursion limit sits above the
+        # renderer's on this interpreter): the message then shows a fixed placeholder,
+        # never an escaped RecursionError. The renderer's placeholder path is proven
+        # directly first (host-independent), then the window between the two limits is
+        # MEASURED on this host and exercised end to end through verify_lines.
+        class _Unrenderable:
+            def __repr__(self):
+                raise RecursionError("synthetic unrenderable value")
+        # the direct probe is guarded so a regressed helper records a NAMED failure here
+        # and the later vectors still run, instead of the whole suite dying on a traceback
+        try:
+            shown_got = _shown(_Unrenderable())
+        except RecursionError:
+            failures.append("shown-placeholder: a RecursionError escaped _shown instead of "
+                            "the placeholder")
+        else:
+            if shown_got != "<a value nested too deeply to display>":
+                failures.append("shown-placeholder: _shown must substitute the placeholder "
+                                "for a value repr cannot walk, got {!r}".format(shown_got))
+        if _shown("x") != "'x'":
+            failures.append("shown-control: _shown must stay repr for a renderable value, "
+                            "got {!r}".format(_shown("x")))
+        # every PRODUCTION rendering call site is driven UNCONDITIONALLY by fault
+        # injection (host-independent, so this coverage cannot vanish on a host whose
+        # decoder does not out-run its renderer): the crafted row reaches verify_lines
+        # through its own decoding hook, so each probe exercises the real call site, not
+        # the helper alone, and a value repr cannot walk must surface as the placeholder
+        # in that site's own violation message, never as an escaped RecursionError
+
+        def _site_fields(**overrides):
+            fields = {"seq": 1, "id": "MR-1", "ts": "t", "mistake": "m", "evidence": "e",
+                      "rule": "r", "guardrail": "g", "status": "proposed", "prev": ZERO}
+            fields.update(overrides)
+            return fields
+
+        real_pairs_hook = _pairs_without_duplicates
+        for site_name, site_row, site_naming, site_root in (
+                ("unrenderable-seq-value-named",
+                 _site_fields(seq=_Unrenderable()), "is not the line number", None),
+                ("unrenderable-status-value-named",
+                 _site_fields(status=_Unrenderable()), "unknown status", None),
+                ("unrenderable-id-value-named",
+                 _site_fields(id=_Unrenderable()), "is not an MR- id", None),
+                ("unrenderable-check-ref-value-named",
+                 _site_fields(status="landed", check_ref=_Unrenderable()),
+                 "not an existing repo-relative path", tmp)):
+            globals()["_pairs_without_duplicates"] = \
+                lambda pairs, crafted=site_row: dict(crafted)
+            try:
+                site_problems = verify_lines(["{}"], root=site_root, prefix="MR-")
+            except RecursionError:
+                failures.append(site_name + ": a RecursionError escaped the violation "
+                                "rendering instead of naming the row")
+            else:
+                if not any(site_naming in p and "nested too deeply to display" in p
+                           for p in site_problems):
+                    failures.append("{}: want a violation naming {!r} with the "
+                                    "placeholder, got {!r}".format(
+                                        site_name, site_naming, site_problems[:3]))
+            finally:
+                globals()["_pairs_without_duplicates"] = real_pairs_hook
+
+        def _deepest(ok):
+            lo, hi = 1, 2
+            while ok(hi):
+                lo, hi = hi, hi * 2
+                if hi > 1 << 24:
+                    return lo
+            while lo + 1 < hi:
+                mid = (lo + hi) // 2
+                if ok(mid):
+                    lo = mid
+                else:
+                    hi = mid
+            return lo
+
+        def _row_line(field, value_json):
+            fields = ['"seq": 1', '"id": "MR-1"', '"status": "proposed"',
+                      '"prev": "{}"'.format(ZERO)]
+            fields = [f for f in fields if not f.startswith('"' + field + '"')]
+            return "{" + ", ".join(['"{}": {}'.format(field, value_json)] + fields) + "}"
+
+        def _line_decodes(depth):
+            try:
+                json.loads(_row_line("seq", "[" * depth + "]" * depth))
+            except RecursionError:
+                return False
+            return True
+
+        def _value_renders(depth):
+            try:
+                repr(json.loads("[" * depth + "]" * depth))
+            except RecursionError:
+                return False
+            return True
+
+        decode_max = _deepest(_line_decodes)
+        render_max = _deepest(_value_renders)
+        if render_max < decode_max:
+            # a decodable-but-unrenderable depth exists on this host: drive it through each
+            # violation message that quotes a row value (seq, status, id)
+            deep_value = "[" * decode_max + "]" * decode_max
+            for shp_name, shp_field, shp_naming in (
+                    ("deep-seq-value-named", "seq", "is not the line number"),
+                    ("deep-status-value-named", "status", "unknown status"),
+                    ("deep-id-value-named", "id", "is not an MR- id")):
+                shp_line = _row_line(shp_field, deep_value)
+                try:
+                    shp_problems = verify_lines([shp_line], prefix="MR-")
+                except RecursionError:
+                    failures.append(shp_name + ": a RecursionError escaped the violation "
+                                    "rendering instead of naming the row")
+                else:
+                    if not any(shp_naming in p and "nested too deeply to display" in p
+                               for p in shp_problems):
+                        failures.append("{}: want a violation naming {!r} with the "
+                                        "placeholder, got {!r}".format(
+                                            shp_name, shp_naming, shp_problems[:3]))
+        else:
+            # when render_max >= decode_max no decodable input can out-run the renderer
+            # on this host, so there is no real-value window to drive end to end here;
+            # the injection probes above drove every rendering call site unconditionally,
+            # and the omitted window cases are reported BY NAME, never silently folded
+            # into the PASS text
+            print("NOT RUN: deep-seq-value-named, deep-status-value-named and "
+                  "deep-id-value-named (this host's render limit {} is not below its "
+                  "decode limit {}, so no decodable input can out-run the renderer; the "
+                  "unconditional injection probes still drove every rendering call "
+                  "site)".format(render_max, decode_max))
         # edit/delete/reorder of an anchored row fails via the anchor
         reg_dir = tmp / "r"
         reg_dir.mkdir()
@@ -770,6 +1159,19 @@ def self_test():
             if "malformed" not in str(exc):
                 failures.append("the non-object anchor refusal should say malformed, got: "
                                 "{}".format(exc))
+        # an anchor nested too deeply for the JSON decoder (which raises RecursionError,
+        # not ValueError) is the same named cannot-evaluate, never an escaped traceback
+        anchor_path.write_text("[" * 2000000, encoding="utf-8")
+        try:
+            verify_append_only(reg_dir, rp, good)
+            failures.append("deep-anchor-named: a too-deep anchor should be cannot-evaluate")
+        except CannotEvaluate as exc:
+            if "nested too deeply" not in str(exc):
+                failures.append("deep-anchor-named: the too-deep anchor refusal should name "
+                                "the nesting, got: {}".format(exc))
+        except RecursionError:
+            failures.append("deep-anchor-named: a RecursionError escaped the anchor read "
+                            "instead of a named refusal")
         # anchor presence is lstat-based: an entry that EXISTS at the anchor path but cannot be
         # used (a dangling symlink, a directory) is cannot-evaluate, never the missing-anchor
         # allowance, with allow_missing_anchor True (the --update-anchor bootstrap) included
@@ -816,6 +1218,69 @@ def self_test():
                         failures.append("the {} refusal should name the link and the "
                                         "allowance, got: {}".format(tag, exc))
             anchor_path.unlink()
+        # final_entry_state's own close refusal: a parent descriptor whose close fails is
+        # a named cannot-evaluate, never an escaped OSError and never a trusted answer;
+        # the injected close really releases the descriptor exactly once, identified by
+        # the parent directory's file identity, and only then reports failure
+        pclose_fired = {"n": 0}
+        pclose_parent_id = os.stat(str(reg_dir))
+        real_parent_release, real_parent_fstat = os.close, os.fstat
+
+        def failing_parent_close(release_fd):
+            try:
+                st_released = real_parent_fstat(release_fd)
+            except OSError:
+                st_released = None
+            real_parent_release(release_fd)
+            if st_released is not None and (st_released.st_dev, st_released.st_ino) == \
+                    (pclose_parent_id.st_dev, pclose_parent_id.st_ino):
+                pclose_fired["n"] += 1
+                raise OSError(5, "injected close failure")
+
+        os.close = failing_parent_close
+        try:
+            try:
+                final_entry_state(reg_dir / "pclose-probe.txt")
+                failures.append("parent-close-failure-named: want a named cannot-evaluate, "
+                                "got an answer")
+            except CannotEvaluate as exc:
+                if "could not be closed" not in str(exc):
+                    failures.append("parent-close-failure-named: the refusal should name "
+                                    "the close failure, got: {}".format(exc))
+            except OSError as exc:
+                failures.append("parent-close-failure-named: an OSError escaped the parent "
+                                "descriptor's close ({})".format(exc))
+        finally:
+            os.close = real_parent_release
+        if pclose_fired["n"] == 0:
+            failures.append("parent-close-failure-named: the injected close failure never "
+                            "fired, so the vector proved nothing")
+        # entry_state's inconsistent re-inspection refusal: an lstat that reports ENOENT
+        # while an entry is PRESENT at the final name is a named cannot-evaluate, never
+        # read as absence
+        incon_entry = reg_dir / "inconsistent-entry.txt"
+        incon_entry.write_text("x\n", encoding="utf-8")
+        real_incon_lstat = os.lstat
+
+        def inconsistent_lstat(p, *largs, **lkw):
+            if not largs and not lkw and str(p) == str(incon_entry):
+                raise FileNotFoundError(2, "injected inconsistent ENOENT")
+            return real_incon_lstat(p, *largs, **lkw)
+
+        os.lstat = inconsistent_lstat
+        try:
+            try:
+                entry_state(incon_entry)
+                failures.append("inconsistent-reinspection-refused: want a named "
+                                "cannot-evaluate, got an answer")
+            except CannotEvaluate as exc:
+                if "present at the final name" not in str(exc):
+                    failures.append("inconsistent-reinspection-refused: the refusal should "
+                                    "name the inconsistent re-inspection, got: "
+                                    "{}".format(exc))
+        finally:
+            os.lstat = real_incon_lstat
+        incon_entry.unlink()
 
         def timed_refusal(seconds=10):
             # a TIMED daemon thread, so a blocking anchor read is a named failure here, never
@@ -862,7 +1327,8 @@ def self_test():
                             "opened descriptor, got {}: {}".format(swap_kind, swap_detail))
         anchor_path.unlink()
         anchor_path.write_text(good_anchor, encoding="utf-8")
-        # anchor presence is an EXPLICIT lstat whose only absence answer is ENOENT: any other
+        # anchor presence is an EXPLICIT lstat whose only absence answer is a confirmed
+        # ENOENT: any other
         # inspection failure (EIO here) leaves the presence question open and is
         # cannot-evaluate, never the missing-anchor allowance, bootstrap included
         real_os_lstat = os.lstat
@@ -1489,6 +1955,223 @@ def self_test():
                             "string") not in decl_out.getvalue():
             failures.append("a malformed attestations declaration should name its own key, "
                             "got exit {}: {}".format(decl_rc, decl_out.getvalue().strip()))
+        # the live leg's registry and register reads never block on the file type: a FIFO at
+        # the declared register path, and a FIFO at the registry path itself, are each
+        # refused (exit 2) with a diagnostic naming the file type; each vector runs under an
+        # alarm so a read that blocks fails instead of hanging the suite. A read that
+        # exceeds the configured seconds (default 60) records a failure, so the alarm can
+        # fail a vector only by firing, never pass one, and a loaded host can at worst
+        # cause a false failure.
+        class ReadAlarm(Exception):
+            # deliberately NOT an OSError: the live leg's reads catch OSError, and the alarm
+            # must escape them to fail the vector
+            pass
+
+        def bounded_run(name, *rargs, seconds=60, **rkw):
+            def on_alarm(signum, frame):
+                raise ReadAlarm("blocked for {} s".format(seconds))
+            old_handler = signal.signal(signal.SIGALRM, on_alarm)
+            signal.alarm(seconds)
+            try:
+                bout = io.StringIO()
+                with contextlib.redirect_stdout(bout):
+                    rc = run(*rargs, **rkw)
+                return rc, bout.getvalue()
+            except ReadAlarm as exc:
+                failures.append("{}: the live leg blocked instead of refusing ({})".format(
+                    name, exc))
+                return None
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+
+        registry.write_text(json.dumps(
+            {"version": 1, "mistakes_register": "fifo-reg.jsonl"}), encoding="utf-8")
+        fifo_decl_reg = repo / "fifo-reg.jsonl"
+        os.mkfifo(str(fifo_decl_reg))
+        fifo_got = bounded_run("gate-fifo-register-refused", repo)
+        if fifo_got is not None and (
+                fifo_got[0] != 2 or "FIFO" not in fifo_got[1]
+                or "not a regular file" not in fifo_got[1]):
+            failures.append("gate-fifo-register-refused: a FIFO register should be exit 2 "
+                            "naming the file type, got exit {!r}: {}".format(
+                                fifo_got[0], fifo_got[1].strip()))
+        if not stat.S_ISFIFO(os.lstat(str(fifo_decl_reg)).st_mode):
+            failures.append("gate-fifo-register-refused: the refusal changed the register "
+                            "entry")
+        fifo_decl_reg.unlink()
+        registry.unlink()
+        os.mkfifo(str(registry))
+        fifo_got = bounded_run("gate-fifo-registry-refused", repo)
+        if fifo_got is not None and (
+                fifo_got[0] != 2 or "FIFO" not in fifo_got[1]
+                or "not a regular file" not in fifo_got[1]
+                or "orchestration registry" not in fifo_got[1]):
+            failures.append("gate-fifo-registry-refused: a FIFO registry should be exit 2 "
+                            "naming the registry and the file type, got exit {!r}: {}".format(
+                                fifo_got[0], fifo_got[1].strip()))
+        registry.unlink()
+        # a registry nested too deeply for the JSON decoder (which raises RecursionError,
+        # not ValueError) is the same named fail-closed refusal (exit 2), never an escaped
+        # traceback
+        registry.write_bytes(b"[" * 2000000)
+
+        def deep_registry_run():
+            try:
+                return bounded_run("gate-deep-registry-refused", repo)
+            except RecursionError as exc:
+                return "an uncaught RecursionError: {}".format(exc), ""
+
+        deepreg_got = deep_registry_run()
+        if deepreg_got is not None and (
+                deepreg_got[0] != 2
+                or "nested too deeply for the JSON decoder" not in deepreg_got[1]):
+            failures.append("gate-deep-registry-refused: a registry nested too deeply for "
+                            "the JSON decoder should be exit 2 naming the nesting, got "
+                            "exit {!r}: {}".format(deepreg_got[0],
+                                                   str(deepreg_got[1]).strip()))
+        registry.unlink()
+        # a symlink to a SOCKET at the declared register path: the read follows the path,
+        # as it always has, so the refusal names the TARGET's type (a socket), never the
+        # link's own numeric mode, still exit 2 under the same bound
+        registry.write_text(json.dumps(
+            {"version": 1, "mistakes_register": "socklink-reg.jsonl"}), encoding="utf-8")
+        gate_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        held_cwd = os.getcwd()
+        os.chdir(str(repo))
+        try:
+            # bound by a relative name: a bound AF_UNIX path is limited to about 107
+            # bytes, and the fixture's temporary directory can be deeper than that
+            gate_sock.bind("sock-target")
+        finally:
+            os.chdir(held_cwd)
+        sock_link_reg = repo / "socklink-reg.jsonl"
+        sock_link_reg.symlink_to("sock-target")
+        try:
+            sock_got = bounded_run("gate-socket-symlink-register-named", repo)
+            if sock_got is not None and (
+                    sock_got[0] != 2 or "a socket" not in sock_got[1]
+                    or "not a regular file" not in sock_got[1]):
+                failures.append("gate-socket-symlink-register-named: a symlink to a socket "
+                                "should be exit 2 naming the socket, got exit {!r}: "
+                                "{}".format(sock_got[0], sock_got[1].strip()))
+            if not sock_link_reg.is_symlink():
+                failures.append("gate-socket-symlink-register-named: the refusal changed "
+                                "the register entry")
+        finally:
+            gate_sock.close()
+        sock_link_reg.unlink()
+        (repo / "sock-target").unlink()
+        # a failure AFTER the declared register's open succeeded (an injected read error
+        # reporting ENOENT, the errno a too-broad absence test would read as a missing
+        # register) is a named cannot-evaluate on the open descriptor, exit 2, never read
+        # as an absent or merely unopenable entry
+        inj_gate_reg = repo / "inject-gate-reg.jsonl"
+        inj_gate_rows = chain(lambda p: row(1, "MR-1", "proposed", p))
+        inj_gate_reg.write_text("\n".join(inj_gate_rows) + "\n", encoding="utf-8")
+        registry.write_text(json.dumps(
+            {"version": 1, "mistakes_register": "inject-gate-reg.jsonl"}), encoding="utf-8")
+        inj_gate_id = os.stat(str(inj_gate_reg))
+        real_gate_read = os.read
+        gate_fired = {"n": 0}
+
+        def gate_failing_read(read_fd, count):
+            # fire only on the declared register's own read, identified by the open
+            # descriptor's file identity, never on the registry read (same chunk size)
+            if count == READ_CHUNK:
+                try:
+                    st_read = os.fstat(read_fd)
+                except OSError:
+                    st_read = None
+                if st_read is not None and (st_read.st_dev, st_read.st_ino) == \
+                        (inj_gate_id.st_dev, inj_gate_id.st_ino):
+                    gate_fired["n"] += 1
+                    raise FileNotFoundError(2, "injected descriptor read failure")
+            return real_gate_read(read_fd, count)
+
+        os.read = gate_failing_read
+        try:
+            inj_got = bounded_run("gate-descriptor-failure-named", repo)
+        finally:
+            os.read = real_gate_read
+        if inj_got is not None and (
+                inj_got[0] != 2
+                or "cannot be read from its open descriptor" not in inj_got[1]):
+            failures.append("gate-descriptor-failure-named: a read failure on the opened "
+                            "register descriptor should be exit 2 naming the descriptor, "
+                            "got exit {!r}: {}".format(inj_got[0], inj_got[1].strip()))
+        if inj_got is not None and gate_fired["n"] == 0:
+            failures.append("gate-descriptor-failure-named: the injected failure never "
+                            "fired, so the vector proved nothing")
+        inj_gate_reg.unlink()
+        registry.unlink()
+        # the paired control: the same reads on a regular registry and register still verify
+        # and pass (update=True establishes the untracked register's first anchor), under the
+        # same bound
+        ctrl_reg = repo / "fifo-control-reg.jsonl"
+        ctrl_rows = chain(lambda p: row(1, "MR-1", "proposed", p))
+        ctrl_reg.write_text("\n".join(ctrl_rows) + "\n", encoding="utf-8")
+        registry.write_text(json.dumps(
+            {"version": 1, "mistakes_register": "fifo-control-reg.jsonl"}),
+            encoding="utf-8")
+        ctrl_got = bounded_run("gate-regular-reads-still-pass", repo, update=True)
+        if ctrl_got is not None and ctrl_got[0] != 0:
+            failures.append("gate-regular-reads-still-pass: the regular-file control should "
+                            "pass, got exit {!r}: {}".format(
+                                ctrl_got[0], ctrl_got[1].strip()))
+        # an UNRESOLVABLE declared register path is a refusal NAMING the cause, never read
+        # as a merely absent or unreadable file: a dangling symbolic link at the register
+        # path, then a register path under a missing parent directory; each runs under the
+        # same bound, and the refusal leaves the entry as it was
+        registry.write_text(json.dumps(
+            {"version": 1, "mistakes_register": "dangling-reg.jsonl"}), encoding="utf-8")
+        dangling_reg = repo / "dangling-reg.jsonl"
+        dangling_reg.symlink_to("missing-reg-target")
+        dang_got = bounded_run("gate-dangling-register-refused", repo)
+        if dang_got is not None and (
+                dang_got[0] != 2 or "dangling symbolic link" not in dang_got[1]):
+            failures.append("gate-dangling-register-refused: a dangling register symlink "
+                            "should be exit 2 naming the dangling link, got exit {!r}: "
+                            "{}".format(dang_got[0], dang_got[1].strip()))
+        if not dangling_reg.is_symlink():
+            failures.append("gate-dangling-register-refused: the refusal changed the "
+                            "register entry")
+        if entry_state(repo / "missing-reg-target") is not None:
+            failures.append("gate-dangling-register-refused: the refusal created the "
+                            "link's target")
+        dangling_reg.unlink()
+        registry.write_text(json.dumps(
+            {"version": 1, "mistakes_register": "no-such-dir/reg.jsonl"}), encoding="utf-8")
+        noparent_got = bounded_run("gate-register-missing-parent-refused", repo)
+        if noparent_got is not None and (
+                noparent_got[0] != 2 or "parent directory" not in noparent_got[1]
+                or "cannot be opened" not in noparent_got[1]):
+            failures.append("gate-register-missing-parent-refused: a register path under a "
+                            "missing parent directory should be exit 2 naming the parent, "
+                            "got exit {!r}: {}".format(
+                                noparent_got[0], noparent_got[1].strip()))
+        registry.unlink()
+        # an unresolvable REGISTRY path fails the same way: a dangling entry on the
+        # registry's own parent chain is exit 2, never NOT APPLICABLE; the paired first-run
+        # control proves a clean tree (no registry entry at all, every missing component a
+        # confirmed ENOENT) still reads NOT APPLICABLE (exit 0)
+        chainroot = tmp / "chainroot"
+        chainroot.mkdir()
+        (chainroot / ".aiqt").symlink_to("missing-aiqt-target")
+        chain_got = bounded_run("gate-registry-unresolvable-parent-refused", chainroot)
+        if chain_got is not None and (
+                chain_got[0] != 2 or "parent directory" not in chain_got[1]
+                or "cannot be opened" not in chain_got[1]):
+            failures.append("gate-registry-unresolvable-parent-refused: a registry under a "
+                            "dangling parent entry should be exit 2 naming the parent, got "
+                            "exit {!r}: {}".format(chain_got[0], chain_got[1].strip()))
+        (chainroot / ".aiqt").unlink()
+        clean_got = bounded_run("gate-clean-tree-not-applicable", chainroot)
+        if clean_got is not None and (
+                clean_got[0] != 0 or "NOT APPLICABLE" not in clean_got[1]):
+            failures.append("gate-clean-tree-not-applicable: a clean tree with no registry "
+                            "and no register should still read NOT APPLICABLE (exit 0), got "
+                            "exit {!r}: {}".format(clean_got[0], clean_got[1].strip()))
         # TRACKED registers and the anchor WRITE: a green tracked run reaches update_anchor
         # through the merge-base leg (no anchor inspection on the read side), so the write
         # itself must refuse a symlink entry, dangling or live, and advance only by atomic
@@ -1693,7 +2376,9 @@ def self_test():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: pure appends pass; a broken chain or sequence, a reused id, an illegal "
-          "transition, a non-object line, a bool or float seq, a duplicated key, an anchored "
+          "transition, a non-object line, a line nested too deeply for the JSON decoder "
+          "(balanced and unbalanced, a named violation, never an escaped RecursionError), "
+          "a bool or float seq, a duplicated key, an anchored "
           "rewrite or reorder, an unverifiable or absolute-path landed check_ref, a tracked "
           "rewrite with no computable merge-base, and a declared untracked register with no "
           "anchor all fail; a malformed, non-object or wrongly shaped anchor (a zero, negative, "
@@ -1742,9 +2427,37 @@ def self_test():
           "uninspectable marker is cannot-evaluate, never a walk past it, and a nested empty "
           ".git directory is refused by the realpath comparison); a landed check_ref whose "
           "inspection fails with anything but ENOENT is cannot-evaluate through the shared "
-          "entry state; and each malformed declaration form (a number, a list, an empty "
+          "entry state; each malformed declaration form (a number, a list, an empty "
           "string, null) is refused with its named per-key diagnostic (a malformed "
-          "attestations declaration names its own key)")
+          "attestations declaration names its own key); and the live leg's registry and "
+          "register reads never block on the file type (a FIFO at the declared register "
+          "path and a FIFO at the registry path are each refused, exit 2, with a diagnostic "
+          "naming the file type, a symlink to a socket is refused naming the TARGET's type, "
+          "a socket, never the link's own numeric mode, and a failure injected after the "
+          "register's open succeeded, reporting ENOENT, is refused naming the open "
+          "descriptor, never read as an absent entry, each alarm-bounded so a blocking "
+          "regression fails rather than hangs, while the regular-file control still "
+          "verifies and passes under the same bound); an UNRESOLVABLE register or registry "
+          "path is a refusal naming the cause, never read as absent (a dangling symbolic "
+          "link at the declared register path, a register path under a missing parent "
+          "directory, and a dangling entry on the registry's own parent chain are each "
+          "exit 2 by name, while the first-run control, a clean tree with no registry and "
+          "no register, still reads NOT APPLICABLE); a registry or anchor nested too "
+          "deeply for the JSON decoder is a named fail-closed refusal, never a traceback; "
+          "an inconsistent entry re-inspection and a parent descriptor whose close fails "
+          "are each a named cannot-evaluate, never an answer and never an escaped "
+          "OSError; and a row value the decoder accepts "
+          "but repr cannot walk renders as a fixed placeholder in the violation message "
+          "(seq, status, id and check_ref each driven unconditionally by fault injection "
+          "at the production call sites, seq, status and id additionally through the "
+          "measured window between the decoder's and the renderer's recursion limits "
+          "where this host has one (the window cases MAY NOT RUN: a host whose render "
+          "limit is not below its decode limit skips them and this suite still exits 0, "
+          "an omission the aggregate runner's RESULT line does not reflect, so the "
+          "named NOT RUN line printed beside this PASS is the only disclosure), a "
+          "skipped window case being reported as a named NOT "
+          "RUN line, and the placeholder substitution itself proven directly), never an "
+          "escaped RecursionError")
     return 0
 
 
