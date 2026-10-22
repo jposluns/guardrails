@@ -14,13 +14,20 @@ every commit reachable from that SHA and not reachable from any ref the target r
 check time (read with git ls-remote; local remote-tracking refs can be stale, and a path or URL
 remote has none), so a commit below --base that the remote lacks is scanned too, and a set that
 cannot be computed, or is empty, refuses. The check resolves --remote ONCE to a single literal
-URL (a configured remote must have exactly one push URL, byte-identical to its one fetch URL: a
-pushurl, an added URL or a pushInsteadOf rewrite refuses; a destination readable as a configured
-or legacy-file remote, or unusable as one URL, refuses; any pushInsteadOf rewrite at all
-refuses), reads the advertisement from that URL and reports it on a `push destination:` line;
-this helper then pushes to exactly that literal URL, never to the remote's name, so a setting
-keyed to the name (an uploadpack or receivepack program) or a legacy one-file remote cannot
-point the advertisement read and the push at different repositories. The check also ignores
+URL and accepts it only when every condition of a closed set holds, refusing otherwise with a
+named reason: a printable --remote with no whitespace; for a configured remote exactly one push
+URL, byte-identical to its one fetch URL (a pushurl, an added URL or a pushInsteadOf rewrite
+refuses); a destination that is an absolute local path or a file://, https:// or ssh:// URL
+(an ext:: or other helper transport, an scp-like name, a relative path or a bare name refuses)
+and does not name a configured remote; no legacy remotes or branches file under the git path at
+all; no url.<base>.insteadOf or pushInsteadOf value prefixing the raw configured or resolved
+URL (an unrelated rewrite for another URL stays allowed); no core.sshCommand, ssh.variant or
+remote uploadpack/receivepack key; and no GIT_SSH or GIT_SSH_COMMAND in the environment. It
+reads the advertisement from that URL and reports it on a `push destination:` line; this helper
+then pushes to exactly that literal URL, never to the remote's name, so a setting that rewrites
+or routes the destination cannot point the advertisement read and the push at different
+repositories. One residual no local check can see: a server that routes its upload-pack and
+receive-pack services to different repositories behind one URL. The check also ignores
 replace refs and a grafts file on every git read, so a replace ref cannot substitute a clean
 message, parent list or changelog for the ones the push sends (the push transports the original
 objects; a grafts file left in force would instead break the push itself on the missing objects,
@@ -53,10 +60,14 @@ and the destination URL the check read the advertisement from. A push that exits
 helper's cannot-evaluate verdict), not passed through as the push's own exit status. After a
 successful push the branch's upstream is set in a separate step (a SHA-sourced push to a literal
 URL records no remote-tracking ref itself, so where --remote was a configured name the helper
-first records the pushed commit under that name's remote-tracking ref, exactly what a by-name push
-of the same commit to the same URL would have recorded); if that convenience step fails, the
-completed, scanned push is still reported with exit 0 and the line says so (a --remote given as a
-URL has no remote-tracking ref, so there the step always fails and the line is expected).
+first records the pushed commit under the remote-tracking ref that remote's OWN fetch refspecs
+map the branch to, the ref a fetch from it would update; when no refspec maps the branch, the
+mapping is ambiguous, the mapped ref lies outside refs/remotes/, or the mapped ref is a symbolic
+ref, nothing is recorded and the skip is reported plainly, because an invented ref name could
+shadow, or through a pre-existing symbolic ref move, a ref a fetch would never touch); if the
+upstream step fails, the completed, scanned push is still reported with exit 0 and the line says
+so (a --remote given as a URL has no remote-tracking ref, so there the step always fails and the
+line is expected).
 
 FAIL-CLOSED: an unknown, repeated or valueless argument (--self-test mixed with anything else
 included: it is honoured only as the sole argument), a working directory outside a git repository,
@@ -78,15 +89,20 @@ strings, such as TOML comments) carry over.
 
 The --self-test builds throwaway git repositories and a bare remote under a scrubbed fixture
 environment (tools/_git_fixture_env.py) and asserts, for each finding channel (a leaky commit below
---base, a leaky intermediate changelog state, a leaky commit hidden by a replace ref or a grafts
-file, and a leaky commit excluded from the scan by a per-remote uploadpack advertisement redirect
-included) and a broad set of fail-closed shapes (a remote whose push URL set splits from its one
-fetch URL through a pushurl, an added URL or a pushInsteadOf rewrite, a name defined only by a
-legacy remotes or branches file, and a destination that resolves to a configured remote's name
-included), that the helper exits non-zero AND the remote gained no ref, and that a clean branch
-pushes (to the resolved literal URL, so a per-remote receivepack program cannot move the push),
-a push under push.followTags publishes no unscanned tag, and a push under push.recurseSubmodules
-publishes no unscanned submodule commit; it also drives the check directly for shapes
+--base, a leaky intermediate changelog state, and a leaky commit hidden by a replace ref or a
+grafts file included) and a broad set of fail-closed shapes (a remote whose push URL set splits
+from its one fetch URL through a pushurl, an added URL or a pushInsteadOf rewrite, a remote name
+with trailing whitespace, a legacy remotes or branches file present at all, an insteadOf rewrite
+matching the configured URL, a destination that resolves to a configured remote's name or falls
+outside the allowed URL shapes, a per-remote uploadpack or receivepack program, a core.sshCommand
+or ssh.variant setting, and a GIT_SSH or GIT_SSH_COMMAND variable included), that the helper exits
+non-zero AND the remote gained no ref, and that a clean branch pushes (to the resolved literal
+URL, with controls for a byte-identical pushurl, a file:// destination, and a rewrite configured
+for an unrelated URL), a push under push.followTags publishes no unscanned tag, and a push under
+push.recurseSubmodules publishes no unscanned submodule commit; that the tracking ref after a push
+through a configured name follows that remote's own fetch refspec mapping, is skipped (and said
+so) when no refspec maps the branch, and never moves another ref through a pre-existing symbolic
+tracking ref; it also drives the check directly for shapes
 reachable only there (a subdirectory --repo, a --head bound to a commit other than the checkout, a
 detached HEAD, a destination unusable as one URL), and drives a copy of this helper against stub
 checks for the digest-missing and unexpected-exit refusals and for the race in which a commit lands
@@ -120,12 +136,12 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")   # a canonical commit id: resolved once
 # The digest line the check prints for the exact body bytes it scanned; the helper reprints it and
 # never rereads the body, so the printed digest cannot describe bytes the check did not scan.
 _BODY_DIGEST_RE = re.compile(r"^body sha256: ([0-9a-f]{64})$", re.MULTILINE)
-# The destination line the check prints on a pass: the one literal URL it resolved --remote to and
-# read the advertisement from. The push below goes to exactly this URL, never to the remote's name,
-# so a setting keyed to the name (an uploadpack or receivepack program) or a legacy one-file remote
-# cannot point the advertisement read and the push at different repositories. The check refuses a
-# destination carrying a line break, so one line always holds the whole URL; requiring exactly one
-# match keeps a second line from ever smuggling in another destination.
+# The destination line the check prints on a pass: the one literal URL it resolved --remote to
+# and read the advertisement from, accepted only from its closed set of URL shapes with every
+# rewrite and service-routing setting it can see refused. The push below goes to exactly this
+# URL, never to the remote's name. The check refuses a destination carrying a line break, so one
+# line always holds the whole URL; requiring exactly one match keeps a second line from ever
+# smuggling in another destination.
 _DESTINATION_RE = re.compile(r"^push destination: (.+)$", re.MULTILINE)
 # A branch name a push could write through this helper must be a single plain ref component chain:
 # check-ref-format validates it below before it is spliced into the refspec.
@@ -180,6 +196,79 @@ def _valid_branch(toplevel, branch):
     except (OSError, ValueError):
         return False
     return proc.returncode == 0
+
+
+def _fetch_refspec_target(toplevel, remote, branch):
+    """The remote-tracking ref the remote's OWN fetch refspecs map refs/heads/<branch> to, or
+    (None, reason) when the mapping gives nothing to record. Only the configured mapping
+    decides: a ref name invented here could shadow, or through a pre-existing symbolic ref
+    move, a ref a fetch from this remote would never touch. A negative refspec and a refspec
+    without a destination (it fetches into FETCH_HEAD only) map nothing; a glob refspec maps
+    through its one '*' on each side; several refspecs naming different destinations are
+    ambiguous and map nothing."""
+    try:
+        proc = subprocess.run(["git", "-C", toplevel, "config", "-z", "--get-all",
+                               "remote." + remote + ".fetch"],
+                              capture_output=True, encoding="utf-8")
+    except (OSError, ValueError):
+        return None, "the remote's fetch refspecs could not be read"
+    if proc.returncode != 0:
+        return None, "this remote has no fetch refspec"
+    source = "refs/heads/" + branch
+    records = proc.stdout.split("\0")
+    if records and records[-1] == "":
+        records.pop()
+    targets = set()
+    for refspec in records:
+        spec = refspec[1:] if refspec.startswith("+") else refspec
+        if spec.startswith("^") or ":" not in spec:
+            continue
+        src, _sep, dst = spec.partition(":")
+        if src.count("*") == 1 and dst.count("*") == 1:
+            prefix, _sep, suffix = src.partition("*")
+            if (source.startswith(prefix) and source.endswith(suffix)
+                    and len(source) >= len(prefix) + len(suffix)):
+                targets.add(dst.replace(
+                    "*", source[len(prefix):len(source) - len(suffix)], 1))
+        elif "*" not in src and "*" not in dst and src == source:
+            targets.add(dst)
+    if not targets:
+        return None, "no fetch refspec of this remote maps the pushed branch"
+    if len(targets) > 1:
+        return None, "the remote's fetch refspecs map the pushed branch ambiguously"
+    return targets.pop(), None
+
+
+def _record_tracking_ref(toplevel, remote, branch, head):
+    """Record the pushed commit under the remote-tracking ref the remote's own fetch refspecs
+    map the branch to (the ref a fetch from that remote would update), so the upstream step can
+    bind to it. Returns (ref, None) when recorded, else (None, reason). A mapped ref outside
+    refs/remotes/ is not recorded (it is not a remote-tracking ref, and a leading '-' could
+    otherwise be read as an option), and a mapped ref that is a symbolic ref is skipped: writing
+    through it would move whatever ref it points at, a local branch included, which a fetch
+    never does (update-ref runs with --no-deref as a second barrier)."""
+    target, reason = _fetch_refspec_target(toplevel, remote, branch)
+    if target is None:
+        return None, reason
+    if not target.startswith("refs/remotes/"):
+        return None, "the mapped tracking ref lies outside refs/remotes/"
+    try:
+        symref = subprocess.run(["git", "-C", toplevel, "symbolic-ref", "-q", target],
+                                capture_output=True, encoding="utf-8")
+    except (OSError, ValueError):
+        return None, "the mapped tracking ref could not be inspected"
+    if symref.returncode == 0:
+        return None, "the mapped tracking ref is a symbolic ref"
+    if symref.returncode != 1:
+        return None, "the mapped tracking ref could not be inspected"
+    try:
+        updated = subprocess.run(["git", "-C", toplevel, "update-ref", "--no-deref",
+                                  target, head], capture_output=True, encoding="utf-8")
+    except (OSError, ValueError):
+        return None, "the tracking ref could not be recorded"
+    if updated.returncode != 0:
+        return None, "the tracking ref could not be recorded"
+    return target, None
 
 
 def parse_argv(argv):
@@ -269,17 +358,24 @@ def run_push(argv):
     if destination != opts["remote"]:
         # a push to a literal URL records no remote-tracking ref; where --remote was a configured
         # name (the only case in which the resolved destination differs from it), record the
-        # pushed commit under that name, exactly what a by-name push of the same commit to the
-        # same URL would have recorded, so the upstream step below can bind to it
-        subprocess.run(["git", "-C", toplevel, "update-ref",
-                        "refs/remotes/" + opts["remote"] + "/" + branch, head],
-                       capture_output=True, encoding="utf-8")
+        # pushed commit under the ref that remote's own fetch refspecs map the branch to (the ref
+        # a fetch from it would update), so the upstream step below can bind to it; with no such
+        # mapping nothing is recorded and the skip is reported, because an invented ref name
+        # could shadow, or through a pre-existing symbolic ref move, an unrelated ref
+        recorded, skip_reason = _record_tracking_ref(toplevel, opts["remote"], branch, head)
+    else:
+        recorded, skip_reason = None, ("--remote is itself the destination URL, which has no "
+                                       "remote-tracking ref")
+    if recorded is not None:
+        print("tracking ref recorded at {}".format(recorded))
+    else:
+        print("no tracking ref recorded ({})".format(skip_reason))
     upstream = subprocess.run(["git", "-C", toplevel, "branch",
                                "--set-upstream-to=" + opts["remote"] + "/" + branch, branch],
                               capture_output=True, encoding="utf-8")
     if upstream.returncode != 0:
-        print("push completed; upstream not set (this remote has no remote-tracking ref here, as "
-              "with a --remote given as a URL, or the tracking ref could not be recorded)")
+        print("push completed; upstream not set (no remote-tracking ref answers to that "
+              "remote/branch name here)")
         return 0
     print("push completed; upstream set")
     return 0
@@ -589,8 +685,9 @@ def self_test():
         # the control's push left the branch tip advertised, under which every later vector on
         # this branch would refuse through the empty-published-set rule whatever the URL rules
         # did; deleting the pushed ref keeps the published set non-empty, so each vector below
-        # passes only through its own refusal (asserted by message), and with that refusal
-        # removed the leaky commit demonstrably reaches the push side
+        # passes only through its own refusal (asserted by message); with that refusal removed,
+        # the message assertions are what fail (the helper pushes only to the one resolved URL,
+        # so the second repository still gains nothing)
         fixture_git(["update-ref", "-d", "refs/heads/feat-pushurl"], seeded)
         # an added second URL: push sends to EVERY configured URL while the advertisement is
         # read from the first, so the same split refuses
@@ -659,35 +756,122 @@ def self_test():
         _expect("names a configured remote" in done.stderr,
                 "the alias refusal must name the rule", failures)
         fixture_git(["remote", "remove", "alias"], repo)
-        # a per-remote uploadpack program redirects the advertisement read while the push writes
-        # to the remote's URL: the check reads the resolved literal URL instead, so the setting
-        # never applies, the advertisement comes from the true destination (empty here), the
-        # leaky commit is in the published set, and the finding refuses before anything is pushed
-        fixture_git(["remote", "set-url", "split", str(pushside)], repo)
-        fixture_git(["config", "remote.split.uploadpack",
-                     "git upload-pack '" + str(seeded) + "' #"], repo)
+        # a per-remote uploadpack or receivepack program routes one of the two services to
+        # another repository entirely, so any such key, together with core.sshCommand and
+        # ssh.variant, refuses before anything is read or pushed
+        for label, key, value, fragment in (
+                ("uploadpack key", "remote.split.uploadpack",
+                 "git upload-pack '" + str(seeded) + "' #", "uploadpack or receivepack"),
+                ("receivepack key", "remote.split.receivepack",
+                 "git receive-pack '" + str(pushside) + "' #", "uploadpack or receivepack"),
+                ("core.sshCommand key", "core.sshCommand", "ssh -F /nonexistent",
+                 "core.sshCommand"),
+                ("ssh.variant key", "ssh.variant", "simple", "ssh.variant")):
+            fixture_git(["config", key, value], repo)
+            done = helper(["--body-file", str(clean_body), "--base", base,
+                           "--remote", "split"], repo)
+            _expect(done.returncode == 2,
+                    (label, done.returncode, done.stdout, done.stderr), failures)
+            _expect(fragment in done.stderr,
+                    (label, "the refusal must name the rule", done.stderr), failures)
+            _expect(fixture_git_rc(["cat-file", "-e", split_leaky], pushside) != 0,
+                    (label, "a service-routing key must not publish the unscanned commit"),
+                    failures)
+            _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet",
+                                    "refs/heads/feat-pushurl"], seeded) != 0,
+                    (label, "a service-routing key must not push"), failures)
+            fixture_git(["config", "--unset", key], repo)
+        # GIT_SSH / GIT_SSH_COMMAND route the ssh transport the same way from the environment,
+        # so either variable refuses; every other vector here runs with both unset (the control)
+        for variable in ("GIT_SSH", "GIT_SSH_COMMAND"):
+            done = helper(["--body-file", str(clean_body), "--base", base,
+                           "--remote", "split"], repo, **{variable: "/bin/false"})
+            _expect(done.returncode == 2,
+                    (variable, done.returncode, done.stdout, done.stderr), failures)
+            _expect("the {} environment variable is set".format(variable) in done.stderr,
+                    (variable, "the refusal must name the variable", done.stderr), failures)
+            _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet",
+                                    "refs/heads/feat-pushurl"], seeded) != 0,
+                    (variable, "an ssh environment override must not push"), failures)
+        # an insteadOf rewrite whose value prefixes the remote's raw configured URL has already
+        # rewritten the resolution once, and one prefixing the resolved URL would rewrite the
+        # ls-remote and push of the literal URL again (a chain), so each refuses; the push side
+        # must gain nothing
+        fixture_git(["config", "url." + str(pushside) + ".insteadOf", str(seeded)], repo)
         done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "split"], repo)
-        _expect(done.returncode == 1,
-                ("uploadpack redirect", done.returncode, done.stdout, done.stderr), failures)
+        _expect(done.returncode == 2,
+                ("insteadOf on configured remote", done.returncode, done.stdout, done.stderr),
+                failures)
+        _expect("url.<base>.insteadOf rewrite matches" in done.stderr,
+                "the raw-URL rewrite refusal must name the rule", failures)
         _expect(fixture_git_rc(["cat-file", "-e", split_leaky], pushside) != 0,
-                "an uploadpack redirect must not publish the unscanned commit", failures)
-        fixture_git(["config", "--unset", "remote.split.uploadpack"], repo)
-        # a per-remote receivepack program redirects the push while the advertisement was read
-        # from the remote's URL: the push goes to the resolved literal URL instead, so the
-        # setting never applies and the scanned branch lands on the advertised repository
-        fixture_git(["remote", "set-url", "split", str(seeded)], repo)
-        fixture_git(["config", "remote.split.receivepack",
-                     "git receive-pack '" + str(pushside) + "' #"], repo)
+                "a rewrite of the configured URL must not publish the unscanned commit", failures)
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", str(seeded)],
+                      repo)
+        _expect(done.returncode == 2,
+                ("insteadOf on URL remote", done.returncode, done.stdout, done.stderr), failures)
+        _expect("url.<base>.insteadOf rewrite matches" in done.stderr,
+                "the resolved-URL rewrite refusal must name the rule", failures)
+        _expect(fixture_git_rc(["cat-file", "-e", split_leaky], pushside) != 0,
+                "a rewrite of the resolved URL must not publish the unscanned commit", failures)
+        fixture_git(["config", "--remove-section", "url." + str(pushside)], repo)
+        # the control for the rewrite rule: a rewrite configured for an UNRELATED URL prefix
+        # matches neither the raw nor the resolved URL and must stay allowed, so the clean push
+        # still lands (the pushed ref is deleted again to keep later published sets non-empty)
+        fixture_git(["config", "url.https://unrelated.example/a.insteadOf",
+                     "https://nowhere.example/a"], repo)
+        fixture_git(["config", "url.https://unrelated.example/b.pushInsteadOf",
+                     "https://nowhere.example/b"], repo)
         done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "split"], repo)
         _expect(done.returncode == 0,
-                ("receivepack redirect", done.returncode, done.stdout, done.stderr), failures)
-        _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet", "refs/heads/feat-pushurl"],
-                               seeded) == 0,
-                "the push must land on the advertised repository, not the receivepack target",
+                ("unrelated rewrite control", done.returncode, done.stdout, done.stderr),
                 failures)
+        _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet",
+                                "refs/heads/feat-pushurl"], seeded) == 0,
+                "an unrelated rewrite must not block the clean push", failures)
+        fixture_git(["config", "--remove-section", "url.https://unrelated.example/a"], repo)
+        fixture_git(["config", "--remove-section", "url.https://unrelated.example/b"], repo)
+        fixture_git(["update-ref", "-d", "refs/heads/feat-pushurl"], seeded)
+        # a destination outside the closed shape set (an ext:: or other helper transport, an
+        # scp-like name, a relative path) can route the two services separately or resolve
+        # against the working directory, so each refuses by shape, before any transport runs
+        for bad_shape in ("ext::fake", "example.org:repo.git", "../seeded.git"):
+            done = helper(["--body-file", str(clean_body), "--base", base,
+                           "--remote", bad_shape], repo)
+            _expect(done.returncode == 2,
+                    ("destination shape", bad_shape, done.returncode, done.stdout, done.stderr),
+                    failures)
+            _expect("not an absolute local path" in done.stderr,
+                    ("the shape refusal must name the rule", bad_shape), failures)
+            _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet",
+                                    "refs/heads/feat-pushurl"], seeded) != 0,
+                    (bad_shape, "a shape refusal must not push"), failures)
+        # a remote name carrying whitespace refuses outright: git itself reads a legacy file
+        # whose name keeps the trailing space, so a name-keyed probe that strips it would check
+        # one path while git reads another
+        legacy_dir = repo / ".git" / "remotes"
+        legacy_dir.mkdir(exist_ok=True)
+        (legacy_dir / "lg ").write_text(
+            "URL: {}\nURL: {}\n".format(seeded, pushside), encoding="utf-8")
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "lg "], repo)
+        _expect(done.returncode == 2,
+                ("trailing-space name", done.returncode, done.stdout, done.stderr), failures)
+        _expect("whitespace" in done.stderr,
+                "the whitespace-name refusal must name the rule", failures)
         _expect(fixture_git_rc(["cat-file", "-e", split_leaky], pushside) != 0,
-                "a receivepack redirect must not publish the unscanned commit", failures)
-        fixture_git(["config", "--unset", "remote.split.receivepack"], repo)
+                "a whitespace name must not publish the unscanned commit", failures)
+        # while that file exists, even a clean configured remote refuses: a legacy remotes or
+        # branches file present at all means a name-shaped destination somewhere could be read
+        # as that remote, so presence alone fails closed, whatever the file is called
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "split"], repo)
+        _expect(done.returncode == 2,
+                ("legacy file present", done.returncode, done.stdout, done.stderr), failures)
+        _expect("legacy" in done.stderr,
+                "the legacy-presence refusal must name the rule", failures)
+        _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet",
+                                "refs/heads/feat-pushurl"], seeded) != 0,
+                "a present legacy file must not push", failures)
+        (legacy_dir / "lg ").unlink()
         # a --remote given directly as a URL still pushes cleanly; the clean run names the
         # resolved destination, and a URL records no remote-tracking ref, so the upstream
         # convenience step reports it was not set
@@ -700,8 +884,68 @@ def self_test():
                 "a URL-remote clean push must create the remote ref", failures)
         _expect("push destination: " + str(origin) in done.stdout,
                 "the check must report the resolved destination it read", failures)
+        _expect("no tracking ref recorded" in done.stdout,
+                ("URL-remote tracking line", done.stdout), failures)
         _expect("upstream not set" in done.stdout,
                 ("URL-remote upstream line", done.stdout), failures)
+        # a file:// URL is inside the closed destination shape set: the control for that rule
+        branch_with_commit("feat-fileurl")
+        done = helper(["--body-file", str(clean_body), "--base", base,
+                       "--remote", "file://" + str(origin)], repo)
+        _expect(done.returncode == 0,
+                ("file URL clean push", done.returncode, done.stdout, done.stderr), failures)
+        _expect(ref_exists("feat-fileurl"),
+                "a file:// clean push must create the remote ref", failures)
+        # the tracking ref after a push through a configured name follows that remote's OWN
+        # fetch refspec mapping, never an invented name: with a custom mapping the mapped ref is
+        # written and the invented one is not
+        fixture_git(["remote", "add", "mapped", str(origin)], repo)
+        fixture_git(["config", "--replace-all", "remote.mapped.fetch",
+                     "+refs/heads/*:refs/remotes/mapped/imported/*"], repo)
+        branch_with_commit("feat-mapped")
+        mapped_head = fixture_git(["rev-parse", "HEAD"], repo).strip()
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "mapped"],
+                      repo)
+        _expect(done.returncode == 0,
+                ("mapped push", done.returncode, done.stdout, done.stderr), failures)
+        _expect("tracking ref recorded at refs/remotes/mapped/imported/feat-mapped"
+                in done.stdout, ("mapped tracking line", done.stdout), failures)
+        recorded_at = fixture_git(["rev-parse", "refs/remotes/mapped/imported/feat-mapped"],
+                                  repo).strip()
+        _expect(recorded_at == mapped_head, ("mapped tracking ref", recorded_at), failures)
+        _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet",
+                                "refs/remotes/mapped/feat-mapped"], repo) != 0,
+                "the helper must not invent a tracking ref outside the fetch mapping", failures)
+        # with no refspec mapping the pushed branch, nothing is recorded and the skip is
+        # reported plainly
+        fixture_git(["config", "--replace-all", "remote.mapped.fetch",
+                     "+refs/heads/main:refs/remotes/mapped/main"], repo)
+        branch_with_commit("feat-unmapped")
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "mapped"],
+                      repo)
+        _expect(done.returncode == 0,
+                ("unmapped push", done.returncode, done.stdout, done.stderr), failures)
+        _expect("no tracking ref recorded (no fetch refspec of this remote maps the pushed "
+                "branch)" in done.stdout, ("unmapped tracking line", done.stdout), failures)
+        _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet",
+                                "refs/remotes/mapped/feat-unmapped"], repo) != 0,
+                "an unmapped branch must record no tracking ref", failures)
+        fixture_git(["remote", "remove", "mapped"], repo)
+        # a pre-existing SYMBOLIC tracking ref is never written through: writing it would move
+        # the ref it points at (local main here), which a fetch never does; the skip is reported
+        main_sha = fixture_git(["rev-parse", "refs/heads/main"], repo).strip()
+        fixture_git(["symbolic-ref", "refs/remotes/origin/feat-symref", "refs/heads/main"],
+                    repo)
+        branch_with_commit("feat-symref")
+        done = helper(["--body-file", str(clean_body), "--base", base], repo)
+        _expect(done.returncode == 0,
+                ("symref push", done.returncode, done.stdout, done.stderr), failures)
+        _expect("no tracking ref recorded (the mapped tracking ref is a symbolic ref)"
+                in done.stdout, ("symref tracking line", done.stdout), failures)
+        _expect(fixture_git(["rev-parse", "refs/heads/main"], repo).strip() == main_sha,
+                "a symbolic tracking ref must not move the local ref it points at", failures)
+        fixture_git(["update-ref", "--no-deref", "-d", "refs/remotes/origin/feat-symref"],
+                    repo)
         # a replace ref cannot substitute a clean message for the one the push sends: the push
         # transports the ORIGINAL object, so the scan reads the original graph and still refuses
         fixture_git(["checkout", "-q", "main"], repo)
@@ -785,10 +1029,13 @@ def self_test():
         fixture_git(["config", "--unset", "push.recurseSubmodules"], repo)
         fixture_git(["checkout", "-q", "main"], repo)
         shutil.rmtree(repo / "sub", ignore_errors=True)   # keep later add -A fixtures clean
-        # an unknown remote refuses at CHECK time: the refs it advertises cannot be read, so the
-        # published set cannot be established, and nothing is pushed
+        # a destination whose advertisement cannot be read refuses at CHECK time (an absolute
+        # path with no repository behind it: the shape is allowed, the read fails), so the
+        # published set cannot be established and nothing is pushed; a bare name such as
+        # "nosuch" refuses earlier, by shape
         branch_with_commit("feat-badremote")
-        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "nosuch"], repo)
+        done = helper(["--body-file", str(clean_body), "--base", base,
+                       "--remote", str(tmp / "nosuch.git")], repo)
         _expect(done.returncode == 2, ("bad remote", done.returncode, done.stdout, done.stderr), failures)
         _expect("ls-remote" in done.stderr, "an unreadable remote advertisement must be named",
                 failures)
@@ -927,16 +1174,18 @@ def self_test():
                              "--base", base, "--head", leaky, "--branch", ""], repo)
         _expect(done.returncode == 2, ("empty branch", done.returncode, done.stderr), failures)
         _expect("--branch" in done.stderr, "the empty-branch refusal must name the flag", failures)
-        # a destination that begins with '-' or carries a line break can never be handed to
-        # ls-remote and push, or printed, as one URL: each fails closed naming the rule
-        for bad_destination in ("-seeded", "a\nb"):
+        # a destination that begins with '-' can never be handed to ls-remote and push, or
+        # printed, as one URL, and one carrying a line break falls to the whitespace-name rule:
+        # each fails closed naming its rule
+        for bad_destination, fragment in (("-seeded", "cannot be handed"),
+                                          ("a\nb", "whitespace")):
             done = check_direct(["--pre-push", "--repo", str(repo), "--body-file",
                                  str(clean_body), "--base", base, "--head", leaky,
                                  "--branch", "feat-msg", "--remote", bad_destination], repo)
             _expect(done.returncode == 2,
                     ("unusable destination", bad_destination, done.returncode, done.stderr),
                     failures)
-            _expect("cannot be handed" in done.stderr,
+            _expect(fragment in done.stderr,
                     ("the unusable-destination refusal must name the rule", bad_destination),
                     failures)
         # without --branch the check resolves the current branch itself, so a detached HEAD fails closed
@@ -953,25 +1202,31 @@ def self_test():
           "one resolved destination URL the check reports, prints the scanned-body digest twice "
           "(check and helper), gets its upstream set (reported as not set for a --remote given as "
           "a URL), carries no unscanned tag along even under push.followTags and no unscanned "
-          "submodule commit even under push.recurseSubmodules, still pushes under a pushurl "
-          "byte-identical to the one fetch URL, and lands on the advertised repository even under "
-          "a per-remote receivepack program (the literal-URL push never applies it); a commit "
+          "submodule commit even under push.recurseSubmodules, and still pushes under a pushurl "
+          "byte-identical to the one fetch URL, over a file:// destination, and beside a rewrite "
+          "configured for an unrelated URL prefix; the tracking ref follows the remote's own "
+          "fetch refspec mapping, is skipped with a plain report when no refspec maps the pushed "
+          "branch or --remote is itself the URL, and never writes through a pre-existing "
+          "symbolic tracking ref (local main stays put); a commit "
           "landing between the check and the push leaves exactly the scanned SHA on the remote, "
           "never the racing commit; every finding channel (an attribution trailer in the body, a "
           "denylist term in the body, a changelog string added in any published commit, an "
           "intermediate state or a leak outside the items array included, a commit message "
-          "anywhere in the published set, a leaky commit below --base, behind a replace ref, "
-          "behind a grafts file or excluded from the scan only by a per-remote uploadpack "
-          "advertisement redirect included, the branch name, a leaky --title) refuses with exit 1 "
+          "anywhere in the published set, a leaky commit below --base, behind a replace ref or "
+          "behind a grafts file included, the branch name, a leaky --title) refuses with exit 1 "
           "and no remote ref; and every exercised fail-closed shape (a relative, missing, "
           "symlinked or non-UTF-8 body, a non-SHA, zero-SHA or nonexistent base, a base equal to "
           "the pushed commit or not its ancestor, an empty title, an unknown, repeated or "
           "valueless flag, --self-test mixed with other arguments, a malformed changelog, a "
           "changelog deleted at the tip or in an intermediate commit, a remote whose push URL set "
           "is not exactly its one fetch URL, a pushInsteadOf rewrite over a configured remote or "
-          "beside a URL remote, a remote name defined only by a legacy remotes or branches file, "
-          "a destination resolving to a configured remote's name, a destination unusable as one "
-          "URL, a remote whose advertised refs cannot be read, a push publishing nothing the "
+          "beside a URL remote, an insteadOf rewrite matching the raw or resolved URL, a remote "
+          "name carrying whitespace, a legacy remotes or branches file present at all, a "
+          "destination resolving to a configured remote's name, a destination unusable as one "
+          "URL or outside the allowed shapes (an ext:: transport, an scp-like name, a relative "
+          "path), a per-remote uploadpack or receivepack program, a core.sshCommand or "
+          "ssh.variant setting, a GIT_SSH or GIT_SSH_COMMAND variable, a remote whose advertised "
+          "refs cannot be read, a push publishing nothing the "
           "remote lacks, a failed push, a detached HEAD, an unborn HEAD, a non-repository working "
           "directory, a subdirectory --repo, an unknown --head, a digestless check pass, a check "
           "pass without exactly one resolved destination, an unexpected check exit) refuses with "

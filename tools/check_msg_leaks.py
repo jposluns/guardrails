@@ -26,16 +26,26 @@ MODES (auto-detected from GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH; overridable for 
     check time (local remote-tracking refs can be stale, and a path or URL remote has none, so neither
     is consulted); when that set cannot be computed, or it is empty, the run fails closed. That binding
     holds only when the advertisement read and the push destination are one repository, so --remote is
-    resolved ONCE to a single literal URL: a configured remote must have exactly one push URL,
-    byte-identical to its one fetch URL (a remote.<name>.pushurl, an added URL or a pushInsteadOf
-    rewrite fails closed), and resolves to that URL; any other --remote must itself be the URL; a
-    resolved destination that names a configured remote or a legacy remotes or branches file, or that
-    is empty, begins with '-' or carries a line break, fails closed; and any url.<base>.pushInsteadOf
-    rewrite at all fails closed (a push of the literal URL would still honour it). The advertisement
-    is read from that literal URL, and a clean run prints it on a `push destination:` line for
-    tools/push_branch.py to push to, so a setting keyed to the remote's name (uploadpack,
-    receivepack) and a legacy one-file remote can never point the advertisement read and the push at
-    different repositories. Every git read here ignores replace refs and a grafts file: a replace
+    resolved ONCE to a single literal URL and accepted only when every condition of a CLOSED SET
+    holds, refusing otherwise with a named reason: the --remote value is printable with no
+    whitespace; a configured remote has exactly one push URL, byte-identical to its one fetch URL
+    (a remote.<name>.pushurl, an added URL or a pushInsteadOf rewrite fails closed), and resolves
+    to that URL, while any other --remote is itself the URL; the resolved destination is an
+    absolute local path or a file://, https:// or ssh:// URL (an ext:: or other helper transport,
+    an scp-like name, a relative path and a bare name each fail closed), does not name a
+    configured remote, and is not empty, does not begin with '-' and carries no line break; no
+    legacy remotes or branches file exists under the git path at all (git reads such a file as a
+    remote definition, whatever name it carries); no url.<base>.insteadOf or url.<base>.pushInsteadOf
+    value is a prefix of the remote's raw configured URL or of the resolved URL (a rewrite that
+    applied, or would apply again to the resolved URL, fails closed, while an unrelated rewrite
+    for another URL stays allowed); no core.sshCommand, ssh.variant, remote.<name>.uploadpack or
+    remote.<name>.receivepack key is configured; and neither GIT_SSH nor GIT_SSH_COMMAND is set in
+    the environment. The advertisement is read from that literal URL, and a clean run prints it on
+    a `push destination:` line for tools/push_branch.py to push to, so a setting that rewrites or
+    routes the destination can never point the advertisement read and the push at different
+    repositories. One residual no local check can see: a server that routes its upload-pack and
+    receive-pack services to different repositories behind one URL splits the two sides anyway.
+    Every git read here ignores replace refs and a grafts file: a replace
     ref could otherwise substitute a clean message, parent list or changelog for the ones the push
     sends (the push transports the original objects), and a grafts file would cut parents out of the
     scanned ancestry (a graft left in force also breaks the push itself, which the remote refuses
@@ -88,13 +98,15 @@ that is not the repository root, a body file that is missing, a symlink, not a r
 MAX_BODY_BYTES or not UTF-8, an empty --title, --branch or --remote, a --base or --head that is not a
 canonical non-zero 40-hex SHA, a --head that does not name a commit in the repository, a --base that is
 not a proper ancestor of the scanned commit (base equal to it included; pass the merge-base when the
-default branch has advanced past the branch point), a configured remote whose push URL set is not
-exactly its one fetch URL (a pushurl, an added URL or a pushInsteadOf rewrite would send the push to a
-repository other than the one whose advertisement defined the scanned set), a resolved push
-destination that is empty, begins with '-', carries a line break, names a configured remote or is
-defined by a legacy remotes or branches file, any configured url.<base>.pushInsteadOf rewrite (it
-would redirect the push of the resolved URL away from the advertised refs the scan read), a remote
-listing or rewrite-configuration read that fails, a destination whose advertised refs cannot be read
+default branch has advanced past the branch point), a --remote value that is empty or carries
+whitespace or an unprintable character, a configured remote whose push URL set is not exactly its
+one fetch URL (its configuration names more than one destination), a resolved push destination
+that is empty, begins with '-', carries a line break, names a configured remote, or is not an
+absolute local path or a file://, https:// or ssh:// URL, a legacy remotes or branches file
+existing under the git path at all, a url.<base>.insteadOf or pushInsteadOf value that is a
+prefix of the remote's raw configured URL or of the resolved URL, a core.sshCommand, ssh.variant,
+remote.<name>.uploadpack or remote.<name>.receivepack key, a GIT_SSH or GIT_SSH_COMMAND
+environment variable, a remote listing or configuration read that fails, a destination whose advertised refs cannot be read
 with git ls-remote (without them the published set cannot be established), unexpected ls-remote or git log
 output, a published set that is EMPTY (the remote already has every commit reachable from the scanned
 commit: scanning nothing is never read as clean), a changelog.toml that does not parse or has an
@@ -494,45 +506,114 @@ def _rev_file_text(rev, rel, root):
     return _run_git(["show", "{}:{}".format(rev, rel)], root)
 
 
+# The only destination shapes the pre-push gate accepts: an absolute local path or one of these
+# scheme prefixes. Anything else (an ext:: or other <helper>:: transport command, an scp-like
+# host:path name, a relative path, a bare name) is a shape whose transport or remote lookup can
+# route the advertisement read and the push separately, so it fails closed rather than being
+# handled case by case.
+_ALLOWED_URL_PREFIXES = ("file://", "https://", "ssh://")
+# Configuration that routes or rewrites where a git service connects: any of these set at all
+# fails the resolution closed (the service split it can introduce is not observable afterwards).
+_SERVICE_KEY_PATTERN = r"^(core\.sshcommand|ssh\.variant|remote\..*\.(uploadpack|receivepack))$"
+_SSH_ENVIRONMENT_VARIABLES = ("GIT_SSH", "GIT_SSH_COMMAND")
+
+
+def _config_records(out):
+    """Split NUL-terminated git config -z output into records, keeping an empty record that is
+    a genuine (empty) value and dropping only the terminator artefact."""
+    if out == "":
+        return []
+    records = out.split("\0")
+    if records and records[-1] == "":
+        records.pop()
+    return records
+
+
+def _config_values(key, root):
+    """Every configured value of one key (git config -z --get-all), exact bytes with no
+    stripping (-z terminates each value with NUL, so a value's own line breaks survive). No
+    match is an empty list; any other failure fails closed."""
+    rc, out = _git_status(["config", "-z", "--get-all", key], root)
+    if rc == 1:
+        return []
+    if rc != 0:
+        raise FailClosed("cannot read the git configuration: the push destination cannot be "
+                         "established")
+    return _config_records(out)
+
+
+def _config_regexp(pattern, root):
+    """Every (key, value) pair whose key matches pattern (git config -z --get-regexp): each -z
+    record is the key, one newline, the value, and a key cannot carry a newline, so splitting at
+    the first newline is exact even for a value with line breaks. No match is an empty list; any
+    other failure fails closed."""
+    rc, out = _git_status(["config", "-z", "--get-regexp", pattern], root)
+    if rc == 1:
+        return []
+    if rc != 0:
+        raise FailClosed("cannot read the git configuration: the push destination cannot be "
+                         "established")
+    pairs = []
+    for record in _config_records(out):
+        key, _sep, value = record.partition("\n")
+        pairs.append((key, value))
+    return pairs
+
+
 def _resolve_push_destination(remote, root):
     """git ls-remote reads the advertisement of a FETCH URL, while git push writes to a PUSH
     URL, so a scanned set derived from that advertisement describes the push only when both name
     one repository; otherwise a commit the fetch repository already holds is excluded from the
     scan yet still sent to the push repository. --remote is therefore resolved ONCE, here, to a
-    single literal URL: the scan reads the advertisement from that URL, and a clean run prints it
-    on a `push destination:` line for tools/push_branch.py to push to, so a setting keyed to the
-    remote's NAME (an uploadpack or receivepack program that would point one side at another
-    repository) and a legacy one-file remote can never apply to one side only. For a configured
-    remote, git remote get-url expands remote.<name>.url, remote.<name>.pushurl and the
-    url.<base>.insteadOf / pushInsteadOf rewrites, so this requires exactly one fetch URL and
-    exactly one push URL, byte-identical (an extra URL, a differing pushurl, or a pushInsteadOf
-    rewrite each fails closed), and resolves to that one URL. Any other --remote must itself be
-    the URL. Either way, the resolved destination must be a string git reads as a URL, never as
-    a remote: one that names a configured remote fails closed, one git would read as a remote
-    nickname (no slash, not . or ..) fails closed when a legacy remotes or branches file defines
-    it, and one that is empty, begins with '-' or carries a line break fails closed (it cannot
-    be handed to git or printed as the one destination line). ls-remote and push apply an
-    insteadOf rewrite to the same literal URL alike, but a pushInsteadOf rewrite redirects only
-    the push, and it applies to a literal push URL even where a byte-identical pushurl kept it
-    out of the get-url comparison, so with any url.<base>.pushInsteadOf configured at all the
-    run fails closed (whether a given rewrite matches a given URL is git's prefix logic, not
-    re-derived here)."""
+    single literal URL, and the push is accepted only when EVERY condition of a closed set
+    holds; each refusal names its reason. The set: the --remote value is printable with no
+    whitespace (git's own name and path handling can otherwise read a different remote
+    definition than the one checked, e.g. a legacy file whose name ends in a space); a
+    configured remote has exactly one fetch URL and one byte-identical push URL (git remote
+    get-url expands remote.<name>.url, remote.<name>.pushurl and the insteadOf/pushInsteadOf
+    rewrites, so an extra URL, a differing pushurl or a push-side rewrite shows up here) and
+    resolves to that URL, while any other --remote is itself the URL; the destination is not
+    empty, does not begin with '-' and carries no line break (it could not be handed to git or
+    printed as the one destination line), does not name a configured remote, and is an absolute
+    local path or a file://, https:// or ssh:// URL (any other shape, an ext:: or other helper
+    transport, an scp-like name, a relative path or a bare name, can route the two services
+    separately or be read as a remote definition); no legacy remotes or branches file exists
+    under the git path at all (git reads such a file as a remote definition whatever name it
+    carries, so presence alone fails closed rather than matching names); no url.<base>.insteadOf
+    or pushInsteadOf value is a prefix of the remote's raw configured URL or of the resolved URL
+    (git applies a rewrite by longest prefix match, so a matching value means a rewrite applied
+    on the way to this URL or would apply again to it, redirecting ls-remote or the push past
+    the resolved destination; an unrelated rewrite for another URL matches nothing and stays
+    allowed); no core.sshCommand, ssh.variant, remote.<name>.uploadpack or
+    remote.<name>.receivepack key is configured and neither GIT_SSH nor GIT_SSH_COMMAND is set
+    (each routes the transport or program a git service uses, so one service can be served from
+    another repository). One residual stays outside any local check: a server that routes its
+    upload-pack and receive-pack services to different repositories behind one URL."""
+    if not remote or any(ch.isspace() or not ch.isprintable() for ch in remote):
+        raise FailClosed("the --remote value is empty or carries whitespace or an unprintable "
+                         "character: git's name and path handling could read a different "
+                         "remote definition than the one checked, so the push destination "
+                         "cannot be established")
     rc, names = _git_status(["remote"], root)
     if rc != 0:
         raise FailClosed("cannot list the configured remotes: the push destination cannot be "
                          "established")
     remote_names = names.splitlines()
     destination = remote
+    raw_urls = [remote]
     if remote in remote_names:
         fetch_urls = _run_git(["remote", "get-url", "--all", remote], root).splitlines()
         push_urls = _run_git(["remote", "get-url", "--push", "--all", remote], root).splitlines()
         if len(fetch_urls) != 1 or push_urls != fetch_urls:
             raise FailClosed("the remote's push URL set is not exactly its one fetch URL (a "
-                             "pushurl, an added URL or a pushInsteadOf rewrite): the refs it "
-                             "advertises would describe a different repository than the push "
-                             "writes to, so the set of commits the push would publish cannot "
-                             "be established")
+                             "pushurl, an added URL or a pushInsteadOf rewrite): the remote's "
+                             "configuration names more than one destination, so one literal "
+                             "push destination cannot be established (the push itself goes "
+                             "only to the resolved URL, so this rule is defence in depth "
+                             "beside the rewrite rules below)")
         destination = fetch_urls[0]
+        raw_urls = (_config_values("remote.{}.url".format(remote), root)
+                    + _config_values("remote.{}.pushurl".format(remote), root))
     if (not destination or destination.startswith("-")
             or "\n" in destination or "\r" in destination):
         raise FailClosed("the resolved push destination is empty, begins with '-' or carries a "
@@ -543,24 +624,60 @@ def _resolve_push_destination(remote, root):
                          "remote's own URL set and settings, not the resolved URL, would "
                          "decide where the push writes, so the push destination cannot be "
                          "established")
-    if "/" not in destination and destination not in (".", ".."):
-        for legacy in ("remotes", "branches"):
-            listed = _run_git(["rev-parse", "--git-path",
-                               "{}/{}".format(legacy, destination)], root).strip()
-            if listed and os.path.lexists(os.path.join(str(root or ROOT), listed)):
-                raise FailClosed("a legacy {} file defines the push destination as a remote: "
-                                 "git would read its URLs and settings instead of the resolved "
-                                 "URL, so the push destination cannot be "
-                                 "established".format(legacy))
-    rc, _out = _git_status(["config", "--get-regexp", r"^url\..*\.pushinsteadof$"], root)
-    if rc == 0:
-        raise FailClosed("a url.<base>.pushInsteadOf rewrite is configured: the push to the "
-                         "resolved destination URL could be redirected away from the "
-                         "advertised refs the scan read, so the set of commits the push would "
-                         "publish cannot be established")
-    if rc != 1:
-        raise FailClosed("cannot read the URL rewrite configuration: the push destination "
-                         "cannot be established")
+    for legacy in ("remotes", "branches"):
+        listed = _run_git(["rev-parse", "--git-path", legacy], root)
+        if listed.endswith("\n"):
+            listed = listed[:-1]
+        if not listed:
+            raise FailClosed("cannot locate the legacy {} path under the git directory: the "
+                             "push destination cannot be established".format(legacy))
+        legacy_path = os.path.join(str(root or ROOT), listed)
+        if os.path.lexists(legacy_path):
+            if not os.path.isdir(legacy_path):
+                raise FailClosed("a legacy {} entry exists under the git path: git reads such "
+                                 "a file as a remote definition, so the push destination "
+                                 "cannot be established".format(legacy))
+            try:
+                entries = os.listdir(legacy_path)
+            except OSError:
+                raise FailClosed("cannot read the legacy {} directory under the git path: the "
+                                 "push destination cannot be established".format(legacy))
+            if entries:
+                raise FailClosed("a legacy {} file exists under the git path: git reads such a "
+                                 "file as a remote definition, whatever name it carries, so "
+                                 "the push destination cannot be established".format(legacy))
+    if not (destination.startswith("/") or destination.startswith(_ALLOWED_URL_PREFIXES)):
+        raise FailClosed("the resolved push destination is not an absolute local path or a "
+                         "file://, https:// or ssh:// URL: any other shape (an ext:: or other "
+                         "helper transport, an scp-like name, a relative path, a bare name) "
+                         "can route the advertisement read and the push separately, so the "
+                         "push destination cannot be established")
+    candidates = set(raw_urls)
+    candidates.add(destination)
+    for key, value in _config_regexp(r"^url\..*\.(insteadof|pushinsteadof)$", root):
+        kind = "pushInsteadOf" if key.endswith(".pushinsteadof") else "insteadOf"
+        if value == "" or any(candidate.startswith(value) for candidate in candidates):
+            raise FailClosed("a url.<base>.{} rewrite matches the remote's configured or "
+                             "resolved URL as a prefix: the advertisement read or the push "
+                             "would be redirected past the resolved destination, so the push "
+                             "destination cannot be established".format(kind))
+    for key, _value in _config_regexp(_SERVICE_KEY_PATTERN, root):
+        if key == "core.sshcommand":
+            which = "core.sshCommand"
+        elif key == "ssh.variant":
+            which = "ssh.variant"
+        else:
+            which = "remote uploadpack or receivepack"
+        raise FailClosed("a {} setting is configured: it routes the transport or program a git "
+                         "service uses, so the advertisement read and the push could reach "
+                         "different repositories and the push destination cannot be "
+                         "established".format(which))
+    for variable in _SSH_ENVIRONMENT_VARIABLES:
+        if variable in os.environ:
+            raise FailClosed("the {} environment variable is set: it routes the transport a "
+                             "git service uses, so the advertisement read and the push could "
+                             "reach different repositories and the push destination cannot be "
+                             "established".format(variable))
     return destination
 
 
@@ -1127,15 +1244,21 @@ def self_test():
             raise AssertionError("expected FailClosed for head {!r}".format(bad))
         except FailClosed:
             pass
-    # 18b. the push-destination resolver, driven through a stubbed _git_status so every rule and
-    # the fail-closed branches no git fixture reaches (a failing remote listing, a rewrite read
-    # exiting neither 0 nor 1) are exercised; the resolved URL is returned only when every rule
-    # holds. The live end-to-end shapes (a real legacy file, real uploadpack and receivepack
-    # settings, a real second URL) run in push_branch.py --self-test over real repositories.
+    # 18b. the push-destination resolver, driven through a stubbed _git_status so every rule of
+    # the closed set and the fail-closed branches no git fixture reaches (a failing remote
+    # listing, a configuration read exiting neither 0 nor 1) are exercised; the resolved URL is
+    # returned only when every rule holds, with one accepted-shape control per allowed form and
+    # one refusal vector per rule. The live end-to-end shapes (a real legacy file, real rewrite
+    # and service-routing settings, a real second URL) run in push_branch.py --self-test over
+    # real repositories; the https:// and ssh:// accepted shapes are exercised only here, since
+    # a hermetic fixture has no such server to push to.
     real_git_status = _git_status
 
-    def resolve_with_stub(remote_arg, listing=(0, ""), fetch="", push="",
-                          git_path="/nonexistent", rewrite=(1, "")):
+    def pairs_z(*pairs):
+        return (0, "".join(key + "\n" + value + "\0" for key, value in pairs))
+
+    def resolve_with_stub(remote_arg, listing=(0, ""), fetch="", push="", raw=None,
+                          git_path="/nonexistent", rewrite=(1, ""), services=(1, "")):
         def stub(args, root=None, stdin_text=None):
             if args == ["remote"]:
                 return listing
@@ -1143,8 +1266,13 @@ def self_test():
                 return (0, push if "--push" in args else fetch)
             if args[:2] == ["rev-parse", "--git-path"]:
                 return (0, git_path + "\n")
-            if args[0] == "config":
-                return rewrite
+            if args[:3] == ["config", "-z", "--get-all"]:
+                values = raw if raw is not None else ()
+                if not values:
+                    return (1, "")
+                return (0, "".join(value + "\0" for value in values))
+            if args[:3] == ["config", "-z", "--get-regexp"]:
+                return rewrite if "insteadof" in args[3] else services
             raise AssertionError("unexpected git read in the resolver: {!r}".format(args))
         globals()["_git_status"] = stub
         try:
@@ -1152,46 +1280,115 @@ def self_test():
         finally:
             globals()["_git_status"] = real_git_status
 
-    _expect(resolve_with_stub("origin", listing=(0, "origin\n"), fetch="/one\n", push="/one\n")
-            == "/one", "a configured remote resolves to its one byte-identical URL")
-    _expect(resolve_with_stub("/direct/url.git") == "/direct/url.git",
-            "an unconfigured --remote is itself the resolved URL")
-    _expect(resolve_with_stub("plainname") == "plainname",
-            "a bare name with no configured remote and no legacy file is a URL")
-    for label, remote_arg, kwargs, fragment in (
-            ("remote listing fails", "origin", {"listing": (1, "")},
-             "cannot list the configured remotes"),
-            ("rewrite read exits oddly", "/u", {"rewrite": (2, "")},
-             "cannot read the URL rewrite configuration"),
-            ("rewrite configured, URL remote", "/u",
-             {"rewrite": (0, "url.x.pushinsteadof y\n")}, "pushInsteadOf"),
-            ("rewrite configured, configured remote", "origin",
-             {"listing": (0, "origin\n"), "fetch": "/one\n", "push": "/one\n",
-              "rewrite": (0, "url.x.pushinsteadof y\n")}, "pushInsteadOf"),
-            ("two fetch URLs", "origin",
-             {"listing": (0, "origin\n"), "fetch": "/one\n/two\n", "push": "/one\n/two\n"},
-             "push URL"),
-            ("push set differs", "origin",
-             {"listing": (0, "origin\n"), "fetch": "/one\n", "push": "/two\n"}, "push URL"),
-            ("destination names a configured remote", "origin",
-             {"listing": (0, "origin\nalias\n"), "fetch": "alias\n", "push": "alias\n"},
-             "names a configured remote"),
-            ("empty destination", "", {}, "cannot be handed"),
-            ("dash destination", "--upload-pack=x", {}, "cannot be handed"),
-            ("line-break destination", "a\nb", {}, "cannot be handed")):
-        try:
-            resolve_with_stub(remote_arg, **kwargs)
-            raise AssertionError("expected FailClosed for {}".format(label))
-        except FailClosed as exc:
-            _expect(fragment in str(exc), (label, str(exc)))
-    with tempfile.TemporaryDirectory() as d:
-        marker = Path(d) / "legfile"
-        marker.write_text("URL: /x\n", encoding="utf-8")
-        try:
-            resolve_with_stub("leg", git_path=str(marker))
-            raise AssertionError("expected FailClosed for a legacy-file destination")
-        except FailClosed as exc:
-            _expect("legacy" in str(exc), str(exc))
+    # the resolver reads GIT_SSH / GIT_SSH_COMMAND from the live environment: hold both unset
+    # across these vectors, restoring the caller's values afterwards
+    ssh_saved = {v: os.environ.pop(v) for v in ("GIT_SSH", "GIT_SSH_COMMAND")
+                 if v in os.environ}
+    try:
+        # accepted shapes: one control per allowed destination form, plus a configured remote
+        # and an unrelated rewrite that matches neither the raw nor the resolved URL
+        _expect(resolve_with_stub("origin", listing=(0, "origin\n"), fetch="/one\n",
+                                  push="/one\n", raw=("/one",)) == "/one",
+                "a configured remote resolves to its one byte-identical URL")
+        for allowed in ("/direct/url.git", "file://host/path.git",
+                        "https://example.org/repo.git", "ssh://example.org/repo.git"):
+            _expect(resolve_with_stub(allowed) == allowed,
+                    ("an allowed destination shape must resolve", allowed))
+        _expect(resolve_with_stub("origin", listing=(0, "origin\n"), fetch="/one\n",
+                                  push="/one\n", raw=("/one",),
+                                  rewrite=pairs_z(("url.https://u.example/.insteadof",
+                                                   "https://n.example/a"),
+                                                  ("url.https://u.example/.pushinsteadof",
+                                                   "https://n.example/b"))) == "/one",
+                "a rewrite for an unrelated URL prefix must stay allowed")
+        # refusal vectors: one per rule of the closed set, each asserting its named reason
+        for label, remote_arg, kwargs, fragment in (
+                ("remote listing fails", "origin", {"listing": (1, "")},
+                 "cannot list the configured remotes"),
+                ("rewrite read exits oddly", "/u", {"rewrite": (2, "")},
+                 "cannot read the git configuration"),
+                ("service-key read exits oddly", "/u", {"services": (2, "")},
+                 "cannot read the git configuration"),
+                ("trailing-whitespace name", "lg ", {}, "whitespace"),
+                ("inner-whitespace name", "a b", {}, "whitespace"),
+                ("tab in name", "a\tb", {}, "whitespace"),
+                ("line break in name", "a\nb", {}, "whitespace"),
+                ("unprintable name", "a\x01b", {}, "whitespace or an unprintable"),
+                ("empty destination", "", {}, "empty or carries whitespace"),
+                ("rewrite applying to the resolved URL", "/direct/b",
+                 {"rewrite": pairs_z(("url./other/.insteadof", "/direct"))}, "insteadOf"),
+                ("rewrite applying to the raw configured URL", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "/expanded\n", "push": "/expanded\n",
+                  "raw": ("/rawurl",),
+                  "rewrite": pairs_z(("url./expanded/.insteadof", "/raw"))},
+                 "url.<base>.insteadOf rewrite matches"),
+                ("pushInsteadOf applying to the resolved URL", "/u",
+                 {"rewrite": pairs_z(("url.x.pushinsteadof", "/u"))},
+                 "url.<base>.pushInsteadOf rewrite matches"),
+                ("empty rewrite value", "/u",
+                 {"rewrite": pairs_z(("url.x.insteadof", ""))}, "insteadOf"),
+                ("core.sshCommand configured", "/u",
+                 {"services": pairs_z(("core.sshcommand", "ssh -F /cfg"))},
+                 "core.sshCommand"),
+                ("ssh.variant configured", "/u",
+                 {"services": pairs_z(("ssh.variant", "simple"))}, "ssh.variant"),
+                ("remote uploadpack configured", "/u",
+                 {"services": pairs_z(("remote.x.uploadpack", "prog"))},
+                 "uploadpack or receivepack"),
+                ("remote receivepack configured", "/u",
+                 {"services": pairs_z(("remote.x.receivepack", "prog"))},
+                 "uploadpack or receivepack"),
+                ("two fetch URLs", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "/one\n/two\n", "push": "/one\n/two\n"},
+                 "push URL"),
+                ("push set differs", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "/one\n", "push": "/two\n"}, "push URL"),
+                ("destination names a configured remote", "origin",
+                 {"listing": (0, "origin\nalias\n"), "fetch": "alias\n", "push": "alias\n",
+                  "raw": ("alias",)}, "names a configured remote"),
+                ("empty configured URL", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "\n", "push": "\n", "raw": ("",)},
+                 "cannot be handed"),
+                ("dash destination", "--upload-pack=x", {}, "cannot be handed"),
+                ("bare name", "plainname", {}, "not an absolute local path"),
+                ("relative path", "../seeded.git", {}, "not an absolute local path"),
+                ("scp-like name", "example.org:repo.git", {}, "not an absolute local path"),
+                ("ext:: transport", "ext::prog", {}, "not an absolute local path"),
+                ("other scheme", "git://example.org/repo.git", {},
+                 "not an absolute local path")):
+            try:
+                resolve_with_stub(remote_arg, **kwargs)
+                raise AssertionError("expected FailClosed for {}".format(label))
+            except FailClosed as exc:
+                _expect(fragment in str(exc), (label, str(exc)))
+        # the ssh environment rule, both variables, with the accepted control just above as the
+        # unset case
+        for variable in ("GIT_SSH", "GIT_SSH_COMMAND"):
+            os.environ[variable] = "/bin/false"
+            try:
+                resolve_with_stub("/direct/url.git")
+                raise AssertionError("expected FailClosed for {}".format(variable))
+            except FailClosed as exc:
+                _expect("the {} environment variable is set".format(variable) in str(exc),
+                        (variable, str(exc)))
+            finally:
+                del os.environ[variable]
+        # a legacy remotes or branches file refuses by EXISTENCE, whatever its name, so a name
+        # git reads (one with a trailing space included) cannot slip past a name-keyed probe;
+        # an empty legacy directory defines no remote and stays allowed
+        with tempfile.TemporaryDirectory() as d:
+            legacy_dir = Path(d)
+            (legacy_dir / "anyname ").write_text("URL: /x\n", encoding="utf-8")
+            try:
+                resolve_with_stub("/direct/url.git", git_path=str(legacy_dir))
+                raise AssertionError("expected FailClosed for a populated legacy directory")
+            except FailClosed as exc:
+                _expect("legacy" in str(exc), str(exc))
+        with tempfile.TemporaryDirectory() as d:
+            _expect(resolve_with_stub("/direct/url.git", git_path=str(d))
+                    == "/direct/url.git", "an empty legacy directory must stay allowed")
+    finally:
+        os.environ.update(ssh_saved)
     _expect(_git_status is real_git_status, "the resolver stub must be unwound")
     # 19. --self-test is honoured only as the sole argument: mixed into a --pre-push invocation it
     # is an unknown argument and the run fails closed (its stderr line is captured and asserted)
@@ -1217,10 +1414,16 @@ def self_test():
           "delta covers every parsed string, per published commit against each of its parents, and "
           "fails closed on any deletion; the pre-push inputs (argv, --base, --head, --remote, body "
           "file, changelog delta) each fail closed when malformed; the push-destination resolver "
-          "returns the one literal URL only when every rule holds and fails closed on a split URL "
-          "set, a destination readable as a configured or legacy-file remote, a destination unusable "
-          "as one URL, any pushInsteadOf rewrite, and a remote listing or rewrite read that fails; "
-          "and --self-test mixed into a production invocation is rejected")
+          "returns the one literal URL only when every condition of its closed set holds (each "
+          "allowed shape has a passing control, an unrelated URL rewrite included) and fails "
+          "closed, naming the rule, on a remote name carrying whitespace or an unprintable "
+          "character, a split URL set, a destination naming a configured remote, a destination "
+          "unusable as one URL or outside the allowed shapes (a bare name, a relative path, an "
+          "scp-like name, an ext:: or other scheme), any legacy remotes or branches file existing "
+          "at all, an insteadOf or pushInsteadOf value prefixing the raw or resolved URL, a "
+          "core.sshCommand, ssh.variant or remote uploadpack/receivepack key, a GIT_SSH or "
+          "GIT_SSH_COMMAND variable, and a remote listing or configuration read that fails; and "
+          "--self-test mixed into a production invocation is rejected")
     return 0
 
 
