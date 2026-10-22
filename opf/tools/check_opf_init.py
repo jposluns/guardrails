@@ -902,33 +902,18 @@ def _init_route_violations(source):
     return violations
 
 
-# The invoke callable the lifecycle-wrapped leg runs; _suite stashes it because the OPF git
-# lifecycle helper takes a no-argument callback.
-_SUITE_INVOKE = [None]
-
-
 def _suite(invoke):
-    """Isolate fixture configuration and restore the caller even on failure. The whole run sits
-    inside the OPF git lifecycle (_opf_oplock._st_with_git_lifecycle), whose PATH git wrapper
-    reasserts the system-config pins after a production helper strips every GIT_* variable (the
-    init operation mutex's rev-parse does), so no git call the fixtures or the driven init make
-    reads the host's system configuration."""
+    """Isolate fixture configuration and restore the caller even on failure. The fixture
+    environment keeps the caller's PATH unchanged; a caller that drives init must already sit
+    inside the OPF git lifecycle (see _self_test), because the init operation mutex's rev-parse
+    strips every GIT_* variable and only that lifecycle's PATH git wrapper puts the system-config
+    pins back."""
     import tempfile
     from unittest.mock import patch
-    import _opf_oplock
-    _SUITE_INVOKE[0] = invoke
-    try:
-        with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
-            with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                            GIT_CONFIG_NOSYSTEM="1"):
-                return _opf_oplock._st_with_git_lifecycle(_suite_lifecycle)
-    finally:
-        _SUITE_INVOKE[0] = None
-
-
-def _suite_lifecycle():
-    """The lifecycle-wrapped leg of _suite: run the vectors over the stashed invoke callable."""
-    return _suite_isolated(_SUITE_INVOKE[0])
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _suite_isolated(invoke)
 
 
 def _suite_isolated(invoke):
@@ -6879,13 +6864,28 @@ def _suite_isolated(invoke):
         return EXIT_ERROR
 
 
+def _self_test():
+    """The gate's fixture run inside the OPF git lifecycle (_opf_oplock._st_with_git_lifecycle).
+    Each init child inherits the lifecycle's PATH git wrapper through _suite's fixture
+    environment, and so does every in-process mutex acquisition in the lease fixtures, so the
+    init operation mutex's rev-parse, which strips every GIT_* variable, still runs with the
+    system-config pins and never reads the host's system configuration."""
+    import _opf_oplock
+    return _opf_oplock._st_with_git_lifecycle(_self_test_lifecycle)
+
+
+def _self_test_lifecycle():
+    """The lifecycle-wrapped leg of _self_test: the fixture suite over the isolated child."""
+    return _suite(_run_init)
+
+
 def main(argv=None):
     try:
         args = list(sys.argv[1:] if argv is None else argv)
         if args not in ([], ["--self-test"]):
             print("usage: check_opf_init.py [--self-test]", file=sys.stderr)
             return EXIT_ERROR
-        return _suite(_run_init)
+        return _self_test()
     except Exception as exc:  # noqa: BLE001  final class-width fail-closed backstop
         print("check_opf_init: cannot evaluate: {}; exit 2".format(ascii(exc)), file=sys.stderr)
         return EXIT_ERROR

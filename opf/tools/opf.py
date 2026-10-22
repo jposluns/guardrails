@@ -21971,8 +21971,12 @@ def _cli_self_test():
 
         # The same fixture vectors drive this in-process dispatcher and the dedicated gate's
         # isolated child. A refusal must name its reason and preserve the fixture, not merely return 2.
+        # The in-process init and the lease fixtures take the shared init operation mutex, whose
+        # rev-parse strips every GIT_* variable; the OPF git lifecycle's PATH wrapper reasserts the
+        # system-config pins there, so these vectors never read the host's system configuration.
         import check_opf_init
-        init_rc = check_opf_init._suite(main)
+        import _opf_oplock
+        init_rc = _opf_oplock._st_with_git_lifecycle(lambda: check_opf_init._suite(main))
         if init_rc == EXIT_MALFORMED:
             return EXIT_MALFORMED
         if init_rc != EXIT_OK:
