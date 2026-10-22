@@ -1147,14 +1147,27 @@ when it carries ANY program-running option or word of the curated model (`--uplo
 `filter-branch`, signing options, a signature placeholder in a format or sort value, a
 `TRANSPORT::ADDRESS` URL, `--help`) or any global option other than a literal `-C` (fail closed),
 because the option's program runs from the target's tree and is not bound to it, whether or not
-its text names the held path; and when its raw text names a held worktree in a `-C` chain step
-that is not the resolved target. A RELATIVE path after `-C`, `--git-dir`, `--work-tree`, `cd`,
+its text names the held path; and when its raw text carries ANY directory step (`-C`,
+`--git-dir`, `--work-tree`, `cd`, `pushd` or a `GIT_` assignment, inside an option value
+included) that its resolved target does not account for, WHATEVER that step names: a step in an
+option value is applied from a directory this rule cannot fix, so the command is withheld even
+where the step names an unheld directory, a stated over-refusal. A RELATIVE path after `-C`,
+`--git-dir`, `--work-tree`, `cd`,
 `pushd` or a `GIT_` assignment anywhere in the raw text resolves against whatever directory runs
 it, which this rule cannot fix, so it is resolved against the session cwd AND every directory the
-command walks to (the resolved target included), each landing repository joining the hold set,
+command walks to (the resolved target and every ABSOLUTE raw-text step before the operand
+included, so a `cd` or `-C` inside an option value is a base for the relative step after it) AND
+every ANCESTOR of each of those directories (an option's program runs from a directory git
+chooses inside a walked worktree, such as the top level `rebase -x` runs from, which is always an
+ancestor of the walked directory), each landing repository joining the hold set,
 and the command is withheld while any reachable hold is live; this over-refuses every relative
 `-C` spelling while a hold is live, an option value that is no directory included (`git commit -C
-HEAD` and a relative `-C` step naming the resolved target itself are withheld the same way). The
+HEAD` and a relative `-C` step naming the resolved target itself are withheld the same way). A
+relative step is never a base for the operand after it (the widening is additive, never a model
+of where each program runs), so a hold reachable only through two relative steps in a row may
+stay out of the hold set; the ancestors narrow that residual, and from a session inside a held
+repository, or with any other reachable live hold, the relative flag withholds the command
+anyway. The
 decision
 weighs every hold the command can reach, the UNION of the hold set, the session repository's holds
 and the target repository's holds deduplicated by marker path, so a session whose own cwd path is
@@ -1230,7 +1243,9 @@ Limits:
   program-running option or unmodelled global option while any reachable hold is live, however
   unrelated its certain target, a RELATIVE `-C`, `--git-dir`, `--work-tree`, `cd` or
   `GIT_`-assignment operand anywhere in the raw text while any reachable hold is live (`git
-  commit -C HEAD` included), a
+  commit -C HEAD` included), any directory step the resolved target does not account for while
+  any reachable hold is live, whatever the step names (a `cd /safe/dir` inside an option value,
+  a held-path spelling in a commit message), a
   repository-level write such as
   `tag` targeted into
   the held worktree, a path that literally contains `$`, a backquote, a glob or brace character or

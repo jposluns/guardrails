@@ -1296,6 +1296,8 @@ expected-check-ids = [
   "rwh/sibling-repo-held-program-option-denies-red-on-revert",
   "rwh/unrelated-target-reaches-held-denies-red-on-revert",
   "rwh/unrelated-target-program-option-discriminates",
+  "rwh/option-value-directory-step-reaches-held-denies-red-on-revert",
+  "rwh/option-value-directory-step-resolution-discriminates",
   "rwh/session-only-hold-allows-unrelated-target",
   "rwh/read-only-option-table-covers-allowlist",
   "rwh/held-read-only-allows",

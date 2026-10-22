@@ -1863,7 +1863,8 @@ def _rwh_cases(tmp):
     # unknown, so whether the write moves the held HEAD cannot be ruled out: fail closed on THAT
     # cause, never read as an empty chain that would let a write of the held branch through. The
     # unpatched control is withheld too (a ref write inside the held repository, the
-    # repository-wide withholding), so the two refusals are told apart by the cause each names.
+    # repository-wide withholding), so the two refusals are told apart by the cause each names,
+    # and the revert leg shows both come from the marker check alone.
     saved_probe2 = aiqt_hooks._review_git
 
     def _fatal_symref2(repo, *args, **kw):
@@ -1882,8 +1883,11 @@ def _rwh_cases(tmp):
           [_rdp_kind(head_fatal_res),
            "symbolic HEAD chain" in _rwh_reason(head_fatal_res),
            _rdp_kind(head_plain_res),
-           "outside the enumerated read-only form" in _rwh_reason(head_plain_res)],
-          ["unverifiable", True, "unverifiable", True])
+           "outside the enumerated read-only form" in _rwh_reason(head_plain_res),
+           _rwh_without_hold(lambda: kind(
+               base, "git -C " + str(main) +
+               " symbolic-ref refs/heads/unrelated refs/heads/main"))],
+          ["unverifiable", True, "unverifiable", True, "allow"])
     # a held worktree the raw text names only inside a program-running option value (ls-remote
     # --upload-pack, grep -O, rebase -x, submodule foreach, difftool -x) joins the hold set but
     # belongs to neither the unheld target's repository nor a tree it encloses, and the option runs
@@ -2024,25 +2028,29 @@ def _rwh_cases(tmp):
            _rwh_without_hold(lambda: kind(main, rel[2]))],
           ["unverifiable", "unverifiable", "unverifiable", "unverifiable", "allow",
            "allow", "allow"])
-    # the review's named shapes that the round-6/7 head still allowed, each on a sibling worktree
-    # of the held repository (target 'other'): a program-running option whose program removes the
-    # held worktree by name (S1), moves the held branch by ref (S2), or runs through a transport
-    # helper (S3, --upload-pack). Each binds to a worktree of the HELD repository, so the
-    # repository-wide withholding withdraws it whether or not the option's path is read; a plain
-    # read on the same sibling and an unrelated-target commit with no program option still pass,
-    # and the revert leg shows the refusal comes from the live hold alone.
+    # program-running options on a sibling worktree of the held repository (target 'other'): the
+    # option's program removes the held worktree by name, moves the held branch by ref, or runs
+    # through a transport helper (--upload-pack). Each binds to a worktree of the HELD repository,
+    # so the repository-wide withholding withdraws it whether or not the option's path is read,
+    # and each reason leg pins the refusal to THAT branch by its text: the program-option
+    # withholding would catch these shapes too, with a different reason, so the kind alone cannot
+    # tell the two apart. A plain read on the same sibling and an unrelated-target commit with no
+    # program option still pass, and the revert leg shows the refusal comes from the live hold
+    # alone.
     srev = ["git -C " + str(base / "other") + " rebase -x 'git worktree remove --force held' HEAD",
             "git -C " + str(base / "other") +
             " rebase -x 'git update-ref refs/heads/review HEAD' HEAD",
             "git -C " + str(base / "other") +
             " ls-remote --upload-pack='git worktree remove --force held; git-upload-pack' " +
             str(free)]
+    srev_res = [run(base, c) for c in srev]
     check("rwh/sibling-repo-held-program-option-denies-red-on-revert",
-          [kind(base, c) for c in srev] +
+          [_rdp_kind(r) for r in srev_res] +
+          ["outside the enumerated read-only form" in _rwh_reason(r) for r in srev_res] +
           [kind(base, "git -C " + str(base / "other") + " status"),
            kind(base, "git -C " + str(free) + " commit --allow-empty -m x"),
            _rwh_without_hold(lambda: kind(base, srev[0]))],
-          ["unverifiable"] * 3 + ["allow", "allow", "allow"])
+          ["unverifiable"] * 3 + [True] * 3 + ["allow", "allow", "allow"])
     # the review's unrelated-target shapes (target the unheld 'free'): the held worktree is named
     # only through a relative step resolved against the target's tree (R1 '-C ../held', R2 'cd
     # ../held'), or through a spelling the raw scan does not read run from a session inside the
@@ -2071,10 +2079,14 @@ def _rwh_cases(tmp):
            _rwh_without_hold(lambda: kind(rurev[0][0], rurev[0][1])),
            _rwh_without_hold(lambda: kind(rurev[2][0], rurev[2][1]))],
           ["unverifiable"] * 6 + ["allow", "allow", "allow", "allow"])
-    # the program-option branch is what carries U1-U4 (the raw scan does not read their held path):
-    # with _rwh_program_word patched to see no program, each U-shape falls through to the
-    # unrelated-target pass, so this leg goes red when the program-option guard is removed. R1 and
-    # R2 do not depend on it (raw_relative withholds them), so they stay withheld under the patch.
+    # the program-option branch is what carries the env --chdir, attached-short-option and alias
+    # shapes (the raw scan reads neither their held path nor any step of theirs): with
+    # _rwh_program_word patched to see no program, each falls through to the unrelated-target
+    # pass, so this leg goes red when the program-option guard is removed. The two relative-step
+    # shapes do not depend on it (raw_relative withholds them) and stay withheld under the patch,
+    # and so does the quote-spliced shape: its spliced prefix is an absolute raw-text directory
+    # step the resolved target does not account for, which the directory-step withholding catches
+    # even with the program guard off, a second guard on that shape.
     saved_prog = aiqt_hooks._rwh_program_word
     aiqt_hooks._rwh_program_word = lambda eff: None
     try:
@@ -2082,7 +2094,58 @@ def _rwh_cases(tmp):
     finally:
         aiqt_hooks._rwh_program_word = saved_prog
     check("rwh/unrelated-target-program-option-discriminates", noprog_got,
-          ["unverifiable", "unverifiable", "allow", "allow", "allow", "allow"])
+          ["unverifiable", "unverifiable", "allow", "unverifiable", "allow", "allow"])
+    # directory steps INSIDE a program-running option's value, where the held worktree is reached
+    # through a relative step whose base the session cannot supply: a -C into a SUBDIRECTORY of
+    # the unheld target (the value's program runs from the worktree's top level, an ancestor of
+    # the walked directory), two cd steps in a row, and an absolute cd, -C, --work-tree or GIT_
+    # step inside the value followed by a relative step. Each lands the held repository in the
+    # hold set through the widened resolution (every walked directory, every absolute raw-text
+    # step, and their ancestors), and the relative operand then withholds while that hold is
+    # live. The same shape stepping into the unheld free repository stays allowed (the withhold
+    # comes from the live hold, not the shape), and the revert leg shows it comes from the
+    # marker alone.
+    out = base / "out"
+    out.mkdir()
+    nest = [(base, "git -C " + str(free) + "/sub rebase -x 'git -C ../held reset --hard " +
+             seed + "' HEAD"),
+            (out, "git -C " + str(free) + " rebase -x 'cd .. && cd held && git reset --hard " +
+             seed + "' HEAD"),
+            (out, "git -C " + str(free) + " rebase -x 'cd " + str(base) +
+             " && git -C held reset --hard " + seed + "' HEAD"),
+            (out, "git -C " + str(free) + " rebase -x 'git -C " + str(base) +
+             " -C held reset --hard " + seed + "' HEAD"),
+            (out, "git -C " + str(free) + " rebase -x 'git --work-tree=" + str(base) +
+             " log; git -C held reset --hard " + seed + "' HEAD"),
+            (out, "git -C " + str(free) + " rebase -x 'GIT_WORK_TREE=" + str(base) +
+             " true; git -C held reset --hard " + seed + "' HEAD")]
+    check("rwh/option-value-directory-step-reaches-held-denies-red-on-revert",
+          [kind(cwd, c) for cwd, c in nest] +
+          [kind(out, "git -C " + str(free) + " rebase -x 'cd " + str(base) +
+                " && git -C free reset --hard " + seed + "' HEAD"),
+           _rwh_without_hold(lambda: kind(nest[0][0], nest[0][1]))],
+          ["unverifiable"] * 6 + ["allow", "allow"])
+    # the widened resolution is what discovers each of those holds: with it patched empty, no
+    # case lands the held repository in the hold set, so every one falls through to the
+    # unrelated-target pass (this leg goes red when the resolution is removed); with it patched
+    # to the walked directories and the session cwd alone (no ancestors), the two cases whose
+    # only base is an ancestor stay undiscovered while the absolute-step cases still land,
+    # telling the two halves of the resolution apart.
+    saved_bases = aiqt_hooks._rwh_rel_bases
+    aiqt_hooks._rwh_rel_bases = lambda bases, cwd: []
+    try:
+        nobase_got = [kind(cwd, c) for cwd, c in nest]
+    finally:
+        aiqt_hooks._rwh_rel_bases = saved_bases
+    aiqt_hooks._rwh_rel_bases = lambda bases, cwd: list(bases) + ([cwd] if cwd else [])
+    try:
+        noanc_got = [kind(cwd, c) for cwd, c in nest]
+    finally:
+        aiqt_hooks._rwh_rel_bases = saved_bases
+    check("rwh/option-value-directory-step-resolution-discriminates",
+          nobase_got + noanc_got,
+          ["allow"] * 6 + ["allow", "allow", "unverifiable", "unverifiable",
+                           "unverifiable", "unverifiable"])
     # a hold known only because the session sits in a held repository (or in a sibling worktree of
     # it) does not withhold a one-plain-git command whose certain target is an unrelated repository:
     # the command cannot reach the held worktree, so a session in a review-held repository can still
@@ -2120,12 +2183,15 @@ def _rwh_cases(tmp):
                base, "git -C " + str(base / "other") + " checkout " + seed))],
           ["unverifiable", True, "allow", "allow"])
     # catches: a path-prefix match without a boundary check (held2 shares held's prefix): the
-    # prefix sibling gets the repository-wide withhold, never the held-worktree deny
+    # prefix sibling gets the repository-wide withhold, never the held-worktree deny, and the
+    # revert leg shows that withhold comes from the marker check alone
     check("rwh/prefix-sibling-withheld-not-held",
           [_rdp_kind(run(base, "git -C " + str(base / "held2") + " checkout " + seed)),
            "outside the enumerated read-only form" in _rwh_reason(
-               run(base, "git -C " + str(base / "held2") + " checkout " + seed))],
-          ["unverifiable", True])
+               run(base, "git -C " + str(base / "held2") + " checkout " + seed)),
+           _rwh_without_hold(lambda: kind(
+               base, "git -C " + str(base / "held2") + " checkout " + seed))],
+          ["unverifiable", True, "allow"])
     # catches: judging by the session cwd over an explicit -C target (a cwd-judged implementation
     # would withhold this unrelated commit run from inside the held worktree)
     check("rwh/explicit-target-over-cwd-allows",
