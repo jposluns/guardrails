@@ -1915,6 +1915,85 @@ def _rwh_cases(tmp):
            kind(base, "git -C " + str(held) + " config --get user.name"),
            _rwh_without_hold(lambda: kind(base, cc[0]))],
           ["deny"] * 4 + ["allow", "allow", "allow", "allow"])
+    # a held worktree named only inside a program-running option value (--upload-pack, grep -O,
+    # rebase -x, submodule foreach, difftool -x) is reachable by the option's program even when it
+    # is a SIBLING worktree of the target's own repository, which the one-plain-git-on-the-target
+    # reasoning cannot rule out, so each is withheld; an option value naming no held worktree (the
+    # unheld free repository) still passes, and the revert leg shows the refusal comes from the
+    # live hold alone
+    sib = ["git -C " + str(base / "other") + " rebase -x 'git -C " + str(held) + " reset --hard " +
+           seed + "' HEAD",
+           "git -C " + str(base / "other") + " ls-remote --upload-pack='git -C " + str(held) +
+           " reset --hard " + seed + "' " + str(free),
+           "git -C " + str(base / "other") + " submodule foreach 'git -C " + str(held) +
+           " reset --hard " + seed + "'",
+           "git -C " + str(base / "other") + " difftool -x 'git -C " + str(held) + " reset --hard " +
+           seed + "'"]
+    check("rwh/sibling-held-in-option-value-denies-red-on-revert",
+          [kind(base, c) for c in sib] +
+          [kind(base, "git -C " + str(base / "other") + " rebase -x 'git -C " + str(free) +
+                " reset' HEAD"),
+           _rwh_without_hold(lambda: kind(base, sib[0]))],
+          ["unverifiable"] * 4 + ["allow", "allow"])
+    # the opaque-path residual drops the session cwd from the hold set (a glob or brace character in
+    # its path), but the session's own live holds are still judged: a whole-tree clean of a foreign
+    # tree that encloses a held worktree of the SESSION's repository is denied even when the session
+    # cwd is opaque, so the reach is the union of the hold set, the session holds and the target
+    # holds. A plain session cwd reaches the same deny (the control that isolates the opaque path),
+    # and the same opaque session against an unrelated target that encloses nothing passes.
+    rsrc = base / "rsrc"
+    rsrc.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(rsrc))
+    (rsrc / "f").write_text("q\n", encoding="utf-8")
+    _rdp_git(rsrc, "add", "-A")
+    _rdp_git(rsrc, "commit", "-q", "-m", "seed")
+    rsrctip = _rdp_git(rsrc, "rev-parse", "HEAD")
+    (rsrc / "o[1]").mkdir()
+    (rsrc / "plain").mkdir()
+    rencl = base / "rencl"
+    rencl.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(rencl))
+    rsnest = rencl / "nestedheld"
+    _rdp_git(rsrc, "worktree", "add", "-q", "--detach", str(rsnest), rsrctip)
+    rsrc_holds = rsrc / ".git" / "aiqt" / "review-holds"
+    rsrc_holds.mkdir(parents=True)
+    (rsrc_holds / "rev-rs.json").write_text(json.dumps(dict(
+        version=1, workdir=str(rsnest), head=rsrctip, dispatch_id="rev-rs",
+        created_utc=_rwh_iso(), expires_utc=_rwh_iso(4))), encoding="utf-8")
+    rsc = "git -C " + str(rencl) + " clean -ffdx"
+    check("rwh/session-hold-opaque-cwd-reach-denies-red-on-revert",
+          [kind(rsrc / "o[1]", rsc), kind(rsrc / "plain", rsc),
+           kind(rsrc / "o[1]", "git -C " + str(free) + " commit --allow-empty -m x"),
+           _rwh_without_hold(lambda: kind(rsrc / "o[1]", rsc))],
+          ["deny", "deny", "allow", "allow"])
+    (rsrc_holds / "rev-rs.json").unlink()
+    _rdp_git(rsrc, "worktree", "remove", "--force", str(rsnest))
+    # a relative path after -C, cd or an override inside a program-running option value runs from the
+    # target's tree, not the session cwd, so while a hold is live whether it lands on a held worktree
+    # cannot be ruled out: withheld. The same option value naming an ABSOLUTE unheld path passes (a
+    # hold known only through the session does not withhold a certain unrelated target), and the
+    # revert leg shows the refusal comes from the live hold alone.
+    rel = ["git -C " + str(free) + " rebase -x 'git -C ../x reset --hard " + seed + "' HEAD",
+           "git -C " + str(free) + " rebase -x 'cd ../x && git reset --hard " + seed + "' HEAD"]
+    check("rwh/relative-raw-operand-unverifiable-red-on-revert",
+          [kind(main, c) for c in rel] +
+          [kind(main, "git -C " + str(free) + " rebase -x 'git -C " + str(free) + " reset --hard " +
+                seed + "' HEAD"),
+           _rwh_without_hold(lambda: kind(main, rel[0]))],
+          ["unverifiable", "unverifiable", "allow", "allow"])
+    # a hold known only because the session sits in a held repository (or in a sibling worktree of
+    # it) does not withhold a one-plain-git command whose certain target is an unrelated repository:
+    # the command cannot reach the held worktree, so a session in a review-held repository can still
+    # commit elsewhere. From a worktree of the held repository and from a sibling worktree the commit
+    # passes; the same command against the held worktree itself still denies, and the revert leg
+    # shows that deny comes from the live hold alone.
+    so = "git -C " + str(held) + " reset --hard " + seed
+    check("rwh/session-only-hold-allows-unrelated-target",
+          [kind(main, "git -C " + str(free) + " commit --allow-empty -m x"),
+           kind(base / "other", "git -C " + str(free) + " commit --allow-empty -m x"),
+           kind(base, "git -C " + str(free) + " commit --allow-empty -m x"),
+           kind(main, so), _rwh_without_hold(lambda: kind(main, so))],
+          ["allow", "allow", "allow", "deny", "allow"])
     # every allowlisted verb carries a closed read-only option set: a verb present in one set but
     # not the other would either fail closed forever or skip the option check
     check("rwh/read-only-option-table-covers-allowlist",

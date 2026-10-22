@@ -1132,10 +1132,18 @@ included) and every certain-target command whose repository top level cannot be 
 repository), and a command whose raw text names a held worktree its resolved target does not
 account for: a held path carried in a program-running option value (`--upload-pack`, grep's `-O`,
 `rebase -x`, `submodule foreach`, `difftool -x`) or in a `-C` chain step that is not the resolved
-target joins the hold set yet belongs to neither the target's repository nor a tree the target
-encloses, so the one-plain-git-on-a-certain-target reasoning cannot show that held worktree is
-left untouched and the command is withheld as `UNVERIFIABLE`. Each is a safe over-refusal taken
-instead of under-blocking; none fires with no live hold. ALLOW RESIDUAL: the hold set is built
+target, a SIBLING worktree of the target's own repository the option's program can still reach
+included, is one the one-plain-git-on-a-certain-target reasoning cannot show left untouched, so the
+command is withheld as `UNVERIFIABLE`; a RELATIVE path in such a value or step (it resolves against
+the directory that runs it, and an option value's program runs from the target's tree, not the
+session cwd, which this rule cannot fix) is withheld the same way while a hold is live. The decision
+weighs every hold the command can reach, the UNION of the hold set, the session repository's holds
+and the target repository's holds deduplicated by marker path, so a session whose own cwd path is
+opaque (a glob or brace character drops it from the hold set) still has its live holds judged. A
+hold known ONLY because the session sits in a held repository, which a one-plain-git command bound
+to a certain unrelated target cannot reach, does NOT withhold that command, so a session in a
+review-held repository can still commit in an unrelated one. Each withholding is a safe over-refusal
+taken instead of under-blocking; none fires with no live hold. ALLOW RESIDUAL: the hold set is built
 from literal text, so an operand only an expansion resolves (`git -C "$DIR"`, a leading `~`, a
 glob) names no repository; from a session outside every held repository such a command stays
 allowed even where the expansion would land in a held worktree, and a git reached through an
