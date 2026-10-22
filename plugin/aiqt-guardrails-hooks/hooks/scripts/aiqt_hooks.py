@@ -12599,11 +12599,13 @@ def decide_yield(ctx):
     # NO item is actionable: a backlog holding both an actionable item and a cannot-evaluate item falls
     # through to the actionable deny below, which names the held items too, so held work never relieves
     # a question past work the enumeration still classifies as actionable. The narrowing reads the
-    # CLASSIFIED sets only: a proof-source failure that holds every otherwise-actionable item (one
-    # schema-invalid dispatch-ledger line, an unreadable pending-decisions record) or an enumeration
+    # CLASSIFIED sets only: a proof-source failure that holds every otherwise-actionable item (examples:
+    # one schema-invalid dispatch-ledger line, an unreadable or undeclared pending-decisions record, or
+    # a declared attestation register whose validated snapshot is absent or stale) or an enumeration
     # failure that hides items (a duplicate id fails the whole enumeration) leaves nothing classified
-    # actionable, so the cap can still relieve the question on such a shape, each relief writing a
-    # forced_unresolved record and a guard-events row.
+    # actionable, so the cap can still relieve the question on such a shape; each relief ATTEMPTS a
+    # forced_unresolved record and a guard-events row in the releasing binding, a failed write is
+    # reported in the released message, and the relief still proceeds.
     if ctx.get("cannot_evaluate", []) and capped and (kind != "ask" or not ctx["actionable"]):
         if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
             return ("ALLOW_WITH_FINDINGS",
@@ -13349,12 +13351,15 @@ def _orch_ask_attended(data, reg, root):
     schedule cap narrowed to the cannot-evaluate denies). It is session-scoped exactly as the yield guard is: a session that is not within
     the live scope (a bounded co-located worker a holder-scoped lease does not name, CX-M3) does not
     inherit the global backlog, so the judgement allows there. Under a holder-scoped lease
-    (holder_is_session_id) the judgement is off for EVERY session, the orchestrator included, in three
-    cases where no holder can be confirmed: a lease file that is absent or unreadable, a call that
-    carries no session id, or a lease that names no session. A lease stale past max_age_hours is a
-    fourth no-confirmed-holder shape with the opposite direction: it skips the holder check, and a
-    live mode record then keeps every session in scope, so the judgement stays on there (erring
-    toward denying). The question is DENIED while granted open
+    (holder_is_session_id) the judgement is off for EVERY session, the orchestrator included, where no
+    holder can be confirmed: a lease file that is absent or unreadable, and, for a NON-EMPTY lease the
+    age classifier reads as fresh or cannot-evaluate (the only shapes the session-id and holder-token
+    checks run on), a call that carries no session id or a lease that names no session. Every other
+    lease shape skips the holder check and falls through to the live-mode scope source: an empty
+    lease, a lease that declares no path, a lease stale past max_age_hours, and a lease future-dated
+    past the tolerated clock skew; a live mode record then keeps every session in scope there, an
+    id-less caller included, so the judgement stays on (erring toward denying). The question is
+    DENIED while granted open
     items are actionable, neither dispatched (waiting on a live tracked task) nor blocked by a human
     decision recorded in the declared pending-decisions record (the stop guard's blocker grammar; fresh
     external evidence and a not-before time also block); the deny names up to _ORCH_MAX_NAMED items and
@@ -13363,10 +13368,13 @@ def _orch_ask_attended(data, reg, root):
     unchanged question is denied exactly as the first, and a backlog holding both an actionable item
     and a cannot-evaluate item keeps that actionable deny, which then also names the held items in one
     reason (held work never relieves a question past work the enumeration still classifies as
-    actionable; a proof-source failure that holds every otherwise-actionable item, one schema-invalid
-    dispatch-ledger line or an unreadable pending-decisions record, or an enumeration failure that
-    hides items, a duplicate item id, leaves nothing classified actionable, so the cap can still
-    relieve the question on such a shape). An enumerator error or an
+    actionable; a proof-source failure that holds every otherwise-actionable item, such as one
+    schema-invalid dispatch-ledger line, an unreadable or undeclared pending-decisions record, or a
+    declared attestation register whose validated snapshot is absent or stale, or an enumeration
+    failure that hides items, such as a duplicate item id, leaves nothing classified actionable, so
+    the cap can still relieve the question on such a shape; each relief attempts a forced_unresolved
+    record and a guard-events row, a failed write is reported in the released message, and the
+    relief still proceeds). An enumerator error or an
     unreadable item proof source is a cannot-evaluate DENY, bounded by _ORCH_SCHEDULE_CAP ask denials
     on an unchanged basis ONLY while no item is actionable, after which the question is allowed with
     findings (a guard that can be farmed trains its own bypass;

@@ -9492,6 +9492,61 @@ def _main_isolated(report_path=None):
         h.lease.write_text("holder: s1\n", encoding="utf-8")
         h.set_turn_state({})
         check("ask/attended-holder-session-denies", _verdict(ask_att("tu-i2")), "deny")
+        # the session-id and holder-token checks run only for a NON-EMPTY lease classified fresh or
+        # cannot-evaluate; every other lease shape (empty, path-less, stale, future-dated past the
+        # tolerated skew) skips the holder check and falls through to the live-mode scope source,
+        # which keeps EVERY session in scope, an id-less caller included (erring toward denying).
+        # First the off side: an id-less caller under a fresh holder-scoped lease is a non-holder
+        def ask_att_idless(tool_use_id):
+            _hp = h.payload("PreToolUse", "AskUserQuestion",
+                            {"questions": [{"question": "pick"}]},
+                            extra={"tool_use_id": tool_use_id})
+            del _hp["session_id"]
+            return aiqt_hooks.orch_ask_guard(_hp)
+        h.set_turn_state({})
+        check("ask/attended-fresh-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i3")), "allow")
+        # an EMPTY lease names no session, yet the judgement stays ON: the empty lease never reaches
+        # the holder check, and the live mode record keeps every session in scope, with and without
+        # a session id on the call
+        h.lease.write_text("", encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-empty-lease-keeps-judgement-on", _verdict(ask_att("tu-i4")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-empty-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i5")), "deny")
+        # the stale boundary from both sides: just INSIDE max_age_hours the lease is fresh, so the
+        # holder check runs and the unnamed session is out of scope (allow); just PAST it the lease
+        # is stale, the holder check is skipped, and the live mode record keeps the judgement on
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        _hnow = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        os.utime(h.lease, (_hnow - 24 * 3600 + 600, _hnow - 24 * 3600 + 600))
+        h.set_turn_state({})
+        check("ask/attended-just-inside-stale-lease-nonholder-allows",
+              _verdict(ask_att("tu-i6")), "allow")
+        os.utime(h.lease, (_hnow - 24 * 3600 - 600, _hnow - 24 * 3600 - 600))
+        h.set_turn_state({})
+        check("ask/attended-stale-lease-keeps-judgement-on", _verdict(ask_att("tu-i7")), "deny")
+        # the future boundary from both sides: a lease mtime within the tolerated clock skew still
+        # reads fresh (the holder check runs, allow for the unnamed session); one past the skew is
+        # the future-dated shape that skips the holder check (judgement on)
+        os.utime(h.lease, (_hnow + 60, _hnow + 60))
+        h.set_turn_state({})
+        check("ask/attended-future-lease-within-skew-nonholder-allows",
+              _verdict(ask_att("tu-i8")), "allow")
+        os.utime(h.lease, (_hnow + 900, _hnow + 900))
+        h.set_turn_state({})
+        check("ask/attended-future-lease-keeps-judgement-on", _verdict(ask_att("tu-i9")), "deny")
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        # a holder-scoped lease that declares NO path never reaches the holder check either: the
+        # live mode record keeps the judgement on
+        _hlease_decl = _hreg["lease"]
+        _hreg["lease"] = {"max_age_hours": 24, "holder_is_session_id": True}
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-pathless-lease-keeps-judgement-on", _verdict(ask_att("tu-i10")), "deny")
+        _hreg["lease"] = _hlease_decl
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
         h.lease.write_text("holder: selftest\n", encoding="utf-8")
         _hreg["lease"].pop("holder_is_session_id")
         _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
@@ -9528,21 +9583,50 @@ def _main_isolated(report_path=None):
         h.set_items([item("T-3", blocker={"kind": "tracked-task", "ref": "T-9"}),
                      item("T-4", blocker={"kind": "tracked-task", "ref": "T-8"})])
         h.set_turn_state({})
+        _hall = [ask_att("tu-l{}".format(i)) for i in range(4)]
         check("ask/attended-all-held-invalid-ledger-line-cap-relieves",
-              [_verdict(ask_att("tu-l{}".format(i))) for i in range(4)],
-              ["deny", "deny", "deny", "warn"])
+              [_verdict(r) for r in _hall], ["deny", "deny", "deny", "warn"])
+        # the verdict sequence alone cannot tell the item-level hold from a whole-enumeration
+        # failure, so the first deny must also NAME the held items as cannot-evaluate (pinning
+        # that the ledger line held them rather than the enumeration failing)
+        check("ask/attended-all-held-first-deny-names-held-items",
+              ("T-3" in ask_reason(_hall[0]), "T-4" in ask_reason(_hall[0]),
+               "cannot-evaluate" in ask_reason(_hall[0])), (True, True, True))
         (hsd / "dispatch-ledger.jsonl").write_text(
             json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-9",
                         "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
         # an enumeration failure HIDES items rather than holding them: a duplicate item id fails the
         # whole enumeration, so an item that would be actionable without the duplicate is absent from
         # the classified sets and the fourth unchanged question is relieved at the cap; the
-        # four-denial actionable run above is the control that a valid enumeration never relieves
+        # four-denial actionable run above is the control that a valid enumeration retaining a
+        # classified actionable item is never cap-relieved
         h.set_items([item("A-14"), item("A-14")])
         h.set_turn_state({})
+        _hdup = [ask_att("tu-m{}".format(i)) for i in range(4)]
         check("ask/attended-duplicate-id-cap-relieves",
-              [_verdict(ask_att("tu-m{}".format(i))) for i in range(4)],
-              ["deny", "deny", "deny", "warn"])
+              [_verdict(r) for r in _hdup], ["deny", "deny", "deny", "warn"])
+        # the relief must come from THIS enumeration failure, not some other persistent fault, so
+        # the first deny must carry the duplicate-id diagnostic
+        check("ask/attended-duplicate-id-first-deny-names-duplicate",
+              "duplicate item id 'A-14'" in ask_reason(_hdup[0]), True)
+        # cap relief is best effort about its OWN records: when neither the forced_unresolved row
+        # nor the guard-events row can be written, the failure is REPORTED in the released message
+        # and the relief still proceeds (the allow-with-note is retained; the recorder never
+        # restores the deny)
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        _happend = aiqt_hooks._orch_append_jsonl
+        try:
+            aiqt_hooks._orch_append_jsonl = lambda path, obj: False
+            att_res = ask_att("tu-n1")
+        finally:
+            aiqt_hooks._orch_append_jsonl = _happend
+        check("ask/attended-cap-relief-record-failure-still-allows", _verdict(att_res), "warn")
+        _hnote = att_res[1].get("systemMessage", "") if isinstance(att_res[1], dict) else ""
+        check("ask/attended-cap-relief-record-failure-says-so",
+              ("could not be fully persisted (guard-events FAILED, forced-exit.jsonl FAILED)"
+               in _hnote, "proceeds with findings" in _hnote), (True, True))
+        h.enum_exit.write_text("0", encoding="utf-8")
 
         # ---------- component 3: the truncation guard ----------
         t = Fixture(tmp, "trunc")
