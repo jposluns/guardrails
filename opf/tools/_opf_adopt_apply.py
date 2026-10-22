@@ -13191,8 +13191,12 @@ def _sweep_report_source(tree):
     function body (descending into the branches of each `if`) that names one of _SWEEP_REPORT_NAMES, or
     that names both `skipped` and `print` (the skip report's emission), kept in order and otherwise
     verbatim; None when the function is missing or nothing matches. Running the slice executes the REAL
-    recording, skip and verdict statements, so a statement that drops the skip entries on the way to the
-    report, or rebinds the expiry list before the verdict, changes what the slice reports."""
+    recording, skip and verdict statements, so dropping or diverting the skip extend, rebinding the
+    expiry list before the verdict, or removing the report's emission changes what the slice reports.
+    The slice holds ONLY the statements the rule above keeps: an inserted statement that names nothing
+    beyond `skipped` (an erasure such as skipped.clear()) never reaches it, so what the slice proves is
+    the sanctioned statements' behaviour, not the absence of writes between them; _skip_list_write_sites
+    pins those write shapes at the source instead."""
     import ast
 
     def _names(stmt):
@@ -13233,6 +13237,44 @@ def _load_sweep_report_slice(slice_source, directory, tag):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.skeleton
+
+
+def _skip_list_write_sites(tree):
+    """How _self_test_checks touches its `skipped` list, read from the module tree: (inits, foreign),
+    where inits counts the bindings of `skipped` to a literal empty list (the run must have exactly one,
+    its creation) and foreign lists every other use of the name that is not a statement-level
+    skipped.append(...) or skipped.extend(...) call or `skipped` as a for statement's iterable (the skip
+    report's read); None when the function is missing. The skip report is honest only while nothing
+    erases, rebinds or hands off the list between a skip's recording and the report, and the executed
+    reporting slice (_sweep_report_source) never contains a statement naming only `skipped`, so a
+    skipped.clear(), a second binding, a del or slice assignment, a pop, and a pass of the list into any
+    call are refused HERE, by shape. Names and shapes only: an erasure that reaches the list object
+    without naming `skipped` is outside this reader's scope."""
+    import ast
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_self_test_checks":
+            inits, sanctioned = 0, set()
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Assign) and len(sub.targets) == 1
+                        and isinstance(sub.targets[0], ast.Name) and sub.targets[0].id == "skipped"
+                        and isinstance(sub.value, ast.List) and not sub.value.elts):
+                    inits += 1
+                    sanctioned.add(id(sub.targets[0]))
+                elif (isinstance(sub, ast.Expr) and isinstance(sub.value, ast.Call)
+                        and isinstance(sub.value.func, ast.Attribute)
+                        and sub.value.func.attr in ("append", "extend")
+                        and isinstance(sub.value.func.value, ast.Name)
+                        and sub.value.func.value.id == "skipped"):
+                    sanctioned.add(id(sub.value.func.value))
+                elif (isinstance(sub, ast.For) and isinstance(sub.iter, ast.Name)
+                        and sub.iter.id == "skipped"):
+                    sanctioned.add(id(sub.iter))
+            foreign = sorted("line {}: {}".format(sub.lineno, type(sub.ctx).__name__)
+                             for sub in ast.walk(node)
+                             if isinstance(sub, ast.Name) and sub.id == "skipped"
+                             and id(sub) not in sanctioned)
+            return inits, foreign
+    return None
 
 
 def _eventfd_skip_call_sites(tree):
@@ -13336,8 +13378,9 @@ def _class_sweep_bound_self_test(check):
     as the bound and never as the sweep's checks failing or passing, the expiry list and the no-census
     skips are wired into the run's own report (the reporting statements are also sliced from this
     module's source and EXECUTED over a controlled expiry, a controlled no-census run and a controlled
-    clean result, asserting the final exit code and the emitted entries), and the bound's size stays the
-    int literal recorded above
+    clean result, asserting the final exit code and the emitted entries), the skip list's writes keep
+    their sanctioned shapes (an erasure the slice cannot see is refused by shape,
+    _skip_list_write_sites), and the bound's size stays the int literal recorded above
     _run_class_sweep_child. Every vector here is in-process and platform-independent."""
     import ast
     import io
@@ -13498,7 +13541,8 @@ def _class_sweep_bound_self_test(check):
     # call names the same bound_expired list the run's verdict call names (a fresh list there would let an
     # expiry exit 0 as PASS), and the no-census branch opposite the sweep run calls the skip-entry
     # builder. Name reading alone does not prove the entries survive to the report; the executed
-    # reporting slice below does.
+    # reporting slice below runs the sanctioned statements, and the skip-list write-shape pin refuses
+    # an unsanctioned write between them.
     live_wiring = _sweep_wiring(source_tree)
     good = ("def _self_test_checks():\n"
             "    if not census:\n"
@@ -13598,6 +13642,43 @@ def _class_sweep_bound_self_test(check):
           observed=repr({label: None if report is None else
                          (report["no-census"][0], len(report["no-census"][1]), report["expiry"][0])
                          for label, report in mutant_reports.items()}))
+    # The skip list's write shapes, pinned at the source: the executed slice above keeps only statements
+    # naming a report name or the report's emission, so an inserted erasure that names nothing beyond
+    # `skipped` (a skipped.clear() right after the sweep extend, say) never reaches the slice and leaves
+    # every slice outcome unchanged. _skip_list_write_sites refuses that statement by shape instead,
+    # with a rebind, a slice assignment, a del, a pop and a handoff of the list into any call; the
+    # cleared_live probe applies the exact clearing mutation to this module's real source.
+    live_shapes = _skip_list_write_sites(source_tree)
+    shape_good = ("def _self_test_checks():\n"
+                  "    skipped = []\n"
+                  "    if not census:\n"
+                  "        skipped.append((name, no_census))\n"
+                  "        skipped.extend(_class_sweep_skip_entries(no_census))\n"
+                  "    for name, why in skipped:\n"
+                  "        print(name, why)\n")
+    report_loop = "    for name, why in skipped:"
+    shape_probes = {}
+    for label, inserted in (("good", None),
+                            ("cleared", "    skipped.clear()\n"),
+                            ("rebound", "    skipped = []\n"),
+                            ("slice-assigned", "    skipped[:] = []\n"),
+                            ("deleted", "    del skipped[:]\n"),
+                            ("handed-off", "    _some_helper(skipped)\n"),
+                            ("popped", "    skipped.pop()\n")):
+        text = shape_good if inserted is None else shape_good.replace(
+            report_loop, inserted + report_loop, 1)
+        shape_probes[label] = _skip_list_write_sites(ast.parse(text))
+    cleared_live = _skip_list_write_sites(ast.parse(source_text.replace(
+        extend_stmt, extend_stmt + "\n        skipped.clear()", 1)))
+    check("class-sweep-skip-list-write-shapes-pinned",
+          live_shapes == (1, []) and shape_probes["good"] == (1, [])
+          and shape_probes["rebound"] == (2, [])
+          and all(shape_probes[label][0] == 1 and shape_probes[label][1] != []
+                  for label in ("cleared", "slice-assigned", "deleted", "handed-off", "popped"))
+          and cleared_live is not None and cleared_live[0] == 1 and cleared_live[1] != []
+          and _skip_list_write_sites(ast.parse("def other():\n    skipped = []\n")) is None,
+          observed="live={!r} probes={!r} cleared_live={!r}".format(
+              live_shapes, shape_probes, cleared_live))
     # The eventfd skip reason's CALL SITE is pinned, not only the helper: _self_test_checks must derive
     # the vector's skip reason from the census flag and from the real presence of os.eventfd, exactly
     # once; a constant second argument or a removed call is refused.
