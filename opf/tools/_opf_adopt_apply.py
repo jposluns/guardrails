@@ -10989,8 +10989,8 @@ def _self_test_checks():
               and _evidence_eligible(frid, planning_inventory_rel(frid))
               and not _bundle_root_inventory(frid, planning_inventory_rel(frid)))
         # the byte-identical plan beside an inventory that does not seal to the plan's inventory_digest
-        # refuses, in approve's re-derivation and before apply writes anything (red without the seal check):
-        # the forged inventory seals its own bytes, so only the plan binding refuses it.
+        # refuses, in approve's re-derivation and before apply writes anything (red with the plan-binding
+        # comparison removed): the forged inventory seals its own bytes, so only the plan binding refuses it.
         forged_doc = tomllib.loads(inventory_bytes.decode("utf-8"))
         forged_doc.pop("inventory_digest", None)
         forged_doc["decisions"] = list(forged_doc["decisions"]) + [dict(
@@ -11004,6 +11004,20 @@ def _self_test_checks():
         check("rederive-refuses-inventory-not-sealed-to-plan",
               "is not the one the plan binds" in (err_direct or "")
               and "is not the one the plan binds" in (err_apply or "") and _snapshot(root) == before)
+        # the same changed body carrying the plan's APPROVED inventory_digest is caught only by the
+        # self-seal comparison (the kept digest still satisfies the plan binding), so it refuses in
+        # re-derivation, approve and apply, with the tree unchanged (red with only the self-seal
+        # comparison removed).
+        unsealed = emit_checked(dict(forged_doc, inventory_digest=plan_doc["inventory_digest"])).encode("utf-8")
+        fake = planner.AdoptResult(VALID, plan=plan_bytes, inventory=unsealed)
+        with mock.patch.object(planner, "plan", lambda *a, **k: fake):
+            err_direct = refusal(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
+            err_approve = refusal(capture_approval, root, plan_bytes, sheet, "adopter", now)
+            err_apply = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("rederive-refuses-inventory-not-self-sealed",
+              "does not seal its own bytes" in (err_direct or "")
+              and "does not seal its own bytes" in (err_approve or "")
+              and "does not seal its own bytes" in (err_apply or "") and _snapshot(root) == before)
         check("driver-approve-multiline-actor-refused", "actor" in
               (refusal(capture_approval, root, plan_bytes, sheet, "adopter\nsecond", now) or ""))
         # the approval follows its plan: an approval instant before the plan's created_at is refused.

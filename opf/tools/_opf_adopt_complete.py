@@ -32,10 +32,15 @@ CANNOT-EVALUATE (an input it cannot read or parse, never a pass). An absent requ
 no receipt, an absent preimage or live file) is a finding; an unreadable or malformed one is
 CANNOT-EVALUATE. A plan that does not re-prove (frozen_plan) leaves every check CANNOT-EVALUATE.
 
-Check ownership, so one mutation flips one check (the canonical single-mutation flips of the self-test;
-the one exception is the bundle's planning-inventory copy, whose tamper without a re-emitted inventory row
-moves checks 2 and 3 together, each from its own sentence: check 2 reads the copy, check 3 verifies the
-bundle that lists it, so the canonical check-2 flips re-emit the row).
+Check ownership, so one mutation flips one check (the canonical single-mutation flips of the self-test),
+holds for fixtures that deliberately repair the other bindings a mutation disturbs; a raw tamper on a
+bundle artefact that more than one check reads is a shared-check case moving those checks together, each
+from its own sentence. The shared-check cases the self-test exercises are: the bundle's planning-inventory
+copy tampered without a re-emitted inventory row moves checks 2 and 3 (check 2 reads the copy, check 3
+verifies the bundle that lists it, so the canonical check-2 flips re-emit the row); a garbled approval
+without a re-emitted inventory row moves checks 1 and 3 (check 1 reads the approval, check 3 verifies the
+bundle that lists it); and a replaced occupying-source archive copy moves checks 3 and 6 (check 3 verifies
+the bundle that lists it, check 6 compares the archived bytes to the plan digest).
 Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the division of labour is:
   1 authority-freshness: the frozen plan re-proves and names this run, the bundle's approval binds it
     (approval_findings), the receipt core validates and binds the run, product, plan and inventory digests,
@@ -910,8 +915,8 @@ def _run_check(name, ev):
 def evaluate(product_root, run_id, *, doctor=None, prober=None):
     """The roster verdicts {check name: CheckResult} in the spec's order (spec 14.1). Check 5 is never VALID
     while PR6_DENY_PROBES_SHIPPED is False. Read-only over the live tree; every unreadable input is
-    CANNOT-EVALUATE. Every artefact, the planning inventory included, is read from the run's committed
-    evidence bundle: there is no caller-supplied stand-in."""
+    CANNOT-EVALUATE. The planning inventory is read only from the run's bundle copy
+    (apply.planning_inventory_rel(run_id)): there is no caller-supplied replacement for it."""
     ev = _Evaluation()
     ev.product_root, ev.run_id, ev.doctor, ev.prober = str(product_root), run_id, doctor, prober
     ev.plan, ev.root_fd = None, None
@@ -1853,8 +1858,8 @@ def self_test():
         check("closed-undigested-file-entry", _only(_case(lambda r, i: _replant(
             r, _reseal_inventory(i, entries=_entries(i) + [dict(
                 path="legacy/undigested.md", kind="file")]))), _red(DISCOVERY, CANNOT_EVALUATE)))
-        # The bundle copy tampered WITHOUT its inventory row re-emitted moves checks 2 and 3 together, the
-        # documented exception to one-mutation-one-check (module docstring): check 2 reads the copy and
+        # The bundle copy tampered WITHOUT its inventory row re-emitted moves checks 2 and 3 together, one
+        # of the documented shared-check cases (module docstring): check 2 reads the copy and
         # check 3 verifies the bundle that lists it.
         unrowed = _case(lambda r, i: _put(r, apply.planning_inventory_rel(_RUN), _strayed(i)))
         check("check-2-unrowed-tamper-flips-2-and-3",
