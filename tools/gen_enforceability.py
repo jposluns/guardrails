@@ -66,7 +66,7 @@ or a stale residue survives the gate and is caught only by review.
 
 Exit convention: 0 clean; 1 EXCLUSIVELY ledger byte-drift; 2 for everything else: an unreadable or
 absent gates manifest or roster file; a malformed manifest; an orphan corpus-id; a class-d control; a
-roster mismatch in either direction (or an asymmetry between the two roster files); a missing gate
+roster mismatch in either direction (or a local/CI roster asymmetry); a missing gate
 script file; or a write error (reconcile's own SystemExit(2)). An unreadable or absent corpus or hooks
 manifest likewise exits 2, but through the reused loaders (gen_rules.load_corpus, gen_hooks.load_manifest)
 which raise on that input; those delegated loader paths are covered by their own suites, not this
@@ -132,11 +132,13 @@ RULES_DIR_REL = ".aiqt/core/rules"
 PREVIEW_DECL_REL = ".aiqt/core/hooks/preview.toml"
 PREVIEW_DIR_REL = ".preview"
 PREVIEW_DECL_KEYS = {"id", "rules"}
-# The Quality roster: the local mirror plus its CI workflow. Reading them to scan their gate steps is a
+# The Quality roster: the local mirror plus its CI workflows. Reading them to scan their gate steps is a
 # VALIDATION-ONLY read that never changes the ledger bytes, so they are deliberately NOT GENSRC_OUTPUTS
 # sources (the exclusion gen_gensrc's docstring defines; gen_hooks reading the corpus to cross-check ids
 # is the cited precedent).
-ROSTER_FILES = ("tools/run_all_checks.sh", ".github/workflows/quality.yml")
+LOCAL_ROSTER = "tools/run_all_checks.sh"
+CI_ROSTER_FILES = (".github/workflows/quality.yml", ".github/workflows/msg-leaks.yml")  # CI side: their union
+ROSTER_FILES = (LOCAL_ROSTER,) + CI_ROSTER_FILES
 
 GATE_KEYS = {"id", "script", "rules", "platform", "default", "class", "residue"}
 PLATFORMS = {"ci"}
@@ -544,19 +546,18 @@ def cross_checks(gates, hooks, corpus_ids, roster_union, per_file):
         if hook["class"] == "d":
             raise ValueError("hooks manifest: hook '{}' is class d; d is never authored on a control"
                              .format(hook["id"]))
-    # Inverse roster, bidirectional AND symmetric across the two roster files. A roster script with no
+    # Inverse roster, bidirectional AND symmetric across the local mirror and CI. A roster script with no
     # manifest entry is an uncatalogued gate; a manifest entry whose script runs in no roster is a
-    # linkage claim with no roster step; a script in one roster file but not the other is an asymmetry
-    # between the local mirror and CI. All fail closed.
+    # linkage claim with no roster step; a script on one side only is an asymmetry
+    # between the local mirror and the union of the CI workflows. All fail closed.
     manifest_scripts = {gate["script"] for gate in gates}
-    files = sorted(per_file)
-    first, second = per_file[files[0]], per_file[files[1]]
-    if first != second:
-        only_first = sorted(first - second)
-        only_second = sorted(second - first)
+    local = per_file[LOCAL_ROSTER]
+    ci = set().union(*(per_file[rel] for rel in CI_ROSTER_FILES))
+    if local != ci:
+        ci_name = " + ".join(CI_ROSTER_FILES)
         raise ValueError("roster asymmetry: {} and {} do not invoke the same gate scripts; only in {}: "
-                         "{}; only in {}: {}".format(files[0], files[1], files[0], only_first,
-                                                     files[1], only_second))
+                         "{}; only in {}: {}".format(LOCAL_ROSTER, ci_name, LOCAL_ROSTER,
+                                                     sorted(local - ci), ci_name, sorted(ci - local)))
     uncatalogued = sorted(roster_union - manifest_scripts)
     if uncatalogued:
         raise ValueError("roster script(s) with no gates-manifest entry (an uncatalogued gate): {}"
@@ -794,6 +795,12 @@ jobs:
       # a self-test CI roster
       - run: python3 -I -B tools/g_alpha.py --self-test
       - run: python3 -I -B tools/g_alpha.py --check
+"""
+
+_ROSTER_MSG_YML = """name: Message leaks
+jobs:
+  msg-leaks:
+    steps:
       - run: python3 -I -B tools/g_empty.py
 """
 
@@ -827,7 +834,7 @@ def _add_previews(base):
 def _build(base):
     """A conformant synthetic tree: a mini corpus (apex + 4 rules), a hooks manifest citing rule 1 and
     rule 3, a gates manifest citing rule 1 (so one rule is hook+gate) and rule 2 plus an explicit-empty
-    gate, the two gate script files, and two roster files invoking exactly the manifest's scripts."""
+    gate, the two gate script files, and the three roster files invoking exactly the manifest's scripts."""
     rules = base / ".aiqt" / "core" / "rules"
     rules.mkdir(parents=True)
     (rules / "00-project-integrity.md").write_text(_APEX, encoding="utf-8")
@@ -849,6 +856,7 @@ def _build(base):
     workflows = base / ".github" / "workflows"
     workflows.mkdir(parents=True)
     (workflows / "quality.yml").write_text(_ROSTER_YML, encoding="utf-8")
+    (workflows / "msg-leaks.yml").write_text(_ROSTER_MSG_YML, encoding="utf-8")
     return base
 
 
@@ -974,7 +982,7 @@ def self_test_main():
             failures.append("a hook control at class d expected exit 2 (d never authored)")
 
         # (g) A roster script with no manifest entry fails closed (exit 2): the uncatalogued-gate
-        #     direction. Added to BOTH roster files so the two stay symmetric and the uncatalogued check
+        #     direction. Added to EVERY roster file so the sides stay symmetric and the uncatalogued check
         #     (not the asymmetry check) is the one exercised.
         gex = _build(tmp / "roster-extra")
         for rel in ROSTER_FILES:
@@ -1046,6 +1054,20 @@ def self_test_main():
                                              encoding="utf-8")
         if run_quiet(mzero, check=True) != 2:
             failures.append("a roster file yielding zero scripts expected exit 2 (fail-closed)")
+        rmsg = _build(tmp / "roster-ci-workflow-absent")
+        (rmsg / CI_ROSTER_FILES[1]).unlink()
+        if run_quiet(rmsg, check=True) != 2:
+            failures.append("an absent second CI workflow expected exit 2 (fail-closed, never an empty side)")
+        rasym = _build(tmp / "roster-asymmetry")
+        replace_in(rasym / CI_ROSTER_FILES[1], "tools/g_empty.py", "tools/g_alpha.py --check")
+        if run_quiet(rasym, check=True) != 2:
+            failures.append("a gate script in the local mirror but in no CI workflow expected exit 2 "
+                            "(roster asymmetry)")
+        rci = _build(tmp / "roster-ci-only")
+        replace_in(rci / LOCAL_ROSTER, "run_gate \"empty\" python3 -I -B tools/g_empty.py\n", "")
+        if run_quiet(rci, check=True) != 2:
+            failures.append("a gate script in a CI workflow but not in the local mirror expected exit 2 "
+                            "(roster asymmetry)")
 
         # (n) A hooks manifest citing an unknown corpus-id fails closed (exit 2): the hook no-orphan
         #     direction, re-checked at the ledger boundary (case (c) is its gate twin).
@@ -1072,7 +1094,7 @@ def self_test_main():
         #     not enumerate that script (the F-148 strip), so its manifest entry reads as a linkage claim
         #     with no roster step and fails closed (exit 2). Without the strip the commented token would
         #     enumerate and the tree would read clean, so this case proves the tightened parser. Added to
-        #     BOTH roster files so the two stay symmetric and the no-roster (not the asymmetry) check
+        #     EVERY roster file so the sides stay symmetric and the no-roster (not the asymmetry) check
         #     fires. The quoted-argument / heredoc residual stays a disclosed limit, not asserted here.
         pinl = _build(tmp / "roster-inline-comment")
         (pinl / "tools" / "g_inline.py").write_text("# self-test gate script\n", encoding="utf-8")

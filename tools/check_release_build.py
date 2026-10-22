@@ -2293,7 +2293,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                 failures.append("(finding 4) a release tag whose annotated object targets a tree must fail "
                                 "closed exit 2 (it cannot peel to a commit), not a clean audit")
 
-            # (finding 6) THE ATTESTATION-COMMIT MODEL (Architect-approved): tag the pre-attestation release
+            # (finding 6) THE ATTESTATION-COMMIT MODEL (maintainer-approved): tag the pre-attestation release
             # tree (immutable ROOT), then in a FOLLOW-UP commit append the attestation row AND regenerate the
             # branch-integrity manifest/root/snippet. Confirm gen_manifest --check AND check_manifest are
             # GREEN on that attestation commit (the required commit merges through the normal gates), and

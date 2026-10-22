@@ -328,14 +328,38 @@ ALLOWLIST = (
      _MUTANT + " (each _CLOSE_SWEEP_REVERTS sweep revert, matched exactly once)"),
     ("tools/pin.py", "_recover_close_vectors", "code", 1,
      _MUTANT + " (the recover close reverts)"),
-    ("tools/selftest_git_fixture_env.py", "_system_pin_checks", "code", 1,
+    ("tools/selftest_git_fixture_env_core.py", "_system_pin_checks", "code", 1,
      "self-test mutant: compiles an AST of the repository's own tools/_git_fixture_env.py"
      " source (read from _git_fixture_env.__file__), its lifecycle PATH installation with one"
      " parsed literal replacement, into a fresh module; no external input"),
-    ("tools/selftest_git_fixture_env.py", "_manifest_extra_setup_failures", "code", 1,
+    ("tools/selftest_git_fixture_env_core.py", "_manifest_extra_setup_failures", "code", 1,
      "self-test probe: runs AST statements lifted from the repository's own"
      " tools/gen_manifest.py source (its fixture setup) against a stubbed git; no external"
      " input"),
+    ("tools/selftest_git_fixture_env_core.py", "_member_close_controls", "code", 2,
+     "self-test oracle probes: types.FunctionType wraps the code object compiled from a"
+     " self-test literal def written to a fixture file, so the lock-site and sweep-site oracles"
+     " parse that def's source at its recorded file and line; the function is never called; no"
+     " external input"),
+    ("tools/selftest_git_fixture_env_core.py", "_timeout_cleanup_order_controls", "shell", 1,
+     _SAVED),
+    ("tools/selftest_git_fixture_env_core.py", "_member_close_controls", "shell", 1, _SAVED),
+    ("tools/selftest_git_fixture_env_core.py", "_member_timeout_controls", "shell", 1, _SAVED),
+    ("tools/selftest_git_fixture_env_config_system.py", "_lifecycle_probe", "shell", 1,
+     _SAVED + " (the injectable runner default of the lifecycle probe, whose call passes its own"
+     " sys.executable -I -B -c argv list)"),
+    ("tools/check_python_floor.py", "_tomllib_catches", "code", 1,
+     "static analysis: getattr(builtins, name) resolves an except-clause name in a scanned"
+     " file's AST and accepts it only as an exception class for issubclass; never called"),
+    ("tools/check_python_floor.py", "_load_path", "code", 1,
+     "self-test probe: exec_module of the repository's own NEWTAB contract script (a fixture"
+     " copy of .github/check_newtab_contract.py), opf/enforcement/claude/pretooluse_deny.py or"
+     " tools/_gen_common.py, the equivalent of an import; no external input"),
+    ("opf/tools/_opf_adopt_discover.py",
+     "self_test.DiscoveryTests.test_change_during_discovery_is_cannot_evaluate.os_hook", "shell", 1,
+     "self-test fault injector: mock.patch.object(os, attribute) where every caller passes the"
+     " literal open or read, wrapped to fire one discovery-time edit and then delegate to the"
+     " real function; never runs a shell"),
     ("opf/tools/_opf_adopt_observe.py", "_cancellation_self_test", "code", 2,
      _MUTANT + " (the descriptor cleanup and cancellation reverts)"),
     ("opf/tools/_opf_adopt_observe.py", "self_test.source_mutant", "code", 1,
@@ -373,6 +397,10 @@ ALLOWLIST = (
      " _journal.py beside this file as the close harness"),
     ("opf/tools/check_opf_record.py", "flip_t70", "code", 1,
      _MUTANT + " (the _opf_oplock _acquire_body T70 flip)"),
+    ("opf/tools/check_opf_record.py", "<module>", "deserialize", 1,
+     "self-test rebuild vector (_T87_REBUILDS pickle-round-trip): pickle.loads of the bytes"
+     " pickle.dumps made in the same expression from an injected exception this self-test built"
+     " itself; no external input"),
     ("opf/tools/opf.py", "_watchdog_completion_case", "code", 5,
      "self-test mutants: compile ASTs of the repository's own _opf_emit members with parsed"
      " literal mutations; no external input"),
@@ -385,6 +413,10 @@ ALLOWLIST = (
     ("opf/tools/opf.py", "_watchdog_completion_case.resolve_exception_classes", "code", 1,
      "static analysis: getattr(builtins, name) resolves an except-clause name in the"
      " repository's own _opf_emit source and asserts it is an exception class; never called"),
+    ("opf/tools/opf.py", "_watchdog_closeout_vectors", "code", 1,
+     "self-test harness: exec_module loads a private copy of the repository's own _opf_emit.py"
+     " beside this file (or a vector's literal mutant source), never registered in sys.modules,"
+     " the equivalent of an import; no external input"),
     ("opf/tools/opf.py", "_cli_self_test._import_leg", "code", 5,
      "self-test probes: types.FunctionType rebinds the repository's own _cmd_import code object"
      " (or a planted swap of it compiled from this file's own source) to a probe namespace, and"
@@ -405,6 +437,10 @@ ALLOWLIST = (
     ("tools/check_python_floor.py", "_rule_reverts", "code", 1,
      "self-test mutant: exec_module of a copy of this gate's own source with one rule removed"
      " from RULES; no external input"),
+    ("tools/check_python_host_pin.py", "_copy", "code", 1,
+     "self-test mutant loader: exec_module of a copy, written under the self-test's temporary"
+     " directory, of this gate's own source (read from __file__) with reviewed literal"
+     " substitutions, or of the repository's own tools/check_python_floor.py; no external input"),
     ("tools/gen_crosswalk.py", "_fdopen_vectors.flipped", "code", 1,
      _MUTANT + " (each fdopen close revert, loaded by exec_module from a scratch file)"),
     ("tools/_close_selftest.py", "_StCloseFault.__init__", "shell", 1,
@@ -440,15 +476,41 @@ ALLOWLIST = (
      " freshly generated certificate; server-side, so it verifies no peer; no client context"),
     ("tools/check_portability.py", "<module>", "shell", 1,
      _SAVED + " (the injectable runner default of _list_tracked, which passes a git argv list)"),
+    ("tools/check_portability.py", "_not_run_vectors", "shell", 6,
+     _SAVED + " (the depth-refusal spies and the modelled launcher doubles, each restored in a"
+     " finally)"),
+    ("tools/check_portability.py", "_not_run_vectors._drive_cleanup_vector", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the recording double, whose __init__ forwards the"
+     " bounded launcher's own sys.executable argv list)"),
+    ("tools/check_version_monotonicity.py", "_not_run_vectors", "shell", 8,
+     _SAVED + " (the depth-refusal spies, the modelled launcher doubles and the git probe stubs,"
+     " each restored in a finally)"),
+    ("tools/check_version_monotonicity.py", "_not_run_vectors._drive_cleanup_vector", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the recording double, whose __init__ forwards the"
+     " bounded launcher's own sys.executable argv list)"),
     ("tools/check_manifest.py", "_self_test_main_isolated", "shell", 1,
      "self-test precondition: __import__('subprocess').run with a literal git --version argv"
      " list, no shell"),
     ("tools/check_byte_canon.py", "self_test_main", "shell", 1, _SAVED),
     ("tools/check_ci_parity.py", "_stubs_prepared_before_pool", "shell", 1, _SAVED),
     ("tools/check_ci_parity.py", "self_test", "shell", 1, _SAVED),
-    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated", "shell", 1, _SAVED),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._check_no_maintenance", "shell", 1,
+     _SAVED + " (the no-maintenance vector's recorder of the template git argv lists)"),
     ("tools/check_release_build.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
+    ("tools/check_mistakes_register.py", "self_test", "shell", 2,
+     _SAVED + " (the saved real runs the git cat-file fault injectors delegate to and restore)"),
+    ("tools/orch_register.py", "self_test", "shell", 3,
+     _SAVED + " (the saved real run the git cat-file fault injector delegates to and restores);"
+     " the descriptor fault vector's two setattr calls on os patch, then restore in a finally,"
+     " one name from its own fixed literal tuple (read, fstat, close); never runs a shell"),
+    ("tools/gen_hooks.py", "self_test_main", "shell", 1,
+     _SAVED + " (the saved real Popen the spawn-failure vector restores after patching)"),
+    ("tools/gen_hooks.py", "self_test_main._communicate_fault_case", "shell", 3,
+     _SAVED + " (the saved real Popen.communicate the fault case wraps and restores)"),
+    ("tools/gen_hooks.py", "self_test_main._secondary_fault_case", "shell", 9,
+     _SAVED + " (the saved real Popen.communicate, kill and wait the staged-cleanup vectors"
+     " wrap and restore)"),
     ("opf/tools/_opf_adopt_observe.py", "_runner_red_checks", "shell", 2, _SAVED),
     ("opf/tools/_opf_pack_manifest.py", "_runner_red_checks", "shell", 3, _SAVED),
     ("opf/tools/check_opf_doctor.py", "_self_test_isolated._doctor_suite", "shell", 3, _SAVED),

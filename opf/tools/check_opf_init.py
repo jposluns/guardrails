@@ -563,7 +563,7 @@ def _init_route_violations(source):
     _InitRestoreLine alone, so minting an instance of that type anywhere else on
     the graph is a violation. Returns a list of violation descriptions; the suite
     requires it empty on the real source and NON-empty on every seeded mutant, so
-    each recognizer is discriminated. RESIDUAL (D-STATIC-PIN-RESIDUAL, stated
+    each recognizer is discriminated. RESIDUAL (what the static pin cannot see, stated
     exactly): a static reference check sees spelled references, not values,
     dataflow or runtime bindings. It cannot see what an ALLOWED spelling does at
     runtime on a hostile or rebound OBJECT, code in ANOTHER MODULE (the sibling
