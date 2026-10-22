@@ -9716,6 +9716,9 @@ _GATE_GRAMMAR_WORD_CHARS = frozenset(
 _GATE_GRAMMAR_TOKEN_END = frozenset(" \t\n;&|)<>")
 _GATE_GRAMMAR_REDIR_WHY = "carries a redirection outside the accepted >/dev/null, 2>/dev/null and 2>&1 forms"
 _GATE_GIT_WORD_RE = re.compile(r"(?i)\bgit\b")
+# Whitespace-delimited tokens of a quoted span interior, tokenized ONCE so _gate_span_hides_roster_git
+# can walk token positions from each 'git' match instead of re-splitting the suffix per match.
+_GATE_SPAN_TOKEN_RE = re.compile(r"\S+")
 # A shell operator or newline inside a quoted word makes the quote's pairing ambiguous: this gate
 # starts its scan at a 'git' word, so it cannot tell whether such a quote OPENS a word or CLOSES a
 # double- or single-quoted span bash opened earlier. When one appears (or the other quote character),
@@ -9793,38 +9796,36 @@ def _gate_grammar_redirect(command, i, start, fd):
     return k, None
 
 
-def _gate_grammar_offroster(words):
-    """True when the words resolved SO FAR already fix this segment's subcommand to a verb OFF the
-    no-verify roster. The lexer uses it to stop at the first ambiguous quote: an off-roster segment can
-    carry no bypass and the caller consumes it only up to that quote (data_end), so reading its remaining
-    operands is work the caller discards. Stopping there keeps the whole-command pass linear when many
-    off-roster git words that each open an ambiguous quote share one line, instead of re-lexing the
-    remainder from each. A subcommand that is NOT yet resolved (a global option's value fell on the
-    ambiguous quote) returns False, so the lexer keeps scanning and the segment still fails closed."""
-    sub, _args, resolved = _gate_grammar_sub(words)
-    return resolved and sub.lower() not in _NOVERIFY_VERBS
-
-
 def _gate_span_hides_roster_git(interior):
-    """True when a quoted span's interior holds a 'git' word whose own next non-option word is a
-    no-verify roster verb (git commit, git push, ...). Bash's own quote close and the next open could
-    bracket that 'git <roster verb>' as live command text, so a span naming one is NOT treated as
-    consumed data even when every interior byte is a bare-word character or a space: the hidden roster
-    git is re-judged as its own segment. The global-option skip mirrors _gate_grammar_sub (a separated
-    arg-consuming global option swallows the next word). A disclosed safe-direction over-deny: a commit
-    message that merely names such a command (git commit -m 'git commit -nv') is re-judged and denies.
-    Bounded by the interior length: one regex pass, each match scanned only to the first non-option word."""
-    for mt in _GATE_GIT_WORD_RE.finditer(interior):
-        rest = interior[mt.end():].split()
-        k = 0
-        while k < len(rest):
-            w = rest[k]
+    """True when a quoted span's interior NAMES a roster git command: a 'git' word whose own next
+    non-option word is a no-verify roster verb (git commit, git push, ...), OR a 'git' word whose
+    option walk runs off the end of the interior before any non-option word is reached (git --namespace
+    at the interior's end). In the second case the would-be verb falls in the NEXT span bash's own close
+    and open could bracket, so the pairing is treated as live command text and FAILS CLOSED. Bash's own
+    quote close and the next open could bracket the hidden git as live command text, so a span naming
+    one is NOT treated as consumed data even when every interior byte is a bare-word character or a
+    space: the hidden git is re-judged as its own segment. The global-option skip mirrors
+    _gate_grammar_sub (a separated arg-consuming global option swallows the next word). A disclosed
+    safe-direction over-deny: quoted text that merely names such a command is re-judged and denies.
+    Linear in the interior length: the interior is tokenized ONCE and each 'git' match walks token
+    positions from a forward-only base pointer, so the suffix is never re-split per match."""
+    toks = [(mt.start(), mt.group()) for mt in _GATE_SPAN_TOKEN_RE.finditer(interior)]
+    base = 0
+    for gm in _GATE_GIT_WORD_RE.finditer(interior):
+        gend = gm.end()
+        while base < len(toks) and toks[base][0] < gend:
+            base += 1
+        k = base
+        while k < len(toks):
+            w = toks[k][1]
             if w.startswith("-") and w != "-":
                 k += 2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1
                 continue
             if w.lower() in _NOVERIFY_VERBS:
                 return True
             break
+        else:
+            return True  # the option walk ran out of interior before a non-option word: fail closed
     return False
 
 
@@ -9843,7 +9844,7 @@ def _gate_grammar_lex(command, start):
     own segment rather than swallowed. The lexer never guesses past a violation: scanning stops there,
     so `end` is also where a caller may safely resume. As soon as the words already resolve an
     OFF-ROSTER subcommand and an ambiguous quote is seen, the lexer stops at that quote
-    (_gate_grammar_offroster): the segment can carry no bypass and the caller consumes it only to
+    (offroster_resolved): the segment can carry no bypass and the caller consumes it only to
     data_end, so reading the rest is discarded work. That early stop bounds each off-roster lex to its
     first ambiguous quote, keeping the whole-command pass linear when many off-roster git words that
     each open an ambiguous quote share one line; a ROSTER verb's segment is still read to its end (its
@@ -9853,9 +9854,32 @@ def _gate_grammar_lex(command, start):
     i = start
     n = len(command)
     data_stop = None  # first ambiguous-pairing quote position; None until one is seen
+    # Off-roster resolution, CACHED so a line with many ambiguous quotes never re-walks `words` from the
+    # start at each one: the scan pointer only advances as words are appended, so the per-quote stop is
+    # O(1) amortized and the whole pass stays linear. _sub_off is None until the subcommand resolves,
+    # then True when that subcommand is OFF the no-verify roster.
+    _sub_scan = [1]
+    _sub_off = [None]
 
     def result(end, bad):
         return words, end, bad, (end if data_stop is None else data_stop)
+
+    def offroster_resolved():
+        # True once the words resolve an off-roster subcommand. Mirrors _gate_grammar_sub's global-option
+        # skip but resumes from the cached pointer (a separated arg-consuming global option swallows the
+        # next word). While the subcommand is unresolved (an option's value fell on an ambiguous quote)
+        # it returns False, so the lexer keeps scanning and the segment still fails closed.
+        if _sub_off[0] is None:
+            p = _sub_scan[0]
+            while p < len(words):
+                w = words[p]
+                if w.startswith("-") and w != "-":
+                    p += 2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1
+                    continue
+                _sub_off[0] = w.lower() not in _NOVERIFY_VERBS
+                break
+            _sub_scan[0] = p
+        return _sub_off[0] is True
 
     while i < n:
         c = command[i]
@@ -9895,9 +9919,9 @@ def _gate_grammar_lex(command, start):
             # The off-roster early stop sits OUTSIDE the `data_stop is None` guard (like the double-quote
             # branch): once the words so far resolve an off-roster subcommand, every later ambiguous
             # quote on the segment can stop here even after an earlier quote already set data_stop, which
-            # keeps a line of many off-roster git words that each open an ambiguous quote linear instead
-            # of re-lexing the whole remainder from each.
-            if data_stop is not None and _gate_grammar_offroster(words):
+            # keeps a line of many off-roster git words that each open an ambiguous quote linear. The
+            # cached offroster_resolved never re-walks the words from the start, so the stop stays O(1).
+            if data_stop is not None and offroster_resolved():
                 return result(i, None)
             if j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END:
                 return result(i, _gate_grammar_violation(command, i, i, n))
@@ -9931,7 +9955,7 @@ def _gate_grammar_lex(command, start):
                     data_stop = i
             if data_stop is None and _gate_span_hides_roster_git(command[i + 1:j]):
                 data_stop = i  # an all-literal interior still re-judged when it names a roster git
-            if data_stop is not None and _gate_grammar_offroster(words):
+            if data_stop is not None and offroster_resolved():
                 return result(i, None)
             if j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END:
                 return result(i, _gate_grammar_violation(command, i, i, n))
@@ -10723,11 +10747,13 @@ def _gate_weakening_fallback(command):
 # the gate-weakening parsed path judges the git behind one (env 'A=git' git commit -nv runs git commit
 # -nv; the command word 'env' would otherwise hide it). Each maps to (options taking a separate value,
 # valueless flag options); env also consumes leading VAR=value assignments, timeout a trailing duration
-# operand, and 'command -v'/'-V' looks a name up and runs nothing. A wrapper option outside its grammar
-# leaves the segment unresolved here (the git behind it is not judged on this path); the raw closed
-# grammar scan still holds every literal git naming. The same wrapper class the sibling commit-identity
-# finder reads (_CMTIDN_GIT_WRAPPERS), less sudo/xargs/setsid/stdbuf, which carry operand shapes (an
-# -I replacement string, a sudo command vector) this bounded peel does not model.
+# operand, and 'command -v'/'-V' looks a name up and runs nothing. A wrapper option this grammar does
+# NOT resolve (an attached short-option value such as env -uX, nice -n5, a combined flag) fails closed:
+# the peel returns _GATE_PEEL_UNRESOLVED and the caller judges the dequoted words, so a quoted git
+# spelling (g'i't) the raw \bgit\b scan cannot see still denies. The same wrapper class the sibling
+# commit-identity finder reads (_CMTIDN_GIT_WRAPPERS), less sudo/xargs/setsid/stdbuf, which carry operand
+# shapes (an -I replacement string, a sudo command vector) this bounded peel does not model; those
+# unlisted wrappers (_GATE_UNLISTED_WRAPPERS) get the SAME dequoted fail-closed judgement in the caller.
 _GATE_NOVERIFY_WRAPPERS = dict((
     ("env", (frozenset(("-u", "--unset", "-C", "--chdir")),
              frozenset(("-i", "--ignore-environment", "-0", "--null", "-v", "--debug")))),
@@ -10741,11 +10767,21 @@ _GATE_NOVERIFY_WRAPPERS = dict((
     ("command", (frozenset(), frozenset(("-p",)))),
 ))
 
+# The command-running wrappers the sibling commit-identity finder recognizes but this bounded peel does
+# not model (their operand shapes are not parsed here). The caller judges a segment that runs the git
+# behind one with the fail-closed dequoted-word scan, so a hidden roster-git bypass still denies.
+_GATE_UNLISTED_WRAPPERS = _CMTIDN_GIT_WRAPPERS - frozenset(_GATE_NOVERIFY_WRAPPERS)
+
+# Peel sentinel: a wrapper option the grammar could not resolve, so the command behind it is unknown
+# here. Distinct from None (no command runs) and from an argv list (a resolved command word).
+_GATE_PEEL_UNRESOLVED = ("__gate_peel_unresolved__",)
+
 
 def _gate_novrf_peel(argv):
     """The argv of the command a segment runs after the wrappers in _GATE_NOVERIFY_WRAPPERS (each with
-    its own option grammar) are peeled, or None when no command word is left to judge here: an empty
-    result, a wrapper option outside its grammar, or a 'command -v'/'-V' name lookup that runs nothing.
+    its own option grammar) are peeled; _GATE_PEEL_UNRESOLVED when a wrapper option is outside that
+    grammar (fail closed: the command behind it is unknown here, so the caller judges the dequoted
+    words); or None when no command runs here (an empty result or a 'command -v'/'-V' name lookup).
     Leading VAR=value words are skipped first. Purely lexical, bounded by the token count."""
     i = _command_word_index(argv)
     n = len(argv)
@@ -10774,9 +10810,49 @@ def _gate_novrf_peel(argv):
                   or (word == "nice" and tok[1:].isdigit())):
                 i += 1
             else:
-                return None  # an option outside the grammar: the command behind it is not resolved here
+                # a wrapper option outside the grammar: fail closed, the caller judges the dequoted words
+                return _GATE_PEEL_UNRESOLVED
         if word == "timeout":
             i += 1   # the duration operand
+    return None
+
+
+def _gate_novrf_dequoted_bypass(words):
+    """(sub, spelling) when the already shell-dequoted literal words name a git whose roster subcommand
+    carries a no-verify bypass (-n in a short cluster, or --no-verify), else None. This is the fail-
+    closed judgement for a wrapper whose option grammar did not resolve the command (env -uX, nice -n5,
+    a combined flag) and for an unlisted command-running wrapper (sudo, xargs, setsid, stdbuf): the
+    spelling is read from the dequoted argv bash would build, so a quote-concatenated git spelling the
+    raw \\bgit\\b scan cannot see (g'i't) still denies. Any word whose basename is 'git' starts the
+    roster/spelling walk, so text that merely names such a command is a disclosed safe-direction
+    over-deny. Purely lexical, bounded by the word count."""
+    for idx, w in enumerate(words):
+        if _gate_word(w) != "git":
+            continue
+        sub, args = _git_sub_and_args(words[idx:])
+        if sub in _NOVERIFY_VERBS:
+            spelling = _no_verify_spelling(sub, args)
+            if spelling is not None:
+                return sub, spelling
+    return None
+
+
+def _gate_novrf_segment_bypass(tokens):
+    """(sub, spelling) when a segment runs a roster git carrying a no-verify bypass behind the command-
+    running wrappers, else None. A recognized wrapper (_GATE_NOVERIFY_WRAPPERS) is peeled and the git
+    behind it judged directly; a wrapper option the grammar could not resolve (_GATE_PEEL_UNRESOLVED) and
+    an unlisted command-running wrapper (_GATE_UNLISTED_WRAPPERS: sudo, xargs, setsid, stdbuf) both fall
+    to the fail-closed dequoted-word scan."""
+    peeled = _gate_novrf_peel(tokens)
+    if peeled is _GATE_PEEL_UNRESOLVED or (
+            peeled is not None and _command_word(peeled) in _GATE_UNLISTED_WRAPPERS):
+        return _gate_novrf_dequoted_bypass(tokens)
+    if peeled is not None and _command_word(peeled) == "git" and not _has_info_flag(peeled):
+        sub, args = _git_sub_and_args(peeled)
+        if sub in _NOVERIFY_VERBS:
+            spelling = _no_verify_spelling(sub, args)
+            if spelling is not None:
+                return sub, spelling
     return None
 
 
@@ -10820,7 +10896,11 @@ def gate_weakening(data):
     enclosing word is still read for its own bypass spelling, so a real flag after the quote is not
     missed). The parsed path also PEELS the command-running wrappers in _GATE_NOVERIFY_WRAPPERS (env with
     its assignments and options, exec -a, nice, nohup, command, time, timeout) so the git command behind
-    one is judged (env 'A=git log ' git commit -nv runs git commit -nv). DISCLOSED
+    one is judged (env 'A=git log ' git commit -nv runs git commit -nv). A wrapper option the peel cannot
+    resolve (an attached short-option value, a combined flag: env -uX, nice -n5) and an unlisted command-
+    running wrapper (sudo, xargs, setsid, stdbuf) FAIL CLOSED instead: the dequoted words are scanned
+    (_gate_novrf_dequoted_bypass) and a roster git carrying a no-verify spelling denies even when the git
+    word is a quote-concatenation (g'i't) the raw \bgit\b scan cannot see. DISCLOSED
     OVER-DENIAL (the deliberate cost of the closed grammar, pending maintainer review): a roster-verb git
     command carrying ANY live expansion denies even where it is a safe operand or value (git commit -m
     "$msg", git push origin "$branch", git merge "release-$v"), and so does one carrying a comment, a
@@ -10831,17 +10911,22 @@ def gate_weakening(data):
     rewrite it; single-quote the text instead), and a quoted interior that could bracket live command
     text (a single-quoted non-word byte, a double-quoted shell operator or the other quote, or an
     all-literal interior that names a roster git command) re-judges any git named inside it and so denies
-    a NAMED roster-verb bypass there EVEN when the interior is all bare-word characters and spaces:
-    git commit -m 'fix; git commit -nv', git commit -m 'hi `git commit -nv`' and now also git commit -m
-    'git commit -nv', git commit -m 'docs: git commit -n is banned', git commit -m 'mention git push'
-    all deny, while an interior naming an OFF-roster git (git commit -m 'see git log for history') or no
-    git at all stays allowed and a benign operator message (git commit -m "a; b | c") still allows;
-    re-issue anything else plainly with every word literal, or keep git-with-roster-verb spellings out of
-    quoted data.
+    a NAMED roster-verb bypass there EVEN when the interior is all bare-word characters and spaces. This
+    over-deny is wider than one commit message: a quoted operand on ANY raw git line, roster or off-roster,
+    in EITHER quote style and matched case-insensitively, re-judges a roster-git naming inside it, so
+    git commit -m 'fix; git commit -nv', git commit -m 'hi `git commit -nv`', git commit -m 'git commit
+    -nv', git commit -m 'docs: git commit -n is banned', git commit -m 'mention git push', git log --grep
+    'git push' and git commit -m 'Use GIT PUSH carefully' all deny; a 'git' word whose own verb falls off
+    the end of such a span (git commit -m 'look at git --namespace') fails closed and denies too. An
+    interior naming only an OFF-roster git (git commit -m 'see git log for history'), or no git at all, or
+    a benign operator message (git commit -m "a; b | c") still allows; re-issue anything else plainly with
+    every word literal, or keep git-with-roster-verb spellings out of quoted data.
     DISCLOSED RESIDUAL: a '-n'/'--no-verify' assembled in a separate stage the shell runs and feeds to
     git (printf ... | xargs git commit) is not reconstructed, and an alias or shell function that renames
-    git, or a command-running wrapper outside _GATE_NOVERIFY_WRAPPERS (sudo, xargs, setsid, stdbuf), is
-    not peeled on the parsed path (the raw scan still holds any literal git naming). A verb off the roster is untouched (git log ${x}-n, git log
+    git is not resolved. A command-running wrapper outside _GATE_NOVERIFY_WRAPPERS (sudo, xargs, setsid,
+    stdbuf) and a wrapper option the peel cannot resolve now FAIL CLOSED through the dequoted-word scan
+    (_gate_novrf_segment_bypass), over-denying text that merely names git with a roster verb and a
+    no-verify spelling behind one. A verb off the roster is untouched (git log ${x}-n, git log
     --format="$f"). The unparseable fallback applies the same scan over the raw text. The checker-output
     check has TWO TIERS. DENY tier, held to one canonical shape whose two
     ends are ALLOW-LISTS (_verification_sink): the first simple command of a pipeline is a KNOWN VERIFICATION
@@ -10892,6 +10977,19 @@ def gate_weakening(data):
         recovered, _complete, in_progress = _lex_command(command, partial=True)
         if in_progress:
             recovered = recovered[:-1]
+        for seg in recovered:
+            # the same fail-closed wrapper judgement as the parsed path, over each recovered segment's
+            # dequoted argv, so a git bypass hidden behind an unresolved or unlisted wrapper on an
+            # otherwise-unparseable line (env -uX git commit -nv ...) still denies
+            bypass = _gate_novrf_segment_bypass(seg.argv)
+            if bypass is not None:
+                sub, spelling = bypass
+                return _deny(
+                    "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate bypass of "
+                    "the verification hooks that gate it. Never weaken a gate to obtain a pass; fix the "
+                    "artefact instead. {}".format(sub, spelling, _GATE_ALTS),
+                    "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) "
+                    "(rule gatdis).")
         hit = _verification_sink(recovered)
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
@@ -10900,18 +10998,14 @@ def gate_weakening(data):
     segments = [(seg.argv, seg.sep_after) for seg in records]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
     for index, (tokens, sep_after) in enumerate(segments):
-        peeled = _gate_novrf_peel(tokens)
-        if peeled is not None and _command_word(peeled) == "git" and not _has_info_flag(peeled):
-            sub, args = _git_sub_and_args(peeled)
-            if sub in _NOVERIFY_VERBS:
-                spelling = _no_verify_spelling(sub, args)
-                if spelling is not None:
-                    return _deny(
-                        "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate "
-                        "bypass of the verification hooks that gate it. Never weaken a gate to obtain "
-                        "a pass; fix the artefact instead. {}".format(sub, spelling, _GATE_ALTS),
-                        "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) "
-                        "(rule gatdis).")
+        bypass = _gate_novrf_segment_bypass(tokens)
+        if bypass is not None:
+            sub, spelling = bypass
+            return _deny(
+                "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate bypass of "
+                "the verification hooks that gate it. Never weaken a gate to obtain a pass; fix the "
+                "artefact instead. {}".format(sub, spelling, _GATE_ALTS),
+                "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) (rule gatdis).")
         if not _is_checker_segment(tokens):
             continue
         # The "immediately following" segment, advancing PAST any EMPTY segments (a bare
