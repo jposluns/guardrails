@@ -9457,6 +9457,27 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-setsid-wait-prefix-allows", _fg("setsid --w long_job"), "allow"),
                 ("trunc/oos-setsid-double-dash-notes", _fg("setsid -- long_job"), "warn"),
                 ("trunc/oos-setsid-wait-nonprefix-notes", _fg("setsid --waitx long_job"), "warn"),
+                # bash removes a redirect from setsid's argument list, so a redirect between setsid and its
+                # wait option must be passed over while the options are read: `-w` after a redirect still
+                # makes setsid wait (allow), while a redirect before a non-waiting setsid still notes.
+                ("trunc/oos-setsid-redirect-then-wait-allows",
+                 _fg("setsid > /dev/null -w long_job"), "allow"),
+                ("trunc/oos-setsid-redirect-then-nonwait-notes",
+                 _fg("setsid > /dev/null -f long_job"), "warn"),
+                # A `${...}` parameter expansion that is the whole redirect target is ONE word to bash, so
+                # its inner blank does not end the operand: the command after it is still read (here setsid
+                # is noted), while a detacher word that sits INSIDE such an expansion is data, not a command.
+                ("trunc/oos-redirect-param-expansion-target-setsid-notes",
+                 _fg("x=/dev/null; > ${x:-a b} setsid -f long_job"), "warn"),
+                ("trunc/oos-redirect-param-expansion-detacher-data-allows",
+                 _fg("> ${x:-setsid long} echo done"), "allow"),
+                # An ANSI-C $'...' here-document delimiter is decoded by bash's own escapes, so the body is
+                # skipped at the real EOF line: a body `&` is data (allow), and a body that ends at EOF no
+                # longer shifts the quote state onto a later real detach (which is then noted).
+                ("trunc/oos-ansi-c-delim-heredoc-amp-allows",
+                 _fg("cat <<$'E\\x4fF'\na & b\nEOF"), "allow"),
+                ("trunc/oos-ansi-c-delim-heredoc-hidden-detach-notes",
+                 _fg("cat <<$'E\\x4fF'\n'\nEOF\nlong_job &"), "warn"),
                 # Documented limit: a here-document inside a double-quoted command substitution (the
                 # commit-message form) is read as double-quoted text, so a body whose double quotes toggle
                 # that reading exposes a body `&` to an extra note; a body that leaves the reading

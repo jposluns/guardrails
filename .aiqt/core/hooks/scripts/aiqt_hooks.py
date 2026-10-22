@@ -853,12 +853,82 @@ def _target_class(target, t_opaque):
     return "file-real"
 
 
-def _parse_heredoc_delim(command, at, n):
+_ANSI_C_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r",
+                  "t": "\t", "v": "\v", "\\": "\\", "'": "'", "\"": "\"", "?": "?"}
+_ANSI_C_HEX = "0123456789abcdefABCDEF"
+
+
+def _decode_ansi_c(s):
+    """Decode a bash ANSI-C $'...' body `s` (the text between the quotes, with its backslash escapes still
+    present) to the literal string bash would produce, or None when it holds an escape this does not model
+    (fail closed). Models the named escapes, octal \\nnn, hex \\xHH, Unicode \\uHHHH / \\UHHHHHHHH, and the
+    control \\cX form; a trailing or unknown backslash escape returns None. A code point outside the Unicode
+    range returns None."""
+    out = []
+    i, m = 0, len(s)
+    while i < m:
+        c = s[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 >= m:
+            return None  # a trailing backslash: not modelled
+        e = s[i + 1]
+        if e in _ANSI_C_SIMPLE:
+            out.append(_ANSI_C_SIMPLE[e])
+            i += 2
+            continue
+        if e == "x":
+            j, h = i + 2, ""
+            while j < m and len(h) < 2 and s[j] in _ANSI_C_HEX:
+                h, j = h + s[j], j + 1
+            if not h:
+                return None
+            out.append(chr(int(h, 16)))
+            i = j
+            continue
+        if e in "01234567":
+            j, o = i + 1, ""
+            while j < m and len(o) < 3 and s[j] in "01234567":
+                o, j = o + s[j], j + 1
+            out.append(chr(int(o, 8) & 0xFF))
+            i = j
+            continue
+        if e in "uU":
+            width = 4 if e == "u" else 8
+            j, h = i + 2, ""
+            while j < m and len(h) < width and s[j] in _ANSI_C_HEX:
+                h, j = h + s[j], j + 1
+            if not h:
+                return None
+            point = int(h, 16)
+            if point > 0x10FFFF:
+                return None  # outside the Unicode range: not a decodable delimiter
+            out.append(chr(point))
+            i = j
+            continue
+        if e == "c":
+            if i + 2 >= m:
+                return None
+            out.append(chr(ord(s[i + 2].upper()) ^ 0x40))
+            i += 3
+            continue
+        return None  # an escape this does not model -> fail closed
+    return "".join(out)
+
+
+def _parse_heredoc_delim(command, at, n, decode_ansi_c=False):
     """ROUND-2 FINDING 17. Parse a heredoc delimiter spec starting immediately after '<<' (index `at`).
     Returns (quoted, delim, strip_tabs, next_i) or None when it cannot be parsed (so the caller keeps the
     conservative unsupported-construct raise). `quoted` is True for the <<'EOF' / <<"EOF" / <<\\EOF forms,
     whose body bash treats as LITERAL DATA with no expansion or command substitution; `strip_tabs` is True
-    for the <<- form; `next_i` is the index just past the delimiter spec (still on the same line)."""
+    for the <<- form; `next_i` is the index just past the delimiter spec (still on the same line).
+
+    `decode_ansi_c` is for the out-of-scope note scanner ONLY (never the shared in-scope callers, which keep
+    the conservative behaviour below): when True, an ANSI-C $'...' delimiter fragment whose escapes this
+    cannot model fails the whole parse closed, but one it can decode resolves to its literal value, so the
+    body is skipped as data. With it False the ANSI-C branch keeps declining any escaped fragment."""
     j = at
     strip_tabs = False
     if j < n and command[j] == "-":
@@ -924,6 +994,24 @@ def _parse_heredoc_delim(command, at, n):
             # not fully decode, so it returns None (the FAIL-CLOSED backstop: the caller then raises/scans the
             # remainder as still-executable rather than swallowing it under a guessed delimiter).
             quoted = True
+            if decode_ansi_c:
+                # The note scanner decodes the ANSI-C escapes by bash's own rules so the real delimiter
+                # (e.g. $'E\\x4fF' -> EOF) is known and its body is skipped as data; the closing quote is
+                # found honouring \\' and \\\\ so an escaped quote does not end the word early.
+                k = j + 2
+                while k < n and command[k] != "'":
+                    if command[k] == "\\" and k + 1 < n:
+                        k += 2
+                        continue
+                    k += 1
+                if k >= n:
+                    return None
+                decoded = _decode_ansi_c(command[j + 2:k])
+                if decoded is None:
+                    return None  # an escape we cannot model -> fail closed (scan the remainder)
+                delim_chars.append(decoded)
+                j = k + 1
+                continue
             k = command.find("'", j + 2)
             if k < 0:
                 return None
@@ -13438,16 +13526,51 @@ _ORCH_NOTE_WORD_RE = re.compile(r"[^\s;&|()<>'\"\\$`]+")
 _ORCH_NOTE_NUMBER_RE = re.compile(r"[0-9][0-9.]*[smhd]?")
 # A named descriptor written directly before a redirect operator ({fd}> file): part of the redirect.
 _ORCH_NOTE_NAMED_FD_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
+# An fd prefix (a number or a {name}) written directly before a redirect operator, and the redirect
+# operators whose target is one word. `<<` (a here-document opener, whose body is not one word) is excluded.
+_ORCH_NOTE_IO_PREFIX_RE = re.compile(r"[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\}")
+_ORCH_NOTE_REDIR_OPS = ("&>>", "&>", ">>", "<<<", ">|", ">&", "<&", "<>", ">", "<")
+
+
+def _orch_skip_redirect(command, i, n):
+    """If a redirect (an optional fd prefix, a redirect operator, then after any blanks one target word)
+    begins at index i, return the index just past its target operand; else None. bash removes a redirect
+    from the argument list, so an option scan passes over it. A `<<` here-document opener is not a
+    one-word-target redirect and returns None; a target that is not a plain word (an expansion, a quote)
+    returns None as well, so the caller keeps its conservative reading there."""
+    j = i
+    pre = _ORCH_NOTE_IO_PREFIX_RE.match(command, j)
+    if pre is not None:
+        j = pre.end()
+    op = None
+    for cand in _ORCH_NOTE_REDIR_OPS:
+        if command.startswith(cand, j):
+            op = cand
+            break
+    if op is None or (op == "<" and command.startswith("<<", j)):
+        return None
+    j += len(op)
+    while j < n and command[j] in " \t":
+        j += 1
+    target = _ORCH_NOTE_WORD_RE.match(command, j)
+    if target is None:
+        return None
+    return target.end()
 
 
 def _orch_setsid_waits(command, i):
     """True when the options after a setsid word that ends at index i include -w or --wait (or a unique
     prefix of --wait, of which --w is the shortest), so setsid waits for its command. The option words are
-    read up to the first word that is not an option, or up to `--`."""
+    read up to the first word that is not an option, or up to `--`; a redirect between the options, which
+    bash removes from the argument list, is passed over (_orch_skip_redirect)."""
     n = len(command)
     while True:
         while i < n and command[i] in " \t":
             i += 1
+        skip = _orch_skip_redirect(command, i, n)
+        if skip is not None:
+            i = skip
+            continue
         match = _ORCH_NOTE_WORD_RE.match(command, i)
         if match is None:
             return False
@@ -13476,31 +13599,77 @@ def _orch_arith_closes(command):
     return closes
 
 
+def _orch_skip_param_expansion(command, i, n):
+    """Given index i at the `$` of a `${...}` parameter expansion, return the index just past the `}` that
+    closes it, or None when it is not closed. A nested `${...}` or `{...}` raises the depth, and a single-
+    or double-quoted span inside is passed over so a `}` in quotes does not close it. Used to consume a
+    parameter expansion as ONE word so a blank inside it (a `${x:-a b}` default) does not end the operand."""
+    depth = 1
+    j = i + 2
+    while j < n:
+        c = command[j]
+        if c == "'":
+            k = command.find("'", j + 1)
+            if k < 0:
+                return None
+            j = k + 1
+            continue
+        if c == '"':
+            j += 1
+            while j < n and command[j] != '"':
+                if command[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                j += 1
+            if j >= n:
+                return None
+            j += 1
+            continue
+        if c == "\\" and j + 1 < n:
+            j += 2
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return None
+
+
 def _orch_note_scan(command, bash_word_starts):
     """The scan behind the note outside registry scope. It reads quotes, escapes and `#` comments exactly
     as _orch_foreground_scan does (bash_word_starts selects the same comment rule), and adds four things
     that scan does not model. A here-document body opened at the outer quoting level is skipped as data,
     quoted delimiter or not, so an `&` or an apostrophe in it neither notes nor shifts the quote state;
-    one opened inside a double-quoted command substitution (the commit-message form) is NOT recognized and
-    is read as double-quoted text, whose own double quotes toggle that reading, so a body `&` there can
-    draw an extra note. An arithmetic expansion $(( ... )) or arithmetic command (( ... )) is skipped, so
-    a bitwise `&` in it does not note; it counts as arithmetic only when its two opening parentheses close
-    as `))`, which is how bash tells it from a nested subshell. A redirect operator and its target operand
-    are passed over without disturbing the pending command position (next_command), so a leading
-    `2> /dev/null` does not hide the command word after its target and a spaced redirect target named like
-    a detacher is not read as one. The same holds for a here-string `<<<`, whose word is a redirect target
-    and never a here-document delimiter, for the noclobber redirect `>|`, read as one operator and not as a
-    redirect then a pipe, and for a named descriptor written directly before its operator ({fd}> file). A
-    setsid, nohup or disown in command position (at the start of a command, after an operator or a
-    reserved word such as then or do, or after a wrapper such as env, nice, sudo or timeout and its
-    options, numbers and assignments) is reported, setsid only without -w or --wait (or a unique prefix of
-    --wait, of which --w is the shortest).
+    an ANSI-C ($'...') delimiter is decoded by bash's own escapes (_parse_heredoc_delim(decode_ansi_c)), so
+    a <<$'E\\x4fF' body is skipped at the real EOF line, except for an escape this does not decode, which
+    fails closed and reads that body as code; one opened inside a double-quoted command substitution (the
+    commit-message form) is NOT recognized and is read as double-quoted text, whose own double quotes
+    toggle that reading, so a body `&` there can draw an extra note. An arithmetic expansion $(( ... )) or
+    arithmetic command (( ... )) is skipped, so a bitwise `&` in it does not note; it counts as arithmetic
+    only when its two opening parentheses close as `))`, which is how bash tells it from a nested subshell.
+    A redirect operator and its target operand are passed over without disturbing the pending command
+    position (next_command), so a leading `2> /dev/null` does not hide the command word after its target
+    and a spaced redirect target named like a detacher is not read as one; a target that begins with a
+    `${...}` parameter expansion is consumed as one word (_orch_skip_param_expansion), so a blank inside a
+    `${x:-a b}` default does not split a word out of the operand nor expose a following detacher. The same
+    holds for a here-string `<<<`, whose word is a redirect target and never a here-document delimiter, for
+    the noclobber redirect `>|`, read as one operator and not as a redirect then a pipe, and for a named
+    descriptor written directly before its operator ({fd}> file). A setsid, nohup or disown in command
+    position (at the start of a command, after an operator or a reserved word such as then or do, or after
+    a wrapper such as env, nice, sudo or timeout and its options, numbers, assignments and redirects) is
+    reported, setsid only without -w or --wait (or a unique prefix of --wait, of which --w is the shortest).
 
     Known misses, each also disclosed in the manifest residue: a detacher after a backtick or after a
     backslash-newline line continuation is not read in command position; a command substitution inside
     skipped arithmetic is skipped with it; a `<<` inside the old-style $[ ... ] arithmetic reads as a
     here-document opener and skips the lines after it; a redirect target written as an arithmetic
-    expansion drops the pending command position.
+    expansion drops the pending command position; a `${...}` NOT at the start of a redirect target (one
+    glued after another operand character, `> a${x:-b c}`) is read char by char, so its inner blank still
+    splits a word; and a setsid whose wait option sits behind a redirect target that is not a plain word
+    (an expansion or a quoted word) reads the redirect as the end of the options, so setsid is noted.
 
     Returns "detach" when it meets a bare `&` control operator, else the first such command word it met
     (setsid, nohup or disown), else None. A scan that ends inside an open quote returns the same, never a
@@ -13539,6 +13708,15 @@ def _orch_note_scan(command, bash_word_starts):
         if redirect_target and not (ch in "<> \t" or (ch == "&" and prev_dup)
                                     or (ch == "|" and command[i - 1] == ">")):
             redirect_target = False  # the redirect's target operand starts at this character
+            if ch == "$" and i + 1 < n and command[i + 1] == "{":
+                # The operand begins with a `${...}` parameter expansion: bash parses it as ONE word, so
+                # consume the whole expansion (its inner blanks do not end the operand nor restore the
+                # pending command position) rather than letting a `${x:-a b}` split a word out of it.
+                end = _orch_skip_param_expansion(command, i, n)
+                if end is not None:
+                    prev_dup, word_start = False, False
+                    i = end
+                    continue
         if ch == "#" and word_start:
             nl = command.find("\n", i)
             if nl == -1:
@@ -13604,7 +13782,7 @@ def _orch_note_scan(command, bash_word_starts):
                 continue
         if (ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i)
                 and not (prev_dup and command[i - 1] == "<")):  # the `<<` that ends a `<<<` opens nothing
-            parsed = _parse_heredoc_delim(command, i + 2, n)
+            parsed = _parse_heredoc_delim(command, i + 2, n, decode_ansi_c=True)
             if parsed is not None:
                 heredocs.append((parsed[1], parsed[2]))
                 prev_dup, word_start = False, False

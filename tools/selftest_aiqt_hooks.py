@@ -3070,6 +3070,13 @@ _DEADLINE_DENY_CASES = frozenset((
 # The (handler, shape) cases whose detach must still be noted outside registry scope, each within its bound.
 _DEADLINE_NOTE_CASES = frozenset((
     ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options")))
+# The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
+# bound: the arithmetic opener carries no `&` or detacher; the quoted-heredoc `&`, the unterminated heredoc
+# body and the balanced subshells are all skipped or carry no outer detach, so none draws a note. Pinning the
+# outcome keeps these timing shapes from passing a scanner that mistook one for a detach.
+_DEADLINE_ALLOW_CASES = frozenset((
+    ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredocs_amp"),
+    ("orch_truncation_guard", "fg_heredoc_ops_open"), ("orch_truncation_guard", "fg_subshells")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
@@ -3192,6 +3199,8 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
         problems.append("expected deny, got {}".format(outcome))
     elif (name, shape) in _DEADLINE_NOTE_CASES and outcome != "allow-note":
         problems.append("expected allow-note, got {}".format(outcome))
+    elif (name, shape) in _DEADLINE_ALLOW_CASES and outcome != "allow":
+        problems.append("expected allow, got {}".format(outcome))
     elif outcome not in ("allow", "allow-note", "deny"):
         problems.append("ended {}".format(outcome))
     return problems
