@@ -434,6 +434,10 @@ ALLOWLIST = (
     ("tools/check_entry_guard.py", "_load_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
      " with one reviewed literal substitution from its fixed MUTANTS table; no external input"),
+    ("tools/check_internal_names.py", "_self_test", "code", 1,
+     "self-test mutant loader: exec_module of scratch copies of this gate's own source (read from"
+     " __file__), each with one ratchet-comparison branch disabled by a reviewed literal"
+     " substitution, written under the self-test's temporary directory; no external input"),
     ("tools/check_python_floor.py", "_rule_reverts", "code", 1,
      "self-test mutant: exec_module of a copy of this gate's own source with one rule removed"
      " from RULES; no external input"),

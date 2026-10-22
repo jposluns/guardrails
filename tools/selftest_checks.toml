@@ -2601,6 +2601,7 @@ expected-check-ids = [
   "tracker/wired-write-baseline-canonical",
   "tracker/wired-ratchet-equal-passes",
   "tracker/wired-ratchet-exceeded-names-lines",
+  "tracker/wired-refresh-regeneration-absorbs-growth",
   "tracker/wired-ratchet-below-asks-lower",
   "tracker/wired-baseline-nonshipped-exit-2",
   "tracker/wired-absent-source-exit-2",
