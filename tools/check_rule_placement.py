@@ -15,7 +15,10 @@ provenance. Check-only; never writes (the self-test builds fixtures under a temp
 An existing .claude/rules that is NOT a real directory (a regular file, a FIFO, a dangling symlink, or
 a symlink even to a directory) exits 2: _standards.dir_present is a three-way probe that refuses a
 wrong-type entry rather than reading it as absent, so this gate can never PASS a wrong-type input as
-"no tree".
+"no tree". The probe is bound beneath the gate's root, so a wrong-type entry or a symlink, live or
+dangling, at an ANCESTOR below the root (.claude itself, or .aiqt on the standards side) is refused
+the same way (exit 2), never followed and never read as absence; a genuinely absent component still
+reads as absence.
 
 Emits the deterministic section 6.6 codes: loose, unknown-family, nested-dir, bad-name,
 tier-code-mismatch, numbered-non-aiqt, apex-nonstandard, frontmatter-drift, missing-provenance. Each
@@ -150,10 +153,11 @@ def main(argv=None):
         print("cannot read {}: {}".format(root / ".aiqt" / "standards", exc), file=sys.stderr)
         return 2
     rules = root / ".claude" / "rules"
-    # dir_present (not is_dir): an unreadable .claude/ parent must fail closed (exit 2), not read as an
-    # absent tree and PASS.
+    # dir_present (not is_dir), bound beneath root: an unreadable .claude/ parent must fail closed
+    # (exit 2), not read as an absent tree and PASS, and a symlink, live or dangling, at .claude or
+    # at rules is refused the same way, never followed and never read as absence.
     try:
-        present = dir_present(rules)
+        present = dir_present(rules, root=root)
     except OSError as exc:
         print("cannot read {}: {}".format(rules, exc), file=sys.stderr)
         return 2
@@ -217,10 +221,12 @@ def main(argv=None):
 # only (never the real repo): a real directory reads present, genuine absence reads absent, a
 # wrong-type entry (a regular file, a FIFO, a dangling symlink, or any symlink where a directory is
 # required) is refused with NotADirectoryError rather than read as absent, and an unreachable path
-# still raises OSError; the gate exits 0 on an absent tree, scans an existing empty directory as a
-# tree, and exits 2 on a wrong-type .claude/rules or .aiqt/standards entry; and each listed probe
-# mutant (a scratch copy of _standards.py with one guard reverted, loaded with importlib) is caught by
-# its named probe vector.
+# still raises OSError; under a root, every component below it is walked beneath directory
+# descriptors, so a symlink (live or dangling) at an ancestor is refused while a genuinely absent
+# ancestor still reads absent; the gate exits 0 on an absent tree, scans an existing empty directory
+# as a tree, and exits 2 on a wrong-type .claude/rules or .aiqt/standards entry and on a symlinked or
+# dangling .claude or .aiqt; and each listed probe mutant (a scratch copy of _standards.py with one
+# guard reverted, loaded with importlib) is caught by its named probe vector.
 
 SUITE_ID = "rule-placement-selftest"
 CHECKS_MANIFEST = Path(__file__).resolve().parent / "selftest_checks.toml"
@@ -269,13 +275,13 @@ def _patched_lstat(module, replacement):
         module._lstat = original
 
 
-def _deny_lstat(path):
+def _deny_lstat(path, dir_fd=None):
     """An lstat refused as an unreadable parent would refuse it, whoever runs the self-test (a
     chmod-based fixture is invisible to root)."""
     raise PermissionError(errno.EACCES, "probe refused by the self-test", str(path))
 
 
-def _probe(module, fixture, paths):
+def _probe(module, fixture, paths, root=None):
     """One dir_present outcome: "present", "absent", "refused" (NotADirectoryError), or
     "error:<type>" for any other OSError."""
     try:
@@ -283,7 +289,7 @@ def _probe(module, fixture, paths):
             with _patched_lstat(module, _deny_lstat):
                 present = module.dir_present(paths["dir"])
         else:
-            present = module.dir_present(paths[fixture])
+            present = module.dir_present(paths[fixture], root=root)
     except NotADirectoryError:
         return "refused"
     except OSError as exc:
@@ -308,6 +314,15 @@ def _probe_paths(base):
     paths["symlink-to-dir"].symlink_to(paths["dir"])
     paths["symlink-to-file"].symlink_to(paths["regular-file"])
     os.mkfifo(paths["fifo"])
+    # The rooted-walk fixtures: each is probed with root=base, so the walk inspects every
+    # component below base, an ancestor included.
+    paths["nested-dir"] = base / "walkdir" / "sub"
+    paths["nested-dir"].mkdir(parents=True)
+    (base / "walklink").symlink_to(base / "walkdir")
+    paths["ancestor-symlink"] = base / "walklink" / "sub"
+    (base / "walkdangling").symlink_to(base / "no-such-target")
+    paths["ancestor-dangling"] = base / "walkdangling" / "sub"
+    paths["ancestor-absent"] = base / "walkmissing" / "sub"
     return paths
 
 
@@ -379,6 +394,18 @@ def self_test(report_path=None):
                 got = _probe(_standards, fixture, paths)
                 check(cid, got == want, got)
 
+            # 1b. the walk under an explicit root: every component below the root is inspected the
+            # same three-way way, so a symlink there, live or dangling, is refused at an ancestor
+            # too, a genuinely absent ancestor still reads absent, and nested real directories
+            # still read present.
+            for cid, fixture, want in (
+                    ("probe/ancestor-symlink-refused", "ancestor-symlink", "refused"),
+                    ("probe/ancestor-dangling-refused", "ancestor-dangling", "refused"),
+                    ("probe/ancestor-absent-reads-false", "ancestor-absent", "absent"),
+                    ("probe/nested-directory-reads-true", "nested-dir", "present")):
+                got = _probe(_standards, fixture, paths, root=base)
+                check(cid, got == want, got)
+
             # 2. the gate over synthetic --root trees: absence still passes, an existing empty
             # directory still reads as a tree (scanned, not "no tree"), and a wrong-type
             # .claude/rules or .aiqt/standards exits 2.
@@ -398,25 +425,49 @@ def self_test(report_path=None):
             check("gate/standards-non-directory-exits-2", code == 2 and "cannot read" in err,
                   (code, out, err))
 
+            # 2b. an ancestor symlink, live or dangling, at .claude or at .aiqt below the gate's
+            # --root is refused (exit 2, naming the probed directory), never followed and never
+            # read as an absent tree or an absent standards dir. A live link points at a real
+            # sibling directory that holds the expected child, so following it would read clean.
+            for cid, entry, live in (
+                    ("gate/claude-ancestor-symlink-exits-2", ".claude", True),
+                    ("gate/claude-ancestor-dangling-exits-2", ".claude", False),
+                    ("gate/aiqt-ancestor-symlink-exits-2", ".aiqt", True),
+                    ("gate/aiqt-ancestor-dangling-exits-2", ".aiqt", False)):
+                child = "rules" if entry == ".claude" else "standards"
+                root = base / "gate-{}-{}".format(entry.lstrip("."), "live" if live else "dangling")
+                root.mkdir()
+                if live:
+                    target = root / ("linked-" + entry.lstrip("."))
+                    (target / child).mkdir(parents=True)
+                    (root / entry).symlink_to(target)
+                else:
+                    (root / entry).symlink_to(root / "no-such-target")
+                probed = root.resolve() / entry / child
+                code, out, err = _gate(["--root", str(root)])
+                check(cid, code == 2 and "cannot read {}".format(probed) in err, (code, out, err))
+
             # 3. each probe mutant (one guard reverted in a scratch copy of _standards.py) must be
             # caught by its named probe vector: the mutant's outcome differs from the intact one.
             source = (Path(__file__).resolve().parent / "_standards.py").read_text(encoding="utf-8")
             mutant_dir = base / "mutants"
             mutant_dir.mkdir()
             number = 0
-            for cid, old, new, fixture, want in (
-                    ("mutant/stat-follows-links-caught", "st = _lstat(path)", "st = os.stat(path)",
-                     "symlink-to-dir", "refused"),
+            for cid, old, new, fixture, rooted, want in (
+                    ("mutant/stat-follows-links-caught", "st = _lstat(name, dir_fd=fds[-1])",
+                     "st = os.stat(name, dir_fd=fds[-1])", "symlink-to-dir", False, "refused"),
                     ("mutant/wrong-type-reads-absent-caught", "raise NotADirectoryError(",
-                     "return False and NotADirectoryError(", "regular-file", "refused"),
+                     "return False and NotADirectoryError(", "regular-file", False, "refused"),
                     ("mutant/eacces-reads-absent-caught", "except FileNotFoundError:",
-                     "except OSError:", "unreachable", "error:PermissionError")):
+                     "except OSError:", "unreachable", False, "error:PermissionError"),
+                    ("mutant/ancestor-walk-skipped-caught", "for i, name in enumerate(parts):",
+                     "for i, name in enumerate(parts[-1:]):", "ancestor-symlink", True, "refused")):
                 number += 1
                 if source.count(old) != 1:
                     caught, got = False, "mutation anchor found {} times".format(source.count(old))
                 else:
                     mutant = _load_probe_mutant(source.replace(old, new), mutant_dir, number)
-                    got = _probe(mutant, fixture, paths)
+                    got = _probe(mutant, fixture, paths, root=base if rooted else None)
                     caught = got != want
                 check(cid, caught, got)
         finally:
@@ -437,10 +488,12 @@ def self_test(report_path=None):
         return 1
     print("SELF-TEST PASS: check_rule_placement {} checks (dir_present reads a real directory as "
           "present and genuine absence as absent, refuses a regular file, a FIFO and every symlink "
-          "with NotADirectoryError, and raises OSError on an unreachable path; the gate passes an "
-          "absent tree, scans an existing empty directory as a tree, and exits 2 on a wrong-type "
-          "rules tree or standards dir; 3 probe mutants each caught); execution set reconciled "
-          "against tools/selftest_checks.toml".format(len(EXECUTED)))
+          "with NotADirectoryError, raises OSError on an unreachable path, and under a root walks "
+          "every component below it, refusing a live or dangling symlink at an ancestor while a "
+          "genuinely absent ancestor still reads absent; the gate passes an absent tree, scans an "
+          "existing empty directory as a tree, and exits 2 on a wrong-type rules tree or standards "
+          "dir and on a symlinked or dangling .claude or .aiqt; 4 probe mutants each caught); "
+          "execution set reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
 

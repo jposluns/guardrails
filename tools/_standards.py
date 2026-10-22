@@ -170,31 +170,72 @@ class Manifest:
 # patches it.
 _lstat = os.lstat
 
+# The dir_fd capability, bound at import so it reflects the platform, not a later rebinding of an os
+# attribute (a self-test may wrap os.open); _adapter_compose binds its _DIR_FD_REQUIRES the same way.
+_DIR_FD_OK = os.open in os.supports_dir_fd and os.lstat in os.supports_dir_fd
 
-def dir_present(path):
-    """Fail-closed three-way directory probe. Return True only when the final component is a real
-    directory by lstat (never following a link there). Return False only on GENUINE absence: no
-    directory entry at the final component (FileNotFoundError; a dangling symlink is a present entry,
-    so it never reads as absent). Anything else RAISES, so a caller can never read 'cannot tell' or
-    'wrong type' as absent. An unreachable path raises OSError as before (an unreadable ancestor such
+
+def dir_present(path, root=None):
+    """Fail-closed three-way directory probe. Return True only when every inspected component is a
+    real directory by lstat (never following a link). Return False only on GENUINE absence: no
+    directory entry at an inspected component (FileNotFoundError; a dangling symlink is a present
+    entry, so it never reads as absent). Anything else RAISES, so a caller can never read 'cannot
+    tell' or 'wrong type' as absent. An unreachable path raises OSError (an unreadable ancestor such
     as a `chmod 0` .aiqt/ parent: Path.is_dir()/exists() SWALLOW EACCES and return False, so an
-    unreadable input dir would read as an absent, transition-safe input and pass clean; os.lstat
-    raises on EACCES). An entry that EXISTS but is not a directory raises NotADirectoryError (an
-    OSError, so the callers' existing fail-closed handlers refuse it): a regular file, a FIFO, a
-    device, or ANY symlink, dangling or resolving, because where a directory is required a symlink is
-    refused rather than resolved (the same rule check_site_versions.py and gen_secret_patterns.py
-    apply, and gen_manifest rejects any tracked symlink repo-wide). Pairs with ensure_listable:
-    dir_present catches an unreachable or wrong-type entry, ensure_listable catches a
-    reachable-but-unlistable directory."""
+    unreadable input dir would read as an absent, transition-safe input and pass clean; the probe
+    raises on EACCES, from lstat or from opening a directory it must walk through). An inspected
+    entry that EXISTS but is not a directory raises NotADirectoryError (an OSError, so the callers'
+    existing fail-closed handlers refuse it): a regular file, a FIFO, a device, or ANY symlink,
+    dangling or resolving, because where a directory is required a symlink is refused rather than
+    resolved (the same rule check_site_versions.py and gen_secret_patterns.py apply, and gen_manifest
+    rejects any tracked symlink repo-wide).
+
+    Which components are inspected is the caller's contract. With `root` (a directory the caller
+    already trusts, e.g. a resolved repository root that `path` must lie beneath), EVERY component of
+    path below root is inspected, each bound beneath the previous component's directory descriptor
+    (lstat with dir_fd, then os.open with O_DIRECTORY|O_NOFOLLOW), so a wrong-type entry or a
+    symlink, live or dangling, at ANY ancestor (a symlinked .claude or .aiqt included, even one
+    swapped in mid-probe) is refused, never followed and never read as absent, while a genuinely
+    absent ancestor still reads as absence. With root=None only the final component is inspected,
+    bound beneath its parent: the rest of the parent chain is the caller's trusted ground (e.g. a
+    directory it just created). Pairs with ensure_listable: dir_present catches an unreachable or
+    wrong-type entry, ensure_listable catches a reachable-but-unlistable directory."""
+    path = Path(path)
+    if root is None:
+        base = path.parent
+        parts = (path.name,) if path.name else ()
+    else:
+        base = Path(root)
+        parts = path.relative_to(base).parts
+    if not _DIR_FD_OK:
+        raise OSError(
+            errno.ENOSYS, "directory probing bound beneath a descriptor (os.open and os.lstat "
+            "with dir_fd) is unavailable on this platform", str(path))
+    walked = base
+    fds = []
     try:
-        st = _lstat(path)
-    except FileNotFoundError:
-        return False
-    if stat.S_ISDIR(st.st_mode):
+        try:
+            fds.append(os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC))
+            for i, name in enumerate(parts):
+                walked = walked / name
+                st = _lstat(name, dir_fd=fds[-1])
+                if not stat.S_ISDIR(st.st_mode):
+                    kind = "a symlink" if stat.S_ISLNK(st.st_mode) else "a non-directory entry"
+                    raise NotADirectoryError(
+                        errno.ENOTDIR, "{} where a directory is required".format(kind), str(walked))
+                if i + 1 < len(parts):
+                    # The next component is judged beneath THIS component's descriptor; O_NOFOLLOW
+                    # refuses even a symlink swapped in between the lstat above and this open. The
+                    # final component needs no descriptor: its lstat is the whole judgement.
+                    fds.append(os.open(name,
+                                       os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                       dir_fd=fds[-1]))
+        except FileNotFoundError:
+            return False
         return True
-    kind = "a symlink" if stat.S_ISLNK(st.st_mode) else "a non-directory entry"
-    raise NotADirectoryError(
-        errno.ENOTDIR, "{} where a directory is required".format(kind), str(path))
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
 
 
 def ensure_listable(directory):
@@ -252,9 +293,11 @@ def map_keys(root):
     else. A bare `map-<stem>` (no fit) or a bad suffix (`map-<stem>-medium`) is therefore not a legal
     frontmatter key, rejected fail-closed by gen_rules._check_keys with no extra gate code. Cheap (no
     parse) so gen_rules can build MAP_KEYS at import; check_mappings does the full parse/validation via
-    load_manifests."""
-    std_dir = Path(root) / ".aiqt" / "standards"
-    if not dir_present(std_dir):
+    load_manifests. .aiqt and standards are both probed beneath root, so a symlinked or dangling
+    .aiqt (or standards) raises rather than reading as an absent, transition-safe key set."""
+    root = Path(root)
+    std_dir = root / ".aiqt" / "standards"
+    if not dir_present(std_dir, root=root):
         return set()
     ensure_listable(std_dir)
     keys = set()
