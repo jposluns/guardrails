@@ -12722,8 +12722,8 @@ def _main_isolated(monitor):
         # single-quoted interior byte that is not a bare-word character or a space or tab, or a shell
         # operator, newline or single quote inside a double-quoted interior, now marks the pairing
         # ambiguous: the span is not treated as consumed data, so the hidden 'git' is judged as its own
-        # segment and the bypass denies. Each of gw-dq-h1..h5 ALLOWS at cea096d25cc9 (this change's
-        # parent) and DENIES here; the control gw-dq-h7/h8 shows a benign operator message still allows
+        # segment and the bypass denies. Each of gw-dq-h1..h5 ALLOWS at cea096d25cc9 (an earlier
+        # revision) and DENIES here; the control gw-dq-h7/h8 shows a benign operator message still allows
         # (only a 'git' inside such a span is re-judged, not every operator), so a mutant that swallows
         # the span again turns gw-dq-h1..h5 (and gw-dq-m1a..m1e, gw-dq-q1, gw-dq-n2) red while one that
         # denies every operator interior turns gw-dq-h7/h8 red.
@@ -12741,21 +12741,26 @@ def _main_isolated(monitor):
         # still read past the ambiguous quote so its own trailing -nv is caught, but that flag is ALSO
         # caught by the raw git-verb backstop, so the vector denied under every mutant tried, including one
         # that stops the roster lex at the ambiguous quote, and discriminated nothing.)
-        # A benign operator message carries no 'git' inside, so it still allows (the pin's gw-dq-a3 win is
-        # kept, for single and double quotes alike): the fix re-judges only a hidden 'git', it does not
-        # refuse every operator-bearing quoted literal.
+        # A benign message carries no roster 'git' inside, so it still allows (the pin's gw-dq-a3 win is
+        # kept, for single and double quotes alike): the fix re-judges only a hidden roster git, it does
+        # not refuse every operator-bearing quoted literal.
         gexpect("(gw-dq-h7) a double-quoted message with ';' and '|' but no inner git still allows",
                 'git commit -m "fix: a; b | c"', "allow")
         gexpect("(gw-dq-h8) the single-quoted operator message likewise still allows",
                 "git commit -m 'fix: a; b | c'", "allow")
-        # A '-m' value NAMING a git bypass stays allowed while its interior holds no operator (the disclosed
-        # residual), but an operator in that interior makes the pairing ambiguous and the named bypass is
-        # re-judged and denies (a disclosed safe-direction over-deny; re-issue the message without a git
-        # bypass spelling).
-        gexpect("(gw-dq-h9) a plain single-quoted -m value naming a git bypass (no operator) still allows",
-                "git commit -m 'git commit -nv'", "allow")
+        # A quoted -m value NAMING a roster git command is re-judged whatever its interior bytes: bash's
+        # own quote close and the next open could bracket that live 'git <roster verb>', so the hidden
+        # bypass is judged as its own segment and denies, whether or not an operator sits in the interior
+        # (the accepted safe-direction over-deny; re-issue without a git roster-verb spelling, or keep it
+        # out of quoted data). A mutant that swallows an all-bare-word span again (reverting
+        # _gate_span_hides_roster_git) turns gw-dq-h9 and gw-cg-g1 red, while one that re-judges ANY inner
+        # git, roster or not, turns the off-roster controls gw-dq-h8b/gw-cg-g1b red.
+        gexpect("(gw-dq-h9) a plain single-quoted -m value naming a roster git bypass (no operator) is "
+                "re-judged and denies (the accepted over-deny)", "git commit -m 'git commit -nv'", "deny")
         gexpect("(gw-dq-h10) the same value with an operator before the named bypass denies (re-judged)",
                 "git commit -m 'fix; git commit -nv'", "deny")
+        gexpect("(gw-dq-h8b) a single-quoted message naming an OFF-roster git (log) stays allowed (control)",
+                "git commit -m 'see git log for history'", "allow")
         # Finding 2 boundary: the backslash interior check is load-bearing. Bash reads this as -m 'a" '
         # then a live -nv; dropping the interior backslash check would mis-pair the quotes and allow it.
         gexpect("(gw-dq-h11) a backslash inside double quotes guards a hidden -nv on the fallback, denies",
@@ -12767,12 +12772,54 @@ def _main_isolated(monitor):
         gexpect("(gw-dq-h13) the same message single-quoted is literal and allows (the documented re-issue)",
                 "git commit -m 'ship it!'", "allow")
 
-        # A backquote (or '$') between a mis-paired single-quote CLOSE and the next OPEN is live command
-        # text bash runs, not quoted data: the single-quote ambiguity test marks the span on ANY interior
-        # byte outside the bare-word set plus space and tab, so the hidden 'git ... -nv' inside it is
-        # re-judged and denies. Each ALLOWS at cea096d25cc9 (this change's parent) AND at the reviewed head
-        # before this change (the backquote was not among the single-quote break bytes there); a mutant that
-        # tests only the shell operators, the newline and the double quote (the pre-change set) turns
+        # === gatdis: command-running wrappers do not hide a roster git behind a quoted assignment ========
+        # env (with its VAR=value assignments and options), exec -a, nice, nohup, command, time and timeout
+        # run the git command after their own words, so the parsed path peels them (_gate_novrf_peel) and
+        # judges that git. A quoted assignment value whose bytes merely resemble a git command
+        # (env 'A=git log ' ...) no longer lets the real 'git commit -nv' slip through as a mis-paired
+        # span's consumed data. Each of gw-wr-env1/env2/env3/exec1/nice1 ALLOWED before the peel and DENIES
+        # here, so a mutant that drops the peel (judging the raw command word 'env'/'exec'/'nice') turns
+        # them red; the controls stay green (gw-wr-cmdv is a name lookup that runs nothing, gw-wr-off is an
+        # off-roster verb).
+        gexpect("(gw-wr-env1) env with a quoted assignment hiding git commit -nv denies",
+                "env 'A=git log ' git commit -nv -m ' fix'", "deny")
+        gexpect("(gw-wr-env2) the same with a double-quoted assignment and message denies",
+                'env "A=git log " git commit -nv -m " fix"', "deny")
+        gexpect("(gw-wr-env3) an env assignment hiding a push --no-verify denies",
+                "env 'A=git log ' git push --no-verify ' origin'", "deny")
+        gexpect("(gw-wr-exec1) exec -a NAME renaming argv[0] before git commit -nv denies",
+                "exec -a 'git log ' git commit -nv -m ' fix'", "deny")
+        gexpect("(gw-wr-nice1) nice env (stacked wrappers) hiding git commit -n denies",
+                "nice env 'A=git status ' git commit -n -m ' wip'", "deny")
+        gexpect("(gw-wr-cmdv) command -v only looks git up and runs nothing, allows (no false deny)",
+                "command -v git", "allow")
+        gexpect("(gw-wr-off) env running an off-roster git verb still allows (no over-deny)",
+                "env FOO=bar git log --oneline", "allow")
+        # The unparseable form (an unterminated trailing quote) falls to the raw-text scan, where the same
+        # 'git <roster verb>' inside the mis-paired span is re-judged rather than swallowed as data. This
+        # ALLOWED before the raw-scan hides-roster-git rule (the all-bare-word span was consumed data).
+        gexpect("(gw-wr-unparse) an unparseable wrapper line hiding git commit -nv denies on the fallback",
+                "env 'A=git log ' git commit -nv -m ' fix'\necho '", "deny")
+        # The env form of the double-quote single-quote ambiguity (MEDIUM 2): bash runs git commit -nv (the
+        # quoted assignment 'A=git log "' sets A), now caught on the parsed path by the wrapper peel.
+        gexpect("(gw-wr-envdqsq) env hiding git commit -nv behind mixed quotes denies",
+                "env 'A=git log \"' git commit -nv -m '\" fix'", "deny")
+        # The glue reason text is read (not only the decision), so a regression that points the offender at
+        # the glued byte instead of the quote (reverting the j+1 -> i offender) turns these red: a
+        # double-quoted word glued to trailing text names the double-quote reason, a single-quoted one the
+        # single-quote reason. The separated controls (gw-dq-a1, gw-k2) allow.
+        gdeny_names("(gw-wr-glue-dq) a glued double-quoted word's deny names the glue reason",
+                    'git commit -m "a"b', "glued to adjacent text")
+        gdeny_names("(gw-wr-glue-sq) a glued single-quoted word's deny names the single-quote glue reason",
+                    "git commit -m 'a'b", "unterminated or glued to adjacent text")
+
+        # A backquote between a mis-paired single-quote CLOSE and the next OPEN is live command text bash
+        # runs, not quoted data (a '$' expansion is the same shape, but every command-running '$' form
+        # also carries a '(' or '{', already a break byte, so these vectors isolate the backquote): the
+        # single-quote ambiguity test marks the span on ANY interior byte outside the bare-word set plus
+        # space and tab, so the hidden 'git ... -nv' inside it is re-judged and denies. Each ALLOWS at
+        # cea096d25cc9 (an earlier revision, before the backquote was a single-quote break byte); a mutant
+        # that tests only the shell operators, the newline and the double quote (the pre-change set) turns
         # gw-dq-m1a..m1e red.
         gexpect("(gw-dq-m1a) a backquote hidden between a single-quoted close and open denies",
                 "echo 'git log ' `git commit -nv` ' x'", "deny")
@@ -12787,26 +12834,58 @@ def _main_isolated(monitor):
         # The other-quote and newline triggers the single-quote ambiguity test still needs are subsumed by
         # the bounded rule (a double quote and a newline are both outside the bare-word set plus space and
         # tab), and these two vectors pin them with the double quote (q1) or the newline (n2) as the ONLY
-        # non-word interior byte, so each isolates one trigger. Each ALLOWS at cea096d25cc9 (this change's
-        # parent, before the ambiguity feature); a mutant that excludes the double quote from the test
-        # turns gw-dq-q1 red, one that excludes the newline turns gw-dq-n2 red.
-        gexpect("(gw-dq-q1) a hidden 'git commit -nv' after a single-quoted 'a\"' (double quote the only "
-                "ambiguous byte) denies", "git log 'a\"' git commit -nv", "deny")
+        # non-word interior byte, so each isolates one trigger. Each ALLOWS at cea096d25cc9 (an earlier
+        # revision, before the ambiguity feature); a mutant that excludes the double quote from the test
+        # turns gw-dq-q1 red, one that excludes the newline turns gw-dq-n2 red. In q1 bash actually runs
+        # only 'git log' (the double-quoted a" is one operand), so the deny is a safe-direction over-deny;
+        # the vector pins the trigger MECHANISM, not a live bypass in that exact string.
+        gexpect("(gw-dq-q1) a double quote is the only ambiguous byte in a single-quoted span, so the "
+                "hidden git commit -nv is re-judged and denies (safe-direction over-deny; bash runs only "
+                "git log)", "git log 'a\"' git commit -nv", "deny")
         gexpect("(gw-dq-n2) a hidden bypass where a newline marks the single-quote span ambiguous denies",
                 "echo 'git log '\ngit commit -nv\necho ' x'\necho '", "deny")
+        # The double-quote branch's single-quote trigger is the mirror: a '"' the scan meets may be bash's
+        # CLOSING double quote, and a single quote in its interior is where bash's own close and the next
+        # open bracket live command text. Here too bash runs only 'git log' (the double-quoted a' is one
+        # operand), a safe-direction over-deny, but dropping the interior single-quote test (and it alone,
+        # the MG mutant) swallows the hidden 'git commit -nv' and allows, so this isolates that trigger;
+        # the parsed path sees an off-roster 'git log', so the deny comes purely from the raw scan.
+        gexpect("(gw-dq-q2) a single quote inside a double-quoted span marks the pairing ambiguous, so the "
+                "hidden git commit -nv is re-judged and denies (pins the double-quote branch's \"'\" "
+                "trigger)", "git log \"a'\" git commit -nv", "deny")
         # Timing: the lexer stops an off-roster segment at its first ambiguous quote, so a line packing
-        # many such segments is scanned in linear time, not quadratically re-lexed from each git word.
-        # This exact input took several seconds before the bound; the assertion holds far under the
-        # PreToolUse 8 s deadline, with wide margin for a shared host (a ROSTER-verb-dense line is still
-        # super-linear by design and relies on the deadline's fail-closed, as the scan docstring states).
+        # many such segments is scanned in linear time, not quadratically re-lexed from each git word. The
+        # assertion is a RATIO, not a fixed wall-clock bound: doubling the input should roughly double the
+        # time (linear), where a quadratic re-lex quadruples it, so a threshold between 2x and 4x holds
+        # regardless of host speed (a fixed bound passes a quadratic scan on a fast host; finding on the
+        # host-dependent 2.0 s threshold). A ROSTER-verb-dense line is still super-linear by design and
+        # relies on the deadline's fail-closed, as the scan docstring states.
+        # gw-dq-lin-sq: `git -C 'a;' log` keeps the subcommand unresolved past the first ambiguous quote
+        # (the -C value falls on it), so the single-quote off-roster stop must fire on LATER quotes to stay
+        # linear; it is quadratic until the stop is moved outside the data_stop guard (this change). The
+        # single-quote `git log 'a;'` form resolved 'log' before its first quote and was already linear.
+        # gw-dq-lin-dq: `git log "a;"` is linear at the pin (the double-quote stop already sits outside the
+        # byte loop); removing that stop (the ME mutant) makes it quadratic.
         import time as _time_lin
-        _gw_lin_cmd = "git log 'a;' " * 4000
-        _gw_lin_t0 = _time_lin.perf_counter()
-        aiqt_hooks._gate_closed_grammar_scan(_gw_lin_cmd)
-        _gw_lin_dt = _time_lin.perf_counter() - _gw_lin_t0
-        if _gw_lin_dt > 2.0:
-            failures.append("(gw-dq-lin) off-roster ambiguity re-lex is not linear: {:.3f}s for {} bytes"
-                            .format(_gw_lin_dt, len(_gw_lin_cmd)))
+
+        def _gw_scan_ratio(unit):
+            # Time the scan at N and 2N repetitions; return (ratio, t_n, t_2n, bytes_2n). A small noise
+            # floor on t_n guards against a tiny-denominator blow-up when the linear scan is sub-millisecond.
+            _t = []
+            for reps in (2000, 4000):
+                cmd = unit * reps
+                _t0 = _time_lin.perf_counter()
+                aiqt_hooks._gate_closed_grammar_scan(cmd)
+                _t.append((_time_lin.perf_counter() - _t0, len(cmd)))
+            (t_n, _bn), (t_2n, b2n) = _t
+            return (t_2n / t_n if t_n else 0.0), t_n, t_2n, b2n
+
+        for _gw_lbl, _gw_unit in (("gw-dq-lin-sq", "git -C 'a;' log "), ("gw-dq-lin-dq", 'git log "a;" ')):
+            _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n = _gw_scan_ratio(_gw_unit)
+            if _gw_tn > 0.02 and _gw_ratio > 3.0:
+                failures.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
+                                "{:.3f}s then {:.3f}s for {} bytes"
+                                .format(_gw_lbl, _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n))
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
@@ -12918,10 +12997,14 @@ def _main_isolated(monitor):
                 "git commit -m 'x' # done", "deny")
         gexpect("(gw-cg-f2) a mid-word '#' is literal and stays accepted (control)",
                 "git commit -m ticket#123", "allow")
-        # Quoted data consumed by an accepted scan is data; unconsumed text naming a roster-verb git is
-        # judged as if it ran (disclosed over-deny: the gate does not model quoting context around git).
-        gexpect("(gw-cg-g1) a -m value naming 'git commit -n' is consumed data, allows",
-                "git commit -m 'say git commit -n somewhere'", "allow")
+        # A -m value naming a roster-verb git command is re-judged, so it denies even when its interior
+        # is all bare-word bytes and spaces (the accepted over-deny; cf gw-dq-h9). An inner git with NO
+        # roster verb after it stays consumed data and allows (g1b), so the over-deny is scoped to the
+        # roster, not every git word inside quoted data.
+        gexpect("(gw-cg-g1) a -m value naming 'git commit -n' is re-judged and denies (accepted over-deny)",
+                "git commit -m 'say git commit -n somewhere'", "deny")
+        gexpect("(gw-cg-g1b) a -m value naming an off-roster git (log) stays consumed data, allows",
+                "git commit -m 'run git log then stop'", "allow")
         gexpect("(gw-cg-g2) echoed quoted text naming git commit -n denies (disclosed over-deny)",
                 "echo 'git commit -n'", "deny")
         gexpect("(gw-cg-g3) a roster-verb git inside $( ) is scanned on its own: a literal form allows",
