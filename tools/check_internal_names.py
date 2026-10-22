@@ -52,11 +52,15 @@ enter without a deliberate baseline edit), and a count BELOW its baseline is a f
 maintainer to lower the baseline to the new count, so the baseline stays exact in both directions and
 moves only through regeneration. `--write-baseline` prints the canonical baseline from a real scan; the
 delivered file is that exact output, regenerated in the same reviewed change whenever an edit
-legitimately moves a count: it is lowered as later per-area changes remove labels, and it rises only
-when a refresh merges upstream files that already carry labels (the shipped set follows the release
-inventory, so growth merged from upstream lands here as count increases); either movement is counts and
-paths only, visible whole in the regenerated file's diff, and a label added without that reviewed
-regeneration fails. The gate ENFORCES the exactness: a baseline that is not the byte-exact canonical
+legitimately moves a count: it is lowered as later per-area changes remove labels, and REVIEW POLICY,
+stated here but NOT enforced by this gate, allows a raise only when a refresh merges upstream files
+that already carry labels (the shipped set follows the release inventory, so growth merged from
+upstream lands here as count increases); either movement is counts and paths only, visible whole in
+the regenerated file's diff, and a label added without a regeneration fails. The gate itself cannot
+tell merged growth from growth the same change adds: it accepts a regenerated baseline at whatever
+counts a real scan yields, so holding a raise to refreshes is the reviewer's recount of the
+regenerated file's diff against the merge parent, never a comparison this gate makes.
+The gate ENFORCES the exactness: a baseline that is not the byte-exact canonical
 render of its own entries is refused, so no TOML comment, alternate integer spelling, reordering or other
 text the parser would drop can ride in the one file this layer skips by name. This layer honours no
 internal-allow marker and no other skip-by-name (the gate's own
@@ -65,7 +69,9 @@ path-only allowlists TRACKER_LABEL_FROZEN (relpath plus sha256 pairs, exempt onl
 BYTES still hash to the record) and TRACKER_LABEL_HISTORY both ship EMPTY. FAIL CLOSED (exit 2): a
 missing or unparseable manifest, a manifest with no [[sources]] array, a listed path that is absent or
 not a regular file (checked before any suffix or decode decision, so an excluded suffix never hides a
-missing path), a text-suffix shipped file that
+missing path; the baseline file itself is the one exception, skipped by name BEFORE that presence
+check, and when absent it is the empty baseline, so every remaining hit then exceeds zero and fails
+loud rather than silently), a text-suffix shipped file that
 is not valid UTF-8, and a malformed, non-canonical, duplicate, unknown or non-shipped baseline entry.
 Every present shipped file is read; one whose suffix is outside the leak gate's text-suffix list is
 skipped only when its bytes do not decode as UTF-8 (the committed .zip archives), the role rule's
@@ -74,6 +80,9 @@ is the baseline file itself (its shape-key-next-to-count lines would
 match the review-round pattern by construction; its closed schema plus the canonical-render byte check
 above is what holds its content instead). DISCLOSED LIMITS of this layer: a label moved between shapes or between lines
 within the same per-file count is not caught; the baseline is trusted input like any configuration file;
+a regeneration admits any raise, including one the same change adds (mixed changes included, where an
+added label is folded into the same count increase), so telling merged growth from added growth needs a
+recount against the merge parent in review;
 a label shape outside the four patterns (a bare one-letter revision token, a lower-case fix word with a
 number, a model id used as a source, a family name for the product it names outside the parenthesized
 family-then-version-digit form below, a split or encoded label) is not matched; prose that legitimately
@@ -353,9 +362,12 @@ def load_tracker_baseline(root, shipped):
 
 
 def _collect_tracker_counts(root, tracked, frozen, history):
-    """{relpath: per-shape line lists} over the shipped set. Every listed path must be PRESENT and a
-    REGULAR file before any suffix or decode decision: an absent or non-regular shipped path raises
-    OSError (fail closed, exit 2) whatever its suffix. A present file is read as raw bytes and decoded
+    """{relpath: per-shape line lists} over the shipped set. Every listed path but one must be PRESENT
+    and a REGULAR file before any suffix or decode decision: an absent or non-regular shipped path
+    raises OSError (fail closed, exit 2) whatever its suffix. The one exception is the baseline file
+    itself, skipped by name BEFORE that presence check: an absent baseline reads as all-zero in
+    load_tracker_baseline, so every remaining hit then exceeds zero and the gate fails loud, never a
+    silent pass of label-bearing files. A present file is read as raw bytes and decoded
     as UTF-8; one whose suffix is outside TEXT_SUFFIXES is skipped only when its bytes do not decode
     (the committed .zip archives), the role rule's existing decode-then-skip rule, so a decodable file
     is scanned whatever its suffix, while a non-UTF-8 text-suffix shipped file raises to the same
@@ -852,6 +864,24 @@ def _stale_sentinel_values(own_pid, parent_pid):
         if len(values) < 2 and candidate != str(own_pid) and candidate not in values:
             values.append(candidate)
     return values
+
+
+def _load_ratchet_mutant(source, directory, tag):
+    """Write one ratchet-mutant module under the self-test's scratch directory and load it with
+    importlib (never a dynamic code string). This helper is the self-test's ONE code-loading site,
+    so the dangerous-api allowlist entry is scoped to it and a code sink anywhere else in the
+    self-test stays a finding."""
+    import importlib.util
+    path = Path(directory) / "tracker_mutant_{}.py".format(tag)
+    path.write_text(source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("tracker_mutant_{}".format(tag), str(path))
+    module = importlib.util.module_from_spec(spec)
+    saved_sys_path = list(sys.path)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = saved_sys_path
+    return module
 
 
 # --- self-test --------------------------------------------------------------------------------------
@@ -1896,12 +1926,31 @@ def _self_test(caller_env=None):
                                  + "{} = 1\n".format(qkey))
             check("tracker/baseline-nonshipped-path-refused",
                   nonshipped is not None and "not a shipped path" in nonshipped, nonshipped)
+            # Each schema guard names its OWN refusal: most of these texts would also fail the
+            # byte-exact canonical-render check below, so a refusal alone cannot show the guard is
+            # live; a copy with the version-type pin, the string-path check or a count-schema branch
+            # disabled would fall through to the canonical check's different message and go red here.
+            misnamed = [(bad, want) for bad, want in (
+                ('format-version = 2\n', "must be the integer 1"),
+                ('format-version = true\n', "must be the integer 1"),
+                ('format-version = 1.0\n', "must be the integer 1"),
+                ('format-version = 1\n\n[[path]]\npath = 3\n', "carries no string path"),
+                (entry_a + "{} = 0\n".format(qkey), "integer count of one or more"),
+                (entry_a + "{} = -2\n".format(qkey), "integer count of one or more"),
+                (entry_a + "{} = true\n".format(qkey), "integer count of one or more"),
+                (entry_a, "carries no shape count"),
+            ) if want not in (refused(bad) or "")]
+            check("tracker/baseline-refusal-names-its-guard", not misnamed, misnamed)
             # The file must be the BYTE-EXACT canonical render of its own entries (the --write-baseline
             # output): a TOML comment is dropped by the parser, so the closed schema alone never sees
-            # it, and an alternate integer spelling or a missing header is equally parser-invisible;
-            # each must be refused while the exact canonical text stays accepted.
+            # it, an alternate integer spelling or a missing header is equally parser-invisible, and a
+            # REORDERING parses to the same entries while the bytes differ; each must be refused while
+            # the exact canonical text stays accepted, for one entry and for two in sorted order.
             header_render = render_tracker_baseline({})
             entry_render = render_tracker_baseline({"docs/a.md": {qkey: [1]}})
+            block_a = '\n[[path]]\npath = "docs/a.md"\n' + "{} = 1\n".format(qkey)
+            block_b = '\n[[path]]\npath = "docs/b.md"\n' + "{} = 2\n".format(qkey)
+            pair_render = header_render + block_a + block_b
             comment_line = "# " + "QA" + "26 riding in a comment\n"
             noncanonical = [bad for bad in (
                 header_render + "\n" + comment_line,
@@ -1909,10 +1958,15 @@ def _self_test(caller_env=None):
                 entry_render.replace("{} = 1".format(qkey), "{} = +1".format(qkey)),
                 'format-version = 1\n',
                 entry_render + "\n",
+                header_render + block_b + block_a,
             ) if refused(bad) is None]
             canonical_ok = refused(entry_render)
+            pair_ok = refused(pair_render)
             check("tracker/baseline-noncanonical-refused",
-                  not noncanonical and canonical_ok is None, (noncanonical, canonical_ok))
+                  not noncanonical and canonical_ok is None and pair_ok is None
+                  and pair_render == render_tracker_baseline(
+                      {"docs/a.md": {qkey: [1]}, "docs/b.md": {qkey: [3, 5]}}),
+                  (noncanonical, canonical_ok, pair_ok))
             # A manifest whose [[sources]] array is absent entirely (a misspelled table name, say) is
             # refused, never read as an empty shipped inventory that would scan nothing at exit 0.
             base_path.unlink()
@@ -1982,9 +2036,9 @@ def _self_test(caller_env=None):
         #     the above-baseline branch disabled no longer reports a count above its baseline, and one
         #     with the below-baseline branch disabled no longer asks for the baseline to be lowered, so
         #     removing either comparison turns its ratchet case red. The copies are scratch modules
-        #     loaded with importlib (never a dynamic code string), each mutated source text required to
-        #     occur exactly once; the anchors below are concatenated so they do not match themselves.
-        import importlib.util
+        #     loaded through _load_ratchet_mutant (never a dynamic code string), each mutated source
+        #     text required to occur exactly once; the anchors below are concatenated so they do not
+        #     match themselves.
         selfdir = Path(__file__).resolve().parent
         mdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-ratchet-mutant-"))
         try:
@@ -2005,15 +2059,7 @@ def _self_test(caller_env=None):
                 if gate_source.count(anchor) != 1:
                     mutant_faults.append("{} anchor occurs {} times".format(tag, gate_source.count(anchor)))
                     continue
-                mpath = mdir / "tracker_mutant_{}.py".format(tag)
-                mpath.write_text(gate_source.replace(anchor, replacement), encoding="utf-8")
-                spec = importlib.util.spec_from_file_location("tracker_mutant_{}".format(tag), str(mpath))
-                module = importlib.util.module_from_spec(spec)
-                saved_sys_path = list(sys.path)
-                try:
-                    spec.loader.exec_module(module)
-                finally:
-                    sys.path[:] = saved_sys_path
+                module = _load_ratchet_mutant(gate_source.replace(anchor, replacement), mdir, tag)
                 if any(expect_gone in f for f in module._tracker_compare(sample_counts, probe_base)):
                     mutant_faults.append("{} mutant still reports its finding".format(tag))
             check("tracker/mutation-ratchet-compare-load-bearing", ok_intact and not mutant_faults,
@@ -2075,16 +2121,28 @@ def _self_test(caller_env=None):
             basefile.write_text(out, encoding="utf-8")
             rc, out, err = tracker_gate()
             check("tracker/wired-ratchet-equal-passes", rc == 0, (rc, out, err))
+            # The one by-name skip, exercised in the wired gate: the baseline file itself may be
+            # LISTED as a shipped source (the pack ships it), and its own shape-key-next-to-count
+            # lines are skipped by name rather than counted, so the gate still passes; a copy
+            # without that skip would read them as fresh hits for the baseline's own path and fail.
+            man.write_text(man_one + '\n[[sources]]\npath = ".aiqt/tracker-label-baseline.toml"\n',
+                           encoding="utf-8")
+            rc, out, err = tracker_gate()
+            check("tracker/wired-baseline-listed-skipped-by-name",
+                  rc == 0 and "tracker-label-baseline.toml" not in out, (rc, out, err))
+            man.write_text(man_one, encoding="utf-8")
             page.write_text("x {} y\nmore {} text\n".format(rlabel, rlabel), encoding="utf-8")
             rc, out, err = tracker_gate()
             check("tracker/wired-ratchet-exceeded-names-lines",
                   rc == 1 and "docs/page.md: review-round count 2 exceeds its ratchet baseline 1" in out
                   and "lines 1, 2" in out, (rc, out, err))
-            # A refresh that merges upstream files already carrying labels raises counts the same way
-            # as the grown page above: the baseline is then REGENERATED from the merged tree
-            # (--write-baseline, reviewed as a counts-and-paths diff) and the gate passes at the new
-            # exact counts, while one more label added on top of the regenerated baseline still fails,
-            # so regeneration absorbs merged growth without admitting a label the change itself adds.
+            # This case CHARACTERIZES EXISTING behaviour at a wired baseline above one; it guards no
+            # logic that tells growth sources apart, because none exists: a regenerated baseline is
+            # accepted at whatever grown counts a real scan yields, however the growth arose (here
+            # the test itself grew the page; a refresh merging upstream files that already carry
+            # labels raises counts the same way), while one more label above the regenerated
+            # baseline still fails. Holding a raise to refresh merges is review policy over the
+            # regenerated file's diff against the merge parent, never a comparison the gate makes.
             rc, out, err = tracker_gate("--write-baseline")
             regen_render = render_tracker_baseline(
                 {"docs/page.md": _tracker_hits("x {0} y\nmore {0} text\n".format(rlabel))})
@@ -2281,16 +2339,20 @@ def _self_test(caller_env=None):
           "exemptions are honoured and bounded, a line carrying the internal-allow marker is still "
           "flagged, a tracked file under .github/ and one under opf/ each join the shipped set, the "
           "closed baseline schema refuses a malformed, wrongly-typed-version, duplicate, unknown, "
-          "non-shipped or non-canonical "
-          "entry (the file must be the byte-exact --write-baseline render of its own entries) and a "
+          "non-shipped, non-canonical or reordered "
+          "entry (the file must be the byte-exact --write-baseline render of its own entries, sorted "
+          "order included) with each schema guard naming its own refusal (so the canonical check "
+          "cannot mask a disabled guard) and a "
           "manifest with no sources array is refused, each pattern row, the case flag, the separator "
           "bound, the severity guard and both "
           "ratchet comparisons are load-bearing (a disabled one turns its case red), a listed path that "
           "is absent or non-regular fails closed before any suffix decision while the decode decides an "
           "unfamiliar suffix, and the real gate "
           "on a fixture repository holds the per-file count at, one above and one below its baseline, "
-          "round-trips --write-baseline byte-exact, accepts a baseline regenerated at grown counts (a "
-          "refresh merging upstream files that already carry labels) while one more label above the "
+          "round-trips --write-baseline byte-exact, skips the baseline file by name even when it is "
+          "listed as a shipped source, accepts a baseline regenerated at grown counts whatever grew "
+          "them (holding a raise to refresh merges is review policy over the baseline diff, not a "
+          "comparison the gate makes) while one more label above the "
           "regenerated baseline still fails, and fails closed loud on a missing shipped manifest, "
           "an absent listed path, a non-UTF-8 listed text file and a baseline entry for a non-shipped "
           "path.")
