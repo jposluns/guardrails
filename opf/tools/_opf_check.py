@@ -1936,11 +1936,15 @@ def _check_receipts(recs, by_id, rep):
 
 
 def _check_handoff(recs, rep):
-    """C-HANDOFF (R2): at most one `current` handoff across the whole store (OPF-SPEC 8.5)."""
-    current = [r.id for r in recs if r.rtype == "handoff" and r.state == "current" and r.qual is None]
+    """C-HANDOFF (R2): at most one `current` handoff across the whole store (OPF-SPEC 8.5). The count is a
+    current-state join, so it evaluates only clean records authored by non-importer actors (OPF-SPEC 8.6:
+    an importer-authored record MUST NOT be treated as the current handoff and keeps its recorded state
+    as readable history only)."""
+    current = [r.id for r in recs if r.rtype == "handoff" and r.state == "current" and r.qual is None
+               and r.actor_kind != "importer"]
     if len(current) > 1:
         rep.finding("C-HANDOFF: {} handoffs are 'current'; at most one current handoff exists across the "
-                    "store (spec 8.5)".format(len(current)))
+                    "store (spec 8.5, importer-authored history excluded per spec 8.6)".format(len(current)))
 
 
 def decision_chains(recs, by_id):
@@ -6839,6 +6843,15 @@ def self_test():
         f["handoff.index.toml"] = idx([ho(1), ho(2)])
         f["counters.toml"] = counters(HO=2)
         check("r2-two-current-handoffs-invalid", run(f).status == INVALID)
+        # The at-most-one-current join evaluates only non-importer records (spec 8.6): a legacy
+        # importer-authored current handoff beside the clean one is readable history, not a second
+        # current handoff (red when the join counts importer-authored rows again).
+        f = clean_machine()
+        f["handoff.index.toml"] = idx([dict(ho(1), actor={"kind": "importer"}), ho(2)])
+        f["counters.toml"] = counters(HO=2)
+        _r2_imp = run(f)
+        check("r2-importer-current-handoff-excluded",
+              _r2_imp.status == VALID and not any("C-HANDOFF" in x for x in _r2_imp.findings))
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1), pd(2, supersedes="PD-1"), pd(3, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=3)

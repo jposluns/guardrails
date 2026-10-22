@@ -288,12 +288,7 @@ _ROUTE_ALLOWED_REFS = dict(
         "opened.st_dev", "opened.st_ino", "os.fstat",
     ]),
     _init_unignored=frozenset([
-        "RuntimeError", "_opf_observe._run_git_config_discovery",
-        "_opf_observe.indexed_ignore_availability",
-        "_opf_write_guard._ignore_file_candidates", "os.fsdecode",
-        "os.fsdecode().splitlines", "result.completed", "result.err",
-        "result.out", "result.rc", "root.relative_to", "sorted", "str",
-        "str-literal.format",
+        "RuntimeError", "_opf_write_guard.init_ignore_refusal", "root.relative_to",
     ]),
     _init_untracked=frozenset([
         "RuntimeError", "os.fsdecode", "root.relative_to", "sorted", "str",
