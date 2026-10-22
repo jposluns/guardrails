@@ -97,12 +97,14 @@ Each case runs on its own copy of that template; the root is removed in a finall
       points on both sides of COMPLETE (flip: a recovery that enumerates only grammar-named
       transactions)
   T20 a legacy .aiqt/record/journal on a homes-2 store is refused with the exact refusal text, which
-      names the path and the operator's remedy (reconcile it with the homes-1 tooling that wrote it,
-      then remove it by hand), and is never recovered: every store byte unchanged, no typed journal
-      home created, and nothing at or beneath the legacy path opened, listed, followed or read, its
-      one access the no-follow existence probe (flips: probe the generation as 1, under which the
-      legacy journal is reconciled in place; the reviewed head's refusal text, which names no remedy;
-      a refusal that reads the journal first; a refusal that leaves a store write outside .aiqt)
+      names the path and the operator's remedy (the journal holds no history of this store, so move it
+      out of the store by hand, keeping it, and re-run), and is never recovered: every working-tree
+      byte outside .git unchanged (content and mode bits), no typed journal home created, and nothing
+      at or beneath the legacy path opened, listed, followed or read through the calls the access
+      recorder wraps, the only exempt kind the no-follow existence probe of the path itself (flips:
+      probe the generation as 1, under which the legacy journal is reconciled in place; an earlier
+      refusal text, whose remedy no current tool can carry out; a refusal that reads the journal
+      first; a refusal that leaves a store write outside .aiqt)
   T21 a direct homes-2 _publish, its reservation published first under the same held capability and
       run id, lands ONE capability-bound transaction in .working/journals/record/journal under that run
       id with its projection at txn_record("record", <rid>), the operands rewritten, and nothing under
@@ -1050,7 +1052,8 @@ def record_cli(env, root, args):
 
 def snapshot(root):
     """Every entry beneath root except .git, each with its mode bits: a regular file by content, a symlink
-    by its target text (never followed), a directory and any other type by its type. A directory the walk
+    by its target text (never followed), a directory and any other type by its type. The comparison is of
+    content and mode bits only: mtime, ownership and xattrs are not compared. A directory the walk
     cannot list (root included) is a harness fault, never an entry silently left out of the comparison."""
     def unlistable(exc):
         raise Harness("snapshot cannot list the directory {!r} ({})".format(exc.filename, exc))
@@ -2965,20 +2968,26 @@ def flip_t19_legacy():
 # and the operator's remedy.
 LEGACY_JOURNAL_REFUSAL = (
     "opf record create: refused: a legacy record journal .aiqt/record/journal is present on a homes-2 "
-    "store. This tooling never reads, recovers, archives or removes it: homes 2 has no homes migration "
-    "(spec 4.2), and on a homes-2 store OPF reads no artefact from a former .aiqt/ location (spec 15). "
-    "Remedy: reconcile .aiqt/record/journal with the homes-1 tooling that wrote it, then remove it by "
-    "hand and re-run. Nothing written (fail-closed); exit 2\n")
+    "store. This tooling never reads, recovers, archives, moves or removes it: homes 2 has no homes "
+    "migration (spec 4.2), and on a homes-2 store OPF reads no artefact from a former .aiqt/ location "
+    "(spec 15). A store is at homes 2 only when it is created there (spec 4.2), so .aiqt/record/journal "
+    "holds no history of this store. Remedy: move .aiqt/record/journal out of the store by hand, "
+    "keeping it, and re-run. Nothing written (fail-closed); exit 2\n")
 
 
 @contextlib.contextmanager
 def _legacy_journal_access(root, seen):
-    """While active, append to `seen` every access AT or BENEATH the legacy record journal of `root`: an
-    os.open, os.listdir, os.scandir, os.readlink or open() of it, and any stat of it but the no-follow
-    existence probe of the path itself (spec 15: that probe, used only to refuse, is not a read). A
-    descriptor or dir_fd-relative argument is resolved through its /proc/self/fd link; without that link
-    table the vector cannot evaluate (Harness), never a vacuous pass. Each stand-in joins the capability
-    sets its real call is in (_journal._st_supports), so a containment probe still finds the call."""
+    """While active, append to `seen` every access AT or BENEATH the legacy record journal of `root` made
+    through the closed list of calls this recorder wraps: os.open, os.listdir, os.scandir, os.readlink,
+    os.stat, os.lstat, builtins.open and io.open, except a no-follow stat of the path itself (spec 15:
+    that existence probe, used only to refuse, is not a read; the exemption is by KIND, not by count, so
+    a repeated no-follow probe is also unrecorded). The watch is that list, not every access path: an
+    os.access, a DirEntry.stat from a scan of the parent directory, an io.FileIO, an os.chdir, an
+    os.listxattr, an access through a /proc/self/fd or symlink alias of the store root, and a child
+    process are all unseen. A descriptor or dir_fd-relative argument is resolved through its
+    /proc/self/fd link; without that link table the vector cannot evaluate (Harness), never a vacuous
+    pass. Each stand-in joins the capability sets its real call is in (_journal._st_supports), so a
+    containment probe still finds the call."""
     if not Path("/proc/self/fd").is_dir():
         raise Harness("no /proc/self/fd link table to resolve descriptor-relative accesses with")
     legacy = os.path.join(os.path.realpath(str(root)), record.JOURNAL_REL)
@@ -3023,10 +3032,12 @@ def _legacy_journal_access(root, seen):
 
 def t20_homes2_legacy_refused(fx):
     """A legacy .aiqt/record/journal found on a homes-2 store is refused with the exact refusal text, which
-    names the path and the operator's remedy, and is never recovered: every store byte stays unchanged
-    (the T15 leftover lock included), no typed journal home is created, and nothing at or beneath the
-    legacy path is opened, listed, followed or read (_legacy_journal_access): its one access is the
-    no-follow existence probe."""
+    names the path and the operator's remedy, and is never recovered: every byte of the store's working
+    tree outside .git stays unchanged, compared by content and mode bits (snapshot; the T15 leftover
+    lock included), no typed journal home is created, and nothing at or beneath the legacy path is
+    opened, listed, followed or read through the calls _legacy_journal_access wraps: the only access
+    kind exempted is the no-follow existence probe of the path itself (the exemption is by kind, not a
+    count of one)."""
     env = fx.env
     root = fx.case("t20-homes2-legacy")
     proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
@@ -3037,25 +3048,30 @@ def t20_homes2_legacy_refused(fx):
         with _legacy_journal_access(root, seen):
             result = record_cli(env, root, CREATE)
         assert result == (2, "", LEGACY_JOURNAL_REFUSAL), ("T20 the exact refusal text", result)
-        assert seen == [], ("T20 nothing at or beneath the legacy journal is read", seen)
-        assert snapshot(root) == before, "T20 every store byte is unchanged"
+        assert seen == [], ("T20 nothing at or beneath the legacy journal is accessed through the "
+                            "watched calls", seen)
+        assert snapshot(root) == before, "T20 every working-tree byte outside .git is unchanged"
         assert not (Path(root) / ".working/journals").exists(), "T20 no typed journal home is created"
 
 
 def flip_t20():
-    """Probe the generation as 1 (the reviewed head's behaviour): the legacy journal is reconciled in
-    place and .aiqt changes."""
+    """Probe the generation as 1 (the behaviour before this refusal existed): the legacy journal is
+    reconciled in place and .aiqt changes."""
     return patch.object(record, "_probe_homes", lambda ctx: 1)
 
 
 def flip_t20_remedy():
-    """The reviewed head's refusal text, from the same probe: it names the path but no remedy."""
+    """An earlier refusal text, from the same probe: its remedy (reconcile the journal with the homes-1
+    tooling) is one no current tool can carry out, because that tooling refuses a store declaring homes 2
+    before any reconciliation or write. Only the exact-text assertion turns it red."""
     def unremedied(ctx):
         if journal._lstat_contained(ctx.root_fd, record.JOURNAL_REL) is not None:
-            raise record.RecordError("a legacy record journal {} is present on a homes-2 store; it is never "
-                                     "recovered: homes 2 has no homes migration (spec 4.2), and the legacy "
-                                     "journal is left unread and unchanged. Nothing written "
-                                     "(fail-closed)".format(record.JOURNAL_REL))
+            raise record.RecordError("a legacy record journal {0} is present on a homes-2 store. This "
+                                     "tooling never reads, recovers, archives or removes it: homes 2 has "
+                                     "no homes migration (spec 4.2), and on a homes-2 store OPF reads no "
+                                     "artefact from a former .aiqt/ location (spec 15). Remedy: reconcile "
+                                     "{0} with the homes-1 tooling that wrote it, then remove it by hand "
+                                     "and re-run. Nothing written (fail-closed)".format(record.JOURNAL_REL))
     return patch.object(record, "_refuse_legacy_journal", unremedied)
 
 
@@ -3076,8 +3092,8 @@ def flip_t20_read():
 
 def flip_t20_write():
     """A refusal that leaves one store write outside .aiqt behind (a lease file, as a refusal raised after
-    the lease was claimed would), with the exact text and nothing read: only the whole-store snapshot
-    turns it red, where the reviewed head's .aiqt-subtree comparison stayed green."""
+    the lease was claimed would), with the exact text and nothing read: only the working-tree-wide
+    snapshot comparison turns it red, where an .aiqt-subtree comparison stays green."""
     original = record._refuse_legacy_journal
 
     def writing(ctx):

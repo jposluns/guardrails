@@ -133,9 +133,10 @@ _opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_vers
 SUPPORTED_HOMES is 1, every subcommand refuses a store declaring homes 2 before any reconciliation or
 write (_probe_homes), so the shipped verb claims through homes 1 only. A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
-migration to carry it (spec 4.2). The refusal names the path and the operator's remedy (reconcile it
-with the homes-1 tooling that wrote it, then remove it by hand); this tooling only probes, no-follow,
-that the path exists, and never reads, archives or removes it (spec 15).
+migration to carry it (spec 4.2). The refusal names the path and the operator's remedy (a store is at
+homes 2 only when it is created there, spec 4.2, so the journal holds no history of this store: move
+it out of the store by hand, keeping it, and re-run); this tooling only probes, no-follow, that the
+path exists, and never reads, moves, archives or removes it (spec 15).
 
 Exit contract: 0 recorded and doctor-VALID, or carrying only that pending cannot-evaluate (uncommitted);
 2 refusal or cannot-evaluate, with recovery text where the working tree changed. Exit 1 is not used (it
@@ -2132,9 +2133,11 @@ def _reconcile_journal(ctx):
 def _refuse_legacy_journal(ctx):
     """A legacy .aiqt/record/journal present on a homes-2 store is refused and never recovered: homes 2
     has no homes migration to carry it (spec 4.2). The refusal names the path and the remedy, which is
-    the operator's: reconcile the journal with the homes-1 tooling that wrote it, then remove it by
-    hand. The one access is a no-follow existence probe, used only to refuse (spec 15): the journal is
-    never read, archived or removed here."""
+    the operator's and needs no tooling: a store is at homes 2 only when it is created there (spec 4.2),
+    so the journal holds no history of this store; the operator moves it out of the store by hand,
+    keeping it, and re-runs. The only access here is of one kind, the no-follow existence probe of the
+    path itself, used only to refuse (spec 15): the journal is never read, moved, archived or removed
+    here."""
     try:
         st = _journal._lstat_contained(ctx.root_fd, JOURNAL_REL)
     except (_journal.JournalError, OSError) as exc:
@@ -2142,10 +2145,11 @@ def _refuse_legacy_journal(ctx):
             JOURNAL_REL, exc))
     if st is not None:
         raise RecordError("a legacy record journal {0} is present on a homes-2 store. This tooling never "
-                          "reads, recovers, archives or removes it: homes 2 has no homes migration "
+                          "reads, recovers, archives, moves or removes it: homes 2 has no homes migration "
                           "(spec 4.2), and on a homes-2 store OPF reads no artefact from a former .aiqt/ "
-                          "location (spec 15). Remedy: reconcile {0} with the homes-1 tooling that wrote "
-                          "it, then remove it by hand and re-run. Nothing written (fail-closed)".format(
+                          "location (spec 15). A store is at homes 2 only when it is created there "
+                          "(spec 4.2), so {0} holds no history of this store. Remedy: move {0} out of the "
+                          "store by hand, keeping it, and re-run. Nothing written (fail-closed)".format(
                               JOURNAL_REL))
 
 
