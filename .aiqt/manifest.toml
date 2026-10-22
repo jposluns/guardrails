@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a23eb26e0ee04dfa8f437337acd847f50fc49d941e47add0b36bcf77f2f6515b"
+tree-sha256 = "75b0e3abe043f0540379422b38376c4dbf3c8f471dbe46797a6e6d67f95684a5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 429236
-sha256 = "1eea9756246466751326c38561a0949708a6125a43772e515061720232fc0995"
+bytes = 430863
+sha256 = "0d61d888bd86d41e344cb64206dbcc6988e2c0caf4e6690e2eaed69c9088245d"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2686,13 +2686,13 @@ sha256 = "65ee9364396ac733e6717e905aaa50665ab68a091e97b6a82b47b56d3a5129ea"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 983975
-sha256 = "c669ae0f3e40b37d233f5f2d10052ab61feb7fa66c92988cf2e5c34477a5bf94"
+bytes = 991211
+sha256 = "a6c47f28cfcac42eab375ffa8ac18e41fe1bdfd628dfe5d5aa432de99af6d3cc"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
-bytes = 166376
-sha256 = "72131fdf70a716ff4877cc42c3888e1775d4d0f703fab1640abc7b4a326fae79"
+bytes = 170935
+sha256 = "d376dee6bce0179cd18d71221ef80442e243f057df791dfbbe3977a1117d5a05"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_discover.py"
@@ -2716,8 +2716,8 @@ sha256 = "24dc739648f0f51f44a16a57168ab4425ddcd77ad09ce11d28639812f9acfd64"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_state.py"
-bytes = 111142
-sha256 = "6614c7781b10e427ce12f5bf6a1f6ece6c0e17c02b6ac86ceaf82245f573431a"
+bytes = 112601
+sha256 = "29999cf8143546e10ec63bc00b0511dda96a9141235260677b7208a9d58e7617"
 
 [[sources]]
 path = "opf/tools/_opf_changelog.py"
@@ -3051,8 +3051,8 @@ sha256 = "a39fd6b1cdbe2ef8d3a9d6ac55b3cf3ecd40e3cd6777dbc3195bc080403c2df2"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1326178
-sha256 = "30040d5d1002849bd6748c7ad812b7dddb127346f4f04def893f1056f756c717"
+bytes = 1326384
+sha256 = "9ee19d55318638cb3c7ae0c534cd97195d9d79aba0c39ebcc9edca3f33b8dffd"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3831,8 +3831,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 28224
-sha256 = "b4431693fa089b1420e6592fb8a2a39cd4c50013dc374e44248ac925e5cb9df6"
+bytes = 28384
+sha256 = "96cd84fe9b214d904e991b35a221090ad7fda6c7937e53125135f992b675bcc5"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

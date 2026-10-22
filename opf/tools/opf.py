@@ -19984,7 +19984,9 @@ def _cmd_adopt(rest):
       apply --inputs FILE --plan FILE --approval FILE [--root DIR] : the apply stage
           (_opf_adopt_apply.run_apply): admit only a plan whose approval binds it, re-derive it over the
           live tree and its observed revision, then in the run's one journaled base transaction persist the
-          plan and the approval in its evidence bundle, dispatch every plan op in the apply stage and compose
+          plan, the approval and the sealed planning inventory re-derivation reproves (the bytes the plan's
+          inventory_digest binds, which the completion check reads) in its evidence bundle, dispatch every
+          plan op in the apply stage and compose
           the mandatory receipt stage; a non-occupying plan source stays frozen in place for the retirement
           stage. An op or the receipt stage not yet landed refuses the whole apply before anything is
           written, which in this build is every plan. Exit 0: applied
@@ -20167,8 +20169,9 @@ def _cmd_adopt(rest):
                 return EXIT_OK
             approval = _adopt_read_bounded(given["--approval"], "--approval file", _opf_adopt_plan.MAX_FILE_BYTES)
             txn = _opf_adopt_apply.run_apply(root_abs, plan_bytes, approval, doc)
-            print("opf adopt apply: applied in transaction {}; the plan and its approval are in the evidence "
-                  "bundle at {}; completion, then retirement, follow".format(
+            print("opf adopt apply: applied in transaction {}; the plan, its approval and the sealed "
+                  "planning inventory are in the evidence bundle at {}; completion, then retirement, "
+                  "follow".format(
                       txn, _opf_adopt_apply.evidence_home_rel(txn)))
             return EXIT_OK
         except (ValueError, _opf_adopt_apply.AdoptApplyError) as exc:

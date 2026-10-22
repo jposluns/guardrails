@@ -1713,6 +1713,34 @@ def _self_test_checks():
             os.close(cross_fd)
         check("crossing-final-read-reported", crossed is not None and "exceeds" in crossed
               and crossing[0] == -2)
+        # The read ceiling at both ends: the budget refuses only when a read drives it NEGATIVE (never at
+        # zero), so a ceiling of one byte over the call's exact consumption and of exactly it both admit,
+        # and one byte under is cannot-evaluate. The exact consumption is metered on the same tree first
+        # (one budget serves the whole call), so each bound is derived, never guessed.
+        root = tree()
+        spent = [0]
+        real_budgeted = reader._read_budgeted
+
+        def metering(root_fd, rel, budget):
+            held = budget[0]
+            try:
+                return real_budgeted(root_fd, rel, budget)
+            finally:
+                spent[0] += held - budget[0]
+
+        with mock.patch.object(reader, "_read_budgeted", metering):
+            rep = contain(root)
+        exact = spent[0]
+        check("read-ceiling-metered-clean", rep.cannot == [] and exact > 0 and bounded(rep) != [])
+        for label, ceiling, admits in (("one-over", exact + 1, True), ("exact", exact, True),
+                                       ("one-under", exact - 1, False)):
+            with mock.patch.object(reader, "READ_CEILING", ceiling):
+                rep = contain(root)
+            if admits:
+                ok = rep.cannot == [] and bounded(rep) != []
+            else:
+                ok = any("read ceiling" in m for m in rep.cannot)
+            check("read-ceiling-" + label + ("-admits" if admits else "-cannot"), ok)
 
         # S18 (QA rounds 1 and 4): the move row, frozen by the real planner: bounded, drifted and
         # vanished grade exactly as retire does. Before the recorded retirement the plan's Move

@@ -32,7 +32,8 @@ register-unmanaged, repoint-consumer). The stage driver
 adds the plan-v2 apply-input gate, the one approval and the apply stage (spec 14.1): `opf adopt approve`
 re-proves a frozen plan from its own bytes, re-derives it over the live tree and prints the approval
 binding its plan_digest and inventory_digest, writing nothing; `opf adopt apply` admits only that approved
-pair, persists both in the run's evidence bundle within the run's one base transaction, and dispatches
+pair, persists both, beside the sealed planning inventory re-derivation reproves against the plan's
+inventory_digest, in the run's evidence bundle within the run's one base transaction, and dispatches
 every plan op through the table and then the driver's mandatory receipt stage (which mints the
 record-adoption row and assembles the receipt core), so while any plan op or the driver's mandatory
 receipt stage is unlanded, apply refuses before anything is written. Every other op returns a
@@ -375,9 +376,14 @@ OPERATION = "adopt-apply"
 JOURNAL_REL = ".aiqt/adopt/journal"
 # The only plan format apply may take (spec 14.1), the schema's own marker.
 PLAN_V2_FORMAT = schema.PLAN_FORMAT
-# The run's evidence-bundle members apply persists: the approved plan and its captured approval (spec 14.1).
+# The run's evidence-bundle members apply persists: the approved plan, its captured approval and the
+# sealed planning inventory the plan's inventory_digest binds (spec 14.1).
 PLAN_NAME = "plan.toml"
 APPROVAL_NAME = "approval.toml"
+# Not an evidence-inventory name (store.is_evidence_inventory_name), so the persisted copy is a listed
+# bundle member, never read as a bundle-root inventory; `inventory-planning.toml` would match that
+# pattern and be taken for a phase inventory.
+PLANNING_INVENTORY_NAME = "planning-inventory.toml"
 BASE_PHASE = "base"    # the [adoption] identity phase of inventory.toml (spec 4.2)
 # The stage every plan op composes in during apply; the retirement stage follows a green completion check.
 APPLY_STAGE = "apply"
@@ -5223,6 +5229,13 @@ def approval_rel(run_id):
     return evidence_home_rel(run_id) + "/" + APPROVAL_NAME
 
 
+def planning_inventory_rel(run_id):
+    """`<bundle>/planning-inventory.toml`: the sealed planning inventory the plan's inventory_digest binds,
+    which apply persists beside the plan and approval after re-derivation reproves it (rederive_or_refuse);
+    the completion evaluator's check 2 reads this copy (spec 14.1)."""
+    return evidence_home_rel(run_id) + "/" + PLANNING_INVENTORY_NAME
+
+
 def require_clean_journal(product_root):
     """The stage driver's reconcile-first gate for plan, approve and apply alike, read-only: investigation
     does not read the adoption journal, so a stage over an interrupted transaction or a held lock refuses
@@ -5503,7 +5516,11 @@ def rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
     not observed here, so re-derivation proves only that the worksheet still freezes this plan, never that
     the tool release, prompt pack or enforcement pack in use match it; observing them is the trust-verification
     slice's. `worksheet` is the parsed planning worksheet: sources, targets, expected_observation_digest,
-    product, decisions, ops, bindings."""
+    product, decisions, ops, bindings. Returns the sealed planning inventory the re-run planner produced,
+    proved by the completion evaluator's own rule (pop the digest field, re-seal the re-emitted body) to
+    seal its own bytes and to equal the plan's bound inventory_digest, so apply can persist that copy in
+    the run's evidence bundle (check 2 reads it); an inventory that does not seal to the plan refuses
+    before anything is written."""
     import _opf_adopt_plan as planner
     observed = observe_revision(product_root)
     if observed != plan_doc["revision"]:
@@ -5529,6 +5546,26 @@ def rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
         raise AdoptApplyError("re-planning from the worksheet over the live tree freezes a different plan than "
                               "{}: a bound item drifted, so a fresh plan with its own single approval is the "
                               "remedy (spec 14.1, fail-closed)".format(plan_doc["plan_digest"]))
+    inventory_bytes = res.inventory
+    if not isinstance(inventory_bytes, bytes):
+        raise AdoptApplyError("re-planning returned no planning inventory beside the byte-identical plan; "
+                              "apply persists the sealed planning inventory, so it refuses (fail-closed)")
+    inventory_doc = _canonical_toml(inventory_bytes, "the re-derived planning inventory")
+    body = dict(inventory_doc)
+    claimed = body.pop("inventory_digest", None)
+    try:
+        sealed = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
+    except EmitError as exc:
+        raise AdoptApplyError("the re-derived planning inventory cannot be re-sealed ({}); "
+                              "fail-closed".format(exc))
+    if claimed != sealed:
+        raise AdoptApplyError("the re-derived planning inventory's inventory_digest does not seal its own "
+                              "bytes; fail-closed")
+    if claimed != plan_doc["inventory_digest"]:
+        raise AdoptApplyError("the re-derived planning inventory {!r} is not the one the plan binds ({!r}); "
+                              "any bound-item drift refuses into a fresh plan with its own single approval "
+                              "(spec 14.1, fail-closed)".format(claimed, plan_doc["inventory_digest"]))
+    return inventory_bytes
 
 
 def capture_approval(product_root, plan_bytes, worksheet, actor, now):
@@ -5568,8 +5605,9 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     (DRIVER_STAGES), has not landed, so an unlanded step refuses the whole apply fail-closed by
     construction, never half of it.
 
-    Composition is the driver's, and so are its rules. One compose function stages the plan and approval
-    bytes in the run's evidence bundle, dispatches EVERY plan op in plan order in the apply stage, each with
+    Composition is the driver's, and so are its rules. One compose function stages the plan, approval and
+    sealed planning-inventory bytes (the inventory rederive_or_refuse returned, proved to seal to the
+    plan's inventory_digest) in the run's evidence bundle, dispatches EVERY plan op in plan order in the apply stage, each with
     one context table (`ops`, the transaction's ApplyOps; `plan`; `approval`; `product_root`; `stage`), then
     composes the mandatory receipt stage whatever rows the plan carries; the first refusing verdict refuses
     the whole composition. Handlers run under the composition guard (_composing): a handler only stages into
@@ -5596,7 +5634,7 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     run_id = plan_doc["run_id"]
     require_clean_journal(product_root)
     _require_unapplied(product_root, run_id)
-    rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
+    inventory_bytes = rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
     rows = list(plan_doc["ops"])
     unlanded = []
     ops_unlanded = sorted(set(row["op"] for row in rows
@@ -5614,6 +5652,7 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
         with _composing():
             ops.create(plan_rel(run_id), plan_bytes)
             ops.create(approval_rel(run_id), approval_bytes)
+            ops.create(planning_inventory_rel(run_id), inventory_bytes)
             # KNOWN GAP, unreachable in this build: the finish ops read context keys this driver does not
             # supply yet: plant-governance reads `pack` (the release manifest, root.txt and members it
             # verifies), render-views reads `observations` (the inert git observations it renders from),
@@ -10894,7 +10933,15 @@ def _self_test_checks():
 
     def _freeze(root, sheet, nonce="0123456789abcdef"):
         res = planner.plan(root, now=now, run_nonce=nonce, **_copy.deepcopy(sheet))
-        return res.plan if res.status == VALID else None
+        return (res.plan, res.inventory) if res.status == VALID else (None, None)
+
+    def _inventory_seal(data):
+        """The planning inventory's inventory_digest, but only when it seals its own bytes (the evaluator's
+        check-2 rule: pop the digest field, re-seal the re-emitted body); None otherwise."""
+        doc = tomllib.loads(data.decode("utf-8"))
+        body = dict((k, v) for k, v in doc.items() if k != "inventory_digest")
+        sealed = _digest(emit_checked(body).encode("utf-8"))
+        return sealed if doc.get("inventory_digest") == sealed else None
 
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = Path(temp).resolve()
@@ -10903,9 +10950,9 @@ def _self_test_checks():
         head = _selftest_git_commit(root)
         check("driver-fixture-git-revision", head is not None and attempt(observe_revision, root)[0] == head)
         sheet = _sheet(root, head)
-        plan_bytes = _freeze(root, sheet)
-        check("driver-fixture-plan-frozen", plan_bytes is not None)
-        plan_bytes = plan_bytes or b""
+        plan_bytes, inventory_bytes = _freeze(root, sheet)
+        check("driver-fixture-plan-frozen", plan_bytes is not None and inventory_bytes is not None)
+        plan_bytes, inventory_bytes = plan_bytes or b"", inventory_bytes or b""
         plan_doc, _err = attempt(frozen_plan, plan_bytes)
         check("driver-frozen-plan-reproved", isinstance(plan_doc, dict)
               and plan_doc == tomllib.loads(plan_bytes.decode("utf-8")))
@@ -10930,6 +10977,47 @@ def _self_test_checks():
               and approval_doc.get("inventory_digest") == plan_doc.get("inventory_digest")
               and approval_doc.get("approved_at") == "2026-09-17T12:00:00Z")
         check("driver-approve-writes-nothing", _snapshot(root) == before)
+        # re-derivation returns the sealed planning inventory the plan's inventory_digest binds, for apply
+        # to persist in the run's bundle (red if the function returns None again).
+        rederived, err = attempt(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
+        check("rederive-returns-sealed-inventory", err is None and rederived == inventory_bytes
+              and _inventory_seal(inventory_bytes) == plan_doc["inventory_digest"])
+        # the persisted copy's name is a listed bundle member, never an evidence-inventory name (red if
+        # renamed to a name the bundle-root inventory pattern matches).
+        check("planning-inventory-name-is-bundle-member",
+              not store.is_evidence_inventory_name(PLANNING_INVENTORY_NAME)
+              and _evidence_eligible(frid, planning_inventory_rel(frid))
+              and not _bundle_root_inventory(frid, planning_inventory_rel(frid)))
+        # the byte-identical plan beside an inventory that does not seal to the plan's inventory_digest
+        # refuses, in approve's re-derivation and before apply writes anything (red with the plan-binding
+        # comparison removed): the forged inventory seals its own bytes, so only the plan binding refuses it.
+        forged_doc = tomllib.loads(inventory_bytes.decode("utf-8"))
+        forged_doc.pop("inventory_digest", None)
+        forged_doc["decisions"] = list(forged_doc["decisions"]) + [dict(
+            path="zz.md", disposition="keep", actor="forger")]
+        forged = emit_checked(dict(forged_doc, inventory_digest=_digest(
+            emit_checked(forged_doc).encode("utf-8")))).encode("utf-8")
+        fake = planner.AdoptResult(VALID, plan=plan_bytes, inventory=forged)
+        with mock.patch.object(planner, "plan", lambda *a, **k: fake):
+            err_direct = refusal(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
+            err_apply = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("rederive-refuses-inventory-not-sealed-to-plan",
+              "is not the one the plan binds" in (err_direct or "")
+              and "is not the one the plan binds" in (err_apply or "") and _snapshot(root) == before)
+        # the same changed body carrying the plan's APPROVED inventory_digest is caught only by the
+        # self-seal comparison (the kept digest still satisfies the plan binding), so it refuses in
+        # re-derivation, approve and apply, with the tree unchanged (red with only the self-seal
+        # comparison removed).
+        unsealed = emit_checked(dict(forged_doc, inventory_digest=plan_doc["inventory_digest"])).encode("utf-8")
+        fake = planner.AdoptResult(VALID, plan=plan_bytes, inventory=unsealed)
+        with mock.patch.object(planner, "plan", lambda *a, **k: fake):
+            err_direct = refusal(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
+            err_approve = refusal(capture_approval, root, plan_bytes, sheet, "adopter", now)
+            err_apply = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("rederive-refuses-inventory-not-self-sealed",
+              "does not seal its own bytes" in (err_direct or "")
+              and "does not seal its own bytes" in (err_approve or "")
+              and "does not seal its own bytes" in (err_apply or "") and _snapshot(root) == before)
         check("driver-approve-multiline-actor-refused", "actor" in
               (refusal(capture_approval, root, plan_bytes, sheet, "adopter\nsecond", now) or ""))
         # the approval follows its plan: an approval instant before the plan's created_at is refused.
@@ -11004,7 +11092,7 @@ def _self_test_checks():
               and "mandatory receipt stage" in (err or "") and "retire-file" not in (err or "")
               and _bytes(root / "legacy.md") == b"legacy rules\n", observed=err)
         check("driver-apply-unlanded-writes-nothing", _snapshot(root) == before)
-        other_plan = _freeze(root, sheet, nonce="fedcba9876543210") or b""
+        other_plan = _freeze(root, sheet, nonce="fedcba9876543210")[0] or b""
         check("driver-apply-approval-binding-flip-refused", "does not bind" in
               (refusal(run_apply, root, other_plan, approval_bytes, sheet) or ""))
         check("driver-apply-edited-approval-refused", "canonical emitted form" in
@@ -11341,10 +11429,16 @@ def _self_test_checks():
               and _bytes(root / archive_rel(frid, "legacy.md")) == b"legacy rules\n")
         check("driver-apply-persists-plan-and-approval",
               _bytes(root / plan_rel(frid)) == plan_bytes and _bytes(root / approval_rel(frid)) == approval_bytes)
+        # the bundle copy is the planner's own sealed inventory for this worksheet, sealing to the plan's
+        # bound inventory_digest (red without the compose line that persists it).
+        check("driver-apply-persists-plan-approval-and-planning-inventory",
+              _bytes(root / planning_inventory_rel(frid)) == inventory_bytes
+              and _inventory_seal(inventory_bytes) == plan_doc["inventory_digest"])
         bundle_rows = tomllib.loads((_bytes(root / inventory_rel(frid)) or b"").decode("utf-8")).get("file", [])
         check("driver-apply-bundle-verifies", verify_bundle(root, frid).status == VALID
               and sorted(r["path"] for r in bundle_rows)
-              == sorted([plan_rel(frid), approval_rel(frid), archive_rel(frid, "legacy.md")]))
+              == sorted([plan_rel(frid), approval_rel(frid), planning_inventory_rel(frid),
+                         archive_rel(frid, "legacy.md")]))
         # one approval, one apply: the second apply refuses on that rule itself, ahead of the freshness
         # refusal its own first apply would otherwise trigger, with the evidence unchanged.
         applied = _snapshot(root)
