@@ -1074,12 +1074,15 @@ def self_test_main():
                 failures.append("parser overflow: {} expected exit 2 naming {!r}, got {}".format(
                     label, _DEEP_CAUSE, rc))
 
-        # (t) The OPF boundary: a target with a .working component fails closed (exit 2); the OPF deny hook owns
-        #     the store tree and its declared views, so the registry never carries a second view roster.
+        # (t) The OPF boundary: a target with a .working component fails closed (exit 2) NAMING the component
+        #     and the target, so an unrelated exit 2 cannot pass this case; the OPF deny hook owns the store
+        #     tree and its declared views, so the registry never carries a second view roster.
         opfdir = tmp / "opfworking"
         _build_from(opfdir, "gen_selftestopf.py", _FAKE_OPF_WORKING)
-        if run_quiet(opfdir, check=True) != 2:
-            failures.append("a .working target (x/.working/TODO.md) expected exit 2 (OPF boundary)")
+        rc, err = run_stderr(opfdir, check=True)
+        if rc != 2 or ".working component" not in err or "x/.working/TODO.md" not in err:
+            failures.append("a .working target (x/.working/TODO.md) expected exit 2 naming the .working "
+                            "component (OPF boundary), got {} ({!r})".format(rc, err.strip()))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit
