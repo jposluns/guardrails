@@ -860,10 +860,15 @@ _ANSI_C_HEX = "0123456789abcdefABCDEF"
 
 def _decode_ansi_c(s):
     """Decode a bash ANSI-C $'...' body `s` (the text between the quotes, with its backslash escapes still
-    present) to the literal string bash would produce, or None when it holds an escape this does not model
-    (fail closed). Models the named escapes, octal \\nnn, hex \\xHH, Unicode \\uHHHH / \\UHHHHHHHH, and the
-    control \\cX form; a trailing or unknown backslash escape returns None. A code point outside the Unicode
-    range returns None."""
+    present), or None (the cannot-decode result) for any body this scanner cannot be certain it reads as
+    bash does. TOTAL: it never raises, on any input. An escape is decoded ONLY when its result is one
+    printable ASCII character (0x20..0x7E), where bash's byte-oriented expansion and this string scanner
+    agree: the quote-mark escapes (\\\\ \\' \\" \\?) and any octal \\nnn, hex \\xHH or Unicode
+    \\uHHHH / \\UHHHHHHHH escape whose value lands in that range. Everything else is the cannot-decode
+    result: a control escape (\\n, \\t, \\e, the \\cX form, ...), a NUL from any escape form (bash
+    truncates the word there), any value above 0x7E (bash writes bytes, not code points), and a trailing
+    or unknown backslash escape. A literal (unescaped) character is kept as written, since the delimiter
+    line it must match comes from the same command string."""
     out = []
     i, m = 0, len(s)
     while i < m:
@@ -875,27 +880,25 @@ def _decode_ansi_c(s):
         if i + 1 >= m:
             return None  # a trailing backslash: not modelled
         e = s[i + 1]
+        decoded = None
         if e in _ANSI_C_SIMPLE:
-            out.append(_ANSI_C_SIMPLE[e])
+            decoded = _ANSI_C_SIMPLE[e]
             i += 2
-            continue
-        if e == "x":
+        elif e == "x":
             j, h = i + 2, ""
             while j < m and len(h) < 2 and s[j] in _ANSI_C_HEX:
                 h, j = h + s[j], j + 1
             if not h:
                 return None
-            out.append(chr(int(h, 16)))
+            decoded = chr(int(h, 16))
             i = j
-            continue
-        if e in "01234567":
+        elif e in "01234567":
             j, o = i + 1, ""
             while j < m and len(o) < 3 and s[j] in "01234567":
                 o, j = o + s[j], j + 1
-            out.append(chr(int(o, 8) & 0xFF))
+            decoded = chr(int(o, 8) & 0xFF)
             i = j
-            continue
-        if e in "uU":
+        elif e in "uU":
             width = 4 if e == "u" else 8
             j, h = i + 2, ""
             while j < m and len(h) < width and s[j] in _ANSI_C_HEX:
@@ -905,16 +908,13 @@ def _decode_ansi_c(s):
             point = int(h, 16)
             if point > 0x10FFFF:
                 return None  # outside the Unicode range: not a decodable delimiter
-            out.append(chr(point))
+            decoded = chr(point)
             i = j
-            continue
-        if e == "c":
-            if i + 2 >= m:
-                return None
-            out.append(chr(ord(s[i + 2].upper()) ^ 0x40))
-            i += 3
-            continue
-        return None  # an escape this does not model -> fail closed
+        else:
+            return None  # \cX and every other escape this does not model -> cannot decode
+        if not ("\x20" <= decoded <= "\x7e"):
+            return None  # not one printable ASCII character: bash and this scanner may disagree
+        out.append(decoded)
     return "".join(out)
 
 
@@ -926,9 +926,12 @@ def _parse_heredoc_delim(command, at, n, decode_ansi_c=False):
     for the <<- form; `next_i` is the index just past the delimiter spec (still on the same line).
 
     `decode_ansi_c` is for the out-of-scope note scanner ONLY (never the shared in-scope callers, which keep
-    the conservative behaviour below): when True, an ANSI-C $'...' delimiter fragment whose escapes this
-    cannot model fails the whole parse closed, but one it can decode resolves to its literal value, so the
-    body is skipped as data. With it False the ANSI-C branch keeps declining any escaped fragment."""
+    the conservative behaviour below): when True, an ANSI-C $'...' delimiter fragment resolves to its
+    literal value where every escape decodes to one printable ASCII character (_decode_ansi_c), so the body
+    is skipped as data at the real delimiter line; any other escape makes the whole parse return None, which
+    that scanner reports as a delimiter it cannot read with certainty (it emits the note; it never guesses a
+    delimiter or reads the body as code). With it False the ANSI-C branch keeps declining any escaped
+    fragment."""
     j = at
     strip_tabs = False
     if j < n and command[j] == "-":
@@ -995,9 +998,10 @@ def _parse_heredoc_delim(command, at, n, decode_ansi_c=False):
             # remainder as still-executable rather than swallowing it under a guessed delimiter).
             quoted = True
             if decode_ansi_c:
-                # The note scanner decodes the ANSI-C escapes by bash's own rules so the real delimiter
-                # (e.g. $'E\\x4fF' -> EOF) is known and its body is skipped as data; the closing quote is
-                # found honouring \\' and \\\\ so an escaped quote does not end the word early.
+                # The note scanner decodes the escapes that resolve to printable ASCII, where bash and
+                # the scanner agree, so the real delimiter (e.g. $'E\\x4fF' -> EOF) is known and its body
+                # is skipped as data; the closing quote is found honouring \\' and \\\\ so an escaped
+                # quote does not end the word early.
                 k = j + 2
                 while k < n and command[k] != "'":
                     if command[k] == "\\" and k + 1 < n:
@@ -1008,7 +1012,7 @@ def _parse_heredoc_delim(command, at, n, decode_ansi_c=False):
                     return None
                 decoded = _decode_ansi_c(command[j + 2:k])
                 if decoded is None:
-                    return None  # an escape we cannot model -> fail closed (scan the remainder)
+                    return None  # cannot decode: the note scanner notes rather than guess a delimiter
                 delim_chars.append(decoded)
                 j = k + 1
                 continue
@@ -13537,7 +13541,9 @@ def _orch_skip_redirect(command, i, n):
     begins at index i, return the index just past its target operand; else None. bash removes a redirect
     from the argument list, so an option scan passes over it. A `<<` here-document opener is not a
     one-word-target redirect and returns None; a target that is not a plain word (an expansion, a quote)
-    returns None as well, so the caller keeps its conservative reading there."""
+    returns None as well, so the caller keeps its conservative reading there. An fd prefix is accepted
+    only before an operator bash takes it for: `&>` and `&>>` never take one (bash reads `2&>f` as the
+    word `2` followed by `&>f`), so a prefixed `&>` returns None and the prefix is read as a word."""
     j = i
     pre = _ORCH_NOTE_IO_PREFIX_RE.match(command, j)
     if pre is not None:
@@ -13549,6 +13555,8 @@ def _orch_skip_redirect(command, i, n):
             break
     if op is None or (op == "<" and command.startswith("<<", j)):
         return None
+    if pre is not None and op.startswith("&"):
+        return None  # bash accepts no fd prefix before `&>` or `&>>`: the prefix is a word
     j += len(op)
     while j < n and command[j] in " \t":
         j += 1
@@ -13601,9 +13609,15 @@ def _orch_arith_closes(command):
 
 def _orch_skip_param_expansion(command, i, n):
     """Given index i at the `$` of a `${...}` parameter expansion, return the index just past the `}` that
-    closes it, or None when it is not closed. A nested `${...}` or `{...}` raises the depth, and a single-
-    or double-quoted span inside is passed over so a `}` in quotes does not close it. Used to consume a
-    parameter expansion as ONE word so a blank inside it (a `${x:-a b}` default) does not end the operand."""
+    closes it, or None when the expansion cannot be read with certainty as data, which the note scanner
+    reports by emitting the note (never by guessing at the remainder). None covers an expansion that is
+    never closed (a quote or the expansion itself left open), and one holding a `$(` or a backtick outside
+    single quotes (bash runs that command substitution even inside a redirect target, so the span is not
+    data; inside single quotes it is literal and stays skipped). Only a nested `${` raises the depth: a
+    literal `{` in a default does not open anything to bash, whose expansion ends at the matching unquoted
+    `}` regardless (so `${x:-{ b}` closes at the first `}`); a single- or double-quoted span inside is
+    passed over so a `}` in quotes does not close it. Used to consume a parameter expansion as ONE word so
+    a blank inside it (a `${x:-a b}` default) does not end the operand."""
     depth = 1
     j = i + 2
     while j < n:
@@ -13620,6 +13634,8 @@ def _orch_skip_param_expansion(command, i, n):
                 if command[j] == "\\" and j + 1 < n:
                     j += 2
                     continue
+                if command[j] == "`" or (command[j] == "$" and j + 1 < n and command[j + 1] == "("):
+                    return None  # a substitution runs inside double quotes too: not readable as data
                 j += 1
             if j >= n:
                 return None
@@ -13628,9 +13644,16 @@ def _orch_skip_param_expansion(command, i, n):
         if c == "\\" and j + 1 < n:
             j += 2
             continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
+        if c == "`":
+            return None  # a backtick command substitution runs here: not readable as data
+        if c == "$" and j + 1 < n:
+            if command[j + 1] == "(":
+                return None  # a `$(...)` command substitution runs here: not readable as data
+            if command[j + 1] == "{":
+                depth += 1
+                j += 2
+                continue
+        if c == "}":
             depth -= 1
             if depth == 0:
                 return j + 1
@@ -13643,9 +13666,12 @@ def _orch_note_scan(command, bash_word_starts):
     as _orch_foreground_scan does (bash_word_starts selects the same comment rule), and adds four things
     that scan does not model. A here-document body opened at the outer quoting level is skipped as data,
     quoted delimiter or not, so an `&` or an apostrophe in it neither notes nor shifts the quote state;
-    an ANSI-C ($'...') delimiter is decoded by bash's own escapes (_parse_heredoc_delim(decode_ansi_c)), so
-    a <<$'E\\x4fF' body is skipped at the real EOF line, except for an escape this does not decode, which
-    fails closed and reads that body as code; one opened inside a double-quoted command substitution (the
+    an ANSI-C ($'...') delimiter is decoded where every escape resolves to one printable ASCII character
+    (_parse_heredoc_delim(decode_ansi_c), via _decode_ansi_c), so a <<$'E\\x4fF' body is skipped at the
+    real EOF line, while a delimiter this cannot read with certainty (an escape it cannot decode - a
+    control escape, a NUL, a byte above 0x7F, an unknown form - a quote left open, or no delimiter word at
+    all) returns "unreadable", so the note is emitted rather than guessing where the body ends or reading
+    the remainder as code; one opened inside a double-quoted command substitution (the
     commit-message form) is NOT recognized and is read as double-quoted text, whose own double quotes
     toggle that reading, so a body `&` there can draw an extra note. An arithmetic expansion $(( ... )) or
     arithmetic command (( ... )) is skipped, so a bitwise `&` in it does not note; it counts as arithmetic
@@ -13654,7 +13680,10 @@ def _orch_note_scan(command, bash_word_starts):
     position (next_command), so a leading `2> /dev/null` does not hide the command word after its target
     and a spaced redirect target named like a detacher is not read as one; a target that begins with a
     `${...}` parameter expansion is consumed as one word (_orch_skip_param_expansion), so a blank inside a
-    `${x:-a b}` default does not split a word out of the operand nor expose a following detacher. The same
+    `${x:-a b}` default does not split a word out of the operand nor expose a following detacher (a
+    literal `{` in the default does not nest: the expansion ends at its matching `}` as in bash), while
+    one that cannot be read with certainty as data (left unclosed, or holding a `$(` or backtick command
+    substitution, which bash runs even in a redirect target) returns "unreadable" and notes. The same
     holds for a here-string `<<<`, whose word is a redirect target and never a here-document delimiter, for
     the noclobber redirect `>|`, read as one operator and not as a redirect then a pipe, and for a named
     descriptor written directly before its operator ({fd}> file). A setsid, nohup or disown in command
@@ -13671,10 +13700,12 @@ def _orch_note_scan(command, bash_word_starts):
     splits a word; and a setsid whose wait option sits behind a redirect target that is not a plain word
     (an expansion or a quoted word) reads the redirect as the end of the options, so setsid is noted.
 
-    Returns "detach" when it meets a bare `&` control operator, else the first such command word it met
-    (setsid, nohup or disown), else None. A scan that ends inside an open quote returns the same, never a
-    separate kind: outside registry scope that case stays silent. The in-scope deny does not use this scan;
-    it keeps _orch_foreground_detach_kind."""
+    Returns "detach" when it meets a bare `&` control operator, "unreadable" the moment it meets a span it
+    would skip but cannot read with certainty (the here-document and `${...}` redirect-target cases above;
+    everything past that point is unknown, so the note is emitted unconditionally), else the first such
+    command word it met (setsid, nohup or disown), else None. A scan that ends inside an open quote returns
+    the same, never a separate kind: outside registry scope that case stays silent. The in-scope deny does
+    not use this scan; it keeps _orch_foreground_detach_kind."""
     in_single = in_double = escaped = False
     prev_dup = False
     redirect_target = False  # between a redirect operator and the start of its target operand
@@ -13711,12 +13742,16 @@ def _orch_note_scan(command, bash_word_starts):
             if ch == "$" and i + 1 < n and command[i + 1] == "{":
                 # The operand begins with a `${...}` parameter expansion: bash parses it as ONE word, so
                 # consume the whole expansion (its inner blanks do not end the operand nor restore the
-                # pending command position) rather than letting a `${x:-a b}` split a word out of it.
+                # pending command position) rather than letting a `${x:-a b}` split a word out of it. One
+                # that cannot be read with certainty as data (left unclosed, or holding a `$(` or backtick
+                # command substitution, which runs even in a redirect target) draws the note: the scan
+                # never reads the remainder as code to decide silence.
                 end = _orch_skip_param_expansion(command, i, n)
-                if end is not None:
-                    prev_dup, word_start = False, False
-                    i = end
-                    continue
+                if end is None:
+                    return "unreadable"
+                prev_dup, word_start = False, False
+                i = end
+                continue
         if ch == "#" and word_start:
             nl = command.find("\n", i)
             if nl == -1:
@@ -13783,12 +13818,16 @@ def _orch_note_scan(command, bash_word_starts):
         if (ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i)
                 and not (prev_dup and command[i - 1] == "<")):  # the `<<` that ends a `<<<` opens nothing
             parsed = _parse_heredoc_delim(command, i + 2, n, decode_ansi_c=True)
-            if parsed is not None:
-                heredocs.append((parsed[1], parsed[2]))
-                prev_dup, word_start = False, False
-                command_position = False
-                i = parsed[3]
-                continue
+            if parsed is None:
+                # A here-document delimiter this scan cannot read with certainty (an ANSI-C escape it
+                # cannot decode, a quote left open, no delimiter word at all) draws the note: where the
+                # body ends is unknown, so the scan never reads the remainder as code to decide silence.
+                return "unreadable"
+            heredocs.append((parsed[1], parsed[2]))
+            prev_dup, word_start = False, False
+            command_position = False
+            i = parsed[3]
+            continue
         if command_position:
             match = _ORCH_NOTE_WORD_RE.match(command, i)
             if match is not None:
@@ -13834,8 +13873,9 @@ def _orch_note_scan(command, bash_word_starts):
 
 def _orch_foreground_note_kind(command):
     """What the note outside registry scope names for a foreground command: "detach" when either `#`
-    comment rule (_orch_note_scan) meets a bare `&`, else the first setsid, nohup or disown command word
-    either rule met, else None."""
+    comment rule (_orch_note_scan) meets a bare `&`, else the first kind either rule met ("unreadable"
+    for a skipped span it could not read with certainty, or a setsid, nohup or disown command word), else
+    None. Any non-None kind draws the note; none of them ever blocks."""
     kinds = (_orch_note_scan(command, False), _orch_note_scan(command, True))
     if "detach" in kinds:
         return "detach"
@@ -14384,7 +14424,10 @@ def orch_truncation_guard(data):
     unreadable, or invalid keeps it active. OUT-OF-SCOPE NOTE: in that no-registry case a readable
     foreground command (run_in_background false or omitted, command a string) that detaches work, by a
     bare `&` or by a setsid (without -w), nohup or disown command (_orch_foreground_note_kind, a scan that
-    also skips outer-level here-document bodies, arithmetic and redirect operands), is allowed WITH A NOTE naming the tracked background
+    also skips outer-level here-document bodies, arithmetic and redirect operands), and one whose scan met
+    a span it would skip but cannot read with certainty (a here-document delimiter it cannot decode or
+    parse, or a `${...}` redirect target left unclosed or holding a command substitution), is allowed WITH
+    A NOTE naming the tracked background
     mechanism; every other call there is the silent allow, malformed input included. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
     off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
@@ -14476,9 +14519,10 @@ def orch_truncation_guard(data):
                 "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
                 "registry found (rule trkasy, fail-closed).")
         # Not an orchestrated session: no registry on the chain or at a git toplevel. A readable foreground
-        # command that detaches work (a bare `&`, or a setsid, nohup or disown command) is allowed WITH A
-        # NOTE naming the tracked background mechanism; every other call, malformed input included, is the
-        # silent allow it always was here (no new fail-closed case outside registry scope).
+        # command that detaches work (a bare `&`, or a setsid, nohup or disown command), or one whose scan
+        # met a skipped span it cannot read with certainty (so a detach cannot be ruled out), is allowed
+        # WITH A NOTE naming the tracked background mechanism; every other call, malformed input included,
+        # is the silent allow it always was here (no new fail-closed case outside registry scope).
         out_input = data.get("tool_input")
         out_command = out_input.get("command") if isinstance(out_input, dict) else None
         if (not isinstance(out_command, str)
@@ -14487,9 +14531,15 @@ def orch_truncation_guard(data):
         note_kind = _orch_foreground_note_kind(out_command)
         if note_kind is None:
             return _allow()
-        what = ("detaches a child with a bare '&', so the work runs on after this call returns"
-                if note_kind == "detach" else "runs {}, which {}".format(
-                    note_kind, _ORCH_DETACH_WORD_EFFECTS[note_kind]))
+        if note_kind == "detach":
+            what = "detaches a child with a bare '&', so the work runs on after this call returns"
+        elif note_kind == "unreadable":
+            what = ("holds a here-document delimiter or a redirect target this guard cannot read with "
+                    "certainty (an escape it cannot decode, a command substitution inside the skipped "
+                    "span, or an unclosed expansion), so work that detaches and runs on after this call "
+                    "returns cannot be ruled out")
+        else:
+            what = "runs {}, which {}".format(note_kind, _ORCH_DETACH_WORD_EFFECTS[note_kind])
         return _allow_note(
             "AIQT guardrail (note, rule trkasy): this foreground command {}; its result and failure are not "
             "collected unless something tracks them. No orchestration registry scopes this session, so this "
