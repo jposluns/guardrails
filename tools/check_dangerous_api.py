@@ -500,8 +500,10 @@ ALLOWLIST = (
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_mistakes_register.py", "self_test", "shell", 2,
      _SAVED + " (the saved real runs the git cat-file fault injectors delegate to and restore)"),
-    ("tools/orch_register.py", "self_test", "shell", 1,
-     _SAVED + " (the saved real run the git cat-file fault injector delegates to and restores)"),
+    ("tools/orch_register.py", "self_test", "shell", 3,
+     _SAVED + " (the saved real run the git cat-file fault injector delegates to and restores);"
+     " the descriptor fault vector's two setattr calls on os patch, then restore in a finally,"
+     " one name from its own fixed literal tuple (read, fstat, close); never runs a shell"),
     ("tools/gen_hooks.py", "self_test_main", "shell", 1,
      _SAVED + " (the saved real Popen the spawn-failure vector restores after patching)"),
     ("tools/gen_hooks.py", "self_test_main._communicate_fault_case", "shell", 3,

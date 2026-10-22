@@ -32,7 +32,16 @@
       is refused at write time instead of reaching CI. A violation (an illegal transition, an
       unknown status, a wrong-family id, a landed row without an existing --commit and --check-ref)
       exits 1; a context or authority the appender cannot evaluate (an unreadable register or
-      register descriptor, a symlinked register path, an appender installed outside any git
+      register descriptor, a symlinked register path, a register path that is not a regular
+      file (a FIFO, a device or a socket: the register open is NON-BLOCKING, so
+      no file type can make the open wait, and the opened descriptor's own fstat decides
+      before any lock or read, because on Linux a read-write open of a FIFO succeeds while a
+      read through that descriptor can wait forever; a directory is refused by the open
+      itself (EISDIR, before any descriptor exists), and a socket, which that open cannot
+      address at all (ENXIO, before any descriptor exists), is refused with its type named
+      from the path's own lstat, a point-in-time read taken only for the message; the
+      non-blocking flag is cleared once
+      the file is proven regular), an appender installed outside any git
       repository, a gate root git itself does not confirm as a repository toplevel (an invalid
       gitfile, an empty .git directory or a dangling .git symlink is a marker, not a
       repository, selected by the shared lstat marker walk and never walked past, and a marker
@@ -44,12 +53,21 @@
       self-test's probe and authority reads keep reading no system or global configuration),
       so a caller-supplied GIT_DIR, GIT_WORK_TREE
       or GIT_INDEX_FILE never redirects them), a registry entry or declared register path whose inspection fails with
-      anything but ENOENT (only confirmed absence reads as absent), a non-string or empty
+      anything but a CONFIRMED ENOENT (only absence confirmed at the final name under a
+      parent that opens, or down a chain of such confirmations, reads as absent; a dangling
+      symbolic link at a declared path is refused by name), a registry that is not
+      a regular file (the registry is read through the same non-blocking open and
+      regular-file proof as the register, so a FIFO, a directory, a device or a socket at
+      the registry path is refused with its named file type, never read and never blocked
+      on), a non-string or empty
       registry declaration, a
       path no registry declaration names, conflicting declarations resolving to one path, a git
       failure deciding whether the register is tracked, no computable merge-base for a tracked
-      register, a malformed or unusable anchor entry, a dangling symlink and an anchor lstat
-      failure that is not ENOENT included, an untracked register with no anchor on an ordinary
+      register, a malformed or unusable anchor entry, a dangling symlink, an anchor lstat
+      failure that is not ENOENT and an anchor path whose own chain cannot confirm the
+      absence included (an anchor under a register directory this first row is yet to
+      create reads as absent only because every missing component is itself a confirmed
+      ENOENT), an untracked register with no anchor on an ordinary
       append, a landed row's commit read that git cannot launch or that times out, a register
       directory that cannot be created, a lock that cannot be acquired, a commit step that
       fails) exits 2; each
@@ -140,6 +158,21 @@
       landed, as granted open items, so the stop guard itself enforces mistake-to-guardrail
       follow-through. A registry can name this as (part of) its enumerator. An attestation register
       is evidence, never backlog: project the mistakes register, not the attestations file.
+      The projection reads through the same non-blocking open and descriptor file-type check
+      as the appender: a register that is not a regular file is refused with exit 2 and a
+      diagnostic naming the file type (a socket, which the open cannot address at all, is
+      named from a following stat, so a symlink to a socket is named as a socket), never
+      read and never blocked on, and any OTHER open, descriptor, path-value or decode
+      failure is refused with exit 2 naming the error, never an escaped traceback. An
+      absent register still projects as no items, where absent means an open ENOENT
+      CONFIRMED at the final name (re-inspected without following links, under a parent
+      that opens): a dangling symbolic link at the register path, a register path under a
+      missing parent directory, or any other unresolvable path is exit 2 naming the
+      cause, and a descriptor failure after a successful open is exit 2, never a
+      successful empty projection. A register line that is not JSON, or whose row is not
+      a JSON object with a string id, is refused with exit 2 as well, and so is a row
+      whose decoded value is still too deep to format into the enumeration. The path is
+      still followed, so a symlink to a regular register projects as before.
   orch_register.py --self-test
       Synthetic fixtures for the write-time validation: each refusal vector leaves the register
       and its anchor byte-identical (the first-row cleanup and left-in-place vectors assert
@@ -186,8 +219,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_mistakes_register import (  # noqa: E402
-    REGISTRY_FILES, CannotEvaluate, confirmed_root, entry_state, gate_root, update_anchor,
-    verify_append_only, verify_lines)
+    REGISTRY_FILES, CannotEvaluate, _absent_down_chain, _nonregular_name, _read_following,
+    confirmed_root, entry_state, gate_root, update_anchor, verify_append_only, verify_lines)
 
 ZERO = "0" * 64
 # how many times an append starts over because a cooperating appender replaced the register
@@ -196,17 +229,42 @@ LOCK_WAITS = 16
 
 
 def _lines(path):
+    """The register's decoded lines, read without blocking through the shared
+    check_mistakes_register._read_following (a non-blocking open whose OPENED descriptor's
+    own fstat must prove a regular file before anything is read; a directory, a FIFO or a
+    device is never a register, and a socket, which that open cannot address at all, is
+    named from a following stat taken only for the message). Raises CannotEvaluate naming
+    the file type for anything that is not a regular file (or naming the descriptor
+    instead, when the refusal's own close also fails: the close's OSError takes over, so
+    the message changes but the result stays CannotEvaluate), and naming the error for any
+    other open, descriptor, path-value or decode failure, so no OSError or ValueError
+    escapes to the caller as a traceback. ONLY an open ENOENT that the shared reader
+    CONFIRMS at the final name (a no-follow re-inspection under a parent that opens) reads
+    as an absent register (no lines): a dangling symbolic link at the register path, a
+    register path under a missing parent directory, or any other unresolvable path raises
+    CannotEvaluate naming the cause, and the shared reader converts every OSError after a
+    successful open (from fstat, read or close) to CannotEvaluate, so a descriptor failure
+    reporting ENOENT is exit 2 for the caller, never a successful empty projection. The
+    path is followed as before, so a symlink to a regular register still reads; what it
+    aliases is still type-checked."""
     try:
-        return path.read_text(encoding="utf-8").splitlines()
+        raw = _read_following(path, "the register path")
     except FileNotFoundError:
         return []
+    except (OSError, ValueError) as exc:
+        raise CannotEvaluate("the register cannot be read ({})".format(exc))
+    try:
+        return raw.decode("utf-8").splitlines()
+    except ValueError as exc:
+        raise CannotEvaluate("the register cannot be read ({})".format(exc))
 
 
 def _gate_root():
     """The register gate's own validation-root CANDIDATE: the nearest enclosing .git entry
     above this appender's own installed location, through the SHARED
     check_mistakes_register.gate_root walk (entry_state: an explicit lstat whose only absence
-    answer is ENOENT, so a dangling .git symlink is SELECTED, never walked past, and left for
+    answer is a CONFIRMED ENOENT, so a dangling .git symlink is SELECTED, never walked past,
+    and left for
     the git confirmation to refuse, and any other inspection failure raises CannotEvaluate,
     never reads as absence). The gate validates a DECLARED register against THIS root, not
     against the repository that happens to contain the register. This resolver has NO cwd
@@ -222,15 +280,28 @@ def _gate_root():
 def _declared_family(root, path):
     """The (registry key, id family) of the declaration that names this register path. Raises
     CannotEvaluate when there is no registry, the registry cannot be inspected or read
-    (registry PRESENCE is an explicit lstat whose only absence answer is ENOENT, so an
-    inspection failure or a dangling entry never selects the lower-priority registry file), a
+    (registry PRESENCE is an explicit lstat whose only absence answer is a confirmed ENOENT,
+    so an
+    inspection failure or a dangling entry never selects the lower-priority registry file;
+    the read itself goes through the shared non-blocking open and regular-file proof, so a
+    registry that is a FIFO, a directory, a device or a socket is refused with its named
+    file type, never read and never blocked on), a
     declaration is not a non-empty string, no declaration names the path, a declared path's
-    file identity cannot be inspected (only confirmed absence, ENOENT, omits an identity from
-    the hard-link conflict check: an unreadable identity is never a missing identity), or two
+    file identity cannot be inspected (only a path CONFIRMED absent, every missing component
+    a plain ENOENT under a parent that opens, omits an identity from
+    the hard-link conflict check: an unreadable identity is never a missing identity, and a
+    dangling symbolic link at a declared path is refused by name, never read as absent), or two
     declarations resolve to the same register path (the declared id family is then ambiguous,
     so there is no single gate context to validate in): the register gate evaluates declared
     surfaces only. RESIDUAL: the identity comparison is point-in-time; a hard link created
-    after this check is not caught here and is left to the register gate."""
+    after this check is not caught here and is left to the register gate. RESIDUAL: the
+    named too-deeply-nested refusal below covers this appender's own registry read (the
+    register gate and the record-drift gate carry their own); the hook script
+    (aiqt_hooks.py) reads the registry and the register anchor catching ValueError only,
+    so a registry or anchor nested too deeply for the JSON decoder there (a
+    RecursionError) is handled by that script's top-level dispatcher handler, which fails
+    closed in blocking modes and warns in fail-open modes, never by a named per-read
+    refusal."""
     registry = None
     found = False
     for rel in REGISTRY_FILES:
@@ -244,8 +315,19 @@ def _declared_family(root, path):
         if candidate_entry is None:
             continue  # confirmed absence: the next registry file may still be present
         found = True
+        # The registry is read like the register itself: a non-blocking open whose opened
+        # descriptor must prove a regular file, so a FIFO (or any other non-regular file)
+        # at the registry path is refused by name instead of blocking the appender; a
+        # non-regular registry raises with its named file type, and any other read failure
+        # keeps this clause's own wording.
         try:
-            registry = json.loads(candidate.read_text(encoding="utf-8"))
+            registry = json.loads(_read_following(
+                candidate, "the orchestration registry").decode("utf-8"))
+        except RecursionError:
+            # the decoder raises RecursionError, not ValueError, past its nesting limit;
+            # a registry that deep is the same named refusal, never an escaped traceback
+            raise CannotEvaluate("the orchestration registry is nested too deeply for the "
+                                 "JSON decoder")
         except (OSError, ValueError) as exc:
             raise CannotEvaluate("the orchestration registry cannot be read ({})".format(exc))
         break
@@ -274,7 +356,18 @@ def _declared_family(root, path):
             declared_stat = os.stat(str(declared_path))
             identities.append((declared_stat.st_dev, declared_stat.st_ino))
         except FileNotFoundError:
-            pass  # confirmed absence: an absent declared path has no identity to collide on
+            # the stat follows the path, so its ENOENT also covers a dangling symbolic
+            # link and a missing parent chain: only a declared path CONFIRMED absent
+            # (every missing component a plain ENOENT under a parent that opens, the
+            # state a first append into a directory it is yet to create legitimately
+            # sees) has no identity to collide on; a dangling link at the declared path,
+            # or any other unresolvable path, is a named refusal, never an absent
+            # register
+            if not _absent_down_chain(declared_path):
+                raise CannotEvaluate("the declared {} path names a dangling symbolic link "
+                                     "(an entry is present at its final name but it does "
+                                     "not resolve to a file); an unresolvable register "
+                                     "path is never read as absent".format(key))
         except OSError as exc:
             raise CannotEvaluate("the declared {} path cannot be inspected ({}); only "
                                  "confirmed absence (ENOENT) omits a file identity from the "
@@ -696,8 +789,9 @@ def _dirs_created(parent):
     creation cannot substitute another tree's entry for the identity read-back. The deepest
     EXISTING ancestor is opened O_RDONLY (a parent that is searchable but not readable
     refuses here rather than creating blind) and the walk descends O_NOFOLLOW, one component
-    at a time. The absence walk inspects each ancestor through the shared entry_state (ENOENT
-    is the only absence), so an UNINSPECTABLE ancestor refuses BEFORE any mkdir runs. A
+    at a time. The absence walk inspects each ancestor through the shared entry_state (a
+    CONFIRMED ENOENT is the only absence), so an UNINSPECTABLE ancestor refuses BEFORE any
+    mkdir runs. A
     component that appears between the walk and its mkdir (FileExistsError) is another
     actor's directory: used for the descent, never recorded. DISCLOSED RESIDUAL: POSIX offers
     no race-free proof that the directory found at a name is the one mkdir just made, so the
@@ -897,11 +991,16 @@ def cmd_append(a, _waits=0):
     tmp_fd = -1
     created = False
     made_dirs = []
+    landed_seq = None
+    retried = False
+    escaping = False
     try:
         try:
             # read-write though the commit never writes through it, so a register this caller
-            # may not write is refused here rather than replaced by the commit's rename
-            fd = os.open(str(path), os.O_RDWR | os.O_NOFOLLOW)
+            # may not write is refused here rather than replaced by the commit's rename; the
+            # open is non-blocking so no file type can make the open itself wait, and the
+            # file-type check on the opened descriptor below decides what was opened
+            fd = os.open(str(path), os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
             fd = -1
         except OSError as exc:
@@ -910,10 +1009,53 @@ def cmd_append(a, _waits=0):
                       "validated text to one file identity, so an aliased path is never "
                       "followed; nothing written", file=sys.stderr)
                 return 2
+            if exc.errno == errno.EISDIR:
+                print("append: refused, the register path names a directory, not a regular "
+                      "file; nothing written", file=sys.stderr)
+                return 2
+            if exc.errno == errno.ENXIO:
+                # on Linux this open cannot address a socket (or a device node no driver
+                # backs) at all: ENXIO arrives before any descriptor exists, so the refusal
+                # names the type from the path's own lstat, a point-in-time read taken only
+                # for the message, never as a proof about an opened descriptor
+                try:
+                    mode = os.lstat(str(path)).st_mode
+                except OSError:
+                    mode = None
+                if mode is not None and not stat.S_ISREG(mode):
+                    print("append: refused, the register path names {}, not a regular file "
+                          "(the non-blocking open cannot address it, so it was never "
+                          "opened, locked or read); nothing written".format(
+                              _nonregular_name(mode)), file=sys.stderr)
+                    return 2
             print("append: refused, the register cannot be read ({}); nothing written".format(
                 exc), file=sys.stderr)
             return 2
         if fd >= 0:
+            # Refuse a non-regular register BEFORE locking or reading: on Linux a read-write
+            # open of a FIFO succeeds and a read through that descriptor can wait forever
+            # (the descriptor itself holds the write end), so only the opened descriptor's
+            # own file type decides.
+            try:
+                st_opened = os.fstat(fd)
+            except OSError as exc:
+                print("append: refused, the register cannot be inspected through its open "
+                      "descriptor ({}); nothing written".format(exc), file=sys.stderr)
+                return 2
+            if not stat.S_ISREG(st_opened.st_mode):
+                print("append: refused, the register path names {}, not a regular file; "
+                      "nothing written".format(_nonregular_name(st_opened.st_mode)),
+                      file=sys.stderr)
+                return 2
+            # the descriptor was opened non-blocking only so the open and the check above
+            # could not wait; the proven-regular file now reads with normal semantics
+            try:
+                fcntl.fcntl(fd, fcntl.F_SETFL,
+                            fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+            except OSError as exc:
+                print("append: refused, the register descriptor's non-blocking flag cannot "
+                      "be cleared ({}); nothing written".format(exc), file=sys.stderr)
+                return 2
             # Serialize cooperating appenders: the exclusive lock is held from before the read
             # until the commit lands (or the refusal returns), so two appends through this tool
             # cannot interleave between the read, the validation and the commit.
@@ -939,6 +1081,7 @@ def cmd_append(a, _waits=0):
             if st_named is None or (st_locked.st_dev, st_locked.st_ino) != \
                     (st_named.st_dev, st_named.st_ino):
                 if _waits < LOCK_WAITS:
+                    retried = True
                     return cmd_append(a, _waits + 1)
                 print("append: refused, the register was replaced {} times while this call "
                       "waited for its lock; nothing written".format(_waits + 1),
@@ -1094,6 +1237,7 @@ def cmd_append(a, _waits=0):
             return 2
         # The rename has landed: the row is in the register. What follows cannot undo it, so
         # a failure here exits 2 saying the row is in place.
+        landed_seq = seq
         notes = []
         sync_note = _dir_synced(path.parent)
         if sync_note is not None:
@@ -1114,29 +1258,109 @@ def cmd_append(a, _waits=0):
         else:
             print("appended {} seq {}".format(a.id, seq))
         return 0
+    except BaseException:
+        # whether an exception is escaping THIS append is tracked explicitly: ambient
+        # exception state (sys.exc_info) would also see an exception a CALLER is already
+        # handling around this call, and the close failure below would then print its
+        # report but return the body's own verdict (success included) instead of exit 2
+        escaping = True
+        raise
     finally:
+        # A close failure here is NAMED on stderr and the call exits 2, never an escaped
+        # OSError: each owned descriptor's close is attempted exactly once (Linux
+        # releases the number even when close reports a failure), the failure is reported
+        # beside whatever verdict was in flight, and only when no exception is escaping
+        # this append's own body (tracked above, never read from ambient state) does the
+        # close failure replace the verdict. A row this call landed was already written
+        # and fsynced before this point, so the message then says the row is in the
+        # register; only an append that landed nothing is called refused.
+        close_failures = []
         if tmp_fd >= 0:
-            os.close(tmp_fd)
+            try:
+                os.close(tmp_fd)
+            except OSError as exc:
+                close_failures.append("the commit temporary's descriptor could not be "
+                                      "closed ({})".format(exc))
         if fd >= 0:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError as exc:
+                close_failures.append("the register descriptor could not be closed "
+                                      "({})".format(exc))
+        if close_failures:
+            if landed_seq is not None:
+                print("append: {} seq {} was appended and is in the register, but {}".format(
+                    a.id, landed_seq, "; ".join(close_failures)), file=sys.stderr)
+            elif retried:
+                # the retried append's verdict is only ABOVE this line when that call
+                # RETURNED; a retried call that raised (the next-id refusal included) is
+                # still unwinding through this finally, so its verdict is reported after
+                # this line, wherever that exception is handled
+                print("append: {} (the descriptor belonged to this call's superseded "
+                      "lock-wait attempt; {})".format(
+                          "; ".join(close_failures),
+                          "the retried append raised instead of returning, so its "
+                          "verdict is carried by that still unwinding exception and "
+                          "is reported after this line" if escaping else
+                          "the retried append reported its own verdict above"),
+                      file=sys.stderr)
+            else:
+                print("append: refused, {}".format("; ".join(close_failures)),
+                      file=sys.stderr)
+            if not escaping:
+                raise SystemExit(2)
 
 
 def cmd_project(a):
     latest = {}
-    for line in _lines(Path(a.register)):
+    try:
+        reg_lines = _lines(Path(a.register))
+    except CannotEvaluate as exc:
+        print("project: refused, {}; the projection reads a regular file only, and its open "
+              "never blocks on the file type".format(exc), file=sys.stderr)
+        return 2
+    # Rows the projection cannot parse or shape are refused like its read failures (exit 2
+    # on stderr), never an escaped traceback and never a partial enumeration: a non-object
+    # row has no fields to project, a non-string id would make the sorted enumeration
+    # below compare incomparable keys, and a line nested too deeply for the JSON decoder
+    # (which raises RecursionError, not ValueError) is a parse failure like any other.
+    for line in reg_lines:
         try:
             row = json.loads(line)
+        except RecursionError:
+            print("project: refused, a register line is nested too deeply for the JSON "
+                  "decoder (run check_mistakes_register.py); the projection never guesses "
+                  "at a row it cannot parse", file=sys.stderr)
+            return 2
         except ValueError:
-            sys.exit("project: malformed register line (run check_mistakes_register.py)")
-        latest[row.get("id")] = row
+            print("project: refused, a register line is not JSON (run "
+                  "check_mistakes_register.py); the projection never guesses at a row it "
+                  "cannot parse", file=sys.stderr)
+            return 2
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            print("project: refused, a register row is not a JSON object with a string id "
+                  "(run check_mistakes_register.py); the projection never guesses at a row "
+                  "it cannot shape", file=sys.stderr)
+            return 2
+        latest[row["id"]] = row
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    items = [{"id": "{}-guardrail".format(rid), "title": "land the guardrail: {}".format(
-        row.get("guardrail", "")), "state": "open", "granted": row["status"] == "accepted"}
-        for rid, row in sorted(latest.items())
-        if row.get("status") in ("proposed", "accepted")]
-    for it in items:  # a proposed row enumerates but does not compel (express authorization)
-        if not it["granted"]:
-            it["state"] = "proposed"
+    try:
+        # formatting a row field walks its decoded value, and the decoder accepts more
+        # nesting than str/repr can walk on the same stack: a value that deep is the same
+        # named refusal as any other row the projection cannot shape, never an escaped
+        # RecursionError and never a partial enumeration (nothing is printed on a refusal)
+        items = [{"id": "{}-guardrail".format(rid), "title": "land the guardrail: {}".format(
+            row.get("guardrail", "")), "state": "open", "granted": row["status"] == "accepted"}
+            for rid, row in sorted(latest.items())
+            if row.get("status") in ("proposed", "accepted")]
+        for it in items:  # a proposed row enumerates but does not compel (express authorization)
+            if not it["granted"]:
+                it["state"] = "proposed"
+    except RecursionError:
+        print("project: refused, a register row is nested too deeply to format for the "
+              "enumeration (run check_mistakes_register.py); the projection never guesses "
+              "at a row it cannot shape", file=sys.stderr)
+        return 2
     print(json.dumps({"version": 1, "generated_at_utc": now,
                       "source": {"locator": a.register, "revision": "", "observed_at_utc": now},
                       "items": items}))
@@ -1149,6 +1373,7 @@ def self_test():
     import resource
     import shutil
     import signal
+    import socket
     import subprocess
     import tempfile
     # Hermetic git fixtures (test-hermeticity): an inherited git environment would redirect the
@@ -1529,6 +1754,743 @@ def self_test():
         link.symlink_to("target.jsonl")
         declare(mistakes_register="link.jsonl")
         refused("symlinked-register-refused", link, 2, "symlink", "MR-2")
+
+        # ---- a register that is not a regular file is refused with exit 2 BEFORE locking or
+        # reading: on Linux a read-write open of a FIFO succeeds and a read through that
+        # descriptor can wait forever (the descriptor itself holds the write end), and a
+        # read-only open of a FIFO with no writer waits in the open itself, so both the
+        # appender and the projection open non-blocking and refuse on the opened
+        # descriptor's file type. Every vector here runs under an alarm, so a regression
+        # that blocks fails instead of hanging the suite.
+        class VectorAlarm(Exception):
+            # deliberately NOT an OSError: the appender's own read loop and the projection
+            # catch OSError, and the alarm must escape both to fail the vector
+            pass
+
+        # The bound exists only to turn a blocking regression into a failure instead of a
+        # hung suite: a step that exceeds the configured seconds (default 60) records a
+        # failure, so the alarm can fail a vector only by firing, never pass one, and a
+        # regression that blocks still fails within the bound. A loaded host can therefore
+        # at worst cause a false failure, never a false pass.
+        def alarm_bounded(name, step, seconds=60):
+            def on_alarm(signum, frame):
+                raise VectorAlarm("blocked for {} s".format(seconds))
+            old_handler = signal.signal(signal.SIGALRM, on_alarm)
+            signal.alarm(seconds)
+            try:
+                return step()
+            except VectorAlarm as exc:
+                failures.append("{}: the call blocked instead of refusing ({})".format(
+                    name, exc))
+                return None
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+
+        def project_rc(regpath):
+            # stdout is kept (third element) so the regular-register vector can assert the
+            # projected payload itself, not only the exit code; an escaped OSError,
+            # ValueError, RecursionError or SystemExit becomes a non-integer rc, which
+            # fails every rc assertion below, so an escape is always red, never a crashed
+            # suite
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    rc = cmd_project(argparse.Namespace(register=str(regpath)))
+                except SystemExit as exc:
+                    rc = "an uncaught SystemExit: {!r}".format(exc.code)
+                except (OSError, ValueError, RecursionError) as exc:
+                    rc = "an uncaught {}: {}".format(type(exc).__name__, exc)
+            return rc, err.getvalue(), out.getvalue()
+
+        def want_refusal(name, got, naming):
+            if got is None:
+                return  # the alarm already recorded the failure
+            rc, err = got[0], got[1]
+            missing = [w for w in naming if w not in err]
+            if rc != 2 or missing:
+                failures.append("{}: want exit 2 naming {}, got exit {!r}: {}".format(
+                    name, " and ".join(repr(w) for w in naming), rc, err.strip()))
+
+        declare(mistakes_register="fifo.jsonl")
+        fifo_reg = repo / "fifo.jsonl"
+        os.mkfifo(str(fifo_reg))
+        fifo_before = os.lstat(str(fifo_reg))
+        want_refusal("fifo-register-refused",
+                     alarm_bounded("fifo-register-refused", lambda: append(fifo_reg, "MR-1")),
+                     ("FIFO", "not a regular file"))
+        fifo_after = os.lstat(str(fifo_reg))
+        if (not stat.S_ISFIFO(fifo_after.st_mode)
+                or (fifo_before.st_dev, fifo_before.st_ino)
+                != (fifo_after.st_dev, fifo_after.st_ino)):
+            failures.append("fifo-register-refused: the refusal changed the register entry")
+        if temps_beside(fifo_reg):
+            failures.append("fifo-register-refused: the refusal left a temporary file: "
+                            "{}".format(temps_beside(fifo_reg)))
+        want_refusal("fifo-project-refused",
+                     alarm_bounded("fifo-project-refused", lambda: project_rc(fifo_reg)),
+                     ("FIFO", "not a regular file"))
+        fifo_reg.unlink()
+        # a close failure while the appender unwinds (here while it returns the FIFO
+        # refusal) is a NAMED refusal (exit 2), never an escaped OSError: the injected
+        # close really closes the descriptor exactly once, identified by its file
+        # identity, and only then reports failure
+        declare(mistakes_register="fifo-close.jsonl")
+        fifo_close_reg = repo / "fifo-close.jsonl"
+        os.mkfifo(str(fifo_close_reg))
+        fifo_close_id = os.lstat(str(fifo_close_reg))
+        close_fired = {"n": 0, "again": 0}
+        app_close_failed = set()
+        real_app_close, real_app_fstat = os.close, os.fstat
+
+        def app_failing_close(close_fd):
+            # a second close of a descriptor number whose close already failed is the
+            # regression the "attempted exactly once" guarantee forbids (the number can
+            # be reissued by then, so a retry can close an unrelated file): count it so
+            # the vector can assert zero
+            if close_fd in app_close_failed:
+                close_fired["again"] += 1
+            try:
+                st_closed = real_app_fstat(close_fd)
+            except OSError:
+                st_closed = None
+            real_app_close(close_fd)
+            if st_closed is not None and (st_closed.st_dev, st_closed.st_ino) == \
+                    (fifo_close_id.st_dev, fifo_close_id.st_ino):
+                close_fired["n"] += 1
+                app_close_failed.add(close_fd)
+                raise OSError(5, "injected close failure")
+
+        def close_fail_append():
+            try:
+                return append(fifo_close_reg, "MR-1")
+            except OSError as exc:  # the pre-fix escape: the close's raw OSError
+                return "an uncaught OSError: {}".format(exc), ""
+
+        os.close = app_failing_close
+        try:
+            cf_got = alarm_bounded("append-close-failure-named", close_fail_append)
+        finally:
+            os.close = real_app_close
+        if cf_got is not None:
+            cf_rc, cf_err = cf_got
+            if cf_rc != 2 or "could not be closed" not in cf_err \
+                    or "not a regular file" not in cf_err:
+                failures.append("append-close-failure-named: want exit 2 naming the close "
+                                "failure beside the refusal, got exit {!r}: {}".format(
+                                    cf_rc, cf_err.strip()))
+            if close_fired["n"] == 0:
+                failures.append("append-close-failure-named: the injected close failure "
+                                "never fired, so the vector proved nothing")
+        if close_fired["again"]:
+            failures.append("append-close-failure-named: the failed close was attempted "
+                            "again ({} extra attempt(s)); each owned descriptor's close "
+                            "is attempted exactly once".format(close_fired["again"]))
+        if not stat.S_ISFIFO(os.lstat(str(fifo_close_reg)).st_mode):
+            failures.append("append-close-failure-named: the refusal changed the register "
+                            "entry")
+        fifo_close_reg.unlink()
+        # a close failure AFTER a row landed: the row was written and fsynced before the
+        # close, so the exit is 2 but the message says the row is in the register, never
+        # that the append was refused; the injection fires on the descriptor that holds
+        # the renamed commit temporary (identified as the file now at the register path),
+        # so the temporary's own close wrapper is the one exercised
+        real_lc_close, real_lc_fstat, real_lc_lstat = os.close, os.fstat, os.lstat
+
+        def landed_close_injector(target_reg, fired):
+            failed_fds = set()
+
+            def failing_close(close_fd):
+                # a second close of a descriptor number whose close already failed is
+                # the regression the "attempted exactly once" guarantee forbids (the
+                # number can be reissued by then, so a retry can close an unrelated
+                # file): count it so each vector can assert zero
+                if close_fd in failed_fds:
+                    fired["again"] += 1
+                try:
+                    st_closed = real_lc_fstat(close_fd)
+                except OSError:
+                    st_closed = None
+                real_lc_close(close_fd)
+                if st_closed is None:
+                    return
+                try:
+                    st_reg = real_lc_lstat(str(target_reg))
+                except OSError:
+                    return
+                if (st_closed.st_dev, st_closed.st_ino) == \
+                        (st_reg.st_dev, st_reg.st_ino):
+                    fired["n"] += 1
+                    failed_fds.add(close_fd)
+                    raise OSError(5, "injected close failure")
+            return failing_close
+
+        declare(mistakes_register="landed-close.jsonl")
+        landed_close_reg = repo / "landed-close.jsonl"
+        landed_fired = {"n": 0, "again": 0}
+
+        def landed_close_append():
+            try:
+                return append(landed_close_reg, "MR-1", bootstrap=True)
+            except OSError as exc:
+                return "an uncaught OSError: {}".format(exc), ""
+
+        os.close = landed_close_injector(landed_close_reg, landed_fired)
+        try:
+            lc_got = alarm_bounded("landed-close-failure-named", landed_close_append)
+        finally:
+            os.close = real_lc_close
+        if lc_got is not None:
+            lc_rc, lc_err = lc_got
+            if lc_rc != 2 or "was appended and is in the register" not in lc_err \
+                    or "could not be closed" not in lc_err or "refused" in lc_err:
+                failures.append("landed-close-failure-named: want exit 2 saying the landed "
+                                "row is in the register beside the close failure (never "
+                                "'refused'), got exit {!r}: {}".format(lc_rc, lc_err.strip()))
+            if landed_fired["n"] == 0:
+                failures.append("landed-close-failure-named: the injected close failure "
+                                "never fired, so the vector proved nothing")
+            if not _lines(landed_close_reg):
+                failures.append("landed-close-failure-named: the landed row is not in the "
+                                "register")
+        if landed_fired["again"]:
+            failures.append("landed-close-failure-named: the failed close was attempted "
+                            "again ({} extra attempt(s)); each owned descriptor's close "
+                            "is attempted exactly once".format(landed_fired["again"]))
+        vector_cleanup("landed-close-failure-named", landed_close_reg.unlink)
+        vector_cleanup("landed-close-failure-named",
+                       Path(str(landed_close_reg) + ".anchor").unlink)
+        # the same landed append plus close failure, invoked while the CALLER is inside
+        # its own exception handler: the exit-2 decision must come from tracking this
+        # append's own escaping exception, because ambient exception state sees the
+        # caller's handled exception and would let the printed close failure return the
+        # body's success
+        declare(mistakes_register="landed-close-handler.jsonl")
+        handler_reg = repo / "landed-close-handler.jsonl"
+        handler_fired = {"n": 0, "again": 0}
+
+        def handler_close_append():
+            try:
+                raise ValueError("a caller's handled exception")
+            except ValueError:
+                try:
+                    return append(handler_reg, "MR-1", bootstrap=True)
+                except OSError as exc:
+                    return "an uncaught OSError: {}".format(exc), ""
+
+        os.close = landed_close_injector(handler_reg, handler_fired)
+        try:
+            hc_got = alarm_bounded("landed-close-failure-in-handler", handler_close_append)
+        finally:
+            os.close = real_lc_close
+        if hc_got is not None:
+            hc_rc, hc_err = hc_got
+            if hc_rc != 2 or "was appended and is in the register" not in hc_err \
+                    or "could not be closed" not in hc_err:
+                failures.append("landed-close-failure-in-handler: a close failure on a "
+                                "landed append must exit 2 even inside a caller's handler, "
+                                "got exit {!r}: {}".format(hc_rc, hc_err.strip()))
+            if handler_fired["n"] == 0:
+                failures.append("landed-close-failure-in-handler: the injected close "
+                                "failure never fired, so the vector proved nothing")
+        if handler_fired["again"]:
+            failures.append("landed-close-failure-in-handler: the failed close was "
+                            "attempted again ({} extra attempt(s)); each owned "
+                            "descriptor's close is attempted exactly once".format(
+                                handler_fired["again"]))
+        vector_cleanup("landed-close-failure-in-handler", handler_reg.unlink)
+        vector_cleanup("landed-close-failure-in-handler",
+                       Path(str(handler_reg) + ".anchor").unlink)
+        # a directory at the register path: the appender's read-write open refuses it with
+        # the same named diagnostic, and the projection's file-type check refuses it too
+        declare(mistakes_register="dirreg.jsonl")
+        dir_reg = repo / "dirreg.jsonl"
+        dir_reg.mkdir()
+        want_refusal("directory-register-refused",
+                     alarm_bounded("directory-register-refused",
+                                   lambda: append(dir_reg, "MR-1")),
+                     ("directory", "not a regular file"))
+        if not dir_reg.is_dir() or list(dir_reg.iterdir()):
+            failures.append("directory-register-refused: the refusal changed the directory")
+        want_refusal("directory-project-refused",
+                     alarm_bounded("directory-project-refused", lambda: project_rc(dir_reg)),
+                     ("directory", "not a regular file"))
+        dir_reg.rmdir()
+        # a symlinked register path stays refused by name under the same bound whatever it
+        # aliases (here a FIFO, so following it could block); the projection still follows
+        # the path but refuses the aliased FIFO by the opened descriptor's file type
+        declare(mistakes_register="fifolink.jsonl")
+        fifo_target = repo / "fifolink-target"
+        os.mkfifo(str(fifo_target))
+        fifo_link = repo / "fifolink.jsonl"
+        fifo_link.symlink_to("fifolink-target")
+        want_refusal("symlink-register-refused-bounded",
+                     alarm_bounded("symlink-register-refused-bounded",
+                                   lambda: append(fifo_link, "MR-1")),
+                     ("symlink",))
+        want_refusal("symlink-to-fifo-project-refused",
+                     alarm_bounded("symlink-to-fifo-project-refused",
+                                   lambda: project_rc(fifo_link)),
+                     ("FIFO", "not a regular file"))
+        if (not fifo_link.is_symlink()
+                or not stat.S_ISFIFO(os.lstat(str(fifo_target)).st_mode)):
+            failures.append("symlink-to-fifo vectors: a refusal changed the register entry "
+                            "or its target")
+        fifo_link.unlink()
+        fifo_target.unlink()
+        # a Unix socket at the register path cannot be opened as a file at all (on Linux the
+        # open fails with ENXIO before any descriptor exists), so both the appender and the
+        # projection refuse it with the same diagnostic naming the file type, exit 2, never
+        # a traceback and never the generic unreadable clause
+        declare(mistakes_register="sock.jsonl")
+        sock_reg = repo / "sock.jsonl"
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        held_cwd = os.getcwd()
+        os.chdir(str(repo))
+        try:
+            # bound by a relative name: a bound AF_UNIX path is limited to about 107 bytes,
+            # and the fixture's temporary directory can be deeper than that
+            sock.bind("sock.jsonl")
+        finally:
+            os.chdir(held_cwd)
+        try:
+            want_refusal("socket-register-refused",
+                         alarm_bounded("socket-register-refused",
+                                       lambda: append(sock_reg, "MR-1")),
+                         ("socket", "not a regular file"))
+            want_refusal("socket-project-refused",
+                         alarm_bounded("socket-project-refused",
+                                       lambda: project_rc(sock_reg)),
+                         ("socket", "not a regular file"))
+            # a symlink to the socket is followed, as projection reads always have been,
+            # so the refusal names the TARGET's type (a socket), never the link's own
+            # numeric mode
+            sock_link = repo / "socklink.jsonl"
+            sock_link.symlink_to("sock.jsonl")
+            want_refusal("socket-symlink-project-named",
+                         alarm_bounded("socket-symlink-project-named",
+                                       lambda: project_rc(sock_link)),
+                         ("socket", "not a regular file"))
+            if not sock_link.is_symlink():
+                failures.append("socket-symlink-project-named: the refusal changed the link")
+            sock_link.unlink()
+            if not stat.S_ISSOCK(os.lstat(str(sock_reg)).st_mode):
+                failures.append("socket vectors: a refusal changed the register entry")
+        finally:
+            sock.close()
+        sock_reg.unlink()
+        # the appender's REGISTRY read never blocks either: a FIFO at the registry path is
+        # refused (exit 2) naming the registry and the file type, before the register is
+        # ever opened, and the refused append creates nothing
+        saved_registry_bytes = registry.read_bytes()
+        registry.unlink()
+        os.mkfifo(str(registry))
+        want_refusal("fifo-registry-refused",
+                     alarm_bounded("fifo-registry-refused",
+                                   lambda: append(repo / "regfifo-probe.jsonl", "MR-1")),
+                     ("orchestration registry", "FIFO", "not a regular file"))
+        if entry_state(repo / "regfifo-probe.jsonl") is not None:
+            failures.append("fifo-registry-refused: the refused append created the register")
+        if not stat.S_ISFIFO(os.lstat(str(registry)).st_mode):
+            failures.append("fifo-registry-refused: the refusal changed the registry entry")
+        registry.unlink()
+        # a registry nested too deeply for the JSON decoder (which raises RecursionError,
+        # not ValueError) is the same named refusal (exit 2), never an escaped traceback,
+        # and the refused append creates nothing
+        registry.write_bytes(b"[" * 2000000)
+
+        def deep_registry_append():
+            try:
+                return append(repo / "deepreg-probe.jsonl", "MR-1")
+            except RecursionError as exc:
+                return "an uncaught RecursionError: {}".format(exc), ""
+
+        want_refusal("deep-registry-append-refused",
+                     alarm_bounded("deep-registry-append-refused", deep_registry_append),
+                     ("orchestration registry", "nested too deeply"))
+        if entry_state(repo / "deepreg-probe.jsonl") is not None:
+            failures.append("deep-registry-append-refused: the refused append created the "
+                            "register")
+        registry.write_bytes(saved_registry_bytes)
+        # the registry control: with the registry a regular file again, the same read
+        # evaluates and a clean append lands under the same bound
+        declare(mistakes_register="regctl.jsonl")
+        alarm_bounded("regular-registry-still-reads",
+                      lambda: accepted("regular-registry-still-reads",
+                                       repo / "regctl.jsonl", "MR-1", bootstrap=True))
+        # a regular register still appends and still projects after the file-type check,
+        # under the same alarm so a clean path that started blocking fails rather than hangs
+        declare(mistakes_register="plain.jsonl")
+        plain_reg = repo / "plain.jsonl"
+        alarm_bounded("regular-register-still-appends",
+                      lambda: accepted("regular-register-still-appends", plain_reg, "MR-1",
+                                       bootstrap=True))
+        alarm_bounded("regular-register-still-appends-ordinary",
+                      lambda: accepted("regular-register-still-appends-ordinary", plain_reg,
+                                       "MR-1", "accepted"))
+        plain_got = alarm_bounded("regular-register-still-projects",
+                                  lambda: project_rc(plain_reg))
+        # the projection's OUTPUT is asserted, not only its exit code: the register's open
+        # item, the envelope and the source locator must all be the projected ones
+        want_plain_items = [{"id": "MR-1-guardrail", "title": "land the guardrail: g",
+                             "state": "open", "granted": True}]
+        if plain_got is not None:
+            if plain_got[0] != 0:
+                failures.append("regular-register-still-projects: want exit 0, got exit "
+                                "{!r}: {}".format(plain_got[0], plain_got[1].strip()))
+            else:
+                try:
+                    plain_payload = json.loads(plain_got[2])
+                except ValueError:
+                    plain_payload = None
+                if (not isinstance(plain_payload, dict)
+                        or plain_payload.get("version") != 1
+                        or plain_payload.get("items") != want_plain_items
+                        or plain_payload.get("source", {}).get("locator") != str(plain_reg)
+                        or not isinstance(plain_payload.get("generated_at_utc"), str)
+                        or not plain_payload.get("generated_at_utc")):
+                    failures.append("regular-register-still-projects: the projection must "
+                                    "emit the register's own open items, got: {!r}".format(
+                                        plain_got[2]))
+        # a symlink to a REGULAR register still projects as before: the path is followed,
+        # only what it aliases is type-checked, and the projected items are the target's own
+        plain_link = repo / "plainlink.jsonl"
+        plain_link.symlink_to("plain.jsonl")
+        link_got = alarm_bounded("symlink-to-regular-register-projects",
+                                 lambda: project_rc(plain_link))
+        if link_got is not None:
+            try:
+                link_payload = json.loads(link_got[2])
+            except ValueError:
+                link_payload = None
+            if (link_got[0] != 0 or not isinstance(link_payload, dict)
+                    or link_payload.get("items") != want_plain_items):
+                failures.append("symlink-to-regular-register-projects: want exit 0 with the "
+                                "target's own items, got exit {!r}: {} {!r}".format(
+                                    link_got[0], link_got[1].strip(), link_got[2]))
+        plain_link.unlink()
+        # a register whose bytes do not decode is refused by the projection as
+        # cannot-evaluate (exit 2 naming the read), never an escaped traceback
+        garbled_proj = repo / "garbled-proj.jsonl"
+        garbled_proj.write_bytes(b"\xff\n")
+        want_refusal("garbled-project-refused",
+                     alarm_bounded("garbled-project-refused",
+                                   lambda: project_rc(garbled_proj)),
+                     ("cannot be read",))
+        garbled_proj.unlink()
+        # a descriptor failure AFTER the projection's open succeeded is cannot-evaluate
+        # (exit 2 naming the open descriptor), never a successful empty projection and
+        # never an escaped OSError: a failure injected at each descriptor step of the
+        # shared reader (fstat, read, close), each reporting ENOENT, the errno that a
+        # too-broad absence test would read as a missing register
+        inj_reg = repo / "inject-proj.jsonl"
+        inj_reg.write_text('{"id": "MR-9", "status": "accepted", "guardrail": "g"}\n',
+                           encoding="utf-8")
+        inj_id = os.stat(str(inj_reg))
+        real_p_read, real_p_fstat, real_p_close = os.read, os.fstat, os.close
+        inj_fired = {"n": 0}
+
+        def inj_is_reg(st):
+            return (st.st_dev, st.st_ino) == (inj_id.st_dev, inj_id.st_ino)
+
+        def inj_read(read_fd, count):
+            # fire only on the projection's own register read, identified by the open
+            # descriptor's file identity, never on another read of the same chunk size
+            if count == 1 << 16:
+                try:
+                    st_read = real_p_fstat(read_fd)
+                except OSError:
+                    st_read = None
+                if st_read is not None and inj_is_reg(st_read):
+                    inj_fired["n"] += 1
+                    raise FileNotFoundError(2, "injected descriptor failure on read")
+            return real_p_read(read_fd, count)
+
+        def inj_fstat(fstat_fd):
+            st_seen = real_p_fstat(fstat_fd)
+            if inj_is_reg(st_seen):
+                inj_fired["n"] += 1
+                raise FileNotFoundError(2, "injected descriptor failure on fstat")
+            return st_seen
+
+        def inj_close(close_fd):
+            # the close itself still happens exactly once; only its reported result fails
+            try:
+                st_closed = real_p_fstat(close_fd)
+            except OSError:
+                st_closed = None
+            real_p_close(close_fd)
+            if st_closed is not None and inj_is_reg(st_closed):
+                inj_fired["n"] += 1
+                raise FileNotFoundError(2, "injected descriptor failure on close")
+
+        inj_reals = {"read": real_p_read, "fstat": real_p_fstat, "close": real_p_close}
+        for inj_name, inj_attr, inj_fn in (
+                ("project-read-failure-never-absent", "read", inj_read),
+                ("project-fstat-failure-never-absent", "fstat", inj_fstat),
+                ("project-close-failure-never-absent", "close", inj_close)):
+            inj_fired["n"] = 0
+            setattr(os, inj_attr, inj_fn)
+            try:
+                inj_got = alarm_bounded(inj_name, lambda: project_rc(inj_reg))
+            finally:
+                setattr(os, inj_attr, inj_reals[inj_attr])
+            want_refusal(inj_name, inj_got,
+                         ("cannot be read from its open descriptor",))
+            if inj_got is not None and inj_fired["n"] == 0:
+                failures.append(inj_name + ": the injected failure never fired, so the "
+                                "vector proved nothing")
+        inj_reg.unlink()
+        # the paired FIRST-RUN control: a genuinely ABSENT register (a missing final name
+        # confirmed under a present parent directory, the clean-tree state before any
+        # append) still projects as no items, exit 0
+        absent_got = alarm_bounded("absent-register-still-projects-empty",
+                                   lambda: project_rc(repo / "no-such-register.jsonl"))
+        if absent_got is not None:
+            absent_payload = None
+            if absent_got[0] == 0:
+                try:
+                    absent_payload = json.loads(absent_got[2])
+                except ValueError:
+                    absent_payload = None
+            if (absent_got[0] != 0 or not isinstance(absent_payload, dict)
+                    or absent_payload.get("items") != []):
+                failures.append("absent-register-still-projects-empty: want exit 0 with no "
+                                "items, got exit {!r}: {} {!r}".format(
+                                    absent_got[0], absent_got[1].strip(), absent_got[2]))
+        # a register path whose OPEN fails with something other than ENOENT (here a path
+        # component that is a file, ENOTDIR) is cannot-evaluate, never an escaped OSError
+        # and never an empty projection; this refusal predates the descriptor-failure
+        # handling, so the vector is retained regression coverage (like the absent-register
+        # control, it also passes without that change); the fixture reuses a regular file
+        # as the bogus directory component
+        enotdir_base = repo / "enotdir-proj.jsonl"
+        enotdir_base.write_text("", encoding="utf-8")
+        want_refusal("enotdir-project-refused",
+                     alarm_bounded("enotdir-project-refused",
+                                   lambda: project_rc(enotdir_base / "child.jsonl")),
+                     ("cannot be read",))
+        enotdir_base.unlink()
+        # an invalid register path VALUE (an embedded NUL, impossible in an OS argument
+        # vector but reachable in-process) is cannot-evaluate, never an escaped ValueError
+        want_refusal("nul-path-project-refused",
+                     alarm_bounded("nul-path-project-refused",
+                                   lambda: project_rc("nul\x00path.jsonl")),
+                     ("cannot be read",))
+        # rows the projection cannot shape are refused with exit 2 naming the row, never
+        # an escaped traceback (a non-object row has no fields; a non-string id would make
+        # the sorted enumeration compare incomparable keys) and never exit 1
+        for row_name, row_body, row_naming in (
+                ("non-json-line-project-refused", "{\n", ("is not JSON",)),
+                ("non-object-row-project-refused", "[1]\n",
+                 ("not a JSON object with a string id",)),
+                ("non-string-id-project-refused",
+                 '{"id": 1, "status": "proposed", "guardrail": "g"}\n',
+                 ("not a JSON object with a string id",))):
+            rowbad = repo / "rowbad-proj.jsonl"
+            rowbad.write_text(row_body, encoding="utf-8")
+            want_refusal(row_name,
+                         alarm_bounded(row_name, lambda: project_rc(rowbad)),
+                         row_naming)
+            rowbad.unlink()
+        # a line nested too deeply for the JSON decoder (balanced or not) is refused with
+        # exit 2 naming the nesting and printing no payload, never an escaped
+        # RecursionError and never exit 1; the depth is far beyond what any plausible
+        # interpreter stack lets the decoder parse, so the decoder's recursion failure,
+        # not a shape check, decides both vectors
+        for deep_name, deep_body in (
+                ("deep-nesting-unbalanced-project-refused", "[" * 2000000 + "\n"),
+                ("deep-nesting-balanced-project-refused",
+                 "[" * 2000000 + "]" * 2000000 + "\n")):
+            deepbad = repo / "deepbad-proj.jsonl"
+            deepbad.write_text(deep_body, encoding="utf-8")
+            deep_got = alarm_bounded(deep_name, lambda: project_rc(deepbad))
+            want_refusal(deep_name, deep_got, ("nested too deeply",))
+            if deep_got is not None and deep_got[2] != "":
+                failures.append("{}: a refused projection must print nothing on stdout, "
+                                "got {!r}".format(deep_name, deep_got[2][:120]))
+            deepbad.unlink()
+        # an UNRESOLVABLE register path is a refusal NAMING the cause (exit 2, empty
+        # stdout), never an empty projection: a dangling symbolic link at the register
+        # path, then a register path under a missing parent directory (the absent-register
+        # first-run control above keeps a confirmed-missing final name projecting as no
+        # items)
+        dangle_proj = repo / "dangle-proj.jsonl"
+        dangle_proj.symlink_to("missing-proj-target")
+        dangle_got = alarm_bounded("dangling-register-project-refused",
+                                   lambda: project_rc(dangle_proj))
+        want_refusal("dangling-register-project-refused", dangle_got,
+                     ("dangling symbolic link",))
+        if dangle_got is not None and dangle_got[2] != "":
+            failures.append("dangling-register-project-refused: a refused projection must "
+                            "print nothing on stdout, got {!r}".format(dangle_got[2][:120]))
+        if not dangle_proj.is_symlink():
+            failures.append("dangling-register-project-refused: the refusal changed the "
+                            "register entry")
+        dangle_proj.unlink()
+        noparent_got = alarm_bounded("missing-parent-project-refused",
+                                     lambda: project_rc(repo / "no-such-dir" / "reg.jsonl"))
+        want_refusal("missing-parent-project-refused", noparent_got,
+                     ("parent directory", "cannot be opened"))
+        if noparent_got is not None and noparent_got[2] != "":
+            failures.append("missing-parent-project-refused: a refused projection must "
+                            "print nothing on stdout, got {!r}".format(noparent_got[2][:120]))
+        # both production rendering sites are driven UNCONDITIONALLY by fault injection
+        # (host-independent, so this coverage cannot vanish on a host whose decoder does
+        # not out-run its renderer): a decoded row value whose rendering raises
+        # RecursionError is a named refusal at the projection's formatting handler
+        # (exit 2, nothing on stdout) and at the appender's shared row validation
+        # (exit 1 through the gate's placeholder), never an escaped RecursionError
+        class _UnshowableValue:
+            def __repr__(self):
+                raise RecursionError("synthetic unrenderable value")
+
+            def __str__(self):
+                raise RecursionError("synthetic unrenderable value")
+
+        unshow_proj = repo / "unshow-proj.jsonl"
+        unshow_proj.write_text("{}\n", encoding="utf-8")
+        real_proj_loads = json.loads
+
+        def unshowable_loads(s, *largs, **lkw):
+            return {"id": "MR-1", "status": "accepted", "guardrail": _UnshowableValue()}
+
+        json.loads = unshowable_loads
+        try:
+            unshow_got = alarm_bounded("project-unrenderable-value-refused",
+                                       lambda: project_rc(unshow_proj))
+        finally:
+            json.loads = real_proj_loads
+        want_refusal("project-unrenderable-value-refused", unshow_got,
+                     ("nested too deeply to format",))
+        if unshow_got is not None and unshow_got[2] != "":
+            failures.append("project-unrenderable-value-refused: a refused projection must "
+                            "print nothing on stdout, got {!r}".format(unshow_got[2][:120]))
+        unshow_proj.unlink()
+        import check_mistakes_register as gate_module
+        declare(mistakes_register="unshow-append.jsonl")
+        unshow_append_reg = repo / "unshow-append.jsonl"
+        real_pairs_hook = gate_module._pairs_without_duplicates
+        unshow_row = {"seq": _UnshowableValue(), "id": "MR-1", "ts": "t", "mistake": "m",
+                      "evidence": "e", "rule": "r", "guardrail": "g", "status": "proposed",
+                      "prev": ZERO}
+
+        def unshow_append():
+            try:
+                return append(unshow_append_reg, "MR-1", bootstrap=True)
+            except RecursionError as exc:
+                return "an uncaught RecursionError: {}".format(exc), ""
+
+        gate_module._pairs_without_duplicates = lambda pairs: dict(unshow_row)
+        try:
+            ua_got = alarm_bounded("append-unrenderable-seq-named", unshow_append)
+        finally:
+            gate_module._pairs_without_duplicates = real_pairs_hook
+        if ua_got is not None:
+            ua_rc, ua_err = ua_got
+            if ua_rc != 1 or "is not the line number" not in ua_err \
+                    or "nested too deeply to display" not in ua_err:
+                failures.append("append-unrenderable-seq-named: want exit 1 naming the seq "
+                                "violation through the placeholder, got exit {!r}: "
+                                "{}".format(ua_rc, ua_err.strip()))
+            if entry_state(unshow_append_reg) is not None:
+                failures.append("append-unrenderable-seq-named: the refused append created "
+                                "the register")
+        # a row the decoder ACCEPTS whose value is still too deep to format into the
+        # enumeration is refused with exit 2 naming the nesting (a wording distinct from
+        # the decoder refusal above, so a mis-measured depth cannot satisfy this vector
+        # through the decoder path), never an escaped RecursionError; the window between
+        # the decoder's and the renderer's recursion limits is MEASURED on this host
+
+        def _deepest(ok):
+            lo, hi = 1, 2
+            while ok(hi):
+                lo, hi = hi, hi * 2
+                if hi > 1 << 24:
+                    return lo
+            while lo + 1 < hi:
+                mid = (lo + hi) // 2
+                if ok(mid):
+                    lo = mid
+                else:
+                    hi = mid
+            return lo
+
+        def _deep_row(depth):
+            return ('{"id": "MR-1", "status": "accepted", "guardrail": '
+                    + "[" * depth + "]" * depth + "}")
+
+        def _row_decodes(depth):
+            try:
+                json.loads(_deep_row(depth))
+            except RecursionError:
+                return False
+            return True
+
+        def _value_renders(depth):
+            try:
+                repr(json.loads("[" * depth + "]" * depth))
+            except RecursionError:
+                return False
+            return True
+
+        decode_max = _deepest(_row_decodes)
+        render_max = _deepest(_value_renders)
+        if render_max < decode_max:
+            deepval = repo / "deepval-proj.jsonl"
+            deepval.write_text(_deep_row(decode_max) + "\n", encoding="utf-8")
+            deepval_got = alarm_bounded("deep-value-project-refused",
+                                        lambda: project_rc(deepval))
+            want_refusal("deep-value-project-refused", deepval_got,
+                         ("nested too deeply to format",))
+            if deepval_got is not None and deepval_got[2] != "":
+                failures.append("deep-value-project-refused: a refused projection must "
+                                "print nothing on stdout, got {!r}".format(
+                                    deepval_got[2][:120]))
+            deepval.unlink()
+            # the appender shares the gate's row validation: an EXISTING row that decodes
+            # but whose seq value is too deep to render refuses with exit 1 naming the
+            # violation through the placeholder, never an escaped RecursionError
+            declare(mistakes_register="deepseq.jsonl")
+            deep_seq_reg = repo / "deepseq.jsonl"
+            deep_seq_line = ('{"seq": ' + "[" * decode_max + "]" * decode_max
+                             + ', "id": "MR-1", "ts": "t", "mistake": "m", "evidence": "e",'
+                             ' "rule": "r", "guardrail": "g", "status": "proposed",'
+                             ' "prev": "' + ZERO + '"}')
+            deep_seq_reg.write_text(deep_seq_line + "\n", encoding="utf-8")
+            # the anchor digests the raw line without rendering its decoded values, so the
+            # untracked register's append-only authority is decidable and the vector exits
+            # at the row violation, not at a missing anchor
+            update_anchor(deep_seq_reg, [deep_seq_line])
+
+            def deep_seq_append():
+                try:
+                    return append(deep_seq_reg, "MR-2")
+                except RecursionError as exc:
+                    return "an uncaught RecursionError: {}".format(exc), ""
+
+            ds_got = alarm_bounded("append-deep-seq-value-named", deep_seq_append)
+            if ds_got is not None:
+                ds_rc, ds_err = ds_got
+                if ds_rc != 1 or "is not the line number" not in ds_err \
+                        or "nested too deeply to display" not in ds_err:
+                    failures.append("append-deep-seq-value-named: want exit 1 naming the "
+                                    "seq violation through the placeholder, got exit {!r}: "
+                                    "{}".format(ds_rc, ds_err.strip()))
+            deep_seq_reg.unlink()
+            Path(str(deep_seq_reg) + ".anchor").unlink()
+        else:
+            # when render_max >= decode_max no decodable input can out-run the renderer
+            # on this host, so there is no real-value window to drive here; the
+            # fault-injection vectors above drove both production rendering sites
+            # unconditionally, and the omitted window cases are reported BY NAME, never
+            # silently folded into the PASS text
+            print("NOT RUN: deep-value-project-refused and append-deep-seq-value-named "
+                  "(this host's render limit {} is not below its decode limit {}, so no "
+                  "decodable input can out-run the renderer; the unconditional "
+                  "fault-injection vectors still drove both rendering sites)".format(
+                      render_max, decode_max))
+
         # a tracked register with no computable merge-base is cannot-evaluate (exit 2), not a pass
         tracked = repo / "tracked.jsonl"
         declare(mistakes_register="tracked.jsonl")
@@ -1575,6 +2537,22 @@ def self_test():
         declare(mistakes_register="garbled.jsonl")
         garbled.write_bytes(b"\xff\n")
         refused("unreadable-register-exit-2", garbled, 2, "cannot be read", "MR-1")
+        # the DECLARATION check's own dangling-link refusal: a dangling symbolic link at a
+        # declared register path is refused by name in _declared_family (the stat's ENOENT
+        # is never read as a confirmed-absent declaration), before the register open could
+        # refuse the link with its own wording
+        declare(mistakes_register="dangle-decl.jsonl")
+        dangle_decl = repo / "dangle-decl.jsonl"
+        dangle_decl.symlink_to("missing-decl-target")
+        refused("declared-dangling-link-refused", dangle_decl, 2,
+                "the declared mistakes_register path names a dangling symbolic link", "MR-1")
+        if not dangle_decl.is_symlink():
+            failures.append("declared-dangling-link-refused: the refusal changed the "
+                            "register entry")
+        if entry_state(repo / "missing-decl-target") is not None:
+            failures.append("declared-dangling-link-refused: the refusal created the "
+                            "link's target")
+        dangle_decl.unlink()
         # an absent register refused on its first row stays absent, directory included
         declare(mistakes_register="sub/new.jsonl")
         refused("refused-first-row-creates-nothing", repo / "sub" / "new.jsonl", 1,
@@ -1887,7 +2865,7 @@ def self_test():
         registry.unlink()
         registry.symlink_to("missing-registry-target")
         refused("dangling-registry-symlink-refused", reg, 2,
-                "the orchestration registry cannot be read", "MR-4")
+                "dangling symbolic link", "MR-4")
         registry.unlink()
         registry.write_bytes(saved_registry)
         real_reg_lstat = os.lstat
@@ -2018,13 +2996,21 @@ def self_test():
         declare(mistakes_register="reg.jsonl")
         real_os_read = os.read
         read_fail = {"fired": False}
+        read_fail_identity = os.stat(str(reg))
 
         def failing_read(read_fd, count):
-            # fire only on the appender's own register read (its 64 KiB chunk size), never
-            # on a subprocess pipe read from the root-validation git probe
+            # fire only on the appender's own register read, identified by the open
+            # descriptor's file identity, never on the registry read (same chunk size) and
+            # never on a subprocess pipe read from the root-validation git probe
             if not read_fail["fired"] and count == 1 << 16:
-                read_fail["fired"] = True
-                raise OSError(5, "injected input-output error")
+                try:
+                    st_read = os.fstat(read_fd)
+                except OSError:
+                    st_read = None
+                if st_read is not None and (st_read.st_dev, st_read.st_ino) == \
+                        (read_fail_identity.st_dev, read_fail_identity.st_ino):
+                    read_fail["fired"] = True
+                    raise OSError(5, "injected input-output error")
             return real_os_read(read_fd, count)
 
         os.read = failing_read
@@ -2371,6 +3357,115 @@ def self_test():
             failures.append("lock-wait-starts-over: both rows should land in order with a "
                             "clean chain, got inner {!r}, outer exit {}: {} rows {}".format(
                                 wait["inner"], rc, err.strip(), wait_ids))
+        # a close failure on the stale descriptor of a SUPERSEDED lock-wait attempt names
+        # the superseded attempt and is never called refused: the retried call carries the
+        # verdict, so when it RETURNED the message says that verdict was reported above
+        # and the exit becomes 2, and when it RAISED the message says the verdict is
+        # carried by the still unwinding exception (reported after this line), which
+        # keeps propagating instead of being replaced by exit 2
+        declare(mistakes_register="superseded-close.jsonl")
+        sup_reg = repo / "superseded-close.jsonl"
+        accepted("superseded-close-seed", sup_reg, "MR-1", bootstrap=True)
+        accepted("superseded-close-second-seed", sup_reg, "MR-2")
+        real_sup_close, real_sup_fstat = os.close, os.fstat
+
+        def superseded_scenario(name, inner_rid, inner_status, outer_rid, outer_status):
+            st_stale = os.lstat(str(sup_reg))
+            fired = {"n": 0, "again": 0, "inner": None}
+            stale_failed = set()
+
+            def stale_failing_close(close_fd):
+                # a second close of a descriptor number whose close already failed is
+                # the regression the "attempted exactly once" guarantee forbids: count
+                # it so the scenario can assert zero
+                if close_fd in stale_failed:
+                    fired["again"] += 1
+                try:
+                    st_closed = real_sup_fstat(close_fd)
+                except OSError:
+                    st_closed = None
+                real_sup_close(close_fd)
+                if st_closed is not None and (st_closed.st_dev, st_closed.st_ino) == \
+                        (st_stale.st_dev, st_stale.st_ino):
+                    fired["n"] += 1
+                    stale_failed.add(close_fd)
+                    raise OSError(5, "injected close failure")
+
+            committed = {"done": False}
+
+            def commit_then_fail_closes(lock_fd, op):
+                # while the outer append waits for its lock, a cooperating appender
+                # commits, so the file the outer call locked is stale and it starts
+                # over; only then is the close failure armed (on the stale file's
+                # identity), so the cooperating append's own closes stay real
+                if not committed["done"]:
+                    committed["done"] = True
+                    fired["inner"] = append(sup_reg, inner_rid, inner_status)
+                    os.close = stale_failing_close
+                return real_flock(lock_fd, op)
+
+            fcntl.flock = commit_then_fail_closes
+            try:
+                got = alarm_bounded(name,
+                                    lambda: append(sup_reg, outer_rid, outer_status))
+            finally:
+                fcntl.flock = real_flock
+                os.close = real_sup_close
+            if fired["inner"] is None or fired["inner"][0] != 0:
+                failures.append("{}: the cooperating commit should land cleanly, got "
+                                "{!r}".format(name, fired["inner"]))
+            if fired["n"] == 0:
+                failures.append("{}: the injected close failure never fired, so the "
+                                "vector proved nothing".format(name))
+            if fired["again"]:
+                failures.append("{}: the failed close was attempted again ({} extra "
+                                "attempt(s)); each owned descriptor's close is attempted "
+                                "exactly once".format(name, fired["again"]))
+            return got
+
+        sup_got = superseded_scenario("superseded-close-failure-named", "MR-1", "accepted",
+                                      "MR-2", "accepted")
+        if sup_got is not None:
+            sup_rc, sup_err = sup_got
+            if (sup_rc != 2 or "superseded lock-wait attempt" not in sup_err
+                    or "reported its own verdict above" not in sup_err
+                    or "could not be closed" not in sup_err or "refused" in sup_err):
+                failures.append("superseded-close-failure-named: want exit 2 naming the "
+                                "superseded attempt beside the close failure (never "
+                                "'refused'), got exit {!r}: {}".format(
+                                    sup_rc, sup_err.strip()))
+            sup_ids = [(json.loads(l).get("id"), json.loads(l).get("status"))
+                       for l in _lines(sup_reg)]
+            if sup_ids != [("MR-1", "proposed"), ("MR-2", "proposed"),
+                           ("MR-1", "accepted"), ("MR-2", "accepted")]:
+                failures.append("superseded-close-failure-named: both rows should land "
+                                "in order past the stale close failure, got {}".format(
+                                    sup_ids))
+        # the retried call RAISES here: the cooperating commit takes the proposal id this
+        # call wanted, so the retried call's next-id refusal (a sys.exit) is still
+        # unwinding when the stale descriptor's close fails; the close failure must say
+        # the verdict follows with that exception, never that it was reported above (the
+        # refusal prints after this message), and the exception's own verdict (exit 1
+        # here) stays, never replaced by exit 2
+        raising_got = superseded_scenario("superseded-close-failure-while-raising",
+                                          "MR-3", "proposed", "MR-3", "proposed")
+        if raising_got is not None:
+            r_rc, r_err = raising_got
+            if (r_rc != 1 or "superseded lock-wait attempt" not in r_err
+                    or "must take the next id" not in r_err
+                    or "still unwinding" not in r_err
+                    or "reported its own verdict above" in r_err
+                    or "could not be closed" not in r_err
+                    or "append: refused" in r_err):
+                failures.append("superseded-close-failure-while-raising: want the retried "
+                                "call's own refusal (exit 1) with the close failure "
+                                "naming the superseded attempt and the still unwinding "
+                                "verdict, got exit {!r}: {}".format(r_rc, r_err.strip()))
+        vector_cleanup("superseded-close-failure-while-raising", sup_reg.unlink)
+        vector_cleanup("superseded-close-failure-while-raising",
+                       Path(str(sup_reg) + ".anchor").unlink)
+        # the vectors below continue on the commit register, so restore its declaration
+        declare(mistakes_register="commit.jsonl")
         # a landed row's commit read that git cannot launch, or that times out, is
         # cannot-evaluate: exit 2 naming the read, never a traceback, nothing written
         real_c_run = subprocess.run
@@ -3014,9 +4109,13 @@ def self_test():
             os.unlink(str(repo / "x2")), os.rmdir(str(repo / "x2-real")),
             os.rmdir(str(x2_target))))
         # ---- every descriptor the creation walk opens is closed exactly once on the clean
-        # path: the deepest existing ancestor plus one per descended component (red with
+        # path: the deepest existing ancestor plus one per descended component, plus one
+        # absence-confirmation open of that ancestor per missing component (entry_state
+        # confirms each ENOENT at the final name relative to an opened parent; the climbs
+        # through the still-missing middle components open nothing). For three missing
+        # components that is 3 walk descriptors + 3 confirmation descriptors. (Red with
         # the descent's os.close of the handed-over parent removed: one descriptor leaks
-        # per descended component)
+        # per descended component.)
         real_os_open = os.open
         real_os_close = os.close
         fd_opens, fd_live, fd_bad = [], set(), []
@@ -3045,10 +4144,11 @@ def self_test():
             os.open = real_os_open
             os.close = real_os_close
         left, skipped, unreach, _closes = _made_dirs_swept(x3_made)
-        if fd_bad or fd_live or len(fd_opens) != 3 or left or skipped or unreach:
+        if fd_bad or fd_live or len(fd_opens) != 6 or left or skipped or unreach:
             failures.append("creation-descriptors-closed-once: the walk must close every "
                             "descriptor it opened exactly once (the ancestor plus one per "
-                            "descended component), got opens={} still-open={} double={} "
+                            "descended component, plus one absence-confirmation open per "
+                            "missing component), got opens={} still-open={} double={} "
                             "left={} skipped={}".format(fd_opens, fd_live, fd_bad, left,
                                                         skipped))
         # ---- the descent is descriptor-relative end to end: an ancestor renamed aside
@@ -3096,8 +4196,18 @@ def self_test():
         # that failure is attributed here, never to the shared fixture handler)
         c3fail = {"fired": False}
 
+        def _is_confirmation_fd(cfd):
+            # entry_state's absence confirmation opens parents O_PATH; the creation walk's
+            # own descriptors are plain directory opens, so the injections below target the
+            # walk's first close, never the confirmation's (F_GETFL is one of the few
+            # operations permitted on an O_PATH descriptor and reports that flag)
+            try:
+                return bool(fcntl.fcntl(cfd, fcntl.F_GETFL) & os.O_PATH)
+            except OSError:
+                return False
+
         def failing_close(cfd):
-            if not c3fail["fired"]:
+            if not c3fail["fired"] and not _is_confirmation_fd(cfd):
                 c3fail["fired"] = True
                 real_os_close(cfd)
                 raise OSError(5, "injected close failure")
@@ -3133,10 +4243,11 @@ def self_test():
         c5fail = {"fired": False}
 
         def final_failing_close(cfd):
+            if c5fail["fired"] or _is_confirmation_fd(cfd):
+                return real_os_close(cfd)
             real_os_close(cfd)
-            if not c5fail["fired"]:
-                c5fail["fired"] = True
-                raise OSError(5, "injected close failure")
+            c5fail["fired"] = True
+            raise OSError(5, "injected close failure")
 
         os.close = final_failing_close
         c5_refusal = c5_raw = None
@@ -4069,7 +5180,33 @@ def self_test():
           "existing commit or check_ref, a row that would fuse onto an unterminated last line, an "
           "anchored rewrite, a wrong-family id in either direction, and a --prefix that disagrees "
           "with the registry declaration are each refused (exit 1); an unreadable register or "
-          "register descriptor, a symlinked register path, an undeclared register, an appender "
+          "register descriptor, a symlinked register path (probed alarm-bounded, aliasing a "
+          "FIFO, so a follow would block), a register path that is not a regular file (a "
+          "FIFO, a directory and a Unix socket, each refused by the appender and by the "
+          "projection with a "
+          "diagnostic naming the file type, each alarm-bounded so a blocking regression "
+          "fails rather than hangs, the FIFO entry, the directory and the socket entry left "
+          "unchanged, while "
+          "a regular register still appends and still projects under the same bound, the "
+          "projected payload itself asserted, envelope, open item and source locator, and a "
+          "symlink to a regular register still projecting the target's own items), a FIFO "
+          "at the registry path (refused naming the registry and the file type, nothing "
+          "created, while a regular registry still reads and a clean append lands under the "
+          "same bound), a register the projection cannot decode (refused naming the read, "
+          "never a traceback), a symlink to a socket at the projected register path "
+          "(refused naming the TARGET's type, a socket, never the link's own numeric "
+          "mode), a descriptor failure after the projection's open succeeded (fstat, read "
+          "and close each injected to report ENOENT, each refused naming the open "
+          "descriptor, never a successful empty projection, while a genuinely absent "
+          "register still projects as no items), a projected register path that cannot be "
+          "opened for another reason (a path through a non-directory) or is not a valid "
+          "path value (an embedded NUL), each refused naming the read, never an escaped "
+          "error, a register line the projection cannot parse or shape (a line that is "
+          "not JSON, a line nested too deeply for the JSON decoder, balanced and "
+          "unbalanced, with nothing printed on stdout, a row that is not a JSON object, a "
+          "row whose id is not a string, each refused "
+          "with exit 2 naming the row, never a traceback and never exit 1), "
+          "an undeclared register, an appender "
           "installed outside any git repository (subprocess vector, never a cwd-derived root, "
           "run through a test-only search ceiling at the fixture's temporary directory, so a "
           "git checkout around it cannot decide the verdict, the ceiling's control still "
@@ -4193,7 +5330,40 @@ def self_test():
           "creation plus those under-lock re-checks, not a second validation (they catch "
           "the register-row interleavings their identity, link-count, size and byte "
           "comparisons detect; other validation inputs, the anchor included, are not "
-          "revalidated under the lock); and every "
+          "revalidated under the lock); an UNRESOLVABLE projected register path is a "
+          "refusal naming the cause, never an empty projection (a dangling symbolic link "
+          "at the register path and a register path under a missing parent directory are "
+          "each exit 2 by name with nothing on stdout, while the first-run control, a "
+          "confirmed-missing final name under a present parent, still projects as no "
+          "items); a row value the decoder accepts but the formatter cannot walk is a "
+          "named refusal too (the projection refuses with exit 2 naming the nesting, and "
+          "the appender's shared validation names the violation through a placeholder at "
+          "exit 1, both driven unconditionally by fault injection at the production "
+          "rendering sites and additionally through the measured window between the "
+          "decoder's and the renderer's recursion limits where this host has one (the "
+          "window cases MAY NOT RUN: a host whose render limit is not below its decode "
+          "limit skips them and this suite still exits 0, an omission the aggregate "
+          "runner's RESULT line does not reflect, so the named NOT RUN line printed "
+          "beside this PASS is the only disclosure), a "
+          "skipped window case being reported as a named NOT RUN line, never a silent "
+          "omission), never an escaped RecursionError; a registry nested too deeply for "
+          "the JSON decoder is the same named refusal (exit 2), never a traceback; a "
+          "descriptor close failure on the appender's unwind is exit 2 with the close "
+          "attempted exactly once (a repeat attempt on a descriptor whose close failed "
+          "is counted by the injectors and asserted zero) and each injection's firing "
+          "asserted, never an escaped "
+          "OSError (after a refusal it is a named refusal; after a LANDED row the message "
+          "says the row is in the register, never refused, and the exit stays 2 even when "
+          "the caller invokes the append inside its own exception handler, the escaping "
+          "exception being tracked explicitly, never read from ambient exception state; "
+          "on a SUPERSEDED lock-wait attempt's stale descriptor the message names the "
+          "superseded attempt, never refused, the exit becoming 2 when the retried "
+          "append returned with both rows landed in order, while a retried append that "
+          "raised keeps its own verdict, probed at the next-id refusal whose exit 1 "
+          "survives the close failure, the message then saying that verdict is carried "
+          "by the still unwinding exception, never that it was reported above); "
+          "the declaration check refuses a dangling symbolic link at a declared register "
+          "path by name; and every "
           "clean append is re-read with its last row and "
           "verify_lines checked")
     return 0

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "036fe36419b1c8535f3dc67905108ce2bc66cc7b0ce13c945750298ad1fe1a1e"
+tree-sha256 = "f64e84d561c39f6d65a776be44d6dab6e0fbf01dd5f57efe38880f786ddaddc1"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3361,8 +3361,8 @@ sha256 = "d7d7614791529f4ba2fc961b84e7a8dee7fcc832fd6c2d034c682fcfc1b7549c"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 126689
-sha256 = "845453d40b395c63b182aa3c61e0d280d03b8b4f0a44b3954fc0233f3836b9c7"
+bytes = 126877
+sha256 = "56da2fa25dfd37ff23025a9bb5c10ce7cede68ca5103bfed139a46916f70a701"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -3436,8 +3436,8 @@ sha256 = "e4fbc6cccdfb032cd5c0f6fecba4fdde40e4ed510435643b2bcba573151b6616"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
-bytes = 105262
-sha256 = "603675169f89cbb081ab1c6a1f55baf952389b2e6523214b4d1e18b0ed2e052d"
+bytes = 147538
+sha256 = "8770f3dad7d891c1f2f136854498f1de8d77c8051e54cdd18e7c5e40aa415cdd"
 
 [[sources]]
 path = "tools/check_msg_leaks.py"
@@ -3496,8 +3496,8 @@ sha256 = "ce538e0eb326029347223915c4f85b81ac19e99beff0916bd5269acb9e2170c6"
 
 [[sources]]
 path = "tools/check_record_drift.py"
-bytes = 14799
-sha256 = "ec8d83d75f38c8875d10cfdc9175c7b70dc432e1bdb10d1fe9b52b8a363bcacb"
+bytes = 20881
+sha256 = "fb55c662fc9a98c41ef3ccbf8cded6b4f5426a277eed0c6073918a8ec63ac241"
 
 [[sources]]
 path = "tools/check_record_sections.py"
@@ -3756,8 +3756,8 @@ sha256 = "26b2e951fe7c452e19c919e04bbc2cf3854eefd085fe3f10399678b84b4d5b9a"
 
 [[sources]]
 path = "tools/orch_register.py"
-bytes = 245203
-sha256 = "32231cb6f5aff57fccaf8d06abb0c053353035bcf22f4d71777fb7ded347f1d4"
+bytes = 316186
+sha256 = "216900989fb5d6843ca83ee485b7963d60bae9f0494803d0a5a0fb27e8bad84d"
 
 [[sources]]
 path = "tools/pin.py"
