@@ -52,6 +52,8 @@ run_gate "opf-adopt-observe-selftest"  python3 -I -B "$here/_opf_adopt_observe.p
 run_gate "opf-adopt-discover-selftest" python3 -I -B "$here/_opf_adopt_discover.py" --self-test
 run_gate "opf-prompt-pack-selftest"    python3 -I -B "$here/check_opf_prompt_pack.py" --self-test
 run_gate "opf-prompt-pack"             python3 -I -B "$here/check_opf_prompt_pack.py"
+run_gate "opf-prompt-pin-selftest"     python3 -I -B "$here/check_opf_prompt_pin.py" --self-test
+run_gate "opf-prompt-pin"              python3 -I -B "$here/check_opf_prompt_pin.py"
 run_gate "opf-oplock-selftest"         python3 -I -B "$here/_opf_oplock.py" --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B "$here/_opf_init_substrate.py" --self-test
 run_gate "opf-init-builders-selftest"  python3 -I -B "$here/_opf_init.py" --self-test

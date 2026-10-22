@@ -39,7 +39,7 @@ store can be built by hand from those sections.
 ## Read the specification first
 
 Read these files in full before you write any code, at the pinned commit
-`028ea6d309eea90d31b51ea57a4e34988972f210` of `jposluns/guardrails`. These pins name the
+`443d19bab79bfba1ad3d650ab023f58798553738` of `jposluns/guardrails`. These pins name the
 specification this prompt quotes: every quotation of OPF-SPEC.md in this prompt is taken from that
 file at that commit, whose SHA-256 the table gives. Read them from the pinned URLs, not from a
 branch, so the text cannot change under you. After downloading each file, compute its
@@ -48,22 +48,22 @@ stop and report it. Do not work from memory or from a summary, this one included
 
 | File | Role | SHA-256 at the pinned commit |
 |---|---|---|
-| `opf/spec/OPF-SPEC.md` | The authoritative specification | `3afc5ffb2eec42c674f575305d6727728ce17023909785557d82165d9a5d6c80` |
-| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `3af785c6ebe1a2ea68e865e27099ce19b10a0490fbd9d74ff633769a11e90ae1` |
+| `opf/spec/OPF-SPEC.md` | The authoritative specification | `80131d168abae3bcbfaf3c2a314a545f044d5a4373ec337d327b1ab8ddf34504` |
+| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `d52a9e62b500b123aa1adf45d0916bf2deedb0d6300936a849c1208561619cdf` |
 | `opf/spec/OPF-INIT-D2B.md` | The coupled initialization contract | `4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec` |
 | `opf/spec/OPF-INIT-D2B-REVIEW.md` | The review register for that contract | `5b29499173ed8ad47607d3d604bb77e59cd47a639f35046fb4815e241a794ffa` |
 | `opf/enforcement/ci/opf-ci.sh` | The reference CI recipe (read for behaviour; do not copy) | `0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104` |
-| `opf/enforcement/ci/github-actions.yml` | The reference CI workflow template (read; do not copy) | `f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5` |
-| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `119cb377c6f1ed90aa237b44e14e6f5786d48d28d84bd0fba2ab0e9d9539b4c3` |
+| `opf/enforcement/ci/github-actions.yml` | The reference CI workflow template (read; do not copy) | `3048d80af20e7c6699aa54d908c6bddb905fe1f4b056b85c30559e5e94be5262` |
+| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `50dd2c36c25afd69cacb3ed3ebe0285347cccaa67d15338b8ccffe4ad9b3310e` |
 
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
 ```text
-https://raw.githubusercontent.com/jposluns/guardrails/028ea6d309eea90d31b51ea57a4e34988972f210/<path>
+https://raw.githubusercontent.com/jposluns/guardrails/443d19bab79bfba1ad3d650ab023f58798553738/<path>
 ```
 
 For example, the specification itself is at
-`https://raw.githubusercontent.com/jposluns/guardrails/028ea6d309eea90d31b51ea57a4e34988972f210/opf/spec/OPF-SPEC.md`.
+`https://raw.githubusercontent.com/jposluns/guardrails/443d19bab79bfba1ad3d650ab023f58798553738/opf/spec/OPF-SPEC.md`.
 
 Facts about these sources that shape the work:
 
@@ -88,7 +88,7 @@ Facts about these sources that shape the work:
   contract (`spec_version = "2.0.0"`, `[opf].homes = 2`) is a separate, later activation, and that
   the section 9 manifest example describes the 1.3.0 target on legacy homes.
 - The prompt pack manifest at the pinned commit (`format = "opf.prompt-pack/v1"`,
-  `version = "0.4.1"`) lists three members: `adopt/SKILL.md`, an adoption procedure that drives the
+  `version = "0.5.2"`) lists three members: `adopt/SKILL.md`, an adoption procedure that drives the
   reference tooling's `opf adopt` verb; `adopt/clean-start.md`, its companion for a project with no
   prior records, whose interim route runs the reference tooling's `opf init`; and `flow/SKILL.md`,
   an operating-loop skill for an assistant. None of them is an import prompt, and this prompt uses
@@ -168,9 +168,12 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   supported `spec_version` (`1.3.0`), homes generation (1) and worklog storage generation (1)
   (section 16.1). Section 9.1 says that a profile, a store manifest field or a command-line request
   "MUST NOT declare, grant, or relax an implementation's class", so none of those carries it.
-  Section 16.1 requires each release to ship the declaration as one file, the declaration file, and
-  to carry in the implementation, apart from that file, the SHA-256 digest of its bytes as shipped
-  (the shipped-file digest), with the documentation of each release stating where. This prompt's
+  Section 16.1 says "Each release MUST ship that declaration as one file, the declaration file."
+  It also says "Each release MUST also carry, in the implementation
+  and apart from that file, the SHA-256 digest of that file's bytes as the release ships them (the
+  shipped-file digest), and the documentation of each release MUST state where the implementation
+  carries it. A release that carries no such digest, or whose documentation states no such place,
+  does not conform to this section, and a conformance claim MUST NOT be made for it." This prompt's
   choice is to keep that file inside each release of your implementation, outside every store, to
   have your build embed in the program the shipped-file digest and the declaration as the release
   ships it, and to produce the declaration in the release documentation and in every report from
@@ -996,6 +999,22 @@ conformance claim (checklist item 19) until the maintainer rules.
     8's, and the modules. Where the ruling is that naming one as an exclusion waives a base
     requirement, make no conformance claim until your implementation provides it; this prompt does
     not cover that work (see "Out of scope for this prompt").
+33. **A 1.2.0 store carrying imported ancestry.** Section 9.2's 1.2.0 to 1.3.0 delta allows
+    "addition of missing imported counter rows at zero only where no imported ancestry exists,
+    never an `"imported:LF"` row", and continues: "Where imported ancestry exists in a namespace,
+    the imported counter row added for it MUST hold the highest imported ID number in that
+    namespace, the largest `<n>` of its `imported:<NS>-<n>` IDs." The pinned sources do not say how
+    a store at `spec_version = "1.2.0"` comes to hold `imported:<NS>-<n>` IDs in a namespace whose
+    imported counter row is missing, and the step 8 fixture list builds its plain 1.2.0 fixtures
+    with no imported leaves and no imported counter rows. Ask the maintainer which store states
+    that sentence covers and what fixture exercises it; do not invent one.
+34. **The ancestry-valued counter row beside the missing-ancestral-counter refusal.** Section 9.2
+    says of the same delta that "the imported counter row added for it MUST hold the highest
+    imported ID number in that namespace", and also says "a populated collision, missing ancestral
+    counter or unprovable prestate refuses." The pinned sources do not say which of the two governs
+    a namespace that holds imported ancestry while its imported counter row is missing: the
+    addition of the row at that highest value, or the missing-ancestral-counter refusal. Ask the
+    maintainer how the two sentences read together; do not invent a reconciliation.
 
 ## The store you are building
 
@@ -1039,7 +1058,15 @@ Build the primitives every later step relies on.
 - A TOML reader, and a canonical TOML emitter whose output for an unchanged parsed model
   reproduces the file's bytes exactly. The writers refuse any file that fails this
   byte-reproduction test, such as one carrying comments (section 8.8, Authoring operations, item 2;
-  section 9.2, Store schema upgrades). The serialization itself is yours to fix (open point 18).
+  section 9.2, Store schema upgrades), with the one exception section 5.7 states: the canonical
+  serialization writes U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR inside a string as
+  six-character backslash-u escapes, and "a file that differs from it only by holding either
+  character literally inside a basic string, as files written by earlier tooling do, still
+  passes, reads back as the same values, and is re-spelled with the escapes by its next write".
+  Section 5.7 also rules that a write that would grow a store file past the store reader's size
+  cap "refuses instead, before anything is written", so an upgrade or record operation never
+  rewrites a readable store into one the reader refuses. The serialization itself is yours to fix
+  (open point 18).
 - A clock reader. Every `created_at`, `updated_at`, `date`, `decided_at`, `sent_at`,
   `receipted_at`, lease acquisition time and release date is read from the clock at the event, in
   RFC 3339 UTC (sections 5.7, 6.1, 8.3, 8.8). Never compose or guess a timestamp.
@@ -1095,7 +1122,15 @@ Build the primitives every later step relies on.
     the release carries apart from the file, such as the version its build embeds in the program,
     never with a value read from the declaration file itself: a declaration copied from another
     release with the same class, version and generations is contradictory. Cannot-evaluate.
-  - No class: a file that is not unreadable, malformed or contradictory but has no class key. As
+  - No class: a file that is not unreadable, malformed or contradictory but has no class key.
+    Section 16.1 says "A declaration that carries its release identity, its
+    `spec_version`, its homes generation, and its worklog storage generation, and omits only its
+    class, declares no class: it MUST NOT be treated as malformed for that omission, and the
+    implementation that ships it MUST be treated as upgrade-capable unless the declaration is
+    malformed or contradictory on other grounds." It closes the same paragraph: "The file declares
+    no class only where it omits its class and no other field: a file that is absent, or that also
+    omits its release identity, its `spec_version`, its homes generation, or its worklog storage
+    generation, is malformed and MUST yield cannot-evaluate." As
     section 16.1 rules, your implementation is then treated as upgrade-capable and every upgrade
     requirement binds it, so the check passes with the class `upgrade-capable`; this case is not
     cannot-evaluate. A release that ships such a file still does not declare its class, as the first
@@ -1177,7 +1212,11 @@ Build the primitives every later step relies on.
 Acceptance checks:
 
 - Re-emitting a parsed canonical file gives identical bytes; a file with a comment or a
-  non-canonical layout is detected as non-canonical.
+  non-canonical layout is detected as non-canonical. A file that differs from the canonical
+  serialization only by holding U+2028 literally inside a basic string, and one only by holding
+  U+2029, each passes, reads back as the same values, and is re-spelled with the escapes by its
+  next write (section 5.7). A write that would grow a store file past the store reader's size cap
+  refuses before anything is written.
 - An unreadable or malformed input produces cannot-evaluate in a unit test, never a pass.
 - A path with a `..` component, a backslash or an absolute form is refused.
 - The class declaration check yields cannot-evaluate for each of these declarations: absent,
@@ -1264,9 +1303,9 @@ Implement resolution exactly as sections 4.3 (The pointer), 4.4 (The machine sto
   report an override that is untracked and matched by no ignore rule, though section 4.3 says the
   file is "ignored by version control". Step 14 discloses both limits as residuals. No OPF operation
   writes the ignore rule. Section 4.2 has init and upgrade render one ignore file,
-  `.working/.gitignore`, and only at homes 2 ("Homes-2 init and upgrade MUST render this managed
-  block into `.working/.gitignore`"); at homes 1, this prompt's target, they render none, and that
-  file would not cover the product root in any case.
+  `.working/.gitignore`, and only at homes 2 ("Homes-2 init, and any upgrade of a store already at
+  homes 2, MUST render this managed block into `.working/.gitignore`"); at homes 1, this prompt's
+  target, they render none, and that file would not cover the product root in any case.
 
 Acceptance checks:
 
@@ -1814,7 +1853,12 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
   The 1.2.0 to 1.3.0 delta is "the version bump, registration and create-only initialization of
   missing imported managed leaves for enabled types other than `legacy_fragment`, and addition of
   missing imported counter rows at zero only where no imported ancestry exists, never an
-  `"imported:LF"` row" (registration is open point 27). Preserve
+  `"imported:LF"` row" (registration is open point 27). Section 9.2 continues: "Where imported
+  ancestry exists in a namespace, the imported counter row added for it MUST hold the highest
+  imported ID number in that namespace, the largest `<n>` of its `imported:<NS>-<n>` IDs." How a
+  1.2.0 store comes to carry imported ancestry with its imported counter row missing is open point
+  33, and how that rule reads beside the missing-ancestral-counter refusal below is open point 34;
+  do not invent an answer to either. Preserve
   existing records, evidence, clean counters and imported high-water values; refuse on "a
   populated collision, missing ancestral counter or unprovable prestate". Never create historical
   records, adoption approval or provenance (no `init.toml` for an upgraded store), never change
@@ -1965,20 +2009,27 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
     reason it counts every other entry under `.working/staging/`: the check cannot show that such an
     entry holds no import state. Section 4.2's "Journals are machine-local even after completion"
     sits in the paragraph after the managed ignore block that lists `/journals/` and that "Homes-2
-    init and upgrade MUST render"; this prompt reads it as a homes-2 rule, though section 4.2 does
-    not limit that paragraph to homes 2, and the same paragraph opens with "Durable `imported/` and
-    `archive/` evidence MUST stay tracked", which is not tied to homes 2. Whichever generation it
-    binds, section 4.2 says of a store under pre-1.3.0 tooling, as every origin store of this
-    upgrade was, that "the homes-2 names are ordinary store paths there, graded, detected, and
-    dispositioned exactly as before", and section 5.1 makes "An untracked or ignored `.working/`
-    tree" a hard failure, so in a homes-1 origin store a journal entry is a store path, not
-    machine-local data. Section 4.2 also says doctor "MUST NOT consult a journal to decide partial
-    status" and "Containment and doctor exclude journals and make no recovery claim", without saying
-    which homes generation the second sentence binds; this prompt's reading is that those rules bind
-    doctor and containment, not this pre-write check of the upgrade, so the check treats a journal
-    entry like any other entry under the rule above. Your own tooling writes no journal there (open
-    point 11). Whether journal entries, or those of some kinds, should instead be left out of the
-    check is the maintainer's to rule; until ruled, this prompt's choice is that every entry counts.
+    init, and any upgrade of a store already at homes 2, MUST render"; this prompt reads it as a
+    homes-2 rule, though section 4.2 does not limit that paragraph to homes 2, and the same
+    paragraph opens with "Durable `imported/` and `archive/` evidence MUST stay tracked", which is
+    not tied to homes 2. Whichever generation it
+    binds, section 4.2 says that under pre-1.3.0 tooling, the tooling of every origin store of this
+    upgrade, "a store that has not started an adoption keeps, within that tooling's own version
+    ceiling, its legacy grading: the homes-2 names are ordinary store paths there, graded, detected,
+    and dispositioned exactly as before", and section 5.1 makes "An untracked or ignored `.working/`
+    tree" a hard failure, so in a homes-1 origin store that has not started an adoption a journal
+    entry is a store path, not machine-local data. Of a store whose adoption home
+    `.working/imported/adoption/` exists, section 4.2 says instead that it "has started an adoption
+    and receives the adoption grading from the same pre-1.3.0 tooling", whose doctor "MUST NOT read
+    the machine-local journal"; the check still counts that store's journal entries, as the rule
+    above says of every entry. Section 4.2 also says doctor "MUST NOT consult a journal to decide
+    partial status" and "Containment and doctor exclude journals and make no recovery claim",
+    without saying which homes generation the second sentence binds; this prompt's reading is that
+    those rules bind doctor and containment, not this pre-write check of the upgrade, so the check
+    treats a journal entry like any other entry under the rule above. Your own tooling writes no
+    journal there (open point 11). Whether journal entries, or those of some kinds, should instead
+    be left out of the check is the maintainer's to rule; until ruled, this prompt's choice is that
+    every entry counts.
 
   If you find another location that the specification names for legacy import or ingest state, add
   it to this list, give it fixtures under the same rule, and ask the maintainer to ratify the
@@ -1995,6 +2046,12 @@ Acceptance checks, over synthetic fixtures the test builds:
   and the validator reports valid, its tracked-store check accepting those leaves under open point
   20. After the test commits the change, the validator still reports valid.
 - A 1.2.0 fixture with synthetic clean records keeps every record byte and every clean counter.
+- Once open points 33 and 34 are resolved: a fixture holding imported ancestry in a namespace with
+  its imported counter row missing, built as the resolution of open point 33 says, upgrades with
+  the imported counter row added for that namespace holding the highest imported ID number in it,
+  the largest `<n>` of its `imported:<NS>-<n>` IDs (section 9.2), as the resolution of open point
+  34 reads that rule beside the missing-ancestral-counter refusal. Until then, report this check as
+  not run.
 - A 1.2.0 fixture whose manifest declares the `legacy_fragment` type, with no LF record, upgrades to
   1.3.0 with the imported leaves and imported counter rows of its other enabled types only: no
   `legacy_fragment.imported.index.toml` and no `"imported:LF"` row is created (sections 4.2 and
@@ -3236,8 +3293,11 @@ maintainer's ruling on an open point, report the ruling with it.
     route, the receipt repair route (from 1.2.0, and from 1.0.0 with the intermediate upgrade
     committed before the writer runs) performed end to end, the decision-chain checks of open point
     28 under the reading the maintainer ruled, with that reading's remedy performed end to end and
-    the report naming every record that becomes or ceases to be current, and the pre-write
-    unresolved-import check over every location and `import_status` value of step 8, is implemented
+    the report naming every record that becomes or ceases to be current, the pre-write
+    unresolved-import check over every location and `import_status` value of step 8, and the
+    imported-counter value check (where imported ancestry exists in a namespace, the imported
+    counter row added for it holds the largest `<n>` of its `imported:<NS>-<n>` IDs, section 9.2,
+    under the maintainer's resolutions of open points 33 and 34), is implemented
     and passed every step 8 check on synthetic fixtures before initialization and the record writer
     accepted the 1.3.0 format (section 4.2); every detail of open point 25 is resolved, and no step
     8 check was left not run.
@@ -3291,8 +3351,12 @@ maintainer's ruling on an open point, report the ruling with it.
     worklog storage generation (1), as section 16.1 requires, and no profile, manifest field or
     command-line request declares or changes the class (section 9.1); the class claim says that it
     is self-asserted (section 17); the declared release identity is that of the running release.
+    Each release ships the declaration as section 16.1 requires: "Each release MUST ship that
+    declaration as one file, the declaration file."
     Each release carries the shipped-file digest apart from the declaration file, and its
-    documentation states where (section 16.1). The documentation of each release restates the
+    documentation states where (section 16.1): "A release that carries no such digest, or whose
+    documentation states no such place, does not conform to this section, and a conformance claim
+    MUST NOT be made for it." The documentation of each release restates the
     declaration file as the release ships it, as section 16.1 requires: "The documentation of each
     release MUST restate that file's declaration without differing from it". Section 16.1 also says
     "Every report the emitter of a release writes MUST carry the four parts compared in every
@@ -3300,7 +3364,9 @@ maintainer's ruling on an open point, report the ruling with it.
     implementation carries, the installed-copy digest, and the runtime result", and every report of
     yours carries them in the forms that section fixes, as the step 1 report emitter builds them:
     the restatement of the declaration as the release ships it, each digest as 64 lowercase
-    hexadecimal digits, the installed-copy digest `not-read` only beside `cannot_evaluate`, and the
+    hexadecimal digits and, in the expected report, as section 16.1 fixes it: "each of its digests
+    equals the SHA-256 digest of that file's bytes as the release ships
+    them", the installed-copy digest `not-read` only beside `cannot_evaluate`, and the
     runtime result read over the store operations the run performed, and every report names its
     scope, its exclusions and its cannot-evaluate results as step 1 describes (section 16).
     With each declaration that the step 1 checks yield cannot-evaluate for, another release's
@@ -3311,7 +3377,13 @@ maintainer's ruling on an open point, report the ruling with it.
     store operation". With the declaration that lacks only its class key, and a shipped-file digest
     of its own bytes, they proceed as upgrade-capable, as section 16.1 requires: "An implementation
     whose declaration lacks only its class MUST be treated as upgrade-capable, and every upgrade
-    requirement binds it".
+    requirement binds it". Section 16.1 bounds that case: "The file declares no class only where it
+    omits its class and no other field: a file that is absent, or that also omits its release
+    identity, its `spec_version`, its homes generation, or its worklog storage generation, is
+    malformed and MUST yield cannot-evaluate." Of a shown failure of either reference-run rule,
+    section 16.1 says, as step 15 quotes it: "Each such failure is a release nonconformance, never
+    a runtime state of the declaration: it MUST NOT be treated as making the declaration malformed
+    or contradictory, and it does not change what a runtime check of an installed copy yields."
     The report checks of steps 1 and 10 and the checks of this item passed. They are tests that
     direct the inspection of item 22, and a run of them made outside your attempts is not evidence
     of conformance: section 16.1 says "A run that is no reference run and belongs to none of the
