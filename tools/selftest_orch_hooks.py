@@ -10791,18 +10791,28 @@ def _main_isolated(report_path=None):
         check("wl/raw-words-dq-subst-hash-comment",
               aiqt_hooks._orch_raw_unquoted_words("for x in \"$(echo a # it's\n)\" y"), ["for", "x", "in", "y"])
         # COST. The poll-loop classifier and the raw word scan read a '#' inside a double-quoted substitution
-        # through the lexer's substitution skip, and the foreground detach scan keeps a comment-rule nesting
-        # stack of its own; each takes time linear in the command's length (COST in the comment above
-        # _nest_track in aiqt_hooks.py), so each must decide these inputs in under 1 s of CPU: a 256 KiB line
-        # of blank-led '#' inside a double-quoted substitution, and a 128 KiB run of open parentheses and
-        # backquote substitutions (the hook self-test's lex-cost inputs). Measured on one host by timing one
-        # call of each with time.process_time, the code before the linear skip and the counted nesting stack
-        # took 14.85 s and 9.25 s in the classifier, 14.84 s in the word scan and 13.90 s in the foreground
-        # scan, and this code at most 0.09 s on any of them (the classifier on the nesting input). The word
-        # scan on the nesting input (0.02 s) and the foreground scan on the comment line (under 0.01 s) stayed
-        # under the bound on both, so neither is checked.
+        # through the lexer's substitution skip, and both also test once per escaped backquote a word reaches
+        # whether a backquote substitution is open ("`" in nest); the foreground detach scan keeps a
+        # comment-rule nesting stack of its own. Each of those tests costs the same time however deep the stack
+        # is only when the stack counts its entries (_NestStack, COST in the comment above _nest_track in
+        # aiqt_hooks.py); on a plain list it reads every entry, so a deep nesting stack under repeated escaped
+        # backquotes makes the raw word scan quadratic. Each scan must decide these inputs in under 1 s of CPU:
+        # a 256 KiB line of blank-led '#' inside a double-quoted substitution; a 128 KiB run of open
+        # parentheses and backquote substitutions; and a 320 KiB deep parameter-expansion stack ("${x:-"
+        # repeated) closed after an equal run of escaped backquotes, which drives the raw word scanner's
+        # per-escaped-backquote "`" in nest test at full depth. Measured on one host by timing one call of each
+        # with time.process_time, the code before the linear skip and the counted nesting stack took 14.85 s
+        # and 9.25 s in the classifier on the first two inputs, 14.84 s in the word scan and 13.90 s in the
+        # foreground scan, and 11.16 s in the classifier and 3.63 s in the word scan on the deep
+        # parameter-expansion input; the counted stack took at most 0.09 s on the first two inputs and 0.23 s
+        # and 0.06 s on the deep one. The word scan on the parentheses input (0.02 s) and the foreground scan
+        # on the comment line (under 0.01 s) stayed under the bound on both, so neither is checked.
         _cost_long = 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'
         _cost_deep = "(" * 56000 + " `a`" * (56000 // 3)
+        _cost_bq_n = 40000  # deep enough that a plain-list nest made the raw word scan take seconds
+        _cost_bq = ("while true; do echo " + "${x:-" * _cost_bq_n
+                    + "\\`" * _cost_bq_n + "}" * _cost_bq_n
+                    + "; sleep 1; gh pr checks 1; done &")
 
         def _cost_cpu(fn, command):
             """'under 1 s' when fn(command) takes under 1 s of CPU, else the time it took."""
@@ -10817,6 +10827,15 @@ def _main_isolated(report_path=None):
               "under 1 s")
         check("trunc/fg-scan-cost-deep-nesting", _cost_cpu(aiqt_hooks._orch_foreground_detach_kind, _cost_deep),
               "under 1 s")
+        # A deep parameter-expansion stack closed after repeated escaped backquotes: the poll-loop body is a
+        # real probe loop, so the classification is 'match' whether the raw scan's nest is a plain list or a
+        # counted stack (this control holds on both), while the two cost checks fail on a plain-list nest (the
+        # raw word scan and the classifier it feeds both went quadratic) and pass once the scan uses a counted
+        # nesting stack. The classifier runs the raw scan, so its cost covers both the scan and the lexer path.
+        check("wl/deep-param-escaped-backquote-match", clf(_cost_bq), "match")
+        check("wl/raw-words-cost-deep-param-escaped-backquote",
+              _cost_cpu(aiqt_hooks._orch_raw_unquoted_words, _cost_bq), "under 1 s")
+        check("wl/cost-deep-param-escaped-backquote", _cost_cpu(clf, _cost_bq), "under 1 s")
         # run_in_background true with an inner trailing `done &` is still 'match' (predicate ignores rib).
         check("wl/deny-rib-true-inner-detach", clf(BASE), "match")
         # NEGATIVE fixtures (this control): every one is 'none'.

@@ -15907,7 +15907,7 @@ def _orch_raw_unquoted_scan(raw, reading):
     words = []
     n = len(raw)
     i = 0
-    nest = []
+    nest = _NestStack()  # count entries so each word's "`" in nest test (see _nest_track) stays O(1)
     while i < n:
         c = raw[i]
         if c in " \t":
