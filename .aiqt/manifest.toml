@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "87a82e2d188ed4d4d601970ab87fd2d5f99877bd2d5a164172aa90403dd42528"
+tree-sha256 = "3616a56ccab5379b094a3e90765515b5b66a08971790f11e7c3faa2ab1e27758"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3526,8 +3526,8 @@ sha256 = "89d29e534757397ed1cd6e10ad8a5d2259f3e84aa15691ef59d5e3b175378721"
 
 [[sources]]
 path = "tools/check_relied_exit_pipes.py"
-bytes = 289122
-sha256 = "1aff6d0b7cc0fafb2396607ebc00c4883363a05e7865e83db4da15781ff0bc35"
+bytes = 300262
+sha256 = "c852017dcc6ddfc01347fdaeb4f861ef45b15121ba3b09419e017b86c36ce6cf"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
