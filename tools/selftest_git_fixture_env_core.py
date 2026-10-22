@@ -2319,15 +2319,23 @@ def _opf_lifecycle_graph_checks():
 
 
 def _trace2_tail_checks(base, probe=_trace2_maintenance_children):
-    """The maintenance probe's trace2 read over seeded files, with a scripted clock and a sleep
-    that can complete the final event, so each leg is deterministic. The red leg's detached child
-    keeps appending after the commit returned, so a read can see an unterminated final event: the
-    probe must wait for it and parse it, fail loudly once the bound is reached (one tick inside the
-    bound, exactly at it, one tick past it), and stay loud on a malformed complete event."""
+    """The maintenance probe's trace2 read over seeded files, with a scripted clock (read after
+    every trace read) and a sleep that can complete the final event, so each leg is deterministic.
+    The red leg's detached child keeps appending after the commit returned, so a read can see an
+    unterminated final event. With a deadline of 1.0: an event completed during the wait is
+    parsed when the read that sees it finishes one tick before the deadline, and is a loud
+    failure when that read finishes exactly at or one tick past it; a tail still unterminated
+    fails loudly at the read whose clock is at or past the deadline, after one more wait when the
+    clock after the first read is one tick inside it and with no wait when that clock is exactly
+    at or one tick past it. Events are split at LF only, so a raw U+2028, U+2029 or U+0085
+    inside a string value stays in its event; a malformed complete event, a non-object event, a
+    child_start argv that is not a list of strings and an empty file are each loud."""
     started = json.dumps({"event": "child_start",
                           "argv": ["git", "maintenance", "run", "--auto"]}).encode("ascii") + b"\n"
     late = json.dumps({"event": "child_start", "argv": ["git", "gc", "--auto"]}).encode("ascii")
     head = started + late[:20]
+    parsed = [["git", "maintenance", "run", "--auto"], ["git", "gc", "--auto"]]
+    completed_late = "trace2 tail completed only after the 1.0 s bound"
 
     def probe_trace(name, content, completion, ticks):
         trace = base / name
@@ -2340,9 +2348,13 @@ def _trace2_tail_checks(base, probe=_trace2_maintenance_children):
                 trace.write_bytes(completion)
         return probe(trace, 1.0, lambda: ticks.pop(0), sleep), len(sleeps)
 
-    check("env/trace2-tail-awaited",
-          probe_trace("trace2-awaited.jsonl", head, started + late + b"\n", (0.0, 0.5, 200.0)),
-          ([["git", "maintenance", "run", "--auto"], ["git", "gc", "--auto"]], 1))
+    awaited_legs = []
+    for name, tick in (("inside", 0.999), ("at", 1.0), ("past", 1.001)):
+        awaited_legs.append((name,) + probe_trace(
+            "trace2-awaited-" + name + ".jsonl", head, started + late + b"\n",
+            (0.0, 0.5, tick, 200.0)))
+    check("env/trace2-tail-awaited", awaited_legs,
+          [("inside", parsed, 1), ("at", completed_late, 1), ("past", completed_late, 1)])
     bound_legs = []
     for name, tick in (("inside", 100.999), ("at", 101.0), ("past", 101.001)):
         got, sleeps = probe_trace("trace2-bound-" + name + ".jsonl", head, None,
@@ -2352,9 +2364,31 @@ def _trace2_tail_checks(base, probe=_trace2_maintenance_children):
     check("env/trace2-tail-bound", bound_legs,
           [("inside", True, 1), ("at", True, 0), ("past", True, 0)])
     got, sleeps = probe_trace("trace2-malformed.jsonl", b'{"event":"child_start",\n' + started,
-                              None, (0.0, 200.0))
+                              None, (0.0, 0.5))
     check("env/trace2-complete-malformed-loud",
           (isinstance(got, str) and got.startswith("unparseable trace2 event"), sleeps), (True, 0))
+    shape_legs = []
+    for name, line in (("array", b'["child_start"]\n'),
+                       ("argv-string", b'{"event":"child_start","argv":"git maintenance run"}\n')):
+        # A probe that raises on the shape instead of returning its string is recorded as this
+        # leg's mismatch, so the remaining legs and checks still run.
+        try:
+            got, sleeps = probe_trace("trace2-shape-" + name + ".jsonl", started + line, None,
+                                      (0.0, 0.5))
+        except (AttributeError, TypeError) as exc:
+            got, sleeps = "raised %s" % (type(exc).__name__,), None
+        shape_legs.append((name, isinstance(got, str)
+                           and got.startswith("unparseable trace2 event"), sleeps))
+    check("env/trace2-malformed-shape-loud", shape_legs,
+          [("array", True, 0), ("argv-string", True, 0)])
+    check("env/trace2-empty-loud", probe_trace("trace2-empty.jsonl", b"", None, (0.0, 0.5)),
+          ("empty trace2 event file: no event recorded", 0))
+    separated = ["git", "gc", "a\u2028b\u2029c\x85d"]
+    check("env/trace2-split-newline-only",
+          probe_trace("trace2-separators.jsonl", started + json.dumps(
+              {"event": "child_start", "argv": separated}, ensure_ascii=False).encode("utf-8")
+              + b"\n", None, (0.0, 0.5)),
+          ([["git", "maintenance", "run", "--auto"], separated], 0))
 
 
 def _core_lanes(base):
