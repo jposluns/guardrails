@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "66556bc07c02e523c6b18a83e68e84d4a8f6272127acbfe575fe514e3bf7d6b1"
+tree-sha256 = "0d8a8f8f48195c33a380d92a419b39a95b3e3ca28bf4b07be689eed6d73dcae6"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 439402
-sha256 = "a05ea6d62441dbd8779196fb12ea20570488d2f5f25b8d9c572c8b3d3435e26a"
+bytes = 439534
+sha256 = "66e60e898ded018e4352e7b25093f406e492a485436118fd0304d9a94029c52c"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -821,8 +821,8 @@ sha256 = "7854ba7c7fa8221a2b408deaf73505b492ff2d39f67d5addac1b20ed98ac2ba6"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 675164
-sha256 = "f190d3eb477d2414e51d861636ca4cc3c8cb40687f344c99019bda6b0469f6eb"
+bytes = 675296
+sha256 = "349e108a06b0be01cfe87c2ec9f9fc473e8ef5aafe3145410181d00725a9feff"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2356,8 +2356,8 @@ sha256 = "b9ab84064341340be432438f6a2e7a6c914b0b64ea56249edd9b22b83d09b6a1"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 394881
-sha256 = "bcaedcd9a3c9f59d8e7e8c3b079d49e6ddef75a2dd0b15a96a5c07c74853e0f9"
+bytes = 395013
+sha256 = "d9068ea5b238774d6daaa33b708c5336ed6e8e3cebd75d38a936c1a302997542"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3171,8 +3171,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 450701
-sha256 = "99d2b14b6dfd1db4c9456f8899978000b8bf9653444d32783db36cd9e7a63946"
+bytes = 450833
+sha256 = "69de1174b6782b64db5c7ad9d1cf39e26e1908f1c7561f79fd7293f3e9951f9f"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3501,8 +3501,8 @@ sha256 = "ec8d83d75f38c8875d10cfdc9175c7b70dc432e1bdb10d1fe9b52b8a363bcacb"
 
 [[sources]]
 path = "tools/check_record_sections.py"
-bytes = 307241
-sha256 = "6125dfb2537941b775ea968173e11598a5ca1a5dfa8de4dc2daeb66633254fc4"
+bytes = 314491
+sha256 = "89e8cc272d5174ab035e2498657d5454175de8189d060d599dd27e726c44b6a6"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
