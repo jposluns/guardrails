@@ -118,9 +118,11 @@ backtick or comment; redirects limited to a literal descriptor duplication or a 
 target) AND whose argv is the EXACT declared argv or a recognized 'gh pr merge' naming an explicit
 -R/--repo target outside the declared repos scope in one of the three read spellings (the
 separated '-R VALUE' / '--repo VALUE', or '--repo=VALUE'). Where that discovery finds NO
-declaration or no merge member, the guard stays INERT for merge spellings whatever the shape (the
-disclosed scope residual: a command that would enter a declaring checkout from elsewhere is not
-seen), and a non-git
+declaration or no merge member, a literal cd/pushd destination carrying a bad declaration or a
+discovery fault still DENIES fail-closed, a cleanly-declaring destination arms nothing, and with
+no such denial the guard stays INERT for merge spellings whatever the shape (the
+disclosed scope residual: a command that would enter a cleanly-declaring checkout from elsewhere
+is not governed), and a non-git
 session allows with a note; a present-but-bad declaration DENIES the matched shapes and leaves other
 commands alone; commands with no merge spelling ALLOW, and the MCP merge tool stays scoped by
 owner/repo. MOST denies carry a nearby allow control differing in one feature; the spelling
@@ -3051,6 +3053,12 @@ _DEADLINE_SHAPES = {
         "options": [{"label": "a", "description": "b"}, {"label": "c", "description": "d"}]}]}),
     "wakeup_long": lambda n, base: ("ScheduleWakeup", {"prompt": "p" * n, "delaySeconds": 60, "reason": "r"}),
     "gh_merge_words": lambda n, base: ("Bash", {"command": _repeat("gh pr merge 12; ", n)}),
+    # One long run of digits with no merge spelling at all, which the raw merge scan's
+    # digit-prefixed redirect-blanking regex re-walked in time quadratic in the run's length
+    # (about 12 s of CPU at 64 KB for one in-process call of the scan alone, measured 2026-10-22
+    # before the blanking walk replaced that regex), so an ordinary long numeric argument could
+    # exhaust the hook budget before the scan decided the command spells no merge.
+    "digit_run": lambda n, base: ("Bash", {"command": "echo " + "9" * max(1, n - 5)}),
 }
 _DEADLINE_CASES = {
     "absolute_paths": ("write_content", "read_deep_path"),
@@ -3064,7 +3072,7 @@ _DEADLINE_CASES = {
     "git_discard": ("git_segments_reset", "nest_parens"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens"),
-    "merge_path_guard": ("gh_merge_words", "git_words", "nest_parens"),
+    "merge_path_guard": ("gh_merge_words", "git_words", "nest_parens", "digit_run"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
@@ -17477,7 +17485,9 @@ def _main_isolated(monitor):
         # raw or de-quoted text denies unless it is one cleanly-lexed simple literal-'gh' command
         # whose argv is the exact declared argv or an explicit literal out-of-scope -R/--repo
         # target in one of the three read spellings (separated '-R VALUE' / '--repo VALUE', or
-        # '--repo=VALUE'); where that discovery finds NO declaration the guard stays inert for
+        # '--repo=VALUE'); where that discovery finds NO declaration, a bad declaration or a
+        # discovery fault at a literal cd/pushd destination still denies fail-closed, and with
+        # no such denial the guard stays inert for
         # merge spellings whatever the shape), prepush arms
         # the SessionStart warn that the declared required pre-push command is installed as the
         # clone's pre-push hook. Judged by the STRUCTURED decision. MOST denies carry a nearby allow
@@ -17600,6 +17610,12 @@ def _main_isolated(monitor):
             (mp_sh / ".aiqt" / "operations.json").write_text(json.dumps(
                 {"version": 1, "merge": {"argv": ["bash", "tools/gh-pr-merge.sh"]}}),
                 encoding="utf-8")
+            # a FIXED bad declaration probed only as a cd destination (mp_bad stays the mutable
+            # one the loader vectors rewrite, so a destination vector never depends on which
+            # content a nearby loader case left there)
+            mp_dest_bad = _mp_init("mpdestbad")
+            (mp_dest_bad / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (mp_dest_bad / ".aiqt" / "operations.json").write_text("{not json", encoding="utf-8")
             mp_plain = tmp / "mpplain"                # plain non-git dir (no resolvable root)
             mp_plain.mkdir(parents=True, exist_ok=True)
             # undeclared repos INSIDE the plain dir: a decoy sibling name and a deeper repo, so the
@@ -17619,6 +17635,9 @@ def _main_isolated(monitor):
             return 2
         mpd, mpn, mpb, mpg, mpp = str(mp_decl), str(mp_none), str(mp_bad), str(mp_gh), str(mp_plain)
         mps = str(mp_sh)
+        mpdb = str(mp_dest_bad)
+        mp_missing = str(tmp / "mp-missing-dest")     # never created: a destination git cannot enter
+        mp_deep = str(mp_plain / "deep")              # an undeclared repo, as a clean destination
         try:
             # --- DENY: every merge spelling the rule governs, in the declaring repo -------------------
             mpexpect("(mp-d1) bare gh pr merge with flags DENIES", "deny",
@@ -18202,6 +18221,91 @@ def _main_isolated(monitor):
                      "checkout", "deny", "m=xmerge; gh pr ${m#x} 3", mpd)
             mpexpect("(mp-d73b) an affix-strip expansion over merge_ DENIES too", "deny",
                      "m=merge_; gh pr ${m%_} 3", mpd)
+            # the EXPANSION read: any construct that can build a word at run time (a dollar
+            # sign, a backquote, a brace, the eval or alias word) beside a literal 'merge'
+            # denies WHATEVER the gh, pr and api words look like: an expansion can assemble
+            # those words out of the scan's sight (each spelling below ran unseen under the
+            # whole-word gh/pr/api requirement), but it cannot hide the 'merge' the spelling
+            # still carries. The mp-k18* twins pin inertness with no declaration; mp-a41 pins
+            # that expansion-free text is still gated by the whole-word gh read
+            mpexpect("(mp-d74) a fragment spelling of the gh word beside a literal merge DENIES "
+                     "in the declaring checkout", "deny", "x=g; ${x}h pr merge 3", mpd)
+            mpexpect("(mp-d74b) an affix-strip spelling of the gh word DENIES too", "deny",
+                     "g=xgh; ${g#x} pr merge 3", mpd)
+            mpexpect("(mp-d74c) an affix-strip spelling of the pr word DENIES too", "deny",
+                     "m=xpr; gh ${m#x} merge 3", mpd)
+            mpexpect("(mp-d74d) a fragment spelling of the pr word DENIES too", "deny",
+                     "p=p; gh ${p}r merge 3", mpd)
+            mpexpect("(mp-d74e) an affix-strip spelling of the api word beside a REST merge "
+                     "endpoint DENIES too", "deny",
+                     "a=xapi; gh ${a#x} -X PUT repos/owner/repo/pulls/3/merge", mpd)
+            mpexpect("(mp-d74f) an ANSI-C spelling of the pr word beside a literal merge DENIES "
+                     "too", "deny", "gh $'\\x70r' merge 3", mpd)
+            mpexpect("(mp-d74g) an affix-strip spelling of the api word beside the enqueue "
+                     "mutation DENIES (beside an expansion, enqueuePullRequest is read as a "
+                     "substring exactly as merge is)", "deny",
+                     "m=xapi; gh ${m#x} graphql -f query='mutation{enqueuePullRequest(input:{})}'",
+                     mpd)
+            # the over-refusal the expansion read buys, stated plainly: a merge-containing text
+            # beside a word-building construct denies in the declaring checkout with NO gh word
+            # at all, because the expansion could build one
+            mpexpect("(mp-d74h) git merge with an expansion operand DENIES in the declaring "
+                     "checkout (the stated over-refusal)", "deny", "git merge $branch", mpd)
+            mpexpect("(mp-d74i) an emergency PR title beside an expansion DENIES there too "
+                     "('emergency' contains the merge letters)", "deny",
+                     'gh pr create --title "Emergency: page $oncall" --body x', mpd)
+            mpexpect("(mp-a41) the same git merge with only literal words allows (no "
+                     "word-building construct, no gh word: the expansion condition, not the "
+                     "merge letters alone, carries mp-d74h)", "allow", "git merge main", mpd)
+            # pinned residuals: a spelling with no literal 'merge' in either reading stays
+            # outside both reads even in the declaring checkout, as the residue discloses (a
+            # split inside the five letters; a brace expansion inside the one token where no
+            # literal 'merge' sits elsewhere in the text)
+            mpexpect("(mp-a41b) a split inside the merge letters stays the disclosed escape",
+                     "allow", "e=mer; gh pr ${e}ge 3", mpd)
+            mpexpect("(mp-a41c) a brace expansion inside the merge token stays the disclosed "
+                     "escape", "allow", "gh pr m{e..e}rge 3", mpd)
+            # the descriptor-digit blanking survives the linear redirect rewrite: an operator
+            # abutting a digit-suffixed word is blanked WITH its digits, so the word boundary
+            # the whole-word pr read needs still appears (both spellings also denied under the
+            # digit-prefixed regex; a blanking that kept the digits would leave 'pr2', match no
+            # whole word 'pr', and allow both)
+            mpexpect("(mp-d75) a digit-abutting descriptor duplication DENIES in the declaring "
+                     "checkout", "deny", "gh pr2>&1 merge 3", mpd)
+            mpexpect("(mp-d75b) a digit-abutting forced-clobber redirect DENIES too", "deny",
+                     "gh pr2>|x merge 3", mpd)
+            # where the session arms nothing, a literal cd/pushd destination keeps the
+            # fail-closed postures for a merge-spelling command: a present-but-bad declaration
+            # or a discovery fault at a probed destination denies, never a silent pass (the
+            # denies the same destinations always earned behind the advisory 'gh api' note;
+            # mp-r1 pins that a cleanly-DECLARING destination still arms nothing)
+            mpexpect("(mp-d76) a bad declaration at a cd destination DENIES a merge-spelling "
+                     "command from an undeclared session", "deny",
+                     "cd {} && gh api graphql -F query=@premerge.graphql".format(mpdb), mpn)
+            mpexpect("(mp-d76b) a discovery fault at a cd destination (a directory git cannot "
+                     "enter) DENIES it too", "deny",
+                     "cd {} && gh api graphql -F query=@premerge.graphql".format(mp_missing),
+                     mpn)
+            mpexpect("(mp-d76c) the same bad destination DENIES from a non-git session too",
+                     "deny", "cd {} && gh api graphql -F query=@premerge.graphql".format(mpdb),
+                     mpp)
+            mpexpect("(mp-a42) a clean undeclared cd destination earns no deny (the bad "
+                     "declaration, not the directory change, carries mp-d76)", "allow",
+                     "cd {} && gh api graphql -F query=@premerge.graphql".format(mp_deep), mpn)
+            # the destination probe set shares _MERGE_PROBE_CAP (16) with the advisory note:
+            # the session cwd plus 15 literal destinations fill it. Just inside the bound (14
+            # fillers, the bad destination appended as the 16th probe) the bad declaration is
+            # read and denies; one past it (15 fillers) the bad destination is passed over and
+            # the command stays inert, so the cap, not the declaration, decides there
+            mpexpect("(mp-d76d) the bad destination just inside the probe bound DENIES", "deny",
+                     " && ".join(["cd {}".format(d) for d in mp_cap_dirs[:14]]
+                                 + ["cd {}".format(mpdb),
+                                    "gh api graphql -F query=@premerge.graphql"]), mpn)
+            mpexpect("(mp-a42b) the bad destination one PAST the probe bound is not probed",
+                     "allow",
+                     " && ".join(["cd {}".format(d) for d in mp_cap_dirs]
+                                 + ["cd {}".format(mpdb),
+                                    "gh api graphql -F query=@premerge.graphql"]), mpn)
             mpexpect("(mp-k13) the expansion spelling stays inert with no declaration", "allow",
                      "gh pr ${x:+;} merge 5", mpn)
             mpexpect("(mp-k13b) the command-substitution spelling stays inert too", "allow",
@@ -18251,6 +18355,27 @@ def _main_isolated(monitor):
                      "allow", "m=xmerge; gh pr ${m#x} 3", mpn)
             mpexpect("(mp-k17b) the merge_ affix-strip spelling stays inert too", "allow",
                      "m=merge_; gh pr ${m%_} 3", mpn)
+            mpexpect("(mp-k18) the gh fragment spelling stays inert with no declaration",
+                     "allow", "x=g; ${x}h pr merge 3", mpn)
+            mpexpect("(mp-k18b) the gh affix-strip spelling stays inert too", "allow",
+                     "g=xgh; ${g#x} pr merge 3", mpn)
+            mpexpect("(mp-k18c) the pr affix-strip spelling stays inert too", "allow",
+                     "m=xpr; gh ${m#x} merge 3", mpn)
+            mpexpect("(mp-k18d) the pr fragment spelling stays inert too", "allow",
+                     "p=p; gh ${p}r merge 3", mpn)
+            mpexpect("(mp-k18e) the api affix-strip endpoint spelling stays inert too", "allow",
+                     "a=xapi; gh ${a#x} -X PUT repos/owner/repo/pulls/3/merge", mpn)
+            mpexpect("(mp-k18f) the ANSI-C pr spelling stays inert too", "allow",
+                     "gh $'\\x70r' merge 3", mpn)
+            mpexpect("(mp-k18g) the enqueue affix-strip spelling stays inert too", "allow",
+                     "m=xapi; gh ${m#x} graphql -f query='mutation{enqueuePullRequest(input:{})}'",
+                     mpn)
+            mpexpect("(mp-k18h) the git merge expansion spelling stays inert too", "allow",
+                     "git merge $branch", mpn)
+            mpexpect("(mp-k18i) the emergency-title expansion spelling stays inert too", "allow",
+                     'gh pr create --title "Emergency: page $oncall" --body x', mpn)
+            mpexpect("(mp-k19) the digit-abutting redirect spellings stay inert with no "
+                     "declaration", "allow", "gh pr2>&1 merge 3", mpn)
             # read-only and scope spellings: every merge spelling denies, only the literal -R/--repo
             # out-of-scope read allows
             mpexpect("(mp-d32) --disable-auto beside a method flag DENIES", "deny",
@@ -19973,9 +20098,12 @@ def _main_isolated(monitor):
           "spellings there too, prose mentions and read-only forms included, and a "
           "present-but-bad declaration, ALLOWS only the exact declared argv or a literal explicit "
           "out-of-scope -R/--repo target (separated '-R VALUE' / '--repo VALUE', or '--repo=VALUE') "
-          "as one simple command, stays INERT for every merge "
+          "as one simple command, DENIES a bad declaration or discovery fault at a probed literal "
+          "cd/pushd destination where the session arms nothing, and otherwise stays INERT for every "
+          "merge "
           "spelling where that discovery finds no declaration (the cd/shell-body/eval/loop route into "
-          "a declaring checkout is the disclosed scope residual), and ALLOWS WITH A NOTE a merge shape "
+          "a cleanly-declaring checkout is the disclosed scope residual), and ALLOWS WITH A NOTE a "
+          "merge shape "
           "in a non-git session and "
           "an opaque graphql body. reqstp/gatdis (prepush_declared_hook) is a SessionStart WARN: silent "
           "without a prepush member or with the declared hook line installed, one non-blocking warning "
