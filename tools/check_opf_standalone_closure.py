@@ -174,7 +174,10 @@ _SUBSET = [
 #     read as 600; timeout=limit reads as nothing). A deadline that under-reads a leg's real
 #     sequential waits kills the leg at its bound and the gate exits 2, a loud refusal to evaluate,
 #     never a clean pass; the measured-ceiling term is what keeps such legs runnable.
-#   * _MIN_LEG_BOUND_S, the floor for the legs that finish in seconds (see below).
+#   * _MIN_LEG_BOUND_S, the floor for the legs that finish in seconds (see below);
+#   * a per-leg RECORDED-EVIDENCE FLOOR (_LEG_BOUND_FLOOR_S, see its own comment): a minimum recorded
+#     after real runs showed the three terms above under-cover that leg. A floor can only RAISE a
+#     bound, never lower one.
 # The legs run one after another, so the worst case of one gate run is the SUM of the bounds plus one
 # bounded post-kill cleanup deadline per leg (_DRAIN_MARGIN_S, which the output drain and the leader
 # reap SHARE, paid only by a leg killed at its bound); the closure work is split between two CI jobs
@@ -219,10 +222,11 @@ _SUBSET = [
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
 # The multiplier is capped by the job fit (_job_worst_case_s against each CI job's 21600 s default
-# limit): on this tree the whole roster's worst case is 39967 s at 3 (no one job fits it: the premise
-# of the split), the per-job worst cases are 20471 s (A) and 20446 s (B) at 3 and 20653 s (A) and
-# 23402 s (B) at 4, and the largest multiplier that fits both jobs is 3.395 (at 3.396, job B's worst
-# case is 21602.32 s, over its limit).
+# limit): on this tree the whole roster's worst case is 41095 s at 3 (no one job fits it: the premise
+# of the split), the per-job worst cases are 21599 s (A) and 20446 s (B) at 3 and 21599 s (A) and
+# 23402 s (B) at 4 (job A's figure is held at both by opf-homes-selftest's recorded-evidence floor,
+# 837 s, which exceeds that leg's headroom term at either multiplier), and the largest multiplier
+# that fits both jobs is 3.395 (at 3.396, job B's worst case is 21602.32 s, over its limit).
 # The multiplier does NOT cover the one loaded run measured against it, and cannot. One --self-test
 # run on 2026-10-15, at the revision carrying this table, at load5 about 50 (between 42 and 61 while it
 # ran), passed (exit 0) with three legs past their ceilings by unequal factors: opf-doctor-selftest
@@ -233,11 +237,14 @@ _SUBSET = [
 # on the headroom term alone needs a multiplier above 299.3 / 69 = 4.33768... (so 4.338 to three
 # places, since 4.337 x 69 = 299.253 falls short of 299.3); the multiplier is one constant for every
 # leg, and at 4.338 job B's worst case is about 24609 s, over its 21600 s limit (job A's, the job that
-# holds this leg, would be about 20715 s). So the multiplier stays 3, and a run under such
+# holds this leg, stays 21599 s: no job A headroom term exceeds its leg's other terms at 4.338). So
+# the multiplier stays 3, and a run under such
 # load CAN exit 2 on a healthy leg: each leg whose bound is the headroom term alone (on this tree
-# opf-homes-selftest 273 s, opf-adopt-selftest 456 s, opf-adopt-state-selftest and
+# opf-adopt-selftest 456 s, opf-adopt-state-selftest and
 # opf-adopt-complete-selftest 1800 s each, and opf-oplock-selftest 324 s) trips its bound once it runs
-# more than 3 times its ceiling. That exit 2 is
+# more than 3 times its ceiling; opf-homes-selftest tripped exactly so (four CI runs of the
+# config-injection lanes killed it at 273 s, 3 x its 91 s ceiling) and now carries the
+# recorded-evidence floor _LEG_BOUND_FLOOR_S documents. That exit 2 is
 # reported as the bound tripping, never as a pass and never as a finding.
 # DELIBERATE SHORTER DEADLINE: opf-tooling-selftest. READ FROM SOURCE (opf/tools/opf.py, the watchdog
 # regression runner's budgets), opf.py --self-test grants its blocked-isolation leg ALONE
@@ -306,6 +313,29 @@ _DRAIN_MARGIN_S = 10
 # is covered at any multiplier on this tree: that leg's bound is set by its declared waits (3615 s),
 # not by the headroom term.
 _MIN_LEG_BOUND_S = 60
+# Per-leg RECORDED-EVIDENCE FLOORS: a minimum bound for a leg whose real runs showed the three derived
+# terms under-cover it; the largest term wins in _leg_bounds, so a floor can only RAISE a bound, never
+# lower one, and a floor at or below what the other terms already reach is refused by the self-test as
+# dead weight (its evidence must be re-fitted or the row removed). FIGURE BASIS, opf-homes-selftest:
+# all four config-injection lanes of one CI run killed this leg at its then 273 s bound (3 x its 91 s
+# ceiling) with the leg still running and silent (it prints only its final summary lines), so 273 s is
+# a LOWER bound on those runs, never a length, and no measured length exists to multiply. MEASURED
+# 2026-10-21 (shared 24-CPU host, load5 about 18 to 20, plain, as the gate runs it: python3 -I -B
+# against a copy of opf/ alone): 62.4 s plain, and 64.2 s (exit 0) under a rebuild of those lanes'
+# injected configuration (HOME and XDG_CONFIG_HOME at the lanes' poison config carrying hooksPath,
+# excludesFile, attributesFile and fsmonitor, the lanes' sh observer wrapper ahead of git on PATH)
+# with the hook, fsmonitor and exposure logs all EMPTY afterwards: the injected configuration never
+# reached this leg's git calls (its fixtures replace HOME and set GIT_CONFIG_NOSYSTEM, and its
+# observation surface builds an allowlist env), so what held it past 273 s in CI is the lanes' load
+# (each lane runs four members at once on an already loaded host), the non-uniform slowdown the
+# multiplier discussion above documents, not the configuration. The floor is therefore sized by the
+# job fit, not from a lane measurement: 837 s is the LARGEST homes bound that keeps job A's worst
+# case inside its 21600 s limit (at 837 s it is 21599 s; at 838 s, 21601 s, over the limit), 9.19
+# times the recorded ceiling where the largest slowdown any leg's account reports is 4.34. A lane run
+# slower still trips the bound again: exit 2, a loud refusal to evaluate, never a pass. A row naming
+# no subset leg, or a value that is not a positive int, is refused fail-closed (_leg_bounds): a stale
+# row left behind by a leg rename would otherwise silently stop raising the bound it records.
+_LEG_BOUND_FLOOR_S = {"opf-homes-selftest": 837}
 # The names the isolated copy of opf/ leaves out (bytecode artefacts). _materialize copies through
 # _COPY_IGNORE, and the whole-roster check refuses a script it would leave out through the same
 # function, so the two cannot disagree on a name.
@@ -399,7 +429,9 @@ _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, be
 #     deadlines above, their work (four launches, and one throwaway opf/ copy and bound scan through
 #     _run_closure) is NOT measured into the 12.8 s. The per-job sweep vectors were added after it
 #     too: they launch no process and hold no deadline, and their work (a few throwaway opf/ copies
-#     and bound scans through run() and main()) is NOT measured into the 12.8 s either.
+#     and bound scans through run() and main()) is NOT measured into the 12.8 s either. So do the
+#     recorded-evidence floor vectors: they launch no process and hold no deadline, and their work
+#     (a few more bound scans through _leg_bounds) is NOT measured into the 12.8 s.
 # 311 + 38.4 = 349.4 s, rounded up to 350 s.
 _VECTOR_ALLOWANCE_S = 350
 
@@ -517,13 +549,26 @@ def _self_test_modules(opf_py):
     raise _BoundError("{} has no _self_tests() registry naming helper self-tests".format(opf_py))
 
 
-def _leg_bounds(tools_dir, ceilings=None, launch_margin_s=None):
+def _leg_bounds(tools_dir, ceilings=None, launch_margin_s=None, bound_floors=None):
     """{leg name: (bound_s, ceiling_s, declared waits sum_s)} for every subset leg, derived from the
-    sources under tools_dir. Raises _BoundError (fail-closed) for a leg with no ceiling. ceilings and
-    launch_margin_s default to _LEG_CEILING_S and _LAUNCH_MARGIN_S (the self-test passes a table
-    missing a row, and a launch margin below the floor so that the floor term must raise a bound)."""
+    sources under tools_dir. Raises _BoundError (fail-closed) for a leg with no ceiling, for a
+    recorded-evidence floor row naming no subset leg, and for a floor value that is not a positive
+    int (a stale or mistyped row must never silently stop raising the bound it records). ceilings,
+    launch_margin_s and bound_floors default to _LEG_CEILING_S, _LAUNCH_MARGIN_S and
+    _LEG_BOUND_FLOOR_S (the self-test passes a table missing a row, a launch margin below the floor
+    so that the floor term must raise a bound, and doctored floor tables around the point where a
+    recorded-evidence floor starts to raise a bound)."""
     ceilings = _LEG_CEILING_S if ceilings is None else ceilings
     margin = _LAUNCH_MARGIN_S if launch_margin_s is None else launch_margin_s
+    floors = _LEG_BOUND_FLOOR_S if bound_floors is None else bound_floors
+    subset_names = {name for name, _script, _args in _SUBSET}
+    for name in sorted(floors):
+        if name not in subset_names:
+            raise _BoundError("recorded-evidence floor for a name that is no subset leg: "
+                              "{}".format(name))
+        if type(floors[name]) is not int or floors[name] <= 0:
+            raise _BoundError("recorded-evidence floor for {} is not a positive int: "
+                              "{!r}".format(name, floors[name]))
     tools_dir = Path(tools_dir)
     bounds = {}
     for name, script, _args in _SUBSET:
@@ -534,7 +579,8 @@ def _leg_bounds(tools_dir, ceilings=None, launch_margin_s=None):
         if script == "opf.py":
             sources.extend(tools_dir / module for module in _self_test_modules(tools_dir / script))
         declared = _declared_wait_s(sources)
-        bound = max(_MIN_LEG_BOUND_S, _LOAD_HEADROOM * ceiling, math.ceil(declared) + margin)
+        bound = max(_MIN_LEG_BOUND_S, _LOAD_HEADROOM * ceiling, math.ceil(declared) + margin,
+                    floors.get(name, 0))
         bounds[name] = (bound, ceiling, declared)
     return bounds
 
@@ -1470,14 +1516,16 @@ def _bounds_self_test(root):
         waits[name] = math.ceil(sum(derive("leg-bounds-cover-their-work", _declared_wait_sites,
                                            sources)))
         needs[name] = max(_MIN_LEG_BOUND_S, _LOAD_HEADROOM * _LEG_CEILING_S[name],
-                          waits[name] + _LAUNCH_MARGIN_S)
+                          waits[name] + _LAUNCH_MARGIN_S, _LEG_BOUND_FLOOR_S.get(name, 0))
     faults = _under_test("leg-bounds-cover-their-work", _bound_faults, live, needs)
     if faults:
         raise _CheckFailure("closure/leg-bounds-cover-their-work: " + "; ".join(faults))
     for name in names:
         bound, ceiling, declared = required[name]
-        print("  bound {:38s} {}s (ceiling {}s x {}; literal wait sites sum {}s + {}s)".format(
-            name, bound, ceiling, _LOAD_HEADROOM, declared, _LAUNCH_MARGIN_S))
+        floor_note = ("; recorded-evidence floor {}s".format(_LEG_BOUND_FLOOR_S[name])
+                      if name in _LEG_BOUND_FLOOR_S else "")
+        print("  bound {:38s} {}s (ceiling {}s x {}; literal wait sites sum {}s + {}s{})".format(
+            name, bound, ceiling, _LOAD_HEADROOM, declared, _LAUNCH_MARGIN_S, floor_note))
     print("PASS closure/leg-bounds-cover-their-work (expectation recombined from the table and the "
           "wait scan, independently of _leg_bounds)")
     # Mutant: a bounds table standing in for a broken _leg_bounds. One second below the independent
@@ -1548,6 +1596,47 @@ def _bounds_self_test(root):
         print("RED flat-600 -> " + "; ".join(flat_faults))
     else:
         print("PASS closure/flat-600-covers-every-leg (no table-derived need exceeds 600s)")
+    # The recorded-evidence floor term, discriminated around its boundary. The control derivation
+    # (an empty floor table) reproduces the bounds the three other terms alone give: for every live
+    # floor row those must sit BELOW the floor (a floor the other terms already reach is dead
+    # weight, refused so its evidence is re-fitted or the row removed), and the floor leg's CI runs
+    # tripped exactly such a control bound, so a _leg_bounds that drops the floor term reproduces
+    # the tripped bound and fails here. The live bound must be exactly the floor; a doctored floor
+    # one second above the control raises the bound to exactly that floor, and at and one below the
+    # control it changes nothing (the max is tested at and beside its boundary). A row naming no
+    # subset leg, a non-int value and a non-positive value are each refused (fail-closed).
+    if not _LEG_BOUND_FLOOR_S:
+        raise _CheckFailure("closure/bound-floor-not-discriminated: the floor table is empty")
+    floorless = derive("bound-floor-raises-the-bound", _leg_bounds, tools_dir, bound_floors={})
+    for name in sorted(_LEG_BOUND_FLOOR_S):
+        floor, control = _LEG_BOUND_FLOOR_S[name], floorless[name][0]
+        if control >= floor:
+            raise _CheckFailure("closure/bound-floor-not-discriminated: the other terms of {} "
+                                "reach {}s, at or above its {}s floor".format(name, control, floor))
+        if live[name] != floor:
+            raise _CheckFailure("closure/bound-floor-raises-the-bound: {} bound {}s, want its {}s "
+                                "floor".format(name, live[name], floor))
+        for probe, want in ((control - 1, control), (control, control), (control + 1, control + 1)):
+            got = derive("bound-floor-raises-the-bound", _leg_bounds, tools_dir,
+                         bound_floors={name: probe})[name][0]
+            if got != want:
+                raise _CheckFailure("closure/bound-floor-raises-the-bound ({} floor {}s): bound "
+                                    "{}s, want {}s".format(name, probe, got, want))
+    floor_leg = sorted(_LEG_BOUND_FLOOR_S)[0]
+    for label, table in (("no-subset-leg", {"opf-no-such-leg": 100}),
+                         ("non-int", dict(_LEG_BOUND_FLOOR_S, **{floor_leg: "837"})),
+                         ("non-positive", dict(_LEG_BOUND_FLOOR_S, **{floor_leg: 0}))):
+        try:
+            derive("bound-floor-bad-row-not-refused", _leg_bounds, tools_dir, bound_floors=table)
+        except _BoundError:
+            continue
+        raise _CheckFailure("closure/bound-floor-bad-row-not-refused ({})".format(label))
+    print("RED an empty floor table -> the bounds the other terms alone give ({}), each below its "
+          "leg's floor (the tripped shape); a floor one second above them -> raises the bound to "
+          "exactly that floor; at and one below them -> unchanged; a row naming no subset leg, a "
+          "non-int and a non-positive value -> each refused".format(
+              ", ".join("{} {}s".format(name, floorless[name][0])
+                        for name in sorted(_LEG_BOUND_FLOOR_S))))
     ceilings = dict(_LEG_CEILING_S)
     del ceilings[leg]
     try:
