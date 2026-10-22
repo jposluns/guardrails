@@ -119,8 +119,9 @@ open a transaction unless the canonical reservation of the run id it publishes u
 plan's claims. An unreadable, malformed or conflicting reservation refuses (exit 2),
 never a silent fallback to the homes-1 counters path; a run killed after reserving and before
 publishing leaves its reservation standing, its numbers conservatively still reserved, and the next run
-derives above them. The final doctor reads the reservations (a read that awaits the homes-2 revision of
-spec 4.2) and does not report a reserved number missing where the prior commit held no record with that
+derives above them. The final doctor reads the reservations (the read-only reservation read spec 4.2
+itself carves out for the spec 8.2 counter checks) and does not report a reserved number missing where
+the prior commit held no record with that
 id, so a reservation's [claims] number grades as issued and that next run records. A reservation keeps
 only its run's new high-water per key, so where an orphaned run claimed several numbers under one key,
 its lower numbers are still reported missing and the next run is held at the post-publication gate

@@ -2076,8 +2076,9 @@ def _reserved_numbers(root_fd, rep):
     present record carries it and the prior committed snapshot held no record with that id
     (_split_reserved), so this reads each reservation read-only and for that purpose alone. Spec 8.2
     defines the reservation and the next-ID derivation, not this grading; reading the journals at all is
-    the one exception to the spec 4.2 sentence that doctor excludes journals, and it awaits the homes-2
-    revision of that section (a release dependency). The homes are the allocations/ home under journals/
+    the one exception the spec 4.2 journal-exclusion sentence itself carves out: the doctor reads the
+    reservations under journals/<kind>/allocations/ read-only, and only for the spec 8.2 counter
+    checks. The homes are the allocations/ home under journals/
     of every kind in _opf_store.JOURNAL_KINDS (read at call time), each derived through
     _opf_store.allocation_record, listed and read through the contained no-follow readers; no journal
     frame, projection or run directory is opened. A reservation is judged as the record writer judges

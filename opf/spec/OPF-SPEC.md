@@ -185,18 +185,19 @@ The imported files are registered managed leaves beside the clean-series files, 
 enabled-type roster except `legacy_fragment`; `worklog` uses `worklog.imported.toml` instead of an
 imported index. Their manifest, emitter, upgrade and containment registrations MUST agree. A
 homes-2 `opf init` MUST create the imported leaves for every enabled type
-except `legacy_fragment`, create-only and empty; in a store that declares `spec_version` 1.3.0 or
-later, enabling a further type or module other than `legacy_fragment` later MUST create its imported
+except `legacy_fragment`, create-only and empty; in a store that declares the homes-2 pair, the
+one declaration that carries the 1.3.0 requirements (section 9.2), enabling a further type or
+module other than `legacy_fragment` later MUST create its imported
 leaf in the same act as its clean index.
 `legacy_fragment` has no imported leaf and no imported counter row, since the imported series
 refuses the `LF` namespace (section 8.2). A homes-2 `opf init` MUST write at zero the imported
-counter row of each type that has an imported leaf (section 8.2). In a store that declares
-`spec_version` 1.3.0 or later, enabling a further type or module other than `legacy_fragment`
+counter row of each type that has an imported leaf (section 8.2). In a store that declares the
+homes-2 pair, enabling a further type or module other than `legacy_fragment`
 MUST also add its imported counter row in the same act as its clean index, at zero only where no
 imported ancestry exists and otherwise at the largest `<n>` of that namespace's
 `imported:<NS>-<n>` IDs. Both counter-row duties follow from the
-section 8.2 rule that requires the imported counter rows once the store declares `spec_version`
-1.3.0 or later. They are machine
+section 8.2 rule that requires the imported counter rows of a store that declares the homes-2
+pair. They are machine
 records, distinct from the original-source evidence under `.working/imported/`. The first
 imported-series release MUST keep these files inline in either store layout and MUST NOT provide
 views over imported data; assistants read the TOML. Historical releases remain in `version.toml`
@@ -256,9 +257,11 @@ a clone without journals grades exactly as the original store. That evidence che
 internal consistency: the sealed inventories, plan and approval bound to the run id of the
 directory they sit in, and the listed bundle, archive and Move-root bytes at their recorded
 digests (a Move-root row counts only as a move destination the run's own plan records).
-On homes 1 too, the apply side MUST write each adoption inventory's `[adoption]` identity table,
+The apply side runs only at homes 2, where adoption activates, never on homes 1 (section 14.1),
+and it writes each adoption inventory's `[adoption]` identity table,
 whose keys are exactly `run_id`, `phase` and `plan_digest` as the bundle layout below defines,
-when it derives the inventory, and the doctor MUST refuse an adoption inventory whose identity is
+when it derives the inventory; in this homes-1 grading too, the doctor MUST refuse an adoption
+inventory whose identity is
 missing or malformed, names another run, names a phase other than the one its file name carries,
 or names a plan digest other than the run's proven plan's own (the frozen plan that re-seals its
 own bytes and that its approval binds), so an inventory copied from another run or phase, an
@@ -948,12 +951,13 @@ The imported series MUST refuse the `LF` namespace, since new imports do not use
 (section 8.1).
 `counters.toml` MUST hold independent monotonic high-water values per series and namespace, `BI`
 for clean backlog items and the quoted TOML key `"imported:BI"` for imported backlog items, with
-the imported series' rows required once the store declares `spec_version` 1.3.0 or later, one for
+the imported series' rows required once the store declares the homes-2 pair that carries the
+1.3.0 requirements (section 9.2), one for
 each enabled type except `legacy_fragment`, since the imported series refuses `LF` and so has no
 `"imported:LF"` row.
 The same rule includes `"imported:WL"`; clean release spans MUST tile only the clean `WL` number
-line. The doctor MUST require the imported counter rows once the store declares `spec_version`
-1.3.0 or later, whether a homes-2 `opf init` wrote them at zero or a re-adoption seeded them from
+line. The doctor MUST require the imported counter rows once the store declares the homes-2
+pair, whether a homes-2 `opf init` wrote them at zero or a re-adoption seeded them from
 its ancestral snapshot. Uniqueness,
 counter high-water, contiguity and no-deletion checks MUST evaluate each series independently;
 allocation MUST increment its counter under the store's lock as one atomic claim, so no gap between
@@ -1178,12 +1182,12 @@ state and a maintainer_action's done on an importer-authored record describe his
 discharge nothing now. A clean `done` record's `receipt_of` MUST target a clean backlog item, and a clean backlog item
 reaching ratified `done` MUST hold a clean receipt authored by a non-importer actor; a legacy
 importer-authored receipt satisfies, as recorded history, only the legacy importer-authored
-backlog item it was recorded with. One exception is defined so that the section 9.2 refusal always
-has a writer-performable remedy: where that upgrade withdraws a ratified `done` item's only
+backlog item it was recorded with. One exception is defined so that this firewall always
+has a writer-performable remedy: where it withdraws a ratified `done` item's only
 receipt as legacy importer-authored, a maintainer-authored clean `maintainer_decision` that links
 `corrects` to that item and records that its completion stands MUST satisfy the item's receipt
-obligation in place of the withdrawn receipt; `opf record create` authors such a decision, doctor
-and the upgrade MUST accept it, and a maintainer who instead judges the work unfinished MUST
+obligation in place of the withdrawn receipt; `opf record create` authors such a decision, the
+doctor MUST accept it, and a maintainer who instead judges the work unfinished MUST
 record a new clean backlog item linking `derives_from` back, never reopen the terminal `done`.
 That acceptance binds an upgrade-capable implementation (section 16.1); a fresh-only
 implementation never reaches it, because the withdrawn legacy receipt is legacy state that it MUST
@@ -1195,10 +1199,11 @@ the current `handoff`, an active `waiver`, a held `session_lease`, an active `mo
 active `preference_pattern`; a state-bearing status on an importer-authored record describes
 history at its source and MUST confer nothing now, and every current-state join, including the
 section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by
-non-importer actors. After the section 9.2 upgrade an
+non-importer actors. Under this firewall an
 existing legacy importer-authored clean record MUST keep its bytes, its recorded state and its place
-in the clean series, and remains readable history there; what the upgrade changes, and its
-report enumerates (section 9.2), is authority alone: such a record leaves every current-state
+in the clean series, and remains readable history there; what the firewall withdraws, with no
+upgrade into base 1.3.0 to perform or report the withdrawal (section 9.2), is authority alone:
+such a record leaves every current-state
 join, its open or active backlog items leave actionability, and its blocks stop granting a stop.
 The clean-series writer MUST refuse a transition on an importer-authored record in either series
 (section 8.8). Acting on history MUST take a new strict clean record at the present time, with a
@@ -1676,7 +1681,14 @@ graded as section 4.2 describes, and never gains the 1.3.0 requirements.
 Declaring a spec_version above the tooling's supported version MUST be refused at validation
 as a fail-closed INVALID finding naming the tooling-upgrade remedy, never treated as supported;
 the 1.2.0 reference validator that ships this ceiling already refuses a 1.3.0 declaration with
-exactly that finding. Only the reserved homes-2 declaration of section 4.2
+exactly that finding. Once homes 2 is activated, a `spec_version = "1.3.0"` declaration MUST
+still be refused at validation as a fail-closed INVALID finding, whatever version the tooling
+then supports, naming the one remedy, a store created at homes 2: the ceiling's expiry never
+makes `"1.3.0"` a supported declaration, since only the homes-2 declaration carries the 1.3.0
+requirements (section 4.2). Once homes 2 is activated, a declaration other than the homes-2 pair
+that carries a 1.3.0 manifest field MUST be refused the same way, so every rule this
+specification scopes to the homes-2 pair binds no other declaration.
+Only the reserved homes-2 declaration of section 4.2
 stays recognized, and that recognition keeps legacy homes-1 grading until its own activation,
 never homes-2 validation. Two residuals are disclosed rather than silent: tooling released before
 this ceiling treats an above-ceiling declaration as legacy and can report it VALID, and the
@@ -1780,8 +1792,10 @@ results are not yet recorded green (section 14.1); it can persist across assista
 without a process running.
 `"complete"` means every such source has a green completion result and recorded retirement under
 section 14.1 with a live full doctor VALID, or that a pre-1.3.0 legacy import finished and its
-preserved legacy run evidence substantiates it; the
-section 9.2 upgrade preserves that legacy status without fabricating an approval or receipt.
+preserved legacy run evidence substantiates it; that
+legacy status stays recorded where it stands, on a homes-1 store no upgrade carries into the
+1.3.0 requirements (section 9.2), and an approval or receipt is never fabricated for it
+(section 14.1).
 A partial or complete status that neither an adoption receipt with completion results nor
 preserved legacy import evidence substantiates MUST fail closed, as does a missing, unreadable
 or contradictory input. Elapsed time and a staging directory MUST NOT be taken as proof of status.
@@ -2047,8 +2061,10 @@ The plan MUST record one disposition per foreign file from `keep`, `migrate`, `m
   `manifest.toml` present in an immediate subdirectory of `.working/` (section 4.5); such an entry
   is a contradictory input and MUST yield cannot-evaluate, so the keep protection never covers a
   file that discovery reads. A `keep` declaration whose path equals or contains a discovery
-  candidate MUST refuse at plan time, naming that candidate, the same way a collision refuses below,
-  and the section 9.2 upgrade into 1.3.0 refuses a store that already carries such an entry. A
+  candidate MUST refuse at plan time, naming that candidate, the same way a collision refuses
+  below; a store that already carries such an entry holds the contradictory input above, which
+  MUST yield cannot-evaluate, and no upgrade into base 1.3.0 exists to admit or repair it
+  (section 9.2). A
   no-follow existence probe of `manifest.toml` in an immediate subdirectory of `.working/`, a kept
   one included, used only by discovery, by this rule, and by the section 16.1 admission check, is
   not a read of a kept path. An unmanaged path MUST NOT collide with an OPF-managed file or view: a
@@ -2150,8 +2166,10 @@ an `[unmanaged]` declaration MUST NOT equal, contain, or lie within them. Adopti
 be committed and immutable under `.working/imported/adoption/<run-id>/`; append-only outcome
 events retain the receipt's history. Every adoption evidence inventory MUST carry the
 section 4.2 `[adoption]` identity table, naming its own run id, its phase and the approved
-plan's `plan_digest`. In homes 2, transaction records live under `.working/journals/adoption/`;
-homes 1 retains its legacy journal paths and completion-carried evidence checks.
+plan's `plan_digest`. In homes 2, transaction records live under `.working/journals/adoption/`,
+and the section 14.1 completion checks carry their own evidence digest verification beside
+C-EVIDENCE-ENUM (section 4.2); adoption never runs on homes 1 (section 14.1), so no adoption
+journal path exists there.
 
 After adoption, containment uses the receipt-bound `import_status` and the bounded treatment of
 section 11: a plan-enumerated frozen retire, move or migrate source whose live bytes still match
@@ -2234,7 +2252,9 @@ activate together with homes 2 on stores created there, and once homes 2 is acti
 reference tooling refuses a homes-1 store by name for adoption, import and upgrade (section 4.2).
 A fresh-only implementation supports exactly
 one base `spec_version`, one homes generation, and one worklog storage generation, initializes
-stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.
+stores directly at them, and implements none of the section 9.2 upgrades between the legacy base
+versions and no legacy-state grading; an upgrade into base 1.3.0 exists for neither class, since
+section 9.2 defines none.
 
 An implementation MUST declare, in the documentation of each release and in every report its emitter
 writes, its release identity, its class, and its supported `spec_version`, homes generation, and

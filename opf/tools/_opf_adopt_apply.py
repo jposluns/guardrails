@@ -6,8 +6,9 @@ Slice 1 (the clean-start adoption track's first apply unit) supplies the engine 
 derived from the `_opf_store` homes constructors (never re-spelled here); the `opf.evidence.inventory/v1`
 inventory DERIVED from the run's own transaction op list and published in that SAME transaction as the
 retained bytes it lists (spec 4.2), a base `inventory.toml` then one `inventory-<phase>.toml` per later
-phase, never rewritten; the homes-1 bundle verification the completion checks carry themselves while
-C-EVIDENCE-ENUM is inactive (spec 14.1), which RE-READS the inventories and payload digests from disk;
+phase, never rewritten; the bundle verification the completion checks carry themselves, as defence in
+depth beside C-EVIDENCE-ENUM rather than relying on it (spec 14.1), which RE-READS the inventories and
+payload digests from disk;
 the preserve-first composition of spec 14.2; live re-observation of every operand; one journaled
 transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed eleven-op
 ADOPT_OPS vocabulary. Slice 2 makes the three pure file ops executable (EXECUTABLE_OPS: create-file,
@@ -80,7 +81,10 @@ run's own archive, this run's own bundle, or the Move root, never write, remove,
 `.working/archive/` or `.working/imported/`, and never create in another run's home.
 
 The adoption journal root is `.aiqt/adopt/journal` at the PRODUCT root: the homes-1 legacy journal family
-of `.aiqt/record/journal` and `.aiqt/import/journal`. It is anchored there, never under the store, because
+of `.aiqt/record/journal` and `.aiqt/import/journal`. Adoption ships together with homes 2 and never on
+homes 1 (spec 14.1), so no real adoption writes this root in this build: apply refuses before anything is
+written (above), and the journal is exercised only by the self-test and the crash children it starts.
+It is anchored there, never under the store, because
 recovery of an interrupted apply MUST resolve from the apply journal alone and MUST NOT require the live
 tree to resolve as a store (spec 14.2): an apply that archived and removed an occupying manifest leaves no
 store to resolve. reconcile() therefore never resolves the store. Homes 2 keeps transaction records
@@ -155,8 +159,9 @@ against the operation's validated recorded plan instead; the context plan's appr
 against the captured approval) and full plan-schema validation are the stage driver's, not init-store's,
 which validates exactly the fields it consumes; bundle MEMBERSHIP (an off-inventory file inside a bundle)
 is not reconciled by the shell's verifier, only listed payloads — init-store's admitted-inventory
-derivation DOES refuse an unlisted file beneath the bundle home; containment registration of the archive,
-Move and evidence homes on homes 1 is part of the 1.3.0 activation, not this slice; investigation does
+derivation DOES refuse an unlisted file beneath the bundle home; containment grading of the archive,
+Move and evidence homes belongs to the homes-2 boundary, which activates together with adoption and
+import on homes 2 and never on homes 1 (spec 4.2, 14.1), not to this slice; investigation does
 not read this journal (the planner's ancestry disclosure lists durable OPF history outside .working, and
 `.aiqt/adopt/journal` is one more such home), so the stage driver refuses plan, approve and apply over a
 non-clean adoption journal (require_clean_journal); the shipped `retire-file` vocabulary row declares a
