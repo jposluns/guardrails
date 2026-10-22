@@ -25,12 +25,21 @@ MODES (auto-detected from GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH; overridable for 
     scanned commit and not reachable from any object the remote advertises, read with git ls-remote at
     check time (local remote-tracking refs can be stale, and a path or URL remote has none, so neither
     is consulted); when that set cannot be computed, or it is empty, the run fails closed. That binding
-    holds only when the advertisement read and the push destination are one repository, so the remote's
-    push URL set must be exactly its one fetch URL (a remote.<name>.pushurl, an added URL or a
-    pushInsteadOf rewrite fails closed, and so does a --remote given as a URL while any pushInsteadOf
-    rewrite is configured); and every git read here is taken on the true object graph the push
-    transports (replace refs and a grafts file are ignored), so neither mechanism can substitute a
-    clean message, parent list or changelog for the ones the push sends. --base does
+    holds only when the advertisement read and the push destination are one repository, so --remote is
+    resolved ONCE to a single literal URL: a configured remote must have exactly one push URL,
+    byte-identical to its one fetch URL (a remote.<name>.pushurl, an added URL or a pushInsteadOf
+    rewrite fails closed), and resolves to that URL; any other --remote must itself be the URL; a
+    resolved destination that names a configured remote or a legacy remotes or branches file, or that
+    is empty, begins with '-' or carries a line break, fails closed; and any url.<base>.pushInsteadOf
+    rewrite at all fails closed (a push of the literal URL would still honour it). The advertisement
+    is read from that literal URL, and a clean run prints it on a `push destination:` line for
+    tools/push_branch.py to push to, so a setting keyed to the remote's name (uploadpack,
+    receivepack) and a legacy one-file remote can never point the advertisement read and the push at
+    different repositories. Every git read here ignores replace refs and a grafts file: a replace
+    ref could otherwise substitute a clean message, parent list or changelog for the ones the push
+    sends (the push transports the original objects), and a grafts file would cut parents out of the
+    scanned ancestry (a graft left in force also breaks the push itself, which the remote refuses
+    for missing objects, so ignoring it here is defence in depth). --base does
     not define the set (it could not: commits below it that the remote lacks are published too); it is
     kept as a CROSS-CHECK of the caller's intent and must still be a proper ancestor of the scanned
     commit; when the default branch has advanced past the branch point, pass the merge-base
@@ -41,7 +50,8 @@ MODES (auto-detected from GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH; overridable for 
     the parsed changelog.toml against its parent or parents (keys and values alike, a multiset
     difference per commit, so a string added and removed again inside the range is still scanned at the
     intermediate state that carried it), and the branch name. On a clean run it prints `body sha256:`,
-    the digest of the exact body bytes it scanned, for the helper to reprint.
+    the digest of the exact body bytes it scanned, for the helper to reprint, and `push destination:`,
+    the one resolved URL the helper must push to.
   - --self-test (honoured only as the SOLE argument): run embedded fail-cases in memory (CI invokes this
     alongside the real run). Mixed with anything else it is an unknown argument and the run fails closed,
     so it can never stand in for a requested production scan.
@@ -80,8 +90,11 @@ canonical non-zero 40-hex SHA, a --head that does not name a commit in the repos
 not a proper ancestor of the scanned commit (base equal to it included; pass the merge-base when the
 default branch has advanced past the branch point), a configured remote whose push URL set is not
 exactly its one fetch URL (a pushurl, an added URL or a pushInsteadOf rewrite would send the push to a
-repository other than the one whose advertisement defined the scanned set), a --remote given as a URL
-while any url.<base>.pushInsteadOf rewrite is configured, a remote whose advertised refs cannot be read
+repository other than the one whose advertisement defined the scanned set), a resolved push
+destination that is empty, begins with '-', carries a line break, names a configured remote or is
+defined by a legacy remotes or branches file, any configured url.<base>.pushInsteadOf rewrite (it
+would redirect the push of the resolved URL away from the advertised refs the scan read), a remote
+listing or rewrite-configuration read that fails, a destination whose advertised refs cannot be read
 with git ls-remote (without them the published set cannot be established), unexpected ls-remote or git log
 output, a published set that is EMPTY (the remote already has every commit reachable from the scanned
 commit: scanning nothing is never read as clean), a changelog.toml that does not parse or has an
@@ -169,11 +182,13 @@ class FailClosed(Exception):
 def _git_status(args, root=None, stdin_text=None):
     """Launch git with an argv array (never a shell) and return (returncode, stdout), for the few
     probes whose non-zero exit is an answer rather than an error; _run_git wraps this for every
-    read that must fail closed. Every launch reads the TRUE object graph the push transports:
-    --no-replace-objects keeps a refs/replace rewrite from substituting another commit's message,
-    parents or changelog for the ones the push sends (the push always sends the original objects),
-    and GIT_GRAFT_FILE pinned to the null device keeps an info/grafts file from cutting parents
-    out of the ancestry walk, so neither mechanism can hide a published commit from the scan."""
+    read that must fail closed. Every launch reads the TRUE object graph: --no-replace-objects
+    keeps a refs/replace rewrite from substituting another commit's message, parents or changelog
+    for the ones the push sends (the push transports the original objects), and GIT_GRAFT_FILE
+    pinned to the null device keeps an info/grafts file from cutting parents out of the ancestry
+    walk, so neither mechanism can skew what the scan reads (a graft left in force also breaks
+    the push itself, which the remote refuses for missing objects, so the graft pin is defence
+    in depth rather than the only barrier)."""
     env = dict(os.environ)
     env["GIT_GRAFT_FILE"] = os.devnull
     try:
@@ -479,24 +494,36 @@ def _rev_file_text(rev, rel, root):
     return _run_git(["show", "{}:{}".format(rev, rel)], root)
 
 
-def _require_push_url_matches(remote, root):
-    """git ls-remote reads the advertisement of the remote's FETCH URL, while git push writes to
-    its PUSH URL(s), so a scanned set derived from that advertisement describes the push only when
-    both name one repository; otherwise a commit the fetch repository already holds is excluded
-    from the scan yet still sent to the push repository. For a configured remote, git remote
-    get-url expands remote.<name>.url, remote.<name>.pushurl and the url.<base>.insteadOf /
-    pushInsteadOf rewrites, so this requires exactly one fetch URL and exactly one push URL,
-    byte-identical: an extra URL (push sends to every configured URL), a differing pushurl, or a
-    pushInsteadOf rewrite each fails closed. A --remote that is not a configured remote name is a
-    URL; ls-remote and push apply an insteadOf rewrite to it alike, but a pushInsteadOf rewrite
-    redirects only the push, so with any url.<base>.pushInsteadOf configured at all the run fails
-    closed (whether a given rewrite matches a given URL is git's prefix logic, not re-derived
-    here)."""
+def _resolve_push_destination(remote, root):
+    """git ls-remote reads the advertisement of a FETCH URL, while git push writes to a PUSH
+    URL, so a scanned set derived from that advertisement describes the push only when both name
+    one repository; otherwise a commit the fetch repository already holds is excluded from the
+    scan yet still sent to the push repository. --remote is therefore resolved ONCE, here, to a
+    single literal URL: the scan reads the advertisement from that URL, and a clean run prints it
+    on a `push destination:` line for tools/push_branch.py to push to, so a setting keyed to the
+    remote's NAME (an uploadpack or receivepack program that would point one side at another
+    repository) and a legacy one-file remote can never apply to one side only. For a configured
+    remote, git remote get-url expands remote.<name>.url, remote.<name>.pushurl and the
+    url.<base>.insteadOf / pushInsteadOf rewrites, so this requires exactly one fetch URL and
+    exactly one push URL, byte-identical (an extra URL, a differing pushurl, or a pushInsteadOf
+    rewrite each fails closed), and resolves to that one URL. Any other --remote must itself be
+    the URL. Either way, the resolved destination must be a string git reads as a URL, never as
+    a remote: one that names a configured remote fails closed, one git would read as a remote
+    nickname (no slash, not . or ..) fails closed when a legacy remotes or branches file defines
+    it, and one that is empty, begins with '-' or carries a line break fails closed (it cannot
+    be handed to git or printed as the one destination line). ls-remote and push apply an
+    insteadOf rewrite to the same literal URL alike, but a pushInsteadOf rewrite redirects only
+    the push, and it applies to a literal push URL even where a byte-identical pushurl kept it
+    out of the get-url comparison, so with any url.<base>.pushInsteadOf configured at all the
+    run fails closed (whether a given rewrite matches a given URL is git's prefix logic, not
+    re-derived here)."""
     rc, names = _git_status(["remote"], root)
     if rc != 0:
         raise FailClosed("cannot list the configured remotes: the push destination cannot be "
                          "established")
-    if remote in names.splitlines():
+    remote_names = names.splitlines()
+    destination = remote
+    if remote in remote_names:
         fetch_urls = _run_git(["remote", "get-url", "--all", remote], root).splitlines()
         push_urls = _run_git(["remote", "get-url", "--push", "--all", remote], root).splitlines()
         if len(fetch_urls) != 1 or push_urls != fetch_urls:
@@ -505,26 +532,46 @@ def _require_push_url_matches(remote, root):
                              "advertises would describe a different repository than the push "
                              "writes to, so the set of commits the push would publish cannot "
                              "be established")
-        return
+        destination = fetch_urls[0]
+    if (not destination or destination.startswith("-")
+            or "\n" in destination or "\r" in destination):
+        raise FailClosed("the resolved push destination is empty, begins with '-' or carries a "
+                         "line break: it cannot be handed to git ls-remote and git push as one "
+                         "URL, so the push destination cannot be established")
+    if destination in remote_names:
+        raise FailClosed("the resolved push destination names a configured remote: that "
+                         "remote's own URL set and settings, not the resolved URL, would "
+                         "decide where the push writes, so the push destination cannot be "
+                         "established")
+    if "/" not in destination and destination not in (".", ".."):
+        for legacy in ("remotes", "branches"):
+            listed = _run_git(["rev-parse", "--git-path",
+                               "{}/{}".format(legacy, destination)], root).strip()
+            if listed and os.path.lexists(os.path.join(str(root or ROOT), listed)):
+                raise FailClosed("a legacy {} file defines the push destination as a remote: "
+                                 "git would read its URLs and settings instead of the resolved "
+                                 "URL, so the push destination cannot be "
+                                 "established".format(legacy))
     rc, _out = _git_status(["config", "--get-regexp", r"^url\..*\.pushinsteadof$"], root)
     if rc == 0:
-        raise FailClosed("--remote is a URL and a url.<base>.pushInsteadOf rewrite is "
-                         "configured: the push could be redirected away from the advertised "
-                         "refs the scan read, so the set of commits the push would publish "
-                         "cannot be established")
+        raise FailClosed("a url.<base>.pushInsteadOf rewrite is configured: the push to the "
+                         "resolved destination URL could be redirected away from the "
+                         "advertised refs the scan read, so the set of commits the push would "
+                         "publish cannot be established")
     if rc != 1:
         raise FailClosed("cannot read the URL rewrite configuration: the push destination "
                          "cannot be established")
+    return destination
 
 
-def _remote_advertised_shas(remote, root):
-    """Every object id the target remote advertises RIGHT NOW, read with git ls-remote at check
-    time: local remote-tracking refs can be stale, and a path or URL remote has none at all, so
-    neither is consulted. A failure to read the advertisement fails closed (without it the set of
-    commits the push would publish cannot be established), and so does an output line without a
-    canonical object id."""
+def _remote_advertised_shas(destination, root):
+    """Every object id the push destination advertises RIGHT NOW, read with git ls-remote over
+    the resolved destination URL at check time: local remote-tracking refs can be stale, and a
+    path or URL remote has none at all, so neither is consulted. A failure to read the
+    advertisement fails closed (without it the set of commits the push would publish cannot be
+    established), and so does an output line without a canonical object id."""
     try:
-        out = _run_git(["ls-remote", "--quiet", remote], root)
+        out = _run_git(["ls-remote", "--quiet", destination], root)
     except FailClosed:
         raise FailClosed("cannot read the refs the remote advertises (git ls-remote failed): the "
                          "set of commits the push would publish cannot be established")
@@ -572,13 +619,15 @@ def pre_push_channels(repo, base, body, title, head=None, branch=None, remote="o
     if HEAD moves in between; without them HEAD and the current branch are resolved here (a
     detached HEAD fails closed: the push targets a branch, so without one there is nothing to bind
     the scan to). The SCANNED SET is every commit reachable from the scanned commit and not
-    reachable from any object the remote advertises at check time (git ls-remote, never local
-    remote-tracking refs), which is what the push sends once _require_push_url_matches has proven
-    the advertisement read and the push destination are one repository; an empty set fails closed
+    reachable from any object the push destination advertises at check time (git ls-remote over
+    the one URL _resolve_push_destination resolved, never local remote-tracking refs), which is
+    what the push sends to that same literal URL; an empty set fails closed
     rather than scanning nothing and reading it as clean. base does NOT define the set (a commit below it
     the remote lacks is published and scanned all the same); it stays as a cross-check and must be
     a proper ancestor of the scanned commit. The changelog delta is taken PER COMMIT in the set, so
-    every intermediate state the push publishes is scanned, including one later removed again."""
+    every intermediate state the push publishes is scanned, including one later removed again.
+    Returns (channels, destination): the resolved destination URL is printed on a clean run for
+    the helper to push to."""
     if head is None:
         head = _run_git(["rev-parse", "--verify", "HEAD^{commit}"], repo).strip()
         if not _SHA_RE.match(head):
@@ -601,8 +650,8 @@ def pre_push_channels(repo, base, body, title, head=None, branch=None, remote="o
                          "the caller's intent; when the default branch has advanced past the "
                          "branch point, pass the merge-base, from git merge-base <default-branch> "
                          "HEAD, not the advanced tip)")
-    _require_push_url_matches(remote, repo)
-    rows = _published_commits(head, _remote_advertised_shas(remote, repo), repo)
+    destination = _resolve_push_destination(remote, repo)
+    rows = _published_commits(head, _remote_advertised_shas(destination, repo), repo)
     if not rows:
         raise FailClosed("the remote already has every commit reachable from the scanned commit: "
                          "the push would publish no new commits, and scanning nothing is never "
@@ -622,7 +671,7 @@ def pre_push_channels(repo, base, body, title, head=None, branch=None, remote="o
         for number, item in enumerate(added, 1):
             channels.append(("commit {} changelog string added #{}".format(short, number), item))
     channels.append(("branch name", branch))
-    return channels
+    return channels, destination
 
 
 def parse_pre_push_argv(argv):
@@ -686,14 +735,15 @@ def run_pre_push(argv):
     remote = opts["remote"] if opts["remote"] is not None else "origin"
     body, body_digest = read_body_file(opts["body-file"])
     hashes, maxn = require_denylist(repo)
-    findings = all_findings(pre_push_channels(repo, base, body, title, head, branch, remote),
-                            "pre-push", hashes, maxn)
+    channels, destination = pre_push_channels(repo, base, body, title, head, branch, remote)
+    findings = all_findings(channels, "pre-push", hashes, maxn)
     if findings:
         print("FAIL: {} possible finding(s) in pre-push channels".format(len(findings)))
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
     print("body sha256: {}".format(body_digest))
+    print("push destination: {}".format(destination))
     print(_SCOPE.format(phase="pre-push", scanned=_SCANNED["pre-push"]))
     return 0
 
@@ -1077,6 +1127,72 @@ def self_test():
             raise AssertionError("expected FailClosed for head {!r}".format(bad))
         except FailClosed:
             pass
+    # 18b. the push-destination resolver, driven through a stubbed _git_status so every rule and
+    # the fail-closed branches no git fixture reaches (a failing remote listing, a rewrite read
+    # exiting neither 0 nor 1) are exercised; the resolved URL is returned only when every rule
+    # holds. The live end-to-end shapes (a real legacy file, real uploadpack and receivepack
+    # settings, a real second URL) run in push_branch.py --self-test over real repositories.
+    real_git_status = _git_status
+
+    def resolve_with_stub(remote_arg, listing=(0, ""), fetch="", push="",
+                          git_path="/nonexistent", rewrite=(1, "")):
+        def stub(args, root=None, stdin_text=None):
+            if args == ["remote"]:
+                return listing
+            if args[:2] == ["remote", "get-url"]:
+                return (0, push if "--push" in args else fetch)
+            if args[:2] == ["rev-parse", "--git-path"]:
+                return (0, git_path + "\n")
+            if args[0] == "config":
+                return rewrite
+            raise AssertionError("unexpected git read in the resolver: {!r}".format(args))
+        globals()["_git_status"] = stub
+        try:
+            return _resolve_push_destination(remote_arg, Path("/"))
+        finally:
+            globals()["_git_status"] = real_git_status
+
+    _expect(resolve_with_stub("origin", listing=(0, "origin\n"), fetch="/one\n", push="/one\n")
+            == "/one", "a configured remote resolves to its one byte-identical URL")
+    _expect(resolve_with_stub("/direct/url.git") == "/direct/url.git",
+            "an unconfigured --remote is itself the resolved URL")
+    _expect(resolve_with_stub("plainname") == "plainname",
+            "a bare name with no configured remote and no legacy file is a URL")
+    for label, remote_arg, kwargs, fragment in (
+            ("remote listing fails", "origin", {"listing": (1, "")},
+             "cannot list the configured remotes"),
+            ("rewrite read exits oddly", "/u", {"rewrite": (2, "")},
+             "cannot read the URL rewrite configuration"),
+            ("rewrite configured, URL remote", "/u",
+             {"rewrite": (0, "url.x.pushinsteadof y\n")}, "pushInsteadOf"),
+            ("rewrite configured, configured remote", "origin",
+             {"listing": (0, "origin\n"), "fetch": "/one\n", "push": "/one\n",
+              "rewrite": (0, "url.x.pushinsteadof y\n")}, "pushInsteadOf"),
+            ("two fetch URLs", "origin",
+             {"listing": (0, "origin\n"), "fetch": "/one\n/two\n", "push": "/one\n/two\n"},
+             "push URL"),
+            ("push set differs", "origin",
+             {"listing": (0, "origin\n"), "fetch": "/one\n", "push": "/two\n"}, "push URL"),
+            ("destination names a configured remote", "origin",
+             {"listing": (0, "origin\nalias\n"), "fetch": "alias\n", "push": "alias\n"},
+             "names a configured remote"),
+            ("empty destination", "", {}, "cannot be handed"),
+            ("dash destination", "--upload-pack=x", {}, "cannot be handed"),
+            ("line-break destination", "a\nb", {}, "cannot be handed")):
+        try:
+            resolve_with_stub(remote_arg, **kwargs)
+            raise AssertionError("expected FailClosed for {}".format(label))
+        except FailClosed as exc:
+            _expect(fragment in str(exc), (label, str(exc)))
+    with tempfile.TemporaryDirectory() as d:
+        marker = Path(d) / "legfile"
+        marker.write_text("URL: /x\n", encoding="utf-8")
+        try:
+            resolve_with_stub("leg", git_path=str(marker))
+            raise AssertionError("expected FailClosed for a legacy-file destination")
+        except FailClosed as exc:
+            _expect("legacy" in str(exc), str(exc))
+    _expect(_git_status is real_git_status, "the resolver stub must be unwound")
     # 19. --self-test is honoured only as the sole argument: mixed into a --pre-push invocation it
     # is an unknown argument and the run fails closed (its stderr line is captured and asserted)
     import contextlib
@@ -1100,8 +1216,11 @@ def self_test():
           "test, with the compiled pattern and flags checked on the gate's side too); the changelog "
           "delta covers every parsed string, per published commit against each of its parents, and "
           "fails closed on any deletion; the pre-push inputs (argv, --base, --head, --remote, body "
-          "file, changelog delta) each fail closed when malformed; and --self-test mixed into a "
-          "production invocation is rejected")
+          "file, changelog delta) each fail closed when malformed; the push-destination resolver "
+          "returns the one literal URL only when every rule holds and fails closed on a split URL "
+          "set, a destination readable as a configured or legacy-file remote, a destination unusable "
+          "as one URL, any pushInsteadOf rewrite, and a remote listing or rewrite read that fails; "
+          "and --self-test mixed into a production invocation is rejected")
     return 0
 
 

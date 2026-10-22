@@ -13,17 +13,26 @@ both refuse the push. The check binds its SCANNED SET to what the push would act
 every commit reachable from that SHA and not reachable from any ref the target remote advertises at
 check time (read with git ls-remote; local remote-tracking refs can be stale, and a path or URL
 remote has none), so a commit below --base that the remote lacks is scanned too, and a set that
-cannot be computed, or is empty, refuses. The check also requires the remote's one push URL to be
-exactly its one fetch URL (a pushurl, an added URL or a pushInsteadOf rewrite refuses: the
-advertisement it read would describe a different repository than the push writes to) and reads the
-object graph the push transports (replace refs and a grafts file are ignored), so neither a split
-fetch/push configuration nor a local object rewrite can route unscanned text past it. --base stays
+cannot be computed, or is empty, refuses. The check resolves --remote ONCE to a single literal
+URL (a configured remote must have exactly one push URL, byte-identical to its one fetch URL: a
+pushurl, an added URL or a pushInsteadOf rewrite refuses; a destination readable as a configured
+or legacy-file remote, or unusable as one URL, refuses; any pushInsteadOf rewrite at all
+refuses), reads the advertisement from that URL and reports it on a `push destination:` line;
+this helper then pushes to exactly that literal URL, never to the remote's name, so a setting
+keyed to the name (an uploadpack or receivepack program) or a legacy one-file remote cannot
+point the advertisement read and the push at different repositories. The check also ignores
+replace refs and a grafts file on every git read, so a replace ref cannot substitute a clean
+message, parent list or changelog for the ones the push sends (the push transports the original
+objects; a grafts file left in force would instead break the push itself on the missing objects,
+so that pin is defence in depth). --base stays
 as a cross-check of the caller's intent and must be a proper ancestor of that SHA; when the default
 branch has advanced past the branch point, pass the merge-base (git merge-base <default-branch>
 HEAD), not the advanced tip. The push passes --no-follow-tags, so a push.followTags configuration
 cannot attach unscanned annotated tags to the gated push (pushing a tag remains outside this helper
-either way), and --recurse-submodules=no, so a push.recurseSubmodules configuration cannot make it
-publish submodule commits the check never scans.
+either way), and --recurse-submodules=no, so a push.recurseSubmodules configuration cannot act on
+the gated push (observed with this helper's SHA refspec, that configuration makes the push fail on
+the submodule rather than publish its never scanned commits; the pin keeps the gated push to the
+scanned superproject commits either way).
 
   push_branch.py --body-file <abs path> --base <40-hex sha> [--title <text>] [--remote <name>]
   push_branch.py --self-test
@@ -35,23 +44,26 @@ adds to the parsed changelog.toml against its parent or parents (every intermedi
 publishes, not only the endpoints), and the branch name, against the hashed leak denylist, the
 STRUCTURAL patterns and the narrow AI-attribution layer. Every input is explicit; there is no
 ambient default for the body or the base, and the helper hands the check the same --remote it will
-push to. On a pass the check prints the sha256 of the exact body bytes it scanned; this helper
-reprints that digest and never rereads the body itself, so the digest it prints can only describe
-bytes the check scanned, and the body later given to the PR can be compared against them. It then
-runs `git push --no-follow-tags --recurse-submodules=no <remote> <sha>:refs/heads/<branch>` for the
-commit and branch it resolved before the check. A push that exits non-zero is reported and mapped to exit 2 (the
+push to. On a pass the check prints the sha256 of the exact body bytes it scanned and the one
+resolved destination URL; this helper reprints the digest and never rereads the body itself, so the
+digest it prints can only describe bytes the check scanned, and the body later given to the PR can
+be compared against them. It then runs `git push --no-follow-tags --recurse-submodules=no
+<resolved-url> <sha>:refs/heads/<branch>` for the commit and branch it resolved before the check
+and the destination URL the check read the advertisement from. A push that exits non-zero is reported and mapped to exit 2 (the
 helper's cannot-evaluate verdict), not passed through as the push's own exit status. After a
-successful push the branch's upstream is set in a separate step (a SHA-sourced push sets none
-itself); if that convenience step fails, the completed, scanned push is still reported with exit 0
-and the line says so (a path or URL remote has no remote-tracking ref, so there the step always
-fails and the line is expected).
+successful push the branch's upstream is set in a separate step (a SHA-sourced push to a literal
+URL records no remote-tracking ref itself, so where --remote was a configured name the helper
+first records the pushed commit under that name's remote-tracking ref, exactly what a by-name push
+of the same commit to the same URL would have recorded); if that convenience step fails, the
+completed, scanned push is still reported with exit 0 and the line says so (a --remote given as a
+URL has no remote-tracking ref, so there the step always fails and the line is expected).
 
 FAIL-CLOSED: an unknown, repeated or valueless argument (--self-test mixed with anything else
 included: it is honoured only as the sole argument), a working directory outside a git repository,
 a HEAD that does not resolve to a commit, a detached HEAD, a branch name git itself rejects, any
 non-zero exit from the check, a check that cannot be launched, and a passing check that does not
-report the scanned-body digest each refuse the push (nothing is pushed), exit 2 (exit 1 when the
-check exits 1). The check's output is reprinted, then the refusal is printed. A check that crashes
+report the scanned-body digest or exactly one resolved push destination each refuse the push
+(nothing is pushed), exit 2 (exit 1 when the check exits 1). The check's output is reprinted, then the refusal is printed. A check that crashes
 with exit 1 is indistinguishable here from a finding and is labelled as one; either way nothing is
 pushed.
 
@@ -66,16 +78,19 @@ strings, such as TOML comments) carry over.
 
 The --self-test builds throwaway git repositories and a bare remote under a scrubbed fixture
 environment (tools/_git_fixture_env.py) and asserts, for each finding channel (a leaky commit below
---base, a leaky intermediate changelog state, and a leaky commit hidden by a replace ref or a
-grafts file included) and a broad set of fail-closed shapes (a remote whose push URL set splits
-from its one fetch URL through a pushurl, an added URL or a pushInsteadOf rewrite included), that
-the helper exits non-zero AND the remote gained no ref, and that a clean branch pushes, a push
-under push.followTags publishes no unscanned tag, and a push under push.recurseSubmodules
+--base, a leaky intermediate changelog state, a leaky commit hidden by a replace ref or a grafts
+file, and a leaky commit excluded from the scan by a per-remote uploadpack advertisement redirect
+included) and a broad set of fail-closed shapes (a remote whose push URL set splits from its one
+fetch URL through a pushurl, an added URL or a pushInsteadOf rewrite, a name defined only by a
+legacy remotes or branches file, and a destination that resolves to a configured remote's name
+included), that the helper exits non-zero AND the remote gained no ref, and that a clean branch
+pushes (to the resolved literal URL, so a per-remote receivepack program cannot move the push),
+a push under push.followTags publishes no unscanned tag, and a push under push.recurseSubmodules
 publishes no unscanned submodule commit; it also drives the check directly for shapes
 reachable only there (a subdirectory --repo, a --head bound to a commit other than the checkout, a
-detached HEAD), and drives a copy of this helper against stub checks for the digest-missing and
-unexpected-exit refusals and for the race in which a commit lands between the check and the push,
-where the remote must hold exactly the scanned SHA.
+detached HEAD, a destination unusable as one URL), and drives a copy of this helper against stub
+checks for the digest-missing and unexpected-exit refusals and for the race in which a commit lands
+between the check and the push, where the remote must hold exactly the scanned SHA.
 """
 import sys
 
@@ -105,6 +120,13 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")   # a canonical commit id: resolved once
 # The digest line the check prints for the exact body bytes it scanned; the helper reprints it and
 # never rereads the body, so the printed digest cannot describe bytes the check did not scan.
 _BODY_DIGEST_RE = re.compile(r"^body sha256: ([0-9a-f]{64})$", re.MULTILINE)
+# The destination line the check prints on a pass: the one literal URL it resolved --remote to and
+# read the advertisement from. The push below goes to exactly this URL, never to the remote's name,
+# so a setting keyed to the name (an uploadpack or receivepack program) or a legacy one-file remote
+# cannot point the advertisement read and the push at different repositories. The check refuses a
+# destination carrying a line break, so one line always holds the whole URL; requiring exactly one
+# match keeps a second line from ever smuggling in another destination.
+_DESTINATION_RE = re.compile(r"^push destination: (.+)$", re.MULTILINE)
 # A branch name a push could write through this helper must be a single plain ref component chain:
 # check-ref-format validates it below before it is spliced into the refspec.
 
@@ -225,23 +247,39 @@ def run_push(argv):
     if digest is None:
         _refuse("the check passed but did not report the scanned-body digest")
         return 2
+    destinations = _DESTINATION_RE.findall(check.stdout)
+    if len(destinations) != 1:
+        _refuse("the check passed but did not report exactly one resolved push destination")
+        return 2
+    destination = destinations[0]
     print("pre-push check passed; body sha256: {}".format(digest.group(1)))
     # --no-follow-tags: a push.followTags configuration would otherwise attach annotated tags,
     # whose messages this check never scanned, to the gated push. --recurse-submodules=no: a
-    # push.recurseSubmodules configuration would otherwise make the push also publish submodule
-    # commits, whose messages the check never scans (the scanned set is superproject commits only).
+    # push.recurseSubmodules configuration would otherwise act on the gated push (observed with
+    # this helper's SHA refspec, it makes the push fail on the submodule rather than publish its
+    # commits; the pin keeps the gated push to the scanned superproject commits either way). The
+    # push goes to the literal URL the check resolved and read the advertisement from, never to
+    # the remote's name, so what was scanned and what is written are one repository.
     pushed = subprocess.run(["git", "-C", toplevel, "push", "--no-follow-tags",
-                             "--recurse-submodules=no", opts["remote"],
+                             "--recurse-submodules=no", destination,
                              head + ":refs/heads/" + branch])
     if pushed.returncode != 0:
         print("push exited non-zero ({})".format(pushed.returncode))
         return 2
+    if destination != opts["remote"]:
+        # a push to a literal URL records no remote-tracking ref; where --remote was a configured
+        # name (the only case in which the resolved destination differs from it), record the
+        # pushed commit under that name, exactly what a by-name push of the same commit to the
+        # same URL would have recorded, so the upstream step below can bind to it
+        subprocess.run(["git", "-C", toplevel, "update-ref",
+                        "refs/remotes/" + opts["remote"] + "/" + branch, head],
+                       capture_output=True, encoding="utf-8")
     upstream = subprocess.run(["git", "-C", toplevel, "branch",
                                "--set-upstream-to=" + opts["remote"] + "/" + branch, branch],
                               capture_output=True, encoding="utf-8")
     if upstream.returncode != 0:
         print("push completed; upstream not set (this remote has no remote-tracking ref here, as "
-              "with a path or URL remote, or the local branch changed after the push)")
+              "with a --remote given as a URL, or the tracking ref could not be recorded)")
         return 0
     print("push completed; upstream set")
     return 0
@@ -548,6 +586,12 @@ def self_test():
         _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet", "refs/heads/feat-pushurl"],
                                seeded) == 0,
                 "a pushurl identical to the fetch URL must still push", failures)
+        # the control's push left the branch tip advertised, under which every later vector on
+        # this branch would refuse through the empty-published-set rule whatever the URL rules
+        # did; deleting the pushed ref keeps the published set non-empty, so each vector below
+        # passes only through its own refusal (asserted by message), and with that refusal
+        # removed the leaky commit demonstrably reaches the push side
+        fixture_git(["update-ref", "-d", "refs/heads/feat-pushurl"], seeded)
         # an added second URL: push sends to EVERY configured URL while the advertisement is
         # read from the first, so the same split refuses
         fixture_git(["config", "--unset", "remote.split.pushurl"], repo)
@@ -555,16 +599,22 @@ def self_test():
         done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "split"], repo)
         _expect(done.returncode == 2,
                 ("added second URL", done.returncode, done.stdout, done.stderr), failures)
+        _expect("push URL" in done.stderr, "the added-URL refusal must name the rule", failures)
         _expect(fixture_git_rc(["cat-file", "-e", split_leaky], pushside) != 0,
                 "an added second URL must not publish the unscanned commit", failures)
         fixture_git(["remote", "set-url", "--delete", "split", str(pushside)], repo)
         # a pushInsteadOf rewrite redirects only the push: on a configured remote the expanded
         # push URL differs from the fetch URL and refuses; on a --remote given as a URL there is
-        # no configured push side to compare, so any configured rewrite at all refuses
+        # no configured push side to compare, and the rewrite applies to a literal push URL even
+        # beside a byte-identical pushurl, so any configured rewrite at all refuses
         fixture_git(["config", "url." + str(pushside) + ".pushInsteadOf", str(seeded)], repo)
         done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "split"], repo)
         _expect(done.returncode == 2,
                 ("pushInsteadOf remote", done.returncode, done.stdout, done.stderr), failures)
+        _expect("push URL" in done.stderr,
+                "the configured-remote rewrite refusal must name the rule", failures)
+        _expect(fixture_git_rc(["cat-file", "-e", split_leaky], pushside) != 0,
+                "a configured-remote rewrite must not publish the unscanned commit", failures)
         done = helper(["--body-file", str(clean_body), "--base", base, "--remote", str(seeded)],
                       repo)
         _expect(done.returncode == 2,
@@ -574,6 +624,84 @@ def self_test():
         _expect(fixture_git_rc(["cat-file", "-e", split_leaky], pushside) != 0,
                 "a pushInsteadOf rewrite must not publish the unscanned commit", failures)
         fixture_git(["config", "--remove-section", "url." + str(pushside)], repo)
+        # a remote defined only by a legacy .git/remotes file is not a configured remote, so its
+        # name reaches the URL handling, where git would still read it as that legacy remote
+        # (ls-remote from its first URL line, push to every URL line): the name refuses as a
+        # destination before anything is read or pushed
+        legacy_dir = repo / ".git" / "remotes"
+        legacy_dir.mkdir(exist_ok=True)
+        (legacy_dir / "legsplit").write_text(
+            "URL: {}\nURL: {}\n".format(seeded, pushside), encoding="utf-8")
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "legsplit"],
+                      repo)
+        _expect(done.returncode == 2,
+                ("legacy remotes file", done.returncode, done.stdout, done.stderr), failures)
+        _expect("legacy" in done.stderr, "the legacy-remote refusal must name the rule", failures)
+        _expect(fixture_git_rc(["cat-file", "-e", split_leaky], pushside) != 0,
+                "a legacy remotes file must not publish the unscanned commit", failures)
+        (legacy_dir / "legsplit").unlink()
+        # a legacy .git/branches file is the same one-file remote mechanism: refused alike
+        branches_dir = repo / ".git" / "branches"
+        branches_dir.mkdir(exist_ok=True)
+        (branches_dir / "legbranch").write_text(str(seeded) + "\n", encoding="utf-8")
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "legbranch"],
+                      repo)
+        _expect(done.returncode == 2,
+                ("legacy branches file", done.returncode, done.stdout, done.stderr), failures)
+        _expect("legacy" in done.stderr, "the branches-file refusal must name the rule", failures)
+        (branches_dir / "legbranch").unlink()
+        # a configured remote whose one URL is itself another configured remote's name: the
+        # resolved destination would be read by git as that remote, not as a URL, so it refuses
+        fixture_git(["remote", "add", "alias", "split"], repo)
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "alias"], repo)
+        _expect(done.returncode == 2,
+                ("alias destination", done.returncode, done.stdout, done.stderr), failures)
+        _expect("names a configured remote" in done.stderr,
+                "the alias refusal must name the rule", failures)
+        fixture_git(["remote", "remove", "alias"], repo)
+        # a per-remote uploadpack program redirects the advertisement read while the push writes
+        # to the remote's URL: the check reads the resolved literal URL instead, so the setting
+        # never applies, the advertisement comes from the true destination (empty here), the
+        # leaky commit is in the published set, and the finding refuses before anything is pushed
+        fixture_git(["remote", "set-url", "split", str(pushside)], repo)
+        fixture_git(["config", "remote.split.uploadpack",
+                     "git upload-pack '" + str(seeded) + "' #"], repo)
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "split"], repo)
+        _expect(done.returncode == 1,
+                ("uploadpack redirect", done.returncode, done.stdout, done.stderr), failures)
+        _expect(fixture_git_rc(["cat-file", "-e", split_leaky], pushside) != 0,
+                "an uploadpack redirect must not publish the unscanned commit", failures)
+        fixture_git(["config", "--unset", "remote.split.uploadpack"], repo)
+        # a per-remote receivepack program redirects the push while the advertisement was read
+        # from the remote's URL: the push goes to the resolved literal URL instead, so the
+        # setting never applies and the scanned branch lands on the advertised repository
+        fixture_git(["remote", "set-url", "split", str(seeded)], repo)
+        fixture_git(["config", "remote.split.receivepack",
+                     "git receive-pack '" + str(pushside) + "' #"], repo)
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "split"], repo)
+        _expect(done.returncode == 0,
+                ("receivepack redirect", done.returncode, done.stdout, done.stderr), failures)
+        _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet", "refs/heads/feat-pushurl"],
+                               seeded) == 0,
+                "the push must land on the advertised repository, not the receivepack target",
+                failures)
+        _expect(fixture_git_rc(["cat-file", "-e", split_leaky], pushside) != 0,
+                "a receivepack redirect must not publish the unscanned commit", failures)
+        fixture_git(["config", "--unset", "remote.split.receivepack"], repo)
+        # a --remote given directly as a URL still pushes cleanly; the clean run names the
+        # resolved destination, and a URL records no remote-tracking ref, so the upstream
+        # convenience step reports it was not set
+        branch_with_commit("feat-urlremote")
+        done = helper(["--body-file", str(clean_body), "--base", base, "--remote", str(origin)],
+                      repo)
+        _expect(done.returncode == 0,
+                ("URL-remote clean push", done.returncode, done.stdout, done.stderr), failures)
+        _expect(ref_exists("feat-urlremote"),
+                "a URL-remote clean push must create the remote ref", failures)
+        _expect("push destination: " + str(origin) in done.stdout,
+                "the check must report the resolved destination it read", failures)
+        _expect("upstream not set" in done.stdout,
+                ("URL-remote upstream line", done.stdout), failures)
         # a replace ref cannot substitute a clean message for the one the push sends: the push
         # transports the ORIGINAL object, so the scan reads the original graph and still refuses
         fixture_git(["checkout", "-q", "main"], repo)
@@ -594,7 +722,10 @@ def self_test():
                 "the original of a replaced leaky commit must not reach the remote", failures)
         fixture_git(["replace", "-d", replaced], repo)
         # a grafts file cannot cut a leaky parent out of the walked ancestry: the scan reads the
-        # true parents, so the grafted-out commit is still scanned and still refuses
+        # true parents, so the grafted-out commit is still scanned and still refuses (defence in
+        # depth: with the graft honoured, this push is rejected by the remote for missing objects
+        # rather than transporting the hidden commit, so the exit-code and landed-ref assertions
+        # are what discriminate here, not the object's absence from the remote)
         fixture_git(["checkout", "-q", "main"], repo)
         fixture_git(["checkout", "-q", "-b", "feat-graft"], repo)
         (repo / "work.txt").write_text("graft one\n", encoding="utf-8")
@@ -614,9 +745,11 @@ def self_test():
         _expect(fixture_git_rc(["cat-file", "-e", graft_leaky], origin) != 0,
                 "a grafted-out leaky commit must not reach the remote", failures)
         (repo / ".git" / "info" / "grafts").unlink()
-        # push.recurseSubmodules cannot make the gated push publish unscanned submodule commits:
-        # the push pins --recurse-submodules=no, so the superproject branch lands while the
-        # submodule's unpushed (never scanned) commit stays local
+        # push.recurseSubmodules cannot act on the gated push: the push pins
+        # --recurse-submodules=no, so the superproject branch lands while the submodule's
+        # unpushed (never scanned) commit stays local (without the pin, this helper's SHA
+        # refspec makes the configured push fail outright rather than publish the submodule
+        # commit, so the exit-code and landed-branch assertions are what discriminate here)
         subremote = tmp / "subremote.git"
         fixture_git(["init", "-q", "-b", "main", "--bare", str(subremote)], tmp)
         subwork = tmp / "subwork"
@@ -704,6 +837,30 @@ def self_test():
         _expect("did not report the scanned-body digest" in done.stdout,
                 "a digestless pass must name the refusal", failures)
         _expect(not ref_exists("feat-stub"), "a digestless pass must not push", failures)
+        # a passing check that reports a digest but no resolved destination refuses too: the
+        # helper must never fall back to pushing the remote's name
+        (stub / "check_msg_leaks.py").write_text(
+            'import sys\nprint("body sha256: " + "0" * 64)\nsys.exit(0)\n', encoding="utf-8")
+        done = helper(["--body-file", str(clean_body), "--base", base], repo,
+                      script=stub / "push_branch.py")
+        _expect(done.returncode == 2,
+                ("missing destination", done.returncode, done.stdout), failures)
+        _expect("exactly one resolved push destination" in done.stdout,
+                "a destinationless pass must name the refusal", failures)
+        _expect(not ref_exists("feat-stub"), "a destinationless pass must not push", failures)
+        # two destination lines are as unusable as none: exactly one is required (the real check
+        # refuses a destination carrying a line break, so it can only ever print one)
+        (stub / "check_msg_leaks.py").write_text(
+            'import sys\nprint("body sha256: " + "0" * 64)\n'
+            'print("push destination: /one")\nprint("push destination: /two")\nsys.exit(0)\n',
+            encoding="utf-8")
+        done = helper(["--body-file", str(clean_body), "--base", base], repo,
+                      script=stub / "push_branch.py")
+        _expect(done.returncode == 2,
+                ("two destinations", done.returncode, done.stdout), failures)
+        _expect("exactly one resolved push destination" in done.stdout,
+                "a two-destination pass must name the refusal", failures)
+        _expect(not ref_exists("feat-stub"), "a two-destination pass must not push", failures)
         (stub / "check_msg_leaks.py").write_text('import sys\nsys.exit(3)\n', encoding="utf-8")
         done = helper(["--body-file", str(clean_body), "--base", base], repo,
                       script=stub / "push_branch.py")
@@ -770,6 +927,18 @@ def self_test():
                              "--base", base, "--head", leaky, "--branch", ""], repo)
         _expect(done.returncode == 2, ("empty branch", done.returncode, done.stderr), failures)
         _expect("--branch" in done.stderr, "the empty-branch refusal must name the flag", failures)
+        # a destination that begins with '-' or carries a line break can never be handed to
+        # ls-remote and push, or printed, as one URL: each fails closed naming the rule
+        for bad_destination in ("-seeded", "a\nb"):
+            done = check_direct(["--pre-push", "--repo", str(repo), "--body-file",
+                                 str(clean_body), "--base", base, "--head", leaky,
+                                 "--branch", "feat-msg", "--remote", bad_destination], repo)
+            _expect(done.returncode == 2,
+                    ("unusable destination", bad_destination, done.returncode, done.stderr),
+                    failures)
+            _expect("cannot be handed" in done.stderr,
+                    ("the unusable-destination refusal must name the rule", bad_destination),
+                    failures)
         # without --branch the check resolves the current branch itself, so a detached HEAD fails closed
         fixture_git(["checkout", "-q", "--detach", "main"], repo)
         done = check_direct(["--pre-push", "--repo", str(repo), "--body-file", str(clean_body),
@@ -780,27 +949,33 @@ def self_test():
         for failure in failures:
             print("  " + failure)
         return 1
-    print("SELF-TEST PASS: a clean branch (an empty body or a clean title included) pushes, prints "
-          "the scanned-body digest twice (check and helper), gets its upstream set, carries no "
-          "unscanned tag along even under push.followTags and no unscanned submodule commit even "
-          "under push.recurseSubmodules, and still pushes under a pushurl byte-identical to the "
-          "one fetch URL; a commit landing between the check and the push leaves exactly the "
-          "scanned SHA on the remote, never the racing commit; every finding channel (an "
-          "attribution trailer in the body, a denylist term in the body, a changelog string added "
-          "in any published commit, an intermediate state or a leak outside the items array "
-          "included, a commit message anywhere in the published set, a leaky commit below --base, "
-          "behind a replace ref or behind a grafts file included, the branch name, a leaky "
-          "--title) refuses with exit 1 and no remote ref; and every exercised fail-closed shape "
-          "(a relative, missing, symlinked or non-UTF-8 body, a non-SHA, zero-SHA or nonexistent "
-          "base, a base equal to the pushed commit or not its ancestor, an empty title, an "
-          "unknown, repeated or valueless flag, --self-test mixed with other arguments, a "
-          "malformed changelog, a changelog deleted at the tip or in an intermediate commit, a "
-          "remote whose push URL set is not exactly its one fetch URL, a pushInsteadOf rewrite "
-          "over a configured remote or beside a URL remote, a remote whose advertised refs cannot "
-          "be read, a push publishing nothing the remote lacks, a failed push, a detached HEAD, "
-          "an unborn HEAD, a non-repository working directory, a subdirectory --repo, an unknown "
-          "--head, a digestless check pass, an unexpected check exit) refuses with exit 2 and no "
-          "remote ref")
+    print("SELF-TEST PASS: a clean branch (an empty body or a clean title included) pushes to the "
+          "one resolved destination URL the check reports, prints the scanned-body digest twice "
+          "(check and helper), gets its upstream set (reported as not set for a --remote given as "
+          "a URL), carries no unscanned tag along even under push.followTags and no unscanned "
+          "submodule commit even under push.recurseSubmodules, still pushes under a pushurl "
+          "byte-identical to the one fetch URL, and lands on the advertised repository even under "
+          "a per-remote receivepack program (the literal-URL push never applies it); a commit "
+          "landing between the check and the push leaves exactly the scanned SHA on the remote, "
+          "never the racing commit; every finding channel (an attribution trailer in the body, a "
+          "denylist term in the body, a changelog string added in any published commit, an "
+          "intermediate state or a leak outside the items array included, a commit message "
+          "anywhere in the published set, a leaky commit below --base, behind a replace ref, "
+          "behind a grafts file or excluded from the scan only by a per-remote uploadpack "
+          "advertisement redirect included, the branch name, a leaky --title) refuses with exit 1 "
+          "and no remote ref; and every exercised fail-closed shape (a relative, missing, "
+          "symlinked or non-UTF-8 body, a non-SHA, zero-SHA or nonexistent base, a base equal to "
+          "the pushed commit or not its ancestor, an empty title, an unknown, repeated or "
+          "valueless flag, --self-test mixed with other arguments, a malformed changelog, a "
+          "changelog deleted at the tip or in an intermediate commit, a remote whose push URL set "
+          "is not exactly its one fetch URL, a pushInsteadOf rewrite over a configured remote or "
+          "beside a URL remote, a remote name defined only by a legacy remotes or branches file, "
+          "a destination resolving to a configured remote's name, a destination unusable as one "
+          "URL, a remote whose advertised refs cannot be read, a push publishing nothing the "
+          "remote lacks, a failed push, a detached HEAD, an unborn HEAD, a non-repository working "
+          "directory, a subdirectory --repo, an unknown --head, a digestless check pass, a check "
+          "pass without exactly one resolved destination, an unexpected check exit) refuses with "
+          "exit 2 and no remote ref")
     return 0
 
 
