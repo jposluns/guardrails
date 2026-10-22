@@ -1084,8 +1084,8 @@ CONFIG_MEMBER_BOUNDS = {
     # sits below the 24 CPUs, where the model adds no growth, so it scales from 24: 24 x 2.159 =
     # 51.8), and about 70 from its ending load5 (32.6 x 2.159 = 70.4).
     # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW either member's own worst case (each CI
-    # job's worst case, per the gate's own fit arithmetic on the merged tree of 2026-10-20, is
-    # 20471 s and 20446 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself), exactly
+    # job's worst case, per the gate's own fit arithmetic on this tree, is
+    # 20519 s and 20446 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself), exactly
     # as the default's comment above sanctions: this lane owns no member's
     # verdict, and reaching this 3600 s bound is cannot-evaluate, never a pass or a fail of the
     # member. The member's OWN inner bounds are read differently: when one of its legs is killed at

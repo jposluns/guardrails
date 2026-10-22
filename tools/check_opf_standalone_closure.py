@@ -222,11 +222,11 @@ _SUBSET = [
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
 # The multiplier is capped by the job fit (_job_worst_case_s against each CI job's 21600 s default
-# limit): on this tree the whole roster's worst case is 41095 s at 3 (no one job fits it: the premise
-# of the split), the per-job worst cases are 21599 s (A) and 20446 s (B) at 3 and 21599 s (A) and
-# 23402 s (B) at 4 (job A's figure is held at both by opf-homes-selftest's recorded-evidence floor,
-# 837 s, which exceeds that leg's headroom term at either multiplier), and the largest multiplier
-# that fits both jobs is 3.395 (at 3.396, job B's worst case is 21602.32 s, over its limit).
+# limit): on this tree the whole roster's worst case is 40015 s at 3 (no one job fits it: the premise
+# of the split), the per-job worst cases are 20519 s (A) and 20446 s (B) at 3 and 20653 s (A) and
+# 23402 s (B) at 4 (at 3, opf-homes-selftest's recorded-evidence floor, 297 s, holds that leg's bound
+# above its 273 s headroom term; at 4 the headroom term, 364 s, exceeds the floor), and the largest
+# multiplier that fits both jobs is 3.395 (at 3.396, job B's worst case is 21602.32 s, over its limit).
 # The multiplier does NOT cover the one loaded run measured against it, and cannot. One --self-test
 # run on 2026-10-15, at the revision carrying this table, at load5 about 50 (between 42 and 61 while it
 # ran), passed (exit 0) with three legs past their ceilings by unequal factors: opf-doctor-selftest
@@ -237,13 +237,14 @@ _SUBSET = [
 # on the headroom term alone needs a multiplier above 299.3 / 69 = 4.33768... (so 4.338 to three
 # places, since 4.337 x 69 = 299.253 falls short of 299.3); the multiplier is one constant for every
 # leg, and at 4.338 job B's worst case is about 24609 s, over its 21600 s limit (job A's, the job that
-# holds this leg, stays 21599 s: no job A headroom term exceeds its leg's other terms at 4.338). So
+# holds this leg, is then about 20714.5 s and still fits: only opf-homes-selftest's headroom term,
+# 394.8 s against its 297 s floor, exceeds its leg's other terms at 4.338). So
 # the multiplier stays 3, and a run under such
 # load CAN exit 2 on a healthy leg: each leg whose bound is the headroom term alone (on this tree
 # opf-adopt-selftest 456 s, opf-adopt-state-selftest and
 # opf-adopt-complete-selftest 1800 s each, and opf-oplock-selftest 324 s) trips its bound once it runs
-# more than 3 times its ceiling; opf-homes-selftest tripped exactly so (four CI runs of the
-# config-injection lanes killed it at 273 s, 3 x its 91 s ceiling) and now carries the
+# more than 3 times its ceiling; opf-homes-selftest tripped exactly so (CI killed it at 273 s, 3 x its
+# 91 s ceiling, in all four config-injection lanes) and now carries the
 # recorded-evidence floor _LEG_BOUND_FLOOR_S documents. That exit 2 is
 # reported as the bound tripping, never as a pass and never as a finding.
 # DELIBERATE SHORTER DEADLINE: opf-tooling-selftest. READ FROM SOURCE (opf/tools/opf.py, the watchdog
@@ -254,7 +255,7 @@ _SUBSET = [
 # 3555 s, plus the 60 s launch margin; it rose with those waits from the former 1458 s, 3 x its 486 s
 # ceiling) sits far below that. A
 # bound above it, 5766 + 60 = 5826 s, counts in both sweeps and in the negative leg: 3 x (5826 - 3615)
-# = 6633 s more, a job A worst case of 27104 s, over the 21600 s limit. So this bound takes the
+# = 6633 s more, a job A worst case of 27152 s, over the 21600 s limit. So this bound takes the
 # kill-timeout rule's exception (AGENTS.md): a deliberately shorter deadline, above the leg's recorded
 # run and cutting a longer run short on purpose, with reaching it attributed to the deadline (LEG BOUND
 # EXCEEDED, exit 2; the self-test's negative leg, under the same bound, reports its trip as cannot
@@ -313,29 +314,45 @@ _DRAIN_MARGIN_S = 10
 # is covered at any multiplier on this tree: that leg's bound is set by its declared waits (3615 s),
 # not by the headroom term.
 _MIN_LEG_BOUND_S = 60
-# Per-leg RECORDED-EVIDENCE FLOORS: a minimum bound for a leg whose real runs showed the three derived
-# terms under-cover it; the largest term wins in _leg_bounds, so a floor can only RAISE a bound, never
-# lower one, and a floor at or below what the other terms already reach is refused by the self-test as
-# dead weight (its evidence must be re-fitted or the row removed). FIGURE BASIS, opf-homes-selftest:
-# all four config-injection lanes of one CI run killed this leg at its then 273 s bound (3 x its 91 s
-# ceiling) with the leg still running and silent (it prints only its final summary lines), so 273 s is
-# a LOWER bound on those runs, never a length, and no measured length exists to multiply. MEASURED
-# 2026-10-21 (shared 24-CPU host, load5 about 18 to 20, plain, as the gate runs it: python3 -I -B
+# Per-leg RECORDED-EVIDENCE FLOORS: a minimum bound for a leg whose recorded runs showed the three
+# derived terms under-cover it; the largest term wins in _leg_bounds, so a floor can only RAISE a
+# bound, never lower one, and a floor at or below what the other terms already reach is refused by the
+# self-test as dead weight (its evidence must be re-fitted or the row removed). FIGURE BASIS,
+# opf-homes-selftest: CI killed this leg at its then 273 s bound (3 x its 91 s ceiling) in all four
+# config-injection lanes with the leg still running and silent (it prints only its final summary
+# lines), so 273 s is a LOWER bound on those runs, never a length, and no measured length exists to
+# multiply. MEASURED 2026-10-21 (shared 24-CPU host, load5 about 18 to 20, plain, as the gate runs
+# it: python3 -I -B
 # against a copy of opf/ alone): 62.4 s plain, and 64.2 s (exit 0) under a rebuild of those lanes'
 # injected configuration (HOME and XDG_CONFIG_HOME at the lanes' poison config carrying hooksPath,
 # excludesFile, attributesFile and fsmonitor, the lanes' sh observer wrapper ahead of git on PATH)
 # with the hook, fsmonitor and exposure logs all EMPTY afterwards: the injected configuration never
-# reached this leg's git calls (its fixtures replace HOME and set GIT_CONFIG_NOSYSTEM, and its
-# observation surface builds an allowlist env), so what held it past 273 s in CI is the lanes' load
-# (each lane runs four members at once on an already loaded host), the non-uniform slowdown the
-# multiplier discussion above documents, not the configuration. The floor is therefore sized by the
-# job fit, not from a lane measurement: 837 s is the LARGEST homes bound that keeps job A's worst
-# case inside its 21600 s limit (at 837 s it is 21599 s; at 838 s, 21601 s, over the limit), 9.19
-# times the recorded ceiling where the largest slowdown any leg's account reports is 4.34. A lane run
-# slower still trips the bound again: exit 2, a loud refusal to evaluate, never a pass. A row naming
-# no subset leg, or a value that is not a positive int, is refused fail-closed (_leg_bounds): a stale
+# reached this leg's git calls in that rebuild (its fixtures replace HOME and set GIT_CONFIG_NOSYSTEM,
+# and its observation surface builds an allowlist env). That the CI kills came from the lanes' load
+# (each lane runs four members at once on an already loaded host) is an INFERENCE from that exclusion
+# and from the non-uniform slowdown the multiplier discussion above documents, not a measurement on
+# the affected runner. The floor's figure comes from the JOB FIT plus the lower bound the CI kills
+# give, not from any run's length: it must exceed 273 s (the lower bound; the self-test refuses a
+# floor the other terms already reach), and 297 s is the LARGEST homes bound that keeps at least five
+# percent of job A's 21600 s limit free for growth in the other legs' derived bounds (at 297 s job
+# A's worst case is 20519 s, slack 1081 s; at 298 s it is 20521 s, slack 1079 s, under the 1080 s
+# that five percent requires). 297 s is 3.26 times the recorded ceiling and 4.76 times the measured
+# 62.4 s. No recorded figure bounds lane slowdown from above: the one loaded standalone run reported
+# above reached 4.34 times a ceiling on one leg, the unverified adopt-apply report about 99 times,
+# and the kills themselves imply only that this leg ran MORE than 273 s, more than 4.37 times its
+# 62.4 s run, with no upper end; a lane run past this floor trips the bound again: exit 2, a loud
+# refusal to evaluate, never a pass. FIT UNDER THE CONFIG-LANE MEMBER BOUND: the config-injection
+# lanes run job A's self-test member under a 3600 s member bound (tools/selftest_git_fixture_env.py),
+# and the recorded one-leg-at-a-time figures of that member's work sum to about 1155 s (homes 62.4 s,
+# tooling 485.6 s, doctor 68.5 s, adopt-apply 8.2 s, the negative leg one more opf.py self-test run
+# at 485.6 s, and the vector phase 44.5 s). With the slowdown confined to this leg and the rest at
+# those figures, the member reaches about 297 + 1092 = 1389 s, inside 3600 s; a UNIFORM lane
+# slowdown above 3600 / 1155 = 3.12 overruns the member bound whatever this floor is (at 4.37 times,
+# about 5047 s), so whether the 3600 s member bound covers the member under lane load is NOT shown by
+# these sources; only a run of those lanes under load can show it. A row naming no subset leg, or a
+# value that is not a positive int (a bool included), is refused fail-closed (_leg_bounds): a stale
 # row left behind by a leg rename would otherwise silently stop raising the bound it records.
-_LEG_BOUND_FLOOR_S = {"opf-homes-selftest": 837}
+_LEG_BOUND_FLOOR_S = {"opf-homes-selftest": 297}
 # The names the isolated copy of opf/ leaves out (bytecode artefacts). _materialize copies through
 # _COPY_IGNORE, and the whole-roster check refuses a script it would leave out through the same
 # function, so the two cannot disagree on a name.
@@ -553,7 +570,8 @@ def _leg_bounds(tools_dir, ceilings=None, launch_margin_s=None, bound_floors=Non
     """{leg name: (bound_s, ceiling_s, declared waits sum_s)} for every subset leg, derived from the
     sources under tools_dir. Raises _BoundError (fail-closed) for a leg with no ceiling, for a
     recorded-evidence floor row naming no subset leg, and for a floor value that is not a positive
-    int (a stale or mistyped row must never silently stop raising the bound it records). ceilings,
+    int, a bool included (a stale or mistyped row must never silently stop raising the bound it
+    records). ceilings,
     launch_margin_s and bound_floors default to _LEG_CEILING_S, _LAUNCH_MARGIN_S and
     _LEG_BOUND_FLOOR_S (the self-test passes a table missing a row, a launch margin below the floor
     so that the floor term must raise a bound, and doctored floor tables around the point where a
@@ -1623,18 +1641,28 @@ def _bounds_self_test(root):
                 raise _CheckFailure("closure/bound-floor-raises-the-bound ({} floor {}s): bound "
                                     "{}s, want {}s".format(name, probe, got, want))
     floor_leg = sorted(_LEG_BOUND_FLOOR_S)[0]
-    for label, table in (("no-subset-leg", {"opf-no-such-leg": 100}),
-                         ("non-int", dict(_LEG_BOUND_FLOOR_S, **{floor_leg: "837"})),
-                         ("non-positive", dict(_LEG_BOUND_FLOOR_S, **{floor_leg: 0}))):
+    # Each bad row must be refused AND the refusal must name the row's leg: a _BoundError raised for
+    # any other reason would otherwise pass these vectors. The string probe mirrors the live floor so
+    # it stays a plausible mistyping; the bool probe holds the value check to type, not isinstance
+    # (True would otherwise read as the int 1 and silently stop raising the bound it records).
+    for label, table, named in (
+            ("no-subset-leg", {"opf-no-such-leg": 100}, "opf-no-such-leg"),
+            ("non-int", dict(_LEG_BOUND_FLOOR_S,
+                             **{floor_leg: str(_LEG_BOUND_FLOOR_S[floor_leg])}), floor_leg),
+            ("bool", dict(_LEG_BOUND_FLOOR_S, **{floor_leg: True}), floor_leg),
+            ("non-positive", dict(_LEG_BOUND_FLOOR_S, **{floor_leg: 0}), floor_leg)):
         try:
             derive("bound-floor-bad-row-not-refused", _leg_bounds, tools_dir, bound_floors=table)
-        except _BoundError:
+        except _BoundError as exc:
+            if named not in str(exc):
+                raise _CheckFailure("closure/bound-floor-bad-row-not-refused ({}): refused without "
+                                    "naming {}: {}".format(label, named, exc))
             continue
         raise _CheckFailure("closure/bound-floor-bad-row-not-refused ({})".format(label))
     print("RED an empty floor table -> the bounds the other terms alone give ({}), each below its "
           "leg's floor (the tripped shape); a floor one second above them -> raises the bound to "
           "exactly that floor; at and one below them -> unchanged; a row naming no subset leg, a "
-          "non-int and a non-positive value -> each refused".format(
+          "non-int, a bool and a non-positive value -> each refused naming the row".format(
               ", ".join("{} {}s".format(name, floorless[name][0])
                         for name in sorted(_LEG_BOUND_FLOOR_S))))
     ceilings = dict(_LEG_CEILING_S)
