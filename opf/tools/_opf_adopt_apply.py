@@ -13242,14 +13242,19 @@ def _load_sweep_report_slice(slice_source, directory, tag):
 def _skip_list_write_sites(tree):
     """How _self_test_checks touches its `skipped` list, read from the module tree: (inits, foreign),
     where inits counts the bindings of `skipped` to a literal empty list (the run must have exactly one,
-    its creation) and foreign lists every other use of the name that is not a statement-level
-    skipped.append(...) or skipped.extend(...) call or `skipped` as a for statement's iterable (the skip
-    report's read); None when the function is missing. The skip report is honest only while nothing
+    its creation) and foreign lists every other appearance of the string `skipped` in ANY field of ANY
+    node of the function; None when the function is missing. The scan reads raw node fields, not only
+    ast.Name nodes, so it also sees the bindings Python stores as plain strings (a match or star
+    capture, a mapping-pattern rest, an import alias, an except-as target, a global or nonlocal
+    declaration's name list) and the string wherever else it occurs (a keyword argument name, an
+    attribute name, a string constant equal to `skipped`). Sanctioned, and so not foreign: the one
+    initialisation, a statement-level skipped.append(...) or skipped.extend(...) call, and `skipped` as
+    a for statement's iterable (the skip report's read). The skip report is honest only while nothing
     erases, rebinds or hands off the list between a skip's recording and the report, and the executed
-    reporting slice (_sweep_report_source) never contains a statement naming only `skipped`, so a
-    skipped.clear(), a second binding, a del or slice assignment, a pop, and a pass of the list into any
-    call are refused HERE, by shape. Names and shapes only: an erasure that reaches the list object
-    without naming `skipped` is outside this reader's scope."""
+    reporting slice (_sweep_report_source) never contains a statement naming only `skipped`, so any
+    unsanctioned field carrying the string is refused HERE. Residual: an erasure that reaches the list
+    object without the string `skipped` in any field (through another name already bound to the same
+    object, or an indirect read of the frame's locals) is outside this reader's scope."""
     import ast
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == "_self_test_checks":
@@ -13269,10 +13274,11 @@ def _skip_list_write_sites(tree):
                 elif (isinstance(sub, ast.For) and isinstance(sub.iter, ast.Name)
                         and sub.iter.id == "skipped"):
                     sanctioned.add(id(sub.iter))
-            foreign = sorted("line {}: {}".format(sub.lineno, type(sub.ctx).__name__)
-                             for sub in ast.walk(node)
-                             if isinstance(sub, ast.Name) and sub.id == "skipped"
-                             and id(sub) not in sanctioned)
+            foreign = sorted(
+                "line {}: {}.{}".format(getattr(sub, "lineno", 0), type(sub).__name__, field)
+                for sub in ast.walk(node) if id(sub) not in sanctioned
+                for field, value in ast.iter_fields(sub)
+                if value == "skipped" or (isinstance(value, list) and "skipped" in value))
             return inits, foreign
     return None
 
@@ -13642,12 +13648,15 @@ def _class_sweep_bound_self_test(check):
           observed=repr({label: None if report is None else
                          (report["no-census"][0], len(report["no-census"][1]), report["expiry"][0])
                          for label, report in mutant_reports.items()}))
-    # The skip list's write shapes, pinned at the source: the executed slice above keeps only statements
+    # The skip list's binding sites, pinned at the source: the executed slice above keeps only statements
     # naming a report name or the report's emission, so an inserted erasure that names nothing beyond
     # `skipped` (a skipped.clear() right after the sweep extend, say) never reaches the slice and leaves
-    # every slice outcome unchanged. _skip_list_write_sites refuses that statement by shape instead,
-    # with a rebind, a slice assignment, a del, a pop and a handoff of the list into any call; the
-    # cleared_live probe applies the exact clearing mutation to this module's real source.
+    # every slice outcome unchanged. _skip_list_write_sites refuses any unsanctioned node field carrying
+    # the string `skipped` instead: a clear, a rebind, a slice assignment, a del, a pop, a handoff of the
+    # list into any call, and the bindings stored as plain string fields rather than ast.Name nodes (a
+    # match or star capture, a mapping-pattern rest, an import alias, an except-as target, a global
+    # declaration, a keyword argument name); the cleared_live probe applies the exact clearing mutation
+    # to this module's real source.
     live_shapes = _skip_list_write_sites(source_tree)
     shape_good = ("def _self_test_checks():\n"
                   "    skipped = []\n"
@@ -13664,21 +13673,39 @@ def _class_sweep_bound_self_test(check):
                             ("slice-assigned", "    skipped[:] = []\n"),
                             ("deleted", "    del skipped[:]\n"),
                             ("handed-off", "    _some_helper(skipped)\n"),
-                            ("popped", "    skipped.pop()\n")):
+                            ("popped", "    skipped.pop()\n"),
+                            ("match-captured",
+                             "    match []:\n        case skipped:\n            pass\n"),
+                            ("star-captured",
+                             "    match ():\n        case [*skipped]:\n            pass\n"),
+                            ("mapping-rest",
+                             "    match {}:\n        case {**skipped}:\n            pass\n"),
+                            ("import-aliased", "    from sys import warnoptions as skipped\n"),
+                            ("except-bound",
+                             "    try:\n        pass\n"
+                             "    except Exception as skipped:\n        pass\n"),
+                            ("global-declared", "    global skipped\n"),
+                            ("keyword-named", "    _some_helper(skipped=[])\n")):
         text = shape_good if inserted is None else shape_good.replace(
             report_loop, inserted + report_loop, 1)
         shape_probes[label] = _skip_list_write_sites(ast.parse(text))
     cleared_live = _skip_list_write_sites(ast.parse(source_text.replace(
         extend_stmt, extend_stmt + "\n        skipped.clear()", 1)))
+    captured_live = _skip_list_write_sites(ast.parse(source_text.replace(
+        extend_stmt,
+        extend_stmt + "\n        match []:\n            case skipped:\n                pass", 1)))
     check("class-sweep-skip-list-write-shapes-pinned",
           live_shapes == (1, []) and shape_probes["good"] == (1, [])
           and shape_probes["rebound"] == (2, [])
           and all(shape_probes[label][0] == 1 and shape_probes[label][1] != []
-                  for label in ("cleared", "slice-assigned", "deleted", "handed-off", "popped"))
+                  for label in ("cleared", "slice-assigned", "deleted", "handed-off", "popped",
+                                "match-captured", "star-captured", "mapping-rest", "import-aliased",
+                                "except-bound", "global-declared", "keyword-named"))
           and cleared_live is not None and cleared_live[0] == 1 and cleared_live[1] != []
+          and captured_live is not None and captured_live[0] == 1 and captured_live[1] != []
           and _skip_list_write_sites(ast.parse("def other():\n    skipped = []\n")) is None,
-          observed="live={!r} probes={!r} cleared_live={!r}".format(
-              live_shapes, shape_probes, cleared_live))
+          observed="live={!r} probes={!r} cleared_live={!r} captured_live={!r}".format(
+              live_shapes, shape_probes, cleared_live, captured_live))
     # The eventfd skip reason's CALL SITE is pinned, not only the helper: _self_test_checks must derive
     # the vector's skip reason from the census flag and from the real presence of os.eventfd, exactly
     # once; a constant second argument or a removed call is refused.
