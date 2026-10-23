@@ -13446,6 +13446,10 @@ _ORCH_NOTE_NAMED_FD_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 # operators whose target is one word. `<<` (a here-document opener, whose body is not one word) is excluded.
 _ORCH_NOTE_IO_PREFIX_RE = re.compile(r"[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\}")
 _ORCH_NOTE_REDIR_OPS = ("&>>", "&>", ">>", "<<<", ">|", ">&", "<&", "<>", ">", "<")
+# The whole of a here-document delimiter word whose body the note scan skips silently, and the character
+# that must open a `${...}` redirect target it consumes silently (a name: a letter, digit or underscore).
+_ORCH_NOTE_DELIM_RE = re.compile(r"[A-Za-z0-9_.+-]+")
+_ORCH_NOTE_NAME_START_RE = re.compile(r"[A-Za-z0-9_]")
 
 
 def _orch_skip_redirect(command, i, n):
@@ -13522,16 +13526,23 @@ def _orch_arith_closes(command):
 def _orch_skip_param_expansion(command, i, n):
     """Given index i at the `$` of a `${...}` parameter expansion, return the index just past the `}` that
     closes it, or None when the expansion is not PROVABLY SIMPLE, which the note scanner reports by
-    emitting the note (never by guessing at the remainder). Provably simple means the span up to the first
-    `}` holds only a name and literal characters: no single or double quote and no backslash (bash's
-    quoting contexts nest in ways a lexical skip cannot read with certainty, and a quote can hide or
-    expose a substitution), no `$` (a nested `${...}` expansion or a `$(...)` command substitution) and no
-    backquote (bash runs a command substitution even inside a redirect target), and no `<` or `>` (a
-    `<(...)` or `>(...)` process substitution runs there too). Such a span closes exactly where bash
-    closes it: at the first unquoted `}` (a literal `{` in a default does not open anything to bash).
-    Every other spelling, nested or quoted or not, returns None rather than being modelled. Used to
-    consume a parameter expansion as ONE word so a blank inside it (a `${x:-a b}` default) does not end
-    the operand."""
+    emitting the note (never by guessing at the remainder). Provably simple means the span opens with a
+    name character (a letter, digit or underscore) and holds, up to the first `}`, only that name and
+    literal characters. Any other opening character returns None: a blank, newline or `|` there opens a
+    bash 5.3 `${ cmd; }` or `${| cmd; }` command substitution, which runs its command in the current shell
+    even in a redirect target, and any other one (a `#`, `!` or special parameter) is a form the scan does
+    not model. The span then holds no single or double quote and no backslash (bash's quoting contexts
+    nest in ways a lexical skip cannot read with certainty, a quote can hide or expose a substitution, and
+    an escaped `\\}` does not close the expansion to bash), no `$` (a nested `${...}` expansion or a
+    `$(...)` command substitution) and no backquote (bash runs a command substitution even inside a
+    redirect target), and no `<` or `>` (a `<(...)` or `>(...)` process substitution runs there too). For
+    such a span the first `}` is where bash closes it (a literal `{` in a default does not open anything
+    to bash). Every other spelling returns None rather than being modelled; nothing here shows that this
+    character list is every way bash can read further than the first `}` or run a command there, only
+    that each listed character is one of them. Used to consume a parameter expansion as ONE word so a
+    blank inside it (a `${x:-a b}` default) does not end the operand."""
+    if _ORCH_NOTE_NAME_START_RE.match(command, i + 2) is None:
+        return None  # no name opens the span (a `${ cmd; }` or `${| cmd; }` included): the scan notes
     j = i + 2
     while j < n:
         c = command[j]
@@ -13546,15 +13557,18 @@ def _orch_skip_param_expansion(command, i, n):
 def _orch_plain_heredoc_delim(command, at, n):
     """Parse the here-document delimiter spec starting immediately after '<<' (index `at`) for the
     out-of-scope note scanner, accepting ONLY a PROVABLY SIMPLE spelling: an optional '-' (the <<- form),
-    optional blanks, then one plain word of literal characters holding no backslash and no quote. Returns
-    (delim, strip_tabs, next_i), or None when there is no delimiter word at all or the word holds a
-    backslash (an escape, or a line continuation that bash removes while this scanner reads raw text) or
-    a single or double quote (which also declines the ANSI-C $'...' and locale $"..." forms): bash joins
-    and quote-removes such a word under rules this scanner does not model, and a wrong guess would skip
-    the body at an invented delimiter and read real commands as data, so the caller notes instead. A
-    plain word is its own delimiter (bash performs no expansion on the word), and the body is skipped at
-    the line that matches it exactly. The shared in-scope parser (_parse_heredoc_delim) is deliberately
-    not used here: it models the joined spellings for the fail-closed deny path."""
+    optional blanks, then a whole word that is a non-empty run of letters, digits and `_ . + -`
+    (_ORCH_NOTE_DELIM_RE), ended where bash itself ends it: at the end of the command, a blank or newline,
+    or one of the metacharacters `; & | )`, or a `<` or `>` that does not open a `<(` or `>(` process
+    substitution. Returns (delim, strip_tabs, next_i), or None for every other spec: no delimiter word at
+    all, a word holding any other character (a quote, a backslash escape or line continuation, a `$` or
+    backquote expansion, a brace), or a word bash reads further than this scan does (a `(` after it, as
+    in an extglob `+(...)`, or a `<(...)` or `>(...)` glued to it). bash joins, quote-removes or extends
+    such a word under rules this scanner does not model, and a wrong guess would skip the body at an
+    invented delimiter and read real commands as data, so the caller notes instead. An allowed word is its
+    own delimiter (bash performs no expansion on the word), and the body is skipped at the line that
+    matches it exactly. The shared in-scope parser (_parse_heredoc_delim) is deliberately not used here:
+    it models the joined spellings for the fail-closed deny path."""
     j = at
     strip_tabs = False
     if j < n and command[j] == "-":
@@ -13562,25 +13576,28 @@ def _orch_plain_heredoc_delim(command, at, n):
         j += 1
     while j < n and command[j] in " \t":
         j += 1
-    start = j
-    while j < n and command[j] not in " \t\n" and command[j] not in _METACHARS:
-        if command[j] in "\\'\"":
-            return None  # a quote or an escape in the word: not provably simple, so the scan notes
-        j += 1
-    if j == start:
-        return None  # no delimiter word at all
-    return (command[start:j], strip_tabs, j)
+    word = _ORCH_NOTE_DELIM_RE.match(command, j)
+    if word is None:
+        return None  # no delimiter word, or one that opens with a character outside the plain set
+    end = word.end()
+    if end < n and not (command[end] in " \t\n;&|)"
+                        or (command[end] in "<>" and not command.startswith("(", end + 1))):
+        return None  # the word goes on past the plain characters (to bash or as an unknown): the scan notes
+    return (word.group(), strip_tabs, end)
 
 
 def _orch_note_scan(command, bash_word_starts):
     """The scan behind the note outside registry scope. It reads quotes, escapes and `#` comments exactly
     as _orch_foreground_scan does (bash_word_starts selects the same comment rule), and adds four things
-    that scan does not model. A here-document whose delimiter spec is provably simple (one plain word with
-    no backslash and no quote, _orch_plain_heredoc_delim) has its body skipped as data at the exact
-    delimiter line, so an `&` or an apostrophe in the body neither notes nor shifts the quote state; EVERY
-    other delimiter spelling (a quoted or ANSI-C fragment, a backslash escape or line continuation in the
-    word, a quote left open, or no delimiter word at all) returns "unreadable", so the note is emitted
-    rather than guessing where the body ends or reading the remainder as code; a here-document opened
+    that scan does not model. A here-document whose delimiter spec is provably simple (a whole word of
+    letters, digits and `_ . + -` that bash ends where this scan does, _orch_plain_heredoc_delim) has its
+    body skipped as data at the exact delimiter line, so an `&` or an apostrophe in the body neither notes
+    nor shifts the quote state; EVERY other delimiter spelling (a quoted or ANSI-C fragment, a backslash
+    escape or line continuation in the word, a `$`, backquote or brace in it, a `(`, `<(` or `>(` glued
+    to it, a quote left open, or no delimiter word at all) returns "unreadable", and so does a body in
+    which a backslash-newline appears anywhere up to its closing delimiter line (bash joins it before
+    matching that line; this raw match does not), so the note is emitted rather than guessing where the
+    body ends or reading the remainder as code; a here-document opened
     inside a double-quoted command substitution (the commit-message form) is NOT recognized and is read as
     double-quoted text, whose own double quotes toggle that reading, so a body `&` there can draw an extra
     note. An arithmetic expansion $(( ... )) or
@@ -13589,12 +13606,15 @@ def _orch_note_scan(command, bash_word_starts):
     A redirect operator and its target operand are passed over without disturbing the pending command
     position (next_command), so a leading `2> /dev/null` does not hide the command word after its target
     and a spaced redirect target named like a detacher is not read as one; a target that begins with a
-    provably simple `${...}` parameter expansion (only a name and literal characters up to the first `}`,
-    _orch_skip_param_expansion) is consumed as one word, so a blank inside a `${x:-a b}` default does not
-    split a word out of the operand nor expose a following detacher (a literal `{` in the default does not
-    nest: the expansion ends at its matching `}` as in bash), while every other such target (one left
-    unclosed, or holding any quote, backslash, `$`, backquote, `<` or `>`, under which bash can run a
-    command or process substitution the skip cannot rule out) returns "unreadable" and notes. The same
+    provably simple `${...}` parameter expansion (a name, then only literal characters up to the first
+    `}`, _orch_skip_param_expansion) is consumed as one word, so a blank inside a `${x:-a b}` default does
+    not split a word out of the operand nor expose a following detacher (a literal `{` in the default does
+    not nest: the expansion ends at its matching `}` as in bash), while every other such target (one left
+    unclosed, one that does not open with a name, such as a bash 5.3 `${ cmd; }` or `${| cmd; }` command
+    substitution, or one holding any quote, backslash, `$`, backquote, `<` or `>`) returns "unreadable"
+    and notes, and so does any further `${` anywhere in a redirect target operand, quoted with double
+    quotes or not (one glued after another operand character, `> a${x:-b c}`, or after a skipped
+    expansion). The same
     holds for a here-string `<<<`, whose word is a redirect target and never a here-document delimiter, for
     the noclobber redirect `>|`, read as one operator and not as a redirect then a pipe, and for a named
     descriptor written directly before its operator ({fd}> file). A setsid, nohup or disown in command
@@ -13606,10 +13626,12 @@ def _orch_note_scan(command, bash_word_starts):
     backslash-newline line continuation is not read in command position; a command substitution inside
     skipped arithmetic is skipped with it; a `<<` inside the old-style $[ ... ] arithmetic reads as a
     here-document opener and skips the lines after it; a redirect target written as an arithmetic
-    expansion drops the pending command position; a `${...}` NOT at the start of a redirect target (one
-    glued after another operand character, `> a${x:-b c}`) is read char by char, so its inner blank still
-    splits a word; and a setsid whose wait option sits behind a redirect target that is not a plain word
-    (an expansion or a quoted word) reads the redirect as the end of the options, so setsid is noted.
+    expansion drops the pending command position; a bash 5.3 `${ cmd; }` or `${| cmd; }` command
+    substitution outside a redirect target (`echo ${ setsid -f job; }`) is read char by char, so an `&`
+    in it notes but a detacher word in it is not read in command position, and one in an unquoted
+    here-document body is skipped with the body; and a setsid whose wait option sits behind a redirect
+    target that is not a plain word (an expansion or a quoted word) reads the redirect as the end of the
+    options, so setsid is noted.
 
     Returns "detach" when it meets a bare `&` control operator, "unreadable" the moment it meets a span it
     would skip but cannot read with certainty (the here-document and `${...}` redirect-target cases above;
@@ -13620,6 +13642,7 @@ def _orch_note_scan(command, bash_word_starts):
     in_single = in_double = escaped = False
     prev_dup = False
     redirect_target = False  # between a redirect operator and the start of its target operand
+    target_word = False  # inside a redirect's target operand, up to the unquoted blank or metacharacter
     word_start = True
     command_position = next_command = True  # next_command: the position the next word takes after a blank
     groups = []  # next_command saved at each unquoted `(`, restored at its `)`
@@ -13640,6 +13663,8 @@ def _orch_note_scan(command, bash_word_starts):
             i += 1
             continue
         if in_double:
+            if target_word and ch == "$" and command.startswith("{", i + 1):
+                return "unreadable"  # a `${` in a redirect target, double-quoted or not, is never skipped
             if ch == "\\":
                 escaped = True
             elif ch == '"':
@@ -13650,20 +13675,28 @@ def _orch_note_scan(command, bash_word_starts):
         if redirect_target and not (ch in "<> \t" or (ch == "&" and prev_dup)
                                     or (ch == "|" and command[i - 1] == ">")):
             redirect_target = False  # the redirect's target operand starts at this character
+            target_word = True
             if ch == "$" and i + 1 < n and command[i + 1] == "{":
                 # The operand begins with a `${...}` parameter expansion: bash parses it as ONE word, so
-                # a provably simple expansion (only a name and literal characters up to the first `}`) is
-                # consumed whole (its inner blanks do not end the operand nor restore the pending command
-                # position) rather than letting a `${x:-a b}` split a word out of it. Every other spelling
-                # (left unclosed, or holding any quote, backslash, `$`, backquote, `<` or `>`, under which
-                # bash can run a command or process substitution the skip cannot rule out) draws the note:
-                # the scan never reads the remainder as code to decide silence.
+                # a provably simple expansion (a name, then only literal characters up to the first `}`)
+                # is consumed whole (its inner blanks do not end the operand nor restore the pending
+                # command position) rather than letting a `${x:-a b}` split a word out of it. Every other
+                # spelling (left unclosed, not opened by a name, as a bash 5.3 `${ cmd; }` is, or holding
+                # any quote, backslash, `$`, backquote, `<` or `>`) draws the note: the scan never reads
+                # the remainder as code to decide silence.
                 end = _orch_skip_param_expansion(command, i, n)
                 if end is None:
                     return "unreadable"
                 prev_dup, word_start = False, False
                 i = end
                 continue
+        if target_word:
+            if ch in " \t\n;&|()<>":
+                target_word = False  # the target operand ends here
+            elif ch == "$" and command.startswith("{", i + 1):
+                # Any other `${` in a redirect target (glued after another operand character, or after a
+                # skipped expansion, a bash 5.3 `${ cmd; }` included) draws the note: it is not read.
+                return "unreadable"
         if ch == "#" and word_start:
             nl = command.find("\n", i)
             if nl == -1:
@@ -13672,7 +13705,13 @@ def _orch_note_scan(command, bash_word_starts):
             continue
         if ch == "\n" and heredocs:
             # The bodies of the here-documents opened on this line follow its newline: skip them as data.
-            i = _skip_heredoc_bodies(command, i + 1, n, heredocs)
+            # bash joins a backslash-newline in an unquoted body before it compares a line with the
+            # delimiter, which this raw line match does not, so one anywhere up to the closing line (or
+            # to the end, for a body left open) draws the note instead.
+            end = _skip_heredoc_bodies(command, i + 1, n, heredocs)
+            if command.find("\\\n", i + 1, end) != -1:
+                return "unreadable"
+            i = end
             heredocs = []
             prev_dup, word_start = False, True
             command_position = next_command = True
@@ -13731,10 +13770,10 @@ def _orch_note_scan(command, bash_word_starts):
                 and not (prev_dup and command[i - 1] == "<")):  # the `<<` that ends a `<<<` opens nothing
             parsed = _orch_plain_heredoc_delim(command, i + 2, n)
             if parsed is None:
-                # A here-document delimiter that is not one plain word (it holds a quote or a backslash,
-                # an escape or line continuation included, or there is no delimiter word at all) draws
-                # the note: where the body ends is unknown, so the scan never reads the remainder as
-                # code to decide silence.
+                # A here-document delimiter that is not provably simple (a character outside the plain
+                # set, a word bash reads further than this scan, or no delimiter word at all) draws the
+                # note: where the body ends is unknown, so the scan never reads the remainder as code to
+                # decide silence.
                 return "unreadable"
             heredocs.append((parsed[0], parsed[1]))
             prev_dup, word_start = False, False
@@ -14338,9 +14377,10 @@ def orch_truncation_guard(data):
     foreground command (run_in_background false or omitted, command a string) that detaches work, by a
     bare `&` or by a setsid (without -w), nohup or disown command (_orch_foreground_note_kind, a scan that
     also skips outer-level here-document bodies, arithmetic and redirect operands), and one whose scan met
-    a span it would skip but cannot read with certainty (a here-document delimiter that is not one plain
-    unquoted word, or a `${...}` redirect target left unclosed or holding anything beyond a name and
-    literal characters), is allowed WITH
+    a span it would skip but cannot read with certainty (a here-document delimiter that is not a whole
+    word of letters, digits and `_ . + -`, a body holding a backslash-newline up to its closing line, a
+    `${...}` redirect target left unclosed, not opened by a name or holding anything beyond literal
+    characters, or a further `${` in a redirect target), is allowed WITH
     A NOTE naming the tracked background
     mechanism; every other call there is the silent allow, malformed input included. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit

@@ -9499,6 +9499,28 @@ def _main_isolated(report_path=None):
                  _fg("> ${x:-\"${y:-\"'$(long_job &)'\"}\"} echo done"), "warn"),
                 ("trunc/oos-param-expansion-unclosed-target-notes",
                  _fg("> ${x:-a b setsid -f long_job"), "warn"),
+                # A `${...}` target must open with a name: a blank or `|` after `${` opens a bash 5.3
+                # `${ cmd; }` or `${| cmd; }` command substitution, which runs its command even in a
+                # redirect target. An escaped `\}` does not close the expansion to bash, so a scan that
+                # closed it there would read the rest of bash's expansion as a `#` comment and miss the
+                # real detach after it.
+                ("trunc/oos-param-expansion-funsub-target-notes",
+                 _fg("> ${ long_job & } echo done"), "warn"),
+                ("trunc/oos-param-expansion-funsub-setsid-target-notes",
+                 _fg("> ${ setsid -f long_job; } echo done"), "warn"),
+                ("trunc/oos-param-expansion-valsub-target-notes",
+                 _fg("> ${|long_job & } echo done"), "warn"),
+                ("trunc/oos-param-expansion-funsub-nohup-target-notes",
+                 _fg("2> ${ nohup long_job; } echo done"), "warn"),
+                ("trunc/oos-param-expansion-escaped-brace-comment-notes",
+                 _fg("x=/dev/null; > ${x:-a\\} #} long_job &"), "warn"),
+                # Any further `${` in a redirect target operand notes, unquoted or double-quoted: it is
+                # never read char by char as code. A `$` that opens no brace is still read (control).
+                ("trunc/oos-glued-target-funsub-setsid-notes",
+                 _fg("echo x > a${ setsid -f long_job; }"), "warn"),
+                ("trunc/oos-quoted-target-funsub-setsid-notes",
+                 _fg("> \"${ setsid -f long_job; }\" echo done"), "warn"),
+                ("trunc/oos-quoted-target-plain-param-allows", _fg("echo x > \"$out\""), "allow"),
                 # bash takes an fd prefix before `>` but never before `&>`: `2&>/dev/null` is the word `2`
                 # (setsid's command) then a redirect, so this setsid runs `2` and does not wait on
                 # long_job (note), while the prefixed `>` form really is a redirect and `-w` still waits.
@@ -9519,6 +9541,38 @@ def _main_isolated(report_path=None):
                  _fg("cat <<EO\\\nF\nbody\nEOF\nlong_job &"), "warn"),
                 ("trunc/oos-heredoc-quoted-continued-delim-notes",
                  _fg("cat <<\"EO\\\nF\"\nbody\nEOF\nlong_job &"), "warn"),
+                # Only a whole word of letters, digits and `_ . + -` is a plain delimiter. bash keeps a
+                # `$(...)`, `$((...))`, `${...}` or backquoted span in the delimiter word, blanks and
+                # metacharacters included, and reads a `>(...)` or an extglob `+(...)` glued to the word as
+                # part of it; a scan that cut the word short would wait for a line that never comes and
+                # read the real detach after bash's delimiter line as body. The plain rows are controls.
+                ("trunc/oos-heredoc-cmdsubst-delim-notes",
+                 _fg("cat <<$(true)\nbody\n$(true)\nlong_job &\n$\n"), "warn"),
+                ("trunc/oos-heredoc-param-blank-delim-notes",
+                 _fg("cat <<${x:-a b}\nbody\n${x:-a b}\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-backtick-blank-delim-notes",
+                 _fg("cat <<`a b`\nbody\n`a b`\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-arith-delim-notes",
+                 _fg("cat <<$((1+1))\nbody\n$((1+1))\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-procsub-glued-delim-notes",
+                 _fg("cat <<EOF>(x y)\nbody\nEOF>(x y)\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-extglob-delim-notes",
+                 _fg("shopt -s extglob\ncat <<a+(b c)\nbody\na+(b c)\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-plain-set-delim-allows",
+                 _fg("cat <<-END.v1+x\n\tFix A & B\n\tEND.v1+x"), "allow"),
+                ("trunc/oos-heredoc-delim-then-redirect-allows",
+                 _fg("cat <<EOF>/tmp/f\nFix A & B\nEOF"), "allow"),
+                # bash joins a backslash-newline in an unquoted body before it matches the closing line,
+                # so `EO\` then `F` closes the body and a raw `x\` then `EOF` does not; either way the raw
+                # line match would skip the real detach. One anywhere up to the closing line notes; a
+                # backslash before another character, or a continuation after the closing line, does not.
+                ("trunc/oos-heredoc-continued-close-line-notes",
+                 _fg("cat <<EOF\nbody\nEO\\\nF\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-continued-body-line-notes",
+                 _fg("cat <<EOF\nx\\\nEOF\nit's\nEOF\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-body-backslash-allows", _fg("cat <<EOF\na\\b & c\nEOF"), "allow"),
+                ("trunc/oos-heredoc-continuation-after-close-allows",
+                 _fg("cat <<EOF\nA & B\nEOF\necho a \\\nb"), "allow"),
                 # An ANSI-C $'...' delimiter is a quoted spelling, so it notes like any other non-plain
                 # delimiter; its body is never skipped at a guessed line, and a body that once shifted
                 # the quote state onto a later real detach now notes at the delimiter instead.
@@ -9565,9 +9619,10 @@ def _main_isolated(report_path=None):
               (_verdict(_oos), "run_in_background" in _oos_note, "setsid" in _oos_note), ("warn", True, True))
         # The whole dispatcher, in a child process: a here-document delimiter the note scan cannot read
         # with certainty (here an ANSI-C escape whose `\c` form once raised out of the handler and
-        # blocked) stays a NOTE with exit 0 outside registry scope: a nonempty systemMessage, NO
-        # permission decision (a structured deny also exits 0 with a systemMessage, so the decision
-        # field is asserted absent), and no fail-closed stderr.
+        # blocked) stays a NOTE with exit 0 outside registry scope: stdout is one JSON object whose keys
+        # are exactly systemMessage, holding non-whitespace text (a structured deny also exits 0 with a
+        # systemMessage, and a top-level decision or a hookSpecificOutput of any type would change what
+        # the platform does, so the whole key set is asserted), and no fail-closed stderr.
         _ctl_env = {k: v for k, v in os.environ.items()
                     if k != aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV}
         _ctl = subprocess.run(
@@ -9579,13 +9634,12 @@ def _main_isolated(report_path=None):
             _ctl_out = json.loads(_ctl.stdout)
         except ValueError:
             _ctl_out = None
-        _ctl_out = _ctl_out if isinstance(_ctl_out, dict) else {}
-        _ctl_note = _ctl_out.get("systemMessage", "")
-        _ctl_hso = _ctl_out.get("hookSpecificOutput")
-        _ctl_decision = _ctl_hso.get("permissionDecision") if isinstance(_ctl_hso, dict) else None
+        _ctl_keys = sorted(_ctl_out) if isinstance(_ctl_out, dict) else None
+        _ctl_note = _ctl_out.get("systemMessage") if isinstance(_ctl_out, dict) else None
         check("trunc/oos-ctl-escape-dispatcher-notes-exit-0",
-              (_ctl.returncode, bool(_ctl_note), _ctl_decision, "failing closed" in _ctl.stderr),
-              (0, True, None, False))
+              (_ctl.returncode, _ctl_keys, isinstance(_ctl_note, str) and bool(_ctl_note.strip()),
+               "failing closed" in _ctl.stderr),
+              (0, ["systemMessage"], True, False))
         # Scanner-level: a literal `{` in a `${...}` default ends the target at the first `}` (as bash
         # does), so the setsid after it is read in command position and named; a depth scan that nested
         # the literal `{` read the target as unreadable or unclosed and never named it.

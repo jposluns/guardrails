@@ -58,20 +58,31 @@ the doctor and the resume audit report and arm from it):
   operator and its target without losing the command position (a here-string `<<<`, the noclobber
   `>|`, a named descriptor such as `{fd}>`, a redirect between `setsid` and its wait option, and a
   `${...}` parameter expansion that is the whole redirect target, read as one word when it is
-  provably simple (only a name and literal characters up to the first `}`; a literal `{` in a
+  provably simple (a name, then only literal characters up to the first `}`; a literal `{` in a
   default does not nest, as in bash), all
   included; a number or `{fd}` before `&>` is a word to bash, never an fd prefix, and is read as
   one). The scan skips a here-document body or a `${...}` redirect target silently ONLY when the
-  span is provably simple: a delimiter that is one plain word with no backslash and no quote, and a
-  target holding nothing beyond a name and literal characters. Every other such span draws the same
-  note instead of a silent skip, and never a block: a quoted, ANSI-C or escaped delimiter spelling,
-  a delimiter continued with a backslash-newline, a quote left open or no delimiter word at all, and
-  a `${...}` target left unclosed or holding any quote, backslash, `$`, backquote, `<` or `>` (a
-  command or process substitution, however nested or quoted, is behind one of those characters).
+  span passes an allow-list: a delimiter whose whole word is letters, digits and `_ . + -`, ended
+  where bash ends it (a blank, a newline, the end of the command, or one of `; & | )`, or a `<` or
+  `>` that opens no process substitution), over a body with no backslash-newline up to its closing
+  line, and a target that opens with a name and holds nothing beyond literal characters. Every
+  other such span draws the same note instead of a silent skip, and never a block: any other
+  delimiter (a quoted, ANSI-C or escaped spelling, one continued with a backslash-newline, one
+  holding a `$`, backquote or brace, such as `<<$(true)` or `<<${x:-a b}`, one with a `(`, `<(` or
+  `>(` glued to it, a quote left open, or no delimiter word at all), a body with a backslash-newline
+  up to its closing line (bash joins it before matching that line), a `${...}` target left
+  unclosed, not opened by a name (a bash 5.3 `${ cmd; }` or `${| cmd; }` command substitution
+  included) or holding any quote, backslash, `$`, backquote, `<` or `>`, and any further `${` in a
+  redirect target. The excluded characters are the ones known to let bash read further or run a
+  command there; nothing shows the list is complete, which is why the rules allow rather than deny.
   Outside registry scope this scan only ever notes; where it is unsure it over-notes rather than
-  misses. No command content makes the scan deny or raise; the guard's fail-closed paths around it
-  stay (a malformed payload still denies, and the dispatcher's 8-second deadline, disclosed in the
-  manifest residue, still exits 2). A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
+  misses, apart from the known misses the manifest residue lists. No command content makes the scan
+  deny or raise. The guard's fail-closed paths outside registry scope are the ones that do not read
+  the command: a hook payload on stdin that is not a readable JSON object, and a handler crash,
+  each exit 2; a `tool_name` or a Bash `cwd` that fails the pre-scope checks above is denied; and
+  the dispatcher's 8-second deadline, disclosed in the manifest residue, exits 2. A malformed
+  `tool_input` (not an object, or a `command` that is not a string) is allowed silently there.
+  A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
   `.aiqt` directory the guard's process lacks search (execute) permission on, such as mode `0600`
   or `0000` for a process those modes bind; a `.aiqt` of mode `0100` evaluates normally for its owner
   where `O_PATH` exists (Linux), because the `O_PATH` open needs no read permission, and for a process
