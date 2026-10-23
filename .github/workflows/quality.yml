@@ -1002,6 +1002,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_clauses.py --genesis --with-manifest
 
+      - name: Rule placement self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite rule-placement-selftest
       - name: Rule placement
         shell: bash
         run: python3 -I -B tools/check_rule_placement.py
