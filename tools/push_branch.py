@@ -18,10 +18,11 @@ URL and accepts it only when every condition of a closed set holds, refusing oth
 named reason: a printable --remote with no whitespace; for a configured remote exactly one push
 URL, byte-identical to its one fetch URL (a pushurl, an added URL or a pushInsteadOf rewrite
 refuses); a destination that is an absolute local path, a file://, https:// or ssh:// URL, or
-an scp-like ssh destination ([user@]host:path with no slash before the first colon, judged as
-the ssh:// URL git maps it to; an ext:: or other helper transport, another scheme's URL, a
-relative path, a bare name, and an scp-like form whose user, host or path part cannot be
-established each refuse)
+an scp-like ssh destination ([user@]host:path with no slash before the first colon, tested for
+shape only, every other rule running on its literal text; a destination with a '::' before
+its first '/' (an ext:: or other helper transport, whatever the helper's name), another
+scheme's URL, a relative path, a bare name, and an scp-like form whose user, host or path part
+cannot be established each refuse)
 and does not name a configured remote; no legacy remotes or branches file under the git path at
 all; no url.<base>.insteadOf or pushInsteadOf value prefixing the raw configured or resolved
 URL (an unrelated rewrite for another URL stays allowed); no core.sshCommand, ssh.variant or
@@ -71,8 +72,10 @@ negative refspec excludes it (a fetch would update no ref for it), the
 mapping is ambiguous, the mapped ref lies outside refs/remotes/, or the mapped ref is a symbolic
 ref, nothing is recorded and the skip is reported plainly, because an invented ref name could
 shadow, or through a pre-existing symbolic ref move, a ref a fetch would never touch); the
-upstream is then bound through the recorded ref (the conventional remote/branch name is still
-tried where nothing was recorded, since a matching remote-tracking ref may already exist); if the
+upstream is then bound through the recorded ref (where nothing was recorded, the conventional
+remote-tracking ref refs/remotes/<remote>/<branch> is still tried by its full name, since one may
+already exist, unless it is a symbolic ref, which would bind the upstream to the ref it points
+at, a local branch included); if the
 upstream step fails, the completed, scanned push is still reported with exit 0 and the line says
 so (a --remote given as a URL has no remote-tracking ref, so there the step always fails and the
 line is expected).
@@ -111,8 +114,11 @@ push.recurseSubmodules publishes no unscanned submodule commit; that the trackin
 through a configured name follows that remote's own fetch refspec mapping, is skipped (and said
 so) when no refspec maps the branch or a negative refspec excludes it (an exact and a wildcard
 exclusion, with a non-matching exclusion as the control), binds the branch's upstream through
-the recorded ref (a custom mapping included), and never moves another ref through a pre-existing
-symbolic tracking ref; it also drives the check directly for shapes
+the recorded ref (a custom mapping included), never moves another ref through a pre-existing
+symbolic tracking ref and never binds the upstream through one or to a local branch named like
+the conventional remote/branch name, and that the fetch refspec reader reports a configuration
+read error as unreadable and a negative refspec it cannot evaluate as such; it also drives the
+check directly for shapes
 reachable only there (a subdirectory --repo, a --head bound to a commit other than the checkout, a
 detached HEAD, a destination unusable as one URL), and drives a copy of this helper against stub
 checks for the digest-missing and unexpected-exit refusals and for the race in which a commit lands
@@ -272,6 +278,22 @@ def _fetch_refspec_target(toplevel, remote, branch):
     return targets.pop(), None
 
 
+def _is_symbolic_ref(toplevel, ref):
+    """True when ref is a symbolic ref, False when it is not (or is absent), None when it
+    cannot be inspected (git symbolic-ref -q exits 1 for a ref that is not symbolic and
+    anything else on a failure, an invalid ref name included)."""
+    try:
+        symref = subprocess.run(["git", "-C", toplevel, "symbolic-ref", "-q", ref],
+                                capture_output=True, encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    if symref.returncode == 0:
+        return True
+    if symref.returncode == 1:
+        return False
+    return None
+
+
 def _record_tracking_ref(toplevel, remote, branch, head):
     """Record the pushed commit under the remote-tracking ref the remote's own fetch refspecs
     map the branch to (the ref a fetch from that remote would update), so the upstream step can
@@ -285,14 +307,10 @@ def _record_tracking_ref(toplevel, remote, branch, head):
         return None, reason
     if not target.startswith("refs/remotes/"):
         return None, "the mapped tracking ref lies outside refs/remotes/"
-    try:
-        symref = subprocess.run(["git", "-C", toplevel, "symbolic-ref", "-q", target],
-                                capture_output=True, encoding="utf-8")
-    except (OSError, ValueError):
-        return None, "the mapped tracking ref could not be inspected"
-    if symref.returncode == 0:
+    symbolic = _is_symbolic_ref(toplevel, target)
+    if symbolic:
         return None, "the mapped tracking ref is a symbolic ref"
-    if symref.returncode != 1:
+    if symbolic is None:
         return None, "the mapped tracking ref could not be inspected"
     try:
         updated = subprocess.run(["git", "-C", toplevel, "update-ref", "--no-deref",
@@ -408,9 +426,17 @@ def run_push(argv):
         print("no tracking ref recorded ({})".format(skip_reason))
     # the upstream binds through the ref just recorded (the ref a fetch from this remote
     # updates for the branch, under a custom mapping too); where nothing was recorded, the
-    # conventional remote/branch name is still tried, since a matching remote-tracking ref
-    # may already exist here
-    upstream_name = recorded if recorded is not None else opts["remote"] + "/" + branch
+    # conventional remote-tracking ref refs/remotes/<remote>/<branch> is still tried, since
+    # one may already exist here, by its full name (a short remote/branch name could resolve
+    # to a local branch of that name) and never through a symbolic ref (binding through it
+    # would make the ref it points at, local main for instance, the upstream)
+    upstream_name = recorded
+    if upstream_name is None:
+        upstream_name = "refs/remotes/" + opts["remote"] + "/" + branch
+        if _is_symbolic_ref(toplevel, upstream_name):
+            print("push completed; upstream not set (the conventional remote-tracking ref is "
+                  "a symbolic ref)")
+            return 0
     upstream = subprocess.run(["git", "-C", toplevel, "branch",
                                "--set-upstream-to=" + upstream_name, branch],
                               capture_output=True, encoding="utf-8")
@@ -876,9 +902,9 @@ def self_test():
         # a destination outside the closed shape set (an ext:: or other helper transport, a
         # relative path) runs a transport the check does not vet or resolves against the
         # working directory, so each refuses by shape, before any transport runs; an scp-like
-        # [user@]host:path destination is inside the set (judged as the ssh:// URL git maps it
-        # to), and its accepted and refused forms are exercised in the resolver's own
-        # self-test, since a hermetic fixture has no ssh server to push to
+        # [user@]host:path destination is inside the set (tested for shape only, every other
+        # rule running on its literal text), and its accepted and refused forms are exercised
+        # in the resolver's own self-test, since a hermetic fixture has no ssh server to push to
         for bad_shape in ("ext::fake", "../seeded.git"):
             done = helper(["--body-file", str(clean_body), "--base", base,
                            "--remote", bad_shape], repo)
@@ -971,9 +997,11 @@ def self_test():
         _expect(mapped_up == "refs/remotes/mapped/imported/feat-mapped",
                 ("mapped upstream ref", mapped_up), failures)
         # with no refspec mapping the pushed branch, nothing is recorded and the skip is
-        # reported plainly
+        # reported plainly; the conventional fallback is tried by its full remote-tracking
+        # name, so a LOCAL branch named mapped/feat-unmapped is never bound as the upstream
         fixture_git(["config", "--replace-all", "remote.mapped.fetch",
                      "+refs/heads/main:refs/remotes/mapped/main"], repo)
+        fixture_git(["branch", "mapped/feat-unmapped", "main"], repo)
         branch_with_commit("feat-unmapped")
         done = helper(["--body-file", str(clean_body), "--base", base, "--remote", "mapped"],
                       repo)
@@ -984,6 +1012,41 @@ def self_test():
         _expect(fixture_git_rc(["rev-parse", "--verify", "--quiet",
                                 "refs/remotes/mapped/feat-unmapped"], repo) != 0,
                 "an unmapped branch must record no tracking ref", failures)
+        _expect("push completed; upstream not set" in done.stdout,
+                ("unmapped upstream line", done.stdout), failures)
+        unmapped_up = fixture_git(["for-each-ref", "--format=%(upstream)",
+                                   "refs/heads/feat-unmapped"], repo).strip()
+        _expect(unmapped_up == "",
+                ("a local branch named like remote/branch must not become the upstream",
+                 unmapped_up), failures)
+        fixture_git(["branch", "-D", "mapped/feat-unmapped"], repo)
+        # the fetch refspec reader, called directly for the two outcomes no live push reaches:
+        # a configuration read that fails (here a malformed config) is reported as unreadable,
+        # never as an absent refspec (the control: a remote with none is reported as such), and
+        # a negative refspec with more than one '*' is reported as not evaluable (git itself
+        # rejects that refspec, so a real push fails before this reader runs)
+        broken = tmp / "broken-config"
+        fixture_git(["init", "-q", str(broken)], tmp)
+        with open(broken / ".git" / "config", "a", encoding="utf-8") as handle:
+            handle.write("[remote \"mapped\"\n")
+        caller_environ = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(git_fixture_env())
+        try:
+            unreadable = _fetch_refspec_target(str(broken), "mapped", "feat-x")
+            absent = _fetch_refspec_target(str(repo), "nosuchremote", "feat-x")
+            fixture_git(["config", "--add", "remote.mapped.fetch", "^refs/heads/feat-*-*"],
+                        repo)
+            unevaluable = _fetch_refspec_target(str(repo), "mapped", "feat-a-b")
+        finally:
+            os.environ.clear()
+            os.environ.update(caller_environ)
+        _expect(unreadable == (None, "the remote's fetch refspecs could not be read"),
+                ("refspec read error", unreadable), failures)
+        _expect(absent == (None, "this remote has no fetch refspec"),
+                ("absent refspec control", absent), failures)
+        _expect(unevaluable == (None, "a fetch refspec of this remote cannot be evaluated here"),
+                ("unevaluable negative refspec", unevaluable), failures)
         # a negative fetch refspec excludes the branch from fetch updates, so nothing is
         # recorded: a recorded ref must be one a fetch from this remote would update (exact
         # and wildcard exclusions, then a non-matching exclusion as the control)
@@ -1020,7 +1083,9 @@ def self_test():
                 ("negative-control recorded ref", negother_at), failures)
         fixture_git(["remote", "remove", "mapped"], repo)
         # a pre-existing SYMBOLIC tracking ref is never written through: writing it would move
-        # the ref it points at (local main here), which a fetch never does; the skip is reported
+        # the ref it points at (local main here), which a fetch never does; the skip is
+        # reported, and the conventional fallback does not bind the upstream through it either
+        # (that would make local main the upstream)
         main_sha = fixture_git(["rev-parse", "refs/heads/main"], repo).strip()
         fixture_git(["symbolic-ref", "refs/remotes/origin/feat-symref", "refs/heads/main"],
                     repo)
@@ -1032,6 +1097,12 @@ def self_test():
                 in done.stdout, ("symref tracking line", done.stdout), failures)
         _expect(fixture_git(["rev-parse", "refs/heads/main"], repo).strip() == main_sha,
                 "a symbolic tracking ref must not move the local ref it points at", failures)
+        _expect("push completed; upstream not set (the conventional remote-tracking ref is a "
+                "symbolic ref)" in done.stdout, ("symref upstream line", done.stdout), failures)
+        symref_up = fixture_git(["for-each-ref", "--format=%(upstream)",
+                                 "refs/heads/feat-symref"], repo).strip()
+        _expect(symref_up == "", ("a symbolic tracking ref must not bind the upstream",
+                                  symref_up), failures)
         fixture_git(["update-ref", "--no-deref", "-d", "refs/remotes/origin/feat-symref"],
                     repo)
         # a replace ref cannot substitute a clean message for the one the push sends: the push
@@ -1298,7 +1369,10 @@ def self_test():
           "exclusion as the control) or --remote is itself the URL, binds the branch's "
           "upstream through the recorded ref (a custom mapping included), and never writes "
           "through a pre-existing "
-          "symbolic tracking ref (local main stays put); a commit "
+          "symbolic tracking ref (local main stays put) nor binds the upstream through one or "
+          "to a local branch named like the conventional remote/branch name; the fetch "
+          "refspec reader reports a configuration read error as unreadable (an absent refspec "
+          "as the control) and a negative refspec it cannot evaluate as such; a commit "
           "landing between the check and the push leaves exactly the scanned SHA on the remote, "
           "never the racing commit; every finding channel (an attribution trailer in the body, a "
           "denylist term in the body, a changelog string added in any published commit, an "

@@ -32,11 +32,12 @@ MODES (auto-detected from GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH; overridable for 
     (a remote.<name>.pushurl, an added URL or a pushInsteadOf rewrite fails closed), and resolves
     to that URL, while any other --remote is itself the URL; the resolved destination is an
     absolute local path, a file://, https:// or ssh:// URL, or an scp-like ssh destination
-    ([user@]host:path with no slash before the first colon, as git reads it, judged as the
-    ssh:// URL git maps it to, so every rewrite and same-repository rule applies to it exactly
-    as to ssh://; an ext:: or other helper transport, another scheme's URL, a relative path and
-    a bare name each fail closed, and so does an scp-like form whose user, host or path part
-    cannot be established), does not name a
+    ([user@]host:path with no slash before the first colon, as git reads it; the scp-like
+    test checks shape only, and every rewrite and same-repository rule runs on the literal
+    destination text, as git matches it; a destination with a '::' before its first '/' (an
+    ext:: or other helper transport, whatever the helper's name), another scheme's URL, a
+    relative path and a bare name each fail closed, and so does an scp-like form whose user,
+    host or path part cannot be established), does not name a
     configured remote, and is not empty, does not begin with '-' and carries no line break; no
     legacy remotes or branches file exists under the git path at all (git reads such a file as a
     remote definition, whatever name it carries); no url.<base>.insteadOf or url.<base>.pushInsteadOf
@@ -515,23 +516,25 @@ def _rev_file_text(rev, rel, root):
 
 # The only destination shapes the pre-push gate accepts: an absolute local path, one of these
 # scheme prefixes, or an scp-like ssh destination ([user@]host:path with no slash before the
-# first colon, as git reads it), judged as the ssh:// URL git maps it to. Anything else (an
-# ext:: or other <helper>:: transport command, another scheme's URL, a relative path, a bare
-# name) runs a transport this gate does not vet or is read against the local filesystem or
-# remote definitions, so it fails closed rather than being handled case by case.
+# first colon, as git reads it). The scp-like test checks shape only: no ssh:// form is derived
+# from it, and every later rule runs on the literal destination text, which is what git matches
+# a rewrite against. Anything else (a '::' before the first '/', which is how an ext:: or other
+# <helper>:: transport command is spelled, another scheme's URL, a relative path, a bare name)
+# runs a transport this gate does not vet or is read against the local filesystem or remote
+# definitions, so it fails closed rather than being handled case by case.
 _ALLOWED_URL_PREFIXES = ("file://", "https://", "ssh://")
-# A remote-helper transport: a leading scheme-name run immediately followed by '::' (git hands
-# everything after the '::' to that helper program, so such a form is never scp-like).
-_HELPER_TRANSPORT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 
 
 def _scp_like_split(destination):
     """The ([user@]host, path) parts of a destination git reads as scp-like ssh, or None when
-    git reads it another way: a '://' anywhere makes it a scheme URL, a leading scheme-name
-    run followed by '::' makes it a remote-helper transport, and no ':' at all or a '/' before
-    the first ':' makes it a local path or a bare name. What remains splits at the first ':'
-    into the [user@]host git connects to over ssh and the path it hands to the remote service."""
-    if "://" in destination or _HELPER_TRANSPORT_RE.match(destination):
+    it is not one: a '://' anywhere makes it a scheme URL, and no ':' at all or a '/' before
+    the first ':' makes it a local path or a bare name. A '::' before the first '/' also gives
+    None, whatever precedes it: git hands everything after a leading helper name and '::' to
+    that helper program, and an scp host cannot contain '::' (a bracketed IPv6 host is refused
+    either way), so the form is refused rather than its helper-name grammar modelled here.
+    What remains splits at the first ':' into the [user@]host git connects to over ssh and the
+    path it hands to the remote service."""
+    if "://" in destination or "::" in destination.partition("/")[0]:
         return None
     head, sep, path = destination.partition(":")
     if not sep or "/" in head:
@@ -539,22 +542,22 @@ def _scp_like_split(destination):
     return head, path
 
 
-def _scp_like_ssh_url(head, path):
-    """The ssh:// URL an accepted scp-like destination is judged as, or None when its parts
-    cannot be established: the user (everything before the last '@', when one is present) and
-    the host must each be non-empty, must not begin with '-' (ssh could read either as an
-    option) and must carry no bracket, whitespace or unprintable character (a bracketed IPv6
-    host or an irregular name is refused rather than guessed at), and the path must be
-    non-empty. The mapping covers the transport and the host; the scp form's relative path
-    stays relative to the remote login home where the URL form's path is absolute."""
+def _scp_like_unestablished_part(head, path):
+    """Which part of an scp-like destination cannot be established ("user", "host" or
+    "path"), or None when every part can; a shape test only. The user (everything before the
+    last '@', when one is present) and the host must each be non-empty and carry no bracket,
+    whitespace or unprintable character (a bracketed IPv6 host or an irregular name is refused
+    rather than guessed at), the host must not begin with '-' (ssh could read it as an
+    option), and the path must be non-empty. A user beginning with '-' is not tested here: it
+    begins the destination itself, which the resolver refuses before this test runs."""
     user, at, host = head.rpartition("@")
-    for part in (user, host) if at else (host,):
-        if (not part or part.startswith("-")
+    for name, part in (("user", user), ("host", host)) if at else (("host", host),):
+        if (not part or (name == "host" and part.startswith("-"))
                 or any(ch.isspace() or not ch.isprintable() or ch in "[]" for ch in part)):
-            return None
+            return name
     if not path:
-        return None
-    return "ssh://" + head + "/" + path
+        return "path"
+    return None
 
 
 # Configuration that routes or rewrites where a git service connects: any of these set at all
@@ -605,6 +608,23 @@ def _config_regexp(pattern, root):
     return pairs
 
 
+def _legacy_file_refusal(legacy, destination):
+    """The refusal for a populated legacy remotes or branches directory, worded for the
+    destination it refuses: git reads a file there as the remote definition of a destination
+    with no '/' that it is named after, so for such a destination the push destination cannot
+    be established, while a destination with a '/' is never read that way and is refused as
+    defence in depth."""
+    if "/" not in destination:
+        return ("a legacy {} file exists under the git path: git reads such a file as the "
+                "remote definition of a destination with no '/' that it is named after, and "
+                "this destination has no '/', so the push destination cannot be "
+                "established".format(legacy))
+    return ("a legacy {} file exists under the git path: git reads such a file as a remote "
+            "definition only for a destination with no '/', so this destination is not read "
+            "that way, but any such file is refused whatever the destination's shape (defence "
+            "in depth) and the push destination is not accepted".format(legacy))
+
+
 def _resolve_push_destination(remote, root):
     """git ls-remote reads the advertisement of a FETCH URL, while git push writes to a PUSH
     URL, so a scanned set derived from that advertisement describes the push only when both name
@@ -621,15 +641,17 @@ def _resolve_push_destination(remote, root):
     empty, does not begin with '-' and carries no line break (it could not be handed to git or
     printed as the one destination line), does not name a configured remote, and is an absolute
     local path, a file://, https:// or ssh:// URL, or an scp-like ssh destination
-    ([user@]host:path with no slash before the first colon, as git reads it, judged as the
-    ssh:// URL git maps it to, so every rule below applies to it exactly as to ssh://, and
+    ([user@]host:path with no slash before the first colon, as git reads it, tested for shape
+    only, so every rule below runs on its literal text, as on any other destination's, and
     refused when its user, host or path part cannot be established; the legacy-file and
     configured-remote rules keep a name git could also read as a remote definition from being
-    read as one; any other shape, an ext:: or other helper transport, another scheme's URL, a
-    relative path or a bare name, runs a transport this gate does not vet or is read against
-    the local filesystem or remote definitions); no legacy remotes or branches file exists
-    under the git path at all (git reads such a file as a remote definition whatever name it
-    carries, so presence alone fails closed rather than matching names); no url.<base>.insteadOf
+    read as one; any other shape, a '::' before the first '/' (an ext:: or other helper
+    transport, whatever the helper's name), another scheme's URL, a relative path or a bare
+    name, runs a transport this gate does not vet or is read against the local filesystem or
+    remote definitions); no legacy remotes or branches file exists under the git path at all
+    (git reads such a file as the remote definition of a destination with no '/' that it is
+    named after, and presence alone fails closed rather than matching names, defence in depth
+    for a destination with a '/', which git never reads that way); no url.<base>.insteadOf
     or pushInsteadOf value is a prefix of the remote's raw configured URL or of the resolved URL
     (git applies a rewrite by longest prefix match against the literal URL text, the scp-like
     text included, so a matching value means a rewrite applied
@@ -688,33 +710,39 @@ def _resolve_push_destination(remote, root):
         legacy_path = os.path.join(str(root or ROOT), listed)
         if os.path.lexists(legacy_path):
             if not os.path.isdir(legacy_path):
-                raise FailClosed("a legacy {} entry exists under the git path: git reads such "
-                                 "a file as a remote definition, so the push destination "
-                                 "cannot be established".format(legacy))
+                raise FailClosed("a legacy {} entry exists under the git path and is not a "
+                                 "directory: the remote definitions git could read through it "
+                                 "cannot be inspected, so it is refused whatever the "
+                                 "destination's shape (defence in depth) and the push "
+                                 "destination is not accepted".format(legacy))
             try:
                 entries = os.listdir(legacy_path)
             except OSError:
                 raise FailClosed("cannot read the legacy {} directory under the git path: the "
                                  "push destination cannot be established".format(legacy))
             if entries:
-                raise FailClosed("a legacy {} file exists under the git path: git reads such a "
-                                 "file as a remote definition, whatever name it carries, so "
-                                 "the push destination cannot be established".format(legacy))
+                raise FailClosed(_legacy_file_refusal(legacy, destination))
     if not (destination.startswith("/") or destination.startswith(_ALLOWED_URL_PREFIXES)):
         parts = _scp_like_split(destination)
         if parts is None:
             raise FailClosed("the resolved push destination is not an absolute local path, a "
                              "file://, https:// or ssh:// URL, or an scp-like ssh destination "
-                             "([user@]host:path with no slash before the first colon): a bare "
-                             "name or a relative path is read against the local filesystem or "
-                             "the repository's own remote definitions, and an ext:: or other "
-                             "helper transport or another scheme's URL runs a transport this "
-                             "gate does not vet, so the push destination cannot be established")
-        if _scp_like_ssh_url(*parts) is None:
-            raise FailClosed("the resolved push destination is scp-like, but the user, host "
-                             "or path git would read from it cannot be established (an empty "
-                             "or '-'-leading user or host, a bracketed or irregular host, or "
-                             "an empty path), so the push destination cannot be established")
+                             "([user@]host:path with no slash before the first colon and no "
+                             "'::' before the first '/'): a bare name or a relative path is "
+                             "read against the local filesystem or the repository's own remote "
+                             "definitions, and an ext:: or other helper transport or another "
+                             "scheme's URL runs a transport this gate does not vet, so the push "
+                             "destination cannot be established")
+        part = _scp_like_unestablished_part(*parts)
+        if part == "path":
+            raise FailClosed("the resolved push destination is scp-like, but its path part is "
+                             "empty, so the push destination cannot be established")
+        if part is not None:
+            raise FailClosed("the resolved push destination is scp-like, but its {} part "
+                             "cannot be established (it is empty{}, or carries a bracket, "
+                             "whitespace or an unprintable character), so the push destination "
+                             "cannot be established".format(
+                                 part, ", begins with '-'" if part == "host" else ""))
     candidates = set(raw_urls)
     candidates.add(destination)
     for key, value in _config_regexp(r"^url\..*\.(insteadof|pushinsteadof)$", root):
@@ -1357,22 +1385,28 @@ def self_test():
                 "a configured remote resolves to its one byte-identical URL")
         for allowed in ("/direct/url.git", "file://host/path.git",
                         "https://example.org/repo.git", "ssh://example.org/repo.git",
-                        # the scp-like ssh forms, judged as the ssh:// URL git maps them to:
-                        # with and without a user, with a '-' inside (not leading) the host,
-                        # and with a slash only after the first colon (the boundary: a slash
-                        # before it is a local path and refuses below)
+                        # the scp-like ssh forms, tested for shape only: with and without a
+                        # user, with a '-' inside (not leading) the host, with a slash only
+                        # after the first colon (the boundary: a slash before it is a local
+                        # path and refuses below), and with a '::' only after the first '/'
+                        # (the boundary: a '::' before it refuses below)
                         "git@example.org:owner/repo.git", "example.org:repo.git",
-                        "x-host.example.org:repo.git", "example.org:sub/dir/repo.git"):
+                        "x-host.example.org:repo.git", "example.org:sub/dir/repo.git",
+                        "example.org:dir/a::b"):
             _expect(resolve_with_stub(allowed) == allowed,
                     ("an allowed destination shape must resolve", allowed))
         # the rewrite rule applies to an scp-like destination exactly as to any URL: git
         # matches a rewrite base against the literal URL text, so one for an unrelated
-        # prefix stays allowed (the matching-prefix refusal is in the vector table below)
-        _expect(resolve_with_stub("git@example.org:owner/repo.git",
-                                  rewrite=pairs_z(("url.ssh://other.example/.insteadof",
-                                                   "ssh://unrelated.example/")))
-                == "git@example.org:owner/repo.git",
-                "an unrelated rewrite must not block an scp-like destination")
+        # prefix stays allowed (the matching-prefix refusal is in the vector table below),
+        # and so does one for the ssh:// spelling of the same host, which that text does
+        # not start with
+        for unrelated in ("ssh://unrelated.example/", "ssh://git@example.org/"):
+            _expect(resolve_with_stub("git@example.org:owner/repo.git",
+                                      rewrite=pairs_z(("url.ssh://other.example/.insteadof",
+                                                       unrelated)))
+                    == "git@example.org:owner/repo.git",
+                    ("a rewrite the literal text does not start with must not block an "
+                     "scp-like destination", unrelated))
         _expect(resolve_with_stub("origin", listing=(0, "origin\n"), fetch="/one\n",
                                   push="/one\n", raw=("/one",),
                                   rewrite=pairs_z(("url.https://u.example/.insteadof",
@@ -1436,19 +1470,45 @@ def self_test():
                 ("slash before the first colon", "example/org:repo.git", {},
                  "or an scp-like ssh destination"),
                 ("ext:: transport", "ext::prog", {}, "not an absolute local path"),
+                # a '::' before the first '/' refuses whatever precedes it, so a helper name
+                # beginning with a digit (which git also dispatches to a helper) refuses
+                # like the letter-led one; a bracketed IPv6 host refuses the same way
+                ("digit-led helper transport", "1helper::x", {}, "not an absolute local path"),
+                ("digit-led helper transport, split", "9mirror::split", {},
+                 "not an absolute local path"),
+                ("letter-led helper transport", "zmirror::split", {},
+                 "not an absolute local path"),
+                ("bracketed IPv6 host", "[::1]:repo.git", {}, "not an absolute local path"),
                 ("other scheme", "git://example.org/repo.git", {},
                  "not an absolute local path"),
                 # scp-like forms whose user, host or path cannot be established are refused
-                # rather than judged (a leading '-' could be read as an option by ssh; a
-                # bracketed or irregular host and an empty path are not plain [user@]host:path)
+                # rather than guessed at, each naming the part (a leading '-' could be read
+                # as an option by ssh; a bracketed or irregular part and an empty part are
+                # not plain [user@]host:path); a part carrying whitespace or an unprintable
+                # character can only arrive through a configured URL, since such a --remote
+                # value is refused first
                 ("scp-like '-'-leading host", "git@-example.org:repo.git", {},
-                 "is scp-like, but the user"),
+                 "is scp-like, but its host part"),
                 ("scp-like empty user", "@example.org:repo.git", {},
-                 "is scp-like, but the user"),
-                ("scp-like bracketed host", "[::1]:repo.git", {},
-                 "is scp-like, but the user"),
+                 "is scp-like, but its user part"),
+                ("scp-like empty host", ":repo.git", {}, "is scp-like, but its host part"),
+                ("scp-like empty host after a user", "git@:repo.git", {},
+                 "is scp-like, but its host part"),
+                ("scp-like bracketed host", "[example.org]:repo.git", {},
+                 "is scp-like, but its host part"),
+                ("scp-like bracketed user", "[u]@host:repo.git", {},
+                 "is scp-like, but its user part"),
+                ("scp-like whitespace in the host", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "git@exa mple.org:repo.git\n",
+                  "push": "git@exa mple.org:repo.git\n", "raw": ("git@exa mple.org:repo.git",)},
+                 "is scp-like, but its host part"),
+                ("scp-like unprintable character in the user", "origin",
+                 {"listing": (0, "origin\n"), "fetch": "g\x01it@example.org:repo.git\n",
+                  "push": "g\x01it@example.org:repo.git\n",
+                  "raw": ("g\x01it@example.org:repo.git",)},
+                 "is scp-like, but its user part"),
                 ("scp-like empty path", "example.org:", {},
-                 "is scp-like, but the user"),
+                 "is scp-like, but its path part is empty"),
                 # the rewrite rule applies to an accepted scp-like destination exactly as to
                 # any URL: a value prefixing its literal text refuses
                 ("rewrite applying to the scp-like destination",
@@ -1475,15 +1535,30 @@ def self_test():
                 del os.environ[variable]
         # a legacy remotes or branches file refuses by EXISTENCE, whatever its name, so a name
         # git reads (one with a trailing space included) cannot slip past a name-keyed probe;
-        # an empty legacy directory defines no remote and stays allowed
+        # the reason fits the destination: one with no '/' could be read through such a file,
+        # one with a '/' never is and is refused as defence in depth; a legacy entry that is
+        # not a directory refuses too; an empty legacy directory defines no remote and stays
+        # allowed
         with tempfile.TemporaryDirectory() as d:
             legacy_dir = Path(d)
             (legacy_dir / "anyname ").write_text("URL: /x\n", encoding="utf-8")
+            for destination, fragment in (
+                    ("/direct/url.git", "this destination is not read that way"),
+                    ("https://example.org/r.git", "this destination is not read that way"),
+                    ("example.org:repo.git", "this destination has no '/'")):
+                try:
+                    resolve_with_stub(destination, git_path=str(legacy_dir))
+                    raise AssertionError("expected FailClosed for a populated legacy "
+                                         "directory ({})".format(destination))
+                except FailClosed as exc:
+                    _expect("legacy" in str(exc) and fragment in str(exc),
+                            (destination, str(exc)))
             try:
-                resolve_with_stub("/direct/url.git", git_path=str(legacy_dir))
-                raise AssertionError("expected FailClosed for a populated legacy directory")
+                resolve_with_stub("/direct/url.git", git_path=str(legacy_dir / "anyname "))
+                raise AssertionError("expected FailClosed for a legacy entry that is not a "
+                                     "directory")
             except FailClosed as exc:
-                _expect("legacy" in str(exc), str(exc))
+                _expect("is not a directory" in str(exc), str(exc))
         with tempfile.TemporaryDirectory() as d:
             _expect(resolve_with_stub("/direct/url.git", git_path=str(d))
                     == "/direct/url.git", "an empty legacy directory must stay allowed")
@@ -1516,13 +1591,17 @@ def self_test():
           "file, changelog delta) each fail closed when malformed; the push-destination resolver "
           "returns the one literal URL only when every condition of its closed set holds (each "
           "allowed shape has a passing control, the scp-like ssh forms and an unrelated URL "
-          "rewrite included) and fails "
+          "rewrite included, a rewrite for the ssh:// spelling of an scp-like destination among "
+          "them) and fails "
           "closed, naming the rule, on a remote name carrying whitespace or an unprintable "
           "character, a split URL set, a destination naming a configured remote, a destination "
           "unusable as one URL or outside the allowed shapes (a bare name, a relative path, a "
-          "slash before the first colon, an ext:: or other scheme, an scp-like form whose "
-          "user, host or path cannot be established), any legacy remotes or branches file existing "
-          "at all, an insteadOf or pushInsteadOf value prefixing the raw or resolved URL, a "
+          "slash before the first colon, a '::' before the first '/' whether the helper name "
+          "begins with a letter or a digit, another scheme, an scp-like form whose user, host or "
+          "path cannot be established, naming that part, an empty host, whitespace and an "
+          "unprintable character included), any legacy remotes or branches file existing "
+          "at all, with a reason fitted to the destination's form, or a legacy entry that is not "
+          "a directory, an insteadOf or pushInsteadOf value prefixing the raw or resolved URL, a "
           "core.sshCommand, ssh.variant or remote uploadpack/receivepack key, a GIT_SSH or "
           "GIT_SSH_COMMAND variable, and a remote listing or configuration read that fails; and "
           "--self-test mixed into a production invocation is rejected")
