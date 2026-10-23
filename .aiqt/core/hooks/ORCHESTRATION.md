@@ -1020,7 +1020,11 @@ The optional review-hold markers turn on the review workdir hold hook (`review-w
 rvwpin): once a review is dispatched against a worktree, that worktree is not modified until the
 review returns or is abandoned. The markers are adopter-provided: the pack ships the hook, the
 dispatcher writes the holds. Without a marker directory the hook is inert (a silent allow), so
-adopters who write no markers see nothing.
+adopters who write no markers see nothing, as long as the payload carries an absolute `cwd`: a
+`cwd` that is missing, relative or carries a NUL byte hides the session's repository, so every git
+command outside the read-only grammar, and an absent command, is withheld as `UNVERIFIABLE`
+(fail closed), in the standalone preflight as in the composed hook. There is no host-wide view of
+holds: the hook reads only the markers of the repositories a command names or sits in.
 
 One marker file per live review lives in `GIT_COMMON_DIR/aiqt/review-holds/<dispatch-id>.json`,
 beside the hook-owned `review-dispatch-binding/` records. Every linked worktree of a repository
@@ -1046,7 +1050,7 @@ The adopter's steps:
    reads as malformed state and withholds git commands outside the read-only grammar
    repository-wide until it is renamed into place or removed.
 2. The resync or fast-forward tool runs the preflight before it moves any worktree: pipe the
-   PreToolUse payload (`tool_name` `Bash`, `cwd`, and `tool_input.command`) to
+   PreToolUse payload (`tool_name` `Bash`, an absolute `cwd`, and `tool_input.command`) to
    `aiqt_hooks.py review_workdir_hold`, and withhold the move on exit 2 or a printed `deny`
    decision; or read the markers itself.
 3. Dispatch each review on a dedicated worktree per review, as the review dispatch binding's limits
@@ -1063,7 +1067,9 @@ worktree's repository to the set, so the expansion also reaches a mutation hidde
 or override). While ANY repository in that set has a live hold, ANY command whose raw text carries
 a git word (the word `git`, the git of a `git-<name>` executable, the git ending an interpreter
 path such as `/usr/bin/git`), anywhere, inside quotes, substitutions, heredoc bodies and option
-values included, is denied with the reason prefixed `UNVERIFIABLE:`, EXCEPT one plain git segment:
+values included, is denied (a git segment carrying a program-running form with a plain reason, see
+PROGRAM-RUNNING FORMS below; anything else with the reason prefixed `UNVERIFIABLE:`), EXCEPT one
+plain git segment:
 exactly one segment, no wrapper or reserved word before git (a bare `command`, `exec`, `builtin`,
 `env` or `sudo` prefix is peeled by the shared peel), the command word the literal word `git`, and
 no `$(`, backquote or heredoc operator anywhere in the raw text. That one plain segment passes
@@ -1083,7 +1089,7 @@ judged is never withheld by a hold; everything else is judged against the hold s
 passes when its target is CERTAIN, resolves outside every held worktree, belongs to a repository
 with NO live hold, and carries no program-running option, no unmodelled global option, no
 relative `-C`/`--git-dir`/`--work-tree`/`cd`/`GIT_`-assignment operand anywhere in the raw text
-and no held path its target does not account for: its
+and no directory step its target does not account for, whatever that step names: its
 only directory moves literal `-C` operands resolved physically (`os.path.realpath`), no
 `--git-dir`/`--work-tree` or `-c`/`--config-env` override, no `GIT_` variable assigned, exported
 or unset in the command, none of the inherited variables GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
@@ -1133,63 +1139,92 @@ withheld while the hold is live, as is every mutation whose target sits anywhere
 that encloses a held worktree (a scoped `git clean` in a subdirectory beside the nested hold
 included) and every certain-target command whose repository top level cannot be read (a bare
 repository). While the TARGET'S OWN repository has a live hold, EVERY git segment outside the
-read-only grammar is withheld as `UNVERIFIABLE`, whether or not the raw text names the held path:
+read-only grammar is withheld (as `UNVERIFIABLE`, or denied by the program gate below when it
+carries a program-running form), whether or not the raw text names the held path:
 a sibling worktree shares the repository's refs, objects and configuration, and a program-running
 option (`--upload-pack`, grep's `-O`, `rebase -x`, `submodule foreach`, `difftool -x`) reaches
 the held worktree without naming it (`git worktree remove held`, `git update-ref` of the held
 branch), shapes this rule does not model case by case; the stated over-refusal is that a plain
 mutation in a sibling worktree that cannot reach the held one (`git -C <sibling> commit`, a
 `worktree remove` of an unheld sibling, an `update-ref` of an unrelated ref) is withheld too
-until the hold ends. While a hold is live in a repository the command reaches only through the
-session or the raw text and the target is an unrelated unheld repository, the segment is withheld
-when it carries ANY program-running option or word of the curated model (`--upload-pack`, `rebase
--x` with the value attached in any spelling, `grep -O`, `submodule foreach`, `bisect run`,
-`filter-branch`, signing options, a signature placeholder in a format or sort value, a
-`TRANSPORT::ADDRESS` URL, `--help`) or any global option other than a literal `-C` (fail closed),
-because the option's program runs from the target's tree and is not bound to it, whether or not
-its text names the held path; and when its raw text carries ANY directory step (`-C`,
+until the hold ends. PROGRAM-RUNNING FORMS: while ANY hold the rule can see is live (a hold in the
+hold set, the session's repository or the target's repository), every git segment that carries a
+form running a program or shell text is DENIED with a plain reason, whatever its target, and the
+rule does not try to resolve where that program runs or which worktree it reaches. The forms are:
+any leading assignment (`GIT_EDITOR`, `GIT_SSH_COMMAND`, the `GIT_CONFIG_*` family, `EDITOR` and
+`PAGER` can name a program, so every assignment counts); any global option other than a literal
+`-C` (`-c` with an `alias.*` `!` value or a `core.*` program setting, `--config-env`,
+`--exec-path`, `-p`); the curated program-option model (`--upload-pack`, `--receive-pack`,
+`--exec`, `rebase -x` with the value attached in any spelling, `grep -O`, `difftool -x` and
+`--extcmd`, `submodule foreach`, `bisect run`, `filter-branch`, the `send-email` command options,
+signing and signature verification options, a signature placeholder in a format or sort value,
+`clone -u`, `-c` and `--config`, a merge `--strategy`, `--patch` and `--interactive`,
+`--trailer`, a `TRANSPORT::ADDRESS` URL, `--help`); the subcommands `mergetool`, `difftool`,
+`instaweb`, `web--browse`, `hook`, `shell`, `daemon`, `credential`, `send-email`, `imap-send`,
+`svn`, `verify-commit` and `verify-tag`; every `config` form outside the read-only grammar (a
+write can install a `!` alias or a `core.*` program setting that a later git runs); `clone` and
+`init` with `--template` (the template's hooks, which clone runs at once through post-checkout);
+and `help` with `--web`, `--info` or `--man` (`-w`, `-i`, `-m`, a viewer). STATED OVER-REFUSAL:
+while some hold is live, an unrelated `git -C <unheld repository> rebase -x 'make' HEAD` is
+refused, as are a harmless leading assignment (`LC_ALL=C git -C <unheld repository> commit`) and a
+`git config user.name` write in an unrelated repository, until the hold ends. With no hold the
+rule can see, each of these forms is allowed. While a hold is live in a repository the command
+reaches only through the session or the raw text and the target is an unrelated unheld
+repository, a segment with no program-running form is still withheld when its raw text carries
+ANY directory step (`-C`,
 `--git-dir`, `--work-tree`, `cd`, `pushd` or a `GIT_` assignment, inside an option value
 included) that its resolved target does not account for, WHATEVER that step names: a step in an
 option value is applied from a directory this rule cannot fix, so the command is withheld even
 where the step names an unheld directory, a stated over-refusal. A RELATIVE path after `-C`,
 `--git-dir`, `--work-tree`, `cd`,
 `pushd` or a `GIT_` assignment anywhere in the raw text resolves against whatever directory runs
-it, which this rule cannot fix, so it is resolved against the session cwd AND every directory the
-command walks to (the resolved target and every ABSOLUTE raw-text step before the operand
-included, so a `cd` or `-C` inside an option value is a base for the relative step after it) AND
-every ANCESTOR of each of those directories (an option's program runs from a directory git
-chooses inside a walked worktree, such as the top level `rebase -x` runs from, which is always an
-ancestor of the walked directory), each landing repository joining the hold set,
+it, which this rule cannot fix, so it is tried against the session cwd AND every directory the
+command walks to (the resolved target and every ABSOLUTE raw-text step before the operand in the
+text included, so a `cd` (its option words such as `-P`, `-L` or `--` skipped) or `-C` inside an
+option value is a base for the relative step after it) AND every textual ANCESTOR of each of
+those directories, each landing repository joining the hold set,
 and the command is withheld while any reachable hold is live; this over-refuses every relative
 `-C` spelling while a hold is live, an option value that is no directory included (`git commit -C
-HEAD` and a relative `-C` step naming the resolved target itself are withheld the same way). A
-relative step is never a base for the operand after it (the widening is additive, never a model
-of where each program runs), so a hold reachable only through two relative steps in a row may
-stay out of the hold set; the ancestors narrow that residual, and from a session inside a held
-repository, or with any other reachable live hold, the relative flag withholds the command
-anyway. The
+HEAD` and a relative `-C` step naming the resolved target itself are withheld the same way). The
+widening is additive and best effort, NOT a model of where a program runs: a symlinked `-C` hides
+the physical top level `rebase -x` runs from, a `submodule foreach` program runs in each
+submodule below the walked directory, text order is not run order, and a relative step is never
+a base for the operand after it, so a hold reachable only through a symlinked `-C`, a submodule
+or two relative steps in a row (unless the first lands on a textual ancestor) may stay out of the
+hold set. From a session inside a held repository, or with any other hold the rule can see, the
+program gate refuses such a command anyway; otherwise it is the allow residual below. The
 decision
 weighs every hold the command can reach, the UNION of the hold set, the session repository's holds
 and the target repository's holds deduplicated by marker path, so a session whose own cwd path is
 opaque (a glob or brace character drops it from the hold set) still has its live holds judged. A
 hold known ONLY because the session sits in a held repository does NOT withhold a one-plain-git
 segment whose certain target is an unrelated unheld repository when that segment carries no
-program-running option and no unmodelled global, so a session in a review-held repository can
-still commit in an unrelated one. Each withholding is a safe over-refusal
-taken instead of under-blocking; none fires with no live hold. ALLOW RESIDUAL: the hold set is built
+program-running form, so a session in a review-held repository can still commit in an unrelated
+one. Each withholding is a safe over-refusal
+taken instead of under-blocking; none fires with no live hold the rule can see (the fail-closed
+`cwd` and malformed-marker refusals aside). ALLOW RESIDUAL: there is no host-wide view of holds,
+so the rule sees only the holds of the repositories in the hold set, the session's repository and
+the target's repository. A program-running form whose program reaches a held worktree only
+through a path the hold set does not resolve (`git -C <link into a subdirectory> rebase -x 'git
+-C ../held reset --hard'`, `git -C <unheld> submodule foreach 'git -C ../../held reset --hard'`,
+`git -C <unheld> rebase -x 'cd a/b && git -C ../../../held reset --hard'`) is ALLOWED from a
+session outside every held repository when no other hold is seen; the program gate refuses it
+only while some hold is seen. The hold set is built
 from literal text, so an operand only an expansion resolves (`git -C "$DIR"`, a leading `~`, a
 glob) names no repository; from a session outside every held repository such a command stays
 allowed even where the expansion would land in a held worktree, and a git reached through an
 opaque program name (a wrapper script, an alias) carries no git word at all. The raw-text scan
-reads only the `-C`, `--git-dir`/`--work-tree`, `cd`/`pushd` and `GIT_`-assignment spellings: a
+reads only the `-C`, `--git-dir`/`--work-tree`, `cd`/`pushd` (an option word such as `-P`, `-L`
+or `--` skipped before the operand) and `GIT_`-assignment spellings: a
 directory named another way (`env --chdir=<held>`, a quote-spliced operand such as `-C
 "<prefix>"<rest>`, a `cd` stuck to a short option's value such as `rebase '-xcd <held> && ...'`,
 or a `cd` inside a git `!` alias value) joins no hold set, so from a session outside every held
 repository such a command stays allowed even where it reaches a held worktree; from a session
-inside one, or with any other reachable live hold, the program-running option that carries such a
-value withholds it. A program-running spelling outside the curated model is the same residual:
-the unrelated-repository pass is bounded by that enumeration, not a certified absence of
-programs. An unreadable or
+inside one, or with any other hold the rule can see, the program gate refuses the program-running
+form that carries such a value. A program-running spelling outside the gate's lists (an alias or
+a `git-<name>` program on PATH, a hook or a program the configuration already names) is the same
+residual: the gate is bounded by its enumeration, not a certified absence of programs. An
+unreadable or
 malformed marker directory, in any consulted repository and including a `review-holds` path that
 exists but is not a directory, denies git-word commands other than the one plain read-only form
 (fail closed); non-git commands pass, and a dry-run spelling of a mutating verb (`git clean -n`,
@@ -1239,9 +1274,13 @@ Limits:
   mutation included),
   `fetch`/`pull`/`push`/`send-pack` targeting any worktree of a held
   repository, every command outside the read-only grammar whose target repository's top level
-  encloses a held worktree (a subdirectory target included) or cannot be read at all, a
-  program-running option or unmodelled global option while any reachable hold is live, however
-  unrelated its certain target, a RELATIVE `-C`, `--git-dir`, `--work-tree`, `cd` or
+  encloses a held worktree (a subdirectory target included) or cannot be read at all, every
+  program-running form of the program gate while any hold the rule can see is live, however
+  unrelated its certain target (an unrelated `rebase -x`, a harmless leading assignment such as
+  `LC_ALL=C` and a `git config` write in an unrelated repository included), every git command
+  outside the read-only grammar, and an absent command, when the payload's `cwd` is missing,
+  relative or carries a NUL byte, even where no marker directory exists, a RELATIVE `-C`,
+  `--git-dir`, `--work-tree`, `cd` or
   `GIT_`-assignment operand anywhere in the raw text while any reachable hold is live (`git
   commit -C HEAD` included), any directory step the resolved target does not account for while
   any reachable hold is live, whatever the step names (a `cd /safe/dir` inside an option value,
