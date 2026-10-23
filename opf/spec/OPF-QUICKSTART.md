@@ -61,7 +61,8 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 ## Getting started
 
 1. Run `opf init` (until the tooling ships: create `.working/toml/` by hand with `manifest.toml`
-   declaring `standard = "opf"` in its `[opf]` table, plus `counters.toml`,
+   declaring `standard = "opf"`, `spec_version = "2.0.0"` and `homes = 2` in its `[opf]` table,
+   plus `counters.toml`,
    `version.toml`, `worklog.toml`, and the eleven baseline `<type>.index.toml` files (worklog is the
    exempt ledger listed above, not an index); specification
    sections 4 and 9). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
@@ -163,8 +164,8 @@ forward within its disclosed limits, and a fresh-only one supports one current f
 name an older store or one in which its admission check detects an item on its closed legacy-state
 list (OPF-SPEC section 16.1). That check searches only the files section 16.1 permits and the list
 catches only what it lists, so legacy state the list omits, or that sits where the check does not
-search, goes undetected. The reference tooling targets the upgrade-capable class, but its upgrade
-into base 1.3.0 is still a target it does not yet perform.
+search, goes undetected. Base 2.0.0, with `homes = 2`, is the only base version the specification
+defines, and the reference tooling does not yet implement it.
 
 The reference tooling requires Python 3.14 or newer.
 
@@ -216,7 +217,7 @@ Superseded by the OPFiles identity fold (this revision):
 
 - The base discovery token is `opf`, carried in the `[opf]` base manifest table. This supersedes the
   earlier `aiqt-opf` token; the interim `devprocess` token and `[devprocess]` table are retired by the
-  OPFiles rebrand, and a legacy store still carrying them is migrated forward by `opf upgrade`.
+  OPFiles rebrand.
 - The base storage field `layout_profile` is renamed to `layout`, reserving the word "profile" for
   the base/profile mechanism (`[profiles.<name>]`).
 
