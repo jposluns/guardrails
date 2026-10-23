@@ -301,12 +301,8 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, 
     return raw, list(data.get("entry", []) if isinstance(data.get("entry"), list) else [])
 
 
-def _load_version(store_root_fd, relpath, *, imported_rows=False):
+def _load_version(store_root_fd, relpath):
     """Load and validate version.toml (spec 6.1); return (raw_bytes, releases, summaries) in file order.
-    `imported_rows` is the U3 imported release-row switch (spec 6.1, 14.3), threaded into
-    validate_version so the planner reads a store whose imported release rows are active by the same
-    rule the doctor applies; it stays False (refuse the flag) unless the caller derives it from the
-    store's own imported-series activation.
     Disclosed divergence (disclose-guard-residuals): the version ledger schema marker follows U3
     optional-marker contract, as _load_worklog documents: validate_version type-pins a PRESENT marker
     but permits an absent one, diverging from the index MANDATORY pin. An unsupported-schema-version
@@ -315,7 +311,7 @@ def _load_version(store_root_fd, relpath, *, imported_rows=False):
     if got is None:
         raise ViewsError("declared source {} is missing (the version ledger must exist)".format(relpath))
     raw, data = got
-    vv = _opf_release.validate_version(data, imported_rows=imported_rows)
+    vv = _opf_release.validate_version(data)
     if vv.status != _opf_store.VALID:
         raise ViewsError("{} is malformed: {}".format(relpath, "; ".join(vv.findings)))
     releases = data.get("release", []) if isinstance(data.get("release"), list) else []
@@ -1681,10 +1677,6 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
     if not isinstance(views, dict):
         raise ViewsError("[views] is not a table")
     registered_vendors, registered_kinds = _registered_vendors_and_kinds(manifest)
-    # The imported release-row switch (spec 6.1, 14.3), derived from the validated manifest through the
-    # ONE shared activation predicate, so the planner admits the flag exactly where the doctor does and
-    # refuses it everywhere else (fail-closed on every store this tooling validates today).
-    imported_rows = _opf_store.imported_series_active(manifest)
 
     # Validate each view's declared sources against its required set AND collect the union to load. Per view
     # the declared `sources` must EQUAL the required set (no missing, extra, duplicate, or ill-typed entry);
@@ -1709,7 +1701,7 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
                 on_legacy_conflict=on_legacy_conflict, manifest_model=manifest_model)
             rows_by_source[name] = entries
         elif name == "version":
-            raw, releases, summaries = _load_version(store_root_fd, relpath, imported_rows=imported_rows)
+            raw, releases, summaries = _load_version(store_root_fd, relpath)
             rows_by_source[name] = {"releases": releases, "summaries": summaries}
         else:
             raw, records = _load_records(store_root_fd, relpath, name, registered_vendors, registered_kinds)
@@ -2128,8 +2120,7 @@ def self_test():
     refused, its target left untouched); per-view declared-source equality (an extra declared source
     refused); deeply nested TOML mapped to cannot-evaluate; a free-text field that cannot forge markdown
     structure; a per-record layout reported as a clear deferral; a missing and a malformed declared source
-    failing closed (exit 2); an empty store rendering valid empty views; and an imported release row on a
-    store whose imported series is not active refused by the planner. The tempdir is removed in a
+    failing closed (exit 2); and an empty store rendering valid empty views. The tempdir is removed in a
     finally. Exit 0 pass, 1 fail, 2 error."""
     import tempfile
     import shutil
@@ -3471,43 +3462,6 @@ def self_test():
         write_toml(vroot, "version.toml", "schema = 1\n")   # OVERRIDE: declared but no-release ledger
         check("empty-version-cannot-eval", render_write(vroot) == EXIT_CANNOT_EVALUATE)
         check("empty-version-not-zero-byte", not (vroot / "VERSION").exists())
-
-        # --- a DORMANT store's imported release row: the planner refuses it, fail-closed ---------------
-        # The store declares the reserved 2.0.0 / homes = 2 pair and its version ledger carries an imported
-        # historical row, but at the shipped tooling constants its imported series is not active, so the
-        # planner keeps the imported-row switch off and _load_version raises a ViewsError naming the flag
-        # (red when plan_views hard-wires the switch on).
-        iroot = new_root()
-        write_toml(iroot, "manifest.toml", manifest.replace(
-            'spec_version = "1.2.0"\n',
-            'spec_version = "{}"\nhomes = 2\n'.format(_opf_store.HOMES2_SPEC_VERSION), 1))
-        empty_indexes(iroot)
-        write_toml(iroot, "version.toml", "\n".join([
-            "schema = 1", "", "[[release]]",
-            'version = "0.0.1"',
-            'date = "2025-12-01T00:00:00Z"',
-            'worklog_span = []',
-            'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
-            "imported = true", "", "[[release]]",
-            'version = "0.1.0"',
-            'date = "2026-01-01T00:00:00Z"',
-            'worklog_span = []',
-            'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
-        ]) + "\n")
-        ires = _opf_store.resolve_store(iroot)
-        iplan = None
-        if ires.status == _opf_store.RESOLVED:
-            ifd = os.open(str(ires.store_root), os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                plan_views(ifd, ires.machine_rel)
-                iplan = "ACCEPTED"
-            except ViewsError as exc:
-                iplan = str(exc)
-            finally:
-                os.close(ifd)
-        check("dormant-imported-row-plan-refused",
-              iplan is not None and "version.toml is malformed" in iplan
-              and "the imported flag is not admitted" in iplan)
 
         # --- a MISSING declared source fails closed (exit 2) --------------------------------------------
         mroot = new_root()

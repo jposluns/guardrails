@@ -401,8 +401,7 @@ def check_freeze(summaries, version_data, entries_by_id, entry_map):
 
 # --- both gates over a resolved store's parsed inputs -------------------------------------------------
 
-def run_gates(version_data, worklog_data, changelog_text, registered_vendors=frozenset(), *,
-              imported_rows=False):
+def run_gates(version_data, worklog_data, changelog_text, registered_vendors=frozenset()):
     """Run both changelog gates over the PARSED inputs. Returns a ChangelogResult. CANNOT-EVALUATE (fail
     closed) when version.toml or worklog.toml does not validate against the release-triad schema (the
     changelog FACTS gates require a consistent ledger and worklog; those structural findings belong to the
@@ -411,12 +410,8 @@ def run_gates(version_data, worklog_data, changelog_text, registered_vendors=fro
     x-<vendor> set (spec 8.7/9), threaded into worklog validation so a worklog entry using a
     manifest-registered vendor extension validates rather than failing closed as unregistered; the live
     `evaluate` path supplies the real set, the self-test drives specific sets, and the default empty set is
-    the base-only case. `imported_rows` is the U3 imported release-row switch (spec 6.1, 14.3), threaded
-    into validate_version so the gates grade a store whose imported release rows are active by the same
-    rule the version gate applies; it stays False (refuse the flag) unless the caller derives it from the
-    store's own imported-series activation. This is the pure core the store-level `evaluate` and the
-    self-test drive."""
-    vv = validate_version(version_data, imported_rows=imported_rows)
+    the base-only case. This is the pure core the store-level `evaluate` and the self-test drive."""
+    vv = validate_version(version_data)
     if vv.status != VALID:
         return ChangelogResult(CANNOT_EVALUATE,
                                ["cannot evaluate the changelog gates: version.toml does not validate "
@@ -469,24 +464,20 @@ def run_gates(version_data, worklog_data, changelog_text, registered_vendors=fro
 
 def _load_inputs(resolution, product_root):
     """Read the four inputs of a RESOLVED store, contained and no-follow. Returns
-    (version_data, worklog_data, changelog_text, registered_vendors, imported_rows, error): the first
-    four parsed on success and `error` None, or all-None (with an empty registered-vendors set and a
-    False switch) plus a fail-closed message string, `error` always LAST. version.toml / worklog.toml /
-    manifest.toml are read from the machine store; CHANGELOG.md from the product repository root (spec
-    5.8/6.3). `registered_vendors` is the manifest's `[vendors].registered` x-<vendor> set (spec 8.7/9),
-    threaded into the worklog validation so a manifest-registered vendor extension is not wrongly
-    reported unregistered. `imported_rows` is the U3 imported release-row switch (spec 6.1, 14.3),
-    derived from the validated manifest through the one shared activation predicate
-    (_opf_store.imported_series_active) so the gates and the drafter grade the ledger exactly as the
-    whole-store doctor does; False (refuse the flag) on every error path. An absent, unreadable,
+    (version_data, worklog_data, changelog_text, registered_vendors, error): the first four parsed on
+    success and `error` None, or all-None (with an empty registered-vendors set) plus a fail-closed
+    message string. version.toml / worklog.toml / manifest.toml are read from the machine store;
+    CHANGELOG.md from the product repository root (spec 5.8/6.3). `registered_vendors` is the manifest's
+    `[vendors].registered` x-<vendor> set (spec 8.7/9), threaded into the worklog validation so a
+    manifest-registered vendor extension is not wrongly reported unregistered. An absent, unreadable,
     unparseable, or non-UTF-8 required input, or a manifest that does not validate in full against the
-    manifest schema (spec 4.5/9), is a fail-closed cannot-evaluate message, never a silent empty pass
-    (the check-fails-closed-on-unreadable rule)."""
+    manifest schema (spec 4.5/9), is a fail-closed cannot-evaluate message, never a silent empty pass (the
+    check-fails-closed-on-unreadable rule)."""
     pointer = resolution.pointer_source != "default"
     try:
         store_fd = _opf_store._open_store_root_fd(resolution.store_root, pointer)
     except OSError as exc:
-        return None, None, None, frozenset(), False, "cannot open store root {} ({})".format(
+        return None, None, None, frozenset(), "cannot open store root {} ({})".format(
             resolution.store_root, exc)
     try:
         try:
@@ -506,22 +497,22 @@ def _load_inputs(resolution, product_root):
             else:
                 message = ("manifest.toml does not validate against the manifest "
                            "schema: {} (fail-closed, spec 4.5/9)".format(exc))
-            return None, None, None, frozenset(), False, message
+            return None, None, None, frozenset(), message
         except (_opf_store.StoreError, OSError) as exc:
             # A StoreError (unreadable/unparseable) OR a raw OSError (e.g. a PermissionError from the
             # contained lstat inside _read_toml_contained) is the fail-closed cannot-evaluate (spec 3/7.1;
             # check-fails-closed-on-unreadable): an unreadable ledger must never escape as an uncaught error.
-            return None, None, None, frozenset(), False, str(exc)
+            return None, None, None, frozenset(), str(exc)
     finally:
         _opf_store._close_fd_exc_safe(store_fd)
     if version_data is None:
-        return None, None, None, frozenset(), False, ("version.toml is absent from the resolved store (a required "
+        return None, None, None, frozenset(), ("version.toml is absent from the resolved store (a required "
                                                 "input; fail-closed, spec 6.1)")
     if worklog_data is None:
-        return None, None, None, frozenset(), False, ("worklog.toml is absent from the resolved store (a required "
+        return None, None, None, frozenset(), ("worklog.toml is absent from the resolved store (a required "
                                                 "input; fail-closed, spec 6.2)")
     if manifest_data is None:
-        return None, None, None, frozenset(), False, ("manifest.toml is absent from the resolved store (a required "
+        return None, None, None, frozenset(), ("manifest.toml is absent from the resolved store (a required "
                                                 "input; fail-closed, spec 9)")
 
     # The manifest must validate in FULL against the release-triad manifest schema (spec 4.5/9), not only
@@ -530,22 +521,18 @@ def _load_inputs(resolution, product_root):
     # schema violation; either is fail-closed here.
     mv = _opf_store.validate_manifest(manifest_data)
     if mv.status != VALID:
-        return None, None, None, frozenset(), False, ("manifest.toml does not validate against the manifest "
+        return None, None, None, frozenset(), ("manifest.toml does not validate against the manifest "
                                                 "schema: {} (fail-closed, spec 4.5/9)".format(
                                                     "; ".join(mv.findings)))
     # Extract the registered x-<vendor> namespaces (spec 8.7/9) to thread into worklog validation so a
     # manifest-registered vendor extension is not wrongly reported unregistered (guard-input-soundness).
     vendor_findings = []
     registered_vendors = _opf_store._validate_vendors(manifest_data.get("vendors"), vendor_findings)
-    # The imported release-row switch (spec 6.1, 14.3), from the ONE shared activation predicate, so the
-    # changelog gates and the drafter admit the flag exactly where the whole-store doctor does and refuse
-    # it everywhere else (fail-closed on every store this tooling validates today).
-    imported_rows = _opf_store.imported_series_active(manifest_data)
 
     try:
         product_fd = _opf_store._open_root_fd(product_root)
     except OSError as exc:
-        return None, None, None, frozenset(), False, "cannot open product root {} ({})".format(product_root, exc)
+        return None, None, None, frozenset(), "cannot open product root {} ({})".format(product_root, exc)
     try:
         try:
             # A non-regular CHANGELOG.md (a FIFO, device, socket, or directory) is refused BEFORE any open,
@@ -573,26 +560,26 @@ def _load_inputs(resolution, product_root):
             # contained reader rather than duplicating its cap.
             st = _journal._lstat_contained(product_fd, CHANGELOG_REL)
             if st is None:
-                return None, None, None, frozenset(), False, ("{} is absent from the product root (a required "
+                return None, None, None, frozenset(), ("{} is absent from the product root (a required "
                                                         "input; fail-closed, spec 5.8/6.3)".format(CHANGELOG_REL))
             if not stat.S_ISREG(st.st_mode):
-                return None, None, None, frozenset(), False, ("{} is present but is not a regular file (an exotic "
+                return None, None, None, frozenset(), ("{} is present but is not a regular file (an exotic "
                                                         "entry; fail-closed, never opened)".format(CHANGELOG_REL))
             if st.st_size > _commonmark_headings.MAX_CHANGELOG_BYTES:
-                return None, None, None, frozenset(), False, (
+                return None, None, None, frozenset(), (
                     "{} is {} bytes, over the {}-byte changelog ceiling; refused before the read "
                     "(fail-closed, SECA resource-bounds)".format(
                         CHANGELOG_REL, st.st_size, _commonmark_headings.MAX_CHANGELOG_BYTES))
             raw, _ = _journal._read_contained(product_fd, CHANGELOG_REL)
         except (_journal.JournalError, OSError) as exc:
-            return None, None, None, frozenset(), False, "cannot read {} ({})".format(CHANGELOG_REL, exc)
+            return None, None, None, frozenset(), "cannot read {} ({})".format(CHANGELOG_REL, exc)
     finally:
         _opf_store._close_fd_exc_safe(product_fd)
     try:
         changelog_text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        return None, None, None, frozenset(), False, "{} is not valid UTF-8 ({})".format(CHANGELOG_REL, exc)
-    return version_data, worklog_data, changelog_text, registered_vendors, imported_rows, None
+        return None, None, None, frozenset(), "{} is not valid UTF-8 ({})".format(CHANGELOG_REL, exc)
+    return version_data, worklog_data, changelog_text, registered_vendors, None
 
 
 def evaluate(product_root):
@@ -620,12 +607,10 @@ def evaluate(product_root):
                                    res.detail)])
     if res.status != RESOLVED:
         return ChangelogResult(CANNOT_EVALUATE, [res.detail])
-    version_data, worklog_data, changelog_text, registered_vendors, imported_rows, error = _load_inputs(
-        res, product_root)
+    version_data, worklog_data, changelog_text, registered_vendors, error = _load_inputs(res, product_root)
     if error is not None:
         return ChangelogResult(CANNOT_EVALUATE, [error])
-    return run_gates(version_data, worklog_data, changelog_text, registered_vendors,
-                     imported_rows=imported_rows)
+    return run_gates(version_data, worklog_data, changelog_text, registered_vendors)
 
 
 def run(root):
@@ -663,9 +648,7 @@ def self_test():
     read (the pre-open st.st_size ceiling), a non-UTF-8 CHANGELOG.md, an un-encodable
     (lone-surrogate) changelog, an unresolvable --root, run()'s exit-code mapping, and the two unreleased
     heading vectors (a heading with no summary row, and a misplaced not-first entry). The imported
-    release-row switch (spec 6.1, 14.3): run_gates admits a covered imported row only when the caller
-    turns the switch on, and the store path derives the switch from the manifest's own activation, so
-    the same store passes when active and refuses fail-closed at the shipped constants."""
+    release-row flag (spec 6.1, 14.3): run_gates passes a covered imported row."""
     import tempfile
     import shutil
 
@@ -938,11 +921,8 @@ def self_test():
     cl_f5 = cl.replace("## 1.0.0 (2026-06-01)", "## 1.0.0 (2026-06-01, 2026-06-02, 2026-06-03)")
     check("f5-multi-date-suffix-pass", run_gates(base_version(cl_f5), worklog, cl_f5).status == PASS)
 
-    # The imported release-row switch (spec 6.1, 14.3): the gates grade an imported historical row by
-    # validate_version's own rule. With the switch on, a covered imported row PASSES end to end; at the
-    # default (off, the fail-closed posture of every store this tooling validates today) the SAME inputs
-    # are a CANNOT-EVALUATE naming the refused flag. Red when run_gates stops threading the switch into
-    # validate_version, or turns it on by default.
+    # The imported release-row flag (spec 6.1, 14.3): the gates grade an imported historical row by
+    # validate_version's own rule, so a covered imported row PASSES end to end.
     cl_imp = cl + "\n## 0.9.0 (2026-05-01)\n\n- imported historical release\n"
     v_imp = base_version(cl_imp)
     v_imp["release"] = [{"version": "0.9.0", "date": "2026-05-01T00:00:00Z", "worklog_span": [],
@@ -950,11 +930,7 @@ def self_test():
                          "imported": True}] + v_imp["release"]
     v_imp["summary"].append({"covers": "0.9.0", "status": "published",
                              "digest": freeze_of(cl_imp, "0.9.0")})
-    check("imported-row-switched-on-pass",
-          run_gates(v_imp, worklog, cl_imp, imported_rows=True).status == PASS)
-    r_impd = run_gates(v_imp, worklog, cl_imp)
-    check("imported-row-default-cannot-eval",
-          r_impd.status == CANNOT_EVALUATE and any("not admitted" in f for f in r_impd.findings))
+    check("imported-row-pass", run_gates(v_imp, worklog, cl_imp).status == PASS)
 
     # F7: the CLI arg parser is fail-closed. In-process (no subprocess): a missing --root value or an
     # unknown arg is a usage error, --root with a value is accepted, and --self-test is honoured only alone.
@@ -1198,53 +1174,6 @@ def self_test():
               evaluate(build_store(version_vendor_text, worklog_vendor_text, cl_disk,
                                    manifest_vendor)).status == PASS)
 
-        # End to end: the imported release-row switch is DERIVED from the store's own manifest inside
-        # _load_inputs (the shared activation predicate) and threaded through evaluate -> run_gates. On a
-        # store declaring the 2.0.0 / homes = 2 pair with BOTH tooling gates raised, a covered imported
-        # row PASSES; the SAME store at the shipped constants refuses it fail-closed (the declaration
-        # alone admits nothing). Red when evaluate or _load_inputs drops the switch, or hard-wires it on.
-        cl_disk_imp = cl_disk + "\n## 0.9.0 (2026-05-01)\n\n- imported historical release\n"
-        version_imp_text = ("schema = 1\n\n"
-                            "[[release]]\n"
-                            'version = "0.9.0"\n'
-                            'date = "2026-05-01T00:00:00Z"\n'
-                            "worklog_span = []\n"
-                            'coverage_digest = "{}"\n'.format(
-                                _opf_release.compute_span_digest(by_id_disk, None)) +
-                            "imported = true\n\n"
-                            "[[release]]\n"
-                            'version = "1.0.0"\n'
-                            'date = "2026-06-01T00:00:00Z"\n'
-                            'worklog_span = ["WL-1", "WL-1"]\n'
-                            'coverage_digest = "{}"\n\n'.format(dig11) +
-                            "[[summary]]\n"
-                            'covers = "unreleased"\n'
-                            'status = "working"\n\n'
-                            "[[summary]]\n"
-                            'covers = "1.0.0"\n'
-                            'status = "published"\n'
-                            'digest = "{}"\n\n'.format(freeze_of(cl_disk_imp, "1.0.0")) +
-                            "[[summary]]\n"
-                            'covers = "0.9.0"\n'
-                            'status = "published"\n'
-                            'digest = "{}"\n'.format(freeze_of(cl_disk_imp, "0.9.0")))
-        manifest_h2 = manifest.replace(
-            'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n',
-            'spec_version = "' + _opf_store.HOMES2_SPEC_VERSION + '"\nhomes = 2\n', 1)
-        imp_root = build_store(version_imp_text, worklog_text, cl_disk_imp, manifest_h2)
-        r_imp_dormant = evaluate(imp_root)
-        check("disk-imported-row-dormant-cannot-eval",
-              r_imp_dormant.status == CANNOT_EVALUATE
-              and any("not admitted" in f for f in r_imp_dormant.findings))
-        _imp_saved_gates = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
-        _opf_store.SUPPORTED_HOMES = 2
-        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-        try:
-            r_imp_active = evaluate(imp_root)
-        finally:
-            _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _imp_saved_gates
-        check("disk-imported-row-active-pass", r_imp_active.status == PASS)
-
         # M1 end-to-end: a raw OSError raised by the contained ledger read must be caught in _load_inputs
         # and returned as a fail-closed cannot-evaluate MESSAGE, never propagated. Inject one after a store
         # has resolved (resolution already read its manifest, so resolve_store is unaffected). With the fix
@@ -1258,7 +1187,7 @@ def self_test():
 
         _opf_store._read_toml_contained = _raise_oserror
         try:
-            _, _, _, _, _, m1_err = _load_inputs(res_m1, m1_root)
+            _, _, _, _, m1_err = _load_inputs(res_m1, m1_root)
             m1_ok = m1_err is not None
         except OSError:
             m1_ok = False                 # M1 unfixed: the OSError escaped _load_inputs uncaught

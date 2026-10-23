@@ -397,20 +397,6 @@ def imported_series_declared(manifest_data):
             and imported_series_supported())
 
 
-def imported_series_active(manifest_data):
-    """The imported-series activation flag (spec 8.2/4.2) over a parsed manifest: the graded homes-2
-    declaration (homes_generation, which reports 2 only when this tooling itself activates homes 2 and
-    the manifest declares exactly homes = 2 with the 2.0.0 spec_version) AND the declared-and-supported
-    imported series (imported_series_declared). Raising SUPPORTED_HOMES alone, or
-    SUPPORTED_SPEC_VERSION alone, activates nothing: each arm gates on its own tooling constant. The
-    optional imported release-row flag (spec 6.1, 14.3) is admitted exactly when this flag holds, so
-    every version-ledger reader outside the doctor (the view planner, the changelog gates, the
-    changelog drafter) derives its imported-row switch from this ONE predicate; the doctor's own
-    activation flag (_opf_check.imported_series_active) delegates to it, so every reader that derives
-    its switch here agrees with the doctor about when the flag is admitted."""
-    return homes_generation(manifest_data) >= 2 and imported_series_declared(manifest_data)
-
-
 def imported_leaf_names(enabled_types):
     """The imported-series managed-leaf FILENAMES for `enabled_types` (an iterable of enabled
     section-8.1 type names, e.g. the C-ROSTER type -> namespace mapping): one

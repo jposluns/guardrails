@@ -415,8 +415,7 @@ def _entry_body(entry_text):
 
 # --- the pure drafting core --------------------------------------------------------------------------
 
-def _validated_inputs(version_data, worklog_data, covers, registered_vendors, what="draft", *,
-                      imported_rows=False):
+def _validated_inputs(version_data, worklog_data, covers, registered_vendors, what="draft"):
     """The shared fail-closed preconditions of BOTH modes (draft and --freeze-digest): the version and
     worklog ledgers validate (the U3 seam), the worklog ids resolve, and the covers token parses against
     the ledger versions (`_parse_covers`, the same grammar the gates enforce). Returns (releases,
@@ -425,11 +424,8 @@ def _validated_inputs(version_data, worklog_data, covers, registered_vendors, wh
     messages, so the freeze-digest assist refuses on the same inputs the draft path does rather than
     digesting past a broken ledger or a covers token that fails to parse or resolve against the ledger
     (guard-input-soundness;
-    check-fails-closed-on-unreadable). `imported_rows` is the U3 imported release-row switch (spec 6.1,
-    14.3), threaded into validate_version so both modes grade a store whose imported release rows are
-    active by the same rule the doctor applies; it stays False (refuse the flag) unless the caller
-    derives it from the store's own imported-series activation."""
-    vv = validate_version(version_data, imported_rows=imported_rows)
+    check-fails-closed-on-unreadable)."""
+    vv = validate_version(version_data)
     if vv.status != VALID:
         return None, None, None, None, (
             ["cannot {}: version.toml does not validate against the release-ledger schema (run the "
@@ -461,19 +457,16 @@ def _unsafe_finding(exc):
 
 
 def draft_entry(version_data, worklog_data, done_records, changelog_text, covers,
-                registered_vendors=frozenset(), done_enabled=True, *, imported_rows=False):
+                registered_vendors=frozenset(), done_enabled=True):
     """Draft ONE candidate CHANGELOG entry for `covers`. Returns (status, draft_text, notes, findings):
     OK with the entry str on success, else CANNOT_EVALUATE with a fail-closed message. The ledgers are
     validated here through `_validated_inputs` (fail-closed CANNOT_EVALUATE, the U3 seam), so the draft
     heading always parses under the gate. `done_records` is the validated receipt list, or None when the
-    type is not enabled; `changelog_text` is consulted ONLY for a range rollup (tier-below sourcing).
-    `imported_rows` is the U3 imported release-row switch (spec 6.1, 14.3), forwarded to
-    `_validated_inputs`; the store-level `evaluate` derives it from the store's own imported-series
-    activation, and it stays False (refuse the flag) for every other caller. This
+    type is not enabled; `changelog_text` is consulted ONLY for a range rollup (tier-below sourcing). This
     is the pure core the store-level `evaluate` and the self-test drive; it reads no files and mutates
     nothing."""
     releases, ledger_versions, by_id, parsed, vfindings = _validated_inputs(
-        version_data, worklog_data, covers, registered_vendors, imported_rows=imported_rows)
+        version_data, worklog_data, covers, registered_vendors)
     if vfindings is not None:
         return CANNOT_EVALUATE, None, [], vfindings
     kind = parsed[0]
@@ -704,7 +697,7 @@ def evaluate(product_root, covers=UNRELEASED, mode="draft"):
     if res.status != RESOLVED:
         return AbsorbResult(CANNOT_EVALUATE, findings=[res.detail])
 
-    version_data, worklog_data, changelog_text, registered_vendors, imported_rows, error = \
+    version_data, worklog_data, changelog_text, registered_vendors, error = \
         _opf_changelog._load_inputs(res, product_root)
     if error is not None:
         return AbsorbResult(CANNOT_EVALUATE, findings=[error])
@@ -717,8 +710,7 @@ def evaluate(product_root, covers=UNRELEASED, mode="draft"):
         # against the ledger, is CANNOT-EVALUATE (`unreleased` and a valid in-ledger range DO resolve and are
         # digested when the entry is present), never a digest over an unvalidated store (guard-input-soundness).
         _releases, _versions, _by_id, _parsed, vfindings = _validated_inputs(
-            version_data, worklog_data, covers, registered_vendors, what="compute the freeze digest",
-            imported_rows=imported_rows)
+            version_data, worklog_data, covers, registered_vendors, what="compute the freeze digest")
         if vfindings is not None:
             return AbsorbResult(CANNOT_EVALUATE, findings=vfindings)
         return _freeze_digest_of(changelog_text, covers)
@@ -728,7 +720,7 @@ def evaluate(product_root, covers=UNRELEASED, mode="draft"):
         return AbsorbResult(CANNOT_EVALUATE, findings=[derr])
     status, text, notes, findings = draft_entry(
         version_data, worklog_data, done_records if done_enabled else None, changelog_text, covers,
-        registered_vendors=registered_vendors, done_enabled=done_enabled, imported_rows=imported_rows)
+        registered_vendors=registered_vendors, done_enabled=done_enabled)
     return AbsorbResult(status, draft=text, notes=notes, findings=findings)
 
 
@@ -781,9 +773,7 @@ def self_test():
     parser fail-closed cases; and end-to-end store resolution (NOT-APPLICABLE, cannot-evaluate, OK, done
     enabled/enriched, done not declared + note, malformed done index, freeze-digest, freeze-digest
     fail-closed on a broken ledger and on an unledgered covers token, exit-map). The imported
-    release-row switch (spec 6.1, 14.3): the drafter refuses an imported historical row at the default
-    switch and drafts over it when the caller (or the store's own activation, end to end) admits it; the
-    freeze-digest assist digests over it on an active store and refuses it on a dormant one."""
+    release-row flag (spec 6.1, 14.3): the drafter drafts over an imported historical row."""
     import tempfile
     import shutil
 
@@ -981,20 +971,15 @@ def self_test():
     check("published-edit-freeze-finding",
           _opf_changelog.run_gates(vbase, worklog, cl_edit).status == "FINDING")
 
-    # 8b: the imported release-row switch (spec 6.1, 14.3). The drafter validates the ledger under the
-    # caller's switch: at the default (off) an imported historical row is a fail-closed CANNOT-EVALUATE
-    # naming the refused flag, and with the switch on the SAME inputs draft byte-identically. Red when
-    # draft_entry stops forwarding the switch into _validated_inputs, or turns it on by default.
+    # 8b: the imported release-row flag (spec 6.1, 14.3). The drafter validates the ledger by
+    # validate_version's own rule, so a ledger with an imported historical row drafts the unreleased entry.
     v_imp = {"schema": 1,
              "release": [{"version": "0.9.0", "date": "2026-05-01T00:00:00Z", "worklog_span": [],
                           "coverage_digest": _opf_release.compute_span_digest(by_id, None),
                           "imported": True}] + vbase["release"],
              "summary": vbase["summary"]}
-    st_impd, _t, _n, f_impd = draft_entry(v_imp, worklog, None, cl, "unreleased")
-    check("imported-row-default-refused",
-          st_impd == CANNOT_EVALUATE and any("not admitted" in f for f in f_impd))
-    st_impa, text_impa, _n, _f = draft_entry(v_imp, worklog, None, cl, "unreleased", imported_rows=True)
-    check("imported-row-switched-on-draft-ok",
+    st_impa, text_impa, _n, _f = draft_entry(v_imp, worklog, None, cl, "unreleased")
+    check("imported-row-draft-ok",
           st_impa == OK and text_impa == "## unreleased\n\n### Added\n- a feature (WL-4)\n")
 
     # 9: the freeze-digest assist equals U5's freeze_digest of the parsed entry.
@@ -1153,45 +1138,6 @@ def self_test():
         check("disk-freeze-digest-unledgered-covers-cannot-eval",
               evaluate(build_store(version_disk, worklog_disk, cl_stray, manifest_wl),
                        "9.9.9", mode="freeze-digest").status == CANNOT_EVALUATE)
-
-        # End to end: the imported release-row switch is derived from the store's own manifest (through
-        # the reused U5 reader) and threaded into the drafter. On a store declaring the 2.0.0 / homes = 2
-        # pair with BOTH tooling gates raised, a ledger carrying an imported historical row drafts OK;
-        # the SAME store at the shipped constants refuses it fail-closed (the declaration alone admits
-        # nothing). The freeze-digest mode reads the same ledger, so it gets the same active and dormant
-        # pair. Red when either mode's call in evaluate drops the switch, or hard-wires it on.
-        version_disk_imp = version_disk.replace(
-            "[[release]]\n",
-            "[[release]]\n"
-            'version = "0.9.0"\n'
-            'date = "2026-05-01T00:00:00Z"\n'
-            "worklog_span = []\n"
-            'coverage_digest = "{}"\n'.format(_opf_release.compute_span_digest({1: wl1d}, None)) +
-            "imported = true\n\n"
-            "[[release]]\n", 1)
-        manifest_h2 = manifest_wl.replace(
-            'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n',
-            'spec_version = "' + _opf_store.HOMES2_SPEC_VERSION + '"\nhomes = 2\n', 1)
-        imp_root = build_store(version_disk_imp, worklog_disk, cl_disk, manifest_h2)
-        r_impd = evaluate(imp_root, "unreleased")
-        check("disk-imported-row-dormant-cannot-eval",
-              r_impd.status == CANNOT_EVALUATE and any("not admitted" in f for f in r_impd.findings))
-        r_impfd = evaluate(imp_root, "1.0.0", mode="freeze-digest")
-        check("disk-imported-row-dormant-freeze-digest-cannot-eval",
-              r_impfd.status == CANNOT_EVALUATE and any("not admitted" in f for f in r_impfd.findings))
-        _imp_saved_gates = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
-        _opf_store.SUPPORTED_HOMES = 2
-        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-        try:
-            r_impa = evaluate(imp_root, "unreleased")
-            r_impfa = evaluate(imp_root, "1.0.0", mode="freeze-digest")
-        finally:
-            _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _imp_saved_gates
-        check("disk-imported-row-active-draft-ok",
-              r_impa.status == OK
-              and r_impa.draft == "## unreleased\n\n### Added\n- a feature (WL-2)\n")
-        check("disk-imported-row-active-freeze-digest-ok",
-              r_impfa.status == OK and r_impfa.draft == freeze_of(cl_disk, "1.0.0"))
 
         # run() maps a store-level status to the process exit code through EXIT.
         check("disk-run-ok-exit-0",

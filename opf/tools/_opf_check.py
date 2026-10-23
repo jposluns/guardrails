@@ -238,10 +238,9 @@ def imported_series_active(manifest_data):
     1). The doctor driver (the roster and C-IMPORTED-SCHEMA) reads this ONE flag, and
     classify_containment derives it internally from the manifest for the containment registration and
     every other consumer (the write guard, _opf_write_guard.plan_write_scope, included), so they
-    cannot disagree on the imported managed set. The body delegates to the store-level predicate
-    _opf_store.imported_series_active, the one the ledger readers outside this module derive their
-    imported release-row switch from, so the doctor and those readers share one definition."""
-    return _opf_store.imported_series_active(manifest_data)
+    cannot disagree on the imported managed set."""
+    return (_opf_store.homes_generation(manifest_data) >= 2
+            and _opf_store.imported_series_declared(manifest_data))
 
 
 def imported_content_checks_landed():
@@ -3167,12 +3166,11 @@ def _check_lease(root_fd, machine_rel, rep):
 
 # --- observations (the inert git-derived facts the caller injects) -----------------------------------
 
-def _wellformed_release_row(row, imported_rows=False):
+def _wellformed_release_row(row):
     """True when `row` is a structurally well-formed release row: the per-row shape validate_version
     enforces (keys EXACTLY RELEASE_KEYS plus any RELEASE_OPTIONAL_KEYS, a valid SemVer version, an RFC
     3339 date, a well-formed worklog_span, a sha256 coverage_digest, and the optional imported flag under
-    the shared _imported_row_findings rule, `imported_rows` being the switch C-VERSION-LEDGER applies to
-    the store). Cross-row tiling, uniqueness, and monotonicity are NOT
+    the shared _imported_row_findings rule). Cross-row tiling, uniqueness, and monotonicity are NOT
     applied: this decides only whether an INJECTED prior row can serve as the append-only immutability
     baseline, so a well-formed row that merely DIFFERS from the current ledger still reaches the graded
     rewrite check (a real history rewrite), while a dict of garbage keys is a malformed observation routed
@@ -3190,20 +3188,19 @@ def _wellformed_release_row(row, imported_rows=False):
         return False
     if not _valid_digest(row.get("coverage_digest")):
         return False
-    if _imported_row_findings(row, imported_rows, "prior release row"):
+    if _imported_row_findings(row, "prior release row"):
         return False
     return True
 
 
-def _normalize_prior(prior, imported_rows=False):
+def _normalize_prior(prior):
     """Validate the injected prior committed snapshot: {releases: list, counters_high: {ns: int},
     records: {id: (type, status)}, digests: {id: str} (optional), held: {ns: [[lo, hi], ...]} (optional)}.
     Every record id is shape-validated and its namespace reconciled against its declared type's roster
     namespace, so a malformed id or a namespace/type mismatch makes the WHOLE prior malformed ->
-    CANNOT-EVALUATE naming the observation, never a store INVALID (codex-9/F4). Each release row is judged
-    under `imported_rows`, the imported release-row switch of the store (_wellformed_release_row). Returns
-    the normalized dict or None when any field is malformed (which the caller routes to CANNOT-EVALUATE,
-    never a permissive pass)."""
+    CANNOT-EVALUATE naming the observation, never a store INVALID (codex-9/F4). Returns the normalized
+    dict or None when any field is malformed (which the caller routes to CANNOT-EVALUATE, never a
+    permissive pass)."""
     if not isinstance(prior, dict):
         return None
     releases = prior.get("releases")
@@ -3219,7 +3216,7 @@ def _normalize_prior(prior, imported_rows=False):
     # counter high-water must be a genuine non-negative int (never a bool); a record value must be a
     # (type, status) pair of strings.
     for row in releases:
-        if not _wellformed_release_row(row, imported_rows):
+        if not _wellformed_release_row(row):
             return None
     norm_high = {}
     for ns, val in counters_high.items():
@@ -3290,9 +3287,7 @@ def _normalize_observations(observations):
     """Validate the injected, inert observations object (all fields optional). Returns (obs, error): `obs`
     is a plain dict holding only the recognized, shape-checked fields, and `error` is None on success or a
     fail-closed message when the object itself is malformed. A recognized field present but malformed is
-    DROPPED so its check routes to CANNOT-EVALUATE naming the missing input (guard-input-soundness). The
-    prior committed snapshot is the one field carried raw (`prior_raw`): _validate_opened_store normalizes
-    it once the manifest has decided the homes generation its release rows are judged under."""
+    DROPPED so its check routes to CANNOT-EVALUATE naming the missing input (guard-input-soundness)."""
     if observations is None:
         return {}, None
     if not isinstance(observations, dict):
@@ -3318,9 +3313,11 @@ def _normalize_observations(observations):
         obs["actual_remote_malformed"] = True
     prior = observations.get("prior")
     if prior is not None:
-        # Carried raw: whether a prior release row may carry the imported flag depends on the homes
-        # generation only the manifest decides, so _validate_opened_store normalizes it (_normalize_prior).
-        obs["prior_raw"] = prior
+        norm = _normalize_prior(prior)
+        if norm is not None:
+            obs["prior"] = norm
+        else:
+            obs["prior_malformed"] = True    # supplied but rejected; the history checks say "malformed"
     return obs, None
 
 
@@ -3472,23 +3469,6 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # SAME predicate, so the leaf registration and the content grading cannot diverge.
     imported = imported_series_active(manifest_data)
     rep.require_homes(homes, imported)
-    # The optional imported release-row flag (spec 6.1, 14.3) is admitted exactly when the imported
-    # series is active for this store (the graded homes-2 declaration AND this tooling's own
-    # imported-series support): raising SUPPORTED_HOMES alone admits nothing, because the 6.1/14.3
-    # imported-row content belongs to the 1.3.0 contract, not to homes 2 by itself. Until activation
-    # the flag stays a C-VERSION-LEDGER finding and a malformed prior release row.
-    imported_rows = imported
-    # The prior is normalized here, under the imported_rows switch C-VERSION-LEDGER applies, so a prior
-    # release row may carry the imported flag only where the current ledger may. It is normalized once,
-    # before any reader: the reserved-number exemption (_prior_holdings) and the across-time checks read
-    # the same normalized prior, or the same "malformed" reason when it is rejected.
-    prior_raw = obs.pop("prior_raw", None)
-    if prior_raw is not None:
-        norm_prior = _normalize_prior(prior_raw, imported_rows)
-        if norm_prior is not None:
-            obs["prior"] = norm_prior
-        else:
-            obs["prior_malformed"] = True    # supplied but rejected; the history checks say "malformed"
 
     # --- C-ROSTER: reconcile the manifest [types] against the authoritative roster (spec 9/8.1) -------
     rep.ran("C-ROSTER")
@@ -3576,7 +3556,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             _rel(machine_rel, VERSION_NAME)))
         version_data = None
     elif vst == "ok":
-        vv = validate_version(version_data, imported_rows=imported_rows)
+        vv = validate_version(version_data)
         if vv.status == CANNOT_EVALUATE:
             rep.cant("version.toml: {}".format("; ".join(vv.findings)))
             version_data = None
@@ -3984,8 +3964,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                     _opf_changelog.CHANGELOG_REL, exc))
                 changelog_text = None
             if changelog_text is not None:
-                cr = _opf_changelog.run_gates(version_data, merged_doc, changelog_text, registered_vendors,
-                                              imported_rows=imported_rows)
+                cr = _opf_changelog.run_gates(version_data, merged_doc, changelog_text, registered_vendors)
                 if cr.status == CANNOT_EVALUATE:
                     for f in cr.findings:
                         rep.cant("C-CHANGELOG-GATES: {}".format(f))
@@ -3994,7 +3973,6 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                         rep.finding("C-CHANGELOG-GATES: {}".format(f))
 
     # --- the across-time checks, from the injected prior committed snapshot (spec 6.1/8.2/8.4/13) -----
-    # The prior was normalized under the imported_rows switch once the manifest decided the homes generation.
     prior = obs.get("prior")
     prior_reason = ("the prior committed snapshot observation was supplied but malformed"
                     if obs.get("prior_malformed") else "no prior committed snapshot was supplied")
@@ -5430,10 +5408,7 @@ def self_test():
                           for f in _h1_run.findings))
             # The pure flag over its arms, the support threshold sampled just below, at, and just
             # above IMPORTED_SPEC_VERSION: True only for the 2.0.0 / homes = 2 pair with both
-            # tooling gates raised (red when either arm, or the threshold, moves). This flag delegates
-            # to the store-level predicate (_opf_store.imported_series_active) that the ledger readers
-            # outside this module derive the imported-row switch from; both names are read on every row,
-            # so a copy that replaced the delegation would be held to the same table.
+            # tooling gates raised (red when either arm, or the threshold, moves).
             _pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
             _flag_rows = (
                 (2, "1.3.0", _pair, True), (2, "1.3.1", _pair, True), (2, "1.2.99", _pair, False),
@@ -5445,8 +5420,7 @@ def self_test():
             _flag_got = []
             for _fh, _fv, _fm, _want in _flag_rows:
                 _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _fh, _fv
-                _flag_got.append(imported_series_active(_fm) is _want
-                                 and _opf_store.imported_series_active(_fm) is _want)
+                _flag_got.append(imported_series_active(_fm) is _want)
             _opf_store.SUPPORTED_HOMES = 2
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
             check("imported-series-active-keyed-on-homes2-declaration",
@@ -6377,13 +6351,9 @@ def self_test():
         check("f5-wellformed-prior-rewrite-invalid", rpr is not None and rpr.status == INVALID)
 
         # --- the optional imported release-row flag (spec 6.1, 14.3): C-VERSION-LEDGER and the prior-row
-        # check admit it only on a store whose imported series is ACTIVE (the graded homes-2 declaration
-        # AND this tooling's imported-series support), which shipped tooling never reports
-        # (SUPPORTED_HOMES = 1, SUPPORTED_SPEC_VERSION below the imported threshold), so each active leg
-        # raises BOTH tooling gates inside the fixture, declares the 2.0.0 pair, and carries the imported
-        # leaves the activated roster registers. The composed ledger readers (the changelog gates and the
-        # view planner) receive the same switch; the whole-store vector below grades an active store with
-        # an admitted imported row VALID end to end.
+        # check admit it as exactly true on an empty span, and the composed ledger readers (the changelog
+        # gates and the view planner) apply the same rule; the whole-store vector below grades a store
+        # with an imported row VALID end to end.
         imp_empty = compute_span_digest(full_wl, None)
 
         def imp_row(version, imported=True):
@@ -6393,101 +6363,53 @@ def self_test():
                 r["imported"] = imported
             return r
 
-        def imp_run(rows, prior_rows, active, spec_version=_opf_store.HOMES2_SPEC_VERSION,
-                    support=True):
+        def imp_run(rows, prior_rows):
             m = clean_machine()
             m["version.toml"]["release"] = rows + m["version.toml"]["release"]
-            m["manifest.toml"]["opf"].update(spec_version=spec_version, homes=2)
-            if active and support and spec_version == _opf_store.HOMES2_SPEC_VERSION:
-                # The declaration activates the imported series, so its leaves are managed and required.
-                for leaf in _opf_store.imported_leaf_names(m["manifest.toml"]["types"]):
-                    m[leaf] = ({"schema": 1, "entry": []} if leaf == _opf_store.IMPORTED_WORKLOG_NAME
-                               else idx([]))
             o = copy.deepcopy(clean_prior())
             o["prior"]["releases"] = prior_rows + o["prior"]["releases"]
-            saved = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
-            _opf_store.SUPPORTED_HOMES = 2 if active else 1
-            if active and support:
-                _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-            try:
-                return run(m, obs=o)
-            finally:
-                _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = saved
+            return run(m, obs=o)
 
         def verdicts(r, *cids):
             return None if r is None else tuple(r.checks.get(c) for c in cids)
 
         hist = ("C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-HISTORY-RESURRECTION")
-        _imp2 = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")], active=True)
-        # C-EVIDENCE-ENUM runs only at homes 2, so its presence proves which generation each leg graded.
-        check("rel-imported-doctor-homes2-accepted",
-              verdicts(_imp2, "C-VERSION-LEDGER", "C-EVIDENCE-ENUM") == ("PASS", "PASS"))
-        check("prior-imported-row-wellformed", verdicts(_imp2, *hist) == ("PASS",) * 3)
-        # The shipped generation: the 2.0.0 pair declared but homes 2 not activated grades as generation 1,
-        # so the same rows are refused (a C-VERSION-LEDGER finding and a malformed prior); homes = 2 at the
-        # base spec_version under a full activation is generation 1 too. Both refusals pin the per-row
-        # refusal reason and the malformed-prior reason, so a cant from any other cause cannot stand in.
-        _imp1 = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")], active=False)
-        check("rel-imported-doctor-homes1-refused",
-              verdicts(_imp1, "C-VERSION-LEDGER", "C-EVIDENCE-ENUM") == ("FINDING", None)
-              and any("not admitted" in f for f in _imp1.findings))
-        check("prior-imported-row-malformed-homes1",
-              verdicts(_imp1, *hist) == (CANNOT_EVALUATE,) * 3
-              and any("malformed" in m for m in _imp1.cannot_evaluate))
-        # support stays at the shipped constant here: raising it would make the declared base
-        # spec_version a C-MANIFEST migration finding and never reach the ledger.
-        _imp12 = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")], active=True,
-                         spec_version=SUPPORTED_SPEC_VERSION, support=False)
-        check("rel-imported-doctor-homes2-at-base-version-refused",
-              verdicts(_imp12, "C-VERSION-LEDGER", "C-HISTORY-APPEND-ONLY", "C-EVIDENCE-ENUM")
-              == ("FINDING", CANNOT_EVALUATE, None)
-              and any("not admitted" in f for f in _imp12.findings)
-              and any("malformed" in m for m in _imp12.cannot_evaluate))
-        # Raising SUPPORTED_HOMES alone admits NOTHING: the switch requires the imported-series support
-        # arm too (the 6.1/14.3 content belongs to the 1.3.0 contract). The leg grades at homes 2
-        # (C-EVIDENCE-ENUM ran) yet the row is still refused and the prior is still malformed.
-        _imph = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")], active=True, support=False)
-        check("rel-imported-doctor-homes-raised-alone-refused",
-              verdicts(_imph, "C-VERSION-LEDGER", "C-EVIDENCE-ENUM") == ("FINDING", "PASS")
-              and any("not admitted" in f for f in _imph.findings)
-              and any("malformed" in m for m in _imph.cannot_evaluate))
+        _imp = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")])
+        check("rel-imported-doctor-accepted", verdicts(_imp, "C-VERSION-LEDGER") == ("PASS",))
+        check("prior-imported-row-wellformed", verdicts(_imp, *hist) == ("PASS",) * 3)
+        # A flag outside the value rule is a C-VERSION-LEDGER finding naming the rule, and the same row in
+        # the prior is a malformed observation, so the history checks cannot evaluate.
+        _impv = imp_run([imp_row("0.9.0", 1)], [imp_row("0.9.0", 1)])
+        check("rel-imported-doctor-int1-refused",
+              verdicts(_impv, "C-VERSION-LEDGER") == ("FINDING",)
+              and any("exactly true" in f for f in _impv.findings)
+              and verdicts(_impv, *hist) == (CANNOT_EVALUATE,) * 3
+              and any("malformed" in m for m in _impv.cannot_evaluate))
         # The prior-row check applies the value and span rules of validate_version at their boundaries.
-        check("prior-row-imported-admitted", _wellformed_release_row(imp_row("0.9.0"), True))
-        check("prior-row-imported-dormant-refused", not _wellformed_release_row(imp_row("0.9.0")))
-        check("prior-row-imported-false-refused", not _wellformed_release_row(imp_row("0.9.0", False), True))
-        check("prior-row-imported-int1-refused", not _wellformed_release_row(imp_row("0.9.0", 1), True))
+        check("prior-row-imported-admitted", _wellformed_release_row(imp_row("0.9.0")))
+        check("prior-row-imported-false-refused", not _wellformed_release_row(imp_row("0.9.0", False)))
+        check("prior-row-imported-int1-refused", not _wellformed_release_row(imp_row("0.9.0", 1)))
         check("prior-row-imported-nonempty-span-refused", not _wellformed_release_row(
             dict(imp_row("0.9.0"), worklog_span=["WL-1", "WL-1"],
-                 coverage_digest=compute_span_digest(full_wl, (1, 1))), True))
+                 coverage_digest=compute_span_digest(full_wl, (1, 1)))))
         check("prior-row-plain-still-wellformed", _wellformed_release_row(imp_row("0.9.0", None)))
         # The flag MUST NOT be added to or removed from an existing row (spec 6.1): with both ledgers
         # admitted, C-HISTORY-APPEND-ONLY reads either change as a rewrite.
         for _imp_label, _imp_cur, _imp_prior in (("added-to", True, None), ("removed-from", None, True)):
-            _impr = imp_run([imp_row("0.9.0", _imp_cur)], [imp_row("0.9.0", _imp_prior)], active=True)
+            _impr = imp_run([imp_row("0.9.0", _imp_cur)], [imp_row("0.9.0", _imp_prior)])
             check("history-flag-{}-existing-row-finding".format(_imp_label),
                   verdicts(_impr, "C-VERSION-LEDGER", "C-HISTORY-APPEND-ONLY") == ("PASS", "FINDING")
                   and any("C-HISTORY-APPEND-ONLY" in f and "rewritten" in f for f in _impr.findings))
-        # WHOLE STORE, end to end: a fully ACTIVE store (both tooling gates raised, the 2.0.0 pair, every
-        # imported leaf present and empty, a declared VERSION view) whose ledger and prior carry an
-        # admitted imported row, with the changelog tiling all three releases, grades VALID with no
-        # finding and no cant under a REDUCED imported-check roster. Every composed ledger reader is on
-        # this path: C-VERSION-LEDGER, the changelog gates, the view planner behind C-VIEW-DRIFT, and the
-        # history checks, so the vector is red when ANY of them keeps the default switch. The roster is
-        # patched to the imported checks landed so far (the imported-valid-row-reaches-valid idiom), so
-        # the pending imported checks do not mask the readers' verdicts. The vector therefore pins the
-        # readers' integration, not whole-store acceptance under the production roster: with the shipped
-        # IMPORTED_CHECKS the same store grades CANNOT-EVALUATE because C-IMPORTED-IDS,
-        # C-IMPORTED-PROVENANCE and C-IMPORTED-SEGREGATION do not run, and acceptance under the full
-        # roster remains an activation requirement.
+        # WHOLE STORE, end to end: a store with a declared VERSION view whose ledger and prior carry an
+        # imported row, with the changelog tiling all three releases, grades VALID with no finding and no
+        # cant. Every composed ledger reader is on this path: C-VERSION-LEDGER, the changelog gates, the
+        # view planner behind C-VIEW-DRIFT, and the history checks, so the vector is red when ANY of them
+        # refuses the flag.
         _e2e_cl = make_changelog(["1.1.0", "1.0.0", "0.9.0"])
         _e2e_dig = freeze_digests(_e2e_cl, ["1.1.0", "1.0.0", "0.9.0"])
         _e2e = clean_machine()
         _e2e["manifest.toml"] = base_manifest(views={"VERSION": {
             "kind": "deterministic", "sources": ["version"], "target": "VERSION"}})
-        _e2e["manifest.toml"]["opf"].update(spec_version=_opf_store.HOMES2_SPEC_VERSION, homes=2)
-        for _e2e_leaf in _opf_store.imported_leaf_names(_e2e["manifest.toml"]["types"]):
-            _e2e[_e2e_leaf] = ({"schema": 1, "entry": []}
-                               if _e2e_leaf == _opf_store.IMPORTED_WORKLOG_NAME else idx([]))
         _e2e["version.toml"]["release"] = [imp_row("0.9.0")] + _e2e["version.toml"]["release"]
         _e2e["version.toml"]["summary"] = [
             {"covers": "0.9.0", "status": "published", "digest": _e2e_dig["0.9.0"]},
@@ -6496,17 +6418,7 @@ def self_test():
             {"covers": "unreleased", "status": "working"}]
         _e2e_obs = copy.deepcopy(clean_prior())
         _e2e_obs["prior"]["releases"] = [imp_row("0.9.0")] + _e2e_obs["prior"]["releases"]
-        _e2e_saved = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
-        _e2e_g = globals()
-        _e2e_prev_roster = IMPORTED_CHECKS
-        _opf_store.SUPPORTED_HOMES = 2
-        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-        _e2e_g["IMPORTED_CHECKS"] = ("C-IMPORTED-SCHEMA",)
-        try:
-            _e2e_run = run(_e2e, product={"VERSION": "1.1.0\n", "CHANGELOG.md": _e2e_cl}, obs=_e2e_obs)
-        finally:
-            _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _e2e_saved
-            _e2e_g["IMPORTED_CHECKS"] = _e2e_prev_roster
+        _e2e_run = run(_e2e, product={"VERSION": "1.1.0\n", "CHANGELOG.md": _e2e_cl}, obs=_e2e_obs)
         check("rel-imported-doctor-whole-store-valid",
               _e2e_run is not None and _e2e_run.status == VALID
               and not _e2e_run.findings and not _e2e_run.cannot_evaluate
