@@ -752,7 +752,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "vfxcmt.2"
@@ -761,7 +761,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "vfxcmt.3"
@@ -770,7 +770,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "vfxcmt.4"
@@ -778,8 +778,8 @@ corpus-id = "vfxcmt"
 source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
-canonical-text = "The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+canonical-text = "The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, the first parent for a merge commit, and the empty tree for a root commit."
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "vfxcmt.5"
@@ -788,7 +788,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "vfxcmt.6"
@@ -797,7 +797,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires of a target or context parameter at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "vfxcmt.7"
@@ -806,7 +806,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "vfxcmt.8"
@@ -815,7 +815,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "vfxcmt.9"
@@ -823,8 +823,8 @@ corpus-id = "vfxcmt"
 source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
-canonical-text = "The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+canonical-text = "The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index or between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass."
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "vfxcmt.10"
@@ -833,7 +833,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "vfxcmt.11"
@@ -841,8 +841,8 @@ corpus-id = "vfxcmt"
 source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
-canonical-text = "This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+canonical-text = "This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no read either relies on resolves to bytes other than the authoritative commit's; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content."
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "vfxcmt.12"
@@ -850,8 +850,8 @@ corpus-id = "vfxcmt"
 source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
-canonical-text = "A claim that a worker-drafted change shipped is withheld until each occurrence of every line the identified draft adds or removes reconciles with the committed content at its intended location, counting an added line only beyond the new base's own occurrences, or reflects an alteration the change's approver authorized on record."
-source-digest = "0f8cbdf5d9acb02868cfd612c346ab9284c1f5d5c0793e6468ee0fce66d37e15"
+canonical-text = "A claim that a worker-drafted change shipped is withheld if no draft is identified by its hand-back digest, and otherwise until each line that draft adds is present, and each it removes absent, at its location in the committed content, occurrences counted relative to the claiming commit's derived base (defined below), except where the line reflects an alteration the change's approver, not its claimant, named on record."
+source-digest = "5aca3660b7c23cd78a675a770f0ea5ec533aa2058f0a3df33fa315afef548ef6"
 
 [[clause]]
 clause-id = "csttir.1"
@@ -5703,7 +5703,7 @@ source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
 start-line = 13
 end-line = 15
 canonical-text = "An action that has an authoritative, explicit way to name what it acts on, its identity, its target,\nor its scope, binds to that explicit name rather than inheriting the binding from ambient context\nthat can silently point elsewhere."
-source-digest = "14134dbfa109e0d6906aa03d28c7e6d6aebbe2495d31f73efc9465b264cb6130"
+source-digest = "ea90e50c2d9e9fbe22f4f57aa47fc016432db9c5eff570aa21fb1f05bf5ce6cf"
 
 [[clause]]
 clause-id = "expbnd.2"
@@ -5712,7 +5712,7 @@ source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
 start-line = 21
 end-line = 25
 canonical-text = "An asynchronous result is correlated to the dispatch that\nproduced it only through the authoritative identifier that dispatch returns, a handle, a path, or an\nid, never by wall-clock proximity or arrival order, because two dispatches can complete out of order\nor at the same instant and ambient timing cannot tell them apart; a result with no identifier is\nsurfaced as unbound, never assigned to the nearest or most recent dispatch."
-source-digest = "14134dbfa109e0d6906aa03d28c7e6d6aebbe2495d31f73efc9465b264cb6130"
+source-digest = "ea90e50c2d9e9fbe22f4f57aa47fc016432db9c5eff570aa21fb1f05bf5ce6cf"
 
 [[clause]]
 clause-id = "expbnd.3"
@@ -5721,7 +5721,7 @@ source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
 start-line = 25
 end-line = 31
 canonical-text = "A command with side\neffects prefers to name its target on the command that performs the mutation, a repository or\nworking tree bound by an on-command flag rather than left to the current working directory. Where\nthe same command also shifts that target, a directory change chained ahead of the mutation or a\nwrapper that redirects the tool, the ambient binding is no longer the target named at the point of\nuse, so the explicit on-command binding is required there because the mutation would otherwise read\nits target from wherever the shell landed."
-source-digest = "14134dbfa109e0d6906aa03d28c7e6d6aebbe2495d31f73efc9465b264cb6130"
+source-digest = "ea90e50c2d9e9fbe22f4f57aa47fc016432db9c5eff570aa21fb1f05bf5ce6cf"
 
 [[clause]]
 clause-id = "expbnd.4"
@@ -5730,7 +5730,7 @@ source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
 start-line = 33
 end-line = 38
 canonical-text = "A destructive\nor broad operation takes its scope from the specific thing under change, an enumerated set of paths,\nrather than from ambient whole-tree state; a breadth selector that stages, commits, or discards\nwhatever the tree currently holds can sweep in unrelated work, and where committed state is needed\nfor a fixture or test, an isolated checkout provides it rather than reshaping the shared working\ntree in place."
-source-digest = "14134dbfa109e0d6906aa03d28c7e6d6aebbe2495d31f73efc9465b264cb6130"
+source-digest = "ea90e50c2d9e9fbe22f4f57aa47fc016432db9c5eff570aa21fb1f05bf5ce6cf"
 
 [[clause]]
 clause-id = "expbnd.5"
@@ -5739,16 +5739,16 @@ source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
 start-line = 17
 end-line = 19
 canonical-text = "Where an explicit binding is available\nand unused, the action is bound to it; where only an ambient binding exists, the execution target is\nconfirmed by observation before the action runs, per the confirm-execution-target discipline."
-source-digest = "14134dbfa109e0d6906aa03d28c7e6d6aebbe2495d31f73efc9465b264cb6130"
+source-digest = "ea90e50c2d9e9fbe22f4f57aa47fc016432db9c5eff570aa21fb1f05bf5ce6cf"
 
 [[clause]]
 clause-id = "expbnd.6"
 corpus-id = "expbnd"
 source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
 start-line = 38
-end-line = 41
-canonical-text = "At its start, a relied-on check binds each repository it reads other than the tree\nit checks (a sibling or reference checkout) to an identified immutable snapshot, or holds a lock\nevery writer of it must take for those reads, and otherwise refuses, naming it; comparing HEAD at\nstart and end is only an early diagnostic."
-source-digest = "14134dbfa109e0d6906aa03d28c7e6d6aebbe2495d31f73efc9465b264cb6130"
+end-line = 43
+canonical-text = "At its start, a relied-on check, one whose result gates a merge, release, or\ncompletion claim, binds each sibling or reference checkout it reads, any repository but the tree it\nchecks, to an identified immutable snapshot, or holds a lock the checkout's writers cannot bypass\nfor the duration of those reads, and otherwise refuses, naming that checkout, even where the\nconfirm-by-observation fallback above would otherwise apply; comparing HEAD at start and end is only\na diagnostic, not a binding."
+source-digest = "ea90e50c2d9e9fbe22f4f57aa47fc016432db9c5eff570aa21fb1f05bf5ce6cf"
 
 [[clause]]
 clause-id = "rvwpin.1"
