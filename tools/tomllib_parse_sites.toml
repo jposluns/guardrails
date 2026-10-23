@@ -887,6 +887,14 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
+function = "flip_t91.absent_if_malformed"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
 function = "model"
 form = "call"
 count = 1
