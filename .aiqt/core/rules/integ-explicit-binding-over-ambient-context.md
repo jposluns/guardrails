@@ -35,10 +35,10 @@ or broad operation takes its scope from the specific thing under change, an enum
 rather than from ambient whole-tree state; a breadth selector that stages, commits, or discards
 whatever the tree currently holds can sweep in unrelated work, and where committed state is needed
 for a fixture or test, an isolated checkout provides it rather than reshaping the shared working
-tree in place. At its start, a check binds each repository dependency it reads to an identified
-immutable snapshot, or holds a lock that every writer honours for the duration of the dependent
-reads, and otherwise refuses, naming the dependency; comparing HEAD at its start and end is only an
-early diagnostic.
+tree in place. At its start, a relied-on check binds each repository it reads other than the tree
+it checks (a sibling or reference checkout) to an identified immutable snapshot, or holds a lock
+every writer of it must take for those reads, and otherwise refuses, naming it; comparing HEAD at
+start and end is only an early diagnostic.
 
 The preference is to remove the ambient dependency, as an explicit binding does, not merely to check
 it: a confirmed ambient binding is correct only until the surrounding state next shifts.

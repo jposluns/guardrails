@@ -319,7 +319,7 @@ reason = "Scope note bounding dfdpth.1; no obligation of its own."
 
 [[exempt]]
 corpus-id = "dfdpth"
-text = "A layer that over-fires is not cheap: its false alarms train its own bypass and erode trust\nin the controls around it, so it is not the low-cost overlap this prefers, and this rule does not warrant\nadding one."
+text = "A layer that over-fires is not cheap: its false alarms train its own bypass and erode trust\nin the controls around it, so it is not the low-cost overlap this prefers, and this rule does not warrant\nsuch a layer."
 reason = "Scope note: an over-firing layer is outside what dfdpth.1 recommends; no obligation of its own."
 
 [[exempt]]

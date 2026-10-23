@@ -24,4 +24,4 @@ The preference never mandates gold-plating. Where a layer's marginal cost is con
 rather than assumed, and omitting an expensive layer on a weighed, recorded judgement is sound, not a
 violation. A layer that over-fires is not cheap: its false alarms train its own bypass and erode trust
 in the controls around it, so it is not the low-cost overlap this prefers, and this rule does not warrant
-adding one.
+such a layer.
