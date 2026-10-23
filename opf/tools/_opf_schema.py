@@ -43,7 +43,8 @@ Five things live here, all from OPF-SPEC.md section 8 (with the release triad's 
   5. THE IMPORTED ENVELOPE (spec 8.3). validate_imported_record is a pure validator for one imported
      record: the closed imported envelope (an `imported:<NS>-<n>` id, no `/proposed`, an importer actor
      with an id), the closed `import` provenance table, and the `unrecorded` missingness contract (exactly
-     one closed-reason row per omitted non-exempt field). It is not yet wired into the doctor.
+     one closed-reason row per omitted non-exempt field). The doctor wires it in as C-IMPORTED-SCHEMA,
+     one validation per imported leaf row.
 
 Every malformed, unknown, illegal, or unidentifiable input fails closed to an INVALID or CANNOT-EVALUATE
 outcome, never a silent VALID (spec 3 "Fail closed"; the check-fails-closed-on-unreadable rule: a
