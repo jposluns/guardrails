@@ -296,7 +296,7 @@ _CONTRACT = {
         _D('Public brand: OPFiles (opfiles.ai).'),
         _D('Base discovery token: opf.'),
         _D('Status: draft (specification only; schemas and the reference tooling, the scaffolder opf init, the adopter opf adopt, the post-adoption importer opf import, the validator opf doctor, the renderer opf render, the relocator opf migrate, the synchronizer opf sync, the schema-upgrader opf upgrade, the absorber opf absorb, and the record author opf record, ship in later releases).'),
-        _D('Date: 2026-10-05 (UTC).'),
+        _D('Date: 2026-10-23 (UTC).'),
         _D('OPFiles is a neutral, self-contained operational-files standard published under the Apache License 2.0 (except vendored third-party material, which remains under its own terms).'),
         _D('AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand, not a legal entity, and the standard is authored and maintained by its lead maintainer.'),
         _D('A project conforms to OPFiles with this specification and its own checks; the AIQT Guardrails pack is the reference enforcement suite and a consumer of the standard, not its definition.'),

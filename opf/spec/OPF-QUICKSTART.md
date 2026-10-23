@@ -1,6 +1,6 @@
 # OPFiles at a glance
 
-Date: 2026-10-03 (UTC). The two-minute version of the OPFiles standard; the full specification
+Date: 2026-10-23 (UTC). The two-minute version of the OPFiles standard; the full specification
 lives in OPF-SPEC.md beside this file.
 
 ## What it is

@@ -8,7 +8,7 @@ the relocator `opf migrate`, the
 synchronizer `opf sync`, the schema-upgrader `opf upgrade`, the absorber `opf absorb`, and the
 record author `opf record`,
 ship in later releases).
-Date: 2026-10-05 (UTC).
+Date: 2026-10-23 (UTC).
 
 OPFiles is a neutral, self-contained operational-files standard published under the Apache
 License 2.0 (except vendored third-party material, which remains under its own terms). AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand,
