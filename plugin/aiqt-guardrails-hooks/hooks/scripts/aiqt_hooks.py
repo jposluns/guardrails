@@ -589,7 +589,9 @@ class _NestStack(list):
 
     def __init__(self):
         super().__init__()
-        self._open = collections.Counter()
+        # Each entry kind starts at zero, so a test for one never opened (the common "`" in nest) is a plain
+        # dictionary read, not a call to Counter.__missing__.
+        self._open = collections.Counter(dict.fromkeys(("(", "${", "`"), 0))
 
     def append(self, item):
         super().append(item)
@@ -607,7 +609,8 @@ class _NestStack(list):
 
     def clear(self):
         super().clear()
-        self._open.clear()
+        for item in self._open:
+            self._open[item] = 0
 
     def __contains__(self, item):
         return self._open[item] > 0
@@ -1165,8 +1168,11 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
     started = False
     all_digits = True
     leading_tilde = False
-    after_dollar = False  # the previous character was an unquoted, unescaped '$' (a following '{' opens '${')
-    after_backquote = False  # the previous character was an unquoted backquote that may open a substitution
+    # The index just past the last unquoted, unescaped '$' (a '{' read there opens '${') and just past the last
+    # backquote that may open a substitution (a '#' read there is cannot-evaluate). Recording where each ends,
+    # set only on those characters, leaves every other character free of this bookkeeping (COST above).
+    dollar_end = -1
+    backquote_end = -1
     # tilde_prefix_open: True while we are still INSIDE the tilde-prefix (from a leading unquoted '~' up to
     # the first UNQUOTED '/', or end of word). Bash expands the leading '~' ONLY when the WHOLE tilde-prefix
     # is unquoted and unescaped; any quoted or escaped character in that span disables expansion and the word
@@ -1182,27 +1188,32 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             # A backslash-newline is a LINE CONTINUATION: it is removed entirely and does NOT start or
             # contribute to a word, so 'git \<newline> commit' is [git, commit], never [git, "", commit]
             # (a synthetic empty argv element that mis-set the subcommand and defeated the sibling guards).
+            # It joins a '$' or backquote before it to the character after it.
+            if dollar_end == i:
+                dollar_end = i + 2
+            if backquote_end == i:
+                backquote_end = i + 2
             i += 2
             continue
-        if c == "#" and not started and (hash_reading is None or hash_reading is _MAIN_HASH_READING
-                                         or hash_reading.get(i) is not False):
-            # A '#' still at a WORD BOUNDARY (the word has not begun), a boundary EXPOSED by a preceding
-            # continuation join ('git diff \<newline># > out.txt'): break so the caller applies the comment
-            # rule there (it knows what preceded the continuation) rather than reading '#' as a literal word
-            # (which would tokenize a commented-out redirect/pipe and earn a false proof). An uncertain '#'
-            # the caller's reading takes as word text is read on as this word's first character.
-            break
-        if c == "#" and after_backquote and hash_reading is not _MAIN_HASH_READING:
-            # Right after a backquote the '#' may begin the text of a backquote substitution, a comment to
-            # bash that ends at the closing backquote, or follow a closing one as word text: neither reading
-            # models that comment, so it is cannot-evaluate whatever the reading (the comment rule). Main's
-            # lexer read it as word text, as _MAIN_HASH_READING does.
-            raise _UncertainHashError("cannot evaluate a '#' right after a backquote", i, True)
+        if c == "#":
+            if not started and (hash_reading is None or hash_reading is _MAIN_HASH_READING
+                                or hash_reading.get(i) is not False):
+                # A '#' still at a WORD BOUNDARY (the word has not begun), a boundary EXPOSED by a preceding
+                # continuation join ('git diff \<newline># > out.txt'): break so the caller applies the comment
+                # rule there (it knows what preceded the continuation) rather than reading '#' as a literal
+                # word (which would tokenize a commented-out redirect/pipe and earn a false proof). An
+                # uncertain '#' the caller's reading takes as word text is read on as this word's first
+                # character.
+                break
+            if backquote_end == i and hash_reading is not _MAIN_HASH_READING:
+                # Right after a backquote the '#' may begin the text of a backquote substitution, a comment to
+                # bash that ends at the closing backquote, or follow a closing one as word text: neither
+                # reading models that comment, so it is cannot-evaluate whatever the reading (the comment
+                # rule). Main's lexer read it as word text, as _MAIN_HASH_READING does.
+                raise _UncertainHashError("cannot evaluate a '#' right after a backquote", i, True)
         # Any other mid-word '#' (ticket#123, a continuation-joined di\<newline>ff#x) is left literal below.
         was_started = started or glued  # whether the word had begun BEFORE this char (a leading tilde needs False)
         started = True
-        dollar_before, after_dollar = after_dollar, False  # only an ordinary '$' (below) sets it again
-        after_backquote = c == "`"  # the escape branch below sets it for an escaped backquote
         if locale and c == "$" and i + 1 < n and command[i + 1] == '"':
             # bash locale quoting $"...": the text is looked up in the current locale's message catalogue
             # and, when no translation applies, the '$' is dropped and the rest is a double-quoted string, read
@@ -1300,7 +1311,8 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             # An escaped backquote is plain word text that opens nothing while no backquote substitution is
             # open (bash prints `# for echo \`#); inside one it opens a nested one, so a '#' right after it
             # stays cannot-evaluate there (and wherever the caller keeps no nesting stack).
-            after_backquote = command[i + 1] == "`" and (nest is None or "`" in nest)
+            if command[i + 1] == "`" and (nest is None or "`" in nest):
+                backquote_end = i + 2
             all_digits = False
             i += 2
             continue
@@ -1320,11 +1332,15 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             # an UNQUOTED '/' ends the tilde-prefix cleanly: the leading '~' stays an expansion, and anything
             # after this '/' (an opaque '$VAR', a quote) no longer blocks it. 'cd ~/$VAR' remains an ALLOW.
             tilde_prefix_open = False
-        if c == "`" and heredoc is not None:
-            heredoc.substitution()
-        if nest is not None:
-            _nest_track(nest, c, dollar_before)
-        after_dollar = c == "$"
+        if c in "{}`":  # of the characters _nest_track records, '(' and ')' end the word above
+            if c == "`":
+                backquote_end = i + 1
+                if heredoc is not None:
+                    heredoc.substitution()
+            if nest is not None:
+                _nest_track(nest, c, dollar_end == i)
+        elif c == "$":
+            dollar_end = i + 1
         if not c.isdigit():
             all_digits = False
         chars.append(c)
@@ -15939,13 +15955,15 @@ def _orch_raw_unquoted_scan(raw, reading):
     return words
 
 
-def _orch_body_cmd(seg):
+def _orch_body_cmd(seg, raw_words):
     """(word, unquoted) for a loop segment's effective command word: basenamed, with a single leading loop
     reserved word (do/for/while/until) stripped as _orch_poll_body_argv does and a leading env-assignment
     prefix skipped, paired with whether that command-word TOKEN was written UNQUOTED in the raw source.
     Soundness of the sleep/probe conjuncts rests on this being the command WORD (an argument that merely
     spells 'sleep'/'gh' is not the command word, so it never fabricates a match); the raw-unquoted gate only
-    tightens it further. ('', False) when the segment resolves to no command word."""
+    tightens it further. ('', False) when the segment resolves to no command word. raw_words is
+    _orch_raw_unquoted_words(seg.raw), which the caller has already scanned, so the segment is not scanned
+    again for each conjunct."""
     argv = _orch_poll_body_argv(seg.argv)
     if not argv:
         return "", False
@@ -15953,7 +15971,7 @@ def _orch_body_cmd(seg):
     if idx >= len(argv):
         return "", False
     token = argv[idx]
-    return token.rsplit("/", 1)[-1], token in _orch_raw_unquoted_words(seg.raw)
+    return token.rsplit("/", 1)[-1], token in raw_words
 
 
 def _orch_poll_loop_at(segments, done_idx):
@@ -15986,13 +16004,13 @@ def _orch_poll_loop_at(segments, done_idx):
             return "indeterminate"          # a conditional reserved word or brace group in the loop span
     has_sleep = False
     for k in range(do_idx, done_idx + 1):
-        word, unq = _orch_body_cmd(segments[k])
+        word, unq = _orch_body_cmd(segments[k], words_by_seg[k])
         if word == "sleep" and unq:
             has_sleep = True
             break
     has_probe = False
     for k in range(header_idx, done_idx + 1):
-        word, unq = _orch_body_cmd(segments[k])
+        word, unq = _orch_body_cmd(segments[k], words_by_seg[k])
         if word in _ORCH_POLL_PROBE_CMDS and unq:
             has_probe = True
             break
