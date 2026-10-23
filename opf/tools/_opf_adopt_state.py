@@ -1743,14 +1743,14 @@ def _self_test_checks():
         # original store, retirement included.
         root = tree()
         original = contain(root)
-        shutil.rmtree(root / ".aiqt")
+        shutil.rmtree(root / store.JOURNALS_REL)
         cloned = contain(root)
         check("clone-without-journal-grades-identically", original.findings == [] and original.cannot == []
               and (cloned.findings, cloned.cannot, cloned.triage, cloned.migration_incomplete)
               == (original.findings, original.cannot, original.triage, original.migration_incomplete))
         root = tree()
         retire(root, rid)
-        shutil.rmtree(root / ".aiqt")
+        shutil.rmtree(root / store.JOURNALS_REL)
         rep = contain(root)
         check("clone-retirement-recorded-from-evidence", rep.cannot == [] and bounded(rep) == [mig])
 
@@ -1821,7 +1821,7 @@ def _self_test_checks():
         # requires the journal, pinned through validate_store itself, not only contain().
         clone_result = None
         if ok and result is not None:
-            shutil.rmtree(e2e / apply.JOURNAL_REL.split("/")[0])
+            shutil.rmtree(e2e / store.JOURNALS_REL)
             if git_commit_all(e2e):
                 res = store.resolve_store(e2e)
                 if res.status == store.RESOLVED:

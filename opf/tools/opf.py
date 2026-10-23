@@ -21129,15 +21129,16 @@ def _cli_self_test():
                 if tree_snapshot(clean) != before:
                     failures.append("adopt status mutated the product root (status must be a pure read)")
 
-                # status over adoption-journal DEBRIS -> 1 (an interrupted transaction is a finding), and
-                # the tree byte-unchanged (status reports, never reconciles).
+                # status over adoption-journal DEBRIS -> 1 (an interrupted transaction is a finding naming
+                # the journal's own home), and the tree byte-unchanged (status reports, never reconciles).
                 before = tree_snapshot(debris)
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                     rc = main(["adopt", "status", "--root", debris])
-                if rc != EXIT_FINDING or "interrupted transaction(s) txn" not in buf.getvalue():
+                if rc != EXIT_FINDING or "adoption journal at {} holds interrupted transaction(s) txn".format(
+                        adopt_j_rel) not in buf.getvalue():
                     failures.append("adopt status over journal debris: rc={!r} (expected 1 + the journal "
-                                    "finding)".format(rc))
+                                    "finding naming {})".format(rc, adopt_j_rel))
                 if tree_snapshot(debris) != before:
                     failures.append("adopt status (journal debris) mutated the product root")
 
@@ -21296,7 +21297,8 @@ def _cli_self_test():
                 race_results = []
                 try:
                     for label, product_pid, decoy_pid, want, needle in (
-                            ("held product lock, empty decoy", 1111, None, EXIT_FINDING, "(pid 1111)"),
+                            ("held product lock, empty decoy", 1111, None, EXIT_FINDING,
+                             "lock at {} is held (pid 1111)".format(adopt_j_rel)),
                             ("no product lock, decoy lock", None, 4242, EXIT_OK, "no adoption run exists")):
                         root = fresh_root("race-{}".format(len(race_results)))
                         decoy = os.path.join(abase, "decoy-{}".format(len(race_results)))
@@ -21806,7 +21808,8 @@ def _cli_self_test():
                     if rc != EXIT_MALFORMED or "does not bind" not in err:
                         failures.append("adopt apply with an approval for another plan: rc={!r} (expected 2 + "
                                         "the binding refusal; {})".format(rc, err.strip()))
-                    if tree_snapshot(adoptee) != before or os.path.exists(os.path.join(adoptee, ".aiqt")):
+                    if tree_snapshot(adoptee) != before \
+                            or os.path.exists(os.path.join(adoptee, _opf_store.WORKING_DIRNAME)):
                         failures.append("adopt approve/apply mutated the stage fixture (each must write nothing "
                                         "in this build)")
                     with open(os.path.join(adoptee, "legacy.md"), "w", encoding="utf-8") as fh:

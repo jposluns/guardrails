@@ -2963,12 +2963,16 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     archive_root = cls.archive_root
     imports_root = cls.imports_root
     staging_root = _opf_store.STAGING_REL
-    # A legacy store keeps its legacy grading: staging/, journals/, imported/ and archive/ are ordinary
-    # paths there, graded as unregistered like any other. Homes 2 registers them (spec 4.2).
+    # A legacy store keeps its legacy grading: staging/, imported/ and archive/ are ordinary paths
+    # there, graded as unregistered like any other. Homes 2 registers them (spec 4.2). The reserved
+    # journals child is excluded in EVERY generation: spec 14.2's reservation carries no homes
+    # qualifier, containment and doctor exclude journals and make no recovery claim (spec 4.2), and
+    # the adoption journal of a coupled first adoption lives there, under the engine's held lock,
+    # before any adoption evidence exists, so a rogue file there is outside this coverage.
     homes2 = cls.homes >= 2
     staged_roots = (imports_root, staging_root) if homes2 else (imports_root,)
     kind_roots = tuple(staging_root + "/" + k for k in _opf_store.STAGING_KINDS) if homes2 else ()
-    skipped_roots = cls.evidence_roots + ((_opf_store.JOURNALS_REL,) if homes2 else ())
+    skipped_roots = cls.evidence_roots + (_opf_store.JOURNALS_REL,)
     # Homes-1 adoption control area and bounded adoption state (spec 4.2, 11, 14.2, 17), read by the read-only
     # _opf_adopt_state reader. Without the adoption home it is NOT_ADOPTING after one lstat and every line
     # below grades exactly as before. Homes 2 registers its evidence roots wholesale above.
