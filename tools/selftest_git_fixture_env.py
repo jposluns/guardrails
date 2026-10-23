@@ -496,6 +496,15 @@ CONFIG_EXCLUSIONS = {
             "A bare launch is a real timing measurement of the shipped hooks, not a self-test:"
             " minutes at its defaults, and the hooks' own git calls drop GIT_CONFIG_NOSYSTEM by"
             " design; its self-test stays in this roster as the hook-latency-selftest suite step.",
+        ("tools/check_internal_names.py",):
+            "A bare launch is the real gate over this checkout, whose tracked-file read drops the"
+            " GIT_* environment but deliberately keeps the caller's on-disk configuration (where"
+            " safe.directory trust for the checkout lives), so a poisoned caller home fails it"
+            " closed by design; its self-test stays in this roster twice: as the"
+            " internal-names-selftest suite step, whose launcher sanitizes the child environment,"
+            " and as the direct self-test launch CONFIG_DIRECT_SELFTESTS keeps, so each poisoned"
+            " lane still enters that self-test's own entry point without any launcher sanitizing"
+            " the environment first.",
     },
     "archive": {
         ("tools/check_release_build.py", "--self-test"):
@@ -509,6 +518,16 @@ CONFIG_EXCLUSIONS = {
         ("tools/check_release_delta.py", "--self-test"):
             "Real-checkout archives intentionally retain caller trust configuration.",
     },
+}
+
+# A registered suite step whose BARE runner is excluded above would otherwise leave the runner's own
+# self-test entry point outside these lanes entirely: the execution gate deliberately sanitizes its
+# child environment, so the suite step never exposes that entry point to a poisoned caller. Each entry
+# here names the direct self-test launch the roster keeps for such a suite (keyed by suite id), so the
+# poisoned lanes still run the entry point itself, which must isolate its own git reads; a stale entry
+# (its suite no longer in any roster, or its launch missing from the built roster) refuses the roster.
+CONFIG_DIRECT_SELFTESTS = {
+    "internal-names-selftest": ("tools/check_internal_names.py", "--self-test"),
 }
 
 
@@ -534,7 +553,10 @@ def _registered_selftests(root=ROOT):
     --self-test, --selftest or --suite flag, not fixture-building behaviour.
     Other entry modes, unregistered entries and conditional reachability are outside
     this inventory. Manifest runners also run directly, because the
-    execution gate deliberately sanitizes its child environment.
+    execution gate deliberately sanitizes its child environment; a suite
+    whose bare runner is excluded keeps the direct self-test launch its
+    CONFIG_DIRECT_SELFTESTS entry names instead, so the lanes still enter
+    that runner's own self-test entry point under the poison.
     """
     from check_ci_parity import (
         adapt_standalone_runner, extract_local, extract_ci,
@@ -603,6 +625,12 @@ def _registered_selftests(root=ROOT):
                 raise ValueError("unparseable suite invocation: {!r}".format(argv))
             if identity not in CONFIG_EXCLUSIONS["all"]:
                 commands.add((runners[argv[2]],))
+                direct = CONFIG_DIRECT_SELFTESTS.get(argv[2])
+                if direct is not None:
+                    commands.add(direct)
+    for suite_id, direct in CONFIG_DIRECT_SELFTESTS.items():
+        if suite_id not in runners or direct not in commands:
+            raise ValueError("stale direct self-test entry: {!r}".format(suite_id))
     identities = {_command_identity(argv) for argv in commands}
     for lane, exclusions in CONFIG_EXCLUSIONS.items():
         for argv, reason in exclusions.items():

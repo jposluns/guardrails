@@ -41,6 +41,57 @@ its suffix is one of the leak gate's TEXT_SUFFIXES or it has no suffix, so a fil
 directory, an unreadable file and a non-regular file (a FIFO) each fail closed with exit 2; a file that
 vanishes between the walk and the read is a fail-closed finding, as in the scoped layer.
 
+SHIPPED TRACKER-LABEL LAYER, per-file ratchet (scan_shipped_tracker_labels). Four generic label SHAPES
+(a tracker fix id, a review-round word next to a digit, a QA-round token, and a reviewer family named as
+a review source) are counted per shipped file: every [[sources]] path of the working-tree
+.aiqt/manifest.toml plus every tracked file under .github/ and opf/. The hand-delivered ratchet baseline
+.aiqt/tracker-label-baseline.toml records, per shipped path that still carries hits, the hit COUNT per
+shape (counts and paths only, never label text); a path absent from the baseline has zero. A count ABOVE
+its baseline is a finding naming the path, the shape and each matching line (exit 1: no new label can
+enter without a deliberate baseline edit), and a count BELOW its baseline is a finding telling the
+maintainer to lower the baseline to the new count, so the baseline stays exact in both directions and
+moves only through regeneration. `--write-baseline` prints the canonical baseline from a real scan; the
+delivered file is that exact output, regenerated in the same reviewed change whenever an edit
+legitimately moves a count: it is lowered as later per-area changes remove labels, and REVIEW POLICY,
+stated here but NOT enforced by this gate, allows a raise only when a refresh merges upstream files
+that already carry labels (the shipped set follows the release inventory, so growth merged from
+upstream lands here as count increases); either movement is counts and paths only, visible whole in
+the regenerated file's diff, and a label added without a regeneration fails. The gate itself cannot
+tell merged growth from growth the same change adds: it accepts a regenerated baseline at whatever
+counts a real scan yields, so holding a raise to refreshes is the reviewer's recount of the
+regenerated file's diff against the merge parent, never a comparison this gate makes.
+The gate ENFORCES the exactness: a baseline that is not the byte-exact canonical
+render of its own entries is refused, so no TOML comment, alternate integer spelling, reordering or other
+text the parser would drop can ride in the one file this layer skips by name. This layer honours no
+internal-allow marker and no other skip-by-name (the gate's own
+source is scanned like any other shipped file; its self-test vectors are assembled at run time); the
+path-only allowlists TRACKER_LABEL_FROZEN (relpath plus sha256 pairs, exempt only while the file's RAW
+BYTES still hash to the record) and TRACKER_LABEL_HISTORY both ship EMPTY. FAIL CLOSED (exit 2): a
+missing or unparseable manifest, a manifest with no [[sources]] array, a listed path that is absent or
+not a regular file (checked before any suffix or decode decision, so an excluded suffix never hides a
+missing path; the baseline file itself is the one exception, skipped by name BEFORE that presence
+check, and when absent it is the empty baseline, so every remaining hit then exceeds zero and fails
+loud rather than silently), a text-suffix shipped file that
+is not valid UTF-8, and a malformed, non-canonical, duplicate, unknown or non-shipped baseline entry.
+Every present shipped file is read; one whose suffix is outside the leak gate's text-suffix list is
+skipped only when its bytes do not decode as UTF-8 (the committed .zip archives), the role rule's
+existing decode-then-skip rule, so a decodable file is scanned whatever its suffix; the one by-name skip
+is the baseline file itself (its shape-key-next-to-count lines would
+match the review-round pattern by construction; its closed schema plus the canonical-render byte check
+above is what holds its content instead). DISCLOSED LIMITS of this layer: a label moved between shapes or between lines
+within the same per-file count is not caught; the baseline is trusted input like any configuration file;
+a regeneration admits any raise, including one the same change adds (mixed changes included, where an
+added label is folded into the same count increase), so telling merged growth from added growth needs a
+recount against the merge parent in review;
+a label shape outside the four patterns (a bare one-letter revision token, a lower-case fix word with a
+number, a model id used as a source, a family name for the product it names outside the parenthesized
+family-then-version-digit form below, a split or encoded label) is not matched; prose that legitimately
+puts a review-round word next to a digit (any letter case), an upper-case FIX word next to a number, a QA
+word glued to a number, a reviewer family name next to a severity word, or a parenthesized family name
+directly before a version digit (ordinary product-version prose included) is a false
+positive this shape layer cannot avoid, absorbed by its path's baseline entry rather than exempted by
+line; and archive contents are not unpacked.
+
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
 by omission. Mixed-content metadata files that legitimately carry existing provenance tokens (for example
@@ -104,6 +155,7 @@ import os
 import re
 import stat
 import subprocess
+import tomllib
 from pathlib import Path
 
 # Import the sibling modules WITHOUT placing this script's own directory AHEAD of the stdlib on sys.path.
@@ -165,6 +217,270 @@ STRUCTURAL = list(check_leaks.STRUCTURAL) + _PROVENANCE + _ROLE_NAMES
 # the D).
 DECISION_ID = (re.compile(r'\bD-(?:[0-9]+|[A-Z][A-Z0-9]+)(?:-[A-Z0-9]+)+\b'), "internal maintainer-decision id")
 
+# --- shipped tracker-label layer (per-file ratchet) ---------------------------------------------------
+# The four internal tracker-label SHAPES counted over every shipped file (the manifest [[sources]] paths
+# plus the tracked files under .github/ and opf/). The patterns are generic shapes, never a live label:
+# no contiguous label text sits in this source (checked by this very layer, which scans this file too).
+_FAM = r"(?:codex|claude|gemini|fable|Codex|Claude|Gemini|Fable|CODEX|CLAUDE|GEMINI|FABLE)"
+_SEV = (r"(?:MINOR|MEDIUM|MED|MAJOR|HIGH|LOW|BLOCKER|CRITICAL|NIT|minor|medium|major|high|low|blocker"
+        r"|\[[HMLB]\]|findings?|QA)")
+TRACKER_LABELS = (
+    (re.compile(r"\bFIX[- ](?:[A-Z]?\d+|[A-Z])(?:-R\d+)?\b"), "internal tracker fix id"),
+    (re.compile(r"\brounds?\W{0,3}\d", re.IGNORECASE), "internal review-round label"),
+    (re.compile(r"\bQA-?\d+\b"), "internal QA-round label"),
+    (re.compile(r"\b" + _FAM + r"(?:'s)?(?: PR #\d+)?(?: (?:QA )?(?:round|r)[- ]?\d+)?,? " + _SEV + r"(?![\w-])"
+                r"|\b(?:CLAUDE|CODEX|GEMINI|FABLE)-F\d+\b"
+                r"|\(" + _FAM + r" \d"
+                r"|\b" + _FAM + r" (?:QA )?round[- ]?\d"), "reviewer family named as a review source"),
+)
+# The baseline's per-shape count keys, positionally parallel to TRACKER_LABELS.
+TRACKER_SHAPE_KEYS = ("fix-id", "review-round", "qa-round", "reviewer-source")
+# Path-only exemptions, both EMPTY at this release. A frozen pair exempts its path only while the file's
+# bytes still hash to the recorded sha256 (a changed byte is scanned like any other file); a history
+# relpath exempts a history record that has to quote a label. There is no exemption by pattern and no
+# per-line marker for this layer.
+TRACKER_LABEL_FROZEN = ()   # (relpath, sha256) pairs
+TRACKER_LABEL_HISTORY = ()  # relpaths
+TRACKER_MANIFEST_RELPATH = ".aiqt/manifest.toml"
+TRACKER_BASELINE_RELPATH = ".aiqt/tracker-label-baseline.toml"
+
+
+def _tracker_hits(text, labels=None):
+    """Per-shape 1-based line numbers of every match in `text` (a line number repeats when one line
+    carries two matches of one shape, so counts are match counts). No internal-allow exemption: this
+    layer honours no line marker. `labels` lets the self-test show each pattern row is load-bearing."""
+    rows = TRACKER_LABELS if labels is None else labels
+    hits = {key: [] for key in TRACKER_SHAPE_KEYS}
+    for number, line in enumerate(text.splitlines(), 1):
+        for key, (pattern, _label) in zip(TRACKER_SHAPE_KEYS, rows):
+            hits[key] += [number for _ in pattern.finditer(line)]
+    return hits
+
+
+def _shipped_tracker_set(root, tracked):
+    """The sorted shipped set this layer scans: every [[sources]] path of the working-tree manifest plus
+    every tracked relpath under .github/ or opf/. A missing or unparseable manifest, a manifest with no
+    [[sources]] array at all (a misspelled table name must never read as an empty inventory), or a
+    malformed sources entry, raises OSError to the fail-closed caller (exit 2); the manifest is read at
+    run time, never baked in, so the scope follows the release inventory."""
+    manifest = _read_present_text(root / TRACKER_MANIFEST_RELPATH)
+    if manifest is None:
+        raise OSError("{} is missing; the shipped set cannot be read".format(TRACKER_MANIFEST_RELPATH))
+    try:
+        data = tomllib.loads(manifest)
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # TOMLDecodeError is a ValueError; tomllib can also raise a bare ValueError (an over-long
+        # integer), RecursionError (deep nesting) or MemoryError, each disposed of here fail-closed.
+        raise OSError("{} cannot be parsed ({!r})".format(TRACKER_MANIFEST_RELPATH, exc))
+    if "sources" not in data:
+        raise OSError("{} carries no [[sources]] array; the shipped set cannot be read".format(
+            TRACKER_MANIFEST_RELPATH))
+    sources = data["sources"]
+    if not isinstance(sources, list):
+        raise OSError("{}: [[sources]] is not an array".format(TRACKER_MANIFEST_RELPATH))
+    shipped = set()
+    for entry in sources:
+        rel = entry.get("path") if isinstance(entry, dict) else None
+        if (not isinstance(rel, str) or not rel or rel.startswith("/")
+                or ".." in rel.split("/") or "\\" in rel):
+            raise OSError("{}: a [[sources]] entry carries no usable relative path".format(
+                TRACKER_MANIFEST_RELPATH))
+        shipped.add(rel)
+    shipped.update(rel for rel in tracked if rel.startswith((".github/", "opf/")))
+    return sorted(shipped)
+
+
+def load_tracker_baseline(root, shipped):
+    """The ratchet baseline as {relpath: {shape key: count}}. An ABSENT baseline is an empty one (every
+    path then has zero); a PRESENT baseline is validated CLOSED: only format-version = 1 and [[path]]
+    entries, each entry a path plus at least one shape-count key from TRACKER_SHAPE_KEYS with an integer
+    count of one or more, and the whole file must be the BYTE-EXACT canonical render of those entries
+    (render_tracker_baseline over its own counts, the exact --write-baseline output), because the parser
+    drops a TOML comment and normalizes an alternate integer spelling, so the closed schema alone can
+    never see text riding in the one shipped file this layer skips by name. A malformed file, an unknown
+    key, a duplicate path, an entry for a path outside the shipped set, or a non-canonical byte raises
+    OSError to the fail-closed caller (exit 2), never a silent default."""
+    raw = _read_present_bytes(root / TRACKER_BASELINE_RELPATH)
+    if raw is None:
+        return {}
+
+    def refuse(reason):
+        raise OSError("{}: {}".format(TRACKER_BASELINE_RELPATH, reason))
+
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        refuse("not valid UTF-8 ({})".format(exc))
+    try:
+        data = tomllib.loads(content)
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # TOMLDecodeError is a ValueError; the other classes are tomllib's non-TOMLDecodeError
+        # refusals (a bare ValueError, deep nesting, memory), each disposed of here fail-closed.
+        raise OSError("{}: malformed TOML ({!r})".format(TRACKER_BASELINE_RELPATH, exc))
+    unknown = set(data) - {"format-version", "path"}
+    if unknown:
+        refuse("unknown top-level key {!r}".format(sorted(unknown)[0]))
+    version = data.get("format-version")
+    # The TYPE is pinned as well as the value: bool is an int subclass and a TOML float compares equal
+    # to its integer value, so true and 1.0 would otherwise both read as the integer 1.
+    if type(version) is not int or version != 1:
+        refuse("format-version must be the integer 1")
+    entries = data.get("path", [])
+    if not isinstance(entries, list):
+        refuse("[[path]] is not an array")
+    shipped_set = set(shipped)
+    baseline = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not entry["path"]:
+            refuse("a [[path]] entry carries no string path")
+        rel = entry["path"]
+        unknown = set(entry) - ({"path"} | set(TRACKER_SHAPE_KEYS))
+        if unknown:
+            refuse("entry {}: unknown key {!r}".format(rel, sorted(unknown)[0]))
+        if rel in baseline:
+            refuse("duplicate entry for {}".format(rel))
+        if rel not in shipped_set:
+            refuse("entry for {}, which is not a shipped path".format(rel))
+        row = {}
+        for key in TRACKER_SHAPE_KEYS:
+            if key in entry:
+                value = entry[key]
+                if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                    refuse("entry {}: {} must be an integer count of one or more (zero is the "
+                           "absent default; drop the key)".format(rel, key))
+                row[key] = value
+        if not row:
+            refuse("entry {} carries no shape count; drop the entry".format(rel))
+        baseline[rel] = row
+    canonical = render_tracker_baseline(
+        {rel: {key: range(count) for key, count in row.items()} for rel, row in baseline.items()})
+    if content != canonical:
+        refuse("not the byte-exact canonical render of its own entries; regenerate it with "
+               "--write-baseline (a comment, an alternate integer spelling or a reordering could "
+               "otherwise carry text this layer never scans)")
+    return baseline
+
+
+def _collect_tracker_counts(root, tracked, frozen, history):
+    """{relpath: per-shape line lists} over the shipped set. Every listed path but one must be PRESENT
+    and a REGULAR file before any suffix or decode decision: an absent or non-regular shipped path
+    raises OSError (fail closed, exit 2) whatever its suffix. The one exception is the baseline file
+    itself, skipped by name BEFORE that presence check: an absent baseline reads as all-zero in
+    load_tracker_baseline, so every remaining hit then exceeds zero and the gate fails loud, never a
+    silent pass of label-bearing files. A present file is read as raw bytes and decoded
+    as UTF-8; one whose suffix is outside TEXT_SUFFIXES is skipped only when its bytes do not decode
+    (the committed .zip archives), the role rule's existing decode-then-skip rule, so a decodable file
+    is scanned whatever its suffix, while a non-UTF-8 text-suffix shipped file raises to the same
+    fail-closed caller. A frozen-allowlisted path whose RAW on-disk bytes still hash to its recorded
+    sha256, and a history-allowlisted path, are skipped."""
+    import hashlib
+    frozen_map = dict(frozen)
+    counts = {}
+    for rel in _shipped_tracker_set(root, tracked):
+        if rel == TRACKER_BASELINE_RELPATH:
+            # The baseline itself is a shipped file whose shape-key-next-to-count lines would match the
+            # review-round pattern by construction, so scanning it can never settle. Its content is held
+            # instead by load_tracker_baseline's CLOSED schema plus its byte-exact canonical-render
+            # check (shipped paths and integer counts only, rendered exactly as --write-baseline prints
+            # them, so no comment or other label-bearing text can ride in it), the one by-name skip
+            # this layer carries.
+            continue
+        raw = _read_present_bytes(root / rel)
+        if raw is None:
+            raise OSError("shipped path {} is absent from the working tree; fail closed".format(rel))
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            suffix = Path(rel).suffix
+            if suffix and suffix not in TEXT_SUFFIXES:
+                continue
+            raise OSError("shipped path {} is not valid UTF-8 ({}); fail closed".format(rel, exc))
+        if rel in frozen_map and hashlib.sha256(raw).hexdigest() == frozen_map[rel]:
+            continue
+        if rel in history:
+            continue
+        counts[rel] = _tracker_hits(text)
+    return counts
+
+
+def _tracker_compare(counts, baseline):
+    """The ratchet findings: per (shipped path, shape), a match count above its baseline (zero when the
+    path has no entry) names the path, the shape and each matching line; a count below its baseline asks
+    for the baseline to be lowered to the new count, so the baseline stays exact in both directions and
+    moves only through a deliberate regeneration (--write-baseline).
+    A label moved between shapes or between lines within one per-file count is a disclosed non-finding."""
+    labels = dict(zip(TRACKER_SHAPE_KEYS, (label for _pattern, label in TRACKER_LABELS)))
+    findings = []
+    for rel in sorted(set(counts) | set(baseline)):
+        hits = counts.get(rel, {})
+        base = baseline.get(rel, {})
+        for key in TRACKER_SHAPE_KEYS:
+            lines = hits.get(key, [])
+            have = len(lines)
+            allowed = base.get(key, 0)
+            if have > allowed:
+                findings.append("{}: {} count {} exceeds its ratchet baseline {} ({}; lines {})".format(
+                    rel, key, have, allowed, labels[key],
+                    ", ".join(str(n) for n in sorted(set(lines)))))
+            elif have < allowed:
+                findings.append("{}: {} count {} is below its ratchet baseline {}; lower the baseline "
+                                "entry to {} so the ratchet stays exact".format(
+                                    rel, key, have, allowed, have))
+    return findings
+
+
+def scan_shipped_tracker_labels(root, tracked, frozen=None, history=None):
+    """The shipped tracker-label layer: count the four label shapes over the shipped set and hold every
+    per-file per-shape count exactly to the ratchet baseline. `tracked` is the tracked-file list run_gate
+    already read; `frozen` and `history` default to the shipped (empty) path-only allowlists and are
+    parameters so the self-test can show each exemption honoured and bounded."""
+    frozen = TRACKER_LABEL_FROZEN if frozen is None else frozen
+    history = TRACKER_LABEL_HISTORY if history is None else history
+    counts = _collect_tracker_counts(root, tracked, frozen, history)
+    baseline = load_tracker_baseline(root, _shipped_tracker_set(root, tracked))
+    return _tracker_compare(counts, baseline)
+
+
+def render_tracker_baseline(counts):
+    """The canonical baseline text for `counts`: a fixed header, then one [[path]] entry per path that
+    carries any hit, paths sorted, shape keys in TRACKER_SHAPE_KEYS order, zero counts omitted. The
+    delivered baseline file must be byte-identical to this render over a real scan."""
+    lines = [
+        "# Ratchet baseline for the shipped tracker-label layer of tools/check_internal_names.py.",
+        "# Generated by: python3 -I -B tools/check_internal_names.py --write-baseline",
+        "# One [[path]] entry per shipped path that still carries hits, with its per-shape match",
+        "# counts; paths and counts only, never label text. The gate refuses a count above an entry",
+        "# and asks for the entry to be lowered when a count falls below it, so it stays exact.",
+        "format-version = 1",
+    ]
+    for rel in sorted(counts):
+        if not any(counts[rel].get(key) for key in TRACKER_SHAPE_KEYS):
+            continue
+        if '"' in rel or "\\" in rel or not all(" " <= ch <= "~" for ch in rel):
+            raise OSError("shipped path {!r} cannot be rendered as a plain TOML string".format(rel))
+        lines.append("")
+        lines.append("[[path]]")
+        lines.append('path = "{}"'.format(rel))
+        for key in TRACKER_SHAPE_KEYS:
+            if counts[rel].get(key):
+                lines.append("{} = {}".format(key, len(counts[rel][key])))
+    return "\n".join(lines) + "\n"
+
+
+def write_baseline_main(root):
+    """`--write-baseline`: print the canonical ratchet baseline from a real scan of the shipped set
+    (exit 0), or fail closed (exit 2) on any input this layer cannot read."""
+    try:
+        counts = _collect_tracker_counts(root, tracked_files(root), TRACKER_LABEL_FROZEN,
+                                         TRACKER_LABEL_HISTORY)
+        rendered = render_tracker_baseline(counts)
+    except (OSError, UnicodeDecodeError) as exc:
+        print("error: cannot read a required input for --write-baseline ({}); fail-closed".format(exc),
+              file=sys.stderr)
+        return 2
+    sys.stdout.write(rendered)
+    return 0
+
 
 def _read_present_text(path):
     """Read `path` as UTF-8 text, failing closed on a present-but-unreadable input WITHOUT blocking. Presence
@@ -185,6 +501,24 @@ def _read_present_text(path):
     if not stat.S_ISREG(st.st_mode):
         raise OSError("{} is present but not a regular file; fail closed".format(path))
     return path.read_text(encoding="utf-8")
+
+
+def _read_present_bytes(path):
+    """_read_present_text's RAW-BYTE sibling for the tracker-label layer: the same presence
+    classification (S_ISREG before any open so a FIFO never blocks, a broken symlink re-raised
+    fail-closed, a genuinely absent path None), returning the file's bytes undecoded. The tracker
+    layer hashes and decodes these same bytes itself: read_text's universal-newline translation would
+    otherwise hash a normalized form that never existed on disk, letting a digest of that form exempt
+    a file whose on-disk bytes differ."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        if path.is_symlink():
+            raise
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        raise OSError("{} is present but not a regular file; fail closed".format(path))
+    return path.read_bytes()
 
 
 def load_hashes(root):
@@ -386,18 +720,20 @@ def run_gate(root):
         hashes, maxn, findings = load_hashes(root)
         findings = list(findings)
         findings += scan_scope(root, SCOPE_RELPATHS, hashes, maxn)
-        role_findings, unevaluable = scan_tracked_roles(root, tracked_files(root))
+        tracked = tracked_files(root)
+        role_findings, unevaluable = scan_tracked_roles(root, tracked)
         findings += role_findings
         findings += scan_tree_decision_ids(root)
+        findings += scan_shipped_tracker_labels(root, tracked)
     except (OSError, UnicodeDecodeError) as exc:
-        print("error: cannot read a required input (denylist, scoped surface, tracked file or tree) ({}); "
-              "fail-closed".format(exc), file=sys.stderr)
+        print("error: cannot read a required input (denylist, scoped surface, tracked file, tree, "
+              "shipped manifest or tracker-label baseline) ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
     # A role-name hit inside a tracked scoped file is reported by both scans in the same form; report it once.
     findings = sorted(set(findings))
     if findings:
-        print("FAIL: {} internal-name leak(s) in the scanned surfaces or decision id(s) in the tree".format(
-            len(findings)))
+        print("FAIL: {} finding(s): internal-name leak(s) in the scanned surfaces, decision id(s) in the "
+              "tree, or tracker-label count(s) off the shipped ratchet baseline".format(len(findings)))
         for finding in findings:
             print("  " + finding)
     if unevaluable:
@@ -409,22 +745,40 @@ def run_gate(root):
     if findings:
         return 1
     print("PASS: no internal provenance vocabulary in the scanned QA-suite surfaces, no internal role "
-          "name in any tracked file, and no maintainer-decision id in the tree")
+          "name in any tracked file, no maintainer-decision id in the tree, and every shipped "
+          "tracker-label count equal to its ratchet baseline")
     return 0
 
 
 def main():
     root = Path(__file__).resolve().parents[1]
     argv = sys.argv[1:]
-    # UNKNOWN-OPTION REJECTION precedes the --self-test dispatch: this gate accepts only --self-test (or no
-    # args for a real scan), so any other token (a misspelled --self-testx, a stray flag) is a LOUD exit 2,
-    # never a silent fall-through to the default scan path that would exit without running the self-test the
-    # caller asked for (which would let --self-testx masquerade as --self-test in CI parity).
+    # The execution gate appends `--execution-report ABS_PATH` to the self-test launch; accepted only in
+    # that trailing two-token form, with an absolute path, alone or after --self-test (it implies the
+    # self-test, as in the sibling registered runners).
+    report_path = None
+    if len(argv) >= 2 and argv[-2] == "--execution-report" and os.path.isabs(argv[-1]) \
+            and argv[:-2] in ([], ["--self-test"]):
+        report_path, argv = argv[-1], ["--self-test"]
+    # UNKNOWN-OPTION REJECTION precedes the dispatch: this gate accepts only --self-test, --write-baseline
+    # alone, the --execution-report form above, or no args for a real scan, so any other token (a
+    # misspelled --self-testx, a stray flag) is a LOUD exit 2, never a silent fall-through to the default
+    # scan path that would exit without running the self-test the caller asked for (which would let
+    # --self-testx masquerade as --self-test in CI parity).
+    if argv == ["--write-baseline"]:
+        return write_baseline_main(root)
     unknown = [a for a in argv if a != "--self-test"]
-    if unknown:
-        print("error: unrecognized option {!r}; fail closed".format(unknown[0]), file=sys.stderr)
+    if unknown or len(argv) > 1:
+        print("error: unrecognized option {!r}; fail closed".format(
+            (unknown or argv)[0]), file=sys.stderr)
         return 2
     if "--self-test" in argv:
+        if report_path is not None:
+            # The execution report is finalized at interpreter exit (tools/_selftest_exit_report.py);
+            # nothing writes it in band. Imported only here: the self-test's scratch copies run without
+            # a report and without that sibling module beside them.
+            import _selftest_exit_report
+            _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
         return self_test_main()
     return run_gate(root)
 
@@ -462,6 +816,15 @@ def _caller_snapshot(environ):
     """The _CALLER_VARS entries of `environ`, and nothing else from it: never HOME, XDG_CONFIG_HOME, any
     other XDG_* variable or any GIT_* variable, so a run built from this reads no caller configuration."""
     return {k: environ[k] for k in _CALLER_VARS if k in environ}
+
+
+# The registered execution-suite identity (tools/selftest_checks.toml) and the executed-check-id record
+# the instrumented check() helper appends to; the execution gate reconciles the emitted report against the
+# registry as an exact set, and the in-run self-guard at the end of _self_test reconciles the same set on
+# a direct run whenever the registry file sits beside this script (the self-test's scratch copies run
+# without it, so an absent registry is a disclosed skip of that guard, not of the checks themselves).
+SUITE_ID = "internal-names-selftest"
+EXECUTED = []
 
 
 # A self-test that launches a child self-test sets _CHILD_SENTINEL in the child's environment to its OWN pid,
@@ -503,6 +866,24 @@ def _stale_sentinel_values(own_pid, parent_pid):
     return values
 
 
+def _load_ratchet_mutant(source, directory, tag):
+    """Write one ratchet-mutant module under the self-test's scratch directory and load it with
+    importlib (never a dynamic code string). This helper is the self-test's ONE code-loading site,
+    so the dangerous-api allowlist entry is scoped to it and a code sink anywhere else in the
+    self-test stays a finding."""
+    import importlib.util
+    path = Path(directory) / "tracker_mutant_{}.py".format(tag)
+    path.write_text(source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("tracker_mutant_{}".format(tag), str(path))
+    module = importlib.util.module_from_spec(spec)
+    saved_sys_path = list(sys.path)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = saved_sys_path
+    return module
+
+
 # --- self-test --------------------------------------------------------------------------------------
 def _self_test(caller_env=None):
     import hashlib
@@ -512,6 +893,15 @@ def _self_test(caller_env=None):
     failures = []
     # Each case this run does not run, with the reason; the full PASS text is printed only when it is empty.
     not_run = []
+
+    def check(check_id, ok, detail=""):
+        # The instrumented choke point for the tracker-label cases (27 to 31): every call records its
+        # literal id in EXECUTED (reconciled by tools/check_selftest_execution.py against the registry)
+        # and a failed one lands in `failures` exactly like the numbered cases above it.
+        EXECUTED.append(check_id)
+        if not ok:
+            failures.append("{}: {!r}".format(check_id, detail))
+
     launched_child = _set_by_launcher(_CHILD_SENTINEL)
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-selftest-"))
     try:
@@ -704,6 +1094,13 @@ def _self_test(caller_env=None):
 
         repo = tmp / "tracked-repo"
         repo.mkdir()
+        # The real gate now also runs the shipped tracker-label layer, which fails closed without a
+        # shipped manifest; this fixture holds an explicitly empty inventory (a bare sources = [] array,
+        # since a manifest with no sources array at all is refused), so the role and decision-id
+        # expectations below stay the deciding layers.
+        (repo / ".aiqt").mkdir()
+        (repo / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
+                                                      encoding="utf-8")
         def gate(at):
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -802,12 +1199,20 @@ def _self_test(caller_env=None):
             if rc != 2 or "bad.md: tracked file is absent" not in report:
                 failures.append("a tracked file absent from the working tree expected cannot-evaluate (exit 2), "
                                 "got rc={} {!r}".format(rc, report))
-        # Outside a git repository the tracked set cannot be listed: the gate fails closed (exit 2).
+        # Outside a git repository the tracked set cannot be listed: the gate fails closed (exit 2)
+        # NAMING the git listing. The fixture holds a valid empty manifest so this exit 2 can only come
+        # from the listing: without one, a listing failure silently read as an empty tracked set (which
+        # must stay a fail-closed error) could hide behind the missing manifest's own fail-closed exit,
+        # and this assertion would still see a 2.
         norepo = tmp / "not-a-repo"
         norepo.mkdir()
+        (norepo / ".aiqt").mkdir()
+        (norepo / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
+                                                        encoding="utf-8")
         rc, report = gate(norepo)
-        if rc != 2:
-            failures.append("a root that is not a git repository expected exit 2, got rc={} {!r}".format(rc, report))
+        if rc != 2 or "git ls-files" not in report:
+            failures.append("a root that is not a git repository expected exit 2 naming the git listing, "
+                            "got rc={} {!r}".format(rc, report))
 
         # 18. DISCRIMINATING (finding-3: an unknown option is a LOUD exit 2, never a silent default path): a
         #     subprocess given a misspelled --self-testx or a stray --bogus exits 2, never 0 by silently
@@ -1191,6 +1596,12 @@ def _self_test(caller_env=None):
             try:
                 (wired / "tools").mkdir()
                 (wired / "docs").mkdir()
+                # An explicitly empty shipped inventory (a manifest with no sources array at all is
+                # refused) keeps the tracker-label layer from failing closed here, so the planted
+                # decision id alone decides each probe's result (as in the fixture above).
+                (wired / ".aiqt").mkdir()
+                (wired / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
+                                                               encoding="utf-8")
                 for name in ("_walk.py", "check_internal_names.py", "check_leaks.py"):
                     shutil.copy(str(Path(toolsdir) / name), str(wired / "tools" / name))
                 note = wired / "docs" / "note.md"
@@ -1389,8 +1800,475 @@ def _self_test(caller_env=None):
                 elsewhere.unlink()
         finally:
             shutil.rmtree(tree, ignore_errors=True)
+
+        # 27. DISCRIMINATING (tracker-label SHAPES): each label shape is counted under its own key and
+        #     each negative control stays unflagged. Every vector is assembled at run time, so no
+        #     contiguous label text sits in this source (which the real layer scans as a shipped file).
+        fixpos = ("FIX" + "-515", "FIX" + "-515-R2", "FIX" + " 1", "FIX" + " A1", "FIX" + " B")
+        roundpos = ("rou" + "nd-7", "Rou" + "nd 25", "ROU" + "ND-2", "rou" + "nd7-email",
+                    "rou" + "nds 4 to 6", "rou" + "nd: 12", "M-rou" + "nd3", "rou" + "nd - 3")
+        qapos = ("QA" + "26", "QA" + "-1")
+        revpos = ("codex" + " MINOR", "claude" + " MAJOR 1", "(gemini" + " 4", "CLAUDE" + "-F2",
+                  "codex" + " PR #520 rou" + "nd 2 MAJOR", "codex" + " rou" + "nd-8",
+                  "fable" + " finding")
+        for check_id, shape_key, vectors in (
+                ("tracker/shape-fix-id-caught", "fix-id", fixpos),
+                ("tracker/shape-review-round-caught", "review-round", roundpos),
+                ("tracker/shape-qa-round-caught", "qa-round", qapos),
+                ("tracker/shape-reviewer-source-caught", "reviewer-source", revpos)):
+            missed = [v for v in vectors if len(_tracker_hits("a {} b\n".format(v))[shape_key]) != 1]
+            check(check_id, not missed, missed)
+        negatives = ("fix the artefact", "--fix", "fix-only=true", "Fix A & B",
+                     "reproduce-before-fix", "FIX" + "-MAIN-UNCOND", "Around 5", "rou" + "nd-trip",
+                     "rou" + "nd -  3", "R1", "Q1 to Q3", "CW-3 Q1", "Claude Code",
+                     "fix claude adapter", "the reviewer family is identical to the author family",
+                     "Gemini CLI", "codex" + " high-water")
+        wrongly_flagged = [v for v in negatives
+                           if any(_tracker_hits("a {} b\n".format(v))[key] for key in TRACKER_SHAPE_KEYS)]
+        check("tracker/negative-controls-unflagged", not wrongly_flagged, wrongly_flagged)
+        # One line carrying TWO matches of one shape counts BOTH (counts are match counts, never
+        # deduplicated per line), and the ratchet finding reports that line once: a count that
+        # collapsed per-line duplicates would let a second label ride an already-counted line.
+        twice = "x {} y {} z\n".format("QA" + "26", "QA" + "31")
+        twice_hits = _tracker_hits(twice)
+        twice_report = _tracker_compare({"docs/twice.md": twice_hits}, {})
+        check("tracker/same-line-multiplicity-counted",
+              twice_hits["qa-round"] == [1, 1] and len(twice_report) == 1
+              and "qa-round count 2 exceeds its ratchet baseline 0" in twice_report[0]
+              and twice_report[0].endswith("lines 1)"), (twice_hits, twice_report))
+
+        # 28. DISCRIMINATING (path-only allowlists, scope membership, no line marker, and the closed
+        #     baseline schema), in process over a fixture root; the tracked argument stands in for the
+        #     git read the real gate already makes, so these cases need no fixture repository.
+        ratch = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-tracker-"))
+        try:
+            (ratch / ".aiqt").mkdir()
+            (ratch / "docs").mkdir()
+            qa_label = "QA" + "26"
+            man_two = ('format-version = 1\n\n[[sources]]\npath = "docs/a.md"\n'
+                       '\n[[sources]]\npath = "docs/b.md"\n')
+            (ratch / ".aiqt" / "manifest.toml").write_text(man_two, encoding="utf-8")
+            (ratch / "docs" / "a.md").write_text("x {} y\n".format(qa_label), encoding="utf-8")
+            (ratch / "docs" / "b.md").write_text("x {} y\n".format(qa_label), encoding="utf-8")
+            digest = hashlib.sha256((ratch / "docs" / "a.md").read_bytes()).hexdigest()
+            frozen_ok = scan_shipped_tracker_labels(ratch, [], frozen=(("docs/a.md", digest),),
+                                                    history=("docs/b.md",))
+            (ratch / "docs" / "a.md").write_text("x {} y z\n".format(qa_label), encoding="utf-8")
+            frozen_stale = scan_shipped_tracker_labels(ratch, [], frozen=(("docs/a.md", digest),),
+                                                       history=("docs/b.md",))
+            check("tracker/frozen-allowlist-sha-bound",
+                  not frozen_ok and any("docs/a.md" in f for f in frozen_stale),
+                  (frozen_ok, frozen_stale))
+            both = scan_shipped_tracker_labels(ratch, [], history=("docs/b.md",))
+            check("tracker/history-allowlist-path-bound",
+                  any("docs/a.md" in f for f in both) and not any("docs/b.md" in f for f in both), both)
+            (ratch / "docs" / "c.md").write_text("x {} y\n".format(qa_label), encoding="utf-8")
+            exempt_pair = ("docs/a.md", "docs/b.md")
+            outside = scan_shipped_tracker_labels(ratch, ["docs/c.md"], history=exempt_pair)
+            (ratch / ".github").mkdir()
+            (ratch / ".github" / "note.md").write_text("x {} y\n".format(qa_label), encoding="utf-8")
+            (ratch / "opf").mkdir()
+            (ratch / "opf" / "util.py").write_text("x {} y\n".format(qa_label), encoding="utf-8")
+            tracked_in = scan_shipped_tracker_labels(ratch, ["docs/c.md", ".github/note.md",
+                                                             "opf/util.py"], history=exempt_pair)
+            (ratch / ".aiqt" / "manifest.toml").write_text(
+                man_two + '\n[[sources]]\npath = "docs/c.md"\n', encoding="utf-8")
+            listed = scan_shipped_tracker_labels(ratch, [], history=exempt_pair)
+            # Both supplemental tracked branches decide membership: a tracked file under .github/ AND
+            # one under opf/ join the shipped set while a tracked file outside both stays out, so
+            # dropping either branch turns this red.
+            check("tracker/scope-membership-decides",
+                  not outside and not any("docs/c.md" in f for f in tracked_in)
+                  and any(".github/note.md" in f for f in tracked_in)
+                  and any("opf/util.py" in f for f in tracked_in)
+                  and any("docs/c.md" in f for f in listed), (outside, tracked_in, listed))
+            (ratch / "docs" / "c.md").write_text("{} kept on purpose  # internal-allow\n".format(qa_label),
+                                                 encoding="utf-8")
+            marked = scan_shipped_tracker_labels(ratch, [], history=exempt_pair)
+            check("tracker/internal-allow-not-honoured", any("docs/c.md" in f for f in marked), marked)
+            (ratch / ".aiqt" / "manifest.toml").write_text(man_two, encoding="utf-8")
+            base_path = ratch / ".aiqt" / "tracker-label-baseline.toml"
+            # The baseline fixture texts are assembled at run time (a shape key next to its count would
+            # otherwise be a review-round hit in this very source, which the real layer scans).
+            qkey = "qa-" + "round"
+            entry_a = 'format-version = 1\n\n[[path]]\npath = "docs/a.md"\n'
+
+            def refused(text):
+                base_path.write_text(text, encoding="utf-8")
+                try:
+                    scan_shipped_tracker_labels(ratch, [], history=("docs/b.md",))
+                except OSError as exc:
+                    return str(exc)
+                return None
+
+            accepted = [bad for bad in (
+                'format-version = 1\n\n[[path]]\npath = 3\n',
+                'format-version = 2\n',
+                # The version's TYPE is pinned too: a boolean and a float each compare EQUAL to the
+                # integer 1 in Python, so either would otherwise slip the equality test.
+                'format-version = true\n',
+                'format-version = 1.0\n',
+                'zz = 3\nformat-version = 1\n',
+                entry_a + "{} = 0\n".format(qkey),
+                entry_a + "{} = -2\n".format(qkey),
+                entry_a + "{} = true\n".format(qkey),
+                entry_a,
+                'format-version = 1\nnot closed [\n',
+            ) if refused(bad) is None]
+            check("tracker/baseline-malformed-refused", not accepted, accepted)
+            dup = refused(entry_a + "{} = 1\n".format(qkey)
+                          + '\n[[path]]\npath = "docs/a.md"\n' + "{} = 1\n".format(qkey))
+            check("tracker/baseline-duplicate-refused", dup is not None and "duplicate" in dup, dup)
+            unknown_key = refused(entry_a + "{}s = 1\n".format(qkey))
+            check("tracker/baseline-unknown-key-refused",
+                  unknown_key is not None and "unknown key" in unknown_key, unknown_key)
+            nonshipped = refused('format-version = 1\n\n[[path]]\npath = "docs/zz.md"\n'
+                                 + "{} = 1\n".format(qkey))
+            check("tracker/baseline-nonshipped-path-refused",
+                  nonshipped is not None and "not a shipped path" in nonshipped, nonshipped)
+            # Each schema guard names its OWN refusal: most of these texts would also fail the
+            # byte-exact canonical-render check below, so a refusal alone cannot show the guard is
+            # live; a copy with the version-type pin, the string-path check or a count-schema branch
+            # disabled would fall through to the canonical check's different message and go red here.
+            misnamed = [(bad, want) for bad, want in (
+                ('format-version = 2\n', "must be the integer 1"),
+                ('format-version = true\n', "must be the integer 1"),
+                ('format-version = 1.0\n', "must be the integer 1"),
+                ('format-version = 1\n\n[[path]]\npath = 3\n', "carries no string path"),
+                (entry_a + "{} = 0\n".format(qkey), "integer count of one or more"),
+                (entry_a + "{} = -2\n".format(qkey), "integer count of one or more"),
+                (entry_a + "{} = true\n".format(qkey), "integer count of one or more"),
+                (entry_a, "carries no shape count"),
+            ) if want not in (refused(bad) or "")]
+            check("tracker/baseline-refusal-names-its-guard", not misnamed, misnamed)
+            # The file must be the BYTE-EXACT canonical render of its own entries (the --write-baseline
+            # output): a TOML comment is dropped by the parser, so the closed schema alone never sees
+            # it, an alternate integer spelling or a missing header is equally parser-invisible, and a
+            # REORDERING parses to the same entries while the bytes differ; each must be refused while
+            # the exact canonical text stays accepted, for one entry and for two in sorted order.
+            header_render = render_tracker_baseline({})
+            entry_render = render_tracker_baseline({"docs/a.md": {qkey: [1]}})
+            block_a = '\n[[path]]\npath = "docs/a.md"\n' + "{} = 1\n".format(qkey)
+            block_b = '\n[[path]]\npath = "docs/b.md"\n' + "{} = 2\n".format(qkey)
+            pair_render = header_render + block_a + block_b
+            comment_line = "# " + "QA" + "26 riding in a comment\n"
+            noncanonical = [bad for bad in (
+                header_render + "\n" + comment_line,
+                entry_render.replace("{} = 1".format(qkey), "{} = 0x1".format(qkey)),
+                entry_render.replace("{} = 1".format(qkey), "{} = +1".format(qkey)),
+                'format-version = 1\n',
+                entry_render + "\n",
+                header_render + block_b + block_a,
+            ) if refused(bad) is None]
+            canonical_ok = refused(entry_render)
+            pair_ok = refused(pair_render)
+            check("tracker/baseline-noncanonical-refused",
+                  not noncanonical and canonical_ok is None and pair_ok is None
+                  and pair_render == render_tracker_baseline(
+                      {"docs/a.md": {qkey: [1]}, "docs/b.md": {qkey: [3, 5]}}),
+                  (noncanonical, canonical_ok, pair_ok))
+            # A manifest whose [[sources]] array is absent entirely (a misspelled table name, say) is
+            # refused, never read as an empty shipped inventory that would scan nothing at exit 0.
+            base_path.unlink()
+            (ratch / ".aiqt" / "manifest.toml").write_text(
+                'format-version = 1\n\n[[source]]\npath = "docs/a.md"\n', encoding="utf-8")
+            try:
+                scan_shipped_tracker_labels(ratch, [], history=exempt_pair)
+                no_sources = None
+            except OSError as exc:
+                no_sources = str(exc)
+            check("tracker/manifest-missing-sources-refused",
+                  no_sources is not None and "sources" in no_sources, no_sources)
+            # An unparseable manifest and a malformed [[sources]] entry are equally refused: neither
+            # may silently shrink the shipped inventory.
+            manifest_faults = []
+            for bad_manifest in ('format-version = 1\nnot closed [\n',
+                                 'format-version = 1\n\n[[sources]]\npath = 3\n'):
+                (ratch / ".aiqt" / "manifest.toml").write_text(bad_manifest, encoding="utf-8")
+                try:
+                    scan_shipped_tracker_labels(ratch, [], history=exempt_pair)
+                    manifest_faults.append(bad_manifest)
+                except OSError:
+                    pass
+            check("tracker/manifest-malformed-refused", not manifest_faults, manifest_faults)
+        finally:
+            shutil.rmtree(ratch, ignore_errors=True)
+
+        # 29. DISCRIMINATING (each pattern row, the case flag, the separator bound and the severity
+        #     guard are load-bearing): with one row replaced by a never-matching pattern, that row's
+        #     positive vector goes unflagged, so its case 27 assertion would go red; without the case
+        #     flag the upper-case review-round vector is dropped; with the separator bound widened by
+        #     one the four-separator negative control is flagged; and without the hyphen in the
+        #     lookahead after the severity word the hyphenated-compound negative control is flagged.
+        never = re.compile(r"(?!x)x")
+
+        def swap_row(row, pattern):
+            return tuple((pattern, label) if index == row else (pat, label)
+                         for index, (pat, label) in enumerate(TRACKER_LABELS))
+
+        for row, check_id, vector, shape_key in (
+                (0, "tracker/mutation-pattern-fix-id", "FIX" + "-515", "fix-id"),
+                (1, "tracker/mutation-pattern-review-round", "rou" + "nd-7", "review-round"),
+                (2, "tracker/mutation-pattern-qa-round", "QA" + "26", "qa-round"),
+                (3, "tracker/mutation-pattern-reviewer-source", "codex" + " MINOR", "reviewer-source")):
+            intact = _tracker_hits("a {} b\n".format(vector))[shape_key]
+            dropped = _tracker_hits("a {} b\n".format(vector), swap_row(row, never))[shape_key]
+            check(check_id, len(intact) == 1 and not dropped, (vector, intact, dropped))
+        flat = re.compile(r"\brounds?\W{0,3}\d")
+        wide = re.compile(r"\brounds?\W{0,4}\d", re.IGNORECASE)
+        unguarded = re.compile(r"\b" + _FAM + r"(?:'s)?(?: PR #\d+)?(?: (?:QA )?(?:round|r)[- ]?\d+)?,? "
+                               + _SEV + r"(?!\w)")
+        upper_vec = "ROU" + "ND-2"
+        check("tracker/mutation-ignorecase-load-bearing",
+              len(_tracker_hits(upper_vec + "\n")["review-round"]) == 1
+              and not _tracker_hits(upper_vec + "\n", swap_row(1, flat))["review-round"], upper_vec)
+        four_sep = "rou" + "nd -  3"
+        check("tracker/mutation-separator-bound-load-bearing",
+              not _tracker_hits(four_sep + "\n")["review-round"]
+              and bool(_tracker_hits(four_sep + "\n", swap_row(1, wide))["review-round"]), four_sep)
+        compound = "codex" + " high-water"
+        check("tracker/mutation-severity-guard-load-bearing",
+              not _tracker_hits(compound + "\n")["reviewer-source"]
+              and bool(_tracker_hits(compound + "\n", swap_row(3, unguarded))["reviewer-source"]),
+              compound)
+
+        # 30. DISCRIMINATING (the ratchet comparison itself is load-bearing): a copy of this gate with
+        #     the above-baseline branch disabled no longer reports a count above its baseline, and one
+        #     with the below-baseline branch disabled no longer asks for the baseline to be lowered, so
+        #     removing either comparison turns its ratchet case red. The copies are scratch modules
+        #     loaded through _load_ratchet_mutant (never a dynamic code string), each mutated source
+        #     text required to occur exactly once; the anchors below are concatenated so they do not
+        #     match themselves.
+        selfdir = Path(__file__).resolve().parent
+        mdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-ratchet-mutant-"))
+        try:
+            gate_source = Path(__file__).resolve().read_text(encoding="utf-8")
+            rkey = "review-" + "round"  # assembled so the key next to a count is no hit in this source
+            sample_counts = {"docs/a.md": {rkey: [4, 9]}}
+            tight = {"docs/a.md": {rkey: 1}}
+            loose = {"docs/a.md": {rkey: 3}}
+            intact_over = _tracker_compare(sample_counts, tight)
+            intact_under = _tracker_compare(sample_counts, loose)
+            ok_intact = (len(intact_over) == 1 and "exceeds" in intact_over[0]
+                         and "lines 4, 9" in intact_over[0]
+                         and len(intact_under) == 1 and "lower the baseline" in intact_under[0])
+            mutant_faults = []
+            for tag, anchor, replacement, probe_base, expect_gone in (
+                    ("over", "if have > " + "allowed:", "if False:", tight, "exceeds"),
+                    ("under", "elif have < " + "allowed:", "elif False:", loose, "lower the baseline")):
+                if gate_source.count(anchor) != 1:
+                    mutant_faults.append("{} anchor occurs {} times".format(tag, gate_source.count(anchor)))
+                    continue
+                module = _load_ratchet_mutant(gate_source.replace(anchor, replacement), mdir, tag)
+                if any(expect_gone in f for f in module._tracker_compare(sample_counts, probe_base)):
+                    mutant_faults.append("{} mutant still reports its finding".format(tag))
+            check("tracker/mutation-ratchet-compare-load-bearing", ok_intact and not mutant_faults,
+                  (intact_over, intact_under, mutant_faults))
+        finally:
+            shutil.rmtree(mdir, ignore_errors=True)
+
+        # 31. DISCRIMINATING (the layer is WIRED into the real gate, the ratchet held at, one above and
+        #     one below its baseline, --write-baseline round-tripping byte-exact, and every fail-closed
+        #     case loud): a copy of this gate runs with no arguments in a fixture git repository whose
+        #     shipped manifest lists docs/page.md. These runs never re-enter the self-test, so they run
+        #     in a child too.
+        wiredlab = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-tracker-wired-"))
+        try:
+            (wiredlab / "tools").mkdir()
+            (wiredlab / "docs").mkdir()
+            (wiredlab / ".aiqt").mkdir()
+            for name in ("check_leaks.py", "_walk.py", "check_internal_names.py"):
+                shutil.copy(str(selfdir / name), str(wiredlab / "tools" / name))
+            page = wiredlab / "docs" / "page.md"
+            page.write_text("A plain page.\n", encoding="utf-8")
+            man = wiredlab / ".aiqt" / "manifest.toml"
+            man_one = 'format-version = 1\n\n[[sources]]\npath = "docs/page.md"\n'
+            man.write_text(man_one, encoding="utf-8")
+            basefile = wiredlab / ".aiqt" / "tracker-label-baseline.toml"
+            fixenv = _git_fixture_env.git_fixture_env()
+            init = subprocess.run(["git", "-C", str(wiredlab), "init", "-q"], capture_output=True,
+                                  text=True, env=fixenv, timeout=60)
+            add = subprocess.run(["git", "-C", str(wiredlab), "add", "--", "tools", "docs/page.md"],
+                                 capture_output=True, text=True, env=fixenv, timeout=60)
+            if init.returncode != 0 or add.returncode != 0:
+                failures.append("the tracker-label wired fixture could not be built: init rc={} add "
+                                "rc={} {!r}".format(init.returncode, add.returncode,
+                                                    init.stderr + add.stderr))
+            gatecopy = str(wiredlab / "tools" / "check_internal_names.py")
+
+            def tracker_gate(*args):
+                try:
+                    proc = subprocess.run([sys.executable, "-I", "-B", gatecopy, *args],
+                                          capture_output=True, text=True, env=dict(os.environ),
+                                          timeout=120)
+                except subprocess.TimeoutExpired:
+                    return None, "", "timed out"
+                return proc.returncode, proc.stdout, proc.stderr
+
+            rc, out, err = tracker_gate()
+            check("tracker/wired-clean-tree-exit-0", rc == 0, (rc, out, err))
+            rlabel = "rou" + "nd-7"
+            page.write_text("x {} y\n".format(rlabel), encoding="utf-8")
+            rc, out, err = tracker_gate()
+            check("tracker/wired-new-path-label-exit-1",
+                  rc == 1 and "docs/page.md: review-round count 1 exceeds its ratchet baseline 0" in out
+                  and "lines 1" in out, (rc, out, err))
+            rc, out, err = tracker_gate("--write-baseline")
+            rendered = render_tracker_baseline({"docs/page.md": _tracker_hits("x {} y\n".format(rlabel))})
+            check("tracker/wired-write-baseline-canonical",
+                  rc == 0 and out == rendered and err == "" and '"docs/page.md"' in out
+                  and "review-rou" + "nd = 1" in out, (rc, out, err))
+            basefile.write_text(out, encoding="utf-8")
+            rc, out, err = tracker_gate()
+            check("tracker/wired-ratchet-equal-passes", rc == 0, (rc, out, err))
+            # The one by-name skip, exercised in the wired gate: the baseline file itself may be
+            # LISTED as a shipped source (the pack ships it), and its own shape-key-next-to-count
+            # lines are skipped by name rather than counted, so the gate still passes; a copy
+            # without that skip would read them as fresh hits for the baseline's own path and fail.
+            man.write_text(man_one + '\n[[sources]]\npath = ".aiqt/tracker-label-baseline.toml"\n',
+                           encoding="utf-8")
+            rc, out, err = tracker_gate()
+            check("tracker/wired-baseline-listed-skipped-by-name",
+                  rc == 0 and "tracker-label-baseline.toml" not in out, (rc, out, err))
+            man.write_text(man_one, encoding="utf-8")
+            page.write_text("x {} y\nmore {} text\n".format(rlabel, rlabel), encoding="utf-8")
+            rc, out, err = tracker_gate()
+            check("tracker/wired-ratchet-exceeded-names-lines",
+                  rc == 1 and "docs/page.md: review-round count 2 exceeds its ratchet baseline 1" in out
+                  and "lines 1, 2" in out, (rc, out, err))
+            # This case CHARACTERIZES EXISTING behaviour at a wired baseline above one; it guards no
+            # logic that tells growth sources apart, because none exists: a regenerated baseline is
+            # accepted at whatever grown counts a real scan yields, however the growth arose (here
+            # the test itself grew the page; a refresh merging upstream files that already carry
+            # labels raises counts the same way), while one more label above the regenerated
+            # baseline still fails. Holding a raise to refresh merges is review policy over the
+            # regenerated file's diff against the merge parent, never a comparison the gate makes.
+            rc, out, err = tracker_gate("--write-baseline")
+            regen_render = render_tracker_baseline(
+                {"docs/page.md": _tracker_hits("x {0} y\nmore {0} text\n".format(rlabel))})
+            regen_ok = rc == 0 and out == regen_render
+            basefile.write_text(regen_render, encoding="utf-8")
+            rc2, out2, err2 = tracker_gate()
+            page.write_text("x {0} y\nmore {0} text\nyet {0} again\n".format(rlabel),
+                            encoding="utf-8")
+            rc3, out3, err3 = tracker_gate()
+            check("tracker/wired-refresh-regeneration-absorbs-growth",
+                  regen_ok and rc2 == 0 and rc3 == 1
+                  and "docs/page.md: review-round count 3 exceeds its ratchet baseline 2" in out3
+                  and "lines 1, 2, 3" in out3,
+                  (rc, out, err, rc2, out2, err2, rc3, out3, err3))
+            basefile.write_text(rendered, encoding="utf-8")
+            page.write_text("A plain page.\n", encoding="utf-8")
+            rc, out, err = tracker_gate()
+            check("tracker/wired-ratchet-below-asks-lower",
+                  rc == 1 and "docs/page.md: review-round count 0 is below its ratchet baseline 1" in out
+                  and "lower the baseline entry to 0" in out, (rc, out, err))
+            basefile.write_text('format-version = 1\n\n[[path]]\npath = "docs/ghost.md"\n'
+                                + "review-rou" + "nd = 1\n", encoding="utf-8")
+            rc, out, err = tracker_gate()
+            check("tracker/wired-baseline-nonshipped-exit-2",
+                  rc == 2 and "not a shipped path" in err, (rc, out, err))
+            basefile.unlink()
+            man.write_text(man_one + '\n[[sources]]\npath = "docs/gone.md"\n', encoding="utf-8")
+            rc, out, err = tracker_gate()
+            check("tracker/wired-absent-source-exit-2",
+                  rc == 2 and "docs/gone.md is absent" in err, (rc, out, err))
+            (wiredlab / "docs" / "bad.py").write_bytes(b"\xff\xfe tracker bytes \xff\n")
+            man.write_text(man_one + '\n[[sources]]\npath = "docs/bad.py"\n', encoding="utf-8")
+            rc, out, err = tracker_gate()
+            check("tracker/wired-non-utf8-source-exit-2",
+                  rc == 2 and "docs/bad.py is not valid UTF-8" in err, (rc, out, err))
+            man.unlink()
+            rc, out, err = tracker_gate()
+            check("tracker/wired-missing-manifest-exit-2",
+                  rc == 2 and "manifest.toml is missing" in err, (rc, out, err))
+        finally:
+            shutil.rmtree(wiredlab, ignore_errors=True)
+
+        # 32. DISCRIMINATING (presence and regularity precede any suffix decision, the decode decides
+        #     an unfamiliar suffix, and the frozen allowlist binds raw bytes): a listed path that is
+        #     absent or is a directory fails closed even under a suffix outside TEXT_SUFFIXES (a suffix
+        #     skip taken before validation would read both as clean); a UTF-8 shipped file under an
+        #     unfamiliar suffix is scanned like any text file; undecodable bytes under such a suffix (a
+        #     committed archive) are skipped; undecodable bytes under a text suffix still fail closed.
+        sufx = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-suffix-"))
+        try:
+            (sufx / ".aiqt").mkdir()
+            (sufx / "docs").mkdir()
+            man_head = 'format-version = 1\n\n[[sources]]\npath = "docs/a.md"\n'
+            (sufx / "docs" / "a.md").write_text("clean\n", encoding="utf-8")
+            manifest = sufx / ".aiqt" / "manifest.toml"
+
+            def suffix_scan(extra):
+                manifest.write_text(man_head + extra, encoding="utf-8")
+                try:
+                    return None, scan_shipped_tracker_labels(sufx, [])
+                except OSError as exc:
+                    return str(exc), None
+
+            absent_err, _unused = suffix_scan('\n[[sources]]\npath = "docs/missing.zip"\n')
+            (sufx / "docs" / "d.zip").mkdir()
+            nonreg_err, _unused = suffix_scan('\n[[sources]]\npath = "docs/d.zip"\n')
+            check("tracker/excluded-suffix-path-still-validated",
+                  absent_err is not None and "docs/missing.zip is absent" in absent_err
+                  and nonreg_err is not None and "not a regular file" in nonreg_err,
+                  (absent_err, nonreg_err))
+            qa_vec = "QA" + "26"
+            (sufx / "docs" / "t.csv").write_text("x {} y\n".format(qa_vec), encoding="utf-8")
+            csv_err, csv_findings = suffix_scan('\n[[sources]]\npath = "docs/t.csv"\n')
+            (sufx / "docs" / "blob.zip").write_bytes(b"PK\x03\x04\xff\xfe not text \xff\n")
+            zip_err, zip_findings = suffix_scan('\n[[sources]]\npath = "docs/blob.zip"\n')
+            (sufx / "docs" / "bad.md").write_bytes(b"\xff\xfe undecodable \xff\n")
+            txt_err, _unused = suffix_scan('\n[[sources]]\npath = "docs/bad.md"\n')
+            check("tracker/unfamiliar-suffix-decode-decides",
+                  csv_err is None and any("docs/t.csv" in f for f in csv_findings)
+                  and zip_err is None and not zip_findings
+                  and txt_err is not None and "docs/bad.md is not valid UTF-8" in txt_err,
+                  (csv_err, csv_findings, zip_err, zip_findings, txt_err))
+            # The frozen allowlist binds a path to its RAW on-disk bytes: the digest of those bytes
+            # exempts the file, and the digest of the newline-normalized text form does not, so a hash
+            # of a form that never existed on disk can never exempt anything.
+            crlf = sufx / "docs" / "c.md"
+            crlf.write_bytes("x {} y\r\n".format(qa_vec).encode("utf-8"))
+            manifest.write_text(man_head + '\n[[sources]]\npath = "docs/c.md"\n', encoding="utf-8")
+            raw_digest = hashlib.sha256(crlf.read_bytes()).hexdigest()
+            text_digest = hashlib.sha256("x {} y\n".format(qa_vec).encode("utf-8")).hexdigest()
+            by_bytes = scan_shipped_tracker_labels(sufx, [], frozen=(("docs/c.md", raw_digest),))
+            by_text = scan_shipped_tracker_labels(sufx, [], frozen=(("docs/c.md", text_digest),))
+            check("tracker/frozen-allowlist-byte-bound",
+                  not by_bytes and any("docs/c.md" in f for f in by_text), (by_bytes, by_text))
+        finally:
+            shutil.rmtree(sufx, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+    # The in-run self-guard (as in the sibling registered runners): the executed tracker check-id set is
+    # reconciled against this suite's registry row whenever the registry sits beside this script. The
+    # self-test's scratch copies run without tools/selftest_checks.toml, so the guard is skipped there;
+    # the execution gate's static and report reconciles are the enforced layers either way.
+    registry = Path(__file__).resolve().parent / "selftest_checks.toml"
+    if registry.is_file():
+        expected = None
+        try:
+            rows = tomllib.loads(registry.read_text(encoding="utf-8")).get("suite", [])
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+            failures.append("execution-set/registry: cannot read {} ({!r})".format(registry, exc))
+            rows = None
+        if rows is not None:
+            for row in rows:
+                if isinstance(row, dict) and row.get("id") == SUITE_ID:
+                    ids = row.get("expected-check-ids")
+                    if isinstance(ids, list) and all(isinstance(i, str) for i in ids) \
+                            and len(set(ids)) == len(ids):
+                        expected = set(ids)
+                    break
+            if expected is None:
+                failures.append("execution-set/registry: missing or malformed suite {!r} in {}".format(
+                    SUITE_ID, registry))
+            elif len(set(EXECUTED)) != len(EXECUTED) or set(EXECUTED) != expected:
+                failures.append("execution-set/reconciled: missing={} extra={} duplicates={}".format(
+                    sorted(expected - set(EXECUTED)), sorted(set(EXECUTED) - expected),
+                    len(EXECUTED) - len(set(EXECUTED))))
 
     # A failure outranks a skip: a run that failed a case exits 1 even when it also skipped one, and lists
     # the cases it did not run.
@@ -1454,9 +2332,34 @@ def _self_test(caller_env=None):
           "id, label or prose word and a D- glued to a longer word are not, and an internal-allow line holding "
           "a decision id is exempt; and in the real scan the tree-wide layer fails closed outside the scoped "
           "surfaces: an unreadable file, an unlistable directory and a FIFO each exit 2 naming the input, and a "
-          "file that vanishes during the walk is a fail-closed finding naming it.")
+          "file that vanishes during the walk is a fail-closed finding naming it; and the shipped "
+          "tracker-label layer is held: each label shape is caught, each negative control stays "
+          "unflagged and two matches on one line both count, over run-time-assembled vectors, the "
+          "path-only frozen (bound to the sha256 of the RAW on-disk bytes) and history "
+          "exemptions are honoured and bounded, a line carrying the internal-allow marker is still "
+          "flagged, a tracked file under .github/ and one under opf/ each join the shipped set, the "
+          "closed baseline schema refuses a malformed, wrongly-typed-version, duplicate, unknown, "
+          "non-shipped, non-canonical or reordered "
+          "entry (the file must be the byte-exact --write-baseline render of its own entries, sorted "
+          "order included) with each schema guard naming its own refusal (so the canonical check "
+          "cannot mask a disabled guard) and a "
+          "manifest with no sources array is refused, each pattern row, the case flag, the separator "
+          "bound, the severity guard and both "
+          "ratchet comparisons are load-bearing (a disabled one turns its case red), a listed path that "
+          "is absent or non-regular fails closed before any suffix decision while the decode decides an "
+          "unfamiliar suffix, and the real gate "
+          "on a fixture repository holds the per-file count at, one above and one below its baseline, "
+          "round-trips --write-baseline byte-exact, skips the baseline file by name even when it is "
+          "listed as a shipped source, accepts a baseline regenerated at grown counts whatever grew "
+          "them (holding a raise to refresh merges is review policy over the baseline diff, not a "
+          "comparison the gate makes) while one more label above the "
+          "regenerated baseline still fails, and fails closed loud on a missing shipped manifest, "
+          "an absent listed path, a non-UTF-8 listed text file and a baseline entry for a non-shipped "
+          "path.")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _code = main()
+    _finalizer = sys.modules.get("_selftest_exit_report")
+    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)

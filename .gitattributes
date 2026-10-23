@@ -188,6 +188,7 @@
 .aiqt/standards/owasp-mcp.toml text eol=lf
 .aiqt/standards/owasp-proactive.toml text eol=lf
 .aiqt/standards/owasp-web.toml text eol=lf
+.aiqt/tracker-label-baseline.toml text eol=lf
 .claude/RULES-INDEX.md text eol=lf
 .claude/rules/README.md text eol=lf
 .claude/rules/aiqt/00-project-integrity.md text eol=lf
