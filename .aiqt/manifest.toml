@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "45de2381f2c4391a0352c9ec8b9e8054d2aabbc0381668946947f1edce1206a9"
+tree-sha256 = "98b36dbaef40459cbceadb0afa2e5021609477c5c82b0e3f9976e844d3211b57"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2726,8 +2726,8 @@ sha256 = "785012cc91281f47261281a8bb412f8c56cd0201815d7e1ce43e1d1ee4010697"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 543681
-sha256 = "b30158862c49ac0d5d042d524c0d2df371b13f45f0f928a45d05ffd57b4e3b14"
+bytes = 523990
+sha256 = "f40bf5805ad15ffe76966cb4d2256109e1a4223a0d1e4a06b192ef9f3044b3c8"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
@@ -2786,8 +2786,8 @@ sha256 = "80bedee0a9245cac9f2480e1af7e523f3933f1f752d310c9887cd2ac0156ce1c"
 
 [[sources]]
 path = "opf/tools/_opf_observe.py"
-bytes = 123063
-sha256 = "b844fb95d9765aac5e7143e240a3a7368f8c8238b69f0b5cb2b9ce163df3945d"
+bytes = 116683
+sha256 = "1955ad2056c9a51b161942132af4bac367a013fa8c9778bfc2025d5a330060e7"
 
 [[sources]]
 path = "opf/tools/_opf_oplock.py"
@@ -2801,8 +2801,8 @@ sha256 = "0d9e538618029fbc77e6e92abcf327013eb4f4245cbd4ddf6767ccaabda67af2"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
-bytes = 280092
-sha256 = "e48b5ba2120c0f3f3db34cfbab62e33418e09792caf5efefdc341e34f2e84d89"
+bytes = 276284
+sha256 = "b3342420c27e0563e63a138e27b8e2feb8ed9b2156eb21c1f46a737b4f9d2bf1"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
@@ -2816,8 +2816,8 @@ sha256 = "6ca849473862cfcbfb3eed0b837d855f1c6b0ffd118a887f02a651c9121b7627"
 
 [[sources]]
 path = "opf/tools/_opf_store.py"
-bytes = 323168
-sha256 = "4a10071a145b34a58dc9b757de5e24a28a8880c26e44eb1fc54be69fd266d228"
+bytes = 322793
+sha256 = "0c92ed80e7718abfd6bc385c2bb98aa1406f319e6ff38c07b8766a4200850994"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
@@ -2836,8 +2836,8 @@ sha256 = "913ebe4e30a731fec7b02ecacec4b4c0f97767b863e02c04d2004be19f3dbc5c"
 
 [[sources]]
 path = "opf/tools/_opf_write_guard.py"
-bytes = 117723
-sha256 = "44fb839c57c73b81eb02b892fef5dcff6619793a51ed0826ebdc9bfe1c708de7"
+bytes = 117666
+sha256 = "93985ea3005c7ae876358f0147d6e4374bdf3738a2ff27449c8d63736531b966"
 
 [[sources]]
 path = "opf/tools/_optlevel.py"
@@ -3832,7 +3832,7 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
 bytes = 28224
-sha256 = "02ad3cd8033fc96a587fcb159d753470ba2e081f6dbc31cf2fb1fded7eb25e4d"
+sha256 = "78a5480798c2b5e0349122e148ce119c880e20de24921f735a9ecdb92cd02869"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

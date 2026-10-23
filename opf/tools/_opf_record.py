@@ -606,15 +606,10 @@ def _counter_state(ctx, counters_model):
     """(high, findings): the counters map validated with the COMPLETENESS control (every enabled type's
     namespace must carry a high-water, the C-COUNTERS rule). Empty findings is the proof that licenses
     next_id(..., known_complete=True): an absent counter can then never read as high-water 0 and reuse an
-    existing id (spec 8.2). Where the manifest activates the imported series (_opf_check.imported_series_active,
-    the flag the doctor's C-COUNTERS reads), the proof is that C-COUNTERS rule too: one "imported:<NS>" row
-    per enabled type except legacy_fragment is required and preserved, and this verb never claims or
-    rewrites one."""
+    existing id (spec 8.2)."""
     return _opf_schema.validate_counters(
         counters_model, known_namespaces=frozenset(ctx.types.values()),
-        optional_namespaces=frozenset(_opf_store.IMPORTER_TYPES.values()),
-        imported_namespaces=(_opf_check._imported_counter_namespaces(ctx.types)
-                             if _opf_check.imported_series_active(ctx.manifest) else None))
+        optional_namespaces=frozenset(_opf_store.IMPORTER_TYPES.values()))
 
 
 def claim_ids(homes, high, demand, known_complete, reserved=None):
@@ -3459,60 +3454,6 @@ def _self_test_contexts(check, root_fd, now):
     del partial["BI"]
     ctx = ctx_of(partial)
     check("a missing enabled namespace breaks the proof", _counter_state(ctx, ctx.counters.model)[1] != [])
-    # Where the imported series is active (a declared 1.3.0-or-later spec_version under the tooling's
-    # imported-series support; the 2.0.0 / homes = 2 manifest here) the proof is the C-COUNTERS rule of
-    # that series (spec 8.2): the zero imported rows are accepted and each is required. Inactive
-    # (support below the series), an imported row still breaks it: at the shipped constants, and on
-    # the same 2.0.0 manifest with homes 2 supported but not the imported series.
-    imported_full = dict(full, **{"imported:" + ns: 0 for ns in full})
-    pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
-    prev_gates = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
-    try:
-        _opf_store.SUPPORTED_HOMES = 2
-        ctx = ctx_of(imported_full)
-        ctx.manifest = pair
-        check("an imported row breaks the proof without imported-series support",
-              _counter_state(ctx, ctx.counters.model)[1] != [])
-        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-        check("the active-series proof holds with every imported row",
-              _counter_state(ctx, ctx.counters.model)[1] == [])
-        imported_partial = dict(imported_full)
-        del imported_partial["imported:BI"]
-        ctx = ctx_of(imported_partial)
-        ctx.manifest = pair
-        check("a missing imported row breaks the active-series proof",
-              _counter_state(ctx, ctx.counters.model)[1] != [])
-    finally:
-        _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = prev_gates
-    ctx = ctx_of(imported_full)
-    check("an imported row breaks the proof at the shipped support",
-          _counter_state(ctx, ctx.counters.model)[1] != [])
-    # A homes-1 manifest that DECLARES the imported series (spec_version 1.3.0) with the tooling's support
-    # raised is ACTIVE (spec 4.2/8.2: base spec 1.3.0 defines the separate imported series on homes 1;
-    # homes 2 is a separate, later activation): this reader takes the ONE activation flag
-    # (_opf_check.imported_series_active), so the proof requires the imported rows and accepts the full
-    # set, at homes support 1 and 2 alike (red when this reader keys activation on the homes-2
-    # declaration: the proof would then refuse the required imported rows).
-    declared_h1 = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION}}
-    declared_active = []
-    try:
-        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-        for supported_homes in (1, 2):
-            _opf_store.SUPPORTED_HOMES = supported_homes
-            ctx = ctx_of(full)
-            ctx.manifest = declared_h1
-            clean_rows_break = _counter_state(ctx, ctx.counters.model)[1] != []
-            ctx = ctx_of(imported_full)
-            ctx.manifest = declared_h1
-            declared_active.append(
-                _opf_store.imported_series_declared(declared_h1)
-                and _opf_check.imported_series_active(declared_h1)
-                and clean_rows_break
-                and _counter_state(ctx, ctx.counters.model)[1] == [])
-    finally:
-        _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = prev_gates
-    check("the declared homes-1 store takes the active-series completeness proof",
-          declared_active == [True, True])
     # Schema markers are exact integers everywhere this verb reads one (codex QA3 F1's sibling checks):
     # a bool or float marker (True == 1, 1.0 == 1 under ==) is refused, never read as schema 1.
     for marker in (True, 1.0):
