@@ -25,6 +25,4 @@ privilege boundary, for instance when it is placed on the wrong side of a privil
 so the intended wait never reaches the callee and its default applies unseen; the override is confirmed
 to land where the callee reads it rather than assumed to have carried across. This is the companion of
 the bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust resources, while this
-one keeps a bound that is meant to allow completion from being set below the callee's own end-to-end
-budget, so a command that is waiting correctly is not cut short and then misread as the failure it was
-tolerating.
+one keeps a bound meant to allow completion from being set below the callee's own end-to-end budget.

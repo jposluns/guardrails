@@ -19,7 +19,7 @@ reason = "Scope note on the rule itself; no obligation of its own."
 
 [[exempt]]
 corpus-id = "citint"
-text = "This rule narrows the reference-capture rule (refcap) to the reviewed commit: refcap requires the\nspecific reference captured when the claim is made, never reconstructed from memory, and the\nobligations above scope that capture to a file opened this session at the commit under review."
+text = "This rule narrows the reference-capture rule (refcap), which requires the specific reference captured\nwhen the claim is made, never reconstructed from memory, to a file opened this session at the commit\nunder review."
 reason = "Cross-reference explaining how citint.1 to citint.3 narrow the reference-capture rule (refcap); no obligation of its own."
 
 [[exempt]]
@@ -164,7 +164,7 @@ reason = "Rationale for vfxcmt.1; no obligation of its own."
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "A commit message that asserts a fix, with no matching change in the commit, is an inaccurate record; verify the artefact before the claim."
+text = "A commit message asserting a fix its commit lacks is an inaccurate record; verify the artefact before the claim."
 reason = "Restates vfxcmt.1 (confirm the fix is in its commit before claiming it); it adds no obligation."
 
 [[exempt]]
@@ -224,8 +224,8 @@ reason = "Defines the ambient context that expbnd.1 to expbnd.5 govern; no oblig
 
 [[exempt]]
 corpus-id = "expbnd"
-text = "This manifests in three recurring forms."
-reason = "Signpost to the three forms that expbnd.2 to expbnd.4 govern; no obligation of its own."
+text = "This manifests in four recurring forms."
+reason = "Signpost to the four forms that expbnd.2 to expbnd.4 and expbnd.6 govern; no obligation of its own."
 
 [[exempt]]
 corpus-id = "expbnd"
@@ -234,7 +234,7 @@ reason = "Scope carve-out bounding expbnd.3 that defers to the confirm-execution
 
 [[exempt]]
 corpus-id = "expbnd"
-text = "The preference is to remove the ambient dependency, not merely to check it: an explicit binding\nremoves that ambient dependency, whereas a confirmed ambient binding is correct only until the\nsurrounding state next shifts."
+text = "The preference is to remove the ambient dependency, as an explicit binding does, not merely to check\nit: a confirmed ambient binding is correct only until the surrounding state next shifts."
 reason = "Rationale for the preference expbnd.5 states; no obligation of its own."
 
 [[exempt]]
@@ -284,7 +284,7 @@ reason = "Rationale for trkasy.1 and trkasy.2; no obligation of its own."
 
 [[exempt]]
 corpus-id = "trkasy"
-text = "Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work no less\nthan an explicit background dispatch does: the foreground call returns while the detached child runs on,\nso its result and its failure are lost unless they are collected."
+text = "Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work no less\nthan an explicit background dispatch does: the foreground call returns while the detached child runs on,\nso its result and failure are lost unless collected."
 reason = "Classifies a detached child as launched asynchronous work, so trkasy.6 applies; no obligation of its own."
 
 [[exempt]]
@@ -319,7 +319,7 @@ reason = "Scope note bounding dfdpth.1; no obligation of its own."
 
 [[exempt]]
 corpus-id = "dfdpth"
-text = "A layer that over-fires is not cheap: one that raises false alarms trains its own bypass and\nerodes trust in the controls around it, so a noisy layer is not the low-cost overlap this prefers, and adding\none is not warranted by this rule."
+text = "A layer that over-fires is not cheap: its false alarms train its own bypass and erode trust\nin the controls around it, so it is not the low-cost overlap this prefers, and this rule does not warrant\nadding one."
 reason = "Scope note: an over-firing layer is outside what dfdpth.1 recommends; no obligation of its own."
 
 [[exempt]]
@@ -339,7 +339,7 @@ reason = "States the hazard that kltwat.4, the clause after the ';', guards agai
 
 [[exempt]]
 corpus-id = "kltwat"
-text = "This is the companion of\nthe bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust resources, while this\none keeps a bound that is meant to allow completion from being set below the callee's own end-to-end\nbudget, so a command that is waiting correctly is not cut short and then misread as the failure it was\ntolerating."
+text = "This is the companion of\nthe bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust resources, while this\none keeps a bound meant to allow completion from being set below the callee's own end-to-end budget."
 reason = "Cross-reference to the bounded-consumption rule; no obligation of its own."
 
 [[exempt]]
