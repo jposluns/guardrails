@@ -4461,9 +4461,10 @@ def _self_test_vectors():
               lambda: refuses(lambda: store.evidence_inventory("import", import_run, bad)))
     check("inventory-run-refusal", lambda: refuses(lambda: store.evidence_inventory("import", "adopt" + suffix)))
 
-    # Real discovery, including legacy-token upgrade discovery and an arbitrary custom machine name.
+    # Real discovery, including an arbitrary custom machine name. Only the opf token is a match: a manifest
+    # whose base table declares the retired devprocess token is no match under any machine name.
     with tempfile.TemporaryDirectory(prefix="opf-homes-") as tmp:
-        for token in (store.STANDARD_TOKEN, store.PRIOR_STANDARD_TOKEN):
+        for token in (store.STANDARD_TOKEN, "devprocess"):
             for name in ("imports", "imported", "archive", "staging", "journals", "toml", "custom"):
                 root = Path(tmp) / token / name
                 machine = root / ".working" / name
@@ -4474,9 +4475,12 @@ def _self_test_vectors():
                 try:
                     def discovery():
                         try:
-                            status, found, _ = store.discover_machine_store(fd, root, accept_tokens=(token,))
+                            status, found, _ = store.discover_machine_store(fd, root)
                         except store.StoreError:
-                            return name in ("imports", "imported", "archive", "staging", "journals")
+                            return (token == store.STANDARD_TOKEN
+                                    and name in ("imports", "imported", "archive", "staging", "journals"))
+                        if token != store.STANDARD_TOKEN:
+                            return status == "present" and found is None
                         return name in ("toml", "custom") and status == "one" and found == name
                     check("discovery-{}-{}".format(token, name), discovery)
                 finally:
@@ -4493,7 +4497,7 @@ def _self_test_vectors():
     _gitignore_reconciliation_self_test(check)
 
     # OPF-D2B PR3a (decision 5): the base spec_version bump 1.1.0 -> 1.2.0 is an intended change
-    # (init.toml provenance, with a tested opf upgrade route), no longer inert.
+    # (init.toml provenance), no longer inert; this tooling defines no store upgrade.
     check("inert-version", lambda: store.SUPPORTED_SPEC_VERSION == "1.2.0")
     check("inert-homes", lambda: store.SUPPORTED_HOMES == 1
           and store.homes_generation({"opf": {"homes": 2}}) == 1)

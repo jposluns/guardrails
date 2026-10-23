@@ -972,6 +972,10 @@ def _config_poison_fixture(base):
 # fsmonitor or exposure record in every run. Each entry below gives its lane time per run.
 # SIZING_ACCOUNT_ROSTER is the set _registered_selftests() returns at commit e5191908, the parent
 # of the commit that recorded these runs; a member registered later is outside the account.
+# One measured member, opf/tools/check_opf_upgrade.py --self-test (one of the six shorter
+# opf/tools self-tests, timed in every run), was later removed with the store-upgrade engine, so
+# the account constants below omit it: 100 account members, 88 timed, 10 measured in the
+# combined lane and 9 in the malformed lane. The runs and times recorded here are unchanged.
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
 # malformed lane's configuration for every member of that lane outside SIZING_MALFORMED_MEASURED;
 # and the fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and
@@ -1060,7 +1064,6 @@ SIZING_ACCOUNT_ROSTER = frozenset({
     ("opf/tools/check_opf_init_p0.py", "--self-test", "--red-on-revert"),
     ("opf/tools/check_opf_prompt_pack.py", "--self-test"),
     ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"),
-    ("opf/tools/check_opf_upgrade.py", "--self-test"),
     ("opf/tools/opf.py", "--self-test"),
     ("opf/tools/selftest_commonmark_conformance.py",),
     ("opf/tools/selftest_commonmark_headings.py",),
@@ -1142,9 +1145,9 @@ SIZING_ACCOUNT_ROSTER = frozenset({
     ("tools/selftest_orch_hooks.py",),
 })
 # How many SIZING_ACCOUNT_ROSTER members the account gives a time or an upper bound for.
-SIZING_ACCOUNT_TIMED = 89
-# The eleven members of the two shorter-roster combined-lane runs (each timed again in the
-# whole-roster run).
+SIZING_ACCOUNT_TIMED = 88
+# The members of the two shorter-roster combined-lane runs (each timed again in the whole-roster
+# run) that are still registered.
 SIZING_MEASURED = frozenset({
     ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"),
     ("opf/tools/opf.py", "--self-test"),
@@ -1154,7 +1157,6 @@ SIZING_MEASURED = frozenset({
     ("opf/tools/_opf_adopt.py", "--self-test"),
     ("opf/tools/_opf_oplock.py", "--self-test"),
     ("opf/tools/_opf_init_operation.py", "--self-test"),
-    ("opf/tools/check_opf_upgrade.py", "--self-test"),
     ("opf/tools/check_opf_homes.py", "--self-test"),
     ("opf/tools/check_opf_doctor.py", "--self-test"),
 })
@@ -1169,7 +1171,6 @@ SIZING_MALFORMED_MEASURED = frozenset({
     ("opf/tools/_opf_adopt.py", "--self-test"),
     ("opf/tools/_opf_oplock.py", "--self-test"),
     ("opf/tools/_opf_init_operation.py", "--self-test"),
-    ("opf/tools/check_opf_upgrade.py", "--self-test"),
     ("opf/tools/check_opf_homes.py", "--self-test"),
     ("opf/tools/check_opf_doctor.py", "--self-test"),
 })
@@ -4540,11 +4541,6 @@ _SCAN_ALLOWED_UNPINNED = (
     ("opf/tools/check_opf_init_p0.py", "runner_check.run_shell", ("unresolved",),
      "cannot-evaluate head: a PATH-resolved bash running this self-test's planted"
      " runner-script bodies; the bodies drive the runner under test, not git"),
-    ("opf/tools/check_opf_upgrade.py", "_suite_isolated", ("unresolved",),
-     "cannot-evaluate argv: replays the doctor's own printed `git -C <fixture>"
-     " --literal-pathspecs add ...` advice command (and its -f-stripped control) inside the"
-     " fixture repo; add is not maintenance-triggering and the argv shape is validated by the"
-     " preceding checks"),
     ("opf/tools/selftest_commonmark_conformance.py", "_run_matrix", ("unresolved",),
      "cannot-evaluate head: re-spawns this conformance harness under each named PATH-resolved"
      " python interpreter (an optional maintainer matrix); not a git launch"),
@@ -4587,9 +4583,7 @@ _SCAN_ALLOWED_UNPINNED = (
      " run_status_owned, whose own argv head is sys.executable running the _fixture_main"
      " supervisor (the opf.py watchdog checks patch it only with wrappers that replay"
      " sys.executable argvs through the saved launcher), and the raw in-child replay runs"
-     " the fixture argvs its callers spell: sys.executable CLI/crash subjects throughout,"
-     " plus the worklog upgrade fixture's git init/add/commit whose argv carries the three"
-     " F-367 pins as literal `-c` pairs in option position under a private HOME/XDG env"),
+     " the fixture argvs its callers spell: sys.executable CLI/crash subjects throughout"),
     # In-process exec loaders and mutant builders (the dynamic tripwire), each audited: each
     # exec compiles THIS repo's own tracked source, an AST/text mutant of it, or a red-leg
     # candidate body spelled as a string literal in the self-test itself, into a module

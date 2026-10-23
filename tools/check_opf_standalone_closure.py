@@ -67,7 +67,6 @@ _SUBSET = [
     ("opf-init-selftest", "check_opf_init.py", ["--self-test"]),
     ("opf-init-contract-validator-selftest", "_opf_init_contract.py", ["--self-test"]),
     ("opf-init-contract-check-selftest", "check_opf_init_contract.py", ["--self-test"]),
-    ("opf-upgrade-selftest", "check_opf_upgrade.py", ["--self-test"]),
     ("opf-adopt-selftest", "_opf_adopt.py", ["--self-test"]),
     ("opf-adopt-apply-selftest", "_opf_adopt_apply.py", ["--self-test"]),
     ("opf-adopt-state-selftest", "_opf_adopt_state.py", ["--self-test"]),
@@ -121,7 +120,6 @@ _LEG_CEILING_S = {
     "opf-init-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
     "opf-init-contract-validator-selftest": 1,  # measured 2026-10-11: under 0.1 s
     "opf-init-contract-check-selftest": 1,  # measured 2026-10-11: under 0.1 s
-    "opf-upgrade-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
     "opf-adopt-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)
     "opf-adopt-apply-selftest": 672,  # recorded 2026-10-11, loaded host (651 to 672 s)
     "opf-adopt-state-selftest": 600,  # not measured 2026-10-11; under the former 600 s bound (inferred)

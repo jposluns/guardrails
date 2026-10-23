@@ -2,17 +2,17 @@
 """The pre-mutation guards the in-place OPF writers share: write-scope planning, working-tree cleanliness, and
 the single-writer lease (spec 5.7).
 
-`opf upgrade` (spec 9.2) and `opf record` (spec 8.8) both rewrite an in-repo store in place and offer the
-uncommitted change for the adopter's own review and merge, so both need the same shell around the mutation:
-plan the destinations (the operation's own store files plus every declared view the post-mutation render
-writes), prove the working tree is clean over exactly that scope (including ignored files, so HEAD is a
-verified restore path), and claim the lease atomically, hold it across mutation, render, and final doctor,
-and release it only as this run's own. These helpers were MOVED here from opf.py (they are not a copy); each
-takes the calling verb explicitly so its refusals name the operation the operator actually ran.
+`opf record` (spec 8.8) rewrites an in-repo store in place and offers the uncommitted change for the
+adopter's own review and merge, so it needs this shell around the mutation: plan the destinations (the
+operation's own store files plus every declared view the post-mutation render writes), prove the working
+tree is clean over exactly that scope (including ignored files, so HEAD is a verified restore path), and
+claim the lease atomically, hold it across mutation, render, and final doctor, and release it only as this
+run's own. These helpers were MOVED here from opf.py (they are not a copy); each takes the calling verb
+explicitly so its refusals name the operation the operator actually ran.
 
 Stdlib only; the sibling _opf_* helpers are imported directly. Every refusal is a WriteGuardError, which the
-calling verb maps to exit 2. Nothing here stages or commits anything. `--self-test` runs the
-lease message vectors (self_test), which opf.py --self-test also runs.
+calling verb maps to exit 2. Nothing here stages or commits anything. `--self-test` runs the lease message,
+porcelain grammar, dirty-probe and lease ownership vectors (self_test), which opf.py --self-test also runs.
 """
 import sys
 
@@ -1537,8 +1537,9 @@ def self_test():
     removes another run's lease, never that it removes none. An oversized lease is reported oversized, never
     by a holder read from its prefix. The ownership-verified release reports an oversized, non-regular or
     unreadable replacement as what it is, never ABSENT, and the holder diagnostic names each unread lease by
-    its cause. Each vector runs over a real lease beneath a private temporary root. Returns 0 clean, 1 on a
-    failure, 2 on a harness error."""
+    its cause. Each vector runs over a real lease beneath a private temporary root. The porcelain grammar,
+    dirty-probe, ignore-probe and lease ownership vectors follow (_self_test_guard_vectors). Returns 0 clean,
+    1 on a failure, 2 on a harness error."""
     import shutil
     import tempfile
     failures = []
@@ -1561,6 +1562,7 @@ def self_test():
         return 2
     try:
         _self_test_vectors(check, base)
+        _self_test_guard_vectors(check, base)
     except Exception as exc:  # noqa: BLE001  a harness fault is cannot-evaluate, never a pass
         print("opf-write-guard self-test: harness error ({!r}); fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -1574,7 +1576,7 @@ def self_test():
         return 1
     print("opf-write-guard self-test: PASS ({} checks: examination-lock refusals, held-lease and "
           "failed-acquisition remedies, oversized lease, release over each replacement, holder "
-          "diagnostic)".format(checked[0]))
+          "diagnostic, porcelain grammar, dirty and ignore probes, lease ownership)".format(checked[0]))
     return 0
 
 
@@ -1752,6 +1754,253 @@ def _self_test_vectors(check, base):
                          (None, "no holder named (the lease was not read)")):
         check("the holder diagnostic names an unread lease by its cause ({})".format(cause or "none given"),
               lambda cause=cause, words=words: diagnosed(cause, words))
+
+
+def _self_test_guard_vectors(check, base):
+    """The porcelain grammar, dirty-probe, ignore-probe and lease ownership vectors self_test runs. They
+    were carried by the removed store-upgrade gate; `opf record` still uses each guard they exercise.
+    parse_porcelain is called directly; probe_dirty and check_ignored run over a stubbed git; the lease
+    vectors run over the lease g/lease.toml beneath `base`."""
+    from unittest import mock
+    obs = _opf_observe
+    outcome = obs._GitOutcome
+    target = ".working/CONTRIBUTIONS.md"
+    lease = ".working/toml/lease.toml"
+
+    def refused(call):
+        try:
+            call()
+        except WriteGuardError:
+            return None
+        return "no refusal"
+
+    def parsed(raw, prefix="", lease_rel=None, specs=(".working",)):
+        """(records, None) for parse_porcelain over `raw`, or (None, its refusal)."""
+        try:
+            return parse_porcelain(raw, prefix, lease_rel, list(specs), "record"), None
+        except WriteGuardError as exc:
+            return None, str(exc)
+
+    def records(raw, wanted, **kwargs):
+        got, error = parsed(raw, **kwargs)
+        return None if error is None and got == wanted else "got {!r} ({})".format(got, error)
+
+    def refusal(raw, **kwargs):
+        got, error = parsed(raw, **kwargs)
+        return None if got is None and error is not None else "parsed as {!r}".format(got)
+
+    # Git diagnostics on stderr: an ignore input git could not read refuses, whatever the exit code, and a
+    # quiet non-match passes; a status diagnostic refuses on the matching and the expanded probe alike.
+    with mock.patch.object(obs, "_git_path", return_value="git"), \
+            mock.patch.object(obs, "_filter_neutralizing_config", return_value=[]):
+        for source in (".gitignore", ".git/info/exclude", "core.excludesFile"):
+            warning = "warning: unable to access '{}': Permission denied\n".format(source)
+            for rc, payload in ((1, b""), (0, b"./.working/CONTRIBUTIONS.md\x00")):
+                with mock.patch.object(obs, "_run_git", return_value=outcome(True, rc, payload, warning)):
+                    check("an ignore-probe diagnostic refuses ({}, rc {})".format(source, rc),
+                          lambda: refused(lambda: check_ignored("/fixture", [target], "record")))
+        with mock.patch.object(obs, "_run_git", return_value=outcome(True, 1, b"", "")):
+            check("a quiet ignore-probe non-match passes",
+                  lambda: None if refused(lambda: check_ignored("/fixture", [target], "record")) else "refused")
+
+        for where in ("matching", "expanded"):
+            def status(_git, _root, args, where=where, **kwargs):
+                if "rev-parse" in args:
+                    return outcome(True, 0, b"\n", "")
+                if "ls-files" in args:
+                    return outcome(True, 0, b"", "")
+                expanded = "--ignored=traditional" in args
+                err = "warning: cannot read ignore input\n" if expanded == (where == "expanded") else ""
+                return outcome(True, 0, b"" if expanded else b"!! .working/\x00", err)
+            with mock.patch.object(obs, "_run_git", side_effect=status):
+                check("a status diagnostic on the {} probe refuses".format(where),
+                      lambda: refused(lambda: probe_dirty("git", "/fixture", [target], None, "record")))
+
+        # Index flags: H (tracked, ordinary) passes; S, h and s (skip-worktree, assume-unchanged) refuse.
+        for tag in (b"H", b"S", b"h", b"s"):
+            def index_flags(_git, _root, args, tag=tag, **kwargs):
+                raw = tag + b" " + os.fsencode(target) + b"\x00" if "ls-files" in args else b""
+                return outcome(True, 0, raw, "")
+            with mock.patch.object(obs, "_run_git", side_effect=index_flags):
+                check("index flag {!r} {}".format(tag, "passes" if tag == b"H" else "refuses"),
+                      lambda tag=tag: (
+                          refused(lambda: probe_dirty("git", "/fixture", [target], None, "record"))
+                          if tag != b"H" else
+                          None if refused(lambda: probe_dirty("git", "/fixture", [target], None, "record"))
+                          else "refused"))
+        for tag in (b"M", b"m"):
+            def unmerged(_git, _root, args, tag=tag, **kwargs):
+                raw = ((tag + b" " + os.fsencode(target) + b"\x00") * 3
+                       if "ls-files" in args else
+                       b"UU " + os.fsencode(target) + b"\x00" if "status" in args else b"\n")
+                return outcome(True, 0, raw, "")
+
+            def names_conflict():
+                try:
+                    probe_dirty("git", "/fixture", [target], None, "record")
+                except WriteGuardError as exc:
+                    text = str(exc)
+                    return None if (target in text and "is unmerged; resolve the conflict" in text
+                                    and "malformed" not in text) else "said {!r}".format(text)
+                return "no refusal"
+            with mock.patch.object(obs, "_run_git", side_effect=unmerged):
+                check("an unmerged index entry {!r} refuses naming the conflict".format(tag), names_conflict)
+        for bad in (b"H", b"H path", b"\x00", b"? path\x00"):
+            def bad_flags(_git, _root, args, bad=bad, **kwargs):
+                return outcome(True, 0, bad if "ls-files" in args else b"", "")
+            with mock.patch.object(obs, "_run_git", side_effect=bad_flags):
+                check("malformed index flags {!r} refuse".format(bad),
+                      lambda: refused(lambda: probe_dirty("git", "/fixture", [target], None, "record")))
+
+    # A tracked record beneath the lease path is a spec 5.7 anomaly and refuses; an untracked or ignored one
+    # is the held-lease exclusion.
+    for pair in (b" M", b"M ", b" D"):
+        def tracked(pair=pair):
+            try:
+                parse_porcelain(pair + b" " + os.fsencode(lease) + b"/child\x00", b"", lease, [lease], "record")
+            except WriteGuardError as exc:
+                return None if "TRACKED" in str(exc) else "said {!r}".format(str(exc))
+            return "no refusal"
+        check("a tracked lease descendant {!r} refuses".format(pair), tracked)
+    for pair in (b"??", b"!!"):
+        check("a held lease descendant {!r} is excluded".format(pair),
+              lambda pair=pair: records(pair + b" " + os.fsencode(lease) + b"/child\x00", [],
+                                        prefix=b"", lease_rel=lease, specs=(lease,)))
+
+    # The porcelain -z grammar: a malformed payload refuses, never reads as clean.
+    check("an empty payload is clean", lambda: records(b"", []))
+    check("a well-formed untracked record parses", lambda: records(b"?? .working/toml/x\x00", [".working/toml/x"]))
+    check("a lone NUL refuses", lambda: refusal(b"\x00"))
+    check("a payload without its NUL terminator refuses", lambda: refusal(b"?? .working/toml/x"))
+    check("a record without status framing refuses", lambda: refusal(b"XYZno-space\x00"))
+    check("a nested store's lease is excluded after the prefix strip",
+          lambda: records(b"?? sub/.working/toml/lease.toml\x00", [], prefix="sub/", lease_rel=lease))
+    # An out-of-vocabulary or impossible status pair refuses on the lease path (where a silent drop would read
+    # dirt as clean) and on any other path: the whole XY pair is checked against git's enumeration.
+    for bad, label in ((b"ZZ", "out-of-vocabulary ZZ"), (b"  ", "blank status"), (b"R ", "rename R"),
+                       (b"C ", "copy C"), (b"UT", "UT"), (b"TU", "TU"), (b"DM", "DM"), (b"DT", "DT"),
+                       (b"DA", "DA"), (b"MA", "MA"), (b"TA", "TA")):
+        check("status {} refuses on the lease path".format(label),
+              lambda bad=bad: refusal(bad + b" " + os.fsencode(lease) + b"\x00", lease_rel=lease))
+        check("status {} refuses on another path".format(label),
+              lambda bad=bad: refusal(bad + b" .working/toml/x\x00", lease_rel=lease))
+    # Every pair git emits for this command parses: ??, !!, the 17 ordinary pairs and the 7 unmerged pairs.
+    for pair in (b"??", b"!!", b" A", b" M", b" T", b" D", b"M ", b"MM", b"MT", b"MD", b"T ", b"TM", b"TT",
+                 b"TD", b"A ", b"AM", b"AT", b"AD", b"D ", b"DD", b"AU", b"UD", b"UA", b"DU", b"AA", b"UU"):
+        check("emittable pair {!r} parses".format(pair),
+              lambda pair=pair: records(pair + b" .working/toml/x\x00", [".working/toml/x"]))
+    check("an untracked exact lease is excluded",
+          lambda: records(b"?? " + os.fsencode(lease) + b"\x00", [], lease_rel=lease))
+    check("an ignored exact lease beneath a prefix is excluded",
+          lambda: records(b"!! sub/" + os.fsencode(lease) + b"\x00", [], prefix="sub/", lease_rel=lease))
+    for pair in (b" D", b"D ", b" M", b"MM", b"M ", b"MD", b"A ", b"AD", b"DD", b"AU", b"UU"):
+        def tracked_lease(pair=pair):
+            got, error = parsed(pair + b" " + os.fsencode(lease) + b"\x00", lease_rel=lease)
+            return None if got is None and error is not None and "5.7" in error else "parsed as {!r}".format(got)
+        check("a tracked lease status {!r} refuses under spec 5.7".format(pair), tracked_lease)
+    check("a dirty record off the lease path is surfaced",
+          lambda: records(b" M .working/toml/x\x00", [".working/toml/x"], lease_rel=lease))
+    # Scope filtering applies to well-formed ignored records only, by path component.
+    for payload, wanted in ((b"!! .working\x00", [".working"]), (b"!! .working/\x00", [".working/"]),
+                            (b"!! .working/child\x00", [".working/child"]), (b"!! .working.bak/\x00", []),
+                            (b"?? .working.bak/child\x00", [".working.bak/child"]),
+                            (b" M .working.bak/child\x00", [".working.bak/child"])):
+        check("component scope {!r}".format(payload), lambda payload=payload, wanted=wanted: records(payload, wanted))
+    check("a malformed status out of scope still refuses", lambda: refusal(b"ZZ .working.bak/child\x00"))
+    # Byte paths stay lossless through prefix stripping, lease exclusion and scope matching.
+    byte_prefix, byte_path = b"nested-\xff/", b".working/\xfe"
+    check("a byte path keeps its filesystem bytes",
+          lambda: records(b"!! " + byte_prefix + byte_path + b"\x00", [os.fsdecode(byte_path)],
+                          prefix=byte_prefix, specs=(os.fsdecode(byte_path),)))
+    check("a byte prefix still excludes the lease",
+          lambda: records(b"!! " + byte_prefix + os.fsencode(lease) + b"\x00", [], prefix=byte_prefix,
+                          lease_rel=lease))
+    for bad_path in (b"elsewhere/file", b"sub/", b"sub//file", b"sub/../file", b"sub/./file", b"/sub/file"):
+        check("an unnormalizable ignored path {!r} refuses".format(bad_path),
+              lambda bad_path=bad_path: refusal(b"!! " + bad_path + b"\x00", prefix="sub/"))
+
+    # The show-prefix strip removes only the trailing newline, so a store directory whose name begins with a
+    # space keeps its prefix and its untracked lease stays excluded.
+    def leading_space_git(_git, _root, args, **kwargs):
+        if "ls-files" in args:
+            return outcome(True, 0, b"", "")
+        if "rev-parse" in args:
+            return outcome(True, 0, b" leading/\n", b"")
+        if "config" in args:
+            return outcome(True, 0, b"", b"")
+        return outcome(True, 0, b"??  leading/.working/toml/lease.toml\x00", b"")
+
+    def leading_space():
+        with mock.patch.object(obs, "_run_git", leading_space_git):
+            dirty = probe_dirty("git", base, [".working"], lease, "record")
+        return None if dirty == [] else "surfaced {!r}".format(dirty)
+    check("a leading-space store prefix keeps the lease excluded", leading_space)
+
+    # Lease ownership: a failed acquisition leaves its lease as a leftover, a lease a peer substituted in that
+    # window survives, and release removes this run's own lease but never a peer's replacement.
+    os.mkdir(os.path.join(base, "g"))
+    path = os.path.join(base, "g", "lease.toml")
+    peer = b'acquired_at = "2026-02-02T00:00:00Z"\nholder = "peer-runner"\noperation = "record"\nschema = 1\n'
+
+    def clear():
+        if os.path.lexists(path):
+            os.unlink(path)
+
+    root_fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        def failed_acquisition():
+            clear()
+
+            def write_fault(fd, data):
+                raise OSError(errno.EIO, "injected write failure")
+            with mock.patch.object(_opf_store._journal, "_write_all", write_fault):
+                try:
+                    acquire_lease(root_fd, "g", "record")
+                except WriteGuardError as exc:
+                    if "never seized" not in str(exc):
+                        return "said {!r}".format(str(exc))
+                else:
+                    return "no refusal"
+            return None if os.path.isfile(path) else "the lease was removed"
+        check("a failed acquisition leaves its lease in place", failed_acquisition)
+
+        def replaced_acquisition():
+            clear()
+
+            def replace_then_fail(fd, data):
+                os.unlink(path)
+                Path(path).write_bytes(peer)
+                raise OSError(errno.EIO, "injected write failure after a peer replaced the lease")
+            with mock.patch.object(_opf_store._journal, "_write_all", replace_then_fail):
+                if refused(lambda: acquire_lease(root_fd, "g", "record")) is not None:
+                    return "no refusal"
+            return None if Path(path).read_bytes() == peer else "the peer's lease was removed or changed"
+        check("a failed acquisition never removes a peer's replacement", replaced_acquisition)
+
+        def replaced_release():
+            clear()
+            payload = acquire_lease(root_fd, "g", "record")
+            if payload != Path(path).read_bytes():
+                return "acquire did not return the on-disk payload"
+            os.unlink(path)
+            Path(path).write_bytes(peer)
+            try:
+                release_lease(root_fd, "g", payload, "record")
+            except WriteGuardError as exc:
+                text = str(exc)
+                if ("never seized" not in text and "NEVER seized" not in text) or "peer-runner" not in text:
+                    return "said {!r}".format(text)
+            else:
+                return "no refusal"
+            if not os.path.isfile(path) or Path(path).read_bytes() != peer:
+                return "the peer's replacement was removed or changed"
+            clear()
+            Path(path).write_bytes(payload)
+            release_lease(root_fd, "g", payload, "record")
+            return None if not os.path.lexists(path) else "this run's own lease was not removed"
+        check("release refuses a peer's replacement and removes this run's own lease", replaced_release)
+    finally:
+        os.close(root_fd)
 
 
 if __name__ == "__main__":
