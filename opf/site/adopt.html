@@ -453,7 +453,10 @@
       the store resolves from a stable location. A <code>[profiles.aiqt]</code> table is optional and
       is ignored by base-only tooling; a base adopter need not add it.</p>
     <p>The reference tooling does not yet implement spec 2.0.0, the only base version the standard
-      defines; it validates spec 1.2.0 stores, as described above.</p>
+      defines; it validates spec 1.2.0 stores, as described above. It accepts a manifest declaring
+      <code>spec_version = "2.0.0"</code> with <code>homes = 2</code> and grades it under its 1.2.0
+      rules, so its VALID verdict on such a store says nothing about conformance to the
+      standard.</p>
     <p>The illustrative base <code>[opf]</code> table of a manifest, not a complete manifest:
       also register enabled types in <code>[types]</code> and declare views and other settings (see
       <a href="./standard">the standard</a> for the normative shape, and

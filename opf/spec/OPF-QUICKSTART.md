@@ -159,13 +159,11 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 
 Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack; until
 then the files are simple enough to keep by hand, and a conformance claim is self-asserted and says
-so. An implementation declares a conformance class: an upgrade-capable one carries older stores
-forward within its disclosed limits, and a fresh-only one supports one current format and refuses by
-name an older store or one in which its admission check detects an item on its closed legacy-state
-list (OPF-SPEC section 16.1). That check searches only the files section 16.1 permits and the list
-catches only what it lists, so legacy state the list omits, or that sits where the check does not
-search, goes undetected. Base 2.0.0, with `homes = 2`, is the only base version the specification
-defines, and the reference tooling does not yet implement it.
+so. The specification defines one implementation model, with no conformance classes (OPF-SPEC
+section 16.1). Base 2.0.0, with `homes = 2`, is the only base version the specification
+defines, and the reference tooling does not yet implement it. The reference tooling accepts a
+manifest declaring `spec_version = "2.0.0"` with `homes = 2` and grades it under its 1.2.0 rules,
+so its VALID verdict on such a store says nothing about conformance to the specification.
 
 The reference tooling requires Python 3.14 or newer.
 

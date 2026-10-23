@@ -121,7 +121,7 @@ yet implement base 2.0.0 (section 16.1).
       counters.toml                # per-namespace ID high-water marks (section 8.2)
       version.toml                 # version and release ledger (section 6.1)
       worklog.toml                 # durable operational record (section 6.2)
-      <type>.imported.index.toml    # imported records per enabled type except LF (section 8.3)
+      <type>.imported.index.toml    # imported records per enabled type (section 8.3)
       worklog.imported.toml         # imported worklog, on its own ID number line
       lease.toml                   # single-writer lease, present only while held (section 5.7)
       init.toml                    # bootstrap provenance of a coupled init (section 9), if present
@@ -158,15 +158,13 @@ per-record layout (section 9) additionally places one file per record under
 `.working/toml/<type>/`, with each `<type>.index.toml` acting as the registry.
 
 The imported files are registered managed leaves beside the clean-series files, using the same
-enabled-type roster except `legacy_fragment`; `worklog` uses `worklog.imported.toml` instead of an
+enabled-type roster; `worklog` uses `worklog.imported.toml` instead of an
 imported index. Their manifest, emitter, upgrade and containment registrations MUST agree.
-`opf init` MUST create the imported leaves for every enabled type except `legacy_fragment`,
-create-only and empty; enabling a further type or module other than `legacy_fragment` later MUST
-create its imported leaf in the same act as its clean index.
-`legacy_fragment` has no imported leaf and no imported counter row, since the imported series
-refuses the `LF` namespace (section 8.2). `opf init` MUST write at zero the imported counter row
-of each type that has an imported leaf (section 8.2). Enabling a further type or module other than
-`legacy_fragment` MUST also add its imported counter row in the same act as its clean index, at
+`opf init` MUST create the imported leaves for every enabled type, create-only and empty; enabling
+a further type or module later MUST create its imported leaf in the same act as its clean index.
+`opf init` MUST write at zero the imported counter row
+of each type that has an imported leaf (section 8.2). Enabling a further type or module MUST also
+add its imported counter row in the same act as its clean index, at
 zero only where no imported ancestry exists and otherwise at the largest `<n>` of that namespace's
 `imported:<NS>-<n>` IDs. Both counter-row duties follow from the section 8.2 rule that requires
 the imported counter rows. They are machine
@@ -220,7 +218,10 @@ adoption state while a drifted or vanished source is a containment failure at `r
 The doctor MUST decide that a run is admitted, and that its retirement is recorded, from the
 committed adoption evidence alone, the bundle under `.working/imported/adoption/<run-id>/` and
 the run archive, which travel with every clone, and MUST NOT read the machine-local journal, so
-a clone without journals grades exactly as the original store. That evidence check verifies
+a clone without journals grades a run's admission and recorded retirement exactly as the original
+store does. That parity covers adoption admission alone: the doctor's read of the section 8.2
+reservations under `journals/<kind>/allocations/` makes a clone's counter grading differ from
+the original store's, a residual section 17 discloses. That evidence check verifies
 internal consistency: the sealed inventories, plan and approval bound to the run id of the
 directory they sit in, and the listed bundle, archive and Move-root bytes at their recorded
 digests (a Move-root row counts only as a move destination the run's own plan records).
@@ -234,14 +235,11 @@ empty retirement record included, never evaluates as this run's record.
 The apply side's bundle verifier, through which `opf adopt status` reports a run, MUST hold every
 adoption inventory to that bar against its bundle's own `plan.toml`: it MUST yield cannot-evaluate
 for an inventory that names a phase other than the one its file name carries or a plan digest
-other than that plan's, and, except for an inventory in the recognized legacy format below, which
-is its named finding, for every inventory of a bundle whose `plan.toml` is absent, unreadable or
-not canonical, names another run, or carries a `plan_digest` that does not re-seal its own bytes,
-an empty base inventory included (a bundle with no inventory is its own named finding). It MUST
-check that plan's inventory row against the same bytes its seal was proven from. It does not check
-the approval's binding, which the doctor's admission checks. Verification stops at the first
-finding, a bundle without an inventory or an inventory in the recognized legacy format, so a
-cannot-evaluate that a later inventory would yield is not reported for that bundle.
+other than that plan's, and for every inventory of a bundle whose `plan.toml` is absent,
+unreadable or not canonical, names another run, or carries a `plan_digest` that does not re-seal
+its own bytes, an empty base inventory included (a bundle with no inventory is its own named
+finding). It MUST check that plan's inventory row against the same bytes its seal was proven from.
+It does not check the approval's binding, which the doctor's admission checks.
 A retirement is recorded only by a sealed retirement inventory in the shape the
 retirement-phase transaction derives from its own create ops: one row per move row of the plan,
 occupying or not, whose recorded Move destination (its move-file destination) lies beneath
@@ -285,7 +283,6 @@ inventory records, spelled `base` for `inventory.toml` and as the file name's `<
 later phase, whose name MUST NOT be `base`, and the run's approved plan's own `plan_digest` in
 the `sha256:` form with 64 lowercase hex digits. An inventory of any other kind MUST NOT carry
 that identity table. The apply side MUST write that identity when it derives the inventory.
-Except for an inventory in the recognized legacy format below, which is its named finding,
 C-EVIDENCE-ENUM MUST yield cannot-evaluate for an adoption inventory whose identity is missing or
 malformed, names another run, names a phase other than the one its file name carries, or names a
 plan digest other than its bundle's own sealed `plan.toml` digest, and for every inventory of an
@@ -306,18 +303,13 @@ digests: every payload file under `.working/imported/` and `.working/archive/`, 
 other than a bundle-root inventory, is claimed by exactly one row, and every inventory is itself
 schema-checked against the shape above rather than claimed. Unlisted or unclaimed entries, a bundle
 without an inventory, and missing listed files MUST be findings; unreadable or malformed inputs,
-including a path claimed twice, MUST yield cannot-evaluate. The recognized legacy format
-`opf.ingest.evidence-inventory/v1` MUST be refused as the named `legacy-ingest-inventory` finding
-under C-EVIDENCE-ENUM, without migration or rewriting; completed-ingest replay cannot evaluate that
-bundle. A fresh-only implementation (section 16.1) refuses such an inventory earlier, as
-`unsupported-legacy-state` at admission, and MUST NOT then grade that store under C-EVIDENCE-ENUM.
+including a path claimed twice, MUST yield cannot-evaluate.
 A phase inventory MUST NOT substitute for a missing
-`inventory.toml`: such a bundle cannot evaluate. Deleting a whole bundle, inventory and payload
-together, is outside this local snapshot check; independent history is required to detect that
+`inventory.toml`: such a bundle cannot evaluate. Deleting a whole bundle (inventory and payload
+together) is outside this local snapshot check; independent history is required to detect that
 loss. Inventories assert membership, not authenticated actor history. The contained reader's size
 ceiling still applies.
 
-The legacy `imports/` exclusion remains registered until its writers migrate.
 `staging/` MUST be walked and stray-graded, including empty runs; an unknown kind MUST always be a
 finding. The existing staged-plan presence test also recognizes import and ingest runs in their
 typed staging homes. Partial status is receipt-bound under section 11, not inferred from
@@ -379,10 +371,9 @@ the named fixed root for this file; any other path in a pointer MUST be absolute
 
 Machine-store TOML records live in `.working/toml/`. The directory name `.working` at the store
 repository root is fixed by this standard. The machine subdirectory's standard name is `toml`;
-tooling MUST NOT hardcode it, and MUST locate it by discovery. The names `imports`, `imported`,
-`archive`, `staging`, and `journals` are reserved at the store level for OPF control area and
-MUST NOT be used as a machine subdirectory name; discovery fails closed on a machine store so named.
-The legacy staging name `imports` remains reserved so legacy content cannot be re-absorbed.
+tooling MUST NOT hardcode it, and MUST locate it by discovery. The names `imported`, `archive`,
+`staging`, and `journals` are reserved at the store level for OPF control area and MUST NOT be
+used as a machine subdirectory name; discovery fails closed on a machine store so named.
 
 ### 4.5 Manifest discovery
 
@@ -399,26 +390,13 @@ and fails closed rather than trusting a stale target (section 4.3). Profiles dec
 is ignored for enforcement and recorded as unevaluated, never treated as a base-validation failure
 (section 9).
 
-A fresh-only implementation (section 16.1) MUST recognize a candidate `manifest.toml` whose base
-table is the retired `[devprocess]` only to refuse that store as `unsupported-older-store`; the
-recognition is not a discovery match. For a fresh-only implementation, a recognized legacy
-candidate, an ambiguous outcome, and an input that discovery cannot read or parse are a failed
-discovery of an existing store and MUST NOT be treated as an absent store that permits
-initialization or adoption; a recognized legacy candidate beside a matching store makes the outcome
-ambiguous, which yields cannot-evaluate, not `unsupported-older-store`, a refusal that applies only
-where no matching store accompanies the legacy candidate. A fresh-only implementation MUST NOT treat
-a zero-match outcome over a present `.working/` as authorizing initialization or adoption by itself.
-In every command that resolves a store and meets that outcome, as part of its section 16.1 admission
-check and so before every write that check precedes, it MUST run the section 16.1 legacy-state
-search over that `.working/` tree and MUST refuse each listed item it finds as
-`unsupported-legacy-state`, beside the zero-match cannot-evaluate result; where that `.working/`
-holds no recognized legacy candidate and no section 16.1 legacy-state item, only a section 14 first
-adoption authorizes initialization there, through an investigation that distinguishes first adoption
-from re-adoption and records a digest-stamped inventory, and one approved plan that gives every
-foreign file a disposition before `init-store` (section 14.1). Because a zero-match outcome
-discovers no store manifest, that search MUST apply the section 16.1 rule for a store with no
-discovered manifest, exactly as section 16.1 states it, and a cannot-evaluate result of that search
-authorizes neither initialization nor adoption.
+An ambiguous outcome and an input that discovery cannot read or parse are a failed discovery of an
+existing store and MUST NOT be treated as an absent store that permits initialization or adoption.
+A zero-match outcome over a present `.working/` MUST NOT be treated as authorizing initialization
+or adoption by itself: only a section 14 first adoption authorizes initialization there, through an
+investigation that distinguishes first adoption from re-adoption and records a digest-stamped
+inventory, and one approved plan that gives every foreign file a disposition before `init-store`
+(section 14.1).
 
 ### 4.6 Casing convention and rationale
 
@@ -858,24 +836,21 @@ is assistance, not authority; the published words are the curator's.
 | Operational-policy module | mode | MO |
 | Operational-policy module | tier_assessment | TA |
 | Concurrent-operation module | session_lease | SL |
-| Migration quarantine (importer-only) | legacy_fragment | LF |
 | Reserved, excluded | transaction | TX |
 | Reserved, unassigned | (none) | CL |
+| Reserved, unassigned | (none) | LF |
 
 Notes on the roster:
 
 - The word "changelog" is not a record type. It names the curated public deliverable (section 6.3).
   The detailed per-change type is `worklog`. The namespace `CL` is reserved unassigned so it can
   never half-collide with the freed word.
+- The namespace `LF` is reserved unassigned in the same way: no record type uses it in either
+  series, and unmappable imported text stays verbatim in `unparsed` (section 8.3).
 - `transaction` (`TX`) is excluded from the adopter standard with its name and namespace reserved;
   it may enter later as a versioned module only if portable semantics are demonstrated.
-- Modules ship default-off; each is enabled by one manifest edit. `legacy_fragment` (LF) is
-  deprecated for new stores as of 1.3.0, not removed: its taxonomy row and legacy validation remain
-  for existing stores and evidence. New imports MUST use the imported series and verbatim `unparsed`
-  text (section 8.3), not LF quarantine. LF MUST NOT be scaffolded. A fresh-only implementation
-  (section 16.1) provides no legacy LF validation and MUST refuse a store that declares the
-  `legacy_fragment` type or holds an LF record.
-- Imported history uses the same enabled types except `legacy_fragment` (section 8.2) in a separate
+- Modules ship default-off; each is enabled by one manifest edit.
+- Imported history uses the same enabled types (section 8.2) in a separate
   series, not additional record types.
   Reserved namespaces remain reserved. Imported states describe history and confer no current
   authority (section 8.6).
@@ -899,12 +874,9 @@ Clean record IDs have the form `<NS>-<n>`; imported IDs have the form `imported:
 for example `imported:BI-7`. The complete lexical grammar is
 `^(?:imported:)?[A-Z]{2}-[1-9][0-9]*$`, and the namespace MUST additionally name the
 record's enabled type in section 8.1. Namespaces map one-to-one to types within each series.
-The imported series MUST refuse the `LF` namespace, since new imports do not use LF quarantine
-(section 8.1).
 `counters.toml` MUST hold independent monotonic high-water values per series and namespace, `BI`
 for clean backlog items and the quoted TOML key `"imported:BI"` for imported backlog items, with
-the imported series' rows required, one for each enabled type except `legacy_fragment`, since the
-imported series refuses `LF` and so has no `"imported:LF"` row.
+the imported series' rows required, one for each enabled type.
 The same rule includes `"imported:WL"`; clean release spans MUST tile only the clean `WL` number
 line. The doctor MUST require the imported counter rows, whether `opf init` wrote them at zero or
 a re-adoption seeded them from its ancestral snapshot. Uniqueness,
@@ -957,10 +929,6 @@ registered vendor extension table.
 | `refs` | optional | array of captured references (section 8.6) |
 | `x-<vendor>` | optional | registered vendor extension tables only (section 8.7) |
 
-An importer MAY omit `created_at` where the source genuinely does not record it; the omission is
-recorded as unknown via the import provenance reference, never guessed. This legacy permission
-does not replace the following 1.3.0 imported-series contract.
-
 The worklog entry uses a reduced envelope (`id`, `date`, `actor`, `kind`, `summary`, optional
 detail, `links`, `refs`); its status is fixed (section 8.5). The worklog records facts, not
 proposable decisions, so its entries MUST NOT take the `/proposed` qualifier whatever the actor: an
@@ -1010,11 +978,15 @@ machine-proven. Preserved originals remain the restoration authority.
 
 Imported records and their worklog entries MUST be immutable after publication; corrections MUST be
 a fresh import run retaining the old evidence. A conforming imported series can reach doctor VALID:
-it MUST NOT enter the legacy importer or module-schema deferral seam. C-IMPORTED-SCHEMA checks
+it MUST NOT enter the module-schema deferral seam. C-IMPORTED-SCHEMA checks
 this envelope and missingness; C-IMPORTED-IDS checks the series grammar, counters and no-deletion;
 C-IMPORTED-PROVENANCE re-reads each preserved original and verifies `source_sha256`.
+C-IMPORTED-IDS owns every imported-series ID defect exclusively, its grammar, counter rows,
+uniqueness, contiguity and no-deletion included: such a defect MUST be a C-IMPORTED-IDS finding and
+MUST NOT be reported again by C-IMPORTED-SCHEMA or any other check.
 C-CONTAINMENT recognizes the imported managed leaves, C-LINKS resolves the union of both series,
-and C-IMPORTED-SEGREGATION enforces section 8.6. Missing or unreadable evidence MUST fail closed.
+and C-IMPORTED-SEGREGATION enforces section 8.6: a firewall breach for which no other check is
+named is a C-IMPORTED-SEGREGATION finding. Missing or unreadable evidence MUST fail closed.
 
 ### 8.4 The status grammar
 
@@ -1091,8 +1063,7 @@ Module types, in outline (full schemas ship with the module schemas release): ma
 `rejected`; gate_run `recorded` with a three-valued verdict field (`pass`, `fail`,
 `cannot_evaluate`), never folded into status; release `planned` > `published` or `abandoned`;
 waiver `active` > `expired` or `revoked`, expiry required at creation; mode `active` > `retired`;
-tier_assessment `recorded`; session_lease `held` > `released` or `reconciled`;
-legacy_fragment `quarantined` > `resolved` or `ignored`.
+tier_assessment `recorded`; session_lease `held` > `released` or `reconciled`.
 
 Actionability: a clean backlog item authored by a non-importer actor is actionable when its
 state is `open` or `active` and no clean, unqualified `active` block authored by a non-importer
@@ -1121,26 +1092,16 @@ applicable), `url`, or `doc` (a document and section). A record whose claims res
 source without a captured reference is unsourced, whatever confidence backs it.
 
 Imported history has an authority firewall, enforced by the writer and doctor and keyed on
-provenance rather than on series alone: it covers every record whose `actor.kind` is `importer`,
-in the imported series or written into the clean series by the pre-1.3.0 legacy importer. An
+provenance rather than on series alone: it covers every record whose `actor.kind` is `importer`.
+A clean-series record MUST NOT carry `actor.kind = "importer"`. An
 importer-authored record MUST NOT satisfy a current approval, receipt, actionability or
 supersession obligation of any record authored by a non-importer actor. The same bar covers
 every current obligation, record-level or store-level, including field-borne authority: a
 gate_run verdict, a tier_assessment outcome, an artifact's promoted state, a release's published
 state and a maintainer_action's done on an importer-authored record describe history and
 discharge nothing now. A clean `done` record's `receipt_of` MUST target a clean backlog item, and a clean backlog item
-reaching ratified `done` MUST hold a clean receipt authored by a non-importer actor; a legacy
-importer-authored receipt satisfies, as recorded history, only the legacy importer-authored
-backlog item it was recorded with. One exception is defined so that the section 9.2 refusal always
-has a writer-performable remedy: where that upgrade withdraws a ratified `done` item's only
-receipt as legacy importer-authored, a maintainer-authored clean `maintainer_decision` that links
-`corrects` to that item and records that its completion stands MUST satisfy the item's receipt
-obligation in place of the withdrawn receipt; `opf record create` authors such a decision, doctor
-and the upgrade MUST accept it, and a maintainer who instead judges the work unfinished MUST
-record a new clean backlog item linking `derives_from` back, never reopen the terminal `done`.
-That acceptance binds an upgrade-capable implementation (section 16.1); a fresh-only
-implementation never reaches it, because the withdrawn legacy receipt is legacy state that it MUST
-refuse under section 16.1. An importer-authored decision MUST NOT be treated as the current effective resolution of a clean
+reaching ratified `done` MUST hold a clean receipt authored by a non-importer actor.
+An importer-authored decision MUST NOT be treated as the current effective resolution of a clean
 `pending_decision` chain; resolving such a chain now MUST take a new clean decision linking back.
 Importer-authored blocks MUST NOT grant a current stop, and an importer-authored record MUST NOT
 discharge a required supersession. The firewall covers every state-bearing type: an importer-authored record MUST NOT be treated as
@@ -1148,15 +1109,14 @@ the current `handoff`, an active `waiver`, a held `session_lease`, an active `mo
 active `preference_pattern`; a state-bearing status on an importer-authored record describes
 history at its source and MUST confer nothing now, and every current-state join, including the
 section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by
-non-importer actors. After the section 9.2 upgrade an
-existing legacy importer-authored clean record MUST keep its bytes, its recorded state and its place
-in the clean series, and remains readable history there; what the upgrade changes, and its
-report enumerates (section 9.2), is authority alone: such a record leaves every current-state
-join, its open or active backlog items leave actionability, and its blocks stop granting a stop.
+non-importer actors.
 The clean-series writer MUST refuse a transition on an importer-authored record in either series
 (section 8.8). Acting on history MUST take a new strict clean record at the present time, with a
 link back to the historical record.
-C-IMPORTED-SEGREGATION enforces this firewall over importer-authored records in both series.
+C-IMPORTED-SEGREGATION enforces this firewall: a clean-series record that carries
+`actor.kind = "importer"`, and a breach of any other part of this firewall, the link rules below
+included, for which this specification names no other doctor check, MUST each be a
+C-IMPORTED-SEGREGATION finding.
 
 Clean-to-imported links MUST be limited to `relates`, `derives_from`, `follows`, and same-type
 `supersedes`; the last records historical continuation without discharging a current supersession
@@ -1183,8 +1143,8 @@ clean-series subcommands use the strict record model; the `import` write mode us
 imported model. Import is not a flag
 that relaxes `create`, and the clean-series subcommands MUST refuse `actor.kind = "importer"`:
 an importer authors only through `import`. The clean-series subcommands MUST also refuse an
-importer-authored record as their operand: acting on imported or legacy importer-authored
-history is a new clean record linking back (section 8.6). Its subcommands:
+importer-authored record as their operand: acting on imported history is a new clean record
+linking back (section 8.6). Its subcommands:
 
 - `create`: one new record of an enabled baseline type, in the type's initial state. An assistant
   or automation author entering a gated initial state lands `/proposed`; a created-terminal factual
@@ -1289,9 +1249,7 @@ guarantees:
    An operand changed since the interruption, to bytes that are neither its journaled prestate nor its
    planned poststate nor a write of either torn by the interruption, MUST be reported and refused,
    never overwritten. A reconciled interruption MUST refuse the new operation, so the operator
-   inspects it before anything new is written. A fresh-only implementation (section 16.1) performs
-   that reconciliation only after its section 16.1 read-only pre-scan and within the section 16.1
-   recovery bound, and runs its admission check after it.
+   inspects it before anything new is written.
 2. Precondition: re-emitting the unchanged parsed model of every file the operation rewrites
    reproduces its on-disk bytes exactly (the section 9.2 rule). A file carrying comments or
    non-canonical serialization MUST be refused and left untouched. The check proves serialization
@@ -1528,30 +1486,22 @@ the reference verification floor, and its `x-aiqt` extension namespace. The `[pr
 namespace and these contract rules are reserved and documented; the profile-authoring interface is
 not yet a committed public contract for third-party authors.
 
-Implementation conformance classes (section 16.1) are defined by the base, not by profiles. A
-profile MAY require an upgrade-capable implementation, because that adds a requirement. A profile,
-a store manifest field, or a command-line request MUST NOT declare, grant, or relax an
-implementation's class.
-
 ### 9.2 Store schema upgrades
 
 Base spec 2.0.0 is the baseline, and it declares the homes generation with the required integer
 `[opf].homes = 2` (section 4.2). A store that omits `[opf].homes`, or declares any value other
 than the integer `2`, MUST be refused. No earlier base version exists, so this section defines no
 upgrade into 2.0.0; its rules bind each later base-schema version bump.
-Unproven legacy `.archive/` entries MUST remain in place with a standing finding until
-dispositioned.
 
 A base-schema version bump MUST ship a tested, in-place store-schema upgrade (`opf upgrade`) in at
-least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a
-store below the new version has an upgrade path; the path holds only
-within this section's preconditions and refusals and that implementation's disclosed residuals.
-Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and
-remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of
-them and MUST instead refuse under section 16.1. Every implementation class MUST apply the version
-ceiling's refusal at the end of this section, a fresh-only implementation at its section 16.1
-admission check. The
-upgrade MUST be idempotent. A schema-level bump MUST be additive, using atomic
+least one published implementation (section 16.1), the reference tooling, so that a store below
+the new version has an upgrade path; the path holds only within this section's preconditions and
+refusals and that implementation's disclosed residuals. Every requirement of this section on an
+upgrade, its deltas, preconditions, report, refusals, and remedies binds every implementation that
+provides `opf upgrade`. Every implementation MUST apply the version ceiling's refusal at the end
+of this section. The
+upgrade MUST be idempotent. An upgrade MUST NOT create provenance, adoption approval or
+historical records. A schema-level bump MUST be additive, using atomic
 replacement of existing files, create-only writes for new index files, and regeneration of declared
 views through exclusively created temporary files followed by atomic rename. These writes are
 sequential, with recovery scope held in memory, not a durable transaction journal. The upgrade MUST
@@ -1584,7 +1534,15 @@ no-op only after full doctor VALID.
 Declaring a spec_version above the tooling's supported version MUST be refused at validation
 as a fail-closed INVALID finding naming the tooling-upgrade remedy, never treated as supported.
 A `spec_version` below 2.0.0 names no version this specification defines, and validation MUST
-refuse it as a fail-closed INVALID finding.
+refuse it as a fail-closed INVALID finding naming the remedy, since this section defines no
+upgrade into 2.0.0: a fresh 2.0.0 store whose section 14 adoption gives the old store's files a
+disposition as foreign content.
+Before any command writes to a store, the claim, release, or reconciliation of the single-writer
+lease (section 5.7), a fast-forward by `opf sync`, and the recovery of sections 8.8, 14.1, and 14.2
+included, every implementation MUST apply these validation refusals and the `[opf].homes`
+refusal above to the store manifest that discovery finds there, so a store they refuse stays
+byte-identical; the one exception is the apply of the section 14 adoption that the remedy above
+names, and the recovery of that apply (section 14.2).
 
 ## 10. Views and deliverables
 
@@ -1682,18 +1640,10 @@ the deterministic checks in sections 8.3 and 8.6; the authority firewall MUST NO
 results are not yet recorded green (section 14.1); it can persist across assistant sessions
 without a process running.
 `"complete"` means every such source has a green completion result and recorded retirement under
-section 14.1 with a live full doctor VALID, or that a pre-1.3.0 legacy import finished and its
-preserved legacy run evidence substantiates it; the
-section 9.2 upgrade preserves that legacy status without fabricating an approval or receipt.
-A partial or complete status that neither an adoption receipt with completion results nor
-preserved legacy import evidence substantiates MUST fail closed, as does a missing, unreadable
+section 14.1 with a live full doctor VALID.
+A partial or complete status that no adoption receipt with completion results substantiates MUST
+fail closed, as does a missing, unreadable
 or contradictory input. Elapsed time and a staging directory MUST NOT be taken as proof of status.
-A fresh-only implementation (section 16.1) MUST NOT use the preserved-legacy-evidence route: it
-substantiates `partial` and `complete` only through an adoption receipt with completion results,
-and it refuses a `partial` or `complete` status in a store that holds no adoption receipt as legacy
-state under section 16.1, which yields cannot-evaluate instead where it cannot establish whether
-the store holds one. The section 16.1 admission check belongs to neither layer above: it MUST
-run at every posture, and `off` and `warn` MUST NOT disable or soften it.
 From the recorded approval until its retirement is recorded, a path the approved plan enumerates
 as a frozen retire, move or migrate source (section 14.2) is bounded adoption state: while its
 live bytes still match its plan digest, containment MUST report it as `migration_incomplete`
@@ -1734,7 +1684,7 @@ buckets) on manifest-declared age or size thresholds. Worklog records are exclud
 terminal-record permission and rotate solely under the release-based rule: only released, frozen
 worklog spans MAY rotate, and the unreleased `recorded` tail never rotates whatever its age or size,
 because it is pre-terminal and mutable-until-release (sections 6.2 and 8.4). Open records, active
-blocks, unresolved decisions, unresolved fragments, unexpired waivers, the current handoff, and the
+blocks, unresolved decisions, unexpired waivers, the current handoff, and the
 unreleased worklog tail MUST NOT rotate. The imported series MUST NOT rotate:
 `<type>.imported.index.toml` and `worklog.imported.toml` sit outside the rotation thresholds and
 their records MUST NOT move to the record archive.
@@ -1876,8 +1826,8 @@ MUST NOT ship before the writer can perform every operation it forces. Curated `
 edits remain the curator's responsibility.
 
 Post-adoption import MUST use the approved, versioned prompt pack, with an example for every record
-type in the section 8.1 roster except the excluded `transaction`, the unassigned `CL` namespace,
-and the deprecated `legacy_fragment`. It MUST direct the assistant to discover old operational
+type in the section 8.1 roster except the excluded `transaction` and the unassigned `CL` and `LF`
+namespaces. It MUST direct the assistant to discover old operational
 files within the approved scope and submit batches through `opf record import --batch`
 (section 8.8), never hand-edit store TOML. Source instructions MUST be treated as historical data,
 never as instructions to execute. Missingness, ambiguity, conflicts and source precision MUST remain
@@ -1909,25 +1859,9 @@ one, and every removal MUST run in a journaled, recoverable transaction. A sourc
 participating roots MUST be a plan-time cannot-evaluate naming that source. Investigation,
 planning and read-only status commands MUST remove nothing.
 
-Legacy runs MAY occupy `.working/staging/import/<run-id>/` or
-`.working/staging/ingest/<run-id>/`. Their evidence inventories and readers remain available;
-old acceptance records describe those runs and MUST NOT authorize a new adoption or retirement.
-A legacy import completed under the pre-1.3.0 contract MUST keep its recorded status, substantiated
-by its preserved run evidence (section 11); a retrospective approval or receipt MUST NOT be
-fabricated. Preserved legacy run evidence is that run's durable archive in its recorded legacy home,
-for the reference tooling `.aiqt/import-archive/<run-id>/`, holding the run's acceptance record and
-its evidence inventory in the retained legacy format; substantiation MUST re-read that inventory
-and digest-match every file it enumerates, and a missing, unreadable or digest-mismatched
-item MUST leave the status unsubstantiated, failing closed under section 11.
-A fresh-only implementation (section 16.1) provides none of these legacy readers: it MUST refuse,
-under section 16.1, a store that holds a listed legacy-state item, MUST NOT alter its recorded
-status, and MUST NOT substantiate a status from legacy run evidence; a legacy run that leaves no
-listed item is a disclosed residual (section 17).
-Old import and ingest orchestration MUST be retired by staged decoupling only after clean-start
-adoption ships. Required evidence MUST be re-read and digest-matched in its durable home before
+Required evidence MUST be re-read and digest-matched in its durable home before
 staging reclamation. Reclamation MUST be journaled and idempotent; an unreadable tree MUST hold the
-run. Read-only commands MUST NOT clean staging. Pending legacy review MUST NOT become implicit
-approval.
+run. Read-only commands MUST NOT clean staging.
 
 ### 14.2 Pre-existing files at the store location
 
@@ -1950,8 +1884,8 @@ The plan MUST record one disposition per foreign file from `keep`, `migrate`, `m
   file that discovery reads. A `keep` declaration whose path equals or contains a discovery
   candidate MUST refuse at plan time, naming that candidate, the same way a collision refuses below. A
   no-follow existence probe of `manifest.toml` in an immediate subdirectory of `.working/`, a kept
-  one included, used only by discovery, by this rule, and by the section 16.1 admission check, is
-  not a read of a kept path. An unmanaged path MUST NOT collide with an OPF-managed file or view: a
+  one included, used only by discovery and by this rule, is not a read of a kept path. An unmanaged
+  path MUST NOT collide with an OPF-managed file or view: a
   `keep` declaration naming a declared view or managed store path MUST refuse at plan time, and a
   later manifest change, type enablement or upgrade delta that would declare a view or managed store
   path at a registered `[unmanaged]` path MUST refuse the same way (section 9.2), so a kept path
@@ -1995,11 +1929,10 @@ apply MUST resolve from the apply journal alone and MUST NOT require the live tr
 a store: on restart the one transaction either completes forward from its durably committed
 journal or reverses fully as above, so an interruption that removed an occupying machine-store
 file, the manifest included, never leaves the store unresolvable or waiting on a plan it cannot
-form. A fresh-only implementation (section 16.1) performs that recovery only after its section 16.1
-read-only pre-scan and within the section 16.1 recovery bound, and runs its admission check after
-it. In a first adoption, its apply also archives and removes every occupying source at a
-section 16.1 candidate path before it writes the store manifest, and its plan refuses a foreign
-source at such a path that is no planned managed destination (section 16.1). After the archival
+form. A fully reversed first adoption leaves `.working/` holding its retained journal, so the
+store location reads as present without a manifest (section 4.5), and journal state that a
+foreign tree planted there is touched only by a fail-closed refusal and by the explicit reconcile
+an operator runs, a same-user residual of the class section 14.1 discloses. After the archival
 the destination is an
 ordinary managed path: apply initializes
 the machine file or renders the view immediately, and no writer carries an occupied-destination
@@ -2113,26 +2046,26 @@ conformance claim is a completeness claim over a declared set, and it enumerates
 which profiles were and were not evaluated. Until validation tooling ships, a conformance claim is
 self-asserted and MUST say so.
 
-### 16.1 Implementation conformance classes
+### 16.1 Implementation conformance
 
 An implementation is a tool or tool suite offered to create, write, or validate OPF stores. A
 project that keeps its own store by hand, with its own checks over that store alone (section 1), is
-not an implementation under this section. The base defines two implementation conformance classes,
-`upgrade-capable` and `fresh-only`. A class changes which requirements bind an implementation only
-where this specification says so; a declared scope, exclusion, profile, or posture MUST NOT
-otherwise waive a base requirement. Current-format requirements, the imported series, adoption, and
-the section 8.6 authority firewall included, bind both classes.
+not an implementation under this section. The base defines one implementation model and no
+implementation conformance classes: a declared scope, exclusion, profile, or posture MUST NOT
+waive a base requirement, and current-format requirements, the imported series, adoption, and the
+section 8.6 authority firewall included, bind every implementation.
 
-An upgrade-capable implementation meets every section 9.2 requirement for each earlier base version
-and generation and grades legacy state under sections 8.1, 8.6, 11, and 14.1. The reference tooling
+An implementation supports base `spec_version` 2.0.0 and homes generation 2, the only ones this
+specification defines (sections 4.2 and 9.2), and the worklog storage generation it declares, and
+initializes stores directly at them. The reference tooling
 does not yet implement base 2.0.0: it still initializes and validates stores at base `1.2.0`, a
 pre-release format this specification does not define, and it makes no claim of conformance to
-this specification. A fresh-only implementation supports exactly
-one base `spec_version`, one homes generation, and one worklog storage generation, initializes
-stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.
+this specification. The reference tooling accepts a manifest declaring `spec_version = "2.0.0"`
+with `homes = 2` and grades it under its 1.2.0 rules, so its VALID verdict on such a store says
+nothing about conformance to this specification.
 
 An implementation MUST declare, in the documentation of each release and in every report its emitter
-writes, its release identity, its class, and its supported `spec_version`, homes generation, and
+writes, its release identity and its supported `spec_version`, homes generation, and
 worklog storage generation. Each release MUST ship that declaration as one file, the declaration
 file. A runtime check is the step of the implementation that, in a run, reads the declaration and
 gates that run's store operations, the emitter is the step of the implementation that writes the
@@ -2141,10 +2074,10 @@ new-document emitter, and a documented run of the runtime check and the emitter 
 store. Whether a run authorized store operations is an observable of that run: it authorized them
 exactly where it performed one, a write within a store that run resolved or to that store's lease,
 as the checker observes the run's writes, and an authorization no performed operation shows is not
-compared. A write this section or section 5.7 itself requires is not a store operation under this
-section, for the runtime-result comparison and the store part below alike: the claim of the
-single-writer lease a command takes, its release, the `session_lease` record of that claim and of
-that release, and the lease reconciliation and recovery writes sections 5.7, 8.8, 14.1, and 14.2
+compared. A write that sections 5.7, 8.8, 14.1, and 14.2 themselves require is not a store
+operation under this section, for the runtime-result comparison and the store part below alike:
+the claim of the single-writer lease a command takes, its release, the `session_lease` record of
+that claim and of that release, and the lease reconciliation and recovery writes those sections
 require, so a run that stops as cannot-evaluate and writes nothing but what section 5.7 requires to
 end its own claim performed no store operation. A runtime check MUST read the declaration from the
 copy of that file installed with the implementation (the installed copy) alone, never from the
@@ -2167,7 +2100,7 @@ check read none because the installed copy is absent or unreadable, and a report
 written as 64 lowercase hexadecimal digits, and the runtime result MUST be written as one of the
 tokens of the three-valued gate_run verdict field (section 8.5): `cannot_evaluate` where that run's
 runtime check yielded cannot-evaluate or another rule of this section made that run yield
-cannot-evaluate, the admission check over the store that run resolved included, and otherwise `pass`
+cannot-evaluate, and otherwise `pass`
 where it authorized store operations and `fail` where it did not. Section 8.5 fixes those tokens,
 not their meaning here: under this section `pass` and `fail` read observably, over performed store
 operations, so a documented run that resolves no store, and one whose only writes are the exempt
@@ -2175,19 +2108,16 @@ writes above, each authorized none and, where no rule yields cannot-evaluate, wr
 restatement differs from that file's declaration where it gives a different value for any field the
 file carries, omits such a field, or states a field the file does not carry. The documentation of
 each release MUST restate that file's declaration without differing from it. The expected report of
-a release is fixed by the bytes the release ships alone, apart from the runtime result, the one part
-also coupled to the run it concerns: its restatement is the declaration of that file as the release
-ships it, each of its digests equals the SHA-256 digest of that file's bytes as the release ships
-them, and its runtime result is `cannot_evaluate` exactly where a rule of this section makes those
-bytes, or the store that run resolved as the checker observes it, yield cannot-evaluate, and
-otherwise `pass` or `fail`, between which this section, as it now stands, sets no rule. A report
+a release is fixed by the bytes the release ships alone: its restatement is the declaration of that
+file as the release ships it, each of its digests equals the SHA-256 digest of that file's bytes as
+the release ships them, and its runtime result is `cannot_evaluate` exactly where a rule of this
+section makes those bytes yield cannot-evaluate, and otherwise `pass` or `fail`, between which this
+section, as it now stands, sets no rule. A report
 deviates from the expected report where any of the four compared parts is omitted, written in
-another form, or holds another value; no other content of a report is compared, the base result of a
-report a reference run emits over a store its admission check refuses (the base-result part below)
-apart. The runtime-result part also deviates where its token disagrees with whether that run
+another form, or holds another value; no other content of a report is compared. The runtime-result
+part also deviates where its token disagrees with whether that run
 authorized store operations, the performed operations the checker observes; this comparison reads
-the run's writes, the store-coupled cannot-evaluate rule above reads the store that run resolved,
-and together they make the runtime result the only part of the expected report not fixed by the
+the run's writes, so the runtime result is the only part of a report compared with more than the
 shipped bytes alone. A `pass` token beside no performed store operation, a `fail` token beside one,
 and a `cannot_evaluate` token beside one each disagree that way, whatever the expected result, since
 a run that yields cannot-evaluate authorizes no store operation. The behaviour-coupled comparisons
@@ -2195,9 +2125,8 @@ are exactly two, the token comparison above and the store part below, and they r
 the checker observed: a run for which the checker cannot determine whether it observed every write
 gives it no evidence under either comparison, so a result-part or store-part failure that only those
 two comparisons of such runs could show MUST be reported as unresolved, never as established, a
-residual section 17 discloses; the rest of the expected-report comparison, the store-coupled
-cannot-evaluate expected result included, reads such a run's report as any other, over the store
-that run resolved as the checker observes it.
+residual section 17 discloses; the rest of the expected-report comparison reads such a run's
+report as any other.
 
 An execution environment is unaltered where it is a stock install of a platform and version within
 what the documentation of the release names or, where that documentation names none, of the platform
@@ -2232,8 +2161,7 @@ otherwise, an installed copy a documented run cannot read, an installation step 
 complete, and a first run whose writes leave the second run with an installed copy that no longer
 holds the shipped bytes are each a failure of this rule. A reference run of a release MUST NOT emit
 a report that deviates from the expected report, and its runtime check MUST NOT authorize any store
-operation where the expected runtime result is `cannot_evaluate` or where its admission check, the
-pre-scan included, refused the store that run resolved.
+operation where the expected runtime result is `cannot_evaluate`.
 
 Only a checker's own attempts and reference runs are evidence under the two rules above: a report of
 any other run or installation, altered or not, MUST NOT be presented as establishing or countering
@@ -2243,21 +2171,21 @@ documentation of the release, and from the checker's own attempts and reference 
 either rule is shown for a checker where one of its own attempts or reference runs shows it, and
 established for that checker where a second of its own attempts or reference runs, made on the same
 platform and version, shows a failure of the same rule and, under the reference-run rule, in the
-same part, the four compared parts of the report and the store and base-result parts below each one
-part; attempts and reference runs that show no failure, however many there are, never counter a
+same part, the four compared parts of the report and the store part below each one part; attempts
+and reference runs that show no failure, however many there are, never counter a
 shown or established failure. The two rules above are the one path from attempts and reference runs
 to a verdict: a breach of any requirement of this section that an attempt or a reference run shows
 in what those rules compare, the four compared parts of a report, `not-read` beside another runtime
 result, a run's cannot-evaluate and the store operations it performs, a restatement a report states,
-and the store and base-result parts below included, MUST be judged solely as a failure of the
+and the store part below included, MUST be judged solely as a failure of the
 availability rule or of the reference-run rule, shown and established only as those rules provide,
 never as nonconformance on one showing; only what a checker inspects in the bytes the release ships
 or reads in the documentation of the release decides a verdict under this section without that
 procedure. Every requirement of this section that those rules do not compare is a requirement on the
 bytes the release ships, on the documentation of the release, or on a checker's own conduct and
 reporting: in particular, a requirement on the conduct of the implementation's commands outside what
-the parts above read, the fresh-only admission, lease, recovery, and sync conduct below included, is
-a property of the bytes the release ships, and a breach of it is judged by that inspection alone,
+the parts above read is a property of the bytes the release ships, and a breach of it is judged by
+that inspection alone,
 never by this procedure. A run that is no reference run and belongs to none of the checker's
 attempts, a run of another command over a store the checker made and the Appendix E scratch-copy
 probe over an edited installed copy included, is an observation of the implementation's behaviour,
@@ -2270,14 +2198,10 @@ and such an observation rest on. An availability failure is shown by a failed at
 established by a second failed attempt of the same checker on the same platform and version; it has
 no part, so the same-part condition does not apply to it. Under the reference-run rule the same-part
 condition applies to every failure, a store operation performed where the expected runtime result is
-`cannot_evaluate` or where that run's admission check, the pre-scan included, refused the store that
-run resolved included: that operation is a failure in a part of its own, the store part, shown and
-reproduced only by a run that performs such an operation, never by a deviating report. A report a
-reference run emits over a store its admission check refuses is compared in one more part of its
-own, the base-result part: it deviates there where that report breaches the refusal-report rule
-below, by a base result other than `indeterminate` or by not naming what that rule has it name, and
-such a breach in such a report is judged only there, under the reference-run rule and the same-part
-condition, never as a direct verdict. The showing and the reproducing evidence MAY be any two of the
+`cannot_evaluate` included: that operation is a failure in a part of its own, the store part, shown
+and
+reproduced only by a run that performs such an operation, never by a deviating report. The showing
+and the reproducing evidence MAY be any two of the
 checker's own reference runs on the same platform and version, the two runs of one attempt included.
 A checker that reports on a shown failure MUST report it as established or, where its own evidence
 has shown it and not reproduced it, as unresolved, MUST name the platform, the version, and its own
@@ -2289,292 +2213,14 @@ reference runs it rests on. Each such failure is a release nonconformance, never
 the declaration: it MUST NOT be treated as making the declaration malformed or contradictory, and it
 does not change what a runtime check of an installed copy yields.
 
-An implementation whose declaration lacks only its class MUST be treated as upgrade-capable, and
-every upgrade requirement binds it. An unreadable, malformed, or contradictory declaration MUST
-yield cannot-evaluate and MUST NOT authorize any store operation. A declaration that is absent, or
-that omits its release identity, its `spec_version`, its homes generation, or its worklog storage
-generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and
-MUST NOT authorize any store operation. A declaration that carries its release identity, its
-`spec_version`, its homes generation, and its worklog storage generation, and omits only its class,
-declares no class: it MUST NOT be treated as malformed for that omission, and the implementation
-that ships it MUST be treated as upgrade-capable unless the declaration is malformed or
-contradictory on other grounds. The rules on an absent, unreadable, malformed, contradictory, or
-classless declaration govern the file alone: a runtime check MUST apply them to the installed copy
-as it stands, a check of the documentation or of the reports MUST apply them to that file as the
-release ships it, and each check MUST NOT take a class or any other field from the documentation of
-the release or from any report. Where that documentation states a class that the file omits, the
-release does not conform to this section and a conformance claim MUST NOT be made for it, because
-the documentation's restatement states a field the file does not carry; where a report a reference
-run of that release emits states such a class, that report's restatement differs from the file's
-declaration the same way, a deviation of the restatement part judged under the reference-run rule
-like any other, never a direct verdict. The file declares no class only where it omits its class and
-no other field: a file that is absent, or that also omits its release identity, its `spec_version`,
-its homes generation, or its worklog storage generation, is malformed and MUST yield
-cannot-evaluate.
-
-A fresh-only implementation MUST run an admission check in every command that resolves a store, at
-every posture, before any other grading and before any write, the claim of the single-writer lease
-(section 5.7) included, apart from the lease reconciliation and recovery that the recovery bound
-below leaves to sections 5.7, 8.8, 14.1, and 14.2, which the read-only pre-scan below precedes. The
-check MUST run after any section 5.7 comparison against the sync target that the command performs,
-over the state that comparison found, and a fresh-only implementation's `opf sync` MUST NOT bring
-in, by a fast-forward, a state that the check, run first over the fetched target state, refuses or
-cannot evaluate, nor send, by a push of pending local commits (section 5.7), a state that the check,
-run first over the local state it would push, refuses or cannot evaluate. A command that writes, and
-does not already hold the lease from the recovery below, MUST, after admission, take the
-`lease.toml` that section 5.7 has it take in the machine store and make it observable at the sync
-target where the store has one (section 5.7) before any other write, the `session_lease` record that
-section 5.7 has it record for that lease where the concurrent-operation module is enabled included.
-Once that lease is taken and observable, and before any other write, it MUST confirm that the
-`lease.toml` carries its own claim and that every directory listing, existence-probe result, and
-candidate the check read is unchanged from what the check read, apart from exactly the bytes that
-its own claim of the lease wrote under section 5.7: the directory entries that claim created, a file
-that claim created, the `lease.toml` included, holding only what that claim wrote, and, in a file
-that claim rewrote, such as a `<type>.index.toml` or worklog ledger that gains its `session_lease`
-record, only that claim's own change, so that file MUST equal the bytes the check read with exactly
-that change applied, and a change to any other record or byte of it is a difference, never exempt as
-part of a file the claim wrote. Where anything else differs, or the `lease.toml` does not carry its
-own claim, it MUST stop as cannot-evaluate and write nothing but what section 5.7 requires to end
-its own claim: it MUST release its own lease (section 5.7) where the `lease.toml` carries its own
-claim, so the lease path ends as it was before the claim, and MUST leave that `lease.toml` untouched
-where it does not, since section 5.7 forbids seizing a lease from a live holder. The check MUST
-compare parsed versions, never strings, and MUST refuse:
-
-- as `unsupported-older-store`, a store whose manifest declares a `spec_version` below the supported
-  one, or whose base table is the retired `[devprocess]` (section 4.5), naming the declared version
-  or table, the supported version, the store location, and the remedy: upgrade the store with an
-  upgrade-capable implementation, then retry;
-- as `unsupported-store-generation`, a store whose homes or worklog storage generation differs from
-  the supported one, naming each generation found and supported;
-- as `unsupported-legacy-state`, a store at the supported version that holds legacy state, or a
-  zero-match `.working/` that holds it (section 4.5), naming each item and its path;
-- with the section 9.2 version ceiling's finding, a store whose manifest declares a `spec_version`
-  above the supported one, naming the declared and supported versions and the tooling-upgrade
-  remedy.
-
-Legacy state is this closed list: a clean-series record, active or archived, whose `actor.kind` is
-`importer` (section 8.6); a declared `legacy_fragment` type or an LF record (section 8.1); a
-`partial` or `complete` `import_status` in a store that holds no adoption receipt (sections 11 and
-14.1); an evidence inventory in the legacy format `opf.ingest.evidence-inventory/v1` (section 4.2);
-a `.working/IMPORT-REPORT.md`; and a legacy `.working/imports/` directory (section 4.4). Extending
-the list is a specification change. The check MUST search the `.working/` tree of the store
-repository for each item, its staging and imported areas and the record archive included, within the
-three limits that follow, and, where discovery finds a store manifest, MUST read `import_status`
-from it; a legacy run archive outside `.working/`, for the reference tooling
-`.aiqt/import-archive/`, is reached only through the `import_status` item. The check MUST enumerate
-`.working/` and every directory beneath the discovered machine store, `.working/staging/` and
-`.working/imported/`, and a directory among these that it cannot enumerate yields cannot-evaluate.
-Outside those directories, a candidate lies only at a `manifest.toml` in an immediate subdirectory
-of `.working/`, which the check MUST reach only by a no-follow existence probe of that name (section
-14.2), never by enumerating that subdirectory; a probe it cannot complete yields cannot-evaluate,
-and no other directory can hold a candidate or a path-defined item, so the check enumerates no
-other, the recovery journal below aside. First, the check MUST match the two path-defined items, a
-`.working/IMPORT-REPORT.md` and a legacy `.working/imports/` directory, at those live paths only; a
-copy preserved under `.working/archive/adoption/<run-id>/` (section 14.2) is adoption evidence, not
-legacy state. Second, the check MUST NOT read the contents of, or enumerate beneath, a path
-registered under `[unmanaged]` that section 14.2 permits: it matches such a path against a
-path-defined item by the path alone, makes no access beneath it but the existence probe above, and
-leaves any other listed item kept inside it unsearched, a gap section 17 discloses. That limit
-applies to no other `[unmanaged]` entry: an entry that equals, contains, or lies within a reserved
-control area (section 14.2) or the machine store, that equals or contains `.working/` itself or a
-discovery candidate (section 14.2), or that names an OPF-managed file or view is a contradictory
-input, and the check MUST yield cannot-evaluate for it, never admission.
-
-Third, to find the items defined by file content, the check MUST parse exactly these candidates and
-no other file, the recovery journal below aside, a boundary section 17 discloses: each candidate
-`manifest.toml` that discovery reads (section 4.5), the discovered store manifest included; as
-candidate records, the record files of the discovered machine store, active and archived, meaning
-the worklog ledger `worklog.toml` and the imported worklog `worklog.imported.toml` (sections 6.2 and
-8.3), each `<type>.index.toml` and `<type>.imported.index.toml`, each per-record file under a
-`<type>/` directory (section 9), and each index, worklog ledger, and record file under its record
-archive `archive/<YYYY>/` (section 12); as candidate inventories, each `inventory.toml` and
-`inventory-<phase>.toml` at the root of a run folder `.working/staging/<kind>/<run-id>/` or
-`.working/imported/<kind>/<run-id>/`; and, in each run folder `.working/imported/adoption/<run-id>/`
-(section 14.2), as candidate adoption receipts, each file at an adoption receipt path of the
-implementation's own section 14 adoption writer. Where discovery finds no store manifest, as over a
-zero-match `.working/` (section 4.5), the `import_status` item and the declared `legacy_fragment`
-type item do not apply and no file is a candidate record; the check still parses each candidate
-inventory and candidate adoption receipt present and matches both path-defined items, and an
-unreadable, malformed, or contradictory candidate that is present, a candidate `manifest.toml` that
-discovery reads (section 4.5) included, MUST yield cannot-evaluate, never admission.
-
-The check MUST classify each candidate it reads by the rules that follow, whether or not discovery
-finds a store manifest, and MUST yield cannot-evaluate, never admission, for each candidate those
-rules class as unreadable, malformed, or contradictory. A candidate is unreadable where the check
-cannot read its bytes. A candidate adoption receipt is malformed where its bytes do not parse in the
-receipt format of the implementation's own section 14 adoption writer, since this specification
-fixes no adoption receipt path or format; every other candidate is malformed where its bytes do not
-parse as TOML. A candidate `manifest.toml` whose `[opf]` table declares `standard = "opf"` is a
-discovery match (section 4.5), and that match is contradictory where the file also carries a
-`[devprocess]` table, where its `spec_version` is absent or does not parse as a version, where a
-present `[opf].homes` or `[opf].worklog` value is not a TOML integer, or where a present
-`import_status` is not `none`, `partial`, or `complete`. A candidate `manifest.toml` that carries an
-`[opf]` table whose `standard` is absent or any other value is contradictory, a mistyped or altered
-discovery token (section 17) included; one that carries a `[devprocess]` table and no `[opf]` table
-is a recognized legacy candidate (section 4.5); and one that carries neither table is foreign
-content, neither a match nor a contradiction, that a section 14 first adoption dispositions. Any
-other candidate is contradictory where a value that decides a listed item, a record's `actor.kind`
-or `type` or an inventory's `format`, is absent where its envelope or format requires it, or is
-present and not a string.
-
-Section 14.2 places adoption evidence under `.working/imported/adoption/<run-id>/`, and the check
-MUST decide from that area alone whether a store holds an adoption receipt. A candidate adoption
-receipt that is neither unreadable nor malformed establishes that the store holds one, and a store
-whose `.working/imported/adoption/` is absent or holds no file holds none. Where that area holds a
-file but no candidate adoption receipt, as where another implementation's writer placed its receipt
-at another path, the check cannot establish whether the store holds an adoption receipt, and for a
-`partial` or `complete` `import_status` it MUST yield cannot-evaluate, never
-`unsupported-legacy-state` and never admission. A file there at no adoption receipt path of the
-implementation's own writer is not a candidate adoption receipt and, as a possible receipt, bears
-only on that decision; the third limit above alone decides whether it is a candidate inventory, so
-an `inventory.toml` or `inventory-<phase>.toml` at the root of a run folder there is one, parsed and
-classified as any other. An adoption receipt kept outside `.working/imported/adoption/`, which
-section 14.2 does not permit, decides nothing, a gap section 17 discloses. A fresh-only
-implementation's own adoption writer MUST make its adoption receipt crash-durable before it begins
-to write the `partial` or `complete` `import_status` that receipt substantiates, whether or not both
-writes share a transaction, and any reversal of that status MUST make the prior `import_status`
-crash-durable before it removes that receipt, so no interruption, recovered or not, leaves its own
-store holding that status without that receipt.
-
-In a first adoption, a fresh-only implementation's own section 14 adoption writer MUST NOT leave the
-store manifest that its apply writes in the live tree beside a foreign source at a candidate path, a
-path at which a file is a candidate record under the third limit above once that manifest exists.
-Its plan MUST refuse at plan time, naming the path, the same way a collision refuses (section 14.2),
-a foreign source at a candidate path that is no planned managed destination, and a `keep` whose
-`[unmanaged]` entry the rules above class as a contradictory input. Its apply MUST archive and
-remove every occupying source at a candidate path (section 14.2), in that section's order of copy,
-verify, commit, and remove, before it begins to write the store manifest. A recovery that completes
-that apply forward MUST keep that order, and a reversal of that apply MUST restore the manifest path
-to its journaled prestate, and make that prestate durable, before it restores any source to a
-candidate path. So no interruption of that apply, recovered or not, leaves that manifest discovered
-beside a live foreign source at a candidate path: before the manifest is written no file is a
-candidate record, and once it is written no foreign source remains at a candidate path.
-
-A fresh-only implementation MUST follow the lease rules of section 5.7 and the recovery rules of
-sections 8.8, 14.1, and 14.2 unchanged and in the order those sections set, exactly as an
-upgrade-capable implementation does: after resolving the store, a command reconciles a leftover
-lease and completes or rolls back, from its journal, an interrupted journaled transaction of the
-implementation's own writer, a section 8.8 authoring or import transaction, a section 14.2 apply, or
-a section 14.1 retirement, removal, relocation, or reclamation transaction, as those sections
-require, and its admission check then runs over the store those steps left, before any other write.
-Before either step and before any other write, every store-resolving command MUST run the admission
-check once as a pre-scan that writes nothing, over the store as the command found it, and where the
-pre-scan refuses the store or yields cannot-evaluate, the command MUST report every finding it meets
-and stop, the lease reconciliation and the recovery unperformed. The pre-scan MUST defer to the
-admission check that follows recovery only the cannot-evaluate classification of a candidate that is
-an operand of an interrupted transaction whose journal lies within the recovery bound below and that
-the pre-scan classes as unreadable, malformed, or contradictory or finds absent, together with a
-discovery outcome that such an operand alone decides, as where apply removed an occupying
-`manifest.toml` (section 14.2), and MUST defer nothing else. That deferral covers no refusal: the
-pre-scan MUST still refuse, before any write, each `spec_version`, homes generation, or worklog
-storage generation that a deferred candidate declares and the check refuses, and each listed
-legacy-state item that the live bytes of a deferred candidate show, so a store whose manifest
-declares a version or generation that the check refuses, or that shows a listed legacy-state item,
-the live bytes of an operand included, is refused before any write, the lease reconciliation and the
-recovery unperformed. Within that order a recovery bound applies: a fresh-only implementation MUST
-recover only a journal in its own writer's format for the supported version and generations whose
-operands all lie at paths that the transaction's section, at that version and those generations,
-lets that kind of transaction write, none of them a path-defined legacy-state item. The bound reads
-the journal's format and its operands' paths, never the content of a journaled prestate or planned
-poststate, so a section 14.2 apply journal whose preimages are an occupying source's foreign bytes,
-TOML or not, lies within it, and each section's own refusal of an operand changed since the
-interruption, such as that of section 8.8, still applies. Every store-resolving command that finds
-its own writer's recovery journal naming an interrupted transaction MUST read that journal in its
-pre-scan, the one input beyond the candidates and directories above that the check reads, and MUST
-yield cannot-evaluate, never admission, before any write, the lease reconciliation included, where
-it cannot read that journal or parse it in that format, or where an operand lies outside those
-paths. After a section 8.8 reconciliation, that reconciliation's refusal of the new operation still
-applies, whatever the admission check that follows it finds. A command that performs no such
-recovery defers nothing and classes every candidate by the rules above, a candidate torn by an
-interruption included, and so does every command for a candidate that no such journal names as an
-operand.
-
-Where a store meets more than one refusal above, the section 9.2 ceiling included, the check MUST
-report every finding it meets, and that store's refusal fixture asserts each of them. An input the
-check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission; the pre-scan's
-deferral of a candidate is not admission, and the check that follows recovery classes that candidate
-afresh. Each refusal MUST be a fail-closed INVALID finding, never VALID. Where its admission check,
-the pre-scan included, refuses a store or yields cannot-evaluate, a fresh-only implementation MUST
-NOT grade the rest of that store, write, stage, or partially upgrade any file, rewrite a version
-declaration, fabricate provenance, or invoke another upgrader, the section 5.7 claim and release of
-a lease the command takes aside; the store and product trees, ignored files and the lease path
-included, MUST stay byte-identical to the state the command found where the pre-scan stops it, and
-otherwise to the state that the lease reconciliation and recovery above left, apart from that claim
-and release. A fresh-only implementation that provides an upgrade command MUST refuse an older store
-with the same finding and MUST NOT report a successful upgrade; it MAY report a no-op on a supported
-store only after full doctor VALID. Admission MUST NOT substitute for any other applicable check.
-
-For a store its admission check refuses, a report MUST give the base result as `indeterminate`,
-naming the class, the supported version and generations, and the finding; it MUST NOT give
-`conformant_for_declared_scope`, nor `nonconformant` on that refusal alone. That sentence is the
-refusal-report rule the base-result part above compares, so in a report a reference run emits, a
-breach of it deviates there, never as a direct verdict. A claim of the fresh-only class MUST cite
-refusal evidence: for each finding above and each legacy-state item, a fixture that every
-store-resolving command refuses with that finding, asserting each seeded legacy-state item by its
-path, with both trees byte-identical; for the section 9.2 ceiling, whose finding carries no token in
-this specification, the fixture asserts an INVALID finding that names the declared and supported
-versions and the tooling-upgrade remedy. The importer-authored clean-series item's fixtures MUST
-include five separate fixtures that each seed exactly one importer-authored clean record, one an
-entry in the active `worklog.toml` ledger, one an entry in an archived worklog ledger, one an active
-typed record in its `<type>.index.toml`, one an active typed record in a per-record file under a
-`<type>/` directory (section 9), and one an archived typed record, and the `import_status` item's
-fixtures MUST include one whose `.working/imported/adoption/` holds no file, refused with that
-item's finding, and one whose `.working/imported/adoption/<run-id>/` holds a file at no adoption
-receipt path of the implementation's own writer and no candidate adoption receipt, which every
-store-resolving command MUST report as cannot-evaluate, never as `unsupported-legacy-state` and
-never as admission, with both trees byte-identical. The recovery bound's fixtures MUST include, for
-each kind of recovery journal the implementation's own writers keep, the section 8.8 journal and the
-section 14.2 apply journal included: one whose candidate is torn under such a journal within the
-bound, which a command that performs that recovery recovers and then admits, the section 14.2 one
-interrupted after apply removed an occupying `manifest.toml`; one whose journal names a path-defined
-legacy-state item as an operand and one whose journal does not parse in its writer's format, each of
-which every store-resolving command MUST report as cannot-evaluate, never as admission, with both
-trees byte-identical; and one at the supported version that holds such a journal, whose operands all
-parse, and a listed legacy-state item that is no operand of it, which every store-resolving command
-MUST refuse with that item's finding, with both trees byte-identical. The section 14.2 apply
-journal's fixtures MUST also include a first adoption interrupted after its apply journal was
-durably committed, once apply had removed a foreign source that does not parse as TOML from a
-planned machine-store record path, such as `worklog.toml`, journaling its preimage, and had written
-the current-format manifest, which a command that performs that recovery completes forward and then
-admits. They MUST also include a first adoption over a foreign `worklog.toml` at a planned
-machine-store record path that parses and holds an importer-authored entry, interrupted with its
-apply journal durably committed and with it not committed, once after apply archived and removed
-that source and before it wrote the store manifest and once after it wrote that manifest, and one
-interrupted during the reversal of an uncommitted apply after that reversal restored the manifest
-path's prestate and before it restored that source; a command that performs that recovery MUST
-complete each committed apply forward and finish reversing each uncommitted one, its pre-scan not
-stopping it, and the admission check that follows MUST find no legacy-state item, admitting each
-store that recovery completed forward; for each store whose apply that recovery finished reversing,
-the fixture MUST assert that no store manifest remains, that the foreign `worklog.toml` is back at
-its path, byte-identical to its plan digest, and that the check reports the zero-match
-cannot-evaluate result (section 4.5). A first adoption's fixtures MUST also include a plan over a
-foreign per-record file under a `<type>/` directory of the planned machine store, which that plan
-MUST refuse at plan time, naming that path, and a zero-match `.working/` whose
-`.working/imported/adoption/<run-id>/` holds a file at an adoption receipt path of the
-implementation's own writer that does not parse in that writer's receipt format, which every
-store-resolving command, a first adoption included, MUST report as cannot-evaluate, each before any
-write, with both trees byte-identical. The pre-scan's fixtures MUST include, each with the
-concurrent-operation module enabled and with it disabled, a store whose manifest declares a
-`spec_version` below the supported one and that holds a dead run's leftover `lease.toml`, with the
-module that run's held `session_lease` record, and an interrupted journal of the implementation's
-own writer whose operands all parse, which every store-resolving command MUST refuse as
-`unsupported-older-store` before any write, with both trees byte-identical, that `lease.toml` and
-that journal included. They MUST also include, each with a dead run's leftover `lease.toml` and an
-interrupted journal of the implementation's own writer within the recovery bound that names the
-candidate below as an operand, one whose live `manifest.toml` declares a `spec_version` below the
-supported one and an `import_status` that is not `none`, `partial`, or `complete`, which every
-store-resolving command MUST refuse as `unsupported-older-store`, and one at the supported version
-whose live `<type>.index.toml` holds one importer-authored record and one record whose `actor.kind`
-is absent, which every store-resolving command MUST refuse as `unsupported-legacy-state`, each
-before any write, with both trees byte-identical, that `lease.toml` and that journal included. The
-recheck's fixtures MUST include one, with the concurrent-operation module enabled and its
-`session_lease` records kept in their `<type>.index.toml`, in which another process sets
-`actor.kind` to `importer` in an existing record of that index after admission and before the
-command's claim, which then rewrites that index; the command MUST stop at the recheck as
-cannot-evaluate and write nothing but the section 5.7 release of its own lease. Missing evidence
-makes the claim `indeterminate`, never a pass. A fresh-only claim MUST NOT imply upgrade
-compatibility or continuity from the implementation's own earlier releases; moving to a later base
-version requires a new declaration and new evidence.
+An unreadable, malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT
+authorize any store operation. A declaration that is absent, or that omits its release identity,
+its `spec_version`, its homes generation, or its worklog storage generation, is malformed: it MUST
+yield cannot-evaluate and MUST NOT authorize any store operation. The rules on an absent,
+unreadable, malformed, or contradictory declaration govern the file alone: a runtime check MUST
+apply them to the installed copy as it stands, a check of the documentation or of the reports MUST
+apply them to that file as the release ships it, and each check MUST NOT take any field from the
+documentation of the release or from any report.
 
 ## 17. Residual coverage disclosures
 
@@ -2590,10 +2236,16 @@ The gates in this standard are strong where they are strong and say so where the
   (`.working/imported/<kind>/<run-id>/`, `.working/archive/adoption/<run-id>/` and
   `.working/archive/moved/`) on every doctor run, and the section 14.1 completion checks still
   verify their evidence digests themselves when they run; C-EVIDENCE-ENUM asserts membership, not
-  authenticated actor history, and deleting a whole bundle, inventory and payload together, is
+  authenticated actor history; deleting a whole bundle (inventory and payload together) is
   outside its local snapshot check (section 4.2). Version-control history over the tracked store
   is the control, and C-IMPORTED-PROVENANCE still re-verifies every preserved original an imported
   record references.
+- Journals are machine-local (section 4.2), and the doctor reads the ID reservations under
+  `journals/<kind>/allocations/` for the section 8.2 counter checks, so a clone, which holds none,
+  can grade those checks differently from the original store: where a reservation covers a number
+  that no published record carries, the original store's doctor treats that number as issued and a
+  clone's doctor reports it missing. Adoption admission and recorded retirement, which the doctor
+  decides from committed evidence alone, grade the same in both (section 4.2).
 - Store resolution fails closed on a pointer that does not resolve and on zero or multiple
   manifests at the target; it cannot detect a second store that no pointer names, placed somewhere
   the tooling was never aimed.
@@ -2633,74 +2285,6 @@ The gates in this standard are strong where they are strong and say so where the
   (fail-closed), never to a silent empty store. The token is stable within a base-schema major line;
   a store-breaking rename MUST ship only with the tested `opf upgrade` migration (section 9.2),
   which rewrites the base table and token in place so no existing adopter's manifest is stranded.
-  The retired token `devprocess` is recognized by a fresh-only implementation (section 16.1),
-  purely to refuse that store by name.
-- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not
-  authenticated history: a version declaration and the absence of listed legacy state cannot prove
-  that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only
-  what it lists. It does not list a legacy staging run under `.working/staging/import/` or
-  `.working/staging/ingest/` that carries no legacy-format inventory, a legacy `.archive/` entry
-  that section 9.2 leaves in place with a standing finding, or a legacy run archive outside
-  `.working/`, which only the `import_status` item reaches. Admission parses only the section 16.1
-  candidates and a recovery journal of the implementation's own writer (sections 8.8, 14.1, and
-  14.2), and never reads beneath a path registered under `[unmanaged]` that section 14.2 permits, so
-  a listed item defined by file content and kept outside those candidates, such as a legacy-format
-  inventory kept under such a path or anywhere but the root of a staging or evidence run folder,
-  goes undetected; an `[unmanaged]` entry that section 14.2 forbids is a cannot-evaluate input,
-  never a reason to leave a path unsearched. Admission recognizes only the adoption receipts of the
-  implementation's own section 14 adoption writer, so where another implementation's writer placed a
-  store's adoption receipt under `.working/imported/adoption/` at another path or in another format,
-  and that area holds no adoption receipt of the implementation's own writer, the check cannot
-  establish whether that store holds an adoption receipt, and a `partial` or `complete`
-  `import_status` there is cannot-evaluate: never refused as legacy, but not admitted either, even
-  where a current-format adoption set that status. An adoption receipt kept outside
-  `.working/imported/adoption/`, which section 14.2 does not permit, decides nothing, so where that
-  area holds no file, a store at the supported version whose `import_status` is `partial` or
-  `complete` is refused as `unsupported-legacy-state`. A refusal at its pre-scan leaves a store
-  unchanged, and no refusal offers preservation, repair, or continuity; an adopter whose store holds
-  legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable
-  implementation for that store. The lease and recovery steps of sections 5.7, 8.8, 14.1, and 14.2
-  run after a read-only pre-scan and before the admission check that follows them (section 16.1).
-  The pre-scan refuses, before any write, a store whose manifest declares a version or generation
-  that the check refuses or that shows a listed legacy-state item, the live bytes of an operand of
-  an interrupted transaction included, and defers only the cannot-evaluate classification of an
-  unreadable, malformed, contradictory, or absent operand of such a transaction within the recovery
-  bound, together with a discovery outcome that such an operand alone decides, so a store that only
-  the later check refuses or cannot evaluate, as where such an operand stays contradictory after
-  recovery or the recovery's own result meets a refusal, or where something that does not take the
-  lease changed the store between the pre-scan and the recovery, may carry the effects of a
-  completed recovery of the implementation's own interrupted transaction, within the section 16.1
-  recovery bound, and of the section 5.7 reconciliation of a dead run's leftover lease. A command
-  that writes and takes its lease after admission confirms, once that lease is taken and observable
-  and before any other write, that the `lease.toml` carries its own claim and that every directory
-  listing, existence-probe result, and candidate the admission check read is unchanged apart from
-  exactly the bytes its own claim of the lease wrote; a stop at that recheck writes nothing but what
-  section 5.7 requires to end the command's own claim: it releases a `lease.toml` that carries its
-  own claim and leaves untouched one that does not. That stop restores nothing else, so a change
-  that another process made and the recheck detected stays in the tree; where the store has a sync
-  target, that target's history can keep the lease's claim and release, and where the
-  concurrent-operation module is enabled the `session_lease` record of that claim and its release
-  remain. Within the section 16.1 recovery bound, a fresh-only implementation trusts its own
-  writer's recovery journal, as section 8.8, 14.1, or 14.2 recovery does, to complete or roll back
-  an interrupted transaction before the admission check that follows recovery runs; a command that
-  performs no such recovery, a read-only command included, reports a store with a candidate that an
-  interruption left unreadable, malformed, or contradictory as cannot-evaluate until a recovering
-  command recovers it, and a clone without the journal (section 4.2) stays cannot-evaluate. Only the
-  transactions section 16.1 lists are recovered that way: a candidate torn by any other write, such
-  as a section 12 rotation or a non-green outcome event appended to an adoption receipt, is classed
-  like any other candidate even where the implementation journals that write, so one left
-  unparseable stays cannot-evaluate for every command of a fresh-only implementation, its own
-  writers included, until something outside that implementation, such as a hand edit, repairs it,
-  and one left parseable is not recognized as torn. A section 14.1 restore after a committed apply
-  is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's store
-  manifest apart from a foreign source at a candidate path binds only that first adoption, so a
-  restore that copies archived bytes to a candidate path, such as an importer-authored
-  `worklog.toml` restored over the live one, leaves a store that every command of a fresh-only
-  implementation, its own writers included, then refuses where those bytes show a listed item, as
-  `unsupported-legacy-state` where the store stays at the supported version, or reports as
-  cannot-evaluate where it classes them unreadable, malformed, or contradictory. A change made after
-  the recheck by anything that does not take the lease, such as a hand edit or a branch switch, is
-  outside admission. Until validation tooling ships, a class claim is self-asserted (section 16).
 - The section 16.1 runtime check compares the installed copy of a release's declaration file with
   the shipped-file digest the implementation carries, so it detects an edit of that copy alone,
   which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy
@@ -2751,8 +2335,8 @@ The gates in this standard are strong where they are strong and say so where the
   nothing under the section 16.1 rules however often it is repeated, it decides no verdict of its
   own, and it informs only the section 16.1 inspection of the implementation, which rests on the
   same observer-local attribution. A requirement of section 16.1 on the conduct of the
-  implementation's commands that its two rules do not compare, the fresh-only admission, lease,
-  recovery, and sync conduct included, is judged only by that inspection, so a conduct breach a
+  implementation's commands that its two rules do not compare is judged only by that inspection, so
+  a conduct breach a
   checker cannot attribute to the bytes the release ships decides nothing for that checker, and one
   it can attribute is decided by what that inspection finds in those bytes, never by the observed
   run itself on any number of showings. A failure that a checker cannot show twice in its own

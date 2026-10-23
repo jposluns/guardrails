@@ -13,8 +13,10 @@ tiled section. The live residuals are additions to untiled sections (for example
 and 13), a default-gate run without the self-test, and an addition landed together with a
 matching registry edit, which review of registry changes catches. One addition is red under the
 default entry alone: a retired fragment (_RETIRED) restored in its own section, since base 2.0.0
-with homes 2 is the only base version (spec 4.2 and 9.2). Each fragment names a retired term
-(homes, legacy state, activation, a target contract or a pre-2.0.0 base version), so a sentence on
+with homes 2 is the only base version (spec 4.2 and 9.2) and the base defines one implementation
+model (spec 16.1). Each fragment names a retired term (homes, legacy state, activation, a target
+contract, a pre-2.0.0 base version, an implementation class or its admission check, the
+legacy_fragment type, or the imports reserved name), so a sentence on
 another upgrade, such as a future 2.x or worklog-generation upgrade, matches none. A retired sentence is quoted, to say it no longer applies, in one exact form, a retired-text
 quotation block: a block quote whose first line is exactly "> Retired text, quoted and not in
 force:", with no line directly above it that opens with ">" after at most three spaces (a
@@ -43,15 +45,17 @@ a backslash escape, is red. Residual: the check removes no other markup, so a fr
 emphasis, a link, a character reference or inline HTML is not found there, and it reads a
 backslash in a code span as an escape too, an over-fire; and the check is section-scoped, so a
 fragment planted in another section is caught only by the self-test's tiling of a tiled section.
-Section 9.1 stays untiled
-over its lowercase-may profile rule, but its implementation-class paragraph is pinned sentence
-by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red;
-the rest of 9.1, and additions to it, stay unprotected. Appendix E stays untiled too, and its
-sentences that state what section 16.1 makes of its probes are pinned the same way; the rest of
-Appendix E, and additions to it, stay unprotected here. The quickstart's implementation-class
-sentences and the opfiles.ai disclosure page's fresh-only item are pinned the same way over
-tag-stripped text (_SURFACE), outside the keyword lint; the rest of those files, and additions
-to them, stay unprotected.
+Section 9.1 stays untiled and unpinned: its implementation-class paragraph is retired, since the
+base defines one implementation model (spec 16.1), so restoring one of its sentences there is red
+under the default entry; the rest of 9.1, and additions to it, stay unprotected. Appendix E stays
+untiled, and its sentences that state what section 16.1 makes of its probes are pinned sentence
+by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red; the
+rest of Appendix E, and additions to it, stay unprotected here. The quickstart's
+implementation-model sentences and the opfiles.ai disclosure page's implementations item are
+pinned the same way over tag-stripped text (_SURFACE), outside the keyword lint, and each
+sentence of the disclosure page's retired fresh-only item is red there (_SURFACE_RETIRED); the
+rest of those files, and additions to them, stay unprotected, and no retired-text check reads
+the quickstart, so a deleted quickstart sentence restored there stays green.
 
 The default entry also runs a section 2 keyword lint over every registered pin: a pin without
 MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D), and a
@@ -323,14 +327,13 @@ _CONTRACT = {
         'A writer MUST NOT accept a format that its doctor does not grade deterministically.',
         _D('The reference tooling does not yet implement base 2.0.0 (section 16.1).'),
         _D('<product repository root>/ .opf.toml # committed store pointer (section 4.3) CHANGELOG.md # curated public changelog (deliverable; section 6.3) VERSION # deterministic render from version.toml (deliverable) .working/ # the store; present here under the default in-repo configuration <store repository root>/ # the product repository itself, by default .working/ README.md # ownership and regeneration note (deliverable) WORKLOG.md # deterministic render of worklog.toml VERSION.md # optional human view of version.toml TODO.md BACKLOG.md PIPELINE.md DONE.md FINDINGS.md DECISIONS.md BLOCKS.md HANDOFF.md REFERENCES.md CONTRIBUTIONS.md DECISIONS.toml # machine projection (deterministic; section 10.5) <TYPE>-INDEX.md ...'),
-        _D('# optional 1:1 index mirrors (section 10.1) toml/ manifest.toml # store manifest and discovery marker (section 9) counters.toml # per-namespace ID high-water marks (section 8.2) version.toml # version and release ledger (section 6.1) worklog.toml # durable operational record (section 6.2) <type>.imported.index.toml # imported records per enabled type except LF (section 8.3) worklog.imported.toml # imported worklog, on its own ID number line lease.toml # single-writer lease, present only while held (section 5.7) init.toml # bootstrap provenance of a coupled init (section 9), if present backlog_item.index.toml # typed record files (section 8) done.index.toml finding.index.toml pending_decision.index.toml autonomous_decision.index.toml block.index.toml handoff.index.toml reference.index.toml contribution.index.toml maintainer_decision.index.toml preference_pattern.index.toml archive/ 2026/ archive.toml # enumerates rotated IDs and spans (section 12) done.index.toml worklog.toml archive/ moved/<source-path> # default Move destinations (section 14.2) adoption/<run-id>/ # retire preimages and archived occupying sources (section 14.2) imported/<kind>/<run-id>/ # durable originals, inventories, approvals and receipts (section 14) staging/<kind>/<run-id>/ # short-lived staging, evidence-gated reclamation (section 14.1) journals/<kind>/ # reserved recovery state, never a view or ordinary op target journal/ # crash-durable frames runs/<run-id>/transaction.toml # gate-readable projections allocations/<run-id>.toml # irrevocable ID reservations (section 8.2) When the store has been relocated, the .working/ tree lives at the store repository root exactly as drawn, and the product repository keeps only the pointer and the public deliverables.'),
+        _D('# optional 1:1 index mirrors (section 10.1) toml/ manifest.toml # store manifest and discovery marker (section 9) counters.toml # per-namespace ID high-water marks (section 8.2) version.toml # version and release ledger (section 6.1) worklog.toml # durable operational record (section 6.2) <type>.imported.index.toml # imported records per enabled type (section 8.3) worklog.imported.toml # imported worklog, on its own ID number line lease.toml # single-writer lease, present only while held (section 5.7) init.toml # bootstrap provenance of a coupled init (section 9), if present backlog_item.index.toml # typed record files (section 8) done.index.toml finding.index.toml pending_decision.index.toml autonomous_decision.index.toml block.index.toml handoff.index.toml reference.index.toml contribution.index.toml maintainer_decision.index.toml preference_pattern.index.toml archive/ 2026/ archive.toml # enumerates rotated IDs and spans (section 12) done.index.toml worklog.toml archive/ moved/<source-path> # default Move destinations (section 14.2) adoption/<run-id>/ # retire preimages and archived occupying sources (section 14.2) imported/<kind>/<run-id>/ # durable originals, inventories, approvals and receipts (section 14) staging/<kind>/<run-id>/ # short-lived staging, evidence-gated reclamation (section 14.1) journals/<kind>/ # reserved recovery state, never a view or ordinary op target journal/ # crash-durable frames runs/<run-id>/transaction.toml # gate-readable projections allocations/<run-id>.toml # irrevocable ID reservations (section 8.2) When the store has been relocated, the .working/ tree lives at the store repository root exactly as drawn, and the product repository keeps only the pointer and the public deliverables.'),
         _D('The per-record layout (section 9) additionally places one file per record under .working/toml/<type>/, with each <type>.index.toml acting as the registry.'),
-        _D('The imported files are registered managed leaves beside the clean-series files, using the same enabled-type roster except legacy_fragment; worklog uses worklog.imported.toml instead of an imported index.'),
+        _D('The imported files are registered managed leaves beside the clean-series files, using the same enabled-type roster; worklog uses worklog.imported.toml instead of an imported index.'),
         'Their manifest, emitter, upgrade and containment registrations MUST agree.',
-        'opf init MUST create the imported leaves for every enabled type except legacy_fragment, create-only and empty; enabling a further type or module other than legacy_fragment later MUST create its imported leaf in the same act as its clean index.',
-        _D('legacy_fragment has no imported leaf and no imported counter row, since the imported series refuses the LF namespace (section 8.2).'),
+        'opf init MUST create the imported leaves for every enabled type, create-only and empty; enabling a further type or module later MUST create its imported leaf in the same act as its clean index.',
         'opf init MUST write at zero the imported counter row of each type that has an imported leaf (section 8.2).',
-        "Enabling a further type or module other than legacy_fragment MUST also add its imported counter row in the same act as its clean index, at zero only where no imported ancestry exists and otherwise at the largest <n> of that namespace's imported:<NS>-<n> IDs.",
+        "Enabling a further type or module MUST also add its imported counter row in the same act as its clean index, at zero only where no imported ancestry exists and otherwise at the largest <n> of that namespace's imported:<NS>-<n> IDs.",
         _D('Both counter-row duties follow from the section 8.2 rule that requires the imported counter rows.'),
         _D('They are machine records, distinct from the original-source evidence under .working/imported/.'),
         'The first imported-series release MUST keep these files inline in either store layout and MUST NOT provide views over imported data; assistants read the TOML.',
@@ -351,13 +354,13 @@ _CONTRACT = {
         'Journals are machine-local even after completion; a clone without them cannot recover those transactions, and requested recovery MUST fail closed on a missing journal.',
         _D('Containment and doctor exclude journals and make no recovery claim, with one exception: the doctor reads the reservations under journals/<kind>/allocations/ read-only, and only for the section 8.2 counter checks; any other journal content, a rogue file included, is outside their coverage.'),
         _D("A store whose adoption home .working/imported/adoption/ exists has started an adoption and receives the adoption grading: each admitted run's recorded paths are registered, the non-occupying retire, move and migrate rows of its plan (and only those) are its frozen sources, and a frozen source whose live bytes still match its plan digest is graded as bounded adoption state while a drifted or vanished source is a containment failure at required (section 11)."),
-        "The doctor MUST decide that a run is admitted, and that its retirement is recorded, from the committed adoption evidence alone, the bundle under .working/imported/adoption/<run-id>/ and the run archive, which travel with every clone, and MUST NOT read the machine-local journal, so a clone without journals grades exactly as the original store.",
+        "The doctor MUST decide that a run is admitted, and that its retirement is recorded, from the committed adoption evidence alone, the bundle under .working/imported/adoption/<run-id>/ and the run archive, which travel with every clone, and MUST NOT read the machine-local journal, so a clone without journals grades a run's admission and recorded retirement exactly as the original store does.",
+        _D("That parity covers adoption admission alone: the doctor's read of the section 8.2 reservations under journals/<kind>/allocations/ makes a clone's counter grading differ from the original store's, a residual section 17 discloses."),
         _D("That evidence check verifies internal consistency: the sealed inventories, plan and approval bound to the run id of the directory they sit in, and the listed bundle, archive and Move-root bytes at their recorded digests (a Move-root row counts only as a move destination the run's own plan records)."),
         "The apply side MUST write each adoption inventory's [adoption] identity table, whose keys are exactly run_id, phase and plan_digest as the bundle layout below defines, when it derives the inventory, and the doctor MUST refuse an adoption inventory whose identity is missing or malformed, names another run, names a phase other than the one its file name carries, or names a plan digest other than the run's proven plan's own (the frozen plan that re-seals its own bytes and that its approval binds), so an inventory copied from another run or phase, an empty retirement record included, never evaluates as this run's record.",
-        "The apply side's bundle verifier, through which opf adopt status reports a run, MUST hold every adoption inventory to that bar against its bundle's own plan.toml: it MUST yield cannot-evaluate for an inventory that names a phase other than the one its file name carries or a plan digest other than that plan's, and, except for an inventory in the recognized legacy format below, which is its named finding, for every inventory of a bundle whose plan.toml is absent, unreadable or not canonical, names another run, or carries a plan_digest that does not re-seal its own bytes, an empty base inventory included (a bundle with no inventory is its own named finding).",
+        "The apply side's bundle verifier, through which opf adopt status reports a run, MUST hold every adoption inventory to that bar against its bundle's own plan.toml: it MUST yield cannot-evaluate for an inventory that names a phase other than the one its file name carries or a plan digest other than that plan's, and for every inventory of a bundle whose plan.toml is absent, unreadable or not canonical, names another run, or carries a plan_digest that does not re-seal its own bytes, an empty base inventory included (a bundle with no inventory is its own named finding).",
         "It MUST check that plan's inventory row against the same bytes its seal was proven from.",
         _D("It does not check the approval's binding, which the doctor's admission checks."),
-        _D("Verification stops at the first finding, a bundle without an inventory or an inventory in the recognized legacy format, so a cannot-evaluate that a later inventory would yield is not reported for that bundle."),
         _D("A retirement is recorded only by a sealed retirement inventory in the shape the retirement-phase transaction derives from its own create ops: one row per move row of the plan, occupying or not, whose recorded Move destination (its move-file destination) lies beneath .working/archive/moved/, naming that destination at the moved source's plan digest, and nothing else, so the record of a plan without such a move row lists no files."),
         _D("Those are the bytes the relocation writes: the frozen live source of a non-occupying move, and for an occupying move the committed archive copy the base inventory claims at that same digest."),
         _D("Retire and migrate preimages are preserved at apply and claimed by the base inventory, never re-listed by the retirement record; that shape also binds the record to its phase, because a base inventory copied to the retirement name lists at least the plan and the approval, which are never Move destinations."),
@@ -372,7 +375,7 @@ _CONTRACT = {
         "An adoption bundle's inventory MUST also hold exactly one [adoption] identity table whose keys are exactly run_id, phase and plan_digest: the bundle's own run id, the phase this inventory records, spelled base for inventory.toml and as the file name's <phase> for a later phase, whose name MUST NOT be base, and the run's approved plan's own plan_digest in the sha256: form with 64 lowercase hex digits.",
         'An inventory of any other kind MUST NOT carry that identity table.',
         'The apply side MUST write that identity when it derives the inventory.',
-        "Except for an inventory in the recognized legacy format below, which is its named finding, C-EVIDENCE-ENUM MUST yield cannot-evaluate for an adoption inventory whose identity is missing or malformed, names another run, names a phase other than the one its file name carries, or names a plan digest other than its bundle's own sealed plan.toml digest, and for every inventory of an adoption bundle whose plan.toml is absent, unreadable or not canonical, names another run, or carries a plan_digest that does not re-seal its own bytes, so an inventory copied from another run or phase never evaluates as this run's record.",
+        "C-EVIDENCE-ENUM MUST yield cannot-evaluate for an adoption inventory whose identity is missing or malformed, names another run, names a phase other than the one its file name carries, or names a plan digest other than its bundle's own sealed plan.toml digest, and for every inventory of an adoption bundle whose plan.toml is absent, unreadable or not canonical, names another run, or carries a plan_digest that does not re-seal its own bytes, so an inventory copied from another run or phase never evaluates as this run's record.",
         "C-EVIDENCE-ENUM MUST check that plan.toml's inventory row against the same bytes its seal was proven from, so a plan swapped between two reads never combines into a clean result.",
         "The owning writer MUST derive each inventory from the run's transaction record or receipt and MUST publish it exclusively with the retained bytes.",
         'An inventory MUST NOT be rewritten, so a bundle stays immutable and an evidence commit changes only its bundle folder.',
@@ -380,13 +383,10 @@ _CONTRACT = {
         'A phase inventory MAY be published in the same transaction as the base inventory to claim the promotion receipt without creating a receipt/inventory digest cycle.',
         _D('C-EVIDENCE-ENUM reconciles exact membership, directory structure, regular-file types, sizes and digests: every payload file under .working/imported/ and .working/archive/, meaning every file other than a bundle-root inventory, is claimed by exactly one row, and every inventory is itself schema-checked against the shape above rather than claimed.'),
         'Unlisted or unclaimed entries, a bundle without an inventory, and missing listed files MUST be findings; unreadable or malformed inputs, including a path claimed twice, MUST yield cannot-evaluate.',
-        'The recognized legacy format opf.ingest.evidence-inventory/v1 MUST be refused as the named legacy-ingest-inventory finding under C-EVIDENCE-ENUM, without migration or rewriting; completed-ingest replay cannot evaluate that bundle.',
-        'A fresh-only implementation (section 16.1) refuses such an inventory earlier, as unsupported-legacy-state at admission, and MUST NOT then grade that store under C-EVIDENCE-ENUM.',
         'A phase inventory MUST NOT substitute for a missing inventory.toml: such a bundle cannot evaluate.',
-        _D('Deleting a whole bundle, inventory and payload together, is outside this local snapshot check; independent history is required to detect that loss.'),
+        _D('Deleting a whole bundle (inventory and payload together) is outside this local snapshot check; independent history is required to detect that loss.'),
         _D('Inventories assert membership, not authenticated actor history.'),
         _D("The contained reader's size ceiling still applies."),
-        _D('The legacy imports/ exclusion remains registered until its writers migrate.'),
         'staging/ MUST be walked and stray-graded, including empty runs; an unknown kind MUST always be a finding.',
         _D('The existing staged-plan presence test also recognizes import and ingest runs in their typed staging homes.'),
         _D('Partial status is receipt-bound under section 11, not inferred from staging.'),
@@ -401,8 +401,7 @@ _CONTRACT = {
         _D('Machine-store TOML records live in .working/toml/.'),
         _D('The directory name .working at the store repository root is fixed by this standard.'),
         "The machine subdirectory's standard name is toml; tooling MUST NOT hardcode it, and MUST locate it by discovery.",
-        'The names imports, imported, archive, staging, and journals are reserved at the store level for OPF control area and MUST NOT be used as a machine subdirectory name; discovery fails closed on a machine store so named.',
-        _D('The legacy staging name imports remains reserved so legacy content cannot be re-absorbed.'),
+        'The names imported, archive, staging, and journals are reserved at the store level for OPF control area and MUST NOT be used as a machine subdirectory name; discovery fails closed on a machine store so named.',
     ),
     "4.5": (
         _D('Within the resolved store repository, tooling locates the machine store by finding exactly one immediate subdirectory of .working/ containing a manifest.toml that declares standard = "opf" in its [opf] base table, trying toml first.'),
@@ -410,11 +409,8 @@ _CONTRACT = {
         _D('The pointer names which repository carries the store; the manifest discovery observes where, within it, the machine store sits.'),
         _D('Because the machine subdirectory is observed at each use rather than declared and trusted, renaming it is a directory move with nothing to go stale; the pointer, which does declare a location, is validated at every resolution and fails closed rather than trusting a stale target (section 4.3).'),
         _D('Profiles declared under [profiles.<name>] are enumerated after the base is validated; a profile a tool does not support is ignored for enforcement and recorded as unevaluated, never treated as a base-validation failure (section 9).'),
-        'A fresh-only implementation (section 16.1) MUST recognize a candidate manifest.toml whose base table is the retired [devprocess] only to refuse that store as unsupported-older-store; the recognition is not a discovery match.',
-        'For a fresh-only implementation, a recognized legacy candidate, an ambiguous outcome, and an input that discovery cannot read or parse are a failed discovery of an existing store and MUST NOT be treated as an absent store that permits initialization or adoption; a recognized legacy candidate beside a matching store makes the outcome ambiguous, which yields cannot-evaluate, not unsupported-older-store, a refusal that applies only where no matching store accompanies the legacy candidate.',
-        'A fresh-only implementation MUST NOT treat a zero-match outcome over a present .working/ as authorizing initialization or adoption by itself.',
-        'In every command that resolves a store and meets that outcome, as part of its section 16.1 admission check and so before every write that check precedes, it MUST run the section 16.1 legacy-state search over that .working/ tree and MUST refuse each listed item it finds as unsupported-legacy-state, beside the zero-match cannot-evaluate result; where that .working/ holds no recognized legacy candidate and no section 16.1 legacy-state item, only a section 14 first adoption authorizes initialization there, through an investigation that distinguishes first adoption from re-adoption and records a digest-stamped inventory, and one approved plan that gives every foreign file a disposition before init-store (section 14.1).',
-        'Because a zero-match outcome discovers no store manifest, that search MUST apply the section 16.1 rule for a store with no discovered manifest, exactly as section 16.1 states it, and a cannot-evaluate result of that search authorizes neither initialization nor adoption.',
+        'An ambiguous outcome and an input that discovery cannot read or parse are a failed discovery of an existing store and MUST NOT be treated as an absent store that permits initialization or adoption.',
+        'A zero-match outcome over a present .working/ MUST NOT be treated as authorizing initialization or adoption by itself: only a section 14 first adoption authorizes initialization there, through an investigation that distinguishes first adoption from re-adoption and records a digest-stamped inventory, and one approved plan that gives every foreign file a disposition before init-store (section 14.1).',
     ),
     "4.6": (
         _D('Source files are lowercase; deliverables are uppercase.'),
@@ -484,17 +480,14 @@ _CONTRACT = {
         'Prose MUST live in exactly one place: the root CHANGELOG.md.',
     ),
     "8.1": (
-        _D('| Tier | Type | Namespace | |---|---|---| | Baseline | backlog_item | BI | | Baseline | done | DN | | Baseline | worklog | WL | | Baseline | finding | FN | | Baseline | pending_decision | PD | | Baseline | autonomous_decision | AD | | Baseline | block | BL | | Baseline | handoff | HO | | Baseline | reference | RF | | Baseline | contribution | CN | | Baseline | maintainer_decision | MD | | Baseline | preference_pattern | PP | | Governance module | maintainer_action | MA | | Delivery-assurance module | artifact | AR | | Delivery-assurance module | gate_run | GR | | Delivery-assurance module | release | RL | | Delivery-assurance module | waiver | WV | | Operational-policy module | mode | MO | | Operational-policy module | tier_assessment | TA | | Concurrent-operation module | session_lease | SL | | Migration quarantine (importer-only) | legacy_fragment | LF | | Reserved, excluded | transaction | TX | | Reserved, unassigned | (none) | CL | Notes on the roster: - The word "changelog" is not a record type.'),
+        _D('| Tier | Type | Namespace | |---|---|---| | Baseline | backlog_item | BI | | Baseline | done | DN | | Baseline | worklog | WL | | Baseline | finding | FN | | Baseline | pending_decision | PD | | Baseline | autonomous_decision | AD | | Baseline | block | BL | | Baseline | handoff | HO | | Baseline | reference | RF | | Baseline | contribution | CN | | Baseline | maintainer_decision | MD | | Baseline | preference_pattern | PP | | Governance module | maintainer_action | MA | | Delivery-assurance module | artifact | AR | | Delivery-assurance module | gate_run | GR | | Delivery-assurance module | release | RL | | Delivery-assurance module | waiver | WV | | Operational-policy module | mode | MO | | Operational-policy module | tier_assessment | TA | | Concurrent-operation module | session_lease | SL | | Reserved, excluded | transaction | TX | | Reserved, unassigned | (none) | CL | | Reserved, unassigned | (none) | LF | Notes on the roster: - The word "changelog" is not a record type.'),
         _D('It names the curated public deliverable (section 6.3).'),
         _D('The detailed per-change type is worklog.'),
         _D('The namespace CL is reserved unassigned so it can never half-collide with the freed word.'),
+        _D('- The namespace LF is reserved unassigned in the same way: no record type uses it in either series, and unmappable imported text stays verbatim in unparsed (section 8.3).'),
         _D('- transaction (TX) is excluded from the adopter standard with its name and namespace reserved; it may enter later as a versioned module only if portable semantics are demonstrated.'),
         _D('- Modules ship default-off; each is enabled by one manifest edit.'),
-        _D('legacy_fragment (LF) is deprecated for new stores as of 1.3.0, not removed: its taxonomy row and legacy validation remain for existing stores and evidence.'),
-        'New imports MUST use the imported series and verbatim unparsed text (section 8.3), not LF quarantine.',
-        'LF MUST NOT be scaffolded.',
-        'A fresh-only implementation (section 16.1) provides no legacy LF validation and MUST refuse a store that declares the legacy_fragment type or holds an LF record.',
-        _D('- Imported history uses the same enabled types except legacy_fragment (section 8.2) in a separate series, not additional record types.'),
+        _D('- Imported history uses the same enabled types (section 8.2) in a separate series, not additional record types.'),
         _D('Reserved namespaces remain reserved.'),
         _D('Imported states describe history and confer no current authority (section 8.6).'),
         '- done is a durable completion receipt linked one-to-one to a backlog item reaching ratified done; a standalone receipt MUST be imported history with provenance.',
@@ -510,8 +503,7 @@ _CONTRACT = {
         _D('Clean record IDs have the form <NS>-<n>; imported IDs have the form imported:<NS>-<n>, for example imported:BI-7.'),
         "The complete lexical grammar is ^(?:imported:)?[A-Z]{2}-[1-9][0-9]*$, and the namespace MUST additionally name the record's enabled type in section 8.1.",
         _D('Namespaces map one-to-one to types within each series.'),
-        'The imported series MUST refuse the LF namespace, since new imports do not use LF quarantine (section 8.1).',
-        'counters.toml MUST hold independent monotonic high-water values per series and namespace, BI for clean backlog items and the quoted TOML key "imported:BI" for imported backlog items, with the imported series\' rows required, one for each enabled type except legacy_fragment, since the imported series refuses LF and so has no "imported:LF" row.',
+        'counters.toml MUST hold independent monotonic high-water values per series and namespace, BI for clean backlog items and the quoted TOML key "imported:BI" for imported backlog items, with the imported series\' rows required, one for each enabled type.',
         'The same rule includes "imported:WL"; clean release spans MUST tile only the clean WL number line.',
         'The doctor MUST require the imported counter rows, whether opf init wrote them at zero or a re-adoption seeded them from its ancestral snapshot.',
         "Uniqueness, counter high-water, contiguity and no-deletion checks MUST evaluate each series independently; allocation MUST increment its counter under the store's lock as one atomic claim, so no gap between choosing and reserving can double-allocate.",
@@ -528,8 +520,7 @@ _CONTRACT = {
         _D('Clean records carry the envelope below; the imported envelope follows it.'),
         _D('Types add their own fields on top.'),
         'Schemas are closed: an unknown key MUST fail validation unless it sits under a registered vendor extension table.',
-        "| Field | Requirement | Meaning | |---|---|---| | id | required | <NS>-<n>, matching the type's namespace | | type | required | the type name; must match the file the record lives in | | status | required | per the status grammar (section 8.4) | | proposed_from | optional | the unqualified state held before the current /proposed status, written by the authoring verb (section 8.8); legal only on a /proposed status, and only naming a legal predecessor state for the type | | title | required | one line, human-oriented | | created_at | required | RFC 3339 UTC, read from the clock at creation | | updated_at | required | RFC 3339 UTC, read from the clock at the last transition | | actor.kind | required | maintainer, assistant, automation, or importer | | actor.id | optional | identity detail within the adopter's own vocabulary | | summary | optional | short prose body | | links | optional | array of {rel, id}; rel from the closed link vocabulary (section 8.6) | | refs | optional | array of captured references (section 8.6) | | x-<vendor> | optional | registered vendor extension tables only (section 8.7) | An importer MAY omit created_at where the source genuinely does not record it; the omission is recorded as unknown via the import provenance reference, never guessed.",
-        _D('This legacy permission does not replace the following 1.3.0 imported-series contract.'),
+        _D("| Field | Requirement | Meaning | |---|---|---| | id | required | <NS>-<n>, matching the type's namespace | | type | required | the type name; must match the file the record lives in | | status | required | per the status grammar (section 8.4) | | proposed_from | optional | the unqualified state held before the current /proposed status, written by the authoring verb (section 8.8); legal only on a /proposed status, and only naming a legal predecessor state for the type | | title | required | one line, human-oriented | | created_at | required | RFC 3339 UTC, read from the clock at creation | | updated_at | required | RFC 3339 UTC, read from the clock at the last transition | | actor.kind | required | maintainer, assistant, automation, or importer | | actor.id | optional | identity detail within the adopter's own vocabulary | | summary | optional | short prose body | | links | optional | array of {rel, id}; rel from the closed link vocabulary (section 8.6) | | refs | optional | array of captured references (section 8.6) | | x-<vendor> | optional | registered vendor extension tables only (section 8.7) |"),
         _D('The worklog entry uses a reduced envelope (id, date, actor, kind, summary, optional detail, links, refs); its status is fixed (section 8.5).'),
         'The worklog records facts, not proposable decisions, so its entries MUST NOT take the /proposed qualifier whatever the actor: an assistant-authored or automation-authored worklog entry is a conformant recorded fact needing no ratification (section 8.4).',
         _D('The imported envelope is closed and deterministic.'),
@@ -559,9 +550,10 @@ _CONTRACT = {
         _D('The writer performs no byte-tiling or leftover accounting: byte-level coverage and semantic fidelity are not machine-proven.'),
         _D('Preserved originals remain the restoration authority.'),
         'Imported records and their worklog entries MUST be immutable after publication; corrections MUST be a fresh import run retaining the old evidence.',
-        'A conforming imported series can reach doctor VALID: it MUST NOT enter the legacy importer or module-schema deferral seam.',
+        'A conforming imported series can reach doctor VALID: it MUST NOT enter the module-schema deferral seam.',
         _D('C-IMPORTED-SCHEMA checks this envelope and missingness; C-IMPORTED-IDS checks the series grammar, counters and no-deletion; C-IMPORTED-PROVENANCE re-reads each preserved original and verifies source_sha256.'),
-        _D('C-CONTAINMENT recognizes the imported managed leaves, C-LINKS resolves the union of both series, and C-IMPORTED-SEGREGATION enforces section 8.6.'),
+        'C-IMPORTED-IDS owns every imported-series ID defect exclusively, its grammar, counter rows, uniqueness, contiguity and no-deletion included: such a defect MUST be a C-IMPORTED-IDS finding and MUST NOT be reported again by C-IMPORTED-SCHEMA or any other check.',
+        _D('C-CONTAINMENT recognizes the imported managed leaves, C-LINKS resolves the union of both series, and C-IMPORTED-SEGREGATION enforces section 8.6: a firewall breach for which no other check is named is a C-IMPORTED-SEGREGATION finding.'),
         'Missing or unreadable evidence MUST fail closed.',
     ),
     "8.4": (
@@ -611,7 +603,7 @@ _CONTRACT = {
         'It MAY exemplifies the preference_pattern it instantiates.',
         _D('| | preference_pattern | active > retired | A distilled preference pattern carrying context and rationale (with the envelope title).'),
         _D('active is gated: an assistant-distilled pattern lands active/proposed awaiting maintainer ratification to the unqualified active.'),
-        _D('| Module types, in outline (full schemas ship with the module schemas release): maintainer_action open > done or dropped; artifact staged > promoted or rejected; gate_run recorded with a three-valued verdict field (pass, fail, cannot_evaluate), never folded into status; release planned > published or abandoned; waiver active > expired or revoked, expiry required at creation; mode active > retired; tier_assessment recorded; session_lease held > released or reconciled; legacy_fragment quarantined > resolved or ignored.'),
+        _D('| Module types, in outline (full schemas ship with the module schemas release): maintainer_action open > done or dropped; artifact staged > promoted or rejected; gate_run recorded with a three-valued verdict field (pass, fail, cannot_evaluate), never folded into status; release planned > published or abandoned; waiver active > expired or revoked, expiry required at creation; mode active > retired; tier_assessment recorded; session_lease held > released or reconciled.'),
         _D('Actionability: a clean backlog item authored by a non-importer actor is actionable when its state is open or active and no clean, unqualified active block authored by a non-importer actor scopes it.'),
         'Imported and importer-authored records MUST NOT enter this join on either side: an importer-authored backlog item is history, never actionable work, whatever its recorded state, and an importer-authored block MUST NOT block (section 8.6).',
         'This is the block join every scheduling view renders; a scheduling view MUST surface an importer-authored item only as history, never as actionable.',
@@ -626,19 +618,17 @@ _CONTRACT = {
         _D('Its primary user is contribution (a contribution derives from the internal finding, decision, or backlog item that motivated it).'),
         _D('refs capture external sources at the moment a claim or artifact is produced: each is {kind, locator, note} with kind one of path (a repository path, with a line where applicable), url, or doc (a document and section).'),
         _D('A record whose claims rest on an external source without a captured reference is unsourced, whatever confidence backs it.'),
-        _D('Imported history has an authority firewall, enforced by the writer and doctor and keyed on provenance rather than on series alone: it covers every record whose actor.kind is importer, in the imported series or written into the clean series by the pre-1.3.0 legacy importer.'),
+        _D('Imported history has an authority firewall, enforced by the writer and doctor and keyed on provenance rather than on series alone: it covers every record whose actor.kind is importer.'),
+        'A clean-series record MUST NOT carry actor.kind = "importer".',
         'An importer-authored record MUST NOT satisfy a current approval, receipt, actionability or supersession obligation of any record authored by a non-importer actor.',
         _D("The same bar covers every current obligation, record-level or store-level, including field-borne authority: a gate_run verdict, a tier_assessment outcome, an artifact's promoted state, a release's published state and a maintainer_action's done on an importer-authored record describe history and discharge nothing now."),
-        "A clean done record's receipt_of MUST target a clean backlog item, and a clean backlog item reaching ratified done MUST hold a clean receipt authored by a non-importer actor; a legacy importer-authored receipt satisfies, as recorded history, only the legacy importer-authored backlog item it was recorded with.",
-        "One exception is defined so that the section 9.2 refusal always has a writer-performable remedy: where that upgrade withdraws a ratified done item's only receipt as legacy importer-authored, a maintainer-authored clean maintainer_decision that links corrects to that item and records that its completion stands MUST satisfy the item's receipt obligation in place of the withdrawn receipt; opf record create authors such a decision, doctor and the upgrade MUST accept it, and a maintainer who instead judges the work unfinished MUST record a new clean backlog item linking derives_from back, never reopen the terminal done.",
-        'That acceptance binds an upgrade-capable implementation (section 16.1); a fresh-only implementation never reaches it, because the withdrawn legacy receipt is legacy state that it MUST refuse under section 16.1.',
+        "A clean done record's receipt_of MUST target a clean backlog item, and a clean backlog item reaching ratified done MUST hold a clean receipt authored by a non-importer actor.",
         'An importer-authored decision MUST NOT be treated as the current effective resolution of a clean pending_decision chain; resolving such a chain now MUST take a new clean decision linking back.',
         'Importer-authored blocks MUST NOT grant a current stop, and an importer-authored record MUST NOT discharge a required supersession.',
         'The firewall covers every state-bearing type: an importer-authored record MUST NOT be treated as the current handoff, an active waiver, a held session_lease, an active mode, or a ratified active preference_pattern; a state-bearing status on an importer-authored record describes history at its source and MUST confer nothing now, and every current-state join, including the section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer actors.',
-        'After the section 9.2 upgrade an existing legacy importer-authored clean record MUST keep its bytes, its recorded state and its place in the clean series, and remains readable history there; what the upgrade changes, and its report enumerates (section 9.2), is authority alone: such a record leaves every current-state join, its open or active backlog items leave actionability, and its blocks stop granting a stop.',
         'The clean-series writer MUST refuse a transition on an importer-authored record in either series (section 8.8).',
         'Acting on history MUST take a new strict clean record at the present time, with a link back to the historical record.',
-        _D('C-IMPORTED-SEGREGATION enforces this firewall over importer-authored records in both series.'),
+        'C-IMPORTED-SEGREGATION enforces this firewall: a clean-series record that carries actor.kind = "importer", and a breach of any other part of this firewall, the link rules below included, for which this specification names no other doctor check, MUST each be a C-IMPORTED-SEGREGATION finding.',
         'Clean-to-imported links MUST be limited to relates, derives_from, follows, and same-type supersedes; the last records historical continuation without discharging a current supersession obligation, and the immutable imported target keeps its recorded state, the link alone recording the supersession (section 8.4).',
         'Imported-to-imported links MAY use every declared relation subject to its type constraints.',
         'Imported-to-clean links MUST be refused by both writer and doctor.',
@@ -650,7 +640,7 @@ _CONTRACT = {
         _D('It writes the record and worklog shapes this specification defines, and it adds one optional envelope key of its own: proposed_from (section 8.3), which appears only on /proposed records written by opf record transition.'),
         _D('Its clean-series subcommands use the strict record model; the import write mode uses the separate imported model.'),
         'Import is not a flag that relaxes create, and the clean-series subcommands MUST refuse actor.kind = "importer": an importer authors only through import.',
-        'The clean-series subcommands MUST also refuse an importer-authored record as their operand: acting on imported or legacy importer-authored history is a new clean record linking back (section 8.6).',
+        'The clean-series subcommands MUST also refuse an importer-authored record as their operand: acting on imported history is a new clean record linking back (section 8.6).',
         _D("Its subcommands: - create: one new record of an enabled baseline type, in the type's initial state."),
         _D('An assistant or automation author entering a gated initial state lands /proposed; a created-terminal factual or ACT type (reference, autonomous_decision, maintainer_decision) carries no qualifier (section 8.4).'),
         _D('done receipts and worklog entries are not created this way.'),
@@ -697,7 +687,6 @@ _CONTRACT = {
         'When any other lease is present, a confirmed-dead leftover of another verb included, reconciliation MUST refuse before any recovery write and MUST NOT release that lease.',
         'An operand changed since the interruption, to bytes that are neither its journaled prestate nor its planned poststate nor a write of either torn by the interruption, MUST be reported and refused, never overwritten.',
         'A reconciled interruption MUST refuse the new operation, so the operator inspects it before anything new is written.',
-        _D('A fresh-only implementation (section 16.1) performs that reconciliation only after its section 16.1 read-only pre-scan and within the section 16.1 recovery bound, and runs its admission check after it.'),
         _D('2. Precondition: re-emitting the unchanged parsed model of every file the operation rewrites reproduces its on-disk bytes exactly (the section 9.2 rule).'),
         'A file carrying comments or non-canonical serialization MUST be refused and left untouched.',
         _D('The check proves serialization only: a hand edit or hand merge that leaves canonical bytes is not detectable by it, and the integration-base merge policy of section 5.7 remains a separate requirement.'),
@@ -755,11 +744,11 @@ _CONTRACT = {
         _D('Base spec 2.0.0 is the baseline, and it declares the homes generation with the required integer [opf].homes = 2 (section 4.2).'),
         'A store that omits [opf].homes, or declares any value other than the integer 2, MUST be refused.',
         _D('No earlier base version exists, so this section defines no upgrade into 2.0.0; its rules bind each later base-schema version bump.'),
-        'Unproven legacy .archive/ entries MUST remain in place with a standing finding until dispositioned.',
-        "A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a store below the new version has an upgrade path; the path holds only within this section's preconditions and refusals and that implementation's disclosed residuals.",
-        'Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of them and MUST instead refuse under section 16.1.',
-        "Every implementation class MUST apply the version ceiling's refusal at the end of this section, a fresh-only implementation at its section 16.1 admission check.",
+        "A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published implementation (section 16.1), the reference tooling, so that a store below the new version has an upgrade path; the path holds only within this section's preconditions and refusals and that implementation's disclosed residuals.",
+        _D('Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and remedies binds every implementation that provides opf upgrade.'),
+        "Every implementation MUST apply the version ceiling's refusal at the end of this section.",
         'The upgrade MUST be idempotent.',
+        'An upgrade MUST NOT create provenance, adoption approval or historical records.',
         'A schema-level bump MUST be additive, using atomic replacement of existing files, create-only writes for new index files, and regeneration of declared views through exclusively created temporary files followed by atomic rename.',
         _D('These writes are sequential, with recovery scope held in memory, not a durable transaction journal.'),
         'The upgrade MUST run under the store consistency contract and the single-writer lease (section 5.7).',
@@ -772,7 +761,8 @@ _CONTRACT = {
         'The manifest and counters rewrite MUST be a model regeneration through the canonical new-document emitter, never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the UNCHANGED parsed model reproduces the on-disk bytes exactly (proving the file is canonical and comment-free, so nothing can be lost), failing closed otherwise; and a postcondition that the model diff equals exactly the allowed delta, failing closed otherwise.',
         _D('Repeated upgrade is a verified no-op only after full doctor VALID.'),
         "Declaring a spec_version above the tooling's supported version MUST be refused at validation as a fail-closed INVALID finding naming the tooling-upgrade remedy, never treated as supported.",
-        'A spec_version below 2.0.0 names no version this specification defines, and validation MUST refuse it as a fail-closed INVALID finding.',
+        "A spec_version below 2.0.0 names no version this specification defines, and validation MUST refuse it as a fail-closed INVALID finding naming the remedy, since this section defines no upgrade into 2.0.0: a fresh 2.0.0 store whose section 14 adoption gives the old store's files a disposition as foreign content.",
+        'Before any command writes to a store, the claim, release, or reconciliation of the single-writer lease (section 5.7), a fast-forward by opf sync, and the recovery of sections 8.8, 14.1, and 14.2 included, every implementation MUST apply these validation refusals and the [opf].homes refusal above to the store manifest that discovery finds there, so a store they refuse stays byte-identical; the one exception is the apply of the section 14 adoption that the remedy above names, and the recovery of that apply (section 14.2).',
     ),
     "11": (
         _D('Enforcement has two layers with deliberately different ceilings:'),
@@ -786,11 +776,9 @@ _CONTRACT = {
         'Imported history joins this integrity layer through the deterministic checks in sections 8.3 and 8.6; the authority firewall MUST NOT be report-only.',
         _D('import_status = "none" means clean start with no approved migrate-source import.'),
         _D('"partial" means the adoption receipt enumerates migrate-disposed sources whose completion results are not yet recorded green (section 14.1); it can persist across assistant sessions without a process running.'),
-        _D('"complete" means every such source has a green completion result and recorded retirement under section 14.1 with a live full doctor VALID, or that a pre-1.3.0 legacy import finished and its preserved legacy run evidence substantiates it; the section 9.2 upgrade preserves that legacy status without fabricating an approval or receipt.'),
-        'A partial or complete status that neither an adoption receipt with completion results nor preserved legacy import evidence substantiates MUST fail closed, as does a missing, unreadable or contradictory input.',
+        _D('"complete" means every such source has a green completion result and recorded retirement under section 14.1 with a live full doctor VALID.'),
+        'A partial or complete status that no adoption receipt with completion results substantiates MUST fail closed, as does a missing, unreadable or contradictory input.',
         'Elapsed time and a staging directory MUST NOT be taken as proof of status.',
-        'A fresh-only implementation (section 16.1) MUST NOT use the preserved-legacy-evidence route: it substantiates partial and complete only through an adoption receipt with completion results, and it refuses a partial or complete status in a store that holds no adoption receipt as legacy state under section 16.1, which yields cannot-evaluate instead where it cannot establish whether the store holds one.',
-        'The section 16.1 admission check belongs to neither layer above: it MUST run at every posture, and off and warn MUST NOT disable or soften it.',
         'From the recorded approval until its retirement is recorded, a path the approved plan enumerates as a frozen retire, move or migrate source (section 14.2) is bounded adoption state: while its live bytes still match its plan digest, containment MUST report it as migration_incomplete detail rather than failing it, at "none" during a clean start as much as at "partial".',
         'A digest mismatch (a drifted source), a source that is gone before its retirement is recorded (a vanished source), or an unenumerated path MUST remain a containment-gate failure at required; the bounded treatment is never a blanket exemption.',
         'A formerly occupied destination needs no bounded treatment: its occupying source was archived at apply (section 14.2), the destination is an ordinary managed path from apply onward, and a check that reads the adoption archive, the section 14.1 completion check and import included, MUST fail at required, naming the path, on a missing, unreadable or digest-mismatched archived copy.',
@@ -808,7 +796,7 @@ _CONTRACT = {
         'Rotation MUST be relocation, never deletion, and never ID reuse.',
         'Records in unqualified terminal states, other than worklog records, MAY rotate to .working/toml/archive/<YYYY>/ (calendar-year buckets) on manifest-declared age or size thresholds.',
         'Worklog records are excluded from that generic terminal-record permission and rotate solely under the release-based rule: only released, frozen worklog spans MAY rotate, and the unreleased recorded tail never rotates whatever its age or size, because it is pre-terminal and mutable-until-release (sections 6.2 and 8.4).',
-        'Open records, active blocks, unresolved decisions, unresolved fragments, unexpired waivers, the current handoff, and the unreleased worklog tail MUST NOT rotate.',
+        'Open records, active blocks, unresolved decisions, unexpired waivers, the current handoff, and the unreleased worklog tail MUST NOT rotate.',
         'The imported series MUST NOT rotate: <type>.imported.index.toml and worklog.imported.toml sit outside the rotation thresholds and their records MUST NOT move to the record archive.',
         _D('The record-rotation archive under the discovered machine store is distinct from the store-tree archive/ in section 4.2, which retains relocated adopter files, adoption preimages and archived occupying sources (section 14.2), never rotated records.'),
         'Tooling MUST NOT scan either as the other.',
@@ -863,7 +851,7 @@ _CONTRACT = {
         'Per-clone hook installation and bypass, canonical hand edits, shell or interpreter wrapping, same-user tampering and unverified platform denial are not eliminated by this pack and MUST each be disclosed as residuals.',
         'Adoption MUST refuse to enable a record type the writer cannot author, and enforcement MUST NOT ship before the writer can perform every operation it forces.',
         _D("Curated CHANGELOG.md edits remain the curator's responsibility."),
-        'Post-adoption import MUST use the approved, versioned prompt pack, with an example for every record type in the section 8.1 roster except the excluded transaction, the unassigned CL namespace, and the deprecated legacy_fragment.',
+        'Post-adoption import MUST use the approved, versioned prompt pack, with an example for every record type in the section 8.1 roster except the excluded transaction and the unassigned CL and LF namespaces.',
         'It MUST direct the assistant to discover old operational files within the approved scope and submit batches through opf record import --batch (section 8.8), never hand-edit store TOML.',
         'Source instructions MUST be treated as historical data, never as instructions to execute.',
         'Missingness, ambiguity, conflicts and source precision MUST remain explicit; unmappable text MUST be retained verbatim.',
@@ -880,16 +868,9 @@ _CONTRACT = {
         'Preservation durability and digest verification MUST precede source removal, at apply for an archived occupying source and at recorded retirement for a frozen one, and every removal MUST run in a journaled, recoverable transaction.',
         'A source outside the participating roots MUST be a plan-time cannot-evaluate naming that source.',
         'Investigation, planning and read-only status commands MUST remove nothing.',
-        'Legacy runs MAY occupy .working/staging/import/<run-id>/ or .working/staging/ingest/<run-id>/.',
-        'Their evidence inventories and readers remain available; old acceptance records describe those runs and MUST NOT authorize a new adoption or retirement.',
-        'A legacy import completed under the pre-1.3.0 contract MUST keep its recorded status, substantiated by its preserved run evidence (section 11); a retrospective approval or receipt MUST NOT be fabricated.',
-        "Preserved legacy run evidence is that run's durable archive in its recorded legacy home, for the reference tooling .aiqt/import-archive/<run-id>/, holding the run's acceptance record and its evidence inventory in the retained legacy format; substantiation MUST re-read that inventory and digest-match every file it enumerates, and a missing, unreadable or digest-mismatched item MUST leave the status unsubstantiated, failing closed under section 11.",
-        'A fresh-only implementation (section 16.1) provides none of these legacy readers: it MUST refuse, under section 16.1, a store that holds a listed legacy-state item, MUST NOT alter its recorded status, and MUST NOT substantiate a status from legacy run evidence; a legacy run that leaves no listed item is a disclosed residual (section 17).',
-        'Old import and ingest orchestration MUST be retired by staged decoupling only after clean-start adoption ships.',
         'Required evidence MUST be re-read and digest-matched in its durable home before staging reclamation.',
         'Reclamation MUST be journaled and idempotent; an unreadable tree MUST hold the run.',
         'Read-only commands MUST NOT clean staging.',
-        'Pending legacy review MUST NOT become implicit approval.',
     ),
     "14.2": (
         'opf adopt MUST investigate every file at the target .working/ location that is not OPF-managed, and every pre-existing file at a declared view or deliverable destination outside .working/, the product-root VERSION included: the manifest, ledgers, counters, clean and imported typed indexes, declared views and registered control areas define the managed set.',
@@ -900,7 +881,7 @@ _CONTRACT = {
         'Ordinary tooling MUST NOT read, rewrite or delete it.',
         'An [unmanaged] path MUST NOT equal or contain a discovery candidate, a manifest.toml present in an immediate subdirectory of .working/ (section 4.5); such an entry is a contradictory input and MUST yield cannot-evaluate, so the keep protection never covers a file that discovery reads.',
         'A keep declaration whose path equals or contains a discovery candidate MUST refuse at plan time, naming that candidate, the same way a collision refuses below.',
-        _D('A no-follow existence probe of manifest.toml in an immediate subdirectory of .working/, a kept one included, used only by discovery, by this rule, and by the section 16.1 admission check, is not a read of a kept path.'),
+        _D('A no-follow existence probe of manifest.toml in an immediate subdirectory of .working/, a kept one included, used only by discovery and by this rule, is not a read of a kept path.'),
         'An unmanaged path MUST NOT collide with an OPF-managed file or view: a keep declaration naming a declared view or managed store path MUST refuse at plan time, and a later manifest change, type enablement or upgrade delta that would declare a view or managed store path at a registered [unmanaged] path MUST refuse the same way (section 9.2), so a kept path never becomes an occupied destination.',
         _D('- **Migrate.** Keep the source for post-adoption import into the separate imported series.'),
         'Its exact bytes MUST be preserved at apply, as the archived occupying copy for an occupying source and as a retirement preimage under .working/archive/adoption/<run-id>/<source-path> for a non-occupying one (completion check 3), and its retirement MUST be recorded only after its source completion check is green (section 14.1).',
@@ -919,8 +900,7 @@ _CONTRACT = {
         'The reversal MAY also discard retirement preimages written by that uncommitted apply for non-occupying sources, since each such source remains frozen, live and byte-identical in place and is never removed at apply.',
         _D("That reversal undoes the uncommitted apply's own writes; it is not the section 14.1 restore, whose fresh-plan rule governs an archived file only once apply commits."),
         'Recovery of an interrupted apply MUST resolve from the apply journal alone and MUST NOT require the live tree to resolve as a store: on restart the one transaction either completes forward from its durably committed journal or reverses fully as above, so an interruption that removed an occupying machine-store file, the manifest included, never leaves the store unresolvable or waiting on a plan it cannot form.',
-        _D('A fresh-only implementation (section 16.1) performs that recovery only after its section 16.1 read-only pre-scan and within the section 16.1 recovery bound, and runs its admission check after it.'),
-        _D('In a first adoption, its apply also archives and removes every occupying source at a section 16.1 candidate path before it writes the store manifest, and its plan refuses a foreign source at such a path that is no planned managed destination (section 16.1).'),
+        _D('A fully reversed first adoption leaves .working/ holding its retained journal, so the store location reads as present without a manifest (section 4.5), and journal state that a foreign tree planted there is touched only by a fail-closed refusal and by the explicit reconcile an operator runs, a same-user residual of the class section 14.1 discloses.'),
         _D('After the archival the destination is an ordinary managed path: apply initializes the machine file or renders the view immediately, and no writer carries an occupied-destination obligation afterward.'),
         _D("The archived copy is the disposition's preserved original: the retire preimage, the source import reads for migrate, or the bytes a move relocation copies out after the green check."),
         _D("Archival is preservation, not retirement: the green completion check of section 14.1 remains the one gate that records each disposition's retirement."),
@@ -977,17 +957,15 @@ _CONTRACT = {
     "16.1": (
         _D('An implementation is a tool or tool suite offered to create, write, or validate OPF stores.'),
         _D('A project that keeps its own store by hand, with its own checks over that store alone (section 1), is not an implementation under this section.'),
-        _D('The base defines two implementation conformance classes, upgrade-capable and fresh-only.'),
-        'A class changes which requirements bind an implementation only where this specification says so; a declared scope, exclusion, profile, or posture MUST NOT otherwise waive a base requirement.',
-        _D('Current-format requirements, the imported series, adoption, and the section 8.6 authority firewall included, bind both classes.'),
-        _D('An upgrade-capable implementation meets every section 9.2 requirement for each earlier base version and generation and grades legacy state under sections 8.1, 8.6, 11, and 14.1.'),
+        "The base defines one implementation model and no implementation conformance classes: a declared scope, exclusion, profile, or posture MUST NOT waive a base requirement, and current-format requirements, the imported series, adoption, and the section 8.6 authority firewall included, bind every implementation.",
+        _D('An implementation supports base spec_version 2.0.0 and homes generation 2, the only ones this specification defines (sections 4.2 and 9.2), and the worklog storage generation it declares, and initializes stores directly at them.'),
         _D('The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, a pre-release format this specification does not define, and it makes no claim of conformance to this specification.'),
-        _D('A fresh-only implementation supports exactly one base spec_version, one homes generation, and one worklog storage generation, initializes stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.'),
-        'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity, its class, and its supported spec_version, homes generation, and worklog storage generation.',
+        _D('The reference tooling accepts a manifest declaring spec_version = "2.0.0" with homes = 2 and grades it under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to this specification.'),
+        'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity and its supported spec_version, homes generation, and worklog storage generation.',
         'Each release MUST ship that declaration as one file, the declaration file.',
         _D("A runtime check is the step of the implementation that, in a run, reads the declaration and gates that run's store operations, the emitter is the step of the implementation that writes the conformance reports section 16 describes, never a store-file emitter such as the canonical new-document emitter, and a documented run of the runtime check and the emitter need not resolve a store."),
         _D("Whether a run authorized store operations is an observable of that run: it authorized them exactly where it performed one, a write within a store that run resolved or to that store's lease, as the checker observes the run's writes, and an authorization no performed operation shows is not compared."),
-        _D('A write this section or section 5.7 itself requires is not a store operation under this section, for the runtime-result comparison and the store part below alike: the claim of the single-writer lease a command takes, its release, the session_lease record of that claim and of that release, and the lease reconciliation and recovery writes sections 5.7, 8.8, 14.1, and 14.2 require, so a run that stops as cannot-evaluate and writes nothing but what section 5.7 requires to end its own claim performed no store operation.'),
+        _D('A write that sections 5.7, 8.8, 14.1, and 14.2 themselves require is not a store operation under this section, for the runtime-result comparison and the store part below alike: the claim of the single-writer lease a command takes, its release, the session_lease record of that claim and of that release, and the lease reconciliation and recovery writes those sections require, so a run that stops as cannot-evaluate and writes nothing but what section 5.7 requires to end its own claim performed no store operation.'),
         'A runtime check MUST read the declaration from the copy of that file installed with the implementation (the installed copy) alone, never from the documentation of the release or from any report.',
         "Each release MUST also carry, in the implementation and apart from that file, the SHA-256 digest of that file's bytes as the release ships them (the shipped-file digest), and the documentation of each release MUST state where the implementation carries it.",
         'A release that carries no such digest, or whose documentation states no such place, does not conform to this section, and a conformance claim MUST NOT be made for it.',
@@ -995,15 +973,15 @@ _CONTRACT = {
         _D('That comparison detects an edit of the installed copy alone; section 17 discloses that residual and the others these rules leave.'),
         'Every report the emitter of a release writes MUST carry the four parts compared in every report, exactly these: the restatement of the declaration, the shipped-file digest the implementation carries, the installed-copy digest, and the runtime result.',
         "The installed-copy digest is the SHA-256 digest of the installed copy's bytes that the runtime check read, or the token not-read where that check read none because the installed copy is absent or unreadable, and a report MUST NOT carry not-read with any runtime result other than cannot_evaluate.",
-        "Each digest in a report MUST be written as 64 lowercase hexadecimal digits, and the runtime result MUST be written as one of the tokens of the three-valued gate_run verdict field (section 8.5): cannot_evaluate where that run's runtime check yielded cannot-evaluate or another rule of this section made that run yield cannot-evaluate, the admission check over the store that run resolved included, and otherwise pass where it authorized store operations and fail where it did not.",
+        "Each digest in a report MUST be written as 64 lowercase hexadecimal digits, and the runtime result MUST be written as one of the tokens of the three-valued gate_run verdict field (section 8.5): cannot_evaluate where that run's runtime check yielded cannot-evaluate or another rule of this section made that run yield cannot-evaluate, and otherwise pass where it authorized store operations and fail where it did not.",
         _D('Section 8.5 fixes those tokens, not their meaning here: under this section pass and fail read observably, over performed store operations, so a documented run that resolves no store, and one whose only writes are the exempt writes above, each authorized none and, where no rule yields cannot-evaluate, write fail.'),
         _D("A restatement differs from that file's declaration where it gives a different value for any field the file carries, omits such a field, or states a field the file does not carry."),
         "The documentation of each release MUST restate that file's declaration without differing from it.",
-        _D("The expected report of a release is fixed by the bytes the release ships alone, apart from the runtime result, the one part also coupled to the run it concerns: its restatement is the declaration of that file as the release ships it, each of its digests equals the SHA-256 digest of that file's bytes as the release ships them, and its runtime result is cannot_evaluate exactly where a rule of this section makes those bytes, or the store that run resolved as the checker observes it, yield cannot-evaluate, and otherwise pass or fail, between which this section, as it now stands, sets no rule."),
-        _D('A report deviates from the expected report where any of the four compared parts is omitted, written in another form, or holds another value; no other content of a report is compared, the base result of a report a reference run emits over a store its admission check refuses (the base-result part below) apart.'),
-        _D("The runtime-result part also deviates where its token disagrees with whether that run authorized store operations, the performed operations the checker observes; this comparison reads the run's writes, the store-coupled cannot-evaluate rule above reads the store that run resolved, and together they make the runtime result the only part of the expected report not fixed by the shipped bytes alone."),
+        _D("The expected report of a release is fixed by the bytes the release ships alone: its restatement is the declaration of that file as the release ships it, each of its digests equals the SHA-256 digest of that file's bytes as the release ships them, and its runtime result is cannot_evaluate exactly where a rule of this section makes those bytes yield cannot-evaluate, and otherwise pass or fail, between which this section, as it now stands, sets no rule."),
+        _D('A report deviates from the expected report where any of the four compared parts is omitted, written in another form, or holds another value; no other content of a report is compared.'),
+        _D("The runtime-result part also deviates where its token disagrees with whether that run authorized store operations, the performed operations the checker observes; this comparison reads the run's writes, so the runtime result is the only part of a report compared with more than the shipped bytes alone."),
         _D('A pass token beside no performed store operation, a fail token beside one, and a cannot_evaluate token beside one each disagree that way, whatever the expected result, since a run that yields cannot-evaluate authorizes no store operation.'),
-        "The behaviour-coupled comparisons are exactly two, the token comparison above and the store part below, and they read only the writes the checker observed: a run for which the checker cannot determine whether it observed every write gives it no evidence under either comparison, so a result-part or store-part failure that only those two comparisons of such runs could show MUST be reported as unresolved, never as established, a residual section 17 discloses; the rest of the expected-report comparison, the store-coupled cannot-evaluate expected result included, reads such a run's report as any other, over the store that run resolved as the checker observes it.",
+        "The behaviour-coupled comparisons are exactly two, the token comparison above and the store part below, and they read only the writes the checker observed: a run for which the checker cannot determine whether it observed every write gives it no evidence under either comparison, so a result-part or store-part failure that only those two comparisons of such runs could show MUST be reported as unresolved, never as established, a residual section 17 discloses; the rest of the expected-report comparison reads such a run's report as any other.",
         _D("An execution environment is unaltered where it is a stock install of a platform and version within what the documentation of the release names or, where that documentation names none, of the platform the checker uses, as that platform's own installer leaves it, changed only as that documentation directs and in this closed operational list, and in nothing else: the account name, administrative privilege only where that documentation directs it, the working and temporary locations, and the clock."),
         _D("Every default of that stock install that the documentation does not exclude, by directing that it be changed or by naming a platform that lacks it, is part of an unaltered execution environment, so meeting it is the release's, whichever platform and version within that naming a checker uses."),
         _D('An attempt is the documented installation of a release, made by one checker in an unaltered execution environment, from the bytes the release ships and, for each installed file the release does not ship, from the source its documentation directs, followed by two successive documented runs of the runtime check and the emitter over that installation.'),
@@ -1012,99 +990,31 @@ _CONTRACT = {
         _D('An attempt whose installation or execution environment anything else altered is not an attempt and establishes nothing.'),
         "A verdict under this section is decided from the checker's own observations, given its detection of alterations (section 17), and an attempt whose eligibility under this rule the checker cannot determine establishes nothing for that checker: a failure that only such attempts show MUST be reported as unresolved, never as established.",
         "A release MUST be available: every attempt MUST complete the documented installation and yield two reference runs, so an installer that rewrites that file's bytes, by converting its line endings or otherwise, an installed copy a documented run cannot read, an installation step an attempt cannot complete, and a first run whose writes leave the second run with an installed copy that no longer holds the shipped bytes are each a failure of this rule.",
-        'A reference run of a release MUST NOT emit a report that deviates from the expected report, and its runtime check MUST NOT authorize any store operation where the expected runtime result is cannot_evaluate or where its admission check, the pre-scan included, refused the store that run resolved.',
+        'A reference run of a release MUST NOT emit a report that deviates from the expected report, and its runtime check MUST NOT authorize any store operation where the expected runtime result is cannot_evaluate.',
         "Only a checker's own attempts and reference runs are evidence under the two rules above: a report of any other run or installation, altered or not, MUST NOT be presented as establishing or countering conformance of any release, and whether a release conforms to this section is judged only from the bytes the release ships, the implementation and the installer included, inspected, from the documentation of the release, and from the checker's own attempts and reference runs.",
-        _D('A failure of either rule is shown for a checker where one of its own attempts or reference runs shows it, and established for that checker where a second of its own attempts or reference runs, made on the same platform and version, shows a failure of the same rule and, under the reference-run rule, in the same part, the four compared parts of the report and the store and base-result parts below each one part; attempts and reference runs that show no failure, however many there are, never counter a shown or established failure.'),
-        "The two rules above are the one path from attempts and reference runs to a verdict: a breach of any requirement of this section that an attempt or a reference run shows in what those rules compare, the four compared parts of a report, not-read beside another runtime result, a run's cannot-evaluate and the store operations it performs, a restatement a report states, and the store and base-result parts below included, MUST be judged solely as a failure of the availability rule or of the reference-run rule, shown and established only as those rules provide, never as nonconformance on one showing; only what a checker inspects in the bytes the release ships or reads in the documentation of the release decides a verdict under this section without that procedure.",
-        _D("Every requirement of this section that those rules do not compare is a requirement on the bytes the release ships, on the documentation of the release, or on a checker's own conduct and reporting: in particular, a requirement on the conduct of the implementation's commands outside what the parts above read, the fresh-only admission, lease, recovery, and sync conduct below included, is a property of the bytes the release ships, and a breach of it is judged by that inspection alone, never by this procedure."),
+        _D('A failure of either rule is shown for a checker where one of its own attempts or reference runs shows it, and established for that checker where a second of its own attempts or reference runs, made on the same platform and version, shows a failure of the same rule and, under the reference-run rule, in the same part, the four compared parts of the report and the store part below each one part; attempts and reference runs that show no failure, however many there are, never counter a shown or established failure.'),
+        "The two rules above are the one path from attempts and reference runs to a verdict: a breach of any requirement of this section that an attempt or a reference run shows in what those rules compare, the four compared parts of a report, not-read beside another runtime result, a run's cannot-evaluate and the store operations it performs, a restatement a report states, and the store part below included, MUST be judged solely as a failure of the availability rule or of the reference-run rule, shown and established only as those rules provide, never as nonconformance on one showing; only what a checker inspects in the bytes the release ships or reads in the documentation of the release decides a verdict under this section without that procedure.",
+        _D("Every requirement of this section that those rules do not compare is a requirement on the bytes the release ships, on the documentation of the release, or on a checker's own conduct and reporting: in particular, a requirement on the conduct of the implementation's commands outside what the parts above read is a property of the bytes the release ships, and a breach of it is judged by that inspection alone, never by this procedure."),
         _D("A run that is no reference run and belongs to none of the checker's attempts, a run of another command over a store the checker made and the Appendix E scratch-copy probe over an edited installed copy included, is an observation of the implementation's behaviour, never an inspection of the bytes the release ships or a reading of the documentation of the release: however often it is repeated, it is no evidence under the two rules above, it shows and establishes nothing there, and it decides no verdict under this section, on one showing or many, since only those two rules, that inspection, and that reading decide; it can only direct the checker to what an inspection of the bytes the release ships then finds, and section 17 discloses what every inspection and such an observation rest on."),
         _D('An availability failure is shown by a failed attempt and established by a second failed attempt of the same checker on the same platform and version; it has no part, so the same-part condition does not apply to it.'),
-        _D("Under the reference-run rule the same-part condition applies to every failure, a store operation performed where the expected runtime result is cannot_evaluate or where that run's admission check, the pre-scan included, refused the store that run resolved included: that operation is a failure in a part of its own, the store part, shown and reproduced only by a run that performs such an operation, never by a deviating report."),
-        _D('A report a reference run emits over a store its admission check refuses is compared in one more part of its own, the base-result part: it deviates there where that report breaches the refusal-report rule below, by a base result other than indeterminate or by not naming what that rule has it name, and such a breach in such a report is judged only there, under the reference-run rule and the same-part condition, never as a direct verdict.'),
+        _D("Under the reference-run rule the same-part condition applies to every failure, a store operation performed where the expected runtime result is cannot_evaluate included: that operation is a failure in a part of its own, the store part, shown and reproduced only by a run that performs such an operation, never by a deviating report."),
         "The showing and the reproducing evidence MAY be any two of the checker's own reference runs on the same platform and version, the two runs of one attempt included.",
         'A checker that reports on a shown failure MUST report it as established or, where its own evidence has shown it and not reproduced it, as unresolved, MUST name the platform, the version, and its own attempts and reference runs behind that state, and MUST NOT report an unresolved failure, or the absence of a shown one, as conformance of the release.',
         "A release for which a checker's own evidence establishes a failure of either rule does not conform to this section, and that checker MUST NOT make a conformance claim for it; a conformance claim under this section MUST name the attempts and reference runs it rests on.",
         'Each such failure is a release nonconformance, never a runtime state of the declaration: it MUST NOT be treated as making the declaration malformed or contradictory, and it does not change what a runtime check of an installed copy yields.',
-        'An implementation whose declaration lacks only its class MUST be treated as upgrade-capable, and every upgrade requirement binds it.',
         'An unreadable, malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
-        'A declaration that is absent, or that omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
-        'A declaration that carries its release identity, its spec_version, its homes generation, and its worklog storage generation, and omits only its class, declares no class: it MUST NOT be treated as malformed for that omission, and the implementation that ships it MUST be treated as upgrade-capable unless the declaration is malformed or contradictory on other grounds.',
-        'The rules on an absent, unreadable, malformed, contradictory, or classless declaration govern the file alone: a runtime check MUST apply them to the installed copy as it stands, a check of the documentation or of the reports MUST apply them to that file as the release ships it, and each check MUST NOT take a class or any other field from the documentation of the release or from any report.',
-        "Where that documentation states a class that the file omits, the release does not conform to this section and a conformance claim MUST NOT be made for it, because the documentation's restatement states a field the file does not carry; where a report a reference run of that release emits states such a class, that report's restatement differs from the file's declaration the same way, a deviation of the restatement part judged under the reference-run rule like any other, never a direct verdict.",
-        'The file declares no class only where it omits its class and no other field: a file that is absent, or that also omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed and MUST yield cannot-evaluate.',
-        'A fresh-only implementation MUST run an admission check in every command that resolves a store, at every posture, before any other grading and before any write, the claim of the single-writer lease (section 5.7) included, apart from the lease reconciliation and recovery that the recovery bound below leaves to sections 5.7, 8.8, 14.1, and 14.2, which the read-only pre-scan below precedes.',
-        "The check MUST run after any section 5.7 comparison against the sync target that the command performs, over the state that comparison found, and a fresh-only implementation's opf sync MUST NOT bring in, by a fast-forward, a state that the check, run first over the fetched target state, refuses or cannot evaluate, nor send, by a push of pending local commits (section 5.7), a state that the check, run first over the local state it would push, refuses or cannot evaluate.",
-        'A command that writes, and does not already hold the lease from the recovery below, MUST, after admission, take the lease.toml that section 5.7 has it take in the machine store and make it observable at the sync target where the store has one (section 5.7) before any other write, the session_lease record that section 5.7 has it record for that lease where the concurrent-operation module is enabled included.',
-        "Once that lease is taken and observable, and before any other write, it MUST confirm that the lease.toml carries its own claim and that every directory listing, existence-probe result, and candidate the check read is unchanged from what the check read, apart from exactly the bytes that its own claim of the lease wrote under section 5.7: the directory entries that claim created, a file that claim created, the lease.toml included, holding only what that claim wrote, and, in a file that claim rewrote, such as a <type>.index.toml or worklog ledger that gains its session_lease record, only that claim's own change, so that file MUST equal the bytes the check read with exactly that change applied, and a change to any other record or byte of it is a difference, never exempt as part of a file the claim wrote.",
-        'Where anything else differs, or the lease.toml does not carry its own claim, it MUST stop as cannot-evaluate and write nothing but what section 5.7 requires to end its own claim: it MUST release its own lease (section 5.7) where the lease.toml carries its own claim, so the lease path ends as it was before the claim, and MUST leave that lease.toml untouched where it does not, since section 5.7 forbids seizing a lease from a live holder.',
-        'The check MUST compare parsed versions, never strings, and MUST refuse:',
-        _D('- as unsupported-older-store, a store whose manifest declares a spec_version below the supported one, or whose base table is the retired [devprocess] (section 4.5), naming the declared version or table, the supported version, the store location, and the remedy: upgrade the store with an upgrade-capable implementation, then retry;'),
-        _D('- as unsupported-store-generation, a store whose homes or worklog storage generation differs from the supported one, naming each generation found and supported;'),
-        _D('- as unsupported-legacy-state, a store at the supported version that holds legacy state, or a zero-match .working/ that holds it (section 4.5), naming each item and its path;'),
-        _D('- with the section 9.2 version ceiling\'s finding, a store whose manifest declares a spec_version above the supported one, naming the declared and supported versions and the tooling-upgrade remedy.'),
-        _D('Legacy state is this closed list: a clean-series record, active or archived, whose actor.kind is importer (section 8.6); a declared legacy_fragment type or an LF record (section 8.1); a partial or complete import_status in a store that holds no adoption receipt (sections 11 and 14.1); an evidence inventory in the legacy format opf.ingest.evidence-inventory/v1 (section 4.2); a .working/IMPORT-REPORT.md; and a legacy .working/imports/ directory (section 4.4).'),
-        _D('Extending the list is a specification change.'),
-        'The check MUST search the .working/ tree of the store repository for each item, its staging and imported areas and the record archive included, within the three limits that follow, and, where discovery finds a store manifest, MUST read import_status from it; a legacy run archive outside .working/, for the reference tooling .aiqt/import-archive/, is reached only through the import_status item.',
-        'The check MUST enumerate .working/ and every directory beneath the discovered machine store, .working/staging/ and .working/imported/, and a directory among these that it cannot enumerate yields cannot-evaluate.',
-        'Outside those directories, a candidate lies only at a manifest.toml in an immediate subdirectory of .working/, which the check MUST reach only by a no-follow existence probe of that name (section 14.2), never by enumerating that subdirectory; a probe it cannot complete yields cannot-evaluate, and no other directory can hold a candidate or a path-defined item, so the check enumerates no other, the recovery journal below aside.',
-        'First, the check MUST match the two path-defined items, a .working/IMPORT-REPORT.md and a legacy .working/imports/ directory, at those live paths only; a copy preserved under .working/archive/adoption/<run-id>/ (section 14.2) is adoption evidence, not legacy state.',
-        'Second, the check MUST NOT read the contents of, or enumerate beneath, a path registered under [unmanaged] that section 14.2 permits: it matches such a path against a path-defined item by the path alone, makes no access beneath it but the existence probe above, and leaves any other listed item kept inside it unsearched, a gap section 17 discloses.',
-        'That limit applies to no other [unmanaged] entry: an entry that equals, contains, or lies within a reserved control area (section 14.2) or the machine store, that equals or contains .working/ itself or a discovery candidate (section 14.2), or that names an OPF-managed file or view is a contradictory input, and the check MUST yield cannot-evaluate for it, never admission.',
-        "Third, to find the items defined by file content, the check MUST parse exactly these candidates and no other file, the recovery journal below aside, a boundary section 17 discloses: each candidate manifest.toml that discovery reads (section 4.5), the discovered store manifest included; as candidate records, the record files of the discovered machine store, active and archived, meaning the worklog ledger worklog.toml and the imported worklog worklog.imported.toml (sections 6.2 and 8.3), each <type>.index.toml and <type>.imported.index.toml, each per-record file under a <type>/ directory (section 9), and each index, worklog ledger, and record file under its record archive archive/<YYYY>/ (section 12); as candidate inventories, each inventory.toml and inventory-<phase>.toml at the root of a run folder .working/staging/<kind>/<run-id>/ or .working/imported/<kind>/<run-id>/; and, in each run folder .working/imported/adoption/<run-id>/ (section 14.2), as candidate adoption receipts, each file at an adoption receipt path of the implementation's own section 14 adoption writer.",
-        'Where discovery finds no store manifest, as over a zero-match .working/ (section 4.5), the import_status item and the declared legacy_fragment type item do not apply and no file is a candidate record; the check still parses each candidate inventory and candidate adoption receipt present and matches both path-defined items, and an unreadable, malformed, or contradictory candidate that is present, a candidate manifest.toml that discovery reads (section 4.5) included, MUST yield cannot-evaluate, never admission.',
-        'The check MUST classify each candidate it reads by the rules that follow, whether or not discovery finds a store manifest, and MUST yield cannot-evaluate, never admission, for each candidate those rules class as unreadable, malformed, or contradictory.',
-        _D('A candidate is unreadable where the check cannot read its bytes.'),
-        _D("A candidate adoption receipt is malformed where its bytes do not parse in the receipt format of the implementation's own section 14 adoption writer, since this specification fixes no adoption receipt path or format; every other candidate is malformed where its bytes do not parse as TOML."),
-        _D('A candidate manifest.toml whose [opf] table declares standard = "opf" is a discovery match (section 4.5), and that match is contradictory where the file also carries a [devprocess] table, where its spec_version is absent or does not parse as a version, where a present [opf].homes or [opf].worklog value is not a TOML integer, or where a present import_status is not none, partial, or complete.'),
-        _D('A candidate manifest.toml that carries an [opf] table whose standard is absent or any other value is contradictory, a mistyped or altered discovery token (section 17) included; one that carries a [devprocess] table and no [opf] table is a recognized legacy candidate (section 4.5); and one that carries neither table is foreign content, neither a match nor a contradiction, that a section 14 first adoption dispositions.'),
-        _D("Any other candidate is contradictory where a value that decides a listed item, a record's actor.kind or type or an inventory's format, is absent where its envelope or format requires it, or is present and not a string."),
-        'Section 14.2 places adoption evidence under .working/imported/adoption/<run-id>/, and the check MUST decide from that area alone whether a store holds an adoption receipt.',
-        _D('A candidate adoption receipt that is neither unreadable nor malformed establishes that the store holds one, and a store whose .working/imported/adoption/ is absent or holds no file holds none.'),
-        "Where that area holds a file but no candidate adoption receipt, as where another implementation's writer placed its receipt at another path, the check cannot establish whether the store holds an adoption receipt, and for a partial or complete import_status it MUST yield cannot-evaluate, never unsupported-legacy-state and never admission.",
-        _D("A file there at no adoption receipt path of the implementation's own writer is not a candidate adoption receipt and, as a possible receipt, bears only on that decision; the third limit above alone decides whether it is a candidate inventory, so an inventory.toml or inventory-<phase>.toml at the root of a run folder there is one, parsed and classified as any other."),
-        _D('An adoption receipt kept outside .working/imported/adoption/, which section 14.2 does not permit, decides nothing, a gap section 17 discloses.'),
-        "A fresh-only implementation's own adoption writer MUST make its adoption receipt crash-durable before it begins to write the partial or complete import_status that receipt substantiates, whether or not both writes share a transaction, and any reversal of that status MUST make the prior import_status crash-durable before it removes that receipt, so no interruption, recovered or not, leaves its own store holding that status without that receipt.",
-        "In a first adoption, a fresh-only implementation's own section 14 adoption writer MUST NOT leave the store manifest that its apply writes in the live tree beside a foreign source at a candidate path, a path at which a file is a candidate record under the third limit above once that manifest exists.",
-        'Its plan MUST refuse at plan time, naming the path, the same way a collision refuses (section 14.2), a foreign source at a candidate path that is no planned managed destination, and a keep whose [unmanaged] entry the rules above class as a contradictory input.',
-        "Its apply MUST archive and remove every occupying source at a candidate path (section 14.2), in that section's order of copy, verify, commit, and remove, before it begins to write the store manifest.",
-        'A recovery that completes that apply forward MUST keep that order, and a reversal of that apply MUST restore the manifest path to its journaled prestate, and make that prestate durable, before it restores any source to a candidate path.',
-        _D('So no interruption of that apply, recovered or not, leaves that manifest discovered beside a live foreign source at a candidate path: before the manifest is written no file is a candidate record, and once it is written no foreign source remains at a candidate path.'),
-        "A fresh-only implementation MUST follow the lease rules of section 5.7 and the recovery rules of sections 8.8, 14.1, and 14.2 unchanged and in the order those sections set, exactly as an upgrade-capable implementation does: after resolving the store, a command reconciles a leftover lease and completes or rolls back, from its journal, an interrupted journaled transaction of the implementation's own writer, a section 8.8 authoring or import transaction, a section 14.2 apply, or a section 14.1 retirement, removal, relocation, or reclamation transaction, as those sections require, and its admission check then runs over the store those steps left, before any other write.",
-        'Before either step and before any other write, every store-resolving command MUST run the admission check once as a pre-scan that writes nothing, over the store as the command found it, and where the pre-scan refuses the store or yields cannot-evaluate, the command MUST report every finding it meets and stop, the lease reconciliation and the recovery unperformed.',
-        'The pre-scan MUST defer to the admission check that follows recovery only the cannot-evaluate classification of a candidate that is an operand of an interrupted transaction whose journal lies within the recovery bound below and that the pre-scan classes as unreadable, malformed, or contradictory or finds absent, together with a discovery outcome that such an operand alone decides, as where apply removed an occupying manifest.toml (section 14.2), and MUST defer nothing else.',
-        'That deferral covers no refusal: the pre-scan MUST still refuse, before any write, each spec_version, homes generation, or worklog storage generation that a deferred candidate declares and the check refuses, and each listed legacy-state item that the live bytes of a deferred candidate show, so a store whose manifest declares a version or generation that the check refuses, or that shows a listed legacy-state item, the live bytes of an operand included, is refused before any write, the lease reconciliation and the recovery unperformed.',
-        "Within that order a recovery bound applies: a fresh-only implementation MUST recover only a journal in its own writer's format for the supported version and generations whose operands all lie at paths that the transaction's section, at that version and those generations, lets that kind of transaction write, none of them a path-defined legacy-state item.",
-        _D("The bound reads the journal's format and its operands' paths, never the content of a journaled prestate or planned poststate, so a section 14.2 apply journal whose preimages are an occupying source's foreign bytes, TOML or not, lies within it, and each section's own refusal of an operand changed since the interruption, such as that of section 8.8, still applies."),
-        "Every store-resolving command that finds its own writer's recovery journal naming an interrupted transaction MUST read that journal in its pre-scan, the one input beyond the candidates and directories above that the check reads, and MUST yield cannot-evaluate, never admission, before any write, the lease reconciliation included, where it cannot read that journal or parse it in that format, or where an operand lies outside those paths.",
-        _D("After a section 8.8 reconciliation, that reconciliation's refusal of the new operation still applies, whatever the admission check that follows it finds."),
-        _D('A command that performs no such recovery defers nothing and classes every candidate by the rules above, a candidate torn by an interruption included, and so does every command for a candidate that no such journal names as an operand.'),
-        "Where a store meets more than one refusal above, the section 9.2 ceiling included, the check MUST report every finding it meets, and that store's refusal fixture asserts each of them.",
-        "An input the check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission; the pre-scan's deferral of a candidate is not admission, and the check that follows recovery classes that candidate afresh.",
-        'Each refusal MUST be a fail-closed INVALID finding, never VALID.',
-        'Where its admission check, the pre-scan included, refuses a store or yields cannot-evaluate, a fresh-only implementation MUST NOT grade the rest of that store, write, stage, or partially upgrade any file, rewrite a version declaration, fabricate provenance, or invoke another upgrader, the section 5.7 claim and release of a lease the command takes aside; the store and product trees, ignored files and the lease path included, MUST stay byte-identical to the state the command found where the pre-scan stops it, and otherwise to the state that the lease reconciliation and recovery above left, apart from that claim and release.',
-        'A fresh-only implementation that provides an upgrade command MUST refuse an older store with the same finding and MUST NOT report a successful upgrade; it MAY report a no-op on a supported store only after full doctor VALID.',
-        'Admission MUST NOT substitute for any other applicable check.',
-        'For a store its admission check refuses, a report MUST give the base result as indeterminate, naming the class, the supported version and generations, and the finding; it MUST NOT give conformant_for_declared_scope, nor nonconformant on that refusal alone.',
-        _D('That sentence is the refusal-report rule the base-result part above compares, so in a report a reference run emits, a breach of it deviates there, never as a direct verdict.'),
-        'A claim of the fresh-only class MUST cite refusal evidence: for each finding above and each legacy-state item, a fixture that every store-resolving command refuses with that finding, asserting each seeded legacy-state item by its path, with both trees byte-identical; for the section 9.2 ceiling, whose finding carries no token in this specification, the fixture asserts an INVALID finding that names the declared and supported versions and the tooling-upgrade remedy.',
-        "The importer-authored clean-series item's fixtures MUST include five separate fixtures that each seed exactly one importer-authored clean record, one an entry in the active worklog.toml ledger, one an entry in an archived worklog ledger, one an active typed record in its <type>.index.toml, one an active typed record in a per-record file under a <type>/ directory (section 9), and one an archived typed record, and the import_status item's fixtures MUST include one whose .working/imported/adoption/ holds no file, refused with that item's finding, and one whose .working/imported/adoption/<run-id>/ holds a file at no adoption receipt path of the implementation's own writer and no candidate adoption receipt, which every store-resolving command MUST report as cannot-evaluate, never as unsupported-legacy-state and never as admission, with both trees byte-identical.",
-        "The recovery bound's fixtures MUST include, for each kind of recovery journal the implementation's own writers keep, the section 8.8 journal and the section 14.2 apply journal included: one whose candidate is torn under such a journal within the bound, which a command that performs that recovery recovers and then admits, the section 14.2 one interrupted after apply removed an occupying manifest.toml; one whose journal names a path-defined legacy-state item as an operand and one whose journal does not parse in its writer's format, each of which every store-resolving command MUST report as cannot-evaluate, never as admission, with both trees byte-identical; and one at the supported version that holds such a journal, whose operands all parse, and a listed legacy-state item that is no operand of it, which every store-resolving command MUST refuse with that item's finding, with both trees byte-identical.",
-        "The section 14.2 apply journal's fixtures MUST also include a first adoption interrupted after its apply journal was durably committed, once apply had removed a foreign source that does not parse as TOML from a planned machine-store record path, such as worklog.toml, journaling its preimage, and had written the current-format manifest, which a command that performs that recovery completes forward and then admits.",
-        "They MUST also include a first adoption over a foreign worklog.toml at a planned machine-store record path that parses and holds an importer-authored entry, interrupted with its apply journal durably committed and with it not committed, once after apply archived and removed that source and before it wrote the store manifest and once after it wrote that manifest, and one interrupted during the reversal of an uncommitted apply after that reversal restored the manifest path's prestate and before it restored that source; a command that performs that recovery MUST complete each committed apply forward and finish reversing each uncommitted one, its pre-scan not stopping it, and the admission check that follows MUST find no legacy-state item, admitting each store that recovery completed forward; for each store whose apply that recovery finished reversing, the fixture MUST assert that no store manifest remains, that the foreign worklog.toml is back at its path, byte-identical to its plan digest, and that the check reports the zero-match cannot-evaluate result (section 4.5).",
-        "A first adoption's fixtures MUST also include a plan over a foreign per-record file under a <type>/ directory of the planned machine store, which that plan MUST refuse at plan time, naming that path, and a zero-match .working/ whose .working/imported/adoption/<run-id>/ holds a file at an adoption receipt path of the implementation's own writer that does not parse in that writer's receipt format, which every store-resolving command, a first adoption included, MUST report as cannot-evaluate, each before any write, with both trees byte-identical.",
-        "The pre-scan's fixtures MUST include, each with the concurrent-operation module enabled and with it disabled, a store whose manifest declares a spec_version below the supported one and that holds a dead run's leftover lease.toml, with the module that run's held session_lease record, and an interrupted journal of the implementation's own writer whose operands all parse, which every store-resolving command MUST refuse as unsupported-older-store before any write, with both trees byte-identical, that lease.toml and that journal included.",
-        "They MUST also include, each with a dead run's leftover lease.toml and an interrupted journal of the implementation's own writer within the recovery bound that names the candidate below as an operand, one whose live manifest.toml declares a spec_version below the supported one and an import_status that is not none, partial, or complete, which every store-resolving command MUST refuse as unsupported-older-store, and one at the supported version whose live <type>.index.toml holds one importer-authored record and one record whose actor.kind is absent, which every store-resolving command MUST refuse as unsupported-legacy-state, each before any write, with both trees byte-identical, that lease.toml and that journal included.",
-        "The recheck's fixtures MUST include one, with the concurrent-operation module enabled and its session_lease records kept in their <type>.index.toml, in which another process sets actor.kind to importer in an existing record of that index after admission and before the command's claim, which then rewrites that index; the command MUST stop at the recheck as cannot-evaluate and write nothing but the section 5.7 release of its own lease.",
-        _D('Missing evidence makes the claim indeterminate, never a pass.'),
-        "A fresh-only claim MUST NOT imply upgrade compatibility or continuity from the implementation's own earlier releases; moving to a later base version requires a new declaration and new evidence.",
+        'A declaration that is absent, or that omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed: it MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
+        'The rules on an absent, unreadable, malformed, or contradictory declaration govern the file alone: a runtime check MUST apply them to the installed copy as it stands, a check of the documentation or of the reports MUST apply them to that file as the release ships it, and each check MUST NOT take any field from the documentation of the release or from any report.',
     ),
     "17": (
         _D("The gates in this standard are strong where they are strong and say so where they are not: - The freeze gate proves a published summary's bytes changed only through recorded re-publication; it cannot prove the prose is accurate or complete."),
         _D('Human curation (section 7.3) is that control.'),
         _D('- Range coverage proves every release is summarized exactly once; it cannot judge summary quality.'),
         '- The unreleased worklog tail is mutable until release: an entry there MAY be corrected in place, a guarantee that rests on review and version-control history rather than machine enforcement; machine freezing and immutability begin at release cut.',
-        _D('- Adoption and import run with C-EVIDENCE-ENUM, which re-enumerates their control areas (.working/imported/<kind>/<run-id>/, .working/archive/adoption/<run-id>/ and .working/archive/moved/) on every doctor run, and the section 14.1 completion checks still verify their evidence digests themselves when they run; C-EVIDENCE-ENUM asserts membership, not authenticated actor history, and deleting a whole bundle, inventory and payload together, is outside its local snapshot check (section 4.2).'),
+        _D('- Adoption and import run with C-EVIDENCE-ENUM, which re-enumerates their control areas (.working/imported/<kind>/<run-id>/, .working/archive/adoption/<run-id>/ and .working/archive/moved/) on every doctor run, and the section 14.1 completion checks still verify their evidence digests themselves when they run; C-EVIDENCE-ENUM asserts membership, not authenticated actor history; deleting a whole bundle (inventory and payload together) is outside its local snapshot check (section 4.2).'),
         _D('Version-control history over the tracked store is the control, and C-IMPORTED-PROVENANCE still re-verifies every preserved original an imported record references.'),
+        _D("- Journals are machine-local (section 4.2), and the doctor reads the ID reservations under journals/<kind>/allocations/ for the section 8.2 counter checks, so a clone, which holds none, can grade those checks differently from the original store: where a reservation covers a number that no published record carries, the original store's doctor treats that number as issued and a clone's doctor reports it missing."),
+        _D('Adoption admission and recorded retirement, which the doctor decides from committed evidence alone, grade the same in both (section 4.2).'),
         _D('- Store resolution fails closed on a pointer that does not resolve and on zero or multiple manifests at the target; it cannot detect a second store that no pointer names, placed somewhere the tooling was never aimed.'),
         _D("- The tracked-store check verifies the resolved store is under version control, not ignored, and that the pointer, the manifest's recorded sync target, and the actual remote agree; it cannot verify the backup, access, or hosting discipline of the repository that tracks the store."),
         "The local-only pattern in particular places durability wholly on the adopter's own backup, which is why choosing it SHOULD be a recorded decision (section 5.3).",
@@ -1122,22 +1032,6 @@ _CONTRACT = {
         _D('- The base discovery token opf is a single exact string carried in every adopter manifest.'),
         _D('A mistyped or altered token makes the store undiscoverable, which resolves to cannot-evaluate (fail-closed), never to a silent empty store.'),
         "The token is stable within a base-schema major line; a store-breaking rename MUST ship only with the tested opf upgrade migration (section 9.2), which rewrites the base table and token in place so no existing adopter's manifest is stranded.",
-        _D('The retired token devprocess is recognized by a fresh-only implementation (section 16.1), purely to refuse that store by name.'),
-        _D('- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not authenticated history: a version declaration and the absence of listed legacy state cannot prove that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only what it lists.'),
-        _D('It does not list a legacy staging run under .working/staging/import/ or .working/staging/ingest/ that carries no legacy-format inventory, a legacy .archive/ entry that section 9.2 leaves in place with a standing finding, or a legacy run archive outside .working/, which only the import_status item reaches.'),
-        _D("Admission parses only the section 16.1 candidates and a recovery journal of the implementation's own writer (sections 8.8, 14.1, and 14.2), and never reads beneath a path registered under [unmanaged] that section 14.2 permits, so a listed item defined by file content and kept outside those candidates, such as a legacy-format inventory kept under such a path or anywhere but the root of a staging or evidence run folder, goes undetected; an [unmanaged] entry that section 14.2 forbids is a cannot-evaluate input, never a reason to leave a path unsearched."),
-        _D("Admission recognizes only the adoption receipts of the implementation's own section 14 adoption writer, so where another implementation's writer placed a store's adoption receipt under .working/imported/adoption/ at another path or in another format, and that area holds no adoption receipt of the implementation's own writer, the check cannot establish whether that store holds an adoption receipt, and a partial or complete import_status there is cannot-evaluate: never refused as legacy, but not admitted either, even where a current-format adoption set that status."),
-        _D("An adoption receipt kept outside .working/imported/adoption/, which section 14.2 does not permit, decides nothing, so where that area holds no file, a store at the supported version whose import_status is partial or complete is refused as unsupported-legacy-state."),
-        _D('A refusal at its pre-scan leaves a store unchanged, and no refusal offers preservation, repair, or continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable implementation for that store.'),
-        _D('The lease and recovery steps of sections 5.7, 8.8, 14.1, and 14.2 run after a read-only pre-scan and before the admission check that follows them (section 16.1).'),
-        _D("The pre-scan refuses, before any write, a store whose manifest declares a version or generation that the check refuses or that shows a listed legacy-state item, the live bytes of an operand of an interrupted transaction included, and defers only the cannot-evaluate classification of an unreadable, malformed, contradictory, or absent operand of such a transaction within the recovery bound, together with a discovery outcome that such an operand alone decides, so a store that only the later check refuses or cannot evaluate, as where such an operand stays contradictory after recovery or the recovery's own result meets a refusal, or where something that does not take the lease changed the store between the pre-scan and the recovery, may carry the effects of a completed recovery of the implementation's own interrupted transaction, within the section 16.1 recovery bound, and of the section 5.7 reconciliation of a dead run's leftover lease."),
-        _D("A command that writes and takes its lease after admission confirms, once that lease is taken and observable and before any other write, that the lease.toml carries its own claim and that every directory listing, existence-probe result, and candidate the admission check read is unchanged apart from exactly the bytes its own claim of the lease wrote; a stop at that recheck writes nothing but what section 5.7 requires to end the command's own claim: it releases a lease.toml that carries its own claim and leaves untouched one that does not."),
-        _D("That stop restores nothing else, so a change that another process made and the recheck detected stays in the tree; where the store has a sync target, that target's history can keep the lease's claim and release, and where the concurrent-operation module is enabled the session_lease record of that claim and its release remain."),
-        _D("Within the section 16.1 recovery bound, a fresh-only implementation trusts its own writer's recovery journal, as section 8.8, 14.1, or 14.2 recovery does, to complete or roll back an interrupted transaction before the admission check that follows recovery runs; a command that performs no such recovery, a read-only command included, reports a store with a candidate that an interruption left unreadable, malformed, or contradictory as cannot-evaluate until a recovering command recovers it, and a clone without the journal (section 4.2) stays cannot-evaluate."),
-        _D('Only the transactions section 16.1 lists are recovered that way: a candidate torn by any other write, such as a section 12 rotation or a non-green outcome event appended to an adoption receipt, is classed like any other candidate even where the implementation journals that write, so one left unparseable stays cannot-evaluate for every command of a fresh-only implementation, its own writers included, until something outside that implementation, such as a hand edit, repairs it, and one left parseable is not recognized as torn.'),
-        _D("A section 14.1 restore after a committed apply is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's store manifest apart from a foreign source at a candidate path binds only that first adoption, so a restore that copies archived bytes to a candidate path, such as an importer-authored worklog.toml restored over the live one, leaves a store that every command of a fresh-only implementation, its own writers included, then refuses where those bytes show a listed item, as unsupported-legacy-state where the store stays at the supported version, or reports as cannot-evaluate where it classes them unreadable, malformed, or contradictory."),
-        _D('A change made after the recheck by anything that does not take the lease, such as a hand edit or a branch switch, is outside admission.'),
-        _D('Until validation tooling ships, a class claim is self-asserted (section 16).'),
         _D("- The section 16.1 runtime check compares the installed copy of a release's declaration file with the shipped-file digest the implementation carries, so it detects an edit of that copy alone, which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy and the digest the implementation carries to match it, or one that changes the installed copy together with the implementation's comparison code so that the comparison no longer refuses that copy, and an anchor outside the installation, such as a signature over that file that the implementation verifies, is the stronger option only against an edit that does not also change the implementation's verification key or its anchor check; section 16.1 does not require one."),
         _D("Whether a release's runtime check compares the installed copy's bytes with the digest the implementation carries at all, and whether that digest sits at the place the documentation states, are established only by an inspection of the implementation, never by a reference run: every reference run's installed copy holds the shipped bytes, over which a runtime check that skips that comparison and one that makes it can yield the same report."),
         _D("Section 16.1 verdicts are observer-local: each rests on a checker's own knowledge of its stock baseline and of what it changed, so an alteration the checker did not detect, such as an organization-wide package-manager configuration file taken for part of the stock install, can mislead that checker."),
@@ -1148,7 +1042,7 @@ _CONTRACT = {
         _D("It covers whether a checker observed every write of a run the same way: the section 16.1 runtime-result token comparison and store part read the writes the checker observed, so a write a checker missed could make an honest token read as disagreeing, or hide a disagreeing token or a store-part failure that the run's writes show, and a checker that cannot determine whether it observed every write of a run reports what only the behaviour-coupled comparisons of such runs show as unresolved, never established."),
         _D("The working and temporary locations a checker chose are its own, and what sits there alters nothing, the installation apart: the installed files, the installed copy included, and the files a documented step or the release's own code wrote stay part of the installation wherever they sit, so the Appendix E scratch-copy probe, which edits an installed copy, alters the installation it probes."),
         _D("That probe, like every run outside the checker's own attempts and reference runs, is an observation of the implementation's behaviour, never an attempt, a reference run, or an inspection of the bytes the release ships: it establishes nothing under the section 16.1 rules however often it is repeated, it decides no verdict of its own, and it informs only the section 16.1 inspection of the implementation, which rests on the same observer-local attribution."),
-        _D("A requirement of section 16.1 on the conduct of the implementation's commands that its two rules do not compare, the fresh-only admission, lease, recovery, and sync conduct included, is judged only by that inspection, so a conduct breach a checker cannot attribute to the bytes the release ships decides nothing for that checker, and one it can attribute is decided by what that inspection finds in those bytes, never by the observed run itself on any number of showings."),
+        _D("A requirement of section 16.1 on the conduct of the implementation's commands that its two rules do not compare is judged only by that inspection, so a conduct breach a checker cannot attribute to the bytes the release ships decides nothing for that checker, and one it can attribute is decided by what that inspection finds in those bytes, never by the observed run itself on any number of showings."),
         _D('A failure that a checker cannot show twice in its own attempts and reference runs, on the same platform and version and, under the reference-run rule, in the same part, stays unresolved, however many other checkers each show it once, and an unresolved failure neither establishes nor counters any conformance or nonconformance of the release.'),
         _D("Where the documentation of a release directs that a file the release does not ship be installed and does not pin its bytes, attempts made at different times can differ as the bytes the directed source serves differ, a residual of the release's own documentation."),
         _D('Appendix E gives informative guidance for checking release conformance: a record of attempts, redaction of secrets, sharing and repetition, corroboration across checkers, a consistency probe over third-party reports, scratch-copy probes of the byte comparison, and an optional content-addressed reference environment.'),
@@ -1156,16 +1050,12 @@ _CONTRACT = {
 }
 # Sentence pins in sections the registry does not tile: substring-checked and keyword-linted
 # like _CONTRACT pins, each proven unique and deletion-red by the self-test, but with no
-# per-section tiling equality, so additions there stay green. Section 9.1 stays untiled because
-# its profile rule uses a lowercase "may", which section 2 reads as descriptive. Appendix E is
+# per-section tiling equality, so additions there stay green. Section 9.1 is neither tiled nor
+# pinned: its implementation-class paragraph is retired (_RETIRED), since the base defines one
+# implementation model (spec 16.1). Appendix E is
 # informative and stays untiled; its pins are the sentences that state what section 16.1 makes of
 # its probes, so reverting one of them turns the gate red.
 _PINNED = {
-    "9.1": (
-        _D('Implementation conformance classes (section 16.1) are defined by the base, not by profiles.'),
-        'A profile MAY require an upgrade-capable implementation, because that adds a requirement.',
-        "A profile, a store manifest field, or a command-line request MUST NOT declare, grant, or relax an implementation's class.",
-    ),
     "E": (
         _D('This appendix is informative: it recommends practice for checkers and releases working under section 16.1, it adds no requirement, and section 16.1 alone decides what a failure, a verdict, or a conformance claim is.'),
         _D("A shared record informs another checker's work and never substitutes for that checker's own attempts and reference runs."),
@@ -1185,15 +1075,23 @@ _PINNED = {
 # default entry is red where one reappears there, outside a retired-text quotation block, on one line
 # or wrapped across quoted lines, so restoring one does not wait for the self-test's tiling equality.
 # Each fragment names a retired term (_RETIRED_TERMS): homes, legacy state, activation, a target
-# contract or a pre-2.0.0 base version. Retired sentences that name none are not fragments, since a
+# contract, a pre-2.0.0 base version, an implementation class or the fresh-only admission check
+# (spec 16.1 defines one implementation model), the legacy_fragment type and its LF quarantine, or
+# the imports reserved name. Retired sentences that name none are not fragments, since a
 # future 2.x upgrade could state them again: "The owning writer or migration MUST derive each
 # inventory" and the containment and discovery sentences reworded for 2.0.0 (4.2), the 8.1 governance
 # note's last two sentences, the 1.1.0 delta's "The upgrade weakens nothing" and the generic rules of
 # the 1.3.0 delta (9.2), "The migration MUST refuse a store resolved outside the product root",
 # "Every destination MUST be digest-verified before its source is removed." and "Both kinds of
 # upgrade MUST run" (9.2), and "That in-place rewrite covers only a bump that ships an upgrade."
-# (17). Restored in place of the current text they stay red through the pins they displace (the
-# retired-run vectors below); restored beside it, through the tiling equality.
+# (17); and of the S2 removal of the implementation classes, legacy state and legacy_fragment, among
+# others "LF MUST NOT be scaffolded.", "An importer MAY omit created_at" (8.3), "One exception is
+# defined so that the section 9.2 refusal" (8.6), "Their evidence inventories and readers remain
+# available" and "Old import and ingest orchestration MUST be retired" (14.1), "In a first
+# adoption, its apply also archives" (14.2), and the 16.1 and 17 sentences on classless
+# declarations, candidates, the recheck and the fixtures that name no retired term. Restored in
+# place of the current text they stay red through the pins they displace (the retired-run vectors
+# below); restored beside it, through the tiling equality, or, in untiled 9.1, not at all.
 _RETIRED = {
     "4.2": (
         "which requires the homes migration (opf upgrade) to be available.",
@@ -1230,15 +1128,59 @@ _RETIRED = {
         "At 1.3.0, partial status is receipt-bound",
         "a legacy store's transactions and recovery keep their legacy operand handling",
         "no homes-1 journal is carried into journals/",
+        'enabled-type roster except legacy_fragment',
+        'for every enabled type except legacy_fragment',
+        'other than legacy_fragment later MUST create',
+        'legacy_fragment has no imported leaf',
+        'Enabling a further type or module other than legacy_fragment',
+        'imported records per enabled type except LF',
+        'an inventory in the recognized legacy format below, which is its named finding',
+        'a bundle without an inventory or an inventory in the recognized legacy format',
+        'The recognized legacy format opf.ingest.evidence-inventory/v1',
+        'refuses such an inventory earlier, as unsupported-legacy-state',
+        'The legacy imports/ exclusion remains registered',
+    ),
+    "4.4": (
+        'The names imports, imported, archive',
+        'The legacy staging name imports remains reserved',
+    ),
+    "4.5": (
+        'the retired [devprocess] only to refuse that store',
+        'For a fresh-only implementation, a recognized legacy candidate',
+        'a recognized legacy candidate beside a matching store',
+        'A fresh-only implementation MUST NOT treat a zero-match outcome',
+        'it MUST run the section 16.1 legacy-state search',
+        'holds no recognized legacy candidate and no section 16.1 legacy-state item',
     ),
     "8.1": (
         "are baseline as of spec_version 1.1.0",
+        'Migration quarantine (importer-only) | legacy_fragment | LF',
+        'legacy_fragment (LF) is deprecated for new stores',
+        'verbatim unparsed text (section 8.3), not LF quarantine',
+        'provides no legacy LF validation',
+        'same enabled types except legacy_fragment',
     ),
     "8.2": (
         "rows required once the store declares spec_version 1.3.0 or later",
         "whether a 1.3.0 opf init or the section 9.2 upgrade created them",
         "At homes 2 the claim additionally begins",
         "applies per series key: at homes 2 the next ID",
+        'since new imports do not use LF quarantine',
+        'one for each enabled type except legacy_fragment',
+    ),
+    "8.3": (
+        'This legacy permission does not replace',
+        'enter the legacy importer or module-schema deferral seam',
+    ),
+    "8.5": (
+        'legacy_fragment quarantined > resolved or ignored',
+    ),
+    "8.6": (
+        'written into the clean series by the pre-1.3.0 legacy importer',
+        'a legacy importer-authored receipt satisfies, as recorded history',
+        'only receipt as legacy importer-authored',
+        'That acceptance binds an upgrade-capable implementation',
+        'existing legacy importer-authored clean record MUST keep its bytes',
     ),
     "8.8": (
         "That key was added while base 1.2.0 was still unreleased",
@@ -1247,10 +1189,17 @@ _RETIRED = {
         "At homes 2 the claim is an irrevocable reservation",
         "keeps that journal under .aiqt/record/journal at homes 1",
         "The journal remains .aiqt/record/journal at homes 1",
+        'acting on imported or legacy importer-authored history',
+        'A fresh-only implementation (section 16.1) performs that reconciliation',
     ),
     "9": (
         'spec_version = "1.3.0" # OPFiles base spec version',
         'base_compat = ">=1.0.0 <2.0.0"',
+    ),
+    "9.1": (
+        'Implementation conformance classes (section 16.1) are defined by the base',
+        'A profile MAY require an upgrade-capable implementation',
+        "MUST NOT declare, grant, or relax an implementation's class",
     ),
     "9.2": (
         "The homes-generation upgrade targets spec_version",
@@ -1280,17 +1229,37 @@ _RETIRED = {
         "Only the reserved homes-2 declaration of section 4.2 stays recognized",
         "tooling released before this ceiling treats an above-ceiling declaration as legacy",
         "Both residuals end when pre-ceiling tooling leaves use and homes 2 activates",
+        'in at least one published upgrade-capable implementation',
+        'binds an upgrade-capable implementation; a fresh-only implementation implements none',
+        'a fresh-only implementation at its section 16.1 admission check',
+        'Unproven legacy .archive/ entries MUST remain in place',
+    ),
+    "11": (
+        'or that a pre-1.3.0 legacy import finished',
+        'the section 9.2 upgrade preserves that legacy status',
+        'nor preserved legacy import evidence substantiates',
+        'MUST NOT use the preserved-legacy-evidence route',
+        'The section 16.1 admission check belongs to neither layer above',
     ),
     "12": (
         "The imported series MUST NOT rotate at 1.3.0",
+        'unresolved decisions, unresolved fragments, unexpired waivers',
     ),
     "14.1": (
         "refuse with a pointer to adoption and the prompt pack when this contract activates",
         "Clean-start adoption and import ship on homes 1",
+        'and the deprecated legacy_fragment',
+        'Legacy runs MAY occupy',
+        'A legacy import completed under the pre-1.3.0 contract',
+        "Preserved legacy run evidence is that run's durable archive",
+        'provides none of these legacy readers',
+        'Pending legacy review MUST NOT become implicit approval',
     ),
     "14.2": (
         "the section 9.2 upgrade into 1.3.0 refuses a store",
         "homes 1 retains its legacy journal paths",
+        'by this rule, and by the section 16.1 admission check',
+        'A fresh-only implementation (section 16.1) performs that recovery',
     ),
     "14.3": (
         "This remains the historical-release path at 1.3.0",
@@ -1303,6 +1272,48 @@ _RETIRED = {
     "16.1": (
         "carries a store from base 1.0.0 or 1.1.0 to base 1.2.0",
         "the reserved homes-2 declaration (section 4.2) included",
+        'The base defines two implementation conformance classes',
+        'An upgrade-capable implementation meets every section 9.2 requirement',
+        'A fresh-only implementation supports exactly one base spec_version',
+        'the admission check over the store that run resolved included',
+        'a store its admission check refuses (the base-result part below)',
+        'or where its admission check, the pre-scan included, refused the store that run resolved',
+        'the fresh-only admission, lease, recovery, and sync conduct below included',
+        "or where that run's admission check, the pre-scan included, refused",
+        'A report a reference run emits over a store its admission check refuses',
+        'An implementation whose declaration lacks only its class MUST be treated as upgrade-capable',
+        'A fresh-only implementation MUST run an admission check',
+        "a fresh-only implementation's opf sync MUST NOT bring in",
+        'or whose base table is the retired [devprocess] (section 4.5)',
+        'upgrade the store with an upgrade-capable implementation, then retry',
+        'as unsupported-store-generation, a store whose homes or worklog storage generation differs',
+        'as unsupported-legacy-state, a store at the supported version that holds legacy state',
+        'Legacy state is this closed list',
+        'a legacy run archive outside .working/, for the reference tooling .aiqt/import-archive/',
+        'a .working/IMPORT-REPORT.md and a legacy .working/imports/ directory',
+        'the import_status item and the declared legacy_fragment type item do not apply',
+        'that match is contradictory where the file also carries a [devprocess] table',
+        'one that carries a [devprocess] table and no [opf] table is a recognized legacy candidate',
+        'never unsupported-legacy-state and never admission',
+        "A fresh-only implementation's own adoption writer MUST make its adoption receipt crash-durable",
+        "a fresh-only implementation's own section 14 adoption writer MUST NOT leave the store manifest",
+        'exactly as an upgrade-capable implementation does',
+        'every store-resolving command MUST run the admission check once as a pre-scan',
+        'The pre-scan MUST defer to the admission check that follows recovery',
+        'That deferral covers no refusal: the pre-scan MUST still refuse',
+        'Within that order a recovery bound applies: a fresh-only implementation MUST recover only',
+        'MUST read that journal in its pre-scan',
+        'whatever the admission check that follows it finds',
+        "the pre-scan's deferral of a candidate is not admission",
+        'a fresh-only implementation MUST NOT grade the rest of that store',
+        'A fresh-only implementation that provides an upgrade command',
+        'For a store its admission check refuses, a report MUST give the base result as indeterminate',
+        'A claim of the fresh-only class MUST cite refusal evidence',
+        "The recovery bound's fixtures MUST include",
+        'the admission check that follows MUST find no legacy-state item',
+        "The pre-scan's fixtures MUST include",
+        'MUST refuse as unsupported-legacy-state, each before any write',
+        'A fresh-only claim MUST NOT imply upgrade compatibility',
     ),
     "17": (
         "On homes 1, under the section 4.2 target contract",
@@ -1310,22 +1321,54 @@ _RETIRED = {
         "and activated 1.3.0 tooling's C-IMPORTED-PROVENANCE",
         "The bump to the homes-2 declaration ships none",
         "is recognized by opf upgrade, purely to carry a legacy store forward",
+        'The retired token devprocess is recognized by a fresh-only implementation',
+        'A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour',
+        'the closed legacy-state list catches only what it lists',
+        'It does not list a legacy staging run',
+        'is partial or complete is refused as unsupported-legacy-state',
+        'A refusal at its pre-scan leaves a store unchanged',
+        'run after a read-only pre-scan and before the admission check that follows them',
+        'The pre-scan refuses, before any write',
+        'Within the section 16.1 recovery bound, a fresh-only implementation trusts',
+        'stays cannot-evaluate for every command of a fresh-only implementation',
+        'leaves a store that every command of a fresh-only implementation',
+        'the fresh-only admission, lease, recovery, and sync conduct included',
     ),
 }
 # A retired fragment names one of these terms (lowercased), so a sentence on a future 2.x upgrade,
 # which names none of them, matches no fragment.
 _RETIRED_TERMS = ("homes", "legacy", "activat", "target contract", "pre-1.", "1.0.0", "1.1.0", "1.2.0",
-                  "1.3.0")
+                  "1.3.0", "fresh-only", "upgrade-capable", "conformance class", "implementation's class",
+                  "devprocess", "admission check", "pre-scan", "recovery bound", "quarantine", "fragment",
+                  "except lf", "imports")
+# Machine-subdirectory names the reference tooling still reserves (store.RESERVED_MACHINE_SUBDIRS) that
+# spec 4.4 no longer reserves: the legacy staging name imports, dropped from the spec by the maintainer
+# ruling of 2026-10-23 while the tooling keeps refusing a machine store so named until its own change.
+# The spec 4.4 reserved-name check skips these alone; the self-test pins this tuple and proves each
+# name is still a tooling reservation, so the exclusion is removed together with the tooling's.
+_TOOLING_ONLY_RESERVATIONS = ("imports",)
 
-# Plain-language surfaces restating the section 16.1 classes: sentence pins over tag-stripped,
+# Plain-language surfaces restating section 16.1: sentence pins over tag-stripped,
 # whitespace-normalized text, so deleting or rewording a pinned sentence turns the gate red.
-# They are not specification sentences, so the section 2 keyword lint does not read them.
+# They are not specification sentences, so the section 2 keyword lint does not read them. The
+# quickstart and the disclosure page restate the one implementation model and the reference
+# tooling's grading of a 2.0.0 manifest with homes = 2.
 _SURFACE = {
     QUICKSTART: (
-        'An implementation declares a conformance class: an upgrade-capable one carries older stores forward within its disclosed limits, and a fresh-only one supports one current format and refuses by name an older store or one in which its admission check detects an item on its closed legacy-state list (OPF-SPEC section 16.1).',
-        'That check searches only the files section 16.1 permits and the list catches only what it lists, so legacy state the list omits, or that sits where the check does not search, goes undetected.',
+        'The specification defines one implementation model, with no conformance classes (OPF-SPEC section 16.1).',
         'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling does not yet implement it.',
+        'The reference tooling accepts a manifest declaring spec_version = "2.0.0" with homes = 2 and grades it under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification.',
     ),
+    DISCLOSURE: (
+        'Implementations (specification section 16.1): the specification defines one implementation model, with no conformance classes, and base 2.0.0, with homes = 2, is the only base version it defines.',
+        'The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification.',
+        'The reference tooling accepts a manifest declaring spec_version = "2.0.0" with homes = 2 and grades it under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification.',
+        "An older store has no upgrade into 2.0.0; its remedy is a fresh 2.0.0 store whose adoption takes the old store's files as foreign content.",
+    ),
+}
+# Retired surface wording: the disclosure page's fresh-only item, retired with the implementation
+# classes (spec 16.1). Each sentence present in its file's normalized text is a finding.
+_SURFACE_RETIRED = {
     DISCLOSURE: (
         'A fresh-only implementation (specification section 16.1) proves tested admission and refusal behaviour, not authenticated history: it refuses by name an older store or one in which its admission check detects an item on the closed legacy-state list.',
         "It runs that check once before any write, and a store refused there is left unchanged; only then does it recover, within a bound, its own interrupted writes and reconcile a dead run's leftover lease as the base rules require, and it runs the check again after them, so a store refused, or found cannot-evaluate, only by that second run can carry their effects.",
@@ -1350,6 +1393,9 @@ def surface_findings(texts=None):
         for fragment in fragments:
             if fragment not in body:
                 findings.append("surface {} missing contract: {}".format(path.name, fragment))
+        for fragment in _SURFACE_RETIRED.get(path, ()):
+            if fragment in body:
+                findings.append("surface {} restores retired text: {}".format(path.name, fragment))
     return findings
 
 
@@ -1466,6 +1512,8 @@ def contract_findings(text):
     layout = sections.get("4.2", "")
     reservation = sections.get("4.4", "")
     for name in store.RESERVED_MACHINE_SUBDIRS:
+        if name in _TOOLING_ONLY_RESERVATIONS:
+            continue
         if "`{}`".format(name) not in reservation:
             findings.append("spec 4.4 missing reserved name: " + name)
     for name in store.STORE_TREE_CONTROL_DIRS:
@@ -4590,6 +4638,18 @@ def _self_test_vectors():
     # red with the pin's own finding.
     from unittest.mock import patch
 
+    # Spec 4.4 no longer reserves imports (maintainer ruling, 2026-10-23) while the tooling still does:
+    # the reserved-name check skips exactly that one name, which must still be a tooling reservation,
+    # every other reserved name stays red when the spec drops it, and without the exclusion the live
+    # spec is red for imports.
+    check("reservation-tooling-only", lambda: _TOOLING_ONLY_RESERVATIONS == ("imports",) and all(
+        name in store.RESERVED_MACHINE_SUBDIRS for name in _TOOLING_ONLY_RESERVATIONS))
+    check("reservation-tooling-only-narrow", lambda: "spec 4.4 missing reserved name: imported" in
+          contract_findings(text.replace("The names `imported`, `archive`,", "The names `archive`,", 1)))
+    with patch.object(sys.modules[__name__], "_TOOLING_ONLY_RESERVATIONS", ()):
+        check("reservation-tooling-only-flip", lambda: "spec 4.4 missing reserved name: imports" in
+              contract_findings(text))
+
     def tiles(spec, section):
         return " ".join(_CONTRACT[section]) == _normalized(_sections(spec)[section])
     for section, fragments in _CONTRACT.items():
@@ -4649,6 +4709,19 @@ def _self_test_vectors():
             check("surface-pin-flip-" + path.name + "-" + fragment,
                   lambda f=finding, m=mutated, frag=fragment, nb=normalized:
                   nb.count(frag) == 1 and f in surface_findings(m))
+    # Each retired surface sentence is absent from its live file, and planting it back turns the
+    # gate red with its own finding.
+    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (7,) and
+          set(_SURFACE_RETIRED) <= set(_SURFACE))
+    for path, fragments in _SURFACE_RETIRED.items():
+        normalized = _surface_text(surfaces[path])
+        for fragment in fragments:
+            mutated = dict(surfaces)
+            mutated[path] = normalized + " " + fragment
+            finding = "surface {} restores retired text: {}".format(path.name, fragment)
+            check("surface-retired-flip-" + path.name + "-" + fragment,
+                  lambda f=finding, m=mutated, frag=fragment, nb=normalized:
+                  frag not in nb and f in surface_findings(m))
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The\s+upgrade\s+MUST\s+be\s+idempotent\.", "", body)
@@ -4722,8 +4795,8 @@ def _self_test_vectors():
               'in hexadecimal,'),
              ('`pass` where it authorized store operations and `fail` where it did not.',
               '`pass` or `fail`.'),
-             ('or another rule of this section made that run yield cannot-evaluate, the admission check over the store that run resolved included,',
-              ''),
+             ('yielded cannot-evaluate or another rule of this section made that run yield cannot-evaluate,',
+              'yielded cannot-evaluate,'),
             )),
             ('A restatement differs from', (
              ('omits such a field, or states a field the file does not carry.',
@@ -4734,7 +4807,7 @@ def _self_test_vectors():
               "SHOULD restate that file's declaration."),
             )),
             ('The expected report of a release', (
-             ('is fixed by the bytes the release ships alone, apart from the runtime result, the one part also coupled to the run it concerns:',
+             ('is fixed by the bytes the release ships alone:',
               'is the report a reference run emits:'),
              ('and otherwise `pass` or `fail`, between which this section, as it now stands, sets no rule.',
               'and otherwise `pass`.'),
@@ -4742,14 +4815,14 @@ def _self_test_vectors():
             ('A report deviates from the expected report', (
              ('is omitted, written in another form, or holds another value;',
               'holds another value;'),
-             ('no other content of a report is compared, the base result of a report a reference run emits over a store its admission check refuses (the base-result part below) apart.',
-              'no other content of a report is compared.'),
+             ('no other content of a report is compared.',
+              'other content of a report is compared as the checker chooses.'),
             )),
             ('The runtime-result part also deviates', (
              ('also deviates where its token disagrees with whether that run authorized store operations, the performed operations the checker observes;',
               'does not deviate on what that run authorized;'),
-             ('the only part of the expected report not fixed by the shipped bytes alone.',
-              'a part of the expected report the shipped bytes fix.'),
+             ('the only part of a report compared with more than the shipped bytes alone.',
+              'a part of a report the shipped bytes alone decide.'),
             )),
             ('An execution environment is unaltered', (
              ('changed only as that documentation directs and in this closed operational list, and in nothing else:',
@@ -4808,10 +4881,8 @@ def _self_test_vectors():
             ('A reference run of a release MUST NOT', (
              ('MUST NOT emit a report that deviates from the expected report,',
               'MUST NOT emit a report that omits the restatement,'),
-             ('its runtime check MUST NOT authorize any store operation where the expected runtime result is `cannot_evaluate` or where its admission check, the pre-scan included, refused the store that run resolved.',
+             ('its runtime check MUST NOT authorize any store operation where the expected runtime result is `cannot_evaluate`.',
               'its runtime check MAY authorize a store operation where the expected runtime result is `cannot_evaluate`.'),
-             ('or where its admission check, the pre-scan included, refused the store that run resolved.',
-              'whatever its admission check found.'),
             )),
             ("Only a checker's own attempts", (
              ("Only a checker's own attempts and reference runs are evidence under the two rules above:",
@@ -4840,8 +4911,8 @@ def _self_test_vectors():
             ('Under the reference-run rule the same-part condition applies to every failure,', (
              ('shown and reproduced only by a run that performs such an operation, never by a deviating report.',
               'shown by such an operation and reproduced by any deviating report.'),
-             ("or where that run's admission check, the pre-scan included, refused the store that run resolved included:",
-              'included:'),
+             ('a store operation performed where the expected runtime result is `cannot_evaluate` included:',
+              'a store operation included:'),
             )),
             ('The showing and the reproducing evidence MAY be', (
              ('the two runs of one attempt included.',
@@ -4859,27 +4930,19 @@ def _self_test_vectors():
              ('it MUST NOT be treated as making the declaration malformed or contradictory,',
               'it makes the declaration contradictory,'),
             )),
-            ('A declaration that carries its release identity,', (
-             ('and omits only its class, declares no class:',
-              'and omits only its class, is malformed:'),
-             ('MUST be treated as upgrade-capable unless the declaration is malformed or contradictory on other grounds.',
-              'MAY be treated as fresh-only.'),
+            ('A declaration that is absent,', (
+             ('is malformed: it MUST yield cannot-evaluate',
+              'is incomplete: it MAY yield cannot-evaluate'),
+             ('or its worklog storage generation, is malformed:',
+              'is malformed:'),
             )),
-            ('The rules on an absent, unreadable, malformed, contradictory, or classless declaration', (
+            ('The rules on an absent, unreadable, malformed, or contradictory declaration', (
              ('govern the file alone:',
               'govern the file and its restatements:'),
-             ('and each check MUST NOT take a class or any other field from the documentation of the release or from any report.',
-              'and each check MAY take a class from the documentation of the release.'),
+             ('and each check MUST NOT take any field from the documentation of the release or from any report.',
+              'and each check MAY take a field from the documentation of the release.'),
             )),
-            ('Where that documentation states a class that the file omits,', (
-             ('a deviation of the restatement part judged under the reference-run rule like any other, never a direct verdict.',
-              'and the release does not conform to this section.'),
-            )),
-            ('The file declares no class only where it omits its class and no other field:', (
-             ('is malformed and MUST yield cannot-evaluate.',
-              'declares no class.'),
-            )),
-            ('A write this section or section 5.7 itself requires', (
+            ('A write that sections 5.7, 8.8, 14.1, and 14.2 themselves require', (
              ('so a run that stops as cannot-evaluate and writes nothing but what section 5.7 requires to end its own claim performed no store operation.',
               'so every write of a run is a store operation.'),
             )),
@@ -4896,7 +4959,7 @@ def _self_test_vectors():
               'MAY be reported as established;'),
              ('are exactly two, the token comparison above and the store part below, and they read only the writes the checker observed:',
               'read every comparison of the run:'),
-             ("the rest of the expected-report comparison, the store-coupled cannot-evaluate expected result included, reads such a run's report as any other, over the store that run resolved as the checker observes it.",
+             ("the rest of the expected-report comparison reads such a run's report as any other.",
               'every comparison of such a run gives no evidence.'),
             )),
             ('Every requirement of this section that those rules do not compare', (
@@ -4909,46 +4972,24 @@ def _self_test_vectors():
              ("is an observation of the implementation's behaviour, never an inspection of the bytes the release ships or a reading of the documentation of the release:",
               'is an inspection of the implementation that decides as inspection does:'),
             )),
-            ('A report a reference run emits over a store its admission check refuses', (
-             ('is compared in one more part of its own, the base-result part:',
-              'is not compared further:'),
+            # One implementation model (maintainer ruling, 2026-10-23): each new 16.1 sentence is red when
+            # its operative clause is reworded back toward a class.
+            ('The base defines one implementation model', (
+             ('defines one implementation model and no implementation conformance classes:',
+              'defines two implementation conformance classes:'),
+             ('bind every implementation.',
+              'bind both classes.'),
             )),
-            ('That sentence is the refusal-report rule', (
-             ('a breach of it deviates there, never as a direct verdict.',
-              'a breach of it is a direct verdict.'),
+            ('An implementation supports base spec_version 2.0.0', (
+             ('and initializes stores directly at them.',
+              'and may also upgrade older stores.'),
+            )),
+            ('The reference tooling accepts a manifest', (
+             ('so its VALID verdict on such a store says nothing about conformance to this specification.',
+              'so its VALID verdict on such a store shows conformance to this specification.'),
             )),
     ))
     spec_vectors("17", (
-            ("Admission parses only the section 16.1 candidates",
-             (("so a listed item defined by file content and kept outside those candidates,",
-               "so a listed item kept outside those candidates,"),)),
-            ("An adoption receipt kept outside",
-             (("a store at the supported version whose `import_status` is `partial` or `complete` is"
-               " refused", "its store's `partial` or `complete` `import_status` is refused"),)),
-            ("The pre-scan refuses, before any write,",
-             (("within the recovery bound, together with a discovery outcome that such an operand alone"
-               " decides, so", "within the recovery bound, so"),)),
-            ("A command that writes and takes its lease after admission",
-             (("after admission confirms, once that lease is taken and observable and before any other"
-               " write, that the `lease.toml` carries its own claim and that",
-               "after admission rechecks admission once that lease is taken and observable and before"
-               " any other write, and checks that"),
-              ("is unchanged apart from exactly the bytes its own claim of the lease wrote;",
-               "is unchanged;"),
-              ("and leaves untouched one that does not.",
-               "and leaves untouched one that carries another holder's claim."))),
-            ("Within the section 16.1 recovery bound,",
-             (("before the admission check that follows recovery runs;", "before admission runs;"),
-              ("reports a store with a candidate that an interruption left unreadable, malformed, or"
-               " contradictory as cannot-evaluate", "reports a store with a torn candidate as"
-               " cannot-evaluate"))),
-            ("Only the transactions section 16.1 lists",
-             (("until something outside that implementation, such as a hand edit, repairs it,",
-               "until it is repaired by hand,"),)),
-            ("A section 14.1 restore after a committed apply",
-             (("then refuses where those bytes show a listed item, as `unsupported-legacy-state` where"
-               " the store stays at the supported version,", "then refuses as"
-               " `unsupported-legacy-state` where those bytes show a listed item,"),)),
             ('- The section 16.1 runtime check compares', (
              ('so it detects an edit of that copy alone,',
               'so it detects any edit,'),
@@ -5102,8 +5143,60 @@ def _self_test_vectors():
               'than the integer `2`, MAY be graded as legacy homes.'),
             )),
             ('A spec_version below 2.0.0', (
-             ('and validation MUST refuse it as a fail-closed INVALID finding.',
-              'and validation MAY grade it as a legacy store.'),
+             ('and validation MUST refuse it as a fail-closed INVALID finding naming the remedy,',
+              'and validation MAY grade it as a legacy store,'),
+             ("a fresh 2.0.0 store whose section 14 adoption gives the old store's files a disposition as foreign content.",
+              'an upgrade of the store in place.'),
+            )),
+            # Refuse before write: each operative clause reworded away turns the gate red.
+            ('Before any command writes to a store,', (
+             ('every implementation MUST apply these validation refusals',
+              'an implementation MAY apply these validation refusals'),
+             ('so a store they refuse stays byte-identical;',
+              'so a store they refuse is repaired first;'),
+             ('the recovery of sections 8.8, 14.1, and 14.2 included,',
+              'the recovery of sections 8.8, 14.1, and 14.2 excepted,'),
+            )),
+    ))
+    # S2 (maintainer ruling, 2026-10-23): one implementation model, the generic upgrade rule, the
+    # imported-series check ownership and the reversed-first-adoption residual. Each sentence is red
+    # where its operative clause is reworded.
+    spec_vectors("9.2", (
+            ('An upgrade MUST NOT create provenance,', (
+             ('An upgrade MUST NOT create provenance, adoption approval or historical records.',
+              'An upgrade MAY create provenance where the store lacks it.'),
+            )),
+            ('Every implementation MUST apply', (
+             ("Every implementation MUST apply the version ceiling's refusal",
+              "An implementation MAY apply the version ceiling's refusal"),
+            )),
+    ))
+    spec_vectors("8.3", (
+            ('C-IMPORTED-IDS owns every imported-series ID defect exclusively', (
+             ('MUST NOT be reported again by C-IMPORTED-SCHEMA or any other check.',
+              'MAY also be reported by C-IMPORTED-SCHEMA.'),
+            )),
+    ))
+    spec_vectors("8.6", (
+            ('A clean-series record MUST NOT carry', (
+             ('A clean-series record MUST NOT carry',
+              'A clean-series record MAY carry'),
+            )),
+            ('C-IMPORTED-SEGREGATION enforces this firewall:', (
+             ('MUST each be a C-IMPORTED-SEGREGATION finding.',
+              'MAY each be reported as a warning.'),
+            )),
+    ))
+    spec_vectors("4.5", (
+            ('A zero-match outcome over a present', (
+             ('MUST NOT be treated as authorizing initialization or adoption by itself:',
+              'MAY authorize initialization by itself:'),
+            )),
+    ))
+    spec_vectors("14.2", (
+            ('A fully reversed first adoption', (
+             ('is touched only by a fail-closed refusal and by the explicit reconcile an operator runs,',
+              'is recovered automatically by the next command,'),
             )),
     ))
     # No section carries a homes-1 store, a homes migration, an activation framing or a 1.x upgrade
@@ -5230,7 +5323,7 @@ def _self_test_vectors():
         ('9.2', ('A base-schema version bump MUST ship',), (
             "A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a store below the new version has an upgrade path once that upgrade activates; the path holds only within this section's preconditions and refusals and that implementation's disclosed residuals.",
         )),
-        ('9.2', ('Every implementation class MUST apply',), (
+        ('9.2', ('Every implementation MUST apply',), (
             "Every implementation class MUST apply the version ceiling's refusal at the end of this section, a fresh-only implementation at its section 16.1 admission check; a fresh-only implementation that supports a version below the reserved homes-2 declaration (section 4.2) MUST NOT apply the ceiling's homes-2 recognition and MUST refuse that declaration under section 16.1.",
         )),
         ('9.2', ('Repeated upgrade is a verified no-op', 'Declaring a spec_version above', 'A spec_version below 2.0.0'), (
@@ -5280,18 +5373,10 @@ def _self_test_vectors():
         ('16.1', ('The reference tooling does not yet implement base 2.0.0:',), (
             "The reference tooling targets the upgrade-capable class: its opf upgrade, in the repository's reference code, carries a store from base 1.0.0 or 1.1.0 to base 1.2.0, within its disclosed residuals, and its upgrade into base 1.3.0 remains a target contract (section 9.2).",
         )),
-        ('16.1', ('- with the section 9.2 version ceiling',), (
-            "- with the section 9.2 version ceiling's finding, a store whose manifest declares a spec_version above the supported one, the reserved homes-2 declaration (section 4.2) included when the supported version is below it, naming the declared and supported versions and the tooling-upgrade remedy.",
-        )),
         ('17', ('- Adoption and import run with C-EVIDENCE-ENUM,', 'Version-control history over the tracked store'), (
             "- On homes 1, under the section 4.2 target contract and only once activated 1.3.0 tooling ships, the adoption and import control areas (.working/imported/<kind>/<run-id>/, .working/archive/adoption/<run-id>/ and .working/archive/moved/) are recognized by containment but not re-enumerated by doctor: the completion checks verify their evidence digests when they run, and C-EVIDENCE-ENUM is inactive until homes 2 (section 4.2), so a file added or altered there after completion, a tampered retire preimage no record references included, is outside doctor's coverage until homes 2 activates.",
             "This bullet discloses that target contract's residual and claims no shipped tooling behaviour.",
             "Version-control history over the tracked store is the control, and activated 1.3.0 tooling's C-IMPORTED-PROVENANCE still re-verifies every preserved original an imported record references.",
-        )),
-        ('17', ('The retired token devprocess',), (
-            'That in-place rewrite covers only a bump that ships an upgrade.',
-            'The bump to the homes-2 declaration ships none (section 9.2), so no store-breaking rename can ship with it: a homes-2 manifest keeps the [opf] base table name and the opf discovery token, and the bump leaves unchanged the manifest of a homes-1 store, which homes 2 does not migrate (section 4.2).',
-            'The retired 1.0.0 token devprocess is recognized by opf upgrade, purely to carry a legacy store forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.',
         )),
     )
     retired_known = {
@@ -5313,6 +5398,73 @@ def _self_test_vectors():
             'Only homes migration MAY read explicitly inventoried OPF artefacts from former .aiqt/ locations.',
         ),
     }
+    # S2 retired sentences no row restores: deleted outright, or a qualifier dropped from a sentence
+    # whose S2 pin is a substring of the retired one; the S1 17 row's sentences moved here when the
+    # devprocess pin it anchored on was deleted, and the S1 16.1 ceiling row's sentence when S2
+    # deleted the refusal-list item it anchored on.
+    for section, sentences in (
+        ('4.2', (
+            'Verification stops at the first finding, a bundle without an inventory or an inventory in the recognized legacy format, so a cannot-evaluate that a later inventory would yield is not reported for that bundle.',
+            "Except for an inventory in the recognized legacy format below, which is its named finding, C-EVIDENCE-ENUM MUST yield cannot-evaluate for an adoption inventory whose identity is missing or malformed, names another run, names a phase other than the one its file name carries, or names a plan digest other than its bundle's own sealed plan.toml digest, and for every inventory of an adoption bundle whose plan.toml is absent, unreadable or not canonical, names another run, or carries a plan_digest that does not re-seal its own bytes, so an inventory copied from another run or phase never evaluates as this run's record.",
+            'The recognized legacy format opf.ingest.evidence-inventory/v1 MUST be refused as the named legacy-ingest-inventory finding under C-EVIDENCE-ENUM, without migration or rewriting; completed-ingest replay cannot evaluate that bundle.',
+            'A fresh-only implementation (section 16.1) refuses such an inventory earlier, as unsupported-legacy-state at admission, and MUST NOT then grade that store under C-EVIDENCE-ENUM.',
+            'The legacy imports/ exclusion remains registered until its writers migrate.',
+        )),
+        ('8.3', (
+            "| Field | Requirement | Meaning | |---|---|---| | id | required | <NS>-<n>, matching the type's namespace | | type | required | the type name; must match the file the record lives in | | status | required | per the status grammar (section 8.4) | | proposed_from | optional | the unqualified state held before the current /proposed status, written by the authoring verb (section 8.8); legal only on a /proposed status, and only naming a legal predecessor state for the type | | title | required | one line, human-oriented | | created_at | required | RFC 3339 UTC, read from the clock at creation | | updated_at | required | RFC 3339 UTC, read from the clock at the last transition | | actor.kind | required | maintainer, assistant, automation, or importer | | actor.id | optional | identity detail within the adopter's own vocabulary | | summary | optional | short prose body | | links | optional | array of {rel, id}; rel from the closed link vocabulary (section 8.6) | | refs | optional | array of captured references (section 8.6) | | x-<vendor> | optional | registered vendor extension tables only (section 8.7) | An importer MAY omit created_at where the source genuinely does not record it; the omission is recorded as unknown via the import provenance reference, never guessed.",
+            'This legacy permission does not replace the following 1.3.0 imported-series contract.',
+        )),
+        ('8.6', (
+            'After the section 9.2 upgrade an existing legacy importer-authored clean record MUST keep its bytes, its recorded state and its place in the clean series, and remains readable history there; what the upgrade changes, and its report enumerates (section 9.2), is authority alone: such a record leaves every current-state join, its open or active backlog items leave actionability, and its blocks stop granting a stop.',
+        )),
+        ('8.8', (
+            'A fresh-only implementation (section 16.1) performs that reconciliation only after its section 16.1 read-only pre-scan and within the section 16.1 recovery bound, and runs its admission check after it.',
+        )),
+        ('9.1', (
+            'Implementation conformance classes (section 16.1) are defined by the base, not by profiles.',
+            'A profile MAY require an upgrade-capable implementation, because that adds a requirement.',
+            "A profile, a store manifest field, or a command-line request MUST NOT declare, grant, or relax an implementation's class.",
+        )),
+        ('11', (
+            'A fresh-only implementation (section 16.1) MUST NOT use the preserved-legacy-evidence route: it substantiates partial and complete only through an adoption receipt with completion results, and it refuses a partial or complete status in a store that holds no adoption receipt as legacy state under section 16.1, which yields cannot-evaluate instead where it cannot establish whether the store holds one.',
+            'The section 16.1 admission check belongs to neither layer above: it MUST run at every posture, and off and warn MUST NOT disable or soften it.',
+        )),
+        ('14.1', (
+            'Legacy runs MAY occupy .working/staging/import/<run-id>/ or .working/staging/ingest/<run-id>/.',
+            'Their evidence inventories and readers remain available; old acceptance records describe those runs and MUST NOT authorize a new adoption or retirement.',
+            'A legacy import completed under the pre-1.3.0 contract MUST keep its recorded status, substantiated by its preserved run evidence (section 11); a retrospective approval or receipt MUST NOT be fabricated.',
+            "Preserved legacy run evidence is that run's durable archive in its recorded legacy home, for the reference tooling .aiqt/import-archive/<run-id>/, holding the run's acceptance record and its evidence inventory in the retained legacy format; substantiation MUST re-read that inventory and digest-match every file it enumerates, and a missing, unreadable or digest-mismatched item MUST leave the status unsubstantiated, failing closed under section 11.",
+            'A fresh-only implementation (section 16.1) provides none of these legacy readers: it MUST refuse, under section 16.1, a store that holds a listed legacy-state item, MUST NOT alter its recorded status, and MUST NOT substantiate a status from legacy run evidence; a legacy run that leaves no listed item is a disclosed residual (section 17).',
+            'Old import and ingest orchestration MUST be retired by staged decoupling only after clean-start adoption ships.',
+            'Pending legacy review MUST NOT become implicit approval.',
+        )),
+        ('16.1', (
+            'An implementation whose declaration lacks only its class MUST be treated as upgrade-capable, and every upgrade requirement binds it.',
+            "- with the section 9.2 version ceiling's finding, a store whose manifest declares a spec_version above the supported one, the reserved homes-2 declaration (section 4.2) included when the supported version is below it, naming the declared and supported versions and the tooling-upgrade remedy.",
+        )),
+        ('17', (
+            'That in-place rewrite covers only a bump that ships an upgrade.',
+            'The bump to the homes-2 declaration ships none (section 9.2), so no store-breaking rename can ship with it: a homes-2 manifest keeps the [opf] base table name and the opf discovery token, and the bump leaves unchanged the manifest of a homes-1 store, which homes 2 does not migrate (section 4.2).',
+            'The retired 1.0.0 token devprocess is recognized by opf upgrade, purely to carry a legacy store forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.',
+            'The retired token devprocess is recognized by a fresh-only implementation (section 16.1), purely to refuse that store by name.',
+            '- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not authenticated history: a version declaration and the absence of listed legacy state cannot prove that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only what it lists.',
+            'It does not list a legacy staging run under .working/staging/import/ or .working/staging/ingest/ that carries no legacy-format inventory, a legacy .archive/ entry that section 9.2 leaves in place with a standing finding, or a legacy run archive outside .working/, which only the import_status item reaches.',
+            "Admission parses only the section 16.1 candidates and a recovery journal of the implementation's own writer (sections 8.8, 14.1, and 14.2), and never reads beneath a path registered under [unmanaged] that section 14.2 permits, so a listed item defined by file content and kept outside those candidates, such as a legacy-format inventory kept under such a path or anywhere but the root of a staging or evidence run folder, goes undetected; an [unmanaged] entry that section 14.2 forbids is a cannot-evaluate input, never a reason to leave a path unsearched.",
+            "Admission recognizes only the adoption receipts of the implementation's own section 14 adoption writer, so where another implementation's writer placed a store's adoption receipt under .working/imported/adoption/ at another path or in another format, and that area holds no adoption receipt of the implementation's own writer, the check cannot establish whether that store holds an adoption receipt, and a partial or complete import_status there is cannot-evaluate: never refused as legacy, but not admitted either, even where a current-format adoption set that status.",
+            'An adoption receipt kept outside .working/imported/adoption/, which section 14.2 does not permit, decides nothing, so where that area holds no file, a store at the supported version whose import_status is partial or complete is refused as unsupported-legacy-state.',
+            'A refusal at its pre-scan leaves a store unchanged, and no refusal offers preservation, repair, or continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable implementation for that store.',
+            'The lease and recovery steps of sections 5.7, 8.8, 14.1, and 14.2 run after a read-only pre-scan and before the admission check that follows them (section 16.1).',
+            "The pre-scan refuses, before any write, a store whose manifest declares a version or generation that the check refuses or that shows a listed legacy-state item, the live bytes of an operand of an interrupted transaction included, and defers only the cannot-evaluate classification of an unreadable, malformed, contradictory, or absent operand of such a transaction within the recovery bound, together with a discovery outcome that such an operand alone decides, so a store that only the later check refuses or cannot evaluate, as where such an operand stays contradictory after recovery or the recovery's own result meets a refusal, or where something that does not take the lease changed the store between the pre-scan and the recovery, may carry the effects of a completed recovery of the implementation's own interrupted transaction, within the section 16.1 recovery bound, and of the section 5.7 reconciliation of a dead run's leftover lease.",
+            "A command that writes and takes its lease after admission confirms, once that lease is taken and observable and before any other write, that the lease.toml carries its own claim and that every directory listing, existence-probe result, and candidate the admission check read is unchanged apart from exactly the bytes its own claim of the lease wrote; a stop at that recheck writes nothing but what section 5.7 requires to end the command's own claim: it releases a lease.toml that carries its own claim and leaves untouched one that does not.",
+            "That stop restores nothing else, so a change that another process made and the recheck detected stays in the tree; where the store has a sync target, that target's history can keep the lease's claim and release, and where the concurrent-operation module is enabled the session_lease record of that claim and its release remain.",
+            "Within the section 16.1 recovery bound, a fresh-only implementation trusts its own writer's recovery journal, as section 8.8, 14.1, or 14.2 recovery does, to complete or roll back an interrupted transaction before the admission check that follows recovery runs; a command that performs no such recovery, a read-only command included, reports a store with a candidate that an interruption left unreadable, malformed, or contradictory as cannot-evaluate until a recovering command recovers it, and a clone without the journal (section 4.2) stays cannot-evaluate.",
+            'Only the transactions section 16.1 lists are recovered that way: a candidate torn by any other write, such as a section 12 rotation or a non-green outcome event appended to an adoption receipt, is classed like any other candidate even where the implementation journals that write, so one left unparseable stays cannot-evaluate for every command of a fresh-only implementation, its own writers included, until something outside that implementation, such as a hand edit, repairs it, and one left parseable is not recognized as torn.',
+            "A section 14.1 restore after a committed apply is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's store manifest apart from a foreign source at a candidate path binds only that first adoption, so a restore that copies archived bytes to a candidate path, such as an importer-authored worklog.toml restored over the live one, leaves a store that every command of a fresh-only implementation, its own writers included, then refuses where those bytes show a listed item, as unsupported-legacy-state where the store stays at the supported version, or reports as cannot-evaluate where it classes them unreadable, malformed, or contradictory.",
+            'A change made after the recheck by anything that does not take the lease, such as a hand edit or a branch switch, is outside admission.',
+            'Until validation tooling ships, a class claim is self-asserted (section 16).',
+        )),
+    ):
+        retired_known[section] = retired_known.get(section, ()) + sentences
     retired_runs += (
         ("9.2", ("A schema-level bump MUST be additive",), (
             'A purely schema-level bump MUST be additive, using atomic replacement of existing files, '
@@ -5328,6 +5480,235 @@ def _self_test_vectors():
             "The upgrade MUST NOT write the adoption archive ",
             "Both upgrade kinds, on the schema-level path and the homes-generation relocation path, the "
             "homes-2 path included, alike, MUST NOT write the adoption archive ", 1),)),
+    )
+    # S2 (maintainer ruling, 2026-10-23): one implementation model, no legacy state, no legacy_fragment
+    # type and no imports reserved name. Each row restores the S1-head pins verbatim in place of the S2
+    # pins that replaced them.
+    retired_runs += (
+        ('4.2', ('# optional 1:1 index mirrors',), (
+            '# optional 1:1 index mirrors (section 10.1) toml/ manifest.toml # store manifest and discovery marker (section 9) counters.toml # per-namespace ID high-water marks (section 8.2) version.toml # version and release ledger (section 6.1) worklog.toml # durable operational record (section 6.2) <type>.imported.index.toml # imported records per enabled type except LF (section 8.3) worklog.imported.toml # imported worklog, on its own ID number line lease.toml # single-writer lease, present only while held (section 5.7) init.toml # bootstrap provenance of a coupled init (section 9), if present backlog_item.index.toml # typed record files (section 8) done.index.toml finding.index.toml pending_decision.index.toml autonomous_decision.index.toml block.index.toml handoff.index.toml reference.index.toml contribution.index.toml maintainer_decision.index.toml preference_pattern.index.toml archive/ 2026/ archive.toml # enumerates rotated IDs and spans (section 12) done.index.toml worklog.toml archive/ moved/<source-path> # default Move destinations (section 14.2) adoption/<run-id>/ # retire preimages and archived occupying sources (section 14.2) imported/<kind>/<run-id>/ # durable originals, inventories, approvals and receipts (section 14) staging/<kind>/<run-id>/ # short-lived staging, evidence-gated reclamation (section 14.1) journals/<kind>/ # reserved recovery state, never a view or ordinary op target journal/ # crash-durable frames runs/<run-id>/transaction.toml # gate-readable projections allocations/<run-id>.toml # irrevocable ID reservations (section 8.2) When the store has been relocated, the .working/ tree lives at the store repository root exactly as drawn, and the product repository keeps only the pointer and the public deliverables.',
+        )),
+        ('4.2', ('The imported files are registered managed leaves',), (
+            'The imported files are registered managed leaves beside the clean-series files, using the same enabled-type roster except legacy_fragment; worklog uses worklog.imported.toml instead of an imported index.',
+        )),
+        ('4.2', ('opf init MUST create the imported leaves',), (
+            'opf init MUST create the imported leaves for every enabled type except legacy_fragment, create-only and empty; enabling a further type or module other than legacy_fragment later MUST create its imported leaf in the same act as its clean index.',
+            'legacy_fragment has no imported leaf and no imported counter row, since the imported series refuses the LF namespace (section 8.2).',
+        )),
+        ('4.2', ('Enabling a further type or module',), (
+            "Enabling a further type or module other than legacy_fragment MUST also add its imported counter row in the same act as its clean index, at zero only where no imported ancestry exists and otherwise at the largest <n> of that namespace's imported:<NS>-<n> IDs.",
+        )),
+        ('4.2', ("The apply side's bundle verifier",), (
+            "The apply side's bundle verifier, through which opf adopt status reports a run, MUST hold every adoption inventory to that bar against its bundle's own plan.toml: it MUST yield cannot-evaluate for an inventory that names a phase other than the one its file name carries or a plan digest other than that plan's, and, except for an inventory in the recognized legacy format below, which is its named finding, for every inventory of a bundle whose plan.toml is absent, unreadable or not canonical, names another run, or carries a plan_digest that does not re-seal its own bytes, an empty base inventory included (a bundle with no inventory is its own named finding).",
+        )),
+        ('4.4', ('The names imported, archive',), (
+            'The names imports, imported, archive, staging, and journals are reserved at the store level for OPF control area and MUST NOT be used as a machine subdirectory name; discovery fails closed on a machine store so named.',
+            'The legacy staging name imports remains reserved so legacy content cannot be re-absorbed.',
+        )),
+        ('4.5', ('An ambiguous outcome and an input', 'A zero-match outcome over a present',), (
+            'A fresh-only implementation (section 16.1) MUST recognize a candidate manifest.toml whose base table is the retired [devprocess] only to refuse that store as unsupported-older-store; the recognition is not a discovery match.',
+            'For a fresh-only implementation, a recognized legacy candidate, an ambiguous outcome, and an input that discovery cannot read or parse are a failed discovery of an existing store and MUST NOT be treated as an absent store that permits initialization or adoption; a recognized legacy candidate beside a matching store makes the outcome ambiguous, which yields cannot-evaluate, not unsupported-older-store, a refusal that applies only where no matching store accompanies the legacy candidate.',
+            'A fresh-only implementation MUST NOT treat a zero-match outcome over a present .working/ as authorizing initialization or adoption by itself.',
+            'In every command that resolves a store and meets that outcome, as part of its section 16.1 admission check and so before every write that check precedes, it MUST run the section 16.1 legacy-state search over that .working/ tree and MUST refuse each listed item it finds as unsupported-legacy-state, beside the zero-match cannot-evaluate result; where that .working/ holds no recognized legacy candidate and no section 16.1 legacy-state item, only a section 14 first adoption authorizes initialization there, through an investigation that distinguishes first adoption from re-adoption and records a digest-stamped inventory, and one approved plan that gives every foreign file a disposition before init-store (section 14.1).',
+            'Because a zero-match outcome discovers no store manifest, that search MUST apply the section 16.1 rule for a store with no discovered manifest, exactly as section 16.1 states it, and a cannot-evaluate result of that search authorizes neither initialization nor adoption.',
+        )),
+        ('8.1', ('| Tier | Type | Namespace |',), (
+            '| Tier | Type | Namespace | |---|---|---| | Baseline | backlog_item | BI | | Baseline | done | DN | | Baseline | worklog | WL | | Baseline | finding | FN | | Baseline | pending_decision | PD | | Baseline | autonomous_decision | AD | | Baseline | block | BL | | Baseline | handoff | HO | | Baseline | reference | RF | | Baseline | contribution | CN | | Baseline | maintainer_decision | MD | | Baseline | preference_pattern | PP | | Governance module | maintainer_action | MA | | Delivery-assurance module | artifact | AR | | Delivery-assurance module | gate_run | GR | | Delivery-assurance module | release | RL | | Delivery-assurance module | waiver | WV | | Operational-policy module | mode | MO | | Operational-policy module | tier_assessment | TA | | Concurrent-operation module | session_lease | SL | | Migration quarantine (importer-only) | legacy_fragment | LF | | Reserved, excluded | transaction | TX | | Reserved, unassigned | (none) | CL | Notes on the roster: - The word "changelog" is not a record type.',
+        )),
+        ('8.1', ('- Imported history uses the same enabled types',), (
+            'legacy_fragment (LF) is deprecated for new stores as of 1.3.0, not removed: its taxonomy row and legacy validation remain for existing stores and evidence.',
+            'New imports MUST use the imported series and verbatim unparsed text (section 8.3), not LF quarantine.',
+            'LF MUST NOT be scaffolded.',
+            'A fresh-only implementation (section 16.1) provides no legacy LF validation and MUST refuse a store that declares the legacy_fragment type or holds an LF record.',
+            '- Imported history uses the same enabled types except legacy_fragment (section 8.2) in a separate series, not additional record types.',
+        )),
+        ('8.2', ('counters.toml MUST hold independent',), (
+            'The imported series MUST refuse the LF namespace, since new imports do not use LF quarantine (section 8.1).',
+            'counters.toml MUST hold independent monotonic high-water values per series and namespace, BI for clean backlog items and the quoted TOML key "imported:BI" for imported backlog items, with the imported series\' rows required, one for each enabled type except legacy_fragment, since the imported series refuses LF and so has no "imported:LF" row.',
+        )),
+        ('8.3', ('A conforming imported series can reach doctor VALID',), (
+            'A conforming imported series can reach doctor VALID: it MUST NOT enter the legacy importer or module-schema deferral seam.',
+        )),
+        ('8.3', ('C-IMPORTED-IDS owns every', 'C-CONTAINMENT recognizes',), (
+            'C-CONTAINMENT recognizes the imported managed leaves, C-LINKS resolves the union of both series, and C-IMPORTED-SEGREGATION enforces section 8.6.',
+        )),
+        ('8.5', ('| Module types, in outline',), (
+            '| Module types, in outline (full schemas ship with the module schemas release): maintainer_action open > done or dropped; artifact staged > promoted or rejected; gate_run recorded with a three-valued verdict field (pass, fail, cannot_evaluate), never folded into status; release planned > published or abandoned; waiver active > expired or revoked, expiry required at creation; mode active > retired; tier_assessment recorded; session_lease held > released or reconciled; legacy_fragment quarantined > resolved or ignored.',
+        )),
+        ('8.6', ('Imported history has an authority firewall', 'A clean-series record MUST NOT carry',), (
+            'Imported history has an authority firewall, enforced by the writer and doctor and keyed on provenance rather than on series alone: it covers every record whose actor.kind is importer, in the imported series or written into the clean series by the pre-1.3.0 legacy importer.',
+        )),
+        ('8.6', ("A clean done record's receipt_of",), (
+            "A clean done record's receipt_of MUST target a clean backlog item, and a clean backlog item reaching ratified done MUST hold a clean receipt authored by a non-importer actor; a legacy importer-authored receipt satisfies, as recorded history, only the legacy importer-authored backlog item it was recorded with.",
+            "One exception is defined so that the section 9.2 refusal always has a writer-performable remedy: where that upgrade withdraws a ratified done item's only receipt as legacy importer-authored, a maintainer-authored clean maintainer_decision that links corrects to that item and records that its completion stands MUST satisfy the item's receipt obligation in place of the withdrawn receipt; opf record create authors such a decision, doctor and the upgrade MUST accept it, and a maintainer who instead judges the work unfinished MUST record a new clean backlog item linking derives_from back, never reopen the terminal done.",
+            'That acceptance binds an upgrade-capable implementation (section 16.1); a fresh-only implementation never reaches it, because the withdrawn legacy receipt is legacy state that it MUST refuse under section 16.1.',
+        )),
+        ('8.6', ('C-IMPORTED-SEGREGATION enforces this firewall',), (
+            'C-IMPORTED-SEGREGATION enforces this firewall over importer-authored records in both series.',
+        )),
+        ('8.8', ('The clean-series subcommands MUST also refuse',), (
+            'The clean-series subcommands MUST also refuse an importer-authored record as their operand: acting on imported or legacy importer-authored history is a new clean record linking back (section 8.6).',
+        )),
+        ('9.2', ('A base-schema version bump MUST ship', 'Every requirement of this section on an upgrade', 'Every implementation MUST apply',), (
+            "A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a store below the new version has an upgrade path; the path holds only within this section's preconditions and refusals and that implementation's disclosed residuals.",
+            'Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of them and MUST instead refuse under section 16.1.',
+            "Every implementation class MUST apply the version ceiling's refusal at the end of this section, a fresh-only implementation at its section 16.1 admission check.",
+        )),
+        ('11', ('"complete" means every such source', 'A partial or complete status that no adoption receipt',), (
+            '"complete" means every such source has a green completion result and recorded retirement under section 14.1 with a live full doctor VALID, or that a pre-1.3.0 legacy import finished and its preserved legacy run evidence substantiates it; the section 9.2 upgrade preserves that legacy status without fabricating an approval or receipt.',
+            'A partial or complete status that neither an adoption receipt with completion results nor preserved legacy import evidence substantiates MUST fail closed, as does a missing, unreadable or contradictory input.',
+        )),
+        ('12', ('Open records, active blocks',), (
+            'Open records, active blocks, unresolved decisions, unresolved fragments, unexpired waivers, the current handoff, and the unreleased worklog tail MUST NOT rotate.',
+        )),
+        ('14.1', ('Post-adoption import MUST use',), (
+            'Post-adoption import MUST use the approved, versioned prompt pack, with an example for every record type in the section 8.1 roster except the excluded transaction, the unassigned CL namespace, and the deprecated legacy_fragment.',
+        )),
+        ('14.2', ('A no-follow existence probe of manifest.toml',), (
+            'A no-follow existence probe of manifest.toml in an immediate subdirectory of .working/, a kept one included, used only by discovery, by this rule, and by the section 16.1 admission check, is not a read of a kept path.',
+        )),
+        ('14.2', ('A fully reversed first adoption',), (
+            'A fresh-only implementation (section 16.1) performs that recovery only after its section 16.1 read-only pre-scan and within the section 16.1 recovery bound, and runs its admission check after it.',
+            'In a first adoption, its apply also archives and removes every occupying source at a section 16.1 candidate path before it writes the store manifest, and its plan refuses a foreign source at such a path that is no planned managed destination (section 16.1).',
+        )),
+        ('16.1', ('The base defines one implementation model', 'An implementation supports base spec_version 2.0.0',), (
+            'The base defines two implementation conformance classes, upgrade-capable and fresh-only.',
+            'A class changes which requirements bind an implementation only where this specification says so; a declared scope, exclusion, profile, or posture MUST NOT otherwise waive a base requirement.',
+            'Current-format requirements, the imported series, adoption, and the section 8.6 authority firewall included, bind both classes.',
+            'An upgrade-capable implementation meets every section 9.2 requirement for each earlier base version and generation and grades legacy state under sections 8.1, 8.6, 11, and 14.1.',
+        )),
+        ('16.1', ('An implementation MUST declare,',), (
+            'A fresh-only implementation supports exactly one base spec_version, one homes generation, and one worklog storage generation, initializes stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.',
+            'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity, its class, and its supported spec_version, homes generation, and worklog storage generation.',
+        )),
+        ('16.1', ('Each digest in a report MUST be written',), (
+            "Each digest in a report MUST be written as 64 lowercase hexadecimal digits, and the runtime result MUST be written as one of the tokens of the three-valued gate_run verdict field (section 8.5): cannot_evaluate where that run's runtime check yielded cannot-evaluate or another rule of this section made that run yield cannot-evaluate, the admission check over the store that run resolved included, and otherwise pass where it authorized store operations and fail where it did not.",
+        )),
+        ('16.1', ('A report deviates from the expected report',), (
+            'A report deviates from the expected report where any of the four compared parts is omitted, written in another form, or holds another value; no other content of a report is compared, the base result of a report a reference run emits over a store its admission check refuses (the base-result part below) apart.',
+        )),
+        ('16.1', ('A reference run of a release MUST NOT',), (
+            'A reference run of a release MUST NOT emit a report that deviates from the expected report, and its runtime check MUST NOT authorize any store operation where the expected runtime result is cannot_evaluate or where its admission check, the pre-scan included, refused the store that run resolved.',
+        )),
+        ('16.1', ('A failure of either rule is shown',), (
+            'A failure of either rule is shown for a checker where one of its own attempts or reference runs shows it, and established for that checker where a second of its own attempts or reference runs, made on the same platform and version, shows a failure of the same rule and, under the reference-run rule, in the same part, the four compared parts of the report and the store and base-result parts below each one part; attempts and reference runs that show no failure, however many there are, never counter a shown or established failure.',
+        )),
+        ('16.1', ('The two rules above are the one path',), (
+            "The two rules above are the one path from attempts and reference runs to a verdict: a breach of any requirement of this section that an attempt or a reference run shows in what those rules compare, the four compared parts of a report, not-read beside another runtime result, a run's cannot-evaluate and the store operations it performs, a restatement a report states, and the store and base-result parts below included, MUST be judged solely as a failure of the availability rule or of the reference-run rule, shown and established only as those rules provide, never as nonconformance on one showing; only what a checker inspects in the bytes the release ships or reads in the documentation of the release decides a verdict under this section without that procedure.",
+        )),
+        ('16.1', ('Every requirement of this section that those rules do not compare',), (
+            "Every requirement of this section that those rules do not compare is a requirement on the bytes the release ships, on the documentation of the release, or on a checker's own conduct and reporting: in particular, a requirement on the conduct of the implementation's commands outside what the parts above read, the fresh-only admission, lease, recovery, and sync conduct below included, is a property of the bytes the release ships, and a breach of it is judged by that inspection alone, never by this procedure.",
+        )),
+        ('16.1', ('Under the reference-run rule the same-part',), (
+            "Under the reference-run rule the same-part condition applies to every failure, a store operation performed where the expected runtime result is cannot_evaluate or where that run's admission check, the pre-scan included, refused the store that run resolved included: that operation is a failure in a part of its own, the store part, shown and reproduced only by a run that performs such an operation, never by a deviating report.",
+            'A report a reference run emits over a store its admission check refuses is compared in one more part of its own, the base-result part: it deviates there where that report breaches the refusal-report rule below, by a base result other than indeterminate or by not naming what that rule has it name, and such a breach in such a report is judged only there, under the reference-run rule and the same-part condition, never as a direct verdict.',
+        )),
+        ('16.1', ('A declaration that is absent,', 'The rules on an absent,',), (
+            'A declaration that is absent, or that omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
+            'A declaration that carries its release identity, its spec_version, its homes generation, and its worklog storage generation, and omits only its class, declares no class: it MUST NOT be treated as malformed for that omission, and the implementation that ships it MUST be treated as upgrade-capable unless the declaration is malformed or contradictory on other grounds.',
+            'The rules on an absent, unreadable, malformed, contradictory, or classless declaration govern the file alone: a runtime check MUST apply them to the installed copy as it stands, a check of the documentation or of the reports MUST apply them to that file as the release ships it, and each check MUST NOT take a class or any other field from the documentation of the release or from any report.',
+            "Where that documentation states a class that the file omits, the release does not conform to this section and a conformance claim MUST NOT be made for it, because the documentation's restatement states a field the file does not carry; where a report a reference run of that release emits states such a class, that report's restatement differs from the file's declaration the same way, a deviation of the restatement part judged under the reference-run rule like any other, never a direct verdict.",
+            'The file declares no class only where it omits its class and no other field: a file that is absent, or that also omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed and MUST yield cannot-evaluate.',
+            'A fresh-only implementation MUST run an admission check in every command that resolves a store, at every posture, before any other grading and before any write, the claim of the single-writer lease (section 5.7) included, apart from the lease reconciliation and recovery that the recovery bound below leaves to sections 5.7, 8.8, 14.1, and 14.2, which the read-only pre-scan below precedes.',
+            "The check MUST run after any section 5.7 comparison against the sync target that the command performs, over the state that comparison found, and a fresh-only implementation's opf sync MUST NOT bring in, by a fast-forward, a state that the check, run first over the fetched target state, refuses or cannot evaluate, nor send, by a push of pending local commits (section 5.7), a state that the check, run first over the local state it would push, refuses or cannot evaluate.",
+            'A command that writes, and does not already hold the lease from the recovery below, MUST, after admission, take the lease.toml that section 5.7 has it take in the machine store and make it observable at the sync target where the store has one (section 5.7) before any other write, the session_lease record that section 5.7 has it record for that lease where the concurrent-operation module is enabled included.',
+            "Once that lease is taken and observable, and before any other write, it MUST confirm that the lease.toml carries its own claim and that every directory listing, existence-probe result, and candidate the check read is unchanged from what the check read, apart from exactly the bytes that its own claim of the lease wrote under section 5.7: the directory entries that claim created, a file that claim created, the lease.toml included, holding only what that claim wrote, and, in a file that claim rewrote, such as a <type>.index.toml or worklog ledger that gains its session_lease record, only that claim's own change, so that file MUST equal the bytes the check read with exactly that change applied, and a change to any other record or byte of it is a difference, never exempt as part of a file the claim wrote.",
+            'Where anything else differs, or the lease.toml does not carry its own claim, it MUST stop as cannot-evaluate and write nothing but what section 5.7 requires to end its own claim: it MUST release its own lease (section 5.7) where the lease.toml carries its own claim, so the lease path ends as it was before the claim, and MUST leave that lease.toml untouched where it does not, since section 5.7 forbids seizing a lease from a live holder.',
+            'The check MUST compare parsed versions, never strings, and MUST refuse:',
+            '- as unsupported-older-store, a store whose manifest declares a spec_version below the supported one, or whose base table is the retired [devprocess] (section 4.5), naming the declared version or table, the supported version, the store location, and the remedy: upgrade the store with an upgrade-capable implementation, then retry;',
+            '- as unsupported-store-generation, a store whose homes or worklog storage generation differs from the supported one, naming each generation found and supported;',
+            '- as unsupported-legacy-state, a store at the supported version that holds legacy state, or a zero-match .working/ that holds it (section 4.5), naming each item and its path;',
+            "- with the section 9.2 version ceiling's finding, a store whose manifest declares a spec_version above the supported one, naming the declared and supported versions and the tooling-upgrade remedy.",
+            'Legacy state is this closed list: a clean-series record, active or archived, whose actor.kind is importer (section 8.6); a declared legacy_fragment type or an LF record (section 8.1); a partial or complete import_status in a store that holds no adoption receipt (sections 11 and 14.1); an evidence inventory in the legacy format opf.ingest.evidence-inventory/v1 (section 4.2); a .working/IMPORT-REPORT.md; and a legacy .working/imports/ directory (section 4.4).',
+            'Extending the list is a specification change.',
+            'The check MUST search the .working/ tree of the store repository for each item, its staging and imported areas and the record archive included, within the three limits that follow, and, where discovery finds a store manifest, MUST read import_status from it; a legacy run archive outside .working/, for the reference tooling .aiqt/import-archive/, is reached only through the import_status item.',
+            'The check MUST enumerate .working/ and every directory beneath the discovered machine store, .working/staging/ and .working/imported/, and a directory among these that it cannot enumerate yields cannot-evaluate.',
+            'Outside those directories, a candidate lies only at a manifest.toml in an immediate subdirectory of .working/, which the check MUST reach only by a no-follow existence probe of that name (section 14.2), never by enumerating that subdirectory; a probe it cannot complete yields cannot-evaluate, and no other directory can hold a candidate or a path-defined item, so the check enumerates no other, the recovery journal below aside.',
+            'First, the check MUST match the two path-defined items, a .working/IMPORT-REPORT.md and a legacy .working/imports/ directory, at those live paths only; a copy preserved under .working/archive/adoption/<run-id>/ (section 14.2) is adoption evidence, not legacy state.',
+            'Second, the check MUST NOT read the contents of, or enumerate beneath, a path registered under [unmanaged] that section 14.2 permits: it matches such a path against a path-defined item by the path alone, makes no access beneath it but the existence probe above, and leaves any other listed item kept inside it unsearched, a gap section 17 discloses.',
+            'That limit applies to no other [unmanaged] entry: an entry that equals, contains, or lies within a reserved control area (section 14.2) or the machine store, that equals or contains .working/ itself or a discovery candidate (section 14.2), or that names an OPF-managed file or view is a contradictory input, and the check MUST yield cannot-evaluate for it, never admission.',
+            "Third, to find the items defined by file content, the check MUST parse exactly these candidates and no other file, the recovery journal below aside, a boundary section 17 discloses: each candidate manifest.toml that discovery reads (section 4.5), the discovered store manifest included; as candidate records, the record files of the discovered machine store, active and archived, meaning the worklog ledger worklog.toml and the imported worklog worklog.imported.toml (sections 6.2 and 8.3), each <type>.index.toml and <type>.imported.index.toml, each per-record file under a <type>/ directory (section 9), and each index, worklog ledger, and record file under its record archive archive/<YYYY>/ (section 12); as candidate inventories, each inventory.toml and inventory-<phase>.toml at the root of a run folder .working/staging/<kind>/<run-id>/ or .working/imported/<kind>/<run-id>/; and, in each run folder .working/imported/adoption/<run-id>/ (section 14.2), as candidate adoption receipts, each file at an adoption receipt path of the implementation's own section 14 adoption writer.",
+            'Where discovery finds no store manifest, as over a zero-match .working/ (section 4.5), the import_status item and the declared legacy_fragment type item do not apply and no file is a candidate record; the check still parses each candidate inventory and candidate adoption receipt present and matches both path-defined items, and an unreadable, malformed, or contradictory candidate that is present, a candidate manifest.toml that discovery reads (section 4.5) included, MUST yield cannot-evaluate, never admission.',
+            'The check MUST classify each candidate it reads by the rules that follow, whether or not discovery finds a store manifest, and MUST yield cannot-evaluate, never admission, for each candidate those rules class as unreadable, malformed, or contradictory.',
+            'A candidate is unreadable where the check cannot read its bytes.',
+            "A candidate adoption receipt is malformed where its bytes do not parse in the receipt format of the implementation's own section 14 adoption writer, since this specification fixes no adoption receipt path or format; every other candidate is malformed where its bytes do not parse as TOML.",
+            'A candidate manifest.toml whose [opf] table declares standard = "opf" is a discovery match (section 4.5), and that match is contradictory where the file also carries a [devprocess] table, where its spec_version is absent or does not parse as a version, where a present [opf].homes or [opf].worklog value is not a TOML integer, or where a present import_status is not none, partial, or complete.',
+            'A candidate manifest.toml that carries an [opf] table whose standard is absent or any other value is contradictory, a mistyped or altered discovery token (section 17) included; one that carries a [devprocess] table and no [opf] table is a recognized legacy candidate (section 4.5); and one that carries neither table is foreign content, neither a match nor a contradiction, that a section 14 first adoption dispositions.',
+            "Any other candidate is contradictory where a value that decides a listed item, a record's actor.kind or type or an inventory's format, is absent where its envelope or format requires it, or is present and not a string.",
+            'Section 14.2 places adoption evidence under .working/imported/adoption/<run-id>/, and the check MUST decide from that area alone whether a store holds an adoption receipt.',
+            'A candidate adoption receipt that is neither unreadable nor malformed establishes that the store holds one, and a store whose .working/imported/adoption/ is absent or holds no file holds none.',
+            "Where that area holds a file but no candidate adoption receipt, as where another implementation's writer placed its receipt at another path, the check cannot establish whether the store holds an adoption receipt, and for a partial or complete import_status it MUST yield cannot-evaluate, never unsupported-legacy-state and never admission.",
+            "A file there at no adoption receipt path of the implementation's own writer is not a candidate adoption receipt and, as a possible receipt, bears only on that decision; the third limit above alone decides whether it is a candidate inventory, so an inventory.toml or inventory-<phase>.toml at the root of a run folder there is one, parsed and classified as any other.",
+            'An adoption receipt kept outside .working/imported/adoption/, which section 14.2 does not permit, decides nothing, a gap section 17 discloses.',
+            "A fresh-only implementation's own adoption writer MUST make its adoption receipt crash-durable before it begins to write the partial or complete import_status that receipt substantiates, whether or not both writes share a transaction, and any reversal of that status MUST make the prior import_status crash-durable before it removes that receipt, so no interruption, recovered or not, leaves its own store holding that status without that receipt.",
+            "In a first adoption, a fresh-only implementation's own section 14 adoption writer MUST NOT leave the store manifest that its apply writes in the live tree beside a foreign source at a candidate path, a path at which a file is a candidate record under the third limit above once that manifest exists.",
+            'Its plan MUST refuse at plan time, naming the path, the same way a collision refuses (section 14.2), a foreign source at a candidate path that is no planned managed destination, and a keep whose [unmanaged] entry the rules above class as a contradictory input.',
+            "Its apply MUST archive and remove every occupying source at a candidate path (section 14.2), in that section's order of copy, verify, commit, and remove, before it begins to write the store manifest.",
+            'A recovery that completes that apply forward MUST keep that order, and a reversal of that apply MUST restore the manifest path to its journaled prestate, and make that prestate durable, before it restores any source to a candidate path.',
+            'So no interruption of that apply, recovered or not, leaves that manifest discovered beside a live foreign source at a candidate path: before the manifest is written no file is a candidate record, and once it is written no foreign source remains at a candidate path.',
+            "A fresh-only implementation MUST follow the lease rules of section 5.7 and the recovery rules of sections 8.8, 14.1, and 14.2 unchanged and in the order those sections set, exactly as an upgrade-capable implementation does: after resolving the store, a command reconciles a leftover lease and completes or rolls back, from its journal, an interrupted journaled transaction of the implementation's own writer, a section 8.8 authoring or import transaction, a section 14.2 apply, or a section 14.1 retirement, removal, relocation, or reclamation transaction, as those sections require, and its admission check then runs over the store those steps left, before any other write.",
+            'Before either step and before any other write, every store-resolving command MUST run the admission check once as a pre-scan that writes nothing, over the store as the command found it, and where the pre-scan refuses the store or yields cannot-evaluate, the command MUST report every finding it meets and stop, the lease reconciliation and the recovery unperformed.',
+            'The pre-scan MUST defer to the admission check that follows recovery only the cannot-evaluate classification of a candidate that is an operand of an interrupted transaction whose journal lies within the recovery bound below and that the pre-scan classes as unreadable, malformed, or contradictory or finds absent, together with a discovery outcome that such an operand alone decides, as where apply removed an occupying manifest.toml (section 14.2), and MUST defer nothing else.',
+            'That deferral covers no refusal: the pre-scan MUST still refuse, before any write, each spec_version, homes generation, or worklog storage generation that a deferred candidate declares and the check refuses, and each listed legacy-state item that the live bytes of a deferred candidate show, so a store whose manifest declares a version or generation that the check refuses, or that shows a listed legacy-state item, the live bytes of an operand included, is refused before any write, the lease reconciliation and the recovery unperformed.',
+            "Within that order a recovery bound applies: a fresh-only implementation MUST recover only a journal in its own writer's format for the supported version and generations whose operands all lie at paths that the transaction's section, at that version and those generations, lets that kind of transaction write, none of them a path-defined legacy-state item.",
+            "The bound reads the journal's format and its operands' paths, never the content of a journaled prestate or planned poststate, so a section 14.2 apply journal whose preimages are an occupying source's foreign bytes, TOML or not, lies within it, and each section's own refusal of an operand changed since the interruption, such as that of section 8.8, still applies.",
+            "Every store-resolving command that finds its own writer's recovery journal naming an interrupted transaction MUST read that journal in its pre-scan, the one input beyond the candidates and directories above that the check reads, and MUST yield cannot-evaluate, never admission, before any write, the lease reconciliation included, where it cannot read that journal or parse it in that format, or where an operand lies outside those paths.",
+            "After a section 8.8 reconciliation, that reconciliation's refusal of the new operation still applies, whatever the admission check that follows it finds.",
+            'A command that performs no such recovery defers nothing and classes every candidate by the rules above, a candidate torn by an interruption included, and so does every command for a candidate that no such journal names as an operand.',
+            "Where a store meets more than one refusal above, the section 9.2 ceiling included, the check MUST report every finding it meets, and that store's refusal fixture asserts each of them.",
+            "An input the check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission; the pre-scan's deferral of a candidate is not admission, and the check that follows recovery classes that candidate afresh.",
+            'Each refusal MUST be a fail-closed INVALID finding, never VALID.',
+            'Where its admission check, the pre-scan included, refuses a store or yields cannot-evaluate, a fresh-only implementation MUST NOT grade the rest of that store, write, stage, or partially upgrade any file, rewrite a version declaration, fabricate provenance, or invoke another upgrader, the section 5.7 claim and release of a lease the command takes aside; the store and product trees, ignored files and the lease path included, MUST stay byte-identical to the state the command found where the pre-scan stops it, and otherwise to the state that the lease reconciliation and recovery above left, apart from that claim and release.',
+            'A fresh-only implementation that provides an upgrade command MUST refuse an older store with the same finding and MUST NOT report a successful upgrade; it MAY report a no-op on a supported store only after full doctor VALID.',
+            'Admission MUST NOT substitute for any other applicable check.',
+            'For a store its admission check refuses, a report MUST give the base result as indeterminate, naming the class, the supported version and generations, and the finding; it MUST NOT give conformant_for_declared_scope, nor nonconformant on that refusal alone.',
+            'That sentence is the refusal-report rule the base-result part above compares, so in a report a reference run emits, a breach of it deviates there, never as a direct verdict.',
+            'A claim of the fresh-only class MUST cite refusal evidence: for each finding above and each legacy-state item, a fixture that every store-resolving command refuses with that finding, asserting each seeded legacy-state item by its path, with both trees byte-identical; for the section 9.2 ceiling, whose finding carries no token in this specification, the fixture asserts an INVALID finding that names the declared and supported versions and the tooling-upgrade remedy.',
+            "The importer-authored clean-series item's fixtures MUST include five separate fixtures that each seed exactly one importer-authored clean record, one an entry in the active worklog.toml ledger, one an entry in an archived worklog ledger, one an active typed record in its <type>.index.toml, one an active typed record in a per-record file under a <type>/ directory (section 9), and one an archived typed record, and the import_status item's fixtures MUST include one whose .working/imported/adoption/ holds no file, refused with that item's finding, and one whose .working/imported/adoption/<run-id>/ holds a file at no adoption receipt path of the implementation's own writer and no candidate adoption receipt, which every store-resolving command MUST report as cannot-evaluate, never as unsupported-legacy-state and never as admission, with both trees byte-identical.",
+            "The recovery bound's fixtures MUST include, for each kind of recovery journal the implementation's own writers keep, the section 8.8 journal and the section 14.2 apply journal included: one whose candidate is torn under such a journal within the bound, which a command that performs that recovery recovers and then admits, the section 14.2 one interrupted after apply removed an occupying manifest.toml; one whose journal names a path-defined legacy-state item as an operand and one whose journal does not parse in its writer's format, each of which every store-resolving command MUST report as cannot-evaluate, never as admission, with both trees byte-identical; and one at the supported version that holds such a journal, whose operands all parse, and a listed legacy-state item that is no operand of it, which every store-resolving command MUST refuse with that item's finding, with both trees byte-identical.",
+            "The section 14.2 apply journal's fixtures MUST also include a first adoption interrupted after its apply journal was durably committed, once apply had removed a foreign source that does not parse as TOML from a planned machine-store record path, such as worklog.toml, journaling its preimage, and had written the current-format manifest, which a command that performs that recovery completes forward and then admits.",
+            "They MUST also include a first adoption over a foreign worklog.toml at a planned machine-store record path that parses and holds an importer-authored entry, interrupted with its apply journal durably committed and with it not committed, once after apply archived and removed that source and before it wrote the store manifest and once after it wrote that manifest, and one interrupted during the reversal of an uncommitted apply after that reversal restored the manifest path's prestate and before it restored that source; a command that performs that recovery MUST complete each committed apply forward and finish reversing each uncommitted one, its pre-scan not stopping it, and the admission check that follows MUST find no legacy-state item, admitting each store that recovery completed forward; for each store whose apply that recovery finished reversing, the fixture MUST assert that no store manifest remains, that the foreign worklog.toml is back at its path, byte-identical to its plan digest, and that the check reports the zero-match cannot-evaluate result (section 4.5).",
+            "A first adoption's fixtures MUST also include a plan over a foreign per-record file under a <type>/ directory of the planned machine store, which that plan MUST refuse at plan time, naming that path, and a zero-match .working/ whose .working/imported/adoption/<run-id>/ holds a file at an adoption receipt path of the implementation's own writer that does not parse in that writer's receipt format, which every store-resolving command, a first adoption included, MUST report as cannot-evaluate, each before any write, with both trees byte-identical.",
+            "The pre-scan's fixtures MUST include, each with the concurrent-operation module enabled and with it disabled, a store whose manifest declares a spec_version below the supported one and that holds a dead run's leftover lease.toml, with the module that run's held session_lease record, and an interrupted journal of the implementation's own writer whose operands all parse, which every store-resolving command MUST refuse as unsupported-older-store before any write, with both trees byte-identical, that lease.toml and that journal included.",
+            "They MUST also include, each with a dead run's leftover lease.toml and an interrupted journal of the implementation's own writer within the recovery bound that names the candidate below as an operand, one whose live manifest.toml declares a spec_version below the supported one and an import_status that is not none, partial, or complete, which every store-resolving command MUST refuse as unsupported-older-store, and one at the supported version whose live <type>.index.toml holds one importer-authored record and one record whose actor.kind is absent, which every store-resolving command MUST refuse as unsupported-legacy-state, each before any write, with both trees byte-identical, that lease.toml and that journal included.",
+            "The recheck's fixtures MUST include one, with the concurrent-operation module enabled and its session_lease records kept in their <type>.index.toml, in which another process sets actor.kind to importer in an existing record of that index after admission and before the command's claim, which then rewrites that index; the command MUST stop at the recheck as cannot-evaluate and write nothing but the section 5.7 release of its own lease.",
+            'Missing evidence makes the claim indeterminate, never a pass.',
+            "A fresh-only claim MUST NOT imply upgrade compatibility or continuity from the implementation's own earlier releases; moving to a later base version requires a new declaration and new evidence.",
+        )),
+        ('17', ('A requirement of section 16.1 on the conduct',), (
+            "A requirement of section 16.1 on the conduct of the implementation's commands that its two rules do not compare, the fresh-only admission, lease, recovery, and sync conduct included, is judged only by that inspection, so a conduct breach a checker cannot attribute to the bytes the release ships decides nothing for that checker, and one it can attribute is decided by what that inspection finds in those bytes, never by the observed run itself on any number of showings.",
+        )),
+    )
+    # Round 2 of PR 665 (B3, B6, the 4.2 and 17 wording, and the 16.1 wording the deleted admission
+    # check left with no rule behind it): each row restores the pin the round rewrote.
+    retired_runs += (
+        ('4.2', ('The doctor MUST decide that a run is admitted', 'That parity covers adoption admission alone'), (
+            'The doctor MUST decide that a run is admitted, and that its retirement is recorded, from the committed adoption evidence alone, the bundle under .working/imported/adoption/<run-id>/ and the run archive, which travel with every clone, and MUST NOT read the machine-local journal, so a clone without journals grades exactly as the original store.',
+        )),
+        ('4.2', ('Deleting a whole bundle',), (
+            'Deleting a whole bundle, inventory and payload together, is outside this local snapshot check; independent history is required to detect that loss.',
+        )),
+        ('9.2', ('A spec_version below 2.0.0', 'Before any command writes to a store,'), (
+            'A spec_version below 2.0.0 names no version this specification defines, and validation MUST refuse it as a fail-closed INVALID finding.',
+        )),
+        ('16.1', ('A write that sections 5.7, 8.8, 14.1, and 14.2 themselves require',), (
+            'A write this section or section 5.7 itself requires is not a store operation under this section, for the runtime-result comparison and the store part below alike: the claim of the single-writer lease a command takes, its release, the session_lease record of that claim and of that release, and the lease reconciliation and recovery writes sections 5.7, 8.8, 14.1, and 14.2 require, so a run that stops as cannot-evaluate and writes nothing but what section 5.7 requires to end its own claim performed no store operation.',
+        )),
+        ('16.1', ('The expected report of a release',), (
+            "The expected report of a release is fixed by the bytes the release ships alone, apart from the runtime result, the one part also coupled to the run it concerns: its restatement is the declaration of that file as the release ships it, each of its digests equals the SHA-256 digest of that file's bytes as the release ships them, and its runtime result is cannot_evaluate exactly where a rule of this section makes those bytes, or the store that run resolved as the checker observes it, yield cannot-evaluate, and otherwise pass or fail, between which this section, as it now stands, sets no rule.",
+        )),
+        ('16.1', ('The runtime-result part also deviates',), (
+            "The runtime-result part also deviates where its token disagrees with whether that run authorized store operations, the performed operations the checker observes; this comparison reads the run's writes, the store-coupled cannot-evaluate rule above reads the store that run resolved, and together they make the runtime result the only part of the expected report not fixed by the shipped bytes alone.",
+        )),
+        ('16.1', ('The behaviour-coupled comparisons are exactly two,',), (
+            "The behaviour-coupled comparisons are exactly two, the token comparison above and the store part below, and they read only the writes the checker observed: a run for which the checker cannot determine whether it observed every write gives it no evidence under either comparison, so a result-part or store-part failure that only those two comparisons of such runs could show MUST be reported as unresolved, never as established, a residual section 17 discloses; the rest of the expected-report comparison, the store-coupled cannot-evaluate expected result included, reads such a run's report as any other, over the store that run resolved as the checker observes it.",
+        )),
+        ('17', ('- Adoption and import run with C-EVIDENCE-ENUM,',), (
+            '- Adoption and import run with C-EVIDENCE-ENUM, which re-enumerates their control areas (.working/imported/<kind>/<run-id>/, .working/archive/adoption/<run-id>/ and .working/archive/moved/) on every doctor run, and the section 14.1 completion checks still verify their evidence digests themselves when they run; C-EVIDENCE-ENUM asserts membership, not authenticated actor history, and deleting a whole bundle, inventory and payload together, is outside its local snapshot check (section 4.2).',
+        )),
+    )
+    retired_known['9.2'] = retired_known['9.2'] + (
+        'Unproven legacy .archive/ entries MUST remain in place with a standing finding until dispositioned.',
     )
     for section, starts, old in retired_runs:
         pins = _CONTRACT[section]
@@ -5375,8 +5756,8 @@ def _self_test_vectors():
                                 + [" ".join(known) for known in retired_known.values()])
         # Emptying or narrowing the registry would retire its vectors silently: its shape is pinned.
         check("spec-retired-registry", lambda: tuple(_RETIRED) == (
-            "4.2", "8.1", "8.2", "8.8", "9", "9.2", "12", "14.1", "14.2", "14.3", "15", "16.1", "17") and
-              tuple(map(len, _RETIRED.values())) == (34, 1, 4, 6, 2, 27, 1, 2, 2, 1, 3, 2, 5))
+            "4.2", "4.4", "4.5", "8.1", "8.2", "8.3", "8.5", "8.6", "8.8", "9", "9.1", "9.2", "11", "12", "14.1", "14.2", "14.3", "15", "16.1", "17") and
+              tuple(map(len, _RETIRED.values())) == (45, 2, 6, 6, 6, 2, 1, 5, 8, 2, 3, 31, 5, 2, 8, 4, 1, 3, 44, 17))
         near_misses = (
             ("plain", "Retired text, quoted and not in force:\n{}"),
             ("inline", "> Retired text, quoted and not in force: {}"),
