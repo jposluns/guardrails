@@ -4445,9 +4445,13 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/check_branch_root.py", "_git", ("git",),
      "production gate probe over the real checkout (rev-parse/merge-base family reads under"
      " _git_env); read-only by design, and production launches stay unchanged"),
-    ("tools/check_msg_leaks.py", "_run_git", ("git",),
-     "production gate read helper (log/rev-parse over the real repository); read-only by"
-     " design, and production launches stay unchanged"),
+    ("tools/check_msg_leaks.py", "_git_status", ("git",),
+     "production gate read funnel with replace refs and grafts disabled (--no-replace-objects"
+     " plus GIT_GRAFT_FILE pinned to os.devnull, so the gate reads the object graph the push"
+     " transports): log/rev-parse/ls-tree/show/symbolic-ref/merge-base reads, the remote and"
+     " config URL reads that bind the scanned set to the push destination, and, in --pre-push"
+     " mode over the repository the caller names, ls-remote over the push target's advertised"
+     " refs; read-only by design, and production launches stay unchanged"),
     ("tools/check_record_sections.py", "_git", ("git",),
      "shared gate/self-test funnel under _clean_env (GIT_* scrubbed, PATH kept):"
      " production callers pass graph reads only (rev-parse/show/ls-tree/merge-base/"
