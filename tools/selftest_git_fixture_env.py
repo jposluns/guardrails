@@ -964,12 +964,13 @@ def _config_poison_fixture(base):
 # _config_injection_lane itself), over opf.py, check_opf_record.py --red-on-revert,
 # _opf_adopt_observe.py, check_release_delta.py and check_opf_init.py --self-test plus six shorter
 # opf/tools self-tests (_opf_adopt.py, _opf_oplock.py, _opf_init_operation.py,
-# check_opf_upgrade.py, check_opf_homes.py and check_opf_doctor.py), eleven members
-# (SIZING_MEASURED), twice (load5 24.02 to 29.29, then 29.29 to 33.68); once over the whole
+# check_opf_upgrade.py, check_opf_homes.py and check_opf_doctor.py), eleven members then (ten
+# now in SIZING_MEASURED), twice (load5 24.02 to 29.29, then 29.29 to 33.68); once over the whole
 # combined roster as registered then, SIZING_ACCOUNT_ROSTER (load5 27.35 to 32.99); and once
 # under the malformed lane's configuration over those eleven members less its exclusion, ten
-# members (SIZING_MALFORMED_MEASURED, load5 30.01 to 32.14). Every member exited 0 with no hook,
-# fsmonitor or exposure record in every run. Each entry below gives its lane time per run.
+# members then (nine now in SIZING_MALFORMED_MEASURED, load5 30.01 to 32.14). Every member
+# exited 0 with no hook, fsmonitor or exposure record in every run. Each entry below gives its
+# lane time per run.
 # SIZING_ACCOUNT_ROSTER is the set _registered_selftests() returns at commit e5191908, the parent
 # of the commit that recorded these runs; a member registered later is outside the account.
 # One measured member, opf/tools/check_opf_upgrade.py --self-test (one of the six shorter

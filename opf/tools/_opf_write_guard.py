@@ -12,7 +12,8 @@ explicitly so its refusals name the operation the operator actually ran.
 
 Stdlib only; the sibling _opf_* helpers are imported directly. Every refusal is a WriteGuardError, which the
 calling verb maps to exit 2. Nothing here stages or commits anything. `--self-test` runs the lease message,
-porcelain grammar, dirty-probe and lease ownership vectors (self_test), which opf.py --self-test also runs.
+porcelain grammar, dirty-probe, lease ownership and filter-neutralization vectors (self_test), which opf.py
+--self-test also runs.
 """
 import sys
 
@@ -1538,8 +1539,8 @@ def self_test():
     by a holder read from its prefix. The ownership-verified release reports an oversized, non-regular or
     unreadable replacement as what it is, never ABSENT, and the holder diagnostic names each unread lease by
     its cause. Each vector runs over a real lease beneath a private temporary root. The porcelain grammar,
-    dirty-probe, ignore-probe and lease ownership vectors follow (_self_test_guard_vectors). Returns 0 clean,
-    1 on a failure, 2 on a harness error."""
+    dirty-probe, ignore-probe, lease ownership and filter-neutralization vectors follow
+    (_self_test_guard_vectors). Returns 0 clean, 1 on a failure, 2 on a harness error."""
     import shutil
     import tempfile
     failures = []
@@ -1576,7 +1577,8 @@ def self_test():
         return 1
     print("opf-write-guard self-test: PASS ({} checks: examination-lock refusals, held-lease and "
           "failed-acquisition remedies, oversized lease, release over each replacement, holder "
-          "diagnostic, porcelain grammar, dirty and ignore probes, lease ownership)".format(checked[0]))
+          "diagnostic, porcelain grammar, dirty and ignore probes, lease ownership, filter "
+          "neutralization over real git)".format(checked[0]))
     return 0
 
 
@@ -1760,7 +1762,8 @@ def _self_test_guard_vectors(check, base):
     """The porcelain grammar, dirty-probe, ignore-probe and lease ownership vectors self_test runs. They
     were carried by the removed store-upgrade gate; `opf record` still uses each guard they exercise.
     parse_porcelain is called directly; probe_dirty and check_ignored run over a stubbed git; the lease
-    vectors run over the lease g/lease.toml beneath `base`."""
+    vectors run over the lease g/lease.toml beneath `base`; the lease-removal docstring keeps its disclosed
+    residual; the filter vectors (_self_test_filter_vectors) run probe_dirty over real git."""
     from unittest import mock
     obs = _opf_observe
     outcome = obs._GitOutcome
@@ -2001,6 +2004,220 @@ def _self_test_guard_vectors(check, base):
         check("release refuses a peer's replacement and removes this run's own lease", replaced_release)
     finally:
         os.close(root_fd)
+
+    # The ownership-verified release keeps its disclosed residual: the false "released" over a swapped peer
+    # lease, reachable only when the release-only-when-no-run-is-live reconciliation is violated. Read from
+    # the source, so the check holds under -OO too.
+    import _optlevel
+    disclosure = " ".join((_optlevel.source_docstring(__file__, "unlink_owned_lease") or "").lower().split())
+    check("the lease-removal residual discloses the false release and its reachability", lambda: None if (
+        "reports exit-0 success" in disclosure and 'false "released"' in disclosure
+        and "release-only-when-no-run-is-live" in disclosure) else "the disclosure is incomplete")
+
+    _self_test_filter_vectors(check, base)
+
+
+def _self_test_filter_vectors(check, base):
+    """probe_dirty over real git repositories beneath `base`: a repository- or worktree-configured clean or
+    process filter never runs during the dirty probe (its command would create a sentinel), whatever its
+    name, while real dirt is still detected and git's built-in text/eol conversion is kept. A corrupt
+    configuration fails closed, and a normalizing filter of the git-lfs shape over-refuses (the record gate
+    drives its refusal note end to end). An un-neutralized status runs each planted filter (the positive
+    control), and the neutralizer stubbed to return [] or rendered as the old `-c key=value` argv runs it
+    again (the flips)."""
+    import subprocess
+    from unittest import mock
+    obs = _opf_observe
+    git = obs._git_path()
+    if git is None:
+        check("the real-git filter vectors find git", lambda: "git is not on PATH")
+        return
+    lease = ".working/toml/lease.toml"
+    target = ".working/toml/pwn.dat"
+    future = (4102444800, 4102444800)   # 2100-01-01: a fixed future mtime, so status must re-hash the target
+    status_args = ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                   "--no-renames", "--", ".working"]
+
+    def refused(call):
+        try:
+            call()
+        except WriteGuardError:
+            return None
+        return "no refusal"
+
+    def fixture_git(root, *args):
+        proc = subprocess.run(
+            [git, "-C", str(root), "-c", "init.defaultBranch=main", "-c", "user.email=gate@example.invalid",
+             "-c", "user.name=gate", "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
+             "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"] + list(args),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=obs._scrubbed_env(), timeout=60)
+        if proc.returncode != 0:
+            raise OSError("fixture git {} failed: {}".format(args, proc.stderr.decode("utf-8", "replace")))
+        return proc.stdout
+
+    def store(name, files=None):
+        """A committed repository holding .working/toml/pwn.dat and `files` (relpath -> bytes)."""
+        root = Path(base, "filter", name)
+        (root / ".working" / "toml").mkdir(parents=True)
+        fixture_git(root, "init", "-q")
+        for rel, data in {target: b"hello\n", **(files or {})}.items():
+            (root / rel).write_bytes(data)
+        fixture_git(root, "--literal-pathspecs", "add", "-A")
+        fixture_git(root, "commit", "-q", "-m", "seed")
+        return root
+
+    def filtered(name, driver, form="clean", required=None, worktree=False):
+        """A committed store whose pwn.dat a `driver` filter claims; its command creates <store>/SENTINEL."""
+        root = store(name)
+        scope = ["--worktree"] if worktree else []
+        if worktree:
+            fixture_git(root, "config", "extensions.worktreeConfig", "true")
+        fixture_git(root, "config", *scope, "filter.{}.{}".format(driver, form),
+                    "sh -c 'touch \"{}\"; cat'".format(root / "SENTINEL"))
+        if required is not None:
+            fixture_git(root, "config", *scope, "filter.{}.required".format(driver), str(required).lower())
+        (root / ".gitattributes").write_text("{} filter={}\n".format(target, driver), encoding="utf-8")
+        return root
+
+    def reset(root):
+        """Remove any sentinel and bump pwn.dat's mtime, content unchanged, so the next status re-hashes it."""
+        Path(root, "SENTINEL").unlink(missing_ok=True)
+        os.utime(str(Path(root, target)), future)
+
+    def probe(root, lease_rel=lease):
+        return probe_dirty(git, str(root), [".working"], lease_rel, "record")
+
+    def ran(root, call):
+        """Whether `call` ran the planted filter, after a reset."""
+        reset(root)
+        call()
+        return Path(root, "SENTINEL").exists()
+
+    def suppressed(root, lease_rel=lease):
+        """None when an un-neutralized status runs the filter and the probe neither runs it nor reads dirt."""
+        if not ran(root, lambda: obs._run_git(git, str(root), status_args)):
+            return "the positive control did not run the planted filter"
+        reset(root)
+        dirty = probe(root, lease_rel)
+        if Path(root, "SENTINEL").exists():
+            return "the dirty probe ran the planted filter"
+        return None if dirty == [] else "an unchanged store read dirty: {!r}".format(dirty)
+
+    for label, name, args in (("a clean filter", "clean", ("pwn",)),
+                              ("a process filter", "process", ("pwn", "process")),
+                              ("a dotted filter name", "dotted", ("a.b",)),
+                              ("a filter name holding '='", "equals", ("pwn=bypass",)),
+                              ("a required filter", "required", ("pwn", "clean", True)),
+                              ("a worktree-scoped filter", "worktree", ("wpwn", "clean", None, True))):
+        check("{} never runs during the dirty probe".format(label),
+              lambda name=name, args=args: suppressed(filtered(name, *args)))
+    check("a filter on a product-root binding never runs during the dirty probe",
+          lambda: suppressed(filtered("product", "ppwn"), lease_rel=None))
+
+    def unneutralized():
+        root = filtered("flip-empty", "pwn")
+        with mock.patch.object(obs, "_filter_neutralizing_config", return_value=[]):
+            return None if ran(root, lambda: probe(root)) else "the probe without neutralization ran no filter"
+    check("FLIP: a probe without neutralization runs the planted filter", unneutralized)
+
+    def old_argv():
+        root = filtered("flip-argv", "pwn=bypass")
+        argv = []
+        for key, value in obs._filter_neutralizing_config(git, str(root)):
+            argv += ["-c", "{}={}".format(key, value)]
+        return None if ran(root, lambda: obs._run_git(git, str(root), argv + status_args)) else (
+            "the -c key=value form neutralized the '='-named filter")
+    check("FLIP: the old -c key=value form leaves a filter name holding '=' executable", old_argv)
+
+    def required_unreleased():
+        root = filtered("flip-required", "pwn", required=True)
+        reset(root)
+        with mock.patch.object(obs, "_filter_neutralizing_config",
+                               return_value=[("filter.pwn.clean", ""), ("filter.pwn.process", "")]):
+            return refused(lambda: probe(root))
+    check("FLIP: emptying a required filter without required=false breaks the probe", required_unreleased)
+
+    def overrides():
+        root = store("overrides")
+        fixture_git(root, "config", "filter.pwn.clean", "sh -c cat")
+        fixture_git(root, "config", "filter.lfs.smudge", "git-lfs smudge -- %f")
+        got = obs._filter_neutralizing_config(git, str(root))
+        return None if got == [("filter.pwn.clean", ""), ("filter.pwn.process", ""),
+                               ("filter.pwn.required", "false")] else "got {!r}".format(got)
+    check("the neutralizer empties a clean driver with three overrides and leaves a smudge-only driver",
+          overrides)
+
+    # Real dirt is still detected under neutralization, without running the filter.
+    def modified(root):
+        Path(root, target).write_bytes(b"changed\n")
+
+    def untracked(root):
+        Path(root, ".working/toml/new.txt").write_bytes(b"new\n")
+        return ".working/toml/new.txt"
+
+    def staged(root):
+        Path(root, target).write_bytes(b"staged change\n")
+        fixture_git(root, "--literal-pathspecs", "add", "--", target)
+
+    for label, change in (("an unstaged modification", modified), ("an untracked file", untracked),
+                          ("a deleted tracked file", lambda root: Path(root, target).unlink()),
+                          ("a staged change", staged),
+                          ("an executable-mode change", lambda root: os.chmod(str(Path(root, target)), 0o755))):
+        def detected(label=label, change=change):
+            root = filtered("dirt-" + label.replace(" ", "-"), "pwn")
+            wanted = change(root) or target
+            Path(root, "SENTINEL").unlink(missing_ok=True)
+            dirty = probe(root)
+            if wanted not in dirty:
+                return "not detected: {!r}".format(dirty)
+            return "the planted filter ran" if Path(root, "SENTINEL").exists() else None
+        check("{} is detected dirty under neutralization".format(label), detected)
+
+    def eol_kept():
+        root = store("eol", {".gitattributes": b".working/toml/text.dat text eol=crlf\n",
+                             ".working/toml/text.dat": b"a\nb\nc\n"})
+        Path(root, ".working/toml/text.dat").unlink()
+        fixture_git(root, "--literal-pathspecs", "checkout", "--", ".working/toml/text.dat")
+        if b"\r\n" not in Path(root, ".working/toml/text.dat").read_bytes():
+            return "the fixture's worktree file is not CRLF"
+        os.utime(str(Path(root, ".working/toml/text.dat")), future)
+        dirty = probe(root)
+        return None if dirty == [] else "the CRLF worktree read dirty: {!r}".format(dirty)
+    check("built-in text/eol conversion is kept: a CRLF worktree of an LF blob reads clean", eol_kept)
+
+    def corrupt():
+        root = filtered("corrupt", "pwn")
+        Path(root, ".git", "config").write_text("[this is not valid\n = = =\n", encoding="utf-8")
+        try:
+            obs._filter_neutralizing_config(git, str(root))
+        except RuntimeError:
+            return refused(lambda: probe(root))
+        return "the neutralizer read a corrupt configuration"
+    check("a corrupt configuration fails closed in the neutralizer and the probe", corrupt)
+
+    def normalizing():
+        """The git-lfs shape: the index holds the cleaned blob and the worktree the uncleaned body."""
+        root = store("normalizing")
+        fixture_git(root, "config", "filter.norm.clean", "sed 's/[0-9]//g'")
+        fixture_git(root, "config", "filter.norm.required", "true")
+        Path(root, ".gitattributes").write_text(".working/norm.md filter=norm\n", encoding="utf-8")
+        Path(root, ".working/norm.md").write_bytes(b"abc123\n")
+        fixture_git(root, "--literal-pathspecs", "add", "-A")
+        fixture_git(root, "commit", "-q", "-m", "a normalizing filter")
+        if fixture_git(root, "show", ":.working/norm.md") != b"abc\n":
+            return "the fixture's index blob is not the cleaned body"
+        os.utime(str(Path(root, ".working/norm.md")), future)
+        native = obs._run_git(git, str(root), status_args)
+        if not native.completed or native.out != b"":
+            return "the store is not clean with its filter active"
+        os.utime(str(Path(root, ".working/norm.md")), future)
+        if ".working/norm.md" not in probe(root):
+            return "the normalizing store read clean under neutralization"
+        Path(root, ".working/toml/genuine.txt").write_bytes(b"real\n")
+        dirty = probe(root)
+        return None if ".working/toml/genuine.txt" in dirty else "real dirt was missed: {!r}".format(dirty)
+    check("a normalizing filter over-refuses under neutralization and real dirt is still detected",
+          normalizing)
 
 
 if __name__ == "__main__":

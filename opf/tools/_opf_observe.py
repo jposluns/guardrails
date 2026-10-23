@@ -1198,7 +1198,8 @@ def self_test_isolated():
     worklog.toml or the archive/ listing cannot be read, when the HEAD manifest's worklog generation is
     unreadable, when the archive/, the active worklog.toml or, at generation 2, the worklog/ is committed as
     another entry type, and, at generation 2, when the worklog/ listing cannot be read or holds a file or a
-    directory that is not a worklog entry. Judged ONLY on
+    directory that is not a worklog entry; and the bounded capture feeding 128 KiB of stdin to a child that
+    first writes 128 KiB, without deadlock. Judged ONLY on
     gather's RETURNED structure (never by grepping git's stdout for verdicts).
     Returns 0 clean, 1 on a failed check, 2 on a harness error. When git is not on PATH at all it SKIPs
     clean, like the POSIX-signal watchdogs, since every path depends on git."""
@@ -1253,7 +1254,18 @@ def self_test_isolated():
         tomllib.loads, tomllib.load = real_loads, real_load
         sys.set_int_max_str_digits(_prev_digits)
 
-    machine_rel = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+    # The bounded capture feeds stdin while it drains stdout and stderr (check_ignored's NUL-framed
+    # transport): a child that writes 128 KiB, more than a pipe buffer, before it reads its own 128 KiB of
+    # input completes within the bound rather than deadlocking against a blocked stdin write.
+    transport = _capture_bounded(
+        [sys.executable, "-I", "-B", "-c",
+         "import sys; sys.stdout.buffer.write(b'o' * 131072); sys.stdout.buffer.flush(); "
+         "sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+        _scrubbed_env(), 10, 524288, input_bytes=b"i" * 131072)
+    check("bounded-stdin-transport-drains", transport.completed and transport.rc == 0
+          and transport.out == b"o" * 131072 + b"i" * 131072)
+
+    machine_rel ="{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
 
     # A git environment for the FIXTURE setup calls: config-neutralized (no host identity or hooks), with a
     # committer identity supplied per-call via -c so a commit needs no ambient config.
@@ -1584,7 +1596,7 @@ def self_test_isolated():
     print("opf observe self-test: PASS (tracked/untracked; 0/1/multiple remotes; prior from a committed "
           "HEAD with an engine-matching immutable-body digest; unborn HEAD -> empty prior; a non-repo dir "
           "omits remote and prior with a note; the ids HEAD held, worklog and archive included, and an "
-          "unreadable or malformed archive or worklog omitting them alone)")
+          "unreadable or malformed archive or worklog omitting them alone; bounded stdin transport)")
     return 0
 
 
