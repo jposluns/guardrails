@@ -40,7 +40,7 @@ removed: the verb refuses every argument list on every root, a NOT-ADOPTED one i
 pointer to adoption and the prompt pack, parsing no argument, reading no input file and writing nothing.
 
 `init` HAS landed: `opf init [--root DIR]` creates validated store sources, a pointer, and a starter
-`CHANGELOG.md` when none exists, without git writes or rendering.
+`CHANGELOG.md`, without git writes or rendering, refusing an existing root `CHANGELOG.md` or `VERSION`.
 `absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
 prints a changelog draft or freeze digest without writing files.
 `record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, and `worklog-append`
@@ -18360,6 +18360,21 @@ def _init_main(rest):
             # The resolver also refuses an existing, empty .working directory. Do not reinterpret a
             # CANNOT-EVALUATE result as permission to initialize a partial store.
             raise RuntimeError("store resolution refused: {}".format(res.detail))
+        # A pre-existing root deliverable is undispositioned content plain init never keeps (spec
+        # 14.2): the declared CHANGELOG.md, and the product-root VERSION spec 14 names beside the
+        # declared destinations. lstat, so a symlink there is refused, never followed. Both run
+        # after the store checks (an initialized root still names its existing pointer first) and
+        # before the history scan (a deleted store whose CHANGELOG.md stayed is refused here).
+        if journal._lstat_at(root_fd, "CHANGELOG.md") is not None:
+            raise RuntimeError("an existing CHANGELOG.md sits at the declared deliverable "
+                               "destination; plain opf init never keeps undispositioned content "
+                               "(spec 14.2); give it a disposition with opf adopt, or move it "
+                               "aside and retry")
+        if journal._lstat_at(root_fd, "VERSION") is not None:
+            raise RuntimeError("an existing VERSION sits at the product-root VERSION deliverable "
+                               "path (spec 14); plain opf init never keeps undispositioned "
+                               "content (spec 14.2); give it a disposition with opf adopt, or "
+                               "move it aside and retry")
 
         stage = "building-and-validating-source-payloads"
         working = _opf_store.WORKING_DIRNAME
@@ -18378,8 +18393,7 @@ def _init_main(rest):
         }
         payloads[_opf_store.POINTER_REL] = _opf_emit.emit_checked(
             {"store": {"target": "dir:."}}).encode("utf-8")
-        if journal._lstat_at(root_fd, "CHANGELOG.md") is None:
-            payloads["CHANGELOG.md"] = b"# Changelog\n"
+        payloads["CHANGELOG.md"] = b"# Changelog\n"
         directories = [working, machine]
 
         stage = "checking-the-destination-inventory"
@@ -18392,7 +18406,7 @@ def _init_main(rest):
         index_paths = set(payloads) | {working, _opf_store.LOCAL_POINTER_REL}
         _init_untracked(git, repo, root, index_paths)
         # The ignore check is scoped to the destinations init actually CREATES (store dirs plus the
-        # committed pointer, the machine sources, and the optional CHANGELOG); the local pointer that
+        # committed pointer, the machine sources, and the fresh CHANGELOG); the local pointer that
         # index_paths carries for _init_untracked's prior-state detection is a path init never creates
         # and adopters legitimately gitignore, so it must not make init refuse.
         _init_unignored(git, repo, root, set(directories) | set(payloads))
