@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f18652fbf45c0e6e9be375a99389dd2273aad9cfe44104750adf26227b033844"
+tree-sha256 = "d5b4fda23fbabdefe208641629aebf7f2d0119566916ae343dd099007f2da76c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2367,7 +2367,7 @@ sha256 = "23d2d502c58498cf4cbfde61246318b933d0cff8bd94f70d336ccff52fbb78c8"
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
 bytes = 3792
-sha256 = "f49d83cf5733528bf5b4c5db03cc44f8283ee2fa50b96c2fc77fbd8f9f0b42cb"
+sha256 = "e6bdaabb2a76529a432e856adb48c5c915fad367017498c20628e5855882512f"
 
 [[sources]]
 path = "LICENSE"
@@ -2382,7 +2382,7 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 [[sources]]
 path = "README.md"
 bytes = 5197
-sha256 = "522a5eaade1e81fb057ce49eb85259cda9c95eab0d2a744dc1d2c92c39ed597f"
+sha256 = "15acbf41db1298538aac1bf712a871b35edec590f39412944fff92a45bfaa772"
 
 [[sources]]
 path = "RELEASING.md"
