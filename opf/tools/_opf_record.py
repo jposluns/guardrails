@@ -3476,6 +3476,16 @@ def _self_test_contexts(check, root_fd, now):
         _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
         check("the active-series proof holds with every imported row",
               _counter_state(ctx, ctx.counters.model)[1] == [])
+        # A homes-1 store declaring the imported series' own spec_version 1.3.0 stays off under both
+        # toggles: the imported series activates only inside the homes-2 declaration, so an imported row
+        # breaks the proof and the clean map alone proves it (red when the flag drops homes_generation >= 2).
+        ctx = ctx_of(imported_full)
+        ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
+        homes1_rows = _counter_state(ctx, ctx.counters.model)[1] != []
+        ctx = ctx_of(full)
+        ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
+        check("an imported row breaks the proof on a 1.3.0 homes-1 manifest with imported-series support",
+              homes1_rows and _counter_state(ctx, ctx.counters.model)[1] == [])
         imported_partial = dict(imported_full)
         del imported_partial["imported:BI"]
         ctx = ctx_of(imported_partial)
@@ -3497,7 +3507,16 @@ def _self_test_contexts(check, root_fd, now):
         ctx.worklog = _model_operand(ctx.worklog.rel, dict(schema=marker, entry=[]))
         check("a non-integer worklog schema marker refuses ({!r})".format(marker),
               _refuses(lambda ctx=ctx: _worklog_entries(ctx), "schema-1"))
-    _self_test_planners(check, ctx_of, full, now)
+    # The planner fixtures claim against the clean map on an inactive store, so a proof that wrongly
+    # requires imported rows there refuses their first claim: that refusal is this named failure, never a
+    # harness error that hides the proof vectors above (red when the record gate is dropped).
+    planners_ran = False
+    try:
+        _self_test_planners(check, ctx_of, full, now)
+        planners_ran = True
+    except RecordError:
+        pass
+    check("the planner fixtures claim against the clean map without a refusal", planners_ran)
 
 
 def _model_operand(rel, model):

@@ -6274,6 +6274,19 @@ def self_test():
                   and any("1 reserved imported:BI number(s)" in m and "the first imported:BI-2" in m
                           for m in _i3_msgs(_i3_rnob, "C-NO-DELETION"))
                   and not any("allocated imported:BI-<n>" in m for m in _i3_msgs(_i3_rnob, "C-NO-DELETION")))
+            # A malformed imported baseline decides nothing either: a clean key (BI-9) in the prior's
+            # imported member makes it malformed, so the exemption is the same named CANNOT-EVALUATE even
+            # though the member also lists imported:BI-2 (red when the malformed-baseline arm of
+            # _imported_prior_holdings is dropped: the partial baseline then reads as holding nothing and
+            # the reserved number is exempted).
+            _i3_rmf = _i3_rrun(_i3_machine(imp={"imported:BI": 2}, leaves=copy.deepcopy(_i3_one_rsv)), (2,),
+                               obs=_i3_obs({"BI-9": _record_digest(_i3_row("imported:BI-1")),
+                                            "imported:BI-2": _record_digest(_i3_row("imported:BI-2"))}))
+            check("imported-reserved-number-undecided-with-malformed-baseline",
+                  _i3_rmf is not None and _i3_rmf.checks.get("C-NO-DELETION") == "CANNOT-EVALUATE"
+                  and any("1 reserved imported:BI number(s)" in m and "the first imported:BI-2" in m
+                          for m in _i3_msgs(_i3_rmf, "C-NO-DELETION"))
+                  and not any("allocated imported:BI-<n>" in m for m in _i3_msgs(_i3_rmf, "C-NO-DELETION")))
             _i3_rwm = _i3_machine(imp={"imported:WL": 3}, leaves={
                 "worklog.imported.toml": {"schema": 1, "entry": [imp_wl(1), imp_wl(3)]}})
             check("imported-reserved-wl-gap-exempt",
@@ -6287,6 +6300,15 @@ def self_test():
                   and any("1 reserved imported:WL number(s)" in m and "the first imported:WL-2" in m
                           for m in _i3_msgs(_i3_rwn, "C-CONTIGUITY"))
                   and not any("imported:WL-2 is missing" in m for m in _i3_msgs(_i3_rwn, "C-CONTIGUITY")))
+            # The imported:WL twin of the malformed-baseline vector, on C-CONTIGUITY.
+            _i3_rwf = _i3_rrun(copy.deepcopy(_i3_rwm), (2,), key="imported:WL",
+                               obs=_i3_obs({"BI-9": _record_digest(imp_wl(1)),
+                                            "imported:WL-2": _record_digest(imp_wl(2))}))
+            check("imported-reserved-wl-undecided-with-malformed-baseline",
+                  _i3_rwf is not None and _i3_rwf.checks.get("C-CONTIGUITY") == "CANNOT-EVALUATE"
+                  and any("1 reserved imported:WL number(s)" in m and "the first imported:WL-2" in m
+                          for m in _i3_msgs(_i3_rwf, "C-CONTIGUITY"))
+                  and not any("imported:WL-2 is missing" in m for m in _i3_msgs(_i3_rwf, "C-CONTIGUITY")))
             # Append-only history over the imported leaves (spec 8.3): an unchanged prior imported record
             # passes; an edited or vanished one is a finding; a prior with no imported baseline is a named
             # CANNOT-EVALUATE; an imported counter regression is a C-HISTORY-COUNTERS finding.
@@ -6333,6 +6355,15 @@ def self_test():
                   and any("malformed" in m for m in _i3_msgs(_i3_hlf, "C-HISTORY-APPEND-ONLY"))
                   and not any("absent from the imported leaves" in m
                               for m in _i3_msgs(_i3_hlf, "C-HISTORY-APPEND-ONLY")))
+            # A prior imported digest that is not a string is the SAME malformed-prior cant, never a changed
+            # record finding (red when the digest-type arm is dropped from the prior normalization: the
+            # integer then normalizes and differs from the present record's digest).
+            _i3_hdt = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_one), obs=_i3_obs({"imported:BI-1": 5}))
+            check("imported-prior-non-string-digest-member-when-active",
+                  _i3_hdt is not None and _i3_hdt.checks.get("C-HISTORY-APPEND-ONLY") == "CANNOT-EVALUATE"
+                  and any("malformed" in m for m in _i3_msgs(_i3_hdt, "C-HISTORY-APPEND-ONLY"))
+                  and not any("changed since the prior committed snapshot" in m
+                              for m in _i3_msgs(_i3_hdt, "C-HISTORY-APPEND-ONLY")))
             # An unreadable imported leaf, or one with no [[record]] array, is a named CANNOT-EVALUATE and is
             # never read as an empty leaf: neither its allocated ids nor a prior imported record are reported
             # deleted (spec 11: an unreadable input fails closed; red when an unread leaf joins the
