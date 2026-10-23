@@ -1929,11 +1929,16 @@ def _check_receipts(recs, by_id, rep):
 
 
 def _check_handoff(recs, rep):
-    """C-HANDOFF (R2): at most one `current` handoff across the whole store (OPF-SPEC 8.5)."""
-    current = [r.id for r in recs if r.rtype == "handoff" and r.state == "current" and r.qual is None]
+    """C-HANDOFF (R2): at most one `current` handoff among clean records authored by non-importer actors
+    (OPF-SPEC 8.5, 8.6). An imported-series row or an importer-authored record is history and never counts.
+    Only a KNOWN importer kind is exempt: a record whose actor kind cannot be read (None) counts, fail-closed
+    (validate_record already names the unreadable actor), never a silent pass."""
+    current = [r.id for r in recs if r.rtype == "handoff" and r.state == "current" and r.qual is None
+               and r.location != "imported" and r.actor_kind != "importer"]
     if len(current) > 1:
-        rep.finding("C-HANDOFF: {} handoffs are 'current'; at most one current handoff exists across the "
-                    "store (spec 8.5)".format(len(current)))
+        rep.finding("C-HANDOFF: {} clean non-importer handoffs are 'current'; at most one current handoff "
+                    "exists among clean records authored by non-importer actors (spec 8.5)".format(
+                        len(current)))
 
 
 def decision_chains(recs, by_id):
@@ -5867,6 +5872,47 @@ def self_test():
         f["handoff.index.toml"] = idx([ho(1), ho(2)])
         f["counters.toml"] = counters(HO=2)
         check("r2-two-current-handoffs-invalid", run(f).status == INVALID)
+
+        def handoff_msgs(res):
+            return res.by_check.get("C-HANDOFF", []) if res is not None else []
+
+        # C-HANDOFF counts only clean records authored by non-importer actors (spec 8.5/8.6): an
+        # importer-authored current handoff is history beside the one clean current handoff (red if the
+        # series/actor filter is removed).
+        f = clean_machine()
+        f["handoff.index.toml"] = idx([ho(1), envelope("HO-2", "handoff", "current",
+                                                       actor={"kind": "importer", "id": "import-assistant"})])
+        f["counters.toml"] = counters(HO=2)
+        r2imp = run(f)
+        check("r2-importer-current-handoff-not-counted",
+              r2imp.status == VALID and not handoff_msgs(r2imp))
+        # Two clean non-importer current handoffs (a maintainer and an automation author) stay a C-HANDOFF
+        # finding (red if the filter excludes any non-importer kind).
+        f = clean_machine()
+        f["handoff.index.toml"] = idx([ho(1), envelope("HO-2", "handoff", "current",
+                                                       actor={"kind": "automation"})])
+        f["counters.toml"] = counters(HO=2)
+        r2mix = run(f)
+        check("r2-two-clean-non-importer-handoffs-invalid",
+              r2mix.status == INVALID and len(handoff_msgs(r2mix)) == 1)
+        # An actor that cannot be read is never taken for an importer: the record counts toward the limit
+        # (fail-closed, as validate_record applies the importer exceptions on a KNOWN kind only), so C-HANDOFF
+        # still fires beside the C-RECORDS finding naming the missing actor (red on a silent pass).
+        f = clean_machine()
+        _ho_noactor = ho(2)
+        del _ho_noactor["actor"]
+        f["handoff.index.toml"] = idx([ho(1), _ho_noactor])
+        f["counters.toml"] = counters(HO=2)
+        r2na = run(f)
+        check("r2-unreadable-actor-handoff-counted",
+              r2na.status == INVALID and len(handoff_msgs(r2na)) == 1
+              and any("missing required field: actor" in m for m in r2na.findings))
+        # An imported-series row never counts, whatever its actor (the series half of the filter).
+        _hrep = _Report()
+        _hrep.ran("C-HANDOFF")
+        _check_handoff([_make_rec(ho(1), "handoff", "active"),
+                        _make_rec(ho(2), "handoff", "imported")], _hrep)
+        check("r2-imported-series-handoff-not-counted", not _hrep.findings)
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1), pd(2, supersedes="PD-1"), pd(3, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=3)
