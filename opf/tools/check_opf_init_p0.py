@@ -186,19 +186,8 @@ def vectors(f):
     add("compat/bad-provenance",
         lambda m: m.validate_compatibility(manifest, provenance=b"not toml"),
         "REFUSED", "COMPATIBILITY")
-    add("compat/old-needs-upgrade", lambda m: m.validate_compatibility(old[p0.MANIFEST_PATH]),
+    add("compat/older-version-refused", lambda m: m.validate_compatibility(old[p0.MANIFEST_PATH]),
         "REFUSED", "VERSION")
-    add("compat/version-only-upgrade", lambda m: m.validate_upgrade_delta(old, d2a))
-    invented = dict(d2a, **{operation.PROVENANCE_RELPATH: provenance})
-    add("compat/no-invented-provenance",
-        lambda m: m.validate_upgrade_delta(old, invented), "REFUSED", "UPGRADE")
-    changed = dict(d2a)
-    changed[operation.COUNTERS_RELPATH] += b"# changed\n"
-    add("compat/no-counter-change",
-        lambda m: m.validate_upgrade_delta(old, changed), "REFUSED", "UPGRADE")
-    other = dict(d2a)
-    other[p0.MANIFEST_PATH] = manifest.replace(b'posture = "required"', b'posture = "optional"')
-    add("compat/no-other-field", lambda m: m.validate_upgrade_delta(old, other), "REFUSED", "UPGRADE")
     def homes(m):
         # Verify the generation fence even if a later resolver activates generation 2.
         from unittest.mock import patch
@@ -261,15 +250,10 @@ REVERSIONS = (
      'True', "refuse/coupled-as-source"),
     ("F19", 'set(staged_paths) <= sources', 'True', "refuse/staged-V"),
     ("optional-provenance", 'if provenance is not None:', 'if True:', "compat/d2a-retained"),
-    ("upgrade-files", 'set(before) == set(after)\n             and all(before[p] == after[p] for p in before if p != MANIFEST_PATH)',
-     'True', "compat/no-invented-provenance"),
-    ("upgrade-field", 'new == expected', 'True', "compat/no-other-field"),
     ("homes", 'store.SUPPORTED_HOMES == 1 and store.homes_generation(manifest) == 1',
      'True', "compat/homes-fence"),
     ("source-result", 'type(value) is int and value in (0, 2)',
      'False', "accept/source-only-zero"),
-    ("upgrade-dispatch", 'return new', 'raise _Refusal("DISPATCH", "upgrade", "removed")',
-     "compat/version-only-upgrade"),
     ("completed-generator", 'if completed:', 'if False:', "accept/completed-recorded-generator"),
     ("coupled-type", 'type(value) is operation.InitResult and type(getattr(value, "status", None)) is str\n                 and value.status in RESULT_STATUSES',
      'True', "refuse/zero-as-coupled"),
@@ -288,7 +272,6 @@ def red_on_revert(source, f):
                                       if s != "VIEWS-READY"),
             "coupled-type": ("refuse/result-status", "refuse/result-missing-status"),
             "F19": ("refuse/staged-K", "refuse/staged-E", "refuse/staged-C"),
-            "upgrade-files": ("compat/no-counter-change",),
             "pins": ("refuse/pin-spec_version", "refuse/pin-provenance_format",
                      "refuse/pin-views_generator", "refuse/interrupted-recorded-generator",
                      "refuse/completed-spec-pin"),

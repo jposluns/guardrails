@@ -327,8 +327,9 @@ def _filter_neutralizing_config(git, store_root, timeout=_GIT_TIMEOUT_S):
     clean/process filters and MUST pass these overrides to _run_git too; a verb that never compares worktree content
     (rev-parse, ls-files, config, cat-file, remote, show HEAD:<blob>) does not and must not pay the cost. A
     residual TOCTOU remains: enumeration and the status are two calls, so a driver ADDED to .git/config
-    between them could exec on the status. The upgrade's dirty-probe runs as a read-only gate BEFORE the
-    single-writer lease is claimed (opf.py step 3 precedes step 4), so the lease does NOT bound this window;
+    between them could exec on the status. A writer's dirty-probe runs as a read-only gate BEFORE the
+    single-writer lease is claimed (opf record's step 6 probes, then acquires), so the lease does NOT
+    bound this window;
     the mitigation is that adding a driver between the two calls requires an adversary with concurrent write
     access to the store's .git/config, who could already rewrite HEAD (or the driver) directly, so only a raw
     filter-free reimplementation (rejected for its text/eol regression) would close it fully."""
@@ -1016,13 +1017,7 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
                          _MANIFEST_NAME, notes)
     if manifest is None:
         return None
-    # The prior committed snapshot may predate the OPFiles base-table rename: during `opf upgrade` the
-    # working tree is already [opf] while HEAD is still the legacy [devprocess] store. Read the base under
-    # the current token, falling back to the retired one, so an across-time comparison against a legacy
-    # prior reconstructs (spec 9.2) instead of falsely omitting the whole prior.
     base = manifest.get(_opf_store.STANDARD_TOKEN)
-    if not isinstance(base, dict):
-        base = manifest.get(_opf_store.PRIOR_STANDARD_TOKEN)
     layout = base.get("layout") if isinstance(base, dict) else None
     if layout not in _LAYOUTS:
         notes.append("prior: HEAD manifest declares layout {!r}, which is not a recognized store layout; "

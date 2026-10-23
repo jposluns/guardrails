@@ -62,8 +62,8 @@ proposal wrote, and its rejection back to `sent` removes those two keys again.
 `receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
 `done`, so no ratified item can exist without its receipt.
 
-Every subcommand runs ONE shared operation sequence (_run_operation), the `opf upgrade` shell applied to
-record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
+Every subcommand runs ONE shared operation sequence (_run_operation), the in-place writer shell applied to
+record authoring (spec 8.8 is normative):
   1. resolve the store; reconcile any interrupted `opf record` journal FIRST. Recovery writes the store,
      so it runs only under the single-writer lease (a held lease refuses before any recovery write and is
      never seized) and only when every open transaction's operand still holds a state the journal explains (an intervening
@@ -141,7 +141,7 @@ is doctor's own finding code).
 
 DISCLOSED RESIDUALS: there is no pre-doctor, so a store invalid in a way the preconditions do not inspect
 fails only at the final doctor, after publication (the change is then left for review with scoped
-recovery text, as `opf upgrade` does); a completed transaction's journal directory is retained under
+recovery text); a completed transaction's journal directory is retained under
 the generation's record journal home as local recovery evidence; the lease is not made observable at a sync target (no
 sync runtime in this build, so the guarantee is single-host single-writer); a signal
 delivered at any point may leave a lease, an operation capability record or a journal lock in place,
@@ -581,16 +581,16 @@ class Context:
 
 def _load_manifest(ctx):
     """Read and validate the manifest (never an operand of this verb). It must be doctor-grade VALID at
-    the tooling spec_version, in the inline layout: an older store takes `opf upgrade` first."""
+    the tooling spec_version, in the inline layout; this tooling defines no store upgrade."""
     manifest = _read_operand(ctx.root_fd, ctx.rel(_opf_store.MANIFEST_NAME)).model
     mv = _opf_store.validate_manifest(manifest)
     if mv.status != _opf_store.VALID:
         raise RecordError("the store manifest is not VALID ({}); fail-closed".format("; ".join(mv.findings)))
     base = manifest.get(_opf_store.STANDARD_TOKEN)
     if base.get("spec_version") != _opf_store.SUPPORTED_SPEC_VERSION:
-        raise RecordError("the store declares spec_version {!r}, not the tooling's {}; run opf upgrade "
-                          "first (fail-closed)".format(base.get("spec_version"),
-                                                       _opf_store.SUPPORTED_SPEC_VERSION))
+        raise RecordError("the store declares spec_version {!r}, not the tooling's {}; this tooling "
+                          "defines no store upgrade (fail-closed)".format(base.get("spec_version"),
+                                                                         _opf_store.SUPPORTED_SPEC_VERSION))
     if base.get("layout") != "inline":
         raise RecordError("layout {!r} is not supported by this build (inline only); fail-closed".format(
             base.get("layout")))

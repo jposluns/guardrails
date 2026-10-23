@@ -1945,8 +1945,8 @@ def _member_bound_checks(roster):
     check("config/member-roster-figures",
           (problems, len(SIZING_ACCOUNT_ROSTER), SIZING_ACCOUNT_TIMED, len(SIZING_MEASURED),
            len(SIZING_MALFORMED_MEASURED), hashlib.sha256(frozen.encode("utf-8")).hexdigest()),
-          ([], 101, 89, 11, 10,
-           "bcddd3095821382d212e55807556964425b56e99600eff248aa87ee4b3fd0902"))
+          ([], 100, 88, 10, 9,
+           "7e2bb7449914bbeb00a01c96d7d680cf24ddf57755bd2b56306815577e37b94d"))
     # The oracle recomputes every live figure from the roster and the frozen constants, so an
     # expectation no longer inherits a drifted figure through the baseline above. It is not an
     # independent derivation: every expression but members mirrors _roster_figures's, so an
@@ -2518,8 +2518,6 @@ def _core_lanes(base):
              ("scrub_git_environment",)),
             ("route/check-release-delta", "tools/check_release_delta.py",
              ("scrub_git_environment",)),
-            ("route/check-opf-upgrade", "opf/tools/check_opf_upgrade.py",
-             ("_scrubbed_env",)),
             ("route/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py",
              ("scrub_git_environment",)),
     ):

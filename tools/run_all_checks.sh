@@ -105,8 +105,6 @@ run_gate "opf-init" python3 -I -B opf/tools/check_opf_init.py
 run_gate "opf-init-contract-selftest" python3 -I -B opf/tools/_opf_init_contract.py --self-test
 run_gate "opf-init-contract-check-selftest" python3 -I -B opf/tools/check_opf_init_contract.py --self-test
 run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contract.py
-run_gate "opf-upgrade-selftest" python3 -I -B opf/tools/check_opf_upgrade.py --self-test
-run_gate "opf-upgrade" python3 -I -B opf/tools/check_opf_upgrade.py
 run_gate "opf-record-selftest" python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py --self-test

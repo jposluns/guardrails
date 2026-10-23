@@ -453,7 +453,7 @@ Each case runs on its own copy of that template; the root is removed in a finall
       _DECLARED_INJECTIONS); the child receives the token pools alone, as what it needs to raise the
       declared injections. A line binds only when its bytes carry exactly one recorded, unconsumed
       token whose label the flip declares and are the backstop envelope the record CLI shares with
-      opf upgrade and opf adopt around a repr EQUAL to one the parent computed for that token's
+      opf adopt around a repr EQUAL to one the parent computed for that token's
       injection; anything the child prints that the parent did not record binds nothing, and
       a token the parent never minted binds nothing however it is shaped (tokens are unguessable and
       parent-held). So an unrelated crash under a declared flip, another exception type carrying the
@@ -1517,7 +1517,8 @@ def _interrupted(fx, name, point="after-apply-0"):
 def t12_recovery_lease(fx):
     env = fx.env
     root = _interrupted(fx, "t12-live-peer")
-    # A live peer takes the shared lease through the upgrade verb, as `opf upgrade` does.
+    # A live peer takes the shared lease under another verb's label (`upgrade`, which no writer of this
+    # tooling now uses), so the record recovery treats it as a live peer, never its own leftover.
     root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
     try:
         peer = guard.acquire_lease(root_fd, MACH, "upgrade")
@@ -7302,7 +7303,7 @@ def _oop_declared(allowed):
 
 # The diagnostic envelope of the record CLI backstops (record.cli, opf._cmd_record) in a line _BACKSTOP
 # found: the printed repr of the exception is everything between the fixed head and the fixed tail. The
-# envelope is shared: the backstops of opf upgrade and of opf adopt plan and status print the same one,
+# envelope is shared: the backstops of opf adopt plan and status print the same one,
 # and the verb prefix that tells them apart lies before the _BACKSTOP match, so the envelope alone never
 # shows which verb printed a line; only the recorded token and parent-computed repr, which the record
 # tests' injections alone carry, make a line bind.
