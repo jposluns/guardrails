@@ -353,10 +353,12 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
 
-  # The closure work is split between two jobs because the whole roster's worst case does not fit
-  # one job's time limit; the gate's own self-test checks the partition (every leg in exactly one
-  # job) and each job's worst case against that job's limit, and the flip (negative leg) runs in
-  # the job whose legs hold opf-tooling-selftest.
+  # The closure work is split between three jobs because the whole roster's worst case does not fit
+  # one job's time limit, and opf-homes-selftest's bound, sized above the budget the config lanes
+  # grant its command, fits neither of the other two (it runs alone in opf-closure-c); the gate's
+  # own self-test checks the partition (every leg in exactly one job) and each job's worst case
+  # against that job's limit, and the flip (negative leg) runs in the job whose legs hold
+  # opf-tooling-selftest.
   opf-closure-a:
     name: OPF standalone closure A
     runs-on: ubuntu-latest
@@ -398,6 +400,27 @@ jobs:
       - name: OPF standalone-closure gate
         shell: bash
         run: python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-b
+
+  opf-closure-c:
+    name: OPF standalone closure C
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: OPF standalone-closure gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-c
+
+      - name: OPF standalone-closure gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-c
 
   release:
     name: Corpus, release and versioning
@@ -1179,6 +1202,7 @@ jobs:
       - opf
       - opf-closure-a
       - opf-closure-b
+      - opf-closure-c
       - release
       - generated
       - selftest-execution
