@@ -1003,10 +1003,9 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
 
 def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
     """Reconstruct the prior committed snapshot from HEAD, shaped exactly as _opf_check._normalize_prior
-    accepts: {releases, counters_high, records, digests, imported, held}. Reads the HEAD manifest to learn the
-    layout and the declared types, then the version and counters ledgers, each declared non-worklog type
-    index and the imported leaves (_reconstruct_imported: the empty baseline where the HEAD manifest does
-    not activate the imported series). Records
+    accepts: {releases, counters_high, records, digests, held} plus, only where the HEAD manifest activates
+    the imported series, the `imported` baseline member. Reads the HEAD manifest to learn the layout and the
+    declared types, then the version and counters ledgers and each declared non-worklog type index. Records
     and digests are built per layout: an INLINE index row IS the record body, so its status is the body's and
     its digest is _opf_check._record_digest(body); a PER-RECORD index row already carries {id, state, digest},
     so the row supplies both directly. ANY absent object or malformed shape omits the WHOLE prior (a partial
@@ -1099,35 +1098,44 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
                     return None
                 records[rid] = (tname, state)
                 digests[rid] = digest
-    imported = _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes)
-    if imported is None:
-        return None
-    prior = {"releases": releases, "counters_high": counters_high, "records": records, "digests": digests,
-             "imported": imported}
+    prior = {"releases": releases, "counters_high": counters_high, "records": records, "digests": digests}
     held = _held_ids(git, store_root, machine_rel, prefix, {"opf": base}, records, notes)
     if held is not None:
         prior["held"] = held
+    # The imported baseline joins the prior only where the HEAD manifest ACTIVATES the series
+    # (_opf_check.imported_series_active, the flag the doctor's imported grading reads: the graded
+    # 2.0.0 / homes = 2 declaration under this tooling's imported-series support). An inactive HEAD
+    # carries NO baseline member rather than an empty one: its imported-leaf bytes, if any, were
+    # never read under series rules, so an empty claim would let an edit pass append-only where the
+    # working tree has since activated; with the member absent the doctor discloses the named
+    # no-baseline CANNOT-EVALUATE instead. (An unborn HEAD keeps the empty-prior {} member: nothing
+    # was committed at all, so the empty baseline is exact.)
+    if _opf_check.imported_series_active(manifest):
+        imported = _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes)
+        if imported is None:
+            return None
+        prior["imported"] = imported
     return prior
 
 
 def _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes):
     """The prior imported baseline {imported id: canonical body digest} for the across-time immutability of
-    the imported leaves (spec 8.3). It is read only where the HEAD manifest activates the imported series
-    (_opf_check.imported_series_active, the flag the doctor's imported grading reads: the graded 2.0.0 /
-    homes = 2 declaration and this tooling's imported-series support), and any other HEAD manifest yields
-    the honest empty baseline. A leaf absent from the HEAD machine-store tree contributes no
+    the imported leaves (spec 8.3). The caller gates it on the HEAD manifest's activation flag. The leaf
+    roster derives from the SAME authoritative type set the doctor grades (_opf_check._authoritative_types
+    over the enabled modules and the declared [types]), so a HEAD manifest that omits a baseline type or
+    lists a disabled module type cannot shrink the baseline below the doctor's managed set. A leaf absent
+    from the HEAD machine-store tree contributes no
     rows; a listed leaf that cannot be read or parsed, a non-array row list, or a row with no string id omits
     the WHOLE prior, as for the clean files. Returns the dict, or None (omit + note)."""
-    if not _opf_check.imported_series_active(manifest):
-        return {}
     listing = _run_git(git, store_root, ["ls-tree", "--name-only", "HEAD:{}{}".format(prefix, machine_rel)])
     if not listing.completed or listing.rc != 0:
         notes.append("prior: the machine store tree {} cannot be listed at HEAD; the prior committed snapshot "
                      "is omitted".format(machine_rel))
         return None
     present = set(listing.out.decode("utf-8", "replace").splitlines())
+    enabled = _opf_check._authoritative_types(_opf_check._enabled_modules(manifest), types_tbl)
     imported = {}
-    for name in sorted(_opf_store.imported_leaf_names(types_tbl)):
+    for name in sorted(_opf_store.imported_leaf_names(enabled)):
         if name not in present:
             continue
         data = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, name), name, notes)
@@ -1248,9 +1256,11 @@ def self_test_isolated():
     _record_digest over the same committed content); an unborn HEAD -> the honest empty prior; a
     non-repository directory -> the remote and prior fields OMITTED with a note while tracked reads
     "untracked"; the imported baseline of a homes-2 HEAD that ACTIVATES the series under the homes-2 test
-    toggle (the committed leaf rows, worklog entries included, under the engine's digest, and the whole
-    prior omitted on a row with no id, a leaf that does not read or parse, a row list that is not an
-    array, a row that cannot be canonicalized, or a machine tree that cannot be listed); and the prior's
+    toggle (the member absent while the series is inactive, the committed leaf rows, worklog entries
+    included, under the engine's digest once it is active, every authoritative type's leaf read even where
+    the HEAD manifest omits the type, and the whole prior omitted on a row with no id, a leaf that does not
+    read or parse, a row list that is not an array, a row that cannot be canonicalized, or a machine tree
+    that cannot be listed); and the prior's
     `held` ids, the active worklog (both generations) and every archive bucket
     file included, omitted alone with a note when an archive entry is not a bucket file, when a bucket file
     or the active worklog.toml does not parse or holds a row table that is not an array, when the active
@@ -1431,6 +1441,9 @@ def self_test_isolated():
                   and prior.get("records", {}).get("DN-1") == ("done", "recorded"))
             check("prior-releases", isinstance(prior.get("releases"), list) and len(prior["releases"]) == 1)
             check("prior-counters", prior.get("counters_high", {}).get("BI") == 1)
+            # A HEAD whose store does not activate the imported series carries no baseline member at
+            # all (never an empty claim over bytes nothing read under series rules).
+            check("prior-imported-member-absent-when-inactive", "imported" not in prior)
             # Digest honesty: gather's digest for the immutable done record must equal the engine's own
             # _record_digest over the SAME committed body (parsed here independently from the working tree).
             with open(str(tracked_repo / machine_rel / ("done" + _INDEX_SUFFIX)), "rb") as fh:
@@ -1487,8 +1500,12 @@ def self_test_isolated():
         check("non-repo-notes", any("omitted" in n for n in notes))
 
         # 7. The imported baseline of a homes-2 HEAD (spec 8.3): a committed 2.0.0 / homes = 2 store whose
-        # only imported leaf is backlog_item's, read under the homes-2 test toggle (SUPPORTED_HOMES at 2 and
-        # SUPPORTED_SPEC_VERSION at IMPORTED_SPEC_VERSION, both restored in finally). The baseline holds
+        # only imported leaf is backlog_item's. At the shipped constants the imported series is inactive, so
+        # the prior carries NO imported member even with the leaf committed, never an empty claim over
+        # unread bytes (red when the branch reads the declaration without tooling support, or when an
+        # inactive HEAD supplies an empty baseline); with homes 2 supported but not the imported series
+        # the member stays absent. Under the homes-2 test toggle (SUPPORTED_HOMES at 2 and
+        # SUPPORTED_SPEC_VERSION at IMPORTED_SPEC_VERSION, both restored in finally), the baseline holds
         # exactly the leaf's row under the engine's own _record_digest, and the leaves absent from HEAD
         # (done, worklog) contribute nothing (red when the branch is dropped, or an absent leaf is read). A
         # committed leaf row with no string id omits the WHOLE prior with a note, as for the clean files
@@ -1516,7 +1533,13 @@ def self_test_isolated():
         prev_homes = _opf_store.SUPPORTED_HOMES
         prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
         try:
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-inert-at-shipped-support",
+                  isinstance(obs.get("prior"), dict) and "imported" not in obs["prior"])
             _opf_store.SUPPORTED_HOMES = 2
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-inert-without-imported-support",
+                  isinstance(obs.get("prior"), dict) and "imported" not in obs["prior"])
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
             obs, notes = gather(_Res(homes2_repo, machine_rel))
             check("homes2-prior-imported-baseline",
@@ -1604,6 +1627,20 @@ def self_test_isolated():
                 globals()["_run_git"] = _saved_run_git
             check("homes2-prior-imported-unlistable-tree-omitted",
                   "prior" not in obs and any("cannot be listed at HEAD" in n for n in notes))
+            # The imported leaf roster derives from the SAME authoritative type set the doctor
+            # grades, never the raw [types] table alone: a HEAD manifest that (non-conformingly) omits
+            # the baseline backlog_item type still contributes its committed imported leaf to the
+            # baseline (red when the reconstruction reads the declared [types] directly and the
+            # committed rows silently leave the baseline).
+            manifest_path.write_text(manifest_path.read_text(encoding="utf-8").replace(
+                '[types.backlog_item]\nnamespace = "BI"\n', ''), encoding="utf-8")
+            _git_setup(homes2_repo, home, "commit", "-am", "drop the backlog_item type declaration")
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("imported-baseline-covers-authoritative-types",
+                  "[types.backlog_item]" not in manifest_path.read_text(encoding="utf-8")
+                  and isinstance(obs.get("prior"), dict)
+                  and obs["prior"].get("imported") == {"imported:BI-1": leaf_digest,
+                                                       "imported:WL-1": wl_digest})
         finally:
             _opf_store.SUPPORTED_HOMES = prev_homes
             _opf_store.SUPPORTED_SPEC_VERSION = prev_ssv
@@ -1783,7 +1820,8 @@ def self_test_isolated():
     print("opf observe self-test: PASS (tracked/untracked; 0/1/multiple remotes; prior from a committed "
           "HEAD with an engine-matching immutable-body digest; unborn HEAD -> empty prior; a non-repo dir "
           "omits remote and prior with a note; a homes-2 HEAD's imported baseline, worklog entries "
-          "included, and an unreadable leaf or tree omitting the whole prior; the ids HEAD held, worklog "
+          "included, and an unreadable leaf or tree omitting the whole prior; an inactive HEAD carries no "
+          "baseline member; the ids HEAD held, worklog "
           "and archive included, and an unreadable or malformed archive or worklog omitting them alone)")
     return 0
 
