@@ -14665,6 +14665,42 @@ def _init_store_git_checks(check, ctx, refused):
               refused(dispatch(dict(row, members=wrongf), ctx(root, run_id=rid())), "builders fix")
               and init_op._tree_snapshot(root) == before)
 
+        # Spec 5.1 through the ONE shared ignore preflight the substrate runs under its mutex before its
+        # first write (_opf_write_guard.init_ignore_refusal, which plain `opf init` calls too): a store git
+        # would ignore refuses with no store entry written and no init operation recorded (the run's
+        # transaction ends rolled back in the journal home), and git failing refuses the same way. Without
+        # the preflight both publish the store. Once no rule ignores the store a fresh run is admitted.
+        from unittest import mock
+        root = init_op._plain_repo(os.path.join(base, "ignored"), env)
+        init_op._write(os.path.join(root, ".gitignore"), b".working/\n")
+        init_op._git(["add", "--", ".gitignore"], root, env)
+        init_op._git(["commit", "-q", "-m", "ignore rules"], root, env)
+        before = snap(root)
+        run = rid()
+        check("init-store-ignored-store-refused-nothing-written",
+              refused(dispatch(row, ctx(root, run_id=run)), "git-ignored")
+              and snap(root) == before and op_ids(root) == []
+              and store.resolve_store(root).status == store.NOT_ADOPTED
+              and txn_state(root, run) == "rolled-back")
+        real_discovery = init_op._opf_observe._run_git_config_discovery
+
+        def check_ignore_fails(git, store_root, args, *a, **k):
+            if "check-ignore" in args:
+                return init_op._opf_observe._GitOutcome(True, 128, b"", "fatal: injected")
+            return real_discovery(git, store_root, args, *a, **k)
+
+        init_op._write(os.path.join(root, ".gitignore"), store.LOCAL_POINTER_REL.encode("ascii") + b"\n")
+        init_op._git(["add", "--", ".gitignore"], root, env)
+        init_op._git(["commit", "-q", "-m", "ignore only the local pointer"], root, env)
+        before = snap(root)
+        with mock.patch.object(init_op._opf_observe, "_run_git_config_discovery", check_ignore_fails):
+            res = dispatch(row, ctx(root, run_id=rid()))
+        check("init-store-ignore-check-git-failure-refused-nothing-written",
+              refused(res, "check-ignore failed (rc=128)") and snap(root) == before and op_ids(root) == [])
+        res = dispatch(row, ctx(root, run_id=rid()))
+        check("init-store-unignored-store-admitted", res.status == valid
+              and store.resolve_store(root).status == store.RESOLVED)
+
         # Reconcile-first: an unreadable adoption journal lock refuses before the substrate.
         root = init_op._plain_repo(os.path.join(base, "journal"), env)
         os.makedirs(os.path.join(root, JOURNAL_REL))
