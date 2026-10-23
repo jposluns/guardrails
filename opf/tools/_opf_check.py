@@ -97,7 +97,7 @@ from _opf_release import (  # noqa: E402
 )
 
 # Fixed store-tree file / directory names (OPF-SPEC 4.2 layout; all lowercase machine source).
-COUNTERS_NAME = "counters.toml"
+COUNTERS_NAME = _opf_store.COUNTERS_NAME
 VERSION_NAME = "version.toml"
 WORKLOG_NAME = _opf_worklog.LEGACY_NAME
 LEASE_NAME = "lease.toml"                  # present only while the single-writer lease is held (spec 5.7)
