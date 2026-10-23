@@ -9661,6 +9661,23 @@ def _main_isolated(report_path=None):
         check("trunc/scan-heredoc-quoted-delim-unreadable",
               aiqt_hooks._orch_foreground_note_kind("cat > /tmp/f <<'EOF'\nFix A & B\nEOF"),
               "unreadable")
+        # The note scan reads a `#` by the in-scope scan's comment rule: a `#` whose reading depends on
+        # context (at a word start inside an open ${...} or backquote substitution, right after a `)`, or
+        # after a blank inside a double-quoted "$(...)") notes as unreadable, where the deny scan denies it.
+        # Before this fix each `#` read as a comment that hid the `&` after it, so the first, second and
+        # fourth rows stayed silent, and the third noted only because the historical word-start rule read
+        # its `#` as text; each row pairs the verdict with the scan's kind, which tells that apart. The
+        # spaced row is the CONTROL: a `#` after a blank with nothing open is a comment, as in bash.
+        for check_id, command in (
+                ("trunc/oos-param-expansion-hash-notes", "echo ${x:- #} & job"),
+                ("trunc/oos-backquote-hash-notes", "echo `true #` & job"),
+                ("trunc/oos-subst-glued-hash-notes", "x=$(true)# & job"),
+                ("trunc/oos-dq-subst-hash-notes", 'echo "$(echo a # "\n)" & job # "')):
+            check(check_id, (_verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", _fg(command)))),
+                aiqt_hooks._orch_foreground_note_kind(command)), ("warn", "unreadable"))
+        check("trunc/oos-subst-spaced-hash-comment-allows", _verdict(aiqt_hooks.orch_truncation_guard(
+            ti.payload("PreToolUse", "Bash", _fg("x=$(true) # & job")))), "allow")
         _oos_bad = ti.payload("PreToolUse", "Bash")
         _oos_bad["tool_input"] = "long_job &"
         check("trunc/oos-malformed-input-allows", _verdict(aiqt_hooks.orch_truncation_guard(_oos_bad)),

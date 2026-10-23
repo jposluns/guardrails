@@ -15220,9 +15220,18 @@ def _orch_plain_heredoc_delim(command, at, n):
 
 
 def _orch_note_scan(command, bash_word_starts):
-    """The scan behind the note outside registry scope. It reads quotes, escapes and `#` comments exactly
-    as _orch_foreground_scan does (bash_word_starts selects the same comment rule), and adds four things
-    that scan does not model. A here-document whose delimiter spec is provably simple (a whole word of
+    """The scan behind the note outside registry scope. It reads quotes and escapes as _orch_foreground_scan
+    does, and reads each unquoted `#` by the comment rule that scan applies (_hash_comment_reading, over a
+    nesting stack this scan keeps, with bash_word_starts selecting the same word-start rule): a word-start
+    `#` opens a comment to the end of its line only while no parenthesis, ${...} or backquote substitution
+    is open, a `#` after any other character is text, and a `#` whose reading depends on context (right
+    after a `(`, a `)` or a backquote, as in `x=$(true)#`, or at a word start while one of those is open,
+    as in `echo ${x:- #}`) returns "unreadable", so the note is emitted instead of a guess at whether the
+    text after it is code. Inside a double-quoted string it keeps that scan's stack of the `$(...)` and
+    backquote substitutions opened there, and a `#` that is not right after a word character while one is
+    open (outside a single-quoted span in it) returns "unreadable" as well, since bash reads it as a
+    comment that can hide the string's closing quote. It adds four things that scan does not model. A
+    here-document whose delimiter spec is provably simple (a whole word of
     letters, digits and `_ . + -` that bash ends where this scan does, _orch_plain_heredoc_delim) has its
     body skipped as data at the exact delimiter line, so an `&` or an apostrophe in the body neither notes
     nor shifts the quote state; EVERY other delimiter spelling (a quoted or ANSI-C fragment, a backslash
@@ -15233,7 +15242,8 @@ def _orch_note_scan(command, bash_word_starts):
     body ends or reading the remainder as code; a here-document opened
     inside a double-quoted command substitution (the commit-message form) is NOT recognized and is read as
     double-quoted text, whose own double quotes toggle that reading, so a body `&` there can draw an extra
-    note. An arithmetic expansion $(( ... )) or
+    note, and so does a body `#` that is not right after a word character (Fixes #12), read as a `#`
+    inside the double-quoted substitution. An arithmetic expansion $(( ... )) or
     arithmetic command (( ... )) is skipped, so a bitwise `&` in it does not note; it counts as arithmetic
     only when its two opening parentheses close as `))`, which is how bash tells it from a nested subshell.
     A redirect operator and its target operand are passed over without disturbing the pending command
@@ -15267,8 +15277,9 @@ def _orch_note_scan(command, bash_word_starts):
     options, so setsid is noted.
 
     Returns "detach" when it meets a bare `&` control operator, "unreadable" the moment it meets a span it
-    would skip but cannot read with certainty (the here-document and `${...}` redirect-target cases above;
-    everything past that point is unknown, so the note is emitted unconditionally), else the first such
+    would skip but cannot read with certainty (the here-document and `${...}` redirect-target cases above)
+    or a `#` whose comment reading depends on context (everything past that point is unknown, so the note
+    is emitted unconditionally), else the first such
     command word it met (setsid, nohup or disown), else None. A scan that ends inside an open quote returns
     the same, never a separate kind: outside registry scope that case stays silent. The in-scope deny does
     not use this scan; it keeps _orch_foreground_detach_kind."""
@@ -15276,7 +15287,12 @@ def _orch_note_scan(command, bash_word_starts):
     prev_dup = False
     redirect_target = False  # between a redirect operator and the start of its target operand
     target_word = False  # inside a redirect's target operand, up to the unquoted blank or metacharacter
-    word_start = True
+    prev = "break"  # the comment rule's class of the previous character (_hash_comment_reading)
+    after_dollar = False  # the previous char was an unquoted, unescaped `$` (a following `{` opens ${...})
+    nest = _NestStack()
+    dq_nest = _NestStack()  # the substitutions opened inside the current double-quoted string: "(" or a backquote
+    dq_prev = "word"  # the comment rule's class of the previous character inside those substitutions
+    dq_single = False  # inside a single-quoted span within such a substitution
     command_position = next_command = True  # next_command: the position the next word takes after a blank
     groups = []  # next_command saved at each unquoted `(`, restored at its `)`
     heredocs = []  # (delimiter, strip_tabs) opened on the current line; their bodies follow its newline
@@ -15286,13 +15302,16 @@ def _orch_note_scan(command, bash_word_starts):
     while i < n:
         ch = command[i]
         if escaped:
-            escaped, prev_dup, word_start = False, False, False
+            escaped, prev_dup = False, False
+            if ch != "\n":  # a backslash-newline is removed before bash reads the line: the classes stay
+                prev = dq_prev = "backquote" if ch == "`" else "word"
+            after_dollar = after_dollar and ch == "\n"  # a backslash-newline joins `$` to what follows it
             i += 1
             continue
         if in_single:
             if ch == "'":
                 in_single = False
-            prev_dup, word_start = False, False
+            prev_dup, prev = False, "word"
             i += 1
             continue
         if in_double:
@@ -15301,8 +15320,26 @@ def _orch_note_scan(command, bash_word_starts):
             if ch == "\\":
                 escaped = True
             elif ch == '"':
-                in_double = False
-            prev_dup, word_start = False, False
+                in_double, dq_single = False, False
+                dq_nest.clear()
+            elif dq_single:
+                dq_single = ch != "'"
+            elif dq_nest and ch == "#" and dq_prev != "word":
+                # A comment to bash inside the substitution, running to the end of the line and past any
+                # quote on it, which this scan would read as the string's closing quote: it notes.
+                return "unreadable"
+            elif dq_nest and ch == "'":
+                dq_single = True
+            else:
+                if ch == "(" and (dq_nest or after_dollar):
+                    dq_nest.append("(")
+                elif ch == ")" and dq_nest and dq_nest[-1] == "(":
+                    dq_nest.pop()
+                elif ch == "`":
+                    _nest_track(dq_nest, ch, False)
+                dq_prev = ("paren" if ch in "()" else "backquote" if ch == "`"
+                           else "break" if ch.isspace() or ch in ";&|<>" else "word")
+            prev_dup, prev, after_dollar = False, "word", ch == "$"
             i += 1
             continue
         if redirect_target and not (ch in "<> \t" or (ch == "&" and prev_dup)
@@ -15320,7 +15357,7 @@ def _orch_note_scan(command, bash_word_starts):
                 end = _orch_skip_param_expansion(command, i, n)
                 if end is None:
                     return "unreadable"
-                prev_dup, word_start = False, False
+                prev_dup, prev, after_dollar = False, "word", False
                 i = end
                 continue
         if target_word:
@@ -15330,12 +15367,18 @@ def _orch_note_scan(command, bash_word_starts):
                 # Any other `${` in a redirect target (glued after another operand character, or after a
                 # skipped expansion, a bash 5.3 `${ cmd; }` included) draws the note: it is not read.
                 return "unreadable"
-        if ch == "#" and word_start:
-            nl = command.find("\n", i)
-            if nl == -1:
-                break
-            i = nl
-            continue
+        if ch == "#":
+            reading = _hash_comment_reading(nest, prev)
+            if reading is None:
+                # The scan cannot tell whether the text after this `#` is code, so it emits the note
+                # rather than read that text as a comment or as words.
+                return "unreadable"
+            if reading:  # a certain comment: the rest of THIS line is not code
+                nl = command.find("\n", i)
+                if nl == -1:
+                    break
+                i = nl
+                continue
         if ch == "\n" and heredocs:
             # The bodies of the here-documents opened on this line follow its newline: skip them as data.
             # bash joins a backslash-newline in an unquoted body before it compares a line with the
@@ -15346,11 +15389,12 @@ def _orch_note_scan(command, bash_word_starts):
                 return "unreadable"
             i = end
             heredocs = []
-            prev_dup, word_start = False, True
+            prev_dup, prev, after_dollar = False, "break", False
             command_position = next_command = True
             continue
         if ch.isspace():
-            prev_dup, word_start = False, (ch in _ORCH_BASH_WORD_BREAKS) if bash_word_starts else True
+            prev_dup, after_dollar = False, False
+            prev = "break" if ch in _ORCH_BASH_WORD_BREAKS or not bash_word_starts else "word"
             if ch == "\n":
                 command_position = next_command = True
             elif ch in " \t":
@@ -15362,31 +15406,33 @@ def _orch_note_scan(command, bash_word_starts):
             continue
         if ch in "\\'\"":
             if ch == "\\":
-                escaped = True
+                escaped = True  # the classes are left to the character it escapes
             elif ch == "'":
-                in_single = True
+                in_single, prev, after_dollar = True, "word", False
             else:
-                in_double = True
-            prev_dup, word_start = False, False
+                in_double, prev, after_dollar = True, "word", False
+            prev_dup = False
             if command_position:
                 command_position = next_command = False  # a quoted or escaped command word is not read
             i += 1
             continue
         if ch == "&":
+            after_dollar = False
+            prev = "break" if bash_word_starts else "word"
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt == "&":
-                prev_dup, word_start = False, bash_word_starts
+                prev_dup = False
                 command_position = next_command = True
                 i += 2
                 continue
             if nxt == ">":
-                prev_dup, word_start = False, bash_word_starts
+                prev_dup = False
                 i += 1
                 continue
             if prev_dup:
                 if command[i - 1] == "|":
                     command_position = next_command = True
-                prev_dup, word_start = False, bash_word_starts
+                prev_dup = False
                 i += 1
                 continue
             return "detach"
@@ -15394,8 +15440,9 @@ def _orch_note_scan(command, bash_word_starts):
             start = i + (ch == "$")
             end = closes[start]
             if end != -1 and closes[start + 1] == end - 1:
-                # arithmetic: `$((` or `((` whose parentheses close as `))`; its `&` is a bitwise AND
-                prev_dup, word_start = False, False
+                # arithmetic: `$((` or `((` whose parentheses close as `))`; its `&` is a bitwise AND,
+                # and the `)` it ends at leaves a following `#` uncertain, as it does after any `)`
+                prev_dup, prev, after_dollar = False, "paren", False
                 command_position = next_command = False
                 i = end + 1
                 continue
@@ -15409,7 +15456,7 @@ def _orch_note_scan(command, bash_word_starts):
                 # decide silence.
                 return "unreadable"
             heredocs.append((parsed[0], parsed[1]))
-            prev_dup, word_start = False, False
+            prev_dup, prev, after_dollar = False, "word", False
             command_position = False
             i = parsed[2]
             continue
@@ -15428,7 +15475,9 @@ def _orch_note_scan(command, bash_word_starts):
                                       or _ORCH_NOTE_NUMBER_RE.fullmatch(word)))
                     or (end < n and command[end] in "<>" and _ORCH_NOTE_NAMED_FD_RE.fullmatch(word)))
                 command_position = False
-                prev_dup, word_start = False, False
+                for c in word:
+                    _nest_track(nest, c, False)  # of the stack's characters a word holds only `}`
+                prev_dup, prev, after_dollar = False, "word", False
                 i = end
                 continue
         if ch in ";|" and not redirect_target:
@@ -15450,8 +15499,15 @@ def _orch_note_scan(command, bash_word_starts):
             redirect_target = True
         elif command_position:
             command_position = next_command = False
+        _nest_track(nest, ch, after_dollar)
+        if ch in "()":
+            prev = "paren"
+        elif ch == "`":
+            prev = "backquote"
+        else:
+            prev = "break" if ch in _ORCH_BASH_WORD_BREAKS and bash_word_starts else "word"
         prev_dup = ch in (">", "<", "|")
-        word_start = bash_word_starts and ch in _ORCH_BASH_WORD_BREAKS
+        after_dollar = ch == "$"
         i += 1
     return found
 
@@ -15459,8 +15515,9 @@ def _orch_note_scan(command, bash_word_starts):
 def _orch_foreground_note_kind(command):
     """What the note outside registry scope names for a foreground command: "detach" when either `#`
     comment rule (_orch_note_scan) meets a bare `&`, else the first kind either rule met ("unreadable"
-    for a skipped span it could not read with certainty, or a setsid, nohup or disown command word), else
-    None. Any non-None kind draws the note; none of them ever blocks."""
+    for a skipped span it could not read with certainty or a `#` whose comment reading depends on context,
+    or a setsid, nohup or disown command word), else None. Any non-None kind draws the note; none of them
+    ever blocks."""
     kinds = (_orch_note_scan(command, False), _orch_note_scan(command, True))
     if "detach" in kinds:
         return "detach"
@@ -16107,9 +16164,9 @@ def orch_truncation_guard(data):
                 "registry found (rule trkasy, fail-closed).")
         # Not an orchestrated session: no registry on the chain or at a git toplevel. A readable foreground
         # command that detaches work (a bare `&`, or a setsid, nohup or disown command), or one whose scan
-        # met a skipped span it cannot read with certainty (so a detach cannot be ruled out), is allowed
-        # WITH A NOTE naming the tracked background mechanism; every other call, malformed input included,
-        # is the silent allow it always was here (no new fail-closed case outside registry scope).
+        # met a skipped span or a `#` it cannot read with certainty (so a detach cannot be ruled out), is
+        # allowed WITH A NOTE naming the tracked background mechanism; every other call, malformed input
+        # included, is the silent allow it always was here (no new fail-closed case outside registry scope).
         out_input = data.get("tool_input")
         out_command = out_input.get("command") if isinstance(out_input, dict) else None
         if (not isinstance(out_command, str)
@@ -16121,10 +16178,11 @@ def orch_truncation_guard(data):
         if note_kind == "detach":
             what = "detaches a child with a bare '&', so the work runs on after this call returns"
         elif note_kind == "unreadable":
-            what = ("holds a here-document delimiter or a redirect target this guard cannot read with "
-                    "certainty (a delimiter that is not one plain unquoted word, or a parameter expansion "
-                    "left unclosed or holding quoting or substitution syntax), so work that detaches and "
-                    "runs on after this call returns cannot be ruled out")
+            what = ("holds a here-document delimiter, a redirect target or a '#' this guard cannot read "
+                    "with certainty (a delimiter that is not one plain unquoted word, a parameter expansion "
+                    "left unclosed or holding quoting or substitution syntax, or a '#' whose comment reading "
+                    "depends on context), so work that detaches and runs on after this call returns cannot "
+                    "be ruled out")
         else:
             what = "runs {}, which {}".format(note_kind, _ORCH_DETACH_WORD_EFFECTS[note_kind])
         return _allow_note(

@@ -51,6 +51,9 @@ the doctor and the resume audit report and arm from it):
   checks. It allows silently, except that a readable foreground command that detaches work (a bare
   `&`, or a `setsid` without `-w`, a `nohup` or a `disown` in command position) is allowed with a
   note naming the tracked background mechanism (`run_in_background`, or a foreground wait); its scan
+  reads a `#` by the in-scope deny's comment rule, so a `#` whose reading depends on context (right
+  after a `)`, as in `x=$(true)#`, or at a word start inside an open `${...}` or backquote
+  substitution, as in `echo ${x:- #} & job`) draws the note rather than being read as a comment; it
   skips here-document bodies opened at the outer quoting level and arithmetic, which the in-scope
   deny still reads as code (a here-document inside a double-quoted command substitution, the
   commit-message form, is still read as double-quoted text, so a body `&` there can draw an extra
