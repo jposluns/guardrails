@@ -167,6 +167,17 @@ ENFORCEMENT_LAUNCHERS = (
     ("pre-commit", "enforcement/precommit/install.sh", "opf/enforcement/precommit/install.sh",
      '[ -f "$here/pre-commit" ] && [ -r "$here/pre-commit" ] || \\', "member", "pre-commit"),
 )
+# The pack members a deny-hook row binds beside its registration, per platform whose deny program the pack
+# ships: the program the registration runs and the sanctioned writer that program allows, each at its pack
+# path under PACK_MIRROR_ROOT, so completion check 5 reads the installed hook's own bytes, not only the
+# registration's. The hook recognizes the writer only at ../../tools/opf.py from its own directory (its
+# _sanctioned_writer; the self-test pins that line to the shipped hook), so the writer member is the tool
+# entry point beside the mirrored hook, standing in for the opf/tools/** tree as on the launcher rows. A
+# deny-hook row of a listed platform that omits either is INVALID, so a row that binds the registration
+# alone, the form plans took before these were members, is planned again rather than read as binding them.
+ENFORCEMENT_DENY_MEMBERS = {
+    "claude-code": ("opf/enforcement/claude/pretooluse_deny.py", "opf/tools/opf.py"),
+}
 # The store control area an adoption plan never selects or writes, in every homes generation: the reserved
 # children archive/, imported/, staging/ and journals/ (spec 14.2, which carries no homes qualifier) and the
 # legacy imports tree homes 1 already reserves. The plan's own preservation copies under this run's adoption
@@ -269,7 +280,11 @@ _REVISION_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 # filesystem's case table (_protected), so a case variant another filesystem folds differently is
 # unseen. Two effect paths, or an effect path and a live source, that fold to one launcher path are an
 # INVALID collision, found only after the launch checks pass, so a written variant no row names is
-# CANNOT-EVALUATE first; the residual
+# CANNOT-EVALUATE first; a deny-hook row of a platform whose deny program the pack ships names that program
+# and the sanctioned writer it allows by their exact mirror paths (ENFORCEMENT_DENY_MEMBERS), which proves
+# the row binds digests for those paths, not that the bytes are the shipped hook or that the opf/tools/**
+# modules the writer imports are bound (opf/tools/opf.py stands in for that tree), and nothing stops
+# same-user tampering after a check reads them; the residual
 # tokens are closed and each means' required disclosure is enforced, which proves a disclosure is recorded,
 # not that it is complete for a live platform; a source's `occupying` flag is the planner's classification
 # against the planned managed destinations, which a lone plan cannot re-derive. `effects` enumerates every
@@ -595,7 +610,8 @@ def canonical_plan_bindings():
     The CI and pre-commit rows bind the members enforcement_launch_members derives, so each launcher sits
     where its own launch line resolves under the opf/ mirror, and the file each launches is a member to
     install (the tool entry point opf/tools/opf.py stands in for the opf/tools/** tree a later install-pack
-    step plants). Each call returns fresh tables."""
+    step plants). The claude-code deny-hook row binds its registration, then the deny program and the
+    sanctioned writer ENFORCEMENT_DENY_MEMBERS names. Each call returns fresh tables."""
     def row(platform, means, paths, residuals):
         return {"platform": platform, "means": means,
                 "members": [{"path": path, "digest": "sha256:" + "9" * 64} for path in paths],
@@ -610,7 +626,8 @@ def canonical_plan_bindings():
                 ["server-side-protection-adopter-attested"]),
             row("pre-commit", "staged-pre-commit", enforcement_launch_members("pre-commit"),
                 ["per-clone-installation-and-bypass", "canonical-hand-edits", "same-user-tampering"]),
-            row("claude-code", "deny-hook", [".claude/settings.json"],
+            row("claude-code", "deny-hook",
+                [".claude/settings.json"] + list(ENFORCEMENT_DENY_MEMBERS["claude-code"]),
                 ["shell-or-interpreter-wrapping", "same-user-tampering"]),
             row("codex", "instructions", ["AGENTS.md"],
                 ["unverified-platform-denial", "shell-or-interpreter-wrapping"]),
@@ -1298,7 +1315,8 @@ def _validate_enforcement(rows, findings):
     """Validate the enforcement-pack binding (spec 14.1): exactly one row per ENFORCEMENT_PLATFORMS entry,
     in that order, each naming a means its platform allows, a non-empty member list and a non-empty,
     duplicate-free list of closed residual tokens carrying the disclosure its means requires, with every
-    PACK_RESIDUALS disclosure on at least one row. _cross_check_plan ties each member to the op installing it.
+    PACK_RESIDUALS disclosure on at least one row, and a deny-hook row naming the members
+    ENFORCEMENT_DENY_MEMBERS lists for its platform. _cross_check_plan ties each member to the op installing it.
     Returns an AdoptValidation ONLY to short-circuit CANNOT-EVALUATE (an out-of-vocabulary platform, means
     or residual); otherwise appends findings and returns None."""
     if not isinstance(rows, list):
@@ -1348,6 +1366,16 @@ def _validate_enforcement(rows, findings):
                 if launcher_platform == platform and destination.rsplit("/", 1)[-1] not in names:
                     findings.append("{} names no member installed as {!r}, the launcher {} its floor "
                                     "runs".format(label, destination.rsplit("/", 1)[-1], member))
+        # a deny-hook row binds the deny program its registration runs and the sanctioned writer that program
+        # allows (ENFORCEMENT_DENY_MEMBERS), each by its exact mirror path, so a row binding its registration
+        # alone fails closed and is planned again.
+        if means == "deny-hook" and "members" in row and _valid_field("members", row["members"]):
+            paths = [member["path"] for member in row["members"]]
+            for path in ENFORCEMENT_DENY_MEMBERS.get(platform, ()):
+                if path not in paths:
+                    findings.append("{} names no member {!r}: a {} deny-hook row binds the deny program its "
+                                    "registration runs and the sanctioned writer it allows, so the plan is "
+                                    "made again".format(label, path, platform))
     if platforms != list(ENFORCEMENT_PLATFORMS):
         findings.append("plan enforcement does not cover each supported platform exactly once, in order")
     lacking = [r for r in PACK_RESIDUALS if r not in disclosed]
@@ -2942,6 +2970,38 @@ def self_test():
                 {"path": "opf/tools/_opf_store.py", "digest": _D9})),
             ("hook-in-other-platform-row-valid", _add(2, "opf/enforcement/other/pre-commit"))):
         check("launch-" + label, _validated(mutate).status == VALID)
+    # The claude-code deny-hook row binds its registration, the shipped deny program and the sanctioned writer
+    # that program allows, where the hook's own line resolves it; the validator requires both members, so a
+    # row binding its registration alone (the form plans took before) is INVALID with that reason alone.
+    _DENY_HOOK = ENFORCEMENT_DENY_MEMBERS["claude-code"][0]
+    _claude_row = canonical_plan_bindings()["enforcement"][2]
+    try:
+        _hook_lines = (Path(__file__).resolve().parent.parent / "enforcement" / "claude"
+                       / "pretooluse_deny.py").read_text(encoding="utf-8").split("\n")
+    except (OSError, UnicodeDecodeError):
+        _hook_lines = []
+    check("deny-hook-row-binds-hook-and-writer", _claude_row["platform"] == "claude-code"
+          and _claude_row["means"] == "deny-hook"
+          and [m["path"] for m in _claude_row["members"]] == [".claude/settings.json", _DENY_HOOK, _TOOL]
+          and _DENY_HOOK == PACK_MIRROR_ROOT + "/enforcement/claude/pretooluse_deny.py"
+          and launch_target("member", "../../tools/opf.py", _DENY_HOOK) == _TOOL
+          and '    return os.path.realpath(os.path.join(here, os.pardir, os.pardir, "tools", "opf.py"))'
+          in _hook_lines)
+    _deny_reason = "deny-hook row binds the deny program its registration runs and the sanctioned writer"
+    for label, named in (("registration-only", (_DENY_HOOK, _TOOL)), ("hook-omitted", (_DENY_HOOK,)),
+                         ("writer-omitted", (_TOOL,))):
+        # the claude-code row without the named members, the pack row still planting them
+        result = _validated(lambda p, n=named: p["enforcement"][2].update(
+            members=[m for m in p["enforcement"][2]["members"] if m["path"] not in n]))
+        check("deny-hook-row-" + label + "-invalid", result.status == INVALID
+              and all(_deny_reason in finding for finding in result.findings)
+              and len(result.findings) == len(named)
+              and all(any("plan enforcement[2] names no member {!r}".format(path) in finding
+                          for finding in result.findings) for path in named))
+    # counter-vector: an instructions row denies nothing, so the same platform may bind its registration alone
+    check("deny-hook-members-instructions-row-valid", _validated(lambda p: p["enforcement"][2].update(
+        means="instructions", members=p["enforcement"][2]["members"][:1],
+        residuals=["unverified-platform-denial", "shell-or-interpreter-wrapping"])).status == VALID)
     # 15h, continued: the unnamed-launcher clause covers every op that writes a file, not only the three that
     # install a member. With the decoy chain named in the pre-commit row, the real pair written by each other
     # op, a hook repoint-consumer rewrites in place, and a launcher an init-store or record-adoption row
