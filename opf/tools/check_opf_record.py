@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T90)
+  check_opf_record.py --self-test                    the fixture suite (T1-T93)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -517,6 +517,15 @@ Each case runs on its own copy of that template; the root is removed in a finall
       under the cap the same create records, re-spells the legacy index, and stays doctor-VALID
       (flip: the size guard removed, so the over-cap index is published and the byte comparison
       turns red)
+  T91 a malformed lease is present, so it is held: a create refuses exit 2 with the held-lease refusal,
+      the lease not deleted and every byte untouched (flip: an acquisition that reads a lease it cannot
+      parse as absent and removes it)
+  T92 a store below its git repository root, with a foreign held lease, reaches the held-lease refusal
+      naming the holder, never the dirty-store refusal; the lease and every byte untouched (flip: the
+      lease exclusion compares porcelain paths without the store's prefix strip)
+  T93 a FIFO at the lease path refuses promptly in a bounded child, naming a present non-regular lease;
+      the FIFO and every byte untouched (flip: the held-lease message opens the lease without
+      O_NONBLOCK, so the child blocks past its bound)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -1310,13 +1319,13 @@ record._publish = _publish
 """
 
 
-def child(env, root, args, kill=None, flip=""):
+def child(env, root, args, kill=None, flip="", timeout=180):
     script = _CHILD.format(tools=str(TOOLS), flip=flip)
     child_env = dict(env.vars)
     if kill is not None:
         child_env[journal.KILL_ENV] = kill
     proc = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(root)] + list(args),
-                          capture_output=True, text=True, timeout=180, env=child_env)
+                          capture_output=True, text=True, timeout=timeout, env=child_env)
     _note_backstops(proc.stderr)
     _oop_forward(proc.stderr)
     return proc
@@ -8796,6 +8805,118 @@ def flip_t90_no_cap():
     return patch.object(record, "_require_within_read_cap", lambda rel, data: None)
 
 
+# --- T91-T93: the held-lease refusal over a malformed, a nested and a non-regular lease (spec 5.7) ----------
+# Carried over from the removed store-upgrade gate (its U13, U22 and U23, which drove `opf upgrade`): the
+# record verb runs the same check_clean lease exclusion and acquire_lease claim, so each is driven here.
+
+T91_MALFORMED = b"not valid = = = toml\n"
+T93_BOUND = 30
+
+
+def t91_malformed_lease(fx):
+    """A malformed lease is present, so it is held, never absent: the create refuses exit 2 with the
+    held-lease refusal, the lease is not deleted and every byte is untouched."""
+    root = fx.case("t91-malformed-lease")
+    (Path(root) / LEASE).write_bytes(T91_MALFORMED)
+    before = snapshot(root)
+    result = record_cli(fx.env, root, CREATE)
+    refused(result, "never seized")
+    assert "a present lease with an unreadable payload" in result[2], result[2][-800:]
+    assert read(root, LEASE) == T91_MALFORMED, "T91 the malformed lease is not deleted"
+    assert snapshot(root) == before, "T91 every byte untouched"
+
+
+def flip_t91():
+    """An acquisition that reads a lease it cannot parse as absent: it removes that lease, then claims."""
+    original = guard.acquire_lease
+
+    def absent_if_malformed(root_fd, machine_rel, verb):
+        rel = "{}/{}".format(machine_rel, opf_check.LEASE_NAME)
+        with contextlib.suppress(FileNotFoundError):
+            with open(os.open(rel, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd), "rb") as handle:
+                raw = handle.read()
+            try:
+                tomllib.loads(raw.decode("utf-8"))
+            except ValueError:
+                os.unlink(rel, dir_fd=root_fd)
+        return original(root_fd, machine_rel, verb)
+    return patch.object(guard, "acquire_lease", absent_if_malformed)
+
+
+def t92_nested_store_held_lease(fx):
+    """A store root BELOW its git repository root, with a foreign held lease, reaches the held-lease
+    refusal naming the holder, never the dirty-store refusal: the porcelain paths are repository-root-
+    relative, so the lease is excluded only once the store's prefix is stripped. The lease survives and
+    every byte is untouched."""
+    env = fx.env
+    outer = fx.case("t92-nested")
+    store = outer / "product" / "store"
+    store.mkdir(parents=True)
+    for entry in sorted(outer.iterdir()):
+        if entry.name not in (".git", "product"):
+            entry.rename(store / entry.name)
+    env.git(outer, "add", "-A")
+    env.git(outer, "commit", "-q", "-m", "nest the store below the repository root")
+    assert env.git(store, "rev-parse", "--show-prefix") == "product/store/\n", "T92 the store is nested"
+    (store / LEASE).write_bytes(PEER_LEASE)   # untracked, as a live peer leaves it
+    before = snapshot(outer)
+    result = record_cli(env, store, CREATE)
+    refused(result, "never seized")
+    assert "peer-runner" in result[2] and "the working tree is not clean" not in result[2], result[2][-800:]
+    assert read(store, LEASE) == PEER_LEASE and snapshot(outer) == before, "T92 the peer lease survives"
+
+
+def flip_t92():
+    """The un-normalized lease exclusion: each porcelain path is compared without the store's prefix strip."""
+    original = guard.parse_porcelain
+    return patch.object(guard, "parse_porcelain",
+                        lambda raw, prefix, lease, specs, verb: original(raw, b"", lease, specs, verb))
+
+
+def t93_fifo_lease(fx):
+    """A FIFO at the lease path refuses promptly: the held-lease refusal names a present non-regular lease
+    without reading it. The create runs in a child bounded by T93_BOUND, so a blocking open turns this
+    test red rather than hanging the gate. The FIFO is untouched and every byte is unchanged."""
+    if not hasattr(os, "mkfifo"):
+        raise CannotEvaluate("T93 needs os.mkfifo to plant a FIFO lease")
+    root = fx.case("t93-fifo-lease")
+    os.mkfifo(str(Path(root) / LEASE))
+    before = snapshot(root)
+    try:
+        proc = child(fx.env, root, CREATE, flip=_t93_flip[0], timeout=T93_BOUND)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("T93 the FIFO lease held the run past {} s, never refused".format(T93_BOUND))
+    assert proc.returncode == 2, ("T93 exit 2", proc.returncode, proc.stderr[-800:])
+    assert "a present non-regular lease (held)" in proc.stderr and "never seized" in proc.stderr, (
+        proc.stderr[-800:])
+    assert stat.S_ISFIFO((Path(root) / LEASE).lstat().st_mode) and snapshot(root) == before, (
+        "T93 the FIFO is untouched")
+
+
+# The T93 flip, applied inside the bounded child: the held-lease message opens the lease without
+# O_NONBLOCK, so its open of a writer-less FIFO blocks. The wrapper forwards dir_fd, so it is listed in
+# os.supports_dir_fd, as the containment probe requires of os.open. _t93_flip holds the child's prelude.
+_t93_flip = [""]
+FLIP_T93 = """
+_open = os.open
+def _blocking_open(path, flags, *args, **kwargs):
+    if path == "lease.toml" and not flags & os.O_CREAT:
+        flags &= ~os.O_NONBLOCK
+    return _open(path, flags, *args, **kwargs)
+os.open = _blocking_open
+os.supports_dir_fd.add(_blocking_open)
+"""
+
+
+@contextlib.contextmanager
+def flip_t93():
+    _t93_flip[0] = FLIP_T93
+    try:
+        yield
+    finally:
+        _t93_flip[0] = ""
+
+
 TESTS = (
     ("T1-precondition-byte-reproduction", t1_precondition, flip_t1),
     ("T2-round-trip-emit-checked", t2_round_trip, flip_t2),
@@ -8953,6 +9074,9 @@ TESTS = (
                                                                             flip_t89_strict)),
     ("T89-prior-separator-spelling-bounded", t89_bounded_acceptance, flip_t89_any_bytes),
     ("T90-store-read-cap-before-publication", t90_reader_cap, flip_t90_no_cap),
+    ("T91-malformed-lease-refused-as-held", t91_malformed_lease, flip_t91),
+    ("T92-nested-store-held-lease", t92_nested_store_held_lease, flip_t92),
+    ("T93-fifo-lease-refused-promptly", t93_fifo_lease, flip_t93),
 )
 
 
