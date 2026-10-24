@@ -1934,14 +1934,21 @@ def _check_receipts(recs, by_id, rep):
 
 def _check_handoff(recs, rep):
     """C-HANDOFF (R2): at most one `current` handoff among clean records authored by non-importer actors
-    (OPF-SPEC 8.5). The section 8.6 importer firewall is keyed on provenance, never on the imported
-    series' activation: it covers every record whose actor.kind is `importer`, in the imported series or
-    written into the clean series by the pre-1.3.0 legacy importer, and the section 8.5 at-most-one-current
-    join evaluates only clean records authored by non-importer actors, whatever the store's declared homes.
-    An imported-series row never counts either (run() routes no such row into the graded record list; the
-    skip matches that routing for a direct caller). Only a KNOWN importer kind is exempt: a record whose
-    actor kind cannot be read (None) counts, fail-closed (validate_record already names the unreadable
-    actor), never a silent pass."""
+    (OPF-SPEC 8.5). Section 8.6 keys the importer firewall "on provenance rather than on series alone": it
+    "covers every record whose `actor.kind` is `importer`, in the imported series or written into the
+    clean series by the pre-1.3.0 legacy importer", and "every current-state join, including the section
+    8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer
+    actors". Whether that firewall binds a store below spec 1.3.0 is a reading the maintainer has not yet
+    ruled on (sections 8.6 and 9.2 describe the 1.2.0 to 1.3.0 upgrade as the step that withdraws a legacy
+    importer-authored record's current authority). This check applies the exemption on every store, keyed
+    on provenance alone, for consistency with the record writer's current-handoff join
+    (_opf_record._current_handoffs) and the HANDOFF view (_opf_views.render_handoff), which apply it the
+    same way. An imported-series row never counts either (_validate_opened_store builds the graded record
+    list from the active, archive and worklog records and never adds an imported-series row; the skip
+    matches that routing for a direct caller). Only the exact kind `importer` is exempt: a lookalike kind
+    (another case, a prefix or an extension) counts, and a record whose actor kind cannot be read (None)
+    counts, fail-closed (validate_record already names the unknown or unreadable actor), never a silent
+    pass."""
     current = [r.id for r in recs if r.rtype == "handoff" and r.state == "current" and r.qual is None
                and r.location != "imported"
                and r.actor_kind != "importer"]
@@ -5915,8 +5922,12 @@ def self_test():
               r2mix.status == INVALID and len(handoff_msgs(r2mix)) == 1)
         # Three clean current handoffs, one per non-importer kind: a maintainer's, an assistant's and an
         # automation's. This vector covers exactly that all three non-importer kinds count while the
-        # series is inactive: the one finding reports all 3, so excluding the assistant or the automation
-        # kind from the count reads red here.
+        # series is inactive: the one finding is the full C-HANDOFF text reporting all 3, so excluding the
+        # assistant or the automation kind from the count, or changing any part of the text, reads red here.
+        _r2_three_msg = ("C-HANDOFF: 3 clean handoffs not authored by a known importer are 'current'; at "
+                         "most one current handoff exists among clean records not authored by a known "
+                         "importer (spec 8.5/8.6)")
+
         def _three_kind_idx():
             return idx([ho(1),
                         envelope("HO-2", "handoff", "current", actor={"kind": "assistant"}),
@@ -5926,9 +5937,7 @@ def self_test():
         f["counters.toml"] = counters(HO=3)
         r2kinds = run(f)
         check("r2-assistant-and-automation-handoffs-counted",
-              r2kinds.status == INVALID and len(handoff_msgs(r2kinds)) == 1
-              and any("3 clean handoffs not authored by a known importer" in m
-                      for m in handoff_msgs(r2kinds)))
+              r2kinds.status == INVALID and handoff_msgs(r2kinds) == [_r2_three_msg])
         # An actor that cannot be read is never taken for an importer: the record counts toward the limit
         # (fail-closed, as validate_record applies the importer exceptions on a KNOWN kind only), so C-HANDOFF
         # still fires beside the C-RECORDS finding naming the missing actor (red on a silent pass).
@@ -5948,6 +5957,35 @@ def self_test():
         _check_handoff([_make_rec(ho(1), "handoff", "active"),
                         _make_rec(ho(2), "handoff", "imported")], _hrep)
         check("r2-imported-series-handoff-not-counted", not _hrep.findings)
+        # Only the exact kind `importer` is exempt: beside a maintainer's current handoff, a lookalike kind
+        # (another case, an extension, a prefix, padding) counts, while the exact kind stays exempt in the
+        # same harness (red if the exemption widens to a case-insensitive, prefix or substring match).
+        _r2_two_msg = ("C-HANDOFF: 2 clean handoffs not authored by a known importer are 'current'; at "
+                       "most one current handoff exists among clean records not authored by a known "
+                       "importer (spec 8.5/8.6)")
+
+        def _r2_kind_msgs(kind):
+            _row = ho(2)
+            _row["actor"] = {"kind": kind, "id": "import-assistant"}
+            _krep = _Report()
+            _krep.ran("C-HANDOFF")
+            _check_handoff([_make_rec(ho(1), "handoff", "active"), _make_rec(_row, "handoff", "active")],
+                           _krep)
+            return _krep.findings
+        check("r2-importer-lookalike-kinds-counted",
+              _r2_kind_msgs("importer") == []
+              and all(_r2_kind_msgs(k) == [_r2_two_msg]
+                      for k in ("Importer", "IMPORTER", "importers", "importer-legacy", "import", " importer")))
+        # The same lookalike through the whole store: C-HANDOFF counts it and the record check names the
+        # unknown kind, so the store is INVALID on both counts (red if either goes quiet).
+        f = clean_machine()
+        f["handoff.index.toml"] = idx([ho(1), envelope("HO-2", "handoff", "current",
+                                                       actor={"kind": "Importer", "id": "import-assistant"})])
+        f["counters.toml"] = counters(HO=2)
+        r2look = run(f)
+        check("r2-importer-lookalike-kind-store-invalid",
+              r2look.status == INVALID and handoff_msgs(r2look) == [_r2_two_msg]
+              and any("is not one of" in m and "Importer" in m for m in r2look.findings))
         # C-HANDOFF with the imported series ACTIVE: BOTH tooling gates are patched inside the vector
         # (the per-vector idiom of the activated C-IMPORTED-SCHEMA vectors above) and the store declares
         # the 2.0.0 / homes = 2 pair, so run()'s imported_series_active flag is True end to end.
@@ -5985,9 +6023,7 @@ def self_test():
         check("r2-importer-current-handoff-exempt-when-active",
               _r2_act_run is not None and not _r2_act_run.findings and not handoff_msgs(_r2_act_run))
         check("r2-assistant-and-automation-handoffs-counted-while-active",
-              _r2k_act_run is not None and len(handoff_msgs(_r2k_act_run)) == 1
-              and any("3 clean handoffs not authored by a known importer" in m
-                      for m in handoff_msgs(_r2k_act_run)))
+              _r2k_act_run is not None and handoff_msgs(_r2k_act_run) == [_r2_three_msg])
         check("r2-unreadable-actor-handoff-counted-while-active",
               _r2na_act_run is not None and len(handoff_msgs(_r2na_act_run)) == 1
               and any("missing required field: actor" in m for m in _r2na_act_run.findings))
