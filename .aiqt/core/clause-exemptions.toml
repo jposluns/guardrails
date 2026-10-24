@@ -334,12 +334,12 @@ reason = "Rationale for kltwat.1; no obligation of its own."
 
 [[exempt]]
 corpus-id = "kltwat"
-text = "An environment override meant to grant a longer wait can be silently stripped when it crosses a\nprivilege boundary, for instance when it is placed on the wrong side of a privilege-elevation command,\nso the intended wait never reaches the callee and its default applies unseen"
+text = "An environment override meant to grant a longer wait can be silently stripped when it crosses a\nprivilege boundary, as when it is placed on the wrong side of a privilege-elevation command,\nso the intended wait never reaches the callee and its default applies unseen"
 reason = "States the hazard that kltwat.4, the clause after the ';', guards against; no obligation of its own."
 
 [[exempt]]
 corpus-id = "kltwat"
-text = "This is the companion of\nthe bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust resources, while this\none keeps a bound meant to allow completion from being set below the callee's own end-to-end budget."
+text = "This is the companion of\nthe bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust resources, while this\none keeps a bound meant to allow completion from being set below the callee's own end-to-end budget, so\na command that is waiting correctly is not cut short and then misread as the failure it was tolerating."
 reason = "Cross-reference to the bounded-consumption rule; no obligation of its own."
 
 [[exempt]]
