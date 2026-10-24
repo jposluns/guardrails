@@ -1688,13 +1688,13 @@ class _FixtureProcess:
     shape, which the kernel may hand to ANY thread with it unblocked -- stays
     kernel-pending. The prior mask is
     captured by QUERY before the restoring try and the block is the try's
-    FIRST statement, restored exactly in the finally (QA21 claude F3): a
+    FIRST statement, restored exactly in the finally: a
     cancellation landing before the block installs disposes NOTHING, not
     even the thread's signal state, and close() can simply run again. The
     pending cancellation is delivered AT the restore, inside close()/poll()'s
-    own finally (QA21 claude F4): close() then raises the KeyboardInterrupt
+    own finally: close() then raises the KeyboardInterrupt
     itself, with any in-flight refusal preserved on the exception chain
-    (callers walk __context__). The deferral is BOUNDED (QA21 gemini F3, an
+    (callers walk __context__). The deferral is BOUNDED (an
     accepted trade-off: guaranteed ownership and cleanup over immediate
     termination): every masked wait carries its own deadline, so a pending
     cancellation -- including a job supervisor's SIGTERM -- is delayed at
@@ -1759,7 +1759,7 @@ class _FixtureProcess:
     poll(), which kills the subject AT COLLECTION TIME and records the
     failure for close() to prove and re-raise, an UNRESOLVED
     collection (guardian reaped, status never validated, no failure
-    recorded: treated as a failure of close()'s own, QA20 codex F1), and a
+    recorded: treated as a failure of close()'s own), and a
     LOST-OWNERSHIP collection (the guardian disappeared without this
     close()'s reap, fix 2y claude Finding 2) -- a receipt-identified subject
     is killed and its disappearance proven on its pidfd or refused loudly;
@@ -2662,14 +2662,14 @@ class _FixtureProcess:
         actually did, accounting every observed member (a member no
         census observed -- the disclosed fork-race
         and pid-wraparound residual -- can be neither addressed nor
-        accounted, per the ruling PD-335-TREE-CLAIM-STALL):
+        accounted, so the refusal discloses it rather than claiming past it):
         "subject tree killed" is claimed ONLY when the guardian-anchored
         census addressed every OBSERVED member (a census can only address
         members it observed) AND the bounded post-kill verification
         census then OBSERVED no live, signalable member left in two
         consecutive clean passes (fix 2z: the claim rests on observation,
-        never on the kill sends alone; the maintainer ruling
-        PD-335-TREE-CLAIM-STALL words even that claim as an observation with
+        never on the kill sends alone; even that claim
+        is worded as an observation with
         its residual, never a proof); a census with skipped or unknown
         members names them, and unverifiable entries -- possible members,
         never established ones (round 24, claude F1) -- are named apart; a

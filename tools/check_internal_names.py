@@ -162,15 +162,17 @@ _ROLE_NAMES = [
     (re.compile(r'\bArchitect\b'), "internal role name"),
 ]
 # Internal REVIEW-ROUND LABEL patterns: a reviewer family name followed by a QA round number, and a QA round
-# number followed by a severity grade or a finding id. A shipped comment or message says what the code guards
-# and why, never which review round asked for it. Case-insensitive, since such labels are written in either
-# case. Each needs the round NUMBER, so "QA" alone in prose, "quality", a bare grade word, a family name alone
-# and a round number with neither a family before it nor a grade after it never match. Like the role-name
-# pattern, these run over every tracked file, this one included; the pattern sources do not match themselves
-# because a family name here is followed by a bar or a parenthesis and "QA" by a bracket.
+# number followed by a severity grade (BLOCKER, MAJOR, MEDIUM or MINOR) or a finding id. A shipped comment or
+# message says what the code guards and why, never which review round asked for it. Case-insensitive, since
+# such labels are written in either case. Each needs the round NUMBER, so "QA" alone in prose, "quality", a
+# bare grade word, a family name alone and a round number with neither a family before it nor a grade after
+# it never match. Like the role-name pattern, these run over every tracked file, this one included; the
+# pattern sources do not match themselves because a family name here is followed by a bar or a parenthesis
+# and "QA" by a bracket.
 _REVIEW_LABELS = [
     (re.compile(r'\b(?:codex|claude|gemini)[ ]?QA[0-9]+', re.IGNORECASE), "internal review-round label"),
-    (re.compile(r'\bQA[0-9]+[ ]?(?:MAJOR|MEDIUM|MINOR|F[0-9])', re.IGNORECASE), "internal review-round label"),
+    (re.compile(r'\bQA[0-9]+[ ]?(?:BLOCKER|MAJOR|MEDIUM|MINOR|F[0-9])', re.IGNORECASE),
+     "internal review-round label"),
 ]
 # The patterns the tracked-file rule applies to every tracked file (see scan_role_text).
 _TRACKED_RULES = _ROLE_NAMES + _REVIEW_LABELS
@@ -379,10 +381,11 @@ def scan_role_text(text):
 
 def scan_tracked_roles(root, relpaths):
     """Return (findings, unevaluable) for the role rule (the role name and the review-round labels) over the
-    tracked `relpaths`, independent of SCOPE_RELPATHS and SKIP_NAMES. A file that is not valid UTF-8 is skipped only under the walk rule this
-    gate already applies (a present suffix outside TEXT_SUFFIXES marks a non-text file); any other
-    non-UTF-8 file, or a tracked path absent from the working tree, is unevaluable. A tracked path that is
-    present but not a readable regular file raises OSError (exit 2) through _read_present_text."""
+    tracked `relpaths`, independent of SCOPE_RELPATHS and SKIP_NAMES. A file that is not valid UTF-8 is
+    skipped only under the walk rule this gate already applies (a present suffix outside TEXT_SUFFIXES marks
+    a non-text file); any other non-UTF-8 file, or a tracked path absent from the working tree, is
+    unevaluable. A tracked path that is present but not a readable regular file raises OSError (exit 2)
+    through _read_present_text."""
     findings, unevaluable = [], []
     for rel in relpaths:
         try:
@@ -391,11 +394,12 @@ def scan_tracked_roles(root, relpaths):
             suffix = Path(rel).suffix
             if suffix and suffix not in TEXT_SUFFIXES:
                 continue
-            unevaluable.append("{}: tracked file is not valid UTF-8; the role-name rule cannot evaluate it".format(rel))
+            unevaluable.append("{}: tracked file is not valid UTF-8; the role-name and review-round label "
+                               "rule cannot evaluate it".format(rel))
             continue
         if text is None:
-            unevaluable.append("{}: tracked file is absent from the working tree; the role-name rule cannot "
-                               "evaluate it".format(rel))
+            unevaluable.append("{}: tracked file is absent from the working tree; the role-name and "
+                               "review-round label rule cannot evaluate it".format(rel))
             continue
         for number, label in scan_role_text(text):
             findings.append("{}:{}: {}".format(rel, number, label))
@@ -424,8 +428,8 @@ def run_gate(root):
         for finding in findings:
             print("  " + finding)
     if unevaluable:
-        print("error: the role-name rule cannot evaluate {} tracked file(s); fail-closed".format(len(unevaluable)),
-              file=sys.stderr)
+        print("error: the role-name and review-round label rule cannot evaluate {} tracked file(s); "
+              "fail-closed".format(len(unevaluable)), file=sys.stderr)
         for item in unevaluable:
             print("  " + item, file=sys.stderr)
         return 2
@@ -717,13 +721,18 @@ def _self_test(caller_env=None):
                             "got {}".format(f))
 
         # 27. DISCRIMINATING (internal review-round labels): a reviewer family name followed by a QA round
-        #     number, and a QA round number followed by a severity grade or a finding id, are each caught by
-        #     the tracked-file rule (scan_role_text) and by the scoped scan, in either case and with or
-        #     without the space. Removing _REVIEW_LABELS, or either of its patterns, leaves hits unflagged;
-        #     making them case-sensitive misses the lower-case hits. The controls stay unflagged: dropping
-        #     the round number flags "QA" alone, dropping the leading word boundary flags a round glued to a
-        #     longer word, and dropping the grade or finding id flags a round number alone. Every vector is
-        #     assembled at runtime, so no contiguous label sits in this source (the rule scans this file).
+        #     number, and a QA round number followed by a severity grade (BLOCKER included) or a finding id,
+        #     are each caught by the tracked-file rule (scan_role_text) and by the scoped scan, in either
+        #     case and with or without the space. Removing _REVIEW_LABELS, or either of its patterns, leaves
+        #     hits unflagged; making them case-sensitive misses the lower-case hits; dropping BLOCKER from
+        #     the grade group leaves the BLOCKER hit unflagged. The controls stay unflagged, and each names
+        #     the mutation it catches: dropping the round-number requirement in pattern 1 flags a family name
+        #     before "QA" alone, dropping it in pattern 2 flags "QA" before a bare grade, dropping pattern
+        #     1's leading word boundary flags a family name glued to a longer word, dropping pattern 2's
+        #     leading word boundary flags a round glued to a longer word, and dropping the grade or finding
+        #     id flags a round number alone. Every vector is assembled at runtime, so no contiguous label
+        #     sits in this source (the rule scans this file), and the three-digit round numbers in the
+        #     controls are synthetic values naming no real round.
         write_hashes([])
         qa = "QA"
         review_label = "internal review-round label"
@@ -734,6 +743,7 @@ def _self_test(caller_env=None):
             "codex/claude " + qa + "34",
             qa + "16 MINOR-1: descriptors are closed",
             qa + "4 MAJOR",
+            qa + "29 BLOCKER 1: a read-born fault",
             qa.lower() + "7 medium",
             qa + "19 F4: array is preloaded",
             qa.lower() + "8f2",
@@ -743,10 +753,13 @@ def _self_test(caller_env=None):
             "the QA suite and its QA skills",
             "a MAJOR change, then MINOR-1 and F2",
             "codex, claude and gemini, each alone",
-            "a mutation vector of round " + qa + "31/" + qa + "32",
+            "the codex " + qa + " suite, with no round number",
+            "the " + qa + " MAJOR backlog, with no round number",
+            "a mutation vector of round " + qa + "901/" + qa + "902",
             "a planted " + qa + "15-CAUSE marker and a " + qa.lower() + "15-st-size probe",
-            "vector:codex32-1 and vector:claude32-3",
+            "vector:codex" + "901-1 and vector:claude" + "901-3",
             "a glued token non" + qa + "3 F1 and pre" + qa + "16 MINOR",
+            "an autocodex " + qa + "901 build and a preclaude " + qa + "902 run",
         )
         for text in label_hits:
             found = scan_role_text(text + "\n")
@@ -1498,10 +1511,13 @@ def _self_test(caller_env=None):
           "the structural layer; the whole capitalized internal role name is caught, while Architecture, "
           "architectural, the lowercase noun, the word inside a longer identifier, an internal-allow line and "
           "a SKIP_NAMES basename are not in the scoped scan; a review-round label of each shape (a reviewer "
-          "family name and a QA round number, a QA round number and a grade or finding id) is caught by the "
+          "family name and a QA round number, a QA round number and a grade (BLOCKER included) or finding "
+          "id) is caught by the "
           "tracked-file rule and the scoped scan in either case, and by the real gate in a tracked file "
           "outside SCOPE_RELPATHS, while \"quality\", \"QA\" alone, a bare grade word, a family name alone, a "
-          "round number alone and a round glued to a longer word are not, and an internal-allow line holding "
+          "family name before \"QA\" with no round number, \"QA\" before a grade with no round number, a "
+          "round number alone and a family name or a round glued to a longer word are not, and an "
+          "internal-allow line holding "
           "one is exempt; the real gate run on a fixture git repository "
           "catches the role name in a tracked file outside SCOPE_RELPATHS and in a tracked file whose basename "
           "is in SKIP_NAMES, exempts only the one internal-allow line, scans a binary-attributed file that "

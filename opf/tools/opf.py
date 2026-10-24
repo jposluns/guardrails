@@ -11398,8 +11398,8 @@ def _watchdog_completion_case(mode, tree=None):
             except AssertionError:
                 return
             raise AssertionError((
-                "a QA31/QA32 mutation vector was ACCEPTED by leg 11 "
-                "(fix 10/11)", label))
+                "a mutation vector that leg 11 must reject was ACCEPTED "
+                "(the pending-cancellation tripwire went quiet)", label))
 
         # QA31 codex BLOCKER 1, mutation 1: the abandonment boundary's
         # pending argument swapped off the captured name -- while the
