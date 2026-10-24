@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d23c868ce1aadb4aae00bf7aea56386dc4487e96c762ec2cb9d133c011e315fb"
+tree-sha256 = "261e35ad4753177ce9b5971624166d468ed870dfd0d10cc2e3d562d98ba36d43"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2731,8 +2731,8 @@ sha256 = "7d5d8e38c3ea1eb409772825f792398025ed8d295539e1a40db54fd080e307a3"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
-bytes = 286674
-sha256 = "a9e3d31fc53ecbe0e726639c636f652fb8fa30c88b2e3c4baee6a487d356dec1"
+bytes = 286406
+sha256 = "e9352c018db54370667891fb3e30fd25ce5dc29b3ec0b94e9bf1fc25414954fb"
 
 [[sources]]
 path = "opf/tools/_opf_fuzz.py"
@@ -3051,8 +3051,8 @@ sha256 = "a39fd6b1cdbe2ef8d3a9d6ac55b3cf3ecd40e3cd6777dbc3195bc080403c2df2"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1322921
-sha256 = "2dbbb506d963bdecf02edb5d1f71e4fe11ca239191073f3b40699e12378b9036"
+bytes = 1322886
+sha256 = "9c3ebe0e5d4f19ae89a3ccf6fccd2026c2d7a88ec1b6043c5898fcf964bb2021"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3406,8 +3406,8 @@ sha256 = "073ba2947543f513f682660ad59eb85a7614665184db50b44d9ebddb8f9da3d5"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 109108
-sha256 = "5aca6cba8bd14fad644d518dc5d229cc5aa39434e01a062223a2b9c7fc7e8f54"
+bytes = 109635
+sha256 = "6ffb7032e1362b590f7e4c03323995d6f3e41691923d0f2d75c9fbc0e60b5a60"
 
 [[sources]]
 path = "tools/check_leaks.py"

@@ -5926,7 +5926,7 @@ def _watchdog_completion_case(mode, tree=None):
             assert emit.run_bounded(probe, timeout_s=10) == "GC-OFF"
     elif mode == "guardian-preload":
         import time
-        # QA18 codex F5: the guardian forks from the launcher thread, so a cold
+        # The guardian forks from the launcher thread, so a cold
         # guardian-side import could block on an import or module lock some other
         # caller thread held at fork time. Construction preloads the whole guardian
         # dependency set, making every guardian-side import a lock-free
@@ -11379,13 +11379,13 @@ def _watchdog_completion_case(mode, tree=None):
                             "a pending cancellation (fix 7, QA28 codex "
                             "BLOCKER 1)", key, ast.dump(call.func))
 
-        # Leg 11 NEGATIVE VECTORS (fix 10, QA31; fix 11, QA32): each
-        # reproduces an in-memory QA mutation and must be REJECTED by
+        # Leg 11 NEGATIVE VECTORS: each reproduces an in-memory
+        # mutation and must be REJECTED by
         # the structural machinery above -- by its named check, never
-        # accepted and never a crash. Every QA31 vector was verified
-        # ACCEPTED (red) by the fix-9 machinery at 7df50fda; every
-        # QA32 vector was verified ACCEPTED (red) by the fix-10
-        # machinery at 7182a86e.
+        # accepted and never a crash. The vectors from here down to
+        # the call-free suspension pair (yield and await) were
+        # verified ACCEPTED (red) by the earlier machinery at
+        # 7df50fda or 7182a86e, before the checks that now reject them.
         def leg11_vector(source):
             function = _optlevel.parse(textwrap.dedent(source)).body[0]
             capturing = next(node for node in function.body
@@ -11401,7 +11401,7 @@ def _watchdog_completion_case(mode, tree=None):
                 "a mutation vector that leg 11 must reject was ACCEPTED "
                 "(the pending-cancellation tripwire went quiet)", label))
 
-        # QA31 codex BLOCKER 1, mutation 1: the abandonment boundary's
+        # Swapped boundary argument: the abandonment boundary's
         # pending argument swapped off the captured name -- while the
         # capture may be pending, a boundary call that passes ANY
         # other name must be rejected.
@@ -11580,8 +11580,8 @@ def _watchdog_completion_case(mode, tree=None):
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex32-1"),
-                    "interrupted", "vector:codex32-1"))
+                                     "vector:finally-swap"),
+                    "interrupted", "vector:finally-swap"))
 
         # QA32 codex BLOCKER 2: a nested def's parameter DEFAULT
         # executes at the definition, right after the capture.
@@ -11603,8 +11603,8 @@ def _watchdog_completion_case(mode, tree=None):
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex32-2"),
-                    "interrupted", "vector:codex32-2"))
+                                     "vector:nested-default"),
+                    "interrupted", "vector:nested-default"))
 
         # QA32 codex BLOCKER 3, form 1: the capture target collides
         # with the handler's own `as` name -- Python deletes that
@@ -11670,8 +11670,8 @@ def _watchdog_completion_case(mode, tree=None):
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:claude32-1"),
-                    "interrupted", "vector:claude32-1"))
+                                     "vector:nonlocal"),
+                    "interrupted", "vector:nonlocal"))
 
         # QA32 claude BLOCKER 2: the pending argument at ANY boundary
         # call must be a recognized shape. The two real shapes stay
@@ -11700,7 +11700,7 @@ def _watchdog_completion_case(mode, tree=None):
                     None if isinstance(exc, _PENDING_CANCELLATIONS)
                     else exc, release_launcher,
                     "parked launcher release")
-                """): boundary_pending_shape(arg, "vector:claude32-2a"))
+                """): boundary_pending_shape(arg, "vector:inverted-guard"))
         leg11_vector_rejected(
             "swapped-guard vector: the conditional guards "
             "a different name than it passes",
@@ -11709,7 +11709,7 @@ def _watchdog_completion_case(mode, tree=None):
                     pending if isinstance(exc, _PENDING_CANCELLATIONS)
                     else None, release_launcher,
                     "parked launcher release")
-                """): boundary_pending_shape(arg, "vector:claude32-2b"))
+                """): boundary_pending_shape(arg, "vector:swapped-guard"))
 
         # QA32 claude MINOR 2: a call-free suspension point after a
         # capture parks the function while the capture is pending -- a
@@ -11732,8 +11732,8 @@ def _watchdog_completion_case(mode, tree=None):
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:claude32-3"),
-                    "interrupted", "vector:claude32-3"))
+                                     "vector:yield"),
+                    "interrupted", "vector:yield"))
         function, capturing = leg11_vector("""
             async def mutant(self):
                 try:
@@ -11751,8 +11751,8 @@ def _watchdog_completion_case(mode, tree=None):
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:claude32-4"),
-                    "interrupted", "vector:claude32-4"))
+                                     "vector:await"),
+                    "interrupted", "vector:await"))
 
         # QA32 codex MINOR (over-rejection pin): a bare annotation
         # with no value binds nothing at runtime -- it must be
@@ -11798,8 +11798,8 @@ def _watchdog_completion_case(mode, tree=None):
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex33-major"),
-                    "interrupted", "vector:codex33-major"))
+                                     "vector:bare-decorator"),
+                    "interrupted", "vector:bare-decorator"))
 
         # QA33 codex MINOR (fix 12, over-rejection pins): a LOCAL
         # annotation never evaluates its annotation expression, so a
@@ -11894,9 +11894,9 @@ def _watchdog_completion_case(mode, tree=None):
                         function,
                         successors_after(
                             function, capturing,
-                            "vector:codex34-major-" + label),
+                            "vector:definition-time-" + label),
                         "interrupted",
-                        "vector:codex34-major-" + label))
+                        "vector:definition-time-" + label))
 
         # Companion rejection pin (fix 13): a walrus in that same
         # definition-time default binds in the ENCLOSING scope, so
@@ -12048,8 +12048,8 @@ def _watchdog_completion_case(mode, tree=None):
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex36-annotation-read"),
-                    "interrupted", "vector:codex36-annotation-read"))
+                                     "vector:annotation-read"),
+                    "interrupted", "vector:annotation-read"))
 
         # QA37 codex MINOR (fix 16, over-rejection pin): a LOCAL
         # AnnAssign's annotation expression never evaluates on the

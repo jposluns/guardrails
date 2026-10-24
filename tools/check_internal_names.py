@@ -732,11 +732,13 @@ def _self_test(caller_env=None):
         #     before "QA" alone, dropping it in pattern 2 flags "QA" before a bare grade, dropping pattern
         #     1's leading word boundary flags a family name glued to a longer word, dropping pattern 2's
         #     leading word boundary flags a round glued to a longer word, dropping the grade or finding
-        #     id flags a round number alone, and dropping the digit from the finding id flags a round number
-        #     before a word that starts with F. Every vector is assembled at runtime, so no contiguous label
-        #     sits in this source (the rule scans this file). The three-digit round numbers in the hits, the
-        #     controls and the fixture below are synthetic values naming no real round, and the subjects are
-        #     neutral; the two-digit control repeats planted marker strings the opf self-tests use.
+        #     id flags a round number alone, dropping the digit from the finding id flags a round number
+        #     before a word that starts with F, and widening either pattern's one optional space (to any run
+        #     of spaces, any whitespace or any character) flags two spaces, a tab or punctuation between the
+        #     parts, the documented separator limit. Every vector is assembled at runtime, so no contiguous
+        #     label sits in this source (the rule scans this file). The round numbers in the hits, the
+        #     controls and the fixture below are synthetic three-digit values naming no real round, and the
+        #     subjects are neutral.
         write_hashes([])
         qa = "QA"
         review_label = "internal review-round label"
@@ -760,11 +762,15 @@ def _self_test(caller_env=None):
             "the codex " + qa + " suite, with no round number",
             "the " + qa + " MAJOR backlog, with no round number",
             "a mutation vector of round " + qa + "901/" + qa + "902",
-            "a planted " + qa + "15-CAUSE marker and a " + qa.lower() + "15-st-size probe",
+            "a planted " + qa + "945-CAUSE marker and a " + qa.lower() + "946-st-size probe",
             "vector:codex" + "901-1 and vector:claude" + "901-3",
             "a glued token non" + qa + "903 F1 and pre" + qa + "916 MINOR",
             "an autocodex " + qa + "901 build and a preclaude " + qa + "902 run",
             "the " + qa + "905 Final summary and a " + qa.lower() + "906 follow-up",
+            "codex  " + qa + "937 and claude\t" + qa + "938, two spaces and a tab apart",
+            "gemini:" + qa + "939 and codex: " + qa + "940, punctuation between",
+            qa + "941  MINOR and " + qa + "942\tMAJOR, two spaces and a tab apart",
+            qa + "943:F1 and " + qa + "944-BLOCKER, punctuation between",
         )
         for text in label_hits:
             found = scan_role_text(text + "\n")
@@ -1521,8 +1527,8 @@ def _self_test(caller_env=None):
           "tracked-file rule and the scoped scan in either case, and by the real gate in a tracked file "
           "outside SCOPE_RELPATHS, while \"quality\", \"QA\" alone, a bare grade word, a family name alone, a "
           "family name before \"QA\" with no round number, \"QA\" before a grade with no round number, a "
-          "round number alone, a round number before a word that starts with F and a family name or a round "
-          "glued to a longer word are not, and an "
+          "round number alone, a round number before a word that starts with F, a family name or a round "
+          "glued to a longer word and parts separated by two spaces, a tab or punctuation are not, and an "
           "internal-allow line holding "
           "one is exempt; the real gate run on a fixture git repository "
           "catches the role name in a tracked file outside SCOPE_RELPATHS and in a tracked file whose basename "
