@@ -90,9 +90,12 @@ ALREADY-INITIALIZED are library milestones and never map to coupled-init exit 0;
 for a fully evaluated, NON-mutating assessment that reports findings; every REFUSED, FAILED, or
 CANNOT-EVALUATE result maps to exit 2.
 
-DISCLOSED RESIDUALS: the git ignore-eligibility preflight D2a runs is not repeated here (it is a
-staging precondition, PR5); the adoption observer that distinguishes a first adoption from a
-committed deletion is PR4, so this layer refuses an existing store it did not itself record; a
+DISCLOSED RESIDUALS: the git ignore-eligibility preflight is the one shared check plain `opf init` runs
+(_opf_write_guard.init_ignore_refusal), applied here by _refuse_ignored_destinations under the held
+mutex on both the fresh path (before the plan is persisted) and the resume path (once the recorded plan
+validates), so its own disclosed residual holds here too (an ignore input git cannot read is read as
+no rule, as git add reads it, and is not refused); the adoption observer that distinguishes a first
+adoption from a committed deletion is PR4, so this layer refuses an existing store it did not itself record; a
 same-uid writer racing the held mutex can still change a destination between the final check and a
 later reader (the lock is advisory; OS isolation is SYSTEM-HARDENING's); a byte-identical file a
 foreign writer plants after the intent is recorded is accepted as a dedupe (its content is exactly

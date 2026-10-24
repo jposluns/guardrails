@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "6b968a060321f36256e3f7fb5b0103f30bd18599966396e673eec96687be1d5f"
+tree-sha256 = "8a34ca4a76913c315ea8b8a4c4325798fb20ee83043d6c994e32ba1d582e5f57"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "413a7947948587acf22644ae31824f50b1d99e70f60299053daf525c6dd92110"
+sha256 = "65262fd410e229583126446f46bdec144be89f9d02abaeea1e81cc3b2858916a"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2686,8 +2686,8 @@ sha256 = "65ee9364396ac733e6717e905aaa50665ab68a091e97b6a82b47b56d3a5129ea"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 1071934
-sha256 = "7797a8a44bff3b15a768dcbce12d0653bc52efc97f4d71a63ef87ff345df82b9"
+bytes = 1076821
+sha256 = "c4c915615772468650fd9a742b8b3d99e4308e30a9e0398d90e8e29740442c28"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
@@ -2761,8 +2761,8 @@ sha256 = "77afb1dcded7f7990f1c2055b5a13c5df0c8fff59505f3e8da5b4a0608350334"
 
 [[sources]]
 path = "opf/tools/_opf_init_operation.py"
-bytes = 270412
-sha256 = "695c0c8fa95d97d70d49e25ac87b72f66f0bab9f051773d35098c79c1b52ad87"
+bytes = 270747
+sha256 = "7f3a42e1cef5fc273274e2ea630ae12c48907037401c8c082c2d8ec6a26d57d9"
 
 [[sources]]
 path = "opf/tools/_opf_init_p0.py"
@@ -3291,8 +3291,8 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_standards.py"
-bytes = 17447
-sha256 = "bb1e262f5f456f93169bd9ca45016e7ef8204a214e59a67c1cb6aeedb514ebdb"
+bytes = 18597
+sha256 = "35f313a97484a89092db9d97e9e029d138388006f084ee5e5de08db8226bf5ba"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -3526,8 +3526,8 @@ sha256 = "89d29e534757397ed1cd6e10ad8a5d2259f3e84aa15691ef59d5e3b175378721"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
-bytes = 23124
-sha256 = "9ac3ffc36983ef060793eea2be911d5d094259c2efadc790ea1857954ba3400e"
+bytes = 25814
+sha256 = "c7dd4e3188186f417d1db5bf9d13da0ac0e214f8223c1ee29a23bbadb0b71989"
 
 [[sources]]
 path = "tools/check_secrets.py"

@@ -180,6 +180,26 @@ def dir_present(path):
     return stat.S_ISDIR(st.st_mode)
 
 
+def dir_or_absent(path):
+    """Three-way fail-closed probe for an input that must be a real directory or be absent. Return
+    (True, None) for a directory, (False, None) when nothing is there, and (False, reason) when something
+    is there that is not a directory: a regular file or other non-directory, or a symbolic link, dangling
+    or not (the link itself is judged with os.lstat, never its target, so a tree elsewhere is never read
+    in its place). RAISE OSError when the path cannot be examined other than by absence (an unreadable
+    ancestor, or an ancestor that is not a directory), as dir_present does. dir_present reads every
+    non-directory as absent; a caller that must not pass over an input it never read refuses the reason
+    as cannot-evaluate instead. Only the last component is judged: an ancestor symlink is followed."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return (False, None)
+    if stat.S_ISLNK(st.st_mode):
+        return (False, "is a symbolic link, not a directory")
+    if not stat.S_ISDIR(st.st_mode):
+        return (False, "is not a directory")
+    return (True, None)
+
+
 def ensure_listable(directory):
     """Fail-closed on a directory that EXISTS but cannot be listed. Path.glob/rglob SILENTLY yield
     nothing on an unreadable directory rather than raising, so an unlistable input dir would read as
