@@ -56,8 +56,11 @@ own source alike), decoded as UTF-8, and also runs inside the scoped scan above 
 surface is still covered). The only exemption is the internal-allow marker, which exempts the ONE line that
 carries it; this gate's own self-test vectors carry that marker on each line that holds the word, and no
 file is exempt by name. A tracked file that is not valid UTF-8 is skipped only when it is in a binary format
-the repository tracks, listed in TRACKED_BINARY_SIGNATURES and recognised by its suffix AND its leading
-content signature (today the ZIP archive alone: the committed skill .zip archives); any other non-UTF-8
+the repository tracks, listed in TRACKED_BINARY_SIGNATURES and recognised by its suffix, its leading
+content signature AND by OPENING as a ZIP archive, the one listed format today (the committed skill .zip
+archives; the standard-library zipfile module parses a bounded read of the file, extracting nothing). A
+file that carries the signature but does not open as an archive within the read bound CANNOT BE EVALUATED
+and fails closed at exit 2 with its own named report; any other non-UTF-8
 tracked file whatever its suffix (a malformed .csv, say), a tracked path absent from the working tree, or a
 tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2, the way an
 unreadable input does. A .gitattributes `binary` attribute is NOT a skip: a binary-attributed file that
@@ -88,8 +91,10 @@ passes clean generic content, so removing a
 layer makes a case fail. It also runs the real scan over a planted fixture repository to prove the tree-wide
 decision-id layer is wired in and fails closed on an unreadable file, an unlistable directory, a FIFO and a
 vanished file, and over fixture repositories to prove the role rule skips a non-UTF-8 tracked file only in a
-tracked binary format (a real ZIP archive passes; a malformed .csv, an unsigned .zip and a .csv carrying the
-ZIP signature each exit 2). The self-test exits 0 only when
+tracked binary format (a real ZIP archive passes, at and one byte inside the read bound too; a malformed
+.csv, an unsigned .zip, a .csv carrying the ZIP signature and a .zip matching only a prefix of the signature
+each exit 2 as not valid UTF-8; a signature-prefixed .zip that does not open as an archive, and the archive
+one byte over the read bound, each exit 2 named as not opening). The self-test exits 0 only when
 every case ran and passed; 1 when any case failed (it also prints the cases it did not run); otherwise, when
 it skipped a case, 3. It never exits 0 after a skip. Skip reasons it prints include, as examples rather than
 a complete set:
@@ -115,10 +120,12 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import io
 import os
 import re
 import stat
 import subprocess
+import zipfile
 from pathlib import Path
 
 # Import the sibling modules WITHOUT placing this script's own directory AHEAD of the stdlib on sys.path.
@@ -138,7 +145,14 @@ TEXT_SUFFIXES = check_leaks.TEXT_SUFFIXES
 # with the content signature a file under it must start with, so a suffix alone never makes a file binary.
 # Today that is the ZIP archive alone (the committed skill archives under site/downloads/, each starting with
 # a ZIP local file header). A tracked file in any other binary format cannot be evaluated until it is listed.
+# The suffix and signature only SELECT the format: the skip is granted only when the file also OPENS as a ZIP
+# archive (_tracked_binary), so a signature prefix glued onto other bytes never reads as binary.
 TRACKED_BINARY_SIGNATURES = {".zip": b"PK\x03\x04"}
+# The most bytes _tracked_binary reads to verify that a signature-matched file opens as a ZIP archive, reused
+# from the leak gate so the two gates agree on what a readable archive is. A signature-matched file over this
+# bound cannot be evaluated (fail closed), never skipped unverified. The self-test proves both ends of the
+# bound by patching this value around a real archive's exact size.
+_BINARY_READ_MAX = check_leaks.MAX_ARCHIVE_FILE_SIZE
 HASHES_RELPATH = ("tools", "internal-name-hashes.txt")
 
 # The QA-suite shipped surfaces this gate is responsible for keeping genericized. Files are scanned
@@ -395,31 +409,55 @@ def scan_role_text(text):
 
 
 def _tracked_binary(path):
-    """True when the regular file at `path` is in a binary format the repository tracks: its suffix is listed
-    in TRACKED_BINARY_SIGNATURES and its content starts with that format's signature."""
+    """Classify the regular file at `path` for the role rule's binary exemption. "binary": the file is in a
+    binary format the repository tracks (its suffix is listed in TRACKED_BINARY_SIGNATURES, its content
+    starts with that format's signature, AND it opens as a ZIP archive, the one listed format today: the
+    standard-library zipfile module parses at most _BINARY_READ_MAX bytes, read through one descriptor and
+    held in memory; no member is extracted or scanned). "unverified": the suffix and signature match but the
+    file does not open as a ZIP archive within the read bound; the caller fails closed (exit 2) naming the
+    file, so a signature prefix alone never buys the skip. "text": an unlisted suffix or a missing
+    signature; the file is not a tracked binary and the caller reports it as not valid UTF-8."""
     signature = TRACKED_BINARY_SIGNATURES.get(path.suffix)
     if signature is None:
-        return False
+        return "text"
     with open(path, "rb") as handle:
-        return handle.read(len(signature)) == signature
+        head = handle.read(len(signature))
+        if head != signature:
+            return "text"
+        data = head + handle.read(_BINARY_READ_MAX - len(head) + 1)
+    if len(data) > _BINARY_READ_MAX:
+        return "unverified"
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)):
+            return "binary"
+    except Exception:  # zipfile reports corruption as BadZipFile, ValueError, EOFError and others
+        return "unverified"
 
 
 def scan_tracked_roles(root, relpaths):
     """Return (findings, unevaluable) for the role rule (the role name and the review-round labels) over the
     tracked `relpaths`, independent of SCOPE_RELPATHS and SKIP_NAMES. A file that is not valid UTF-8 is
-    skipped only when it is in a binary format the repository tracks (_tracked_binary: a listed suffix and
-    that format's content signature); any other non-UTF-8 file, whatever its suffix, or a tracked path
-    absent from the working tree, is unevaluable. A tracked path that is present but not a readable regular
-    file raises OSError (exit 2) through _read_present_text."""
+    skipped only when it is in a binary format the repository tracks (_tracked_binary: a listed suffix, that
+    format's content signature, and the file opening as a ZIP archive within the read bound); a file that
+    carries the signature but does not open as an archive is unevaluable with its own named report, and any
+    other non-UTF-8 file, whatever its suffix, or a tracked path absent from the working tree, is
+    unevaluable too. A tracked path that is present but not a readable regular file raises OSError (exit 2)
+    through _read_present_text."""
     findings, unevaluable = [], []
     for rel in relpaths:
         try:
             text = _read_present_text(root / rel)
         except UnicodeDecodeError:
-            if _tracked_binary(root / rel):
+            verdict = _tracked_binary(root / rel)
+            if verdict == "binary":
                 continue
-            unevaluable.append("{}: tracked file is not valid UTF-8; the role-name and review-round label "
-                               "rule cannot evaluate it".format(rel))
+            if verdict == "unverified":
+                unevaluable.append("{}: tracked file starts with the ZIP signature but does not open as a "
+                                   "ZIP archive within the read bound; the role-name and review-round label "
+                                   "rule cannot evaluate it".format(rel))
+            else:
+                unevaluable.append("{}: tracked file is not valid UTF-8; the role-name and review-round label "
+                                   "rule cannot evaluate it".format(rel))
             continue
         if text is None:
             unevaluable.append("{}: tracked file is absent from the working tree; the role-name and "
@@ -755,10 +793,14 @@ def _self_test(caller_env=None):
         #     alone, dropping it in pattern 2 flags "QA" before a bare grade, dropping pattern 1's leading
         #     word boundary flags a family name glued to a longer word, dropping pattern 2's leading word
         #     boundary flags a round glued to a longer word, dropping the grade or finding id flags a round
-        #     number alone, dropping the digit from the finding id flags a round number before a word that
-        #     starts with F, dropping pattern 2's trailing word boundary flags a round number before
+        #     number alone, dropping the digit from the finding id leaves the F4 and F12 hits unflagged (with
+        #     the trailing word boundary, a round number before an ordinary word that starts with F stays
+        #     unmatched either way), dropping pattern 2's trailing word boundary flags a round number before
         #     "minority", "majority", "mediums", "Blockers" or an F, digits and then letters, narrowing that
-        #     boundary to "no letter follows" flags the F, two digits and then letters, and widening either
+        #     boundary to "no letter follows" flags the F, two digits and then letters, and the grade run
+        #     straight into a digit, narrowing it to "no letter or digit follows" flags the grade or finding
+        #     id run straight into an underscore, widening the finding id to zero digits (one or more digits
+        #     is part of the pattern) flags the bare F after a round number, and widening either
         #     pattern's one optional space (to any run of spaces, any whitespace, any character, or a set
         #     that adds any one ASCII punctuation character) flags two spaces, a tab or that punctuation
         #     character between the parts, the documented separator limit: each pattern has a control for
@@ -805,6 +847,9 @@ def _self_test(caller_env=None):
             qa.lower() + "951 mediums and " + qa + "952 Blockers",
             qa + "953 F2fa, an F, a digit and then letters",
             qa + "954 F12abc, an F, digits and then letters",
+            qa + "955 F: a bare F with no digits after it",
+            qa + "956 MINOR1, a grade run straight into a digit",
+            qa + "957 MINOR_note and " + qa + "958 F2_x, a grade and a finding id run into an underscore",
         )
         import string
         for mark in string.punctuation:
@@ -857,7 +902,8 @@ def _self_test(caller_env=None):
                                         "the Architect again\n", encoding="utf-8")  # internal-allow
         (repo / "data.bin").write_text("binary-attributed but UTF-8: Architect\n", encoding="utf-8")  # internal-allow
         (repo / ".gitattributes").write_text("data.bin binary\nblob.zip binary\n", encoding="utf-8")
-        (repo / "blob.zip").write_bytes(b"PK\x03\x04\xff\xfe Architect \xff\n")  # internal-allow
+        with zipfile.ZipFile(repo / "blob.zip", "w", zipfile.ZIP_STORED) as blob:
+            blob.writestr("note.bin", b"\xff\xfe Architect \xff\n")  # internal-allow
         (repo / "clean.md").write_text("An architectural note on the Architecture section.\n", encoding="utf-8")
         (repo / "untracked.md").write_text("the Architect, never added\n", encoding="utf-8")  # internal-allow
         init = subprocess.run(["git", "-C", str(repo), "init", "-q"], capture_output=True, text=True,
@@ -896,14 +942,14 @@ def _self_test(caller_env=None):
                 failures.append("internal-allow expected to exempt notes.txt line 1 only, got {!r}".format(report))
             # 16. DISCRIMINATING (binary and non-UTF-8 files follow the stated rule): a .gitattributes
             #     binary file that decodes as UTF-8 is scanned (data.bin is caught); a non-UTF-8 file in a
-            #     tracked binary format is skipped (blob.zip, with the ZIP signature, is neither caught nor
-            #     unevaluable; case 28 covers the formats that are not skipped); and
+            #     tracked binary format is skipped (blob.zip, a real ZIP archive built with zipfile, is
+            #     neither caught nor unevaluable; case 28 covers the inputs that are not skipped); and
             #     an untracked file is out of the role rule's reach (untracked.md, a disclosed limit).
             if "data.bin:1: " + role not in report:
                 failures.append("a binary-attributed UTF-8 tracked file expected to be scanned, got {!r}".format(
                     report))
             if "blob.zip" in report or "untracked.md" in report:
-                failures.append("a non-text-suffix non-UTF-8 file and an untracked file expected to be outside "
+                failures.append("a tracked ZIP archive and an untracked file expected to be outside "
                                 "the role rule, got {!r}".format(report))
             # DISCRIMINATING (the tracked-file read drops the GIT_* environment): GIT_CONFIG_GLOBAL pointed at
             # a malformed file must not change the gate's result. A control first proves the file breaks a git
@@ -958,13 +1004,21 @@ def _self_test(caller_env=None):
             failures.append("a root that is not a git repository expected exit 2, got rc={} {!r}".format(rc, report))
 
         # 28. DISCRIMINATING (a non-UTF-8 tracked file is skipped only in a tracked binary format, recognised by
-        #     suffix AND content signature): a real ZIP archive with non-UTF-8 bytes, tracked beside a clean
-        #     file, passes (exit 0). Each of the following, tracked in turn, cannot be evaluated (exit 2): a
-        #     malformed .csv holding a review-round label, a .zip without the ZIP signature, and a .csv that
-        #     starts with the ZIP signature. Skipping by a suffix outside TEXT_SUFFIXES lets the .csv read
-        #     clean; skipping by suffix alone lets the unsigned .zip read clean; skipping by signature alone
-        #     lets the signed .csv read clean; never skipping fails the archive; each fails this case.
-        import zipfile
+        #     suffix AND content signature AND by opening as a ZIP archive): a real ZIP archive with non-UTF-8
+        #     bytes, tracked beside a clean file, passes (exit 0). Each of the following, tracked in turn,
+        #     cannot be evaluated (exit 2) with the expected report: a malformed .csv holding a review-round
+        #     label, a .zip without the ZIP signature and a .csv that starts with the ZIP signature (each
+        #     reported as not valid UTF-8); a .zip that starts with the ZIP signature but does not open as an
+        #     archive (reported as not opening, never skipped on the signature alone); and a .zip whose first
+        #     bytes match only a PREFIX of the signature (reported as not valid UTF-8, so truncating the
+        #     stored signature to any prefix, or comparing fewer bytes than the signature holds, moves it to
+        #     the not-opening report and fails this case). Skipping by a suffix outside TEXT_SUFFIXES lets the
+        #     .csv read clean; skipping by suffix alone lets the unsigned .zip read clean; skipping by
+        #     signature alone lets the signed .csv read clean; skipping on the signature without opening the
+        #     archive lets the malformed .zip read clean; never skipping fails the archive; each fails this
+        #     case. The read bound is then proven at both ends by patching _BINARY_READ_MAX around the
+        #     archive's exact size: at the size and one byte above, the archive still passes; one byte below,
+        #     it cannot be evaluated, pinning the comparison's direction and inclusiveness.
         binrepo = tmp / "binary-repo"
         binrepo.mkdir()
         (binrepo / "clean.md").write_text("A clean note.\n", encoding="utf-8")
@@ -987,22 +1041,44 @@ def _self_test(caller_env=None):
             rc, report = gate(binrepo)
             if rc != 0 or "archive.zip" in report:
                 failures.append("a tracked ZIP archive expected to pass (exit 0), got rc={} {!r}".format(rc, report))
-            for name, content in (
-                    ("review.csv", ("codex " + qa + "932\n").encode("utf-8") + b"\xff"),
-                    ("unsigned.zip", b"\xff\xfe not an archive \xff\n"),
-                    ("signed.csv", b"PK\x03\x04\xff\xfe not an archive \xff\n")):
+            not_utf8 = ": tracked file is not valid UTF-8"
+            not_open = ": tracked file starts with the ZIP signature but does not open as a ZIP archive"
+            for name, content, expect in (
+                    ("review.csv", ("codex " + qa + "932\n").encode("utf-8") + b"\xff", not_utf8),
+                    ("unsigned.zip", b"\xff\xfe not an archive \xff\n", not_utf8),
+                    ("signed.csv", b"PK\x03\x04\xff\xfe not an archive \xff\n", not_utf8),
+                    ("malformed.zip", b"PK\x03\x04\xff\xfe not an archive \xff\n", not_open),
+                    ("nearsigned.zip", b"PK\x03\x05\xff\xfe not an archive \xff\n", not_utf8)):
                 (binrepo / name).write_bytes(content)
                 add = subprocess.run(["git", "-C", str(binrepo), "add", "--", name], capture_output=True,
                                      text=True, env=_git_fixture_env.git_fixture_env(), timeout=60)
                 rc, report = gate(binrepo)
-                if add.returncode != 0 or rc != 2 or name + ": tracked file is not valid UTF-8" not in report:
-                    failures.append("a tracked non-UTF-8 {} expected cannot-evaluate (exit 2), got rc={} {!r}".format(
-                        name, rc, report))
+                wrong = name + not_open if expect == not_utf8 else name + not_utf8
+                if add.returncode != 0 or rc != 2 or name + expect not in report or wrong in report:
+                    failures.append("a tracked non-UTF-8 {} expected cannot-evaluate (exit 2) reported as {!r}, "
+                                    "got rc={} {!r}".format(name, expect, rc, report))
                 remove = subprocess.run(["git", "-C", str(binrepo), "rm", "-q", "-f", "--", name],
                                         capture_output=True, text=True, env=_git_fixture_env.git_fixture_env(),
                                         timeout=60)
                 if remove.returncode != 0:
                     failures.append("the case 28 file {} could not be removed: {!r}".format(name, remove.stderr))
+            # Both ends of the verification read bound, on the tracked real archive: at the archive's exact
+            # size and one byte above it, the archive verifies and the gate passes; one byte below, the
+            # archive is over the bound and cannot be evaluated (exit 2, named with the not-opening report),
+            # never skipped unverified. A bound comparison with the wrong direction or inclusiveness, or a
+            # skip that stops verifying, fails one of the three.
+            global _BINARY_READ_MAX
+            saved_bound = _BINARY_READ_MAX
+            try:
+                for bound, want_rc in ((len(archive_bytes), 0), (len(archive_bytes) + 1, 0),
+                                       (len(archive_bytes) - 1, 2)):
+                    _BINARY_READ_MAX = bound
+                    rc, report = gate(binrepo)
+                    if rc != want_rc or (want_rc == 2) != ("archive.zip" + not_open in report):
+                        failures.append("with the binary read bound {} the archive ({} bytes) expected exit {}, "
+                                        "got rc={} {!r}".format(bound, len(archive_bytes), want_rc, rc, report))
+            finally:
+                _BINARY_READ_MAX = saved_bound
 
         # 18. DISCRIMINATING (finding-3: an unknown option is a LOUD exit 2, never a silent default path): a
         #     subprocess given a misspelled --self-testx or a stray --bogus exits 2, never 0 by silently
@@ -1613,16 +1689,23 @@ def _self_test(caller_env=None):
           "tracked-file rule and the scoped scan in either case, and by the real gate in a tracked file "
           "outside SCOPE_RELPATHS, while \"quality\", \"QA\" alone, a bare grade word, a family name alone, a "
           "family name before \"QA\" with no round number, \"QA\" before a grade with no round number, a "
-          "round number alone, a round number before a word that starts with F, a family name or a round "
+          "round number alone, a round number before a word that starts with F, a bare F with no digits, a "
+          "grade or finding id run straight into a digit or an underscore, a family name or a round "
           "glued to a longer word and parts separated by two spaces, a tab or any one ASCII punctuation "
           "character are not, and an "
           "internal-allow line holding "
           "one is exempt; the real gate run on a fixture git repository "
           "catches the role name in a tracked file outside SCOPE_RELPATHS and in a tracked file whose basename "
           "is in SKIP_NAMES, exempts only the one internal-allow line, scans a binary-attributed file that "
-          "decodes as UTF-8, skips a non-UTF-8 file with a non-text suffix and an untracked file, and exits 2 "
+          "decodes as UTF-8, skips a non-UTF-8 tracked ZIP archive and an untracked file, and exits 2 "
           "(cannot evaluate) on a tracked non-UTF-8 text file, a tracked file absent from the working tree and "
-          "a root that is not a git repository; a GIT_CONFIG_GLOBAL pointed at a malformed file does not "
+          "a root that is not a git repository; a non-UTF-8 tracked file is skipped only in a tracked binary "
+          "format, recognised by its suffix, the ZIP signature and opening as a ZIP archive within the read "
+          "bound (a real tracked archive passes, with the bound at its exact size and one byte above too; a "
+          "malformed .csv, an unsigned .zip, a .csv carrying the ZIP signature and a .zip matching only a "
+          "prefix of the signature each exit 2 reported as not valid UTF-8; a signature-prefixed .zip that "
+          "does not open as an archive, and the archive with the bound one byte under its size, each exit 2 "
+          "reported as not opening within the read bound); a GIT_CONFIG_GLOBAL pointed at a malformed file does not "
           "change the gate result (the gate's tracked-file read drops the GIT_* environment); a child "
           "self-test still passes (child line, exit 3) with a malformed .gitconfig under the caller's HOME, a "
           "malformed git/config "
