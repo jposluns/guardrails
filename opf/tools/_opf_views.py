@@ -27,8 +27,10 @@ on declared keys with the record ID as the final tie-breaker; group by a declare
 columns; plus EXACTLY TWO named joins, the block-actionability join (a clean, unqualified active block
 authored by a non-importer actor HIDES the records it scopes; importer-authored records enter the join on
 neither side and a scheduling view surfaces an importer-authored item only as history, spec 8.5/8.6) and
-the decision-resolution supersession-chain join (the current effective
-resolution is the head of each supersedes chain, spec 8.5). Nothing beyond this vocabulary enters a
+the decision-resolution supersession-chain join (the current effective resolution is the head of each
+supersedes chain, spec 8.5; an importer-authored decision enters this join on neither side, so it never
+becomes a current effective resolution nor supersedes one away, and DECISIONS surfaces it only as history,
+spec 8.5/8.6). Nothing beyond this vocabulary enters a
 generator; a new composition shape is a specification version bump, not ad hoc logic here.
 
 Determinism (spec 10.3): UTF-8, LF, stable ordering, no locale-dependent sorting, no wall-clock content,
@@ -406,10 +408,14 @@ def _is_proposed(record):
 def _importer_authored(record):
     """True when a record's actor kind is `importer` (spec 8.6): such a record is imported history,
     keyed on PROVENANCE (actor.kind), not on series or import activation. An importer-authored record
-    enters no current-state join: it neither grants a stop nor counts as actionable work, and a view
-    surfaces it only as history (spec 8.5/8.6). A missing or malformed actor is NOT importer-authored
-    (records are validated before they reach a renderer; this is the permissive side, so a clean record
-    with an odd envelope is never silently demoted to history)."""
+    enters no current-state join: it neither grants a stop, nor counts as actionable work, nor becomes
+    (or displaces) a current effective resolution, and a view surfaces it only as history (spec 8.5/8.6).
+    A missing or malformed actor is NOT importer-authored. That permissive reading is unreachable from a
+    store: every store record reaches a renderer through _load_records, which refuses any record
+    _opf_schema.validate_record grades invalid, and that validation requires the actor envelope (a table
+    whose kind is a registered ACTOR_KINDS string). It matters only to a direct synthetic caller, for
+    which a clean record with an odd envelope must never be silently demoted to history (the fail-closed
+    handling of a malformed record is _load_records' refusal, never a demotion here)."""
     actor = record.get("actor")
     return isinstance(actor, dict) and actor.get("kind") == "importer"
 
@@ -481,9 +487,10 @@ _FILTER_PREDICATES = {
     "not_proposed": lambda: (lambda r: not _is_proposed(r)),
     # The imported-history firewall keys on PROVENANCE, the declared actor.kind field (spec 8.5/8.6):
     # these split a set into importer-authored history and the records that may enter a current-state
-    # join. Every such split (the actionability join's block side, is_actionable's item side, and the
-    # BACKLOG, PIPELINE and HANDOFF renderers) goes through this pair, never a direct _importer_authored
-    # call, so the firewall has one registered definition.
+    # join. Every such split (the actionability join's block side, is_actionable's item side, the
+    # decision-resolution join's input side, and the BACKLOG, PIPELINE, DECISIONS and HANDOFF renderers)
+    # goes through this pair, never a direct _importer_authored call, so the firewall has one registered
+    # definition.
     "importer_authored": lambda: (lambda r: _importer_authored(r)),
     "not_importer_authored": lambda: (lambda r: not _importer_authored(r)),
 }
@@ -630,10 +637,16 @@ def join_resolution(decisions):
     a newer one linking `supersedes`, and exactly one current effective resolution exists per chain.
     Returns (current, superseded, supersedes_map): current is the set of decision IDs not superseded by any
     other decision in the set (the chain heads), superseded is the complementary set, and supersedes_map
-    maps each decision ID to the sorted IDs it directly supersedes. A FORK (a decision superseded by more
+    maps each decision ID to the sorted IDs it directly supersedes. An importer-authored decision is
+    imported history outside every current-state join (spec 8.5/8.6): the input is filtered through the
+    registered `not_importer_authored` predicate, so such a decision enters this join on NEITHER side; it
+    never becomes a current effective resolution, its `supersedes` links confer no authority (a clean head
+    it names stays current), and it lands in none of the returned sets (the DECISIONS renderer surfaces it
+    only as history). A FORK (a decision superseded by more
     than one other), a CYCLE, or any chain resolving to more than one head is an INVALID graph and raises
     ViewsError (a cannot-evaluate), never returned as multiple current heads; the single-head happy path
     returns unchanged."""
+    decisions = t_filter(decisions, "not_importer_authored")
     supersedes_map = {}
     superseded = set()
     ids = {d.get("id") for d in decisions if isinstance(d.get("id"), str)}
@@ -898,8 +911,8 @@ def _toml_comment_safe(value):
 def render_todo(src):
     """TODO: the actionable open and active backlog items (block-actionability join, then a state filter,
     then an ID-tie-broken sort). An item a clean, unqualified active block authored by a non-importer actor
-    scopes is hidden; an importer-authored block hides nothing. An importer-authored item is never actionable (spec 8.5/8.6), so it never appears here; BACKLOG and PIPELINE surface it as
-    history."""
+    scopes is hidden; an importer-authored block hides nothing. An importer-authored item is never
+    actionable (spec 8.5/8.6), so it never appears here; BACKLOG and PIPELINE surface it as history."""
     items, blocks = src["backlog_item"], src["block"]
     _blocked_by, hidden = join_actionability(items, blocks)
     actionable = t_filter(items, "is_actionable", hidden=hidden)
@@ -1006,11 +1019,27 @@ def render_decisions(src):
     listed under `Withdrawn decisions`, never dropped. Each maintainer_decision is a created-terminal ruling
     that may `exemplifies` the preference_pattern it instantiates (a projection of the record's OWN links,
     not a join). A preference_pattern lands under Active / Retired, and a `/proposed` distilled pattern
-    awaiting ratification is surfaced with its FULL status, never mis-listed as active. Every valid record of
+    awaiting ratification is surfaced with its FULL status, never mis-listed as active. An importer-authored
+    record of ANY of the four sources is imported history outside every current-state join (spec 8.5/8.6):
+    whatever its recorded status, it is held OUT of every section and join above and surfaced only under a
+    trailing `Imported history` section with that FULL status (as PIPELINE and HANDOFF surface theirs),
+    never as a pending/effective/superseded/withdrawn decision, an autonomous or maintainer ruling, or an
+    active pattern. Every valid record of
     every source thus lands in exactly one place."""
     pend, auto = src["pending_decision"], src["autonomous_decision"]
     md = src.get("maintainer_decision", [])
     pp = src.get("preference_pattern", [])
+    # The imported-history firewall (spec 8.5/8.6) keys on provenance: an importer-authored record of any
+    # decision-register source confers no current-state authority, so it is held out of every section and
+    # join below (join_resolution filters its own input too, as defence in depth) and surfaced only under
+    # the trailing Imported history section with its full status. The split runs through the registered
+    # predicate pair, like every importer split in this module.
+    imported = t_sort(t_filter(pend, "importer_authored") + t_filter(auto, "importer_authored")
+                      + t_filter(md, "importer_authored") + t_filter(pp, "importer_authored"))
+    pend = t_filter(pend, "not_importer_authored")
+    auto = t_filter(auto, "not_importer_authored")
+    md = t_filter(md, "not_importer_authored")
+    pp = t_filter(pp, "not_importer_authored")
     settled = t_filter(pend, "not_proposed")
     proposed = t_sort(t_filter(pend, "is_proposed"))
     # The ratified supersession graph is over the SETTLED decisions only: a proposal does not yet supersede
@@ -1067,6 +1096,11 @@ def render_decisions(src):
             + ["- {} ({}) {}".format(_md_text(r.get("id")), _md_text(r.get("status", "")),
                                      _md_text(r.get("title", ""))) for r in proposed_pp]
             or [_EMPTY])
+    if imported:
+        out += ["", "## Imported history"]
+        out += ["- {} ({}) {}".format(
+            _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", "")))
+            for r in imported]
     return "# {}\n\n{}\n".format("DECISIONS", "\n".join(out))
 
 
@@ -1164,7 +1198,10 @@ def render_decisions_toml(src):
     Returns the TOML BODY only; the driver prepends the `#` do-not-edit header (_toml_header). Each source
     is an array of tables of its projected rows, ID-sorted; the `[derived]` table carries the
     decision-resolution join's effective/superseded output over the SETTLED pending decisions (no vocabulary
-    beyond spec 10.2). x-<vendor> tables are excluded (profile-owned). The body is emitted through
+    beyond spec 10.2). The projected rows are the faithful full-record mirror, so an importer-authored
+    record still projects as a row; the `[derived]` table is a CURRENT-STATE join, so join_resolution's own
+    provenance firewall (spec 8.5/8.6) keeps an importer-authored decision out of both derived sets.
+    x-<vendor> tables are excluded (profile-owned). The body is emitted through
     _opf_emit.emit_checked, which reparses and byte-canon-proves its own output (fail-closed)."""
     sources = ("pending_decision", "autonomous_decision", "maintainer_decision", "preference_pattern")
     doc = {"projection": "decisions", "schema": PROJECTION_SCHEMA}
@@ -1394,7 +1431,8 @@ def _write_contained(root_fd, relpath, text, check, preimages=None, scope=None):
 
     This is the single choke point EVERY view and deliverable write passes through, so the write-gate
     refusal is the DEFENCE-IN-DEPTH layer HERE at the write boundary, overlapping render()'s composed U6
-    gate: the real store-integrity gate runs in render() (validate_store, VALID-only), and this guard is the
+    gate: the real store-integrity gate runs in render() (the three-phase SOURCE-GATED-REGENERATE
+    validate_store composition, spec 5.7/5.8/11), and this guard is the
     low-cost before-any-truncation backstop that refuses a mutating write whenever _WRITE_GATE_COMPOSED is
     somehow False, so no helper (a direct _write_contained or _render_resolved call included) can open or
     truncate a file with the gate flag cleared (defence-in-depth-default). --check is read-only and
@@ -2530,8 +2568,9 @@ def self_test():
         check("actionability-importer-item-never-actionable",
               is_actionable(dict(id="BI-1", status="open", actor={"kind": "importer"}), set()) is False
               and is_actionable(dict(id="BI-1", status="open", actor={"kind": "maintainer"}), set()) is True)
-        # The importer split is registered vocabulary (spec 10.2): the join's block side, is_actionable's
-        # item side, and the BACKLOG, PIPELINE and HANDOFF splits all run through the
+        # The importer split is registered vocabulary (spec 10.2): the actionability join's block side,
+        # is_actionable's item side, the decision-resolution join's input side, and the BACKLOG, PIPELINE,
+        # DECISIONS and HANDOFF splits all run through the
         # `importer_authored`/`not_importer_authored` pair. Re-registering the pair to key on `assistant`
         # must move every split with it, pinned as literal bodies; a split that tests _importer_authored
         # directly keeps keying on `importer` and changes its view. The real pair is restored afterwards.
@@ -2548,9 +2587,13 @@ def self_test():
                 block=[dict(id="BL-1", status="active", scopes=["BI-1"], actor={"kind": "importer"}),
                        dict(id="BL-2", status="active", scopes=["BI-2"], actor={"kind": "assistant"})],
                 handoff=[dict(id="HO-1", status="current", title="i", actor={"kind": "importer"}),
-                         dict(id="HO-2", status="current", title="a", actor={"kind": "assistant"})])
+                         dict(id="HO-2", status="current", title="a", actor={"kind": "assistant"})],
+                pending_decision=[dict(id="PD-1", status="decided", title="m", actor={"kind": "maintainer"}),
+                                  dict(id="PD-2", status="decided", title="a", actor={"kind": "assistant"},
+                                       links=[dict(rel="supersedes", id="PD-1")])],
+                autonomous_decision=[])
             _sw_views = (render_todo(_sw_src), render_backlog(_sw_src), render_pipeline(_sw_src),
-                         render_handoff(_sw_src))
+                         render_handoff(_sw_src), render_decisions(_sw_src))
         finally:
             _FILTER_PREDICATES.update(_sw_real)
         check("vocab-importer-split-registered-todo", _sw_views[0] == "# TODO\n\n- BI-2 (open) i\n")
@@ -2563,6 +2606,17 @@ def self_test():
         check("vocab-importer-split-registered-handoff", _sw_views[3] == (
             "# HANDOFF\n\n## Current\n- HO-1 i\n\n## Superseded\n_No records._\n\n"
             "## Imported history\n- HO-2 (current) a\n"))
+        # Under the swapped pair the assistant-authored PD-2 reads as imported: it leaves the resolution
+        # join (so the maintainer PD-1 it links `supersedes` STAYS the effective head) and surfaces only
+        # under Imported history. A DECISIONS split testing _importer_authored directly keeps keying on
+        # `importer`, leaves PD-2 in the join, and flips PD-1 to Superseded.
+        _swd = _sw_views[4]
+        _swd_eff = _swd.index("## Effective resolutions")
+        _swd_sup = _swd.index("## Superseded resolutions")
+        _swd_imp = _swd.index("## Imported history") if "## Imported history" in _swd else len(_swd)
+        check("vocab-importer-split-registered-decisions",
+              "- PD-1 m" in _swd[_swd_eff:_swd_sup] and "PD-2" not in _swd[:_swd_imp]
+              and "- PD-2 (decided) a" in _swd[_swd_imp:])
         # TRANSFORM_VOCAB_VERSION names the registered vocabulary (spec 10.2) and init plans record it, so
         # the version and the registered name set are pinned together: adding, removing or renaming a
         # predicate, sort key, group field or projection column without a version bump fails here, and so
@@ -2709,13 +2763,13 @@ def self_test():
             "decision": "d", "x-aiqt": {"rule": 5}, "actor": {"kind": "maintainer", "id": "jp"}}]})
         _xp = tomllib.loads(_xrow)
         check("projection-excludes-x-vendor", "x-aiqt" not in _xp["maintainer_decision"][0])
-        # m3: the row is self-describing (`type`) and the actor is projected as a NESTED sub-table (the
+        # The row is self-describing (`type`) and the actor is projected as a NESTED sub-table (the
         # faithful full-envelope shape, spec 10.5), not a flattened actor_kind/actor_id pair.
         check("projection-includes-type",
               _xp["maintainer_decision"][0].get("type") == "maintainer_decision")
         check("projection-includes-actor-subtable",
               _xp["maintainer_decision"][0].get("actor") == {"kind": "maintainer", "id": "jp"})
-        # m3 binding verification: a TWO-row projection with a DISTINCT actor per row reparses with each
+        # Binding verification: a TWO-row projection with a DISTINCT actor per row reparses with each
         # actor bound to its OWN row (the canonical emitter's per-element array-of-tables sub-table binding).
         _tworow = render_decisions_toml({"maintainer_decision": [
             {"id": "MD-1", "type": "maintainer_decision", "status": "recorded", "title": "t",
@@ -2754,7 +2808,7 @@ def self_test():
             dupok = False
         check("duplicate-supersedes-link-no-false-fork", dupok)
 
-        # FIX A (join_resolution supersedes-map ordering): a decision superseding several others lists them
+        # join_resolution supersedes-map ordering: a decision superseding several others lists them
         # DEDUPED and in numeric id order (PD-2 before PD-10), the SINGLE _sorted_ids ordering every id-set
         # annotation join uses. Reverting _sorted_ids in this sink to append/lexical order yields
         # ["PD-10", "PD-2"] (or a duplicate PD-10), flipping this; the single-link populated-store golden
@@ -2771,7 +2825,7 @@ def self_test():
             suporder_ok = False
         check("supersedes-map-dedup-numeric-order", suporder_ok)
 
-        # FIX B (supersedes-graph harden): a supersedes link on a NON-DECIDED (open/withdrawn) decision must
+        # Supersedes-graph hardening: a supersedes link on a NON-DECIDED (open/withdrawn) decision must
         # NOT supersede its target, so a decided effective resolution is never mislabeled "Superseded" by a
         # non-decided decision's link. PD-1 is a decided head; PD-2 is WITHDRAWN yet links supersedes PD-1.
         # PD-1 must stay in `current` and out of `superseded`. Sourcing edges from every decision regardless
@@ -2785,6 +2839,62 @@ def self_test():
         except ViewsError:
             nondecided_ok = False
         check("nondecided-supersedes-does-not-mark-target", nondecided_ok)
+
+        # The decision-resolution join's provenance firewall (spec 8.5/8.6): an importer-authored DECIDED
+        # decision enters the join on neither side, so its `supersedes` link confers no current-state
+        # authority (the clean head it names stays current and is never marked superseded) and the
+        # importer-authored decision itself lands in none of the returned sets. Red when the join's
+        # input-side importer filter is removed.
+        _fw_clean = {"id": "PD-1", "status": "decided", "links": []}
+        _fw_imp = {"id": "PD-2", "status": "decided", "actor": {"kind": "importer"},
+                   "links": [{"rel": "supersedes", "id": "PD-1"}]}
+        try:
+            _fwc, _fws, _fwm = join_resolution([_fw_clean, _fw_imp])
+            resolution_fw_ok = (_fwc == {"PD-1"} and _fws == set() and "PD-2" not in _fwm)
+        except ViewsError:
+            resolution_fw_ok = False
+        check("resolution-importer-decision-confers-no-authority", resolution_fw_ok)
+
+        # The DECISIONS renderer surfaces an importer-authored record of ANY decision-register source only
+        # under a trailing Imported history section with its FULL status: never as an effective resolution
+        # (nor may it supersede a clean one away), never under the autonomous or maintainer sections, and
+        # never as an active preference pattern. Red when the renderer's importer split or the join's
+        # input-side filter is reverted.
+        _dfw = render_decisions(dict(
+            pending_decision=[
+                dict(id="PD-1", status="decided", title="clean head"),
+                dict(id="PD-2", status="decided", title="imported ruling", actor={"kind": "importer"},
+                     links=[dict(rel="supersedes", id="PD-1")])],
+            autonomous_decision=[dict(id="AD-1", status="recorded", title="imported call",
+                                      actor={"kind": "importer"})],
+            maintainer_decision=[dict(id="MD-1", status="recorded", title="imported ruling",
+                                      actor={"kind": "importer"})],
+            preference_pattern=[dict(id="PP-1", status="active", title="imported pattern",
+                                     actor={"kind": "importer"})]))
+        _dfw_eff = _dfw.index("## Effective resolutions")
+        _dfw_sup = _dfw.index("## Superseded resolutions")
+        _dfw_imp = _dfw.index("## Imported history") if "## Imported history" in _dfw else len(_dfw)
+        check("decisions-importer-surfaces-only-as-history",
+              "- PD-1 clean head" in _dfw[_dfw_eff:_dfw_sup]
+              and "PD-2" not in _dfw[:_dfw_imp] and "AD-1" not in _dfw[:_dfw_imp]
+              and "MD-1" not in _dfw[:_dfw_imp] and "PP-1" not in _dfw[:_dfw_imp]
+              and "- PD-2 (decided) imported ruling" in _dfw[_dfw_imp:]
+              and "- AD-1 (recorded) imported call" in _dfw[_dfw_imp:]
+              and "- MD-1 (recorded) imported ruling" in _dfw[_dfw_imp:]
+              and "- PP-1 (active) imported pattern" in _dfw[_dfw_imp:])
+
+        # The `[derived]` table of DECISIONS.toml is the same current-state join, so an importer-authored
+        # decided decision never lands in derived.effective or derived.superseded, while its row still
+        # projects (the projection arrays are the faithful full-record mirror, not a join). Red when
+        # join_resolution loses its input-side provenance filter.
+        _pfw = tomllib.loads(render_decisions_toml({"pending_decision": [
+            {"id": "PD-1", "status": "decided", "title": "clean head"},
+            {"id": "PD-2", "status": "decided", "title": "imported ruling",
+             "actor": {"kind": "importer"},
+             "links": [{"rel": "supersedes", "id": "PD-1"}]}]}))
+        check("projection-derived-importer-confers-no-authority",
+              _pfw["derived"] == {"effective": ["PD-1"], "superseded": []}
+              and [r["id"] for r in _pfw["pending_decision"]] == ["PD-1", "PD-2"])
 
         # Autolink sink: _md_text renders GFM EXTENDED autolinks INERT by wrapping each
         # trigger in a CODE SPAN, which cmark-gfm never autolinks. Judged by RENDERING each sample through
@@ -3234,7 +3344,7 @@ def self_test():
              {"id": "BL-2", "status": "active", "scopes": ["BI-5", "BI-5"]}])
         check("block-annotation-dedup-numeric-order", _bb.get("BI-5") == ["BL-2", "BL-10"])
 
-        # FIX A (render_done receipt ordering): a done record naming several receipts lists them DEDUPED and
+        # render_done receipt ordering: a done record naming several receipts lists them DEDUPED and
         # in numeric id order (BI-2 before BI-10), the same _sorted_ids ordering. Reverting _sorted_ids in
         # render_done to append/lexical order yields "BI-10, BI-2" (or a duplicate), flipping this; the
         # single-receipt populated-store golden (DN-1 receipt_of BI-4) does not discriminate it. Exercised
@@ -4545,7 +4655,7 @@ def self_test():
               render(["--root", str(gvroot), "--write"], observations=gvobs) == EXIT_OK
               and _plain_view.read_bytes() == _plain_before)
 
-        # --- VECTOR A (change-carries-check): EXERCISE the Phase-C owned-miss ROLLBACK + corrected diagnostic.
+        # --- Change-carries-check: EXERCISE the Phase-C owned-miss ROLLBACK + corrected diagnostic.
         # The natural regenerate vectors above never reach owned-miss (a source-sound store regenerates
         # cleanly and Phase C witnesses 1->0), so this seam monkeypatches _opf_check.validate_store to FORCE
         # a PRE=valid / POST=owned-miss disagreement over an ALREADY-rewritten target. Phase B is UNAFFECTED
@@ -4638,7 +4748,7 @@ def self_test():
         check("prc-ownedmiss-partial-no-false-success",
               "rolled back to the pre-write bytes" not in _pa_err)
 
-        # --- VECTOR B (change-carries-check): the unowned-VERSION residual remedy. Drive
+        # --- Change-carries-check: the unowned-VERSION residual remedy. Drive
         # _residual_write_exit DIRECTLY with a synthesized POST for an UNOWNED C-VERSION-FILE
         # FINDING (a fully-synthetic unowned-VERSION whole-store is awkward to build from the VERSION-declaring
         # gate fixtures) and capture its stdout. The version ledger HAS releases here, so C-VERSION-FILE REQUIRES
@@ -4659,7 +4769,7 @@ def self_test():
         check("prc-unowned-version-residual-no-remove-advice", "remove the file" not in _rv_out)
         check("prc-unowned-version-residual-declare-advice", "declare the VERSION view" in _rv_out)
 
-        # --- VECTOR B (END-TO-END): the unowned-VERSION residual remedy driven through the REAL caller, not a
+        # --- END-TO-END: the unowned-VERSION residual remedy driven through the REAL caller, not a
         # synthesized _residual_write_exit call. Build a gate store that does NOT declare the root VERSION as a
         # view (so C-VERSION-FILE is UNOWNED) with the version ledger carrying releases, a STALE root VERSION on
         # disk, and a drifted OWNED view (TODO). render --write with honest observations exercises ownership
@@ -4690,7 +4800,7 @@ def self_test():
               "removing the root VERSION is valid ONLY when the version ledger has no releases" in _ev_out)
         check("prc-unowned-version-e2e-declare-advice", "declare the VERSION view" in _ev_out)
 
-        # --- VECTOR C (change-carries-check): the reopen-failure path of _restore_preimages must return the
+        # --- Change-carries-check: the reopen-failure path of _restore_preimages must return the
         # AFFECTED relpaths of EVERY captured target, not a single opaque sentinel. Force the
         # rollback reopen to fail by monkeypatching _opf_store._open_store_root_fd to raise OSError, then call
         # _restore_preimages with a preimages dict of 2+ entries across DIFFERENT scopes/relpaths. Assert it
