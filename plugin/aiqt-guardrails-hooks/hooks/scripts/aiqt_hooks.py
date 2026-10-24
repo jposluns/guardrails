@@ -636,7 +636,10 @@ def _nest_track(nest, c, after_dollar):
     entries removed, not in the stack's depth. Any other character leaves the stack unchanged. The stack only
     has to tell whether ANYTHING is open: a case pattern's ')' inside an open parenthesis pops that
     parenthesis, which can hide only a subshell or substitution parenthesis (inside which bash reads a
-    word-start '#' as a comment too), never an open '${' or backquote."""
+    word-start '#' as a comment too), never an open '${' or backquote. That pop is safe for the '#'
+    rule only: the out-of-scope note scan's here-document rule keeps its OWN count of open command and
+    process substitutions (_orch_note_scan), because for that rule a substitution parenthesis popped
+    at a case pattern's ')' is exactly the body misread the rule exists to note."""
     if c == "(":
         nest.append("(")
     elif c in ")}":
@@ -15429,7 +15432,8 @@ def _orch_note_scan(command, bash_word_starts):
     comment that can hide the string's closing quote. It adds four things that scan does not model. A
     here-document whose delimiter spec is provably simple (a whole word of
     letters, digits and `_ . + -` that bash ends where this scan does, _orch_plain_heredoc_delim), opened
-    while NO parenthesis, `${...}` or backquote substitution is open on the nesting stack, has its
+    while NO parenthesis, `${...}` or backquote substitution is open on the nesting stack AND no
+    command or process substitution is open on the scan's own substitution count, has its
     body skipped as data at the exact delimiter line, so an `&` or an apostrophe in the body neither notes
     nor shifts the quote state; EVERY other delimiter spelling (a quoted or ANSI-C fragment, a backslash
     escape or line continuation in the word, a `$`, backquote or brace in it, a `(`, `<(` or `>(` glued
@@ -15440,7 +15444,12 @@ def _orch_note_scan(command, bash_word_starts):
     that merely STARTS with the delimiter when a `)` or a backquote follows it on that line, as in
     x=$(cat <<EOF ... EOF), and reads the rest of that line as commands, so the exact-line skip would
     misread where such a body ends), so the note is emitted rather than guessing where the
-    body ends or reading the remainder as code; a here-document opened
+    body ends or reading the remainder as code. Whether such a substitution is open is read from the
+    scan's own count of unquoted `$(`, `<(` and `>(` openers as well as from the stack, because a bare
+    case pattern's `)` pops the stack's parenthesis (x=$(case y in y) :;; esac; cat <<EOF): the count
+    falls only at a `)` met before any `case` keyword was read in command position, since a later `)`
+    cannot be told from a bare pattern's, so after a `case` a closed substitution stays counted open
+    and a later here-document in the same command draws the note, an over-note; a here-document opened
     inside a double-quoted command substitution (the commit-message form) is NOT recognized and is read as
     double-quoted text, whose own double quotes toggle that reading, so a body `&` there can draw an extra
     note, and so does a body `#` that is not right after a word character (Fixes #12), read as a `#`
@@ -15471,7 +15480,13 @@ def _orch_note_scan(command, bash_word_starts):
     reported, setsid only without -w or --wait (or a unique prefix of --wait, of which --w is the shortest).
 
     Known misses, each also disclosed in the manifest residue: a detacher after a backtick or after a
-    backslash-newline line continuation is not read in command position; a command substitution inside
+    backslash-newline line continuation is not read in command position; an unquoted expansion as the
+    command word hides the detacher after it ($SUDO setsid -f job, $(true) nohup job: an empty
+    expansion vanishes to bash, which runs the word after it as the command, while this scan reads
+    that word as an argument); a `case` keyword hidden from command position the same way (one after a
+    backslash-newline line continuation) is not read, so a bare pattern's `)` after it can still lower
+    the substitution count and a later here-document inside that substitution can be skipped at a
+    wrong line; a command substitution inside
     skipped arithmetic is skipped with it; a `<<` inside the old-style $[ ... ] arithmetic reads as a
     here-document opener and skips the lines after it; a redirect target written as an arithmetic
     expansion drops the pending command position; a bash 5.3 `${ cmd; }` or `${| cmd; }` command
@@ -15501,7 +15516,14 @@ def _orch_note_scan(command, bash_word_starts):
     dq_single = False  # inside a single-quoted span within such a substitution
     command_position = next_command = True  # next_command: the position the next word takes after a blank
     after_function = False  # the previous command-position word was the `function` keyword
-    groups = []  # (glued, next_command, index) saved at each unquoted `(`, restored at its `)`
+    groups = []  # (glued, next_command, index, is_subst) saved at each unquoted `(`, restored at its `)`
+    # Open command and process substitutions, counted apart from the nesting stack: a bare case
+    # pattern's `)` pops that stack's parenthesis, so the stack alone would read the substitution as
+    # closed while bash still ends a here-document body inside it early. The count falls only at a `)`
+    # that cannot be a case pattern's (none read after a `case` keyword in command position can be
+    # ruled out, so after one the count never falls: an over-note, never a missed body misread).
+    subst_open = 0
+    case_word = False  # a `case` keyword was read in command position: a later `)` may be a bare pattern
     heredocs = []  # (delimiter, strip_tabs) opened on the current line; their bodies follow its newline
     closes = _orch_arith_closes(command) if "((" in command else None
     found = None
@@ -15655,13 +15677,16 @@ def _orch_note_scan(command, bash_word_starts):
                 continue
         if (ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i)
                 and not (prev_dup and command[i - 1] == "<")):  # the `<<` that ends a `<<<` opens nothing
-            if nest:
+            if nest or subst_open:
                 # A here-document opened while a parenthesis, `${...}` or backquote substitution is
                 # open: bash 5.3 ends such a body inside a command or process substitution or
                 # backquotes at a line that merely STARTS with the delimiter when a `)` or a backquote
                 # follows it on that line (x=$(cat <<EOF ... EOF) runs the rest of that line as
                 # commands), so the exact-delimiter-line skip below would misread where the body ends
                 # and read real commands as data. Where the body ends is unknown, so the scan notes.
+                # The substitution count is read as well as the stack: a bare case pattern's `)`
+                # pops the stack's parenthesis (x=$(case y in y) :;; esac; cat <<EOF), but it cannot
+                # close a command or process substitution on the count, so the body is still noted.
                 return "unreadable"
             parsed = _orch_plain_heredoc_delim(command, i + 2, n)
             if parsed is None:
@@ -15694,6 +15719,10 @@ def _orch_note_scan(command, bash_word_starts):
                     # name keeps command position for it.
                     or after_function)
                 after_function = at_break and base == "function"
+                if at_break and word == "case":
+                    # A `case` statement can hold bare patterns, whose `)` is no close to bash: from
+                    # here on no `)` can be told from one, so the substitution count stops falling.
+                    case_word = True
                 command_position = False
                 for c in word:
                     _nest_track(nest, c, False)  # of the stack's characters a word holds only `}`
@@ -15707,11 +15736,21 @@ def _orch_note_scan(command, bash_word_starts):
             # `>(`, `a+(`); any other `(` opens a subshell or a parenthesised case pattern. The
             # distinction decides what its `)` restores below, so it is saved with the `(`.
             glued = i > 0 and command[i - 1] not in " \t\n;&|("
-            groups.append((glued, next_command, i))
+            # A command or process substitution's `(` (one after an unquoted, unescaped `$`, `<` or
+            # `>`; an escaped or quoted opener never reaches here with after_dollar set, and reading
+            # a literal `\<(` as one can only over-note) also raises the substitution count above.
+            is_subst = after_dollar or (i > 0 and command[i - 1] in "<>")
+            groups.append((glued, next_command, i, is_subst))
+            subst_open += is_subst
             command_position = next_command = True
         elif ch == ")":
             if groups:
-                glued, saved, opened = groups.pop()
+                glued, saved, opened, is_subst = groups.pop()
+                if is_subst and not case_word:
+                    # The `)` of a closed command or process substitution. After a `case` keyword it
+                    # could instead be a bare pattern's, so the count stays up there and a later
+                    # here-document draws the note (an over-note, never a body skipped at a wrong line).
+                    subst_open -= 1
                 if not glued or not command[opened + 1:i].strip(" \t"):
                     # A word directly after a `)` is bash code only where the `)` closes a case
                     # pattern (after a subshell's `)` it is a syntax error), and after glued EMPTY
@@ -16309,9 +16348,11 @@ def orch_truncation_guard(data):
     bare `&` or by a setsid (without -w), nohup or disown command (_orch_foreground_note_kind, a scan that
     also skips outer-level here-document bodies, arithmetic and redirect operands), and one whose scan met
     a span it would skip but cannot read with certainty (a here-document delimiter that is not a whole
-    word of letters, digits and `_ . + -`, a body holding a backslash-newline up to its closing line, a
-    `${...}` redirect target left unclosed, not opened by a name or holding anything beyond literal
-    characters, or a further `${` in a redirect target), is allowed WITH
+    word of letters, digits and `_ . + -`, a here-document opened while a parenthesis, `${...}` or
+    backquote substitution is open or not provably closed, a body holding a backslash-newline up to its
+    closing line, a `${...}` redirect target left unclosed, not opened by a name or holding anything
+    beyond literal characters, or a further `${` in a redirect target), or whose scan ends inside an
+    open quote, is allowed WITH
     A NOTE naming the tracked background
     mechanism; every other call there is the silent allow, malformed input included. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
@@ -16422,11 +16463,13 @@ def orch_truncation_guard(data):
         if note_kind == "detach":
             what = "detaches a child with a bare '&', so the work runs on after this call returns"
         elif note_kind == "unreadable":
-            what = ("holds a here-document delimiter, a redirect target or a '#' this guard cannot read "
-                    "with certainty (a delimiter that is not one plain unquoted word, a parameter expansion "
-                    "left unclosed or holding quoting or substitution syntax, or a '#' whose comment reading "
-                    "depends on context), so work that detaches and runs on after this call returns cannot "
-                    "be ruled out")
+            what = ("holds a here-document, a redirect target, a quote or a '#' this guard cannot read "
+                    "with certainty (a here-document delimiter that is not one plain unquoted word, a "
+                    "here-document opened while a parenthesis, '${...}' or backquote substitution is open "
+                    "or not provably closed, a parameter expansion left unclosed or holding quoting or "
+                    "substitution syntax, a '#' whose comment reading depends on context, or a scan that "
+                    "ends inside an open quote), so work that detaches and runs on after this call returns "
+                    "cannot be ruled out")
         else:
             what = "runs {}, which {}".format(note_kind, _ORCH_DETACH_WORD_EFFECTS[note_kind])
         return _allow_note(

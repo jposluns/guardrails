@@ -10061,8 +10061,9 @@ def _main_isolated(report_path=None):
                 # follows it on that line (bash runs the rest of that line as commands, so the
                 # exact-delimiter-line skip would read real commands as data), so a here-document
                 # opened while a parenthesis, `${...}` or backquote substitution is open notes as
-                # unreadable instead of a guessed skip. The close-on-its-own-line row is the control
-                # for the well-formed shape, which draws the same note (a disclosed over-note).
+                # unreadable instead of a guessed skip. The close-on-its-own-line row pins the
+                # disclosed over-note for the well-formed shape: nothing in it detaches, and the
+                # note still fires.
                 ("trunc/oos-heredoc-in-cmdsubst-eof-paren-notes",
                  _fg("msg=$(cat <<EOF\nhello\nEOF)\nlong_job &"), "warn"),
                 ("trunc/oos-heredoc-in-cmdsubst-eof-spaced-paren-notes",
@@ -10074,7 +10075,27 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-heredoc-in-cmdsubst-nohup-notes",
                  _fg("msg=$(cat <<EOF\nhello\nEOF)\nnohup long_job"), "warn"),
                 ("trunc/oos-heredoc-in-cmdsubst-close-own-line-notes",
-                 _fg("msg=$(cat <<EOF\nhello\nEOF\n)\nlong_job &"), "warn"),
+                 _fg("msg=$(cat <<EOF\nhello\nEOF\n)\necho done"), "warn"),
+                ("trunc/oos-heredoc-in-subshell-overnote-notes",
+                 _fg("(cat <<EOF\nhello\nEOF\n)"), "warn"),
+                # A bare case pattern's `)` inside a substitution pops the nesting stack's parenthesis
+                # but cannot close the scan's substitution count, so a here-document after it is still
+                # read as opened inside the substitution (bash ends such a body at a line that merely
+                # starts with the delimiter) and the real detach after it draws the note. The
+                # parenthesised-pattern row is the same shape held open by the stack alone (control).
+                ("trunc/oos-heredoc-after-case-bare-paren-cmdsubst-notes",
+                 _fg("x=$(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-in-case-branch-cmdsubst-setsid-notes",
+                 _fg("x=$(case y in y) cat <<EOF;; esac\nhi\nEOF)\nsetsid -f long_job"), "warn"),
+                ("trunc/oos-heredoc-after-case-bare-paren-procsub-notes",
+                 _fg("cat <(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-after-case-parenthesised-pattern-notes",
+                 _fg("x=$(case y in (y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                # Disclosed SILENT miss (the manifest residue): an unquoted expansion as the command
+                # word can vanish, so bash runs the word after it as the command; this scan reads
+                # that word as an argument and stays silent.
+                ("trunc/oos-expansion-command-word-detacher-allows",
+                 _fg("$(true) nohup long_job"), "allow"),
                 # A case pattern's `)` restores command position whether the pattern is parenthesised
                 # or bare (bash runs the word after `(x)`), and a function body the command itself
                 # defines is scanned as code (the empty `()` parens and the `function` keyword with
@@ -10166,6 +10187,22 @@ def _main_isolated(report_path=None):
         check("trunc/scan-open-quote-end-unreadable",
               aiqt_hooks._orch_foreground_note_kind("echo 'oops & bg"),
               "unreadable")
+        # Scanner-level: the substitution count, not the poppable nesting stack alone, gates the
+        # here-document rule. A bare case pattern's `)` leaves the count up (unreadable); the `)` of
+        # a substitution met before any `case` keyword closes it, so a later here-document is still
+        # skipped silently; after a `case` keyword no `)` is counted as closing, so a later
+        # here-document after a closed substitution notes (the disclosed over-note).
+        check("trunc/scan-heredoc-after-case-bare-paren-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "x=$(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\necho done"),
+              "unreadable")
+        check("trunc/scan-heredoc-after-closed-subst-skips-silently",
+              aiqt_hooks._orch_foreground_note_kind("x=$(true)\ncat <<EOF\nhello & 'hi\nEOF"),
+              None)
+        check("trunc/scan-heredoc-after-case-then-closed-subst-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "case a in a) :;; esac\nx=$(true)\ncat <<EOF\nhi\nEOF"),
+              "unreadable")
         # The note scan reads a `#` by the in-scope scan's comment rule: a `#` whose reading depends on
         # context (at a word start inside an open ${...} or backquote substitution, right after a `)`, or
         # after a blank inside a double-quoted "$(...)") notes as unreadable, where the deny scan denies it.
@@ -10201,6 +10238,10 @@ def _main_isolated(report_path=None):
                 "permissionDecisionReason", "")
             check("trunc/registry-required-absent-denies",
                   (_verdict(rr), _rr in rr_reason, "orchestration" in rr_reason), ("deny", True, True))
+            # The reason's default-mode wording states the posture this mode replaces (with no
+            # registry the guard denies nothing), so that sentence is pinned, not only the mode name.
+            check("trunc/registry-required-reason-pins-default-wording",
+                  "instead of the default, in which this guard denies nothing" in rr_reason, True)
             check("trunc/registry-required-present-plain-allows", _verdict(bg("python3 build.py")),
                   "allow")
             check("trunc/registry-required-present-detach-denies",
@@ -10270,6 +10311,13 @@ def _main_isolated(report_path=None):
         check("trunc/malformed-no-registry-allows", _verdict(aiqt_hooks.orch_truncation_guard(
             {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
              "tool_input": None})), "allow")
+        # The doctor's default-mode scope report for a no-registry root is pinned the same way: it
+        # says the guard denies nothing there, and reports no deny.
+        _scope_lines, _scope_denies = aiqt_hooks._orch_guard_scope_report(str(ti.root))
+        check("trunc/doctor-scope-line-pins-denies-nothing",
+              (_scope_denies,
+               any("denies nothing for a Bash call" in line for line in _scope_lines)),
+              (False, True))
         tb = Fixture(tmp, "trunc-badreg")
         (tb.root / ".aiqt" / "orchestration.local.json").write_text("{not json", encoding="utf-8")
         check("trunc/bad-registry-detach-denies", _verdict(aiqt_hooks.orch_truncation_guard(

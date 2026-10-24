@@ -80,7 +80,12 @@ the doctor and the resume audit report and arm from it):
   parenthesis, `${...}` or backquote substitution is open (bash 5.3 ends such a body inside a
   command or process substitution or backquotes at a line that merely starts with the delimiter
   when a `)` or a backquote follows it on that line, as in `x=$(cat <<EOF ... EOF)`, and reads the
-  rest of that line as commands, so where such a body ends is unknown), a body with a
+  rest of that line as commands, so where such a body ends is unknown; whether such a substitution
+  is open is read from the scan's own count of unquoted `$(`, `<(` and `>(` openers as well as from
+  its nesting stack, because a bare case pattern's `)` pops the stack's parenthesis, as in
+  `x=$(case y in y) :;; esac; cat <<EOF`, and once a `case` keyword has been read in command
+  position no `)` is counted as closing a substitution, so a here-document after a closed one in
+  such a command draws the note too, an over-note), a body with a
   backslash-newline
   up to its closing line (bash joins it before matching that line), a `${...}` target left
   unclosed, not opened by a name (a bash 5.3 `${ cmd; }` or `${| cmd; }` command substitution
@@ -88,7 +93,9 @@ the doctor and the resume audit report and arm from it):
   redirect target. Command position includes the word after a case pattern's `)`, parenthesised
   (`(pat)`) or bare, and a function body the command itself defines (`f() { ...; }` or
   `function f { ...; }`); a detacher renamed by an alias or by a function defined outside the
-  command is still not seen. The excluded characters are the ones known to let bash read further or run a
+  command is still not seen, and neither is one after an unquoted expansion as the command word
+  (`$SUDO setsid -f job`: an empty expansion vanishes to bash, which runs the word after it as the
+  command, while the scan reads that word as an argument). The excluded characters are the ones known to let bash read further or run a
   command there; nothing shows the list is complete, which is why the rules allow rather than deny.
   Outside registry scope this scan only ever notes; where it is unsure it over-notes rather than
   misses, apart from the known misses the manifest residue lists. No command content makes the scan
