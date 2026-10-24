@@ -10025,15 +10025,17 @@ def _main_isolated(report_path=None):
                  _fg("cat <<EOF>/tmp/f\nFix A & B\nEOF"), "allow"),
                 # bash joins a backslash-newline in an unquoted body before it matches the closing line,
                 # so `EO\` then `F` closes the body and a raw `x\` then `EOF` does not; either way the raw
-                # line match would skip the real detach. One anywhere up to the closing line notes; a
-                # backslash before another character, or a continuation after the closing line, does not.
+                # line match would skip the real detach, so one anywhere up to the closing line notes. A
+                # continuation after the closing line is live command text, and a live backslash-newline
+                # anywhere outside a single-quoted span notes too (the class is closed as a whole, below);
+                # a backslash before another character stays silent.
                 ("trunc/oos-heredoc-continued-close-line-notes",
                  _fg("cat <<EOF\nbody\nEO\\\nF\nlong_job &\nEOF"), "warn"),
                 ("trunc/oos-heredoc-continued-body-line-notes",
                  _fg("cat <<EOF\nx\\\nEOF\nit's\nEOF\nlong_job &"), "warn"),
                 ("trunc/oos-heredoc-body-backslash-allows", _fg("cat <<EOF\na\\b & c\nEOF"), "allow"),
-                ("trunc/oos-heredoc-continuation-after-close-allows",
-                 _fg("cat <<EOF\nA & B\nEOF\necho a \\\nb"), "allow"),
+                ("trunc/oos-heredoc-continuation-after-close-notes",
+                 _fg("cat <<EOF\nA & B\nEOF\necho a \\\nb"), "warn"),
                 # An ANSI-C $'...' delimiter is a quoted spelling, so it notes like any other non-plain
                 # delimiter; its body is never skipped at a guessed line, and a body that once shifted
                 # the quote state onto a later real detach now notes at the delimiter instead.
@@ -10109,6 +10111,36 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-heredoc-after-expansion-paren-setsid-notes",
                  _fg("x=$(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\n"
                      "setsid -f long_job"), "warn"),
+                # A backslash-newline line continuation outside a single-quoted span notes as
+                # unreadable wherever the scan meets it: bash removes the pair before it tokenizes,
+                # so any token can be split across one. A `<` or `>` split from its `(` still opens
+                # a process substitution to bash, whose inner here-document body bash ends at a line
+                # that merely STARTS with the delimiter, exactly the shape the substitution count
+                # guards; a raw per-shape scan of the unjoined text counted no substitution there
+                # and skipped the body at a wrong line, so the real detach after it was silently
+                # allowed (bash 5.3.9 runs it). The split `$(` rows are the same split-opener shape
+                # through the `$` path; the plain-word, double-quoted, comment-line and arithmetic
+                # rows pin the rest of the class (bash does not continue a comment past its newline,
+                # so that row is an over-note, never a miss); the single-quoted row is the boundary
+                # (the pair is literal data to bash and stays silent), and a backslash before
+                # another character stays silent too (the body-backslash row above).
+                ("trunc/oos-split-procsub-opener-heredoc-notes",
+                 _fg("cat <\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-split-procsub-opener-setsid-notes",
+                 _fg("cat <\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nsetsid -f long_job"),
+                 "warn"),
+                ("trunc/oos-split-outsub-opener-heredoc-notes",
+                 _fg("echo hi >\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-split-cmdsubst-dollar-heredoc-notes",
+                 _fg("x=$\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-split-cmdsubst-dollar-plain-notes",
+                 _fg("x=$\\\n(true)\necho done"), "warn"),
+                ("trunc/oos-continuation-plain-word-notes", _fg("echo a \\\nb"), "warn"),
+                ("trunc/oos-continuation-double-quoted-notes", _fg("echo \"a \\\nb\""), "warn"),
+                ("trunc/oos-continuation-comment-line-notes",
+                 _fg("true # tail \\\necho done"), "warn"),
+                ("trunc/oos-continuation-arith-notes", _fg("echo $((1 + \\\n2))"), "warn"),
+                ("trunc/oos-continuation-single-quoted-allows", _fg("echo 'a \\\nb'"), "allow"),
                 # Disclosed SILENT miss (the manifest residue): an unquoted expansion as the command
                 # word can vanish, so bash runs the word after it as the command; this scan reads
                 # that word as an argument and stays silent.
@@ -10154,9 +10186,10 @@ def _main_isolated(report_path=None):
         check("trunc/oos-note-names-mechanism",
               (_verdict(_oos), "run_in_background" in _oos_note, "setsid" in _oos_note), ("warn", True, True))
         # The unreadable note's text is pinned: it names the causes the scan cannot read with
-        # certainty, including a substitution open or not provably closed and a scan that ends
-        # inside an open quote (without this pin, reverting the note's wording to an older text
-        # that omits those causes would pass every check).
+        # certainty, including a substitution open or not provably closed, a backslash-newline line
+        # continuation outside a single-quoted span and a scan that ends inside an open quote
+        # (without this pin, reverting the note's wording to an older text that omits those causes
+        # would pass every check).
         _unr = aiqt_hooks.orch_truncation_guard(ti.payload(
             "PreToolUse", "Bash", _fg("msg=$(cat <<EOF\nhello\nEOF)\necho done")))
         _unr_note = (_unr[1] or {}).get("systemMessage", "")
@@ -10164,9 +10197,11 @@ def _main_isolated(report_path=None):
               (_verdict(_unr),
                "a here-document opened while a parenthesis, '${...}' or backquote substitution is "
                "open or not provably closed" in _unr_note,
+               "a backslash-newline line continuation outside a single-quoted "
+               "span, which can split any token" in _unr_note,
                "or a scan that ends inside an open quote), so work that detaches and runs on after "
                "this call returns cannot be ruled out" in _unr_note),
-              ("warn", True, True))
+              ("warn", True, True, True))
         # The whole dispatcher, in a child process: a here-document delimiter the note scan cannot read
         # with certainty (here an ANSI-C escape whose `\c` form once raised out of the handler and
         # blocked) stays a NOTE with exit 0 outside registry scope: stdout is one JSON object whose keys
@@ -10249,6 +10284,31 @@ def _main_isolated(report_path=None):
               aiqt_hooks._orch_foreground_note_kind(
                   "x=$(echo ${y%)}; true)\ncat <<EOF\nhello & 'hi\nEOF"),
               None)
+        # Scanner-level: a backslash-newline reports the unreadable kind itself, before any other
+        # reading. The split `<(` row was a silent None (the `(` after the raw newline was counted as
+        # no substitution, so the here-document body was skipped at a wrong line past the real
+        # detach), and the split `$(` row read the joined substitution and reported the detach from a
+        # guessed remainder; both now stop at the continuation.
+        check("trunc/scan-split-procsub-opener-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "cat <\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\necho done"),
+              "unreadable")
+        check("trunc/scan-continuation-before-detach-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("x=$\\\n(true)\nlong_job &"),
+              "unreadable")
+        # The glued-close emptiness test is pinned to the in-place running-index walk
+        # (_orch_span_blank): the slice it replaced copied the whole enclosed text once per closer,
+        # so nested glued substitutions cost time quadratic in the nesting depth while the manifest
+        # states linear passes, and the timed deadline shape alone cannot pin the walk (the sliced
+        # test stayed under the 1 MB CPU bound when measured). The rows pin the exact semantics the
+        # slice had: an empty span and a spaces-and-tabs span are blank, a newline or any other
+        # character is not (in "x=$( \t)" the span runs from index 4 up to the `)`).
+        _span = getattr(aiqt_hooks, "_orch_span_blank", None)
+        check("trunc/scan-glued-close-running-index-walk",
+              None if _span is None else
+              (_span("x=$( \t)", 4, 6), _span("x=$()", 4, 4),
+               _span("x=$(\n)", 4, 5), _span("x=$(a)", 4, 5)),
+              (True, True, False, False))
         # The note scan reads a `#` by the in-scope scan's comment rule: a `#` whose reading depends on
         # context (at a word start inside an open ${...} or backquote substitution, right after a `)`, or
         # after a blank inside a double-quoted "$(...)") notes as unreadable, where the deny scan denies it.

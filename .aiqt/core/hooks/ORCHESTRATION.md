@@ -55,7 +55,10 @@ the doctor and the resume audit report and arm from it):
   after a `)`, as in `x=$(true)#`, or at a word start inside an open `${...}` or backquote
   substitution, as in `echo ${x:- #} & job`) draws the note rather than being read as a comment; a
   scan that ends inside an open quote reads as unreadable and draws the note too, never a silent
-  allow; it
+  allow, and so does a backslash-newline line continuation anywhere outside a single-quoted span,
+  wherever the scan meets it (bash removes the pair before it tokenizes, so any token can be split
+  across one, a `<(` or `>(` process-substitution opener included; a pair inside single quotes is
+  literal data to bash and stays silent); it
   skips here-document bodies opened at the outer quoting level, while no parenthesis, `${...}` or
   backquote substitution is open, and arithmetic, which the in-scope
   deny still reads as code (a here-document inside a double-quoted command substitution, the
@@ -106,7 +109,10 @@ the doctor and the resume audit report and arm from it):
   the command: a hook payload on stdin that is not a readable JSON object, and a handler crash,
   each exit 2; a `tool_name` or a Bash `cwd` that fails the pre-scope checks above is denied; and
   the dispatcher's 8-second deadline, disclosed in the manifest residue, exits 2. A malformed
-  `tool_input` (not an object, or a `command` that is not a string) is allowed silently there.
+  `tool_input` (missing, null or not an object, or a `command` that is missing or not a string) is
+  allowed silently there, and so is any call whose `run_in_background` is present and anything but
+  an exact boolean false (a real background dispatch and a malformed flag such as the string
+  `"true"` alike): outside registry scope no note scan runs on those shapes.
   A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
   `.aiqt` directory the guard's process lacks search (execute) permission on, such as mode `0600`
   or `0000` for a process those modes bind; a `.aiqt` of mode `0100` evaluates normally for its owner

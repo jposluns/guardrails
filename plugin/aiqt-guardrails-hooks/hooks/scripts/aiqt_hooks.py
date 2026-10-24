@@ -15418,6 +15418,19 @@ def _orch_plain_heredoc_delim(command, at, n):
     return (word.group(), strip_tabs, end)
 
 
+def _orch_span_blank(command, start, end):
+    """True when command[start:end] holds only blanks (spaces and tabs), read in place by a running
+    index. A slice copy here made closing the nested glued substitutions of x=$(x=$(...)) cost time
+    quadratic in the nesting depth (each closer copied the whole enclosed text to test it for
+    emptiness); this walk stops at the first non-blank character instead, and because every opener
+    is itself non-blank, the blank run after one opener is read by that opener's close alone, so the
+    positions read over a whole scan stay linear in the command."""
+    j = start
+    while j < end and command[j] in " \t":
+        j += 1
+    return j >= end
+
+
 def _orch_note_scan(command, bash_word_starts):
     """The scan behind the note outside registry scope. It reads quotes and escapes as _orch_foreground_scan
     does, and reads each unquoted `#` by the comment rule that scan applies (_hash_comment_reading, over a
@@ -15429,7 +15442,16 @@ def _orch_note_scan(command, bash_word_starts):
     text after it is code. Inside a double-quoted string it keeps that scan's stack of the `$(...)` and
     backquote substitutions opened there, and a `#` that is not right after a word character while one is
     open (outside a single-quoted span in it) returns "unreadable" as well, since bash reads it as a
-    comment that can hide the string's closing quote. It adds four things that scan does not model. A
+    comment that can hide the string's closing quote. It adds five things that scan does not model. A
+    backslash-newline line continuation anywhere outside a single-quoted span returns "unreadable" the
+    moment the scan meets it: bash removes the pair before it tokenizes, so ANY token can be split
+    across one (a `<` or `>` split from its `(` still opens a process substitution to bash, which this
+    raw scan would not count on the substitution count below, a split detacher or `case` keyword is
+    still that word to bash, and a split delimiter word is not this scan's delimiter), so the class is
+    closed as a whole rather than shape by shape; each span this scan skips as data is checked for one
+    too (a certain comment's line ending in a backslash, a skipped arithmetic span, and a here-document
+    body, below), and only a pair inside a single-quoted span, which is literal data to bash, stays
+    silent. A
     here-document whose delimiter spec is provably simple (a whole word of
     letters, digits and `_ . + -` that bash ends where this scan does, _orch_plain_heredoc_delim), opened
     while NO parenthesis, `${...}` or backquote substitution is open on the nesting stack AND no
@@ -15484,14 +15506,13 @@ def _orch_note_scan(command, bash_word_starts):
     keyword and name keep command position for the body) is
     reported, setsid only without -w or --wait (or a unique prefix of --wait, of which --w is the shortest).
 
-    Known misses, each also disclosed in the manifest residue: a detacher after a backtick or after a
-    backslash-newline line continuation is not read in command position; an unquoted expansion as the
+    Known misses, each also disclosed in the manifest residue: a detacher after a backtick is not
+    read in command position; an unquoted expansion as the
     command word hides the detacher after it ($SUDO setsid -f job, $(true) nohup job: an empty
     expansion vanishes to bash, which runs the word after it as the command, while this scan reads
-    that word as an argument); a `case` keyword hidden from command position is not read, in every
-    spelling (one after a backslash-newline line continuation, one followed by a backslash-newline,
-    which is no word break to this raw scan although bash removes the continuation, one split by a
-    continuation inside the keyword, and one after coproc, which is not a recognized command prefix),
+    that word as an argument); a `case` keyword hidden from command position after coproc, which is
+    not a recognized command prefix, is not read (a spelling hidden by a backslash-newline line
+    continuation, split by one or followed by one, draws the continuation note above instead),
     so a bare pattern's `)` after it still reads as a substitution's close on the count exactly as it
     pops the stack, and a later here-document inside that substitution can be skipped at a
     wrong line; a command substitution inside
@@ -15504,7 +15525,8 @@ def _orch_note_scan(command, bash_word_starts):
     target that is not a plain word (an expansion or a quoted word) reads the redirect as the end of the
     options, so setsid is noted.
 
-    Returns "detach" when it meets a bare `&` control operator, "unreadable" the moment it meets a span it
+    Returns "detach" when it meets a bare `&` control operator, "unreadable" the moment it meets a
+    backslash-newline line continuation outside a single-quoted span, a span it
     would skip but cannot read with certainty (the here-document and `${...}` redirect-target cases above)
     or a `#` whose comment reading depends on context (everything past that point is unknown, so the note
     is emitted unconditionally), else the first such
@@ -15543,10 +15565,18 @@ def _orch_note_scan(command, bash_word_starts):
     while i < n:
         ch = command[i]
         if escaped:
+            if ch == "\n":
+                # A backslash-newline line continuation: bash removes the pair before it tokenizes, so
+                # ANY token can be split across one (a `<` or `>` split from its `(` still opens a
+                # process substitution, a split detacher or `case` keyword is still that word), and a
+                # raw scan of the unjoined text gets each such shape wrong in its own way. The whole
+                # class notes instead of a per-shape guess: a continuation anywhere outside a
+                # single-quoted span returns "unreadable" (inside single quotes the pair is literal
+                # data to bash, so it never reaches this escape handling).
+                return "unreadable"
             escaped, prev_dup = False, False
-            if ch != "\n":  # a backslash-newline is removed before bash reads the line: the classes stay
-                prev = dq_prev = "backquote" if ch == "`" else "word"
-            after_dollar = after_dollar and ch == "\n"  # a backslash-newline joins `$` to what follows it
+            prev = dq_prev = "backquote" if ch == "`" else "word"
+            after_dollar = False
             i += 1
             continue
         if in_single:
@@ -15618,6 +15648,13 @@ def _orch_note_scan(command, bash_word_starts):
                 nl = command.find("\n", i)
                 if nl == -1:
                     break
+                if command[nl - 1] == "\\":
+                    # The comment's line ends in a backslash-newline. bash ends the comment at the
+                    # newline regardless, but every backslash-newline outside a single-quoted span
+                    # notes (the uniform continuation rule above), and a comment is the one span this
+                    # scan skips whose text could otherwise hold one silently (nl > i always: the `#`
+                    # at i is not a newline, so nl - 1 is at least i and inside the comment).
+                    return "unreadable"
                 i = nl
                 continue
         if ch == "\n" and heredocs:
@@ -15683,6 +15720,12 @@ def _orch_note_scan(command, bash_word_starts):
             if end != -1 and closes[start + 1] == end - 1:
                 # arithmetic: `$((` or `((` whose parentheses close as `))`; its `&` is a bitwise AND,
                 # and the `)` it ends at leaves a following `#` uncertain, as it does after any `)`
+                if command.find("\\\n", start, end) != -1:
+                    # The skipped span holds a backslash-newline: the uniform continuation rule
+                    # (the escape handling above) notes for one anywhere outside a single-quoted
+                    # span, and this skip would otherwise pass over it as data. Each span is
+                    # scanned once (the scan resumes past it), so this stays linear.
+                    return "unreadable"
                 prev_dup, prev, after_dollar = False, "paren", False
                 command_position = next_command = False
                 i = end + 1
@@ -15771,7 +15814,7 @@ def _orch_note_scan(command, bash_word_starts):
                     # could instead be a bare pattern's, so the count stays up there and a later
                     # here-document draws the note (an over-note, never a body skipped at a wrong line).
                     subst_open -= 1
-                if not glued or not command[opened + 1:i].strip(" \t"):
+                if not glued or _orch_span_blank(command, opened + 1, i):
                     # A word directly after a `)` is bash code only where the `)` closes a case
                     # pattern (after a subshell's `)` it is a syntax error), and after glued EMPTY
                     # parens, which close a function definition (`f()`) whose body follows (an empty
@@ -16486,11 +16529,14 @@ def orch_truncation_guard(data):
         if note_kind == "detach":
             what = "detaches a child with a bare '&', so the work runs on after this call returns"
         elif note_kind == "unreadable":
-            what = ("holds a here-document, a redirect target, a quote or a '#' this guard cannot read "
+            what = ("holds a here-document, a redirect target, a quote, a line continuation or a '#' "
+                    "this guard cannot read "
                     "with certainty (a here-document delimiter that is not one plain unquoted word, a "
                     "here-document opened while a parenthesis, '${...}' or backquote substitution is open "
                     "or not provably closed, a parameter expansion left unclosed or holding quoting or "
-                    "substitution syntax, a '#' whose comment reading depends on context, or a scan that "
+                    "substitution syntax, a backslash-newline line continuation outside a single-quoted "
+                    "span, which can split any token, a '#' whose comment reading depends on context, "
+                    "or a scan that "
                     "ends inside an open quote), so work that detaches and runs on after this call returns "
                     "cannot be ruled out")
         else:

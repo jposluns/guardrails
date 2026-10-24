@@ -3283,6 +3283,17 @@ _DEADLINE_SHAPES = {
     "fg_heredocs_amp": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na & b's\nE\n", n)}),
     "fg_heredoc_ops_open": lambda n, base: ("Bash", {"command": _repeat("cat <<A ", n, "\nx & y")}),
     "fg_subshells": lambda n, base: ("Bash", {"command": "(" * (n // 2 - 2) + "true" + ")" * (n // 2 - 2)}),
+    # Nested GLUED command substitutions: each `(` sits directly after a `$`, so, unlike the bare
+    # subshell parentheses above, every closer takes the glued branch of the note scan's `)` handling.
+    # That branch once tested the enclosed text for emptiness by slicing it (one copy per closer, so
+    # the characters copied grew with the square of the nesting depth); the running-index test reads
+    # each enclosed position at most once, keeping the scan linear on this shape. The bounds here are
+    # not what pins the running-index test (the sliced test measured about 3.6 s of CPU for both scan
+    # passes at 1 MB, in-process on a 24-core host with Python 3.14.4, 2026-10-24, under that size's
+    # 7 s bound, against about 0.49 s for the running index); the orch-behaviour self-test's
+    # running-index-walk row does.
+    "fg_nested_glued_substs": lambda n, base: ("Bash", {"command": "x=$(" * (n // 5 - 1) + "true"
+                                                        + ")" * (n // 5 - 1)}),
     "fg_setsid_options": lambda n, base: ("Bash", {"command": "setsid" + _repeat(" -c", n - 6)}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
@@ -3347,7 +3358,7 @@ _DEADLINE_CASES = {
 # out-of-scope detach note.
 _DEADLINE_PLAIN_CASES = {
     "orch_truncation_guard": ("fg_detach_after", "fg_arith_open", "fg_heredocs_amp", "fg_heredoc_ops_open",
-                              "fg_subshells", "fg_setsid_options"),
+                              "fg_subshells", "fg_nested_glued_substs", "fg_setsid_options"),
 }
 # The (handler, shape) cases whose hazard must still be denied, each within its bound.
 _DEADLINE_DENY_CASES = frozenset((
@@ -3361,12 +3372,14 @@ _DEADLINE_NOTE_CASES = frozenset((
 # The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
 # bound: the arithmetic opener carries no `&` or detacher; the plain-delimiter heredoc bodies (their `&`
 # and apostrophe are skipped data; a quoted delimiter would note, and its early note would also cut the
-# timing short), the unterminated heredoc body and the balanced subshells are all skipped or carry no outer
+# timing short), the unterminated heredoc body, the balanced subshells and the nested glued command
+# substitutions are all skipped, provably closed or carry no outer
 # detach, so none draws a note. Pinning the outcome keeps these timing shapes from passing a scanner that
 # mistook one for a detach.
 _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredocs_amp"),
-    ("orch_truncation_guard", "fg_heredoc_ops_open"), ("orch_truncation_guard", "fg_subshells")))
+    ("orch_truncation_guard", "fg_heredoc_ops_open"), ("orch_truncation_guard", "fg_subshells"),
+    ("orch_truncation_guard", "fg_nested_glued_substs")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
