@@ -858,7 +858,7 @@ def _require_valid_current(row, rtype, ctx, rid, rel):
     verb trusts or overwrites it: a rejection restores the row's recorded `proposed_from`, a proposing
     transition writes the field, and leaving a proposal removes it, so acting on a schema-invalid row (a
     `proposed_from` naming an illegal predecessor, or a stray one on an unqualified status, each a doctor
-    finding) would launder a doctor-INVALID store into a VALID one and erase the evidence (QA4 F1).
+    finding) would launder a doctor-INVALID store into a VALID one and erase the evidence.
     Refused with every byte untouched; the operator repairs the record first (spec 5.7)."""
     rv = _opf_schema.validate_record(row, expected_type=rtype, registered_vendors=ctx.vendors)
     if rv.status != _opf_store.VALID:
@@ -1838,7 +1838,7 @@ def _strict_equal(a, b):
     """The postcondition's comparator: strict, TYPE-AWARE structural equality (_opf_emit._model_equal, the
     round-trip comparator emit_checked already proves itself with), never Python's ==. Ordinary equality
     let a mutation that changed only a value's type (True for 1, 1.0 for 1) read as the allowed delta and
-    publish (codex QA3 F2); here bool is never a bare int, int is never a float, and datetime is never a
+    publish (an exact-type rule); here bool is never a bare int, int is never a float, and datetime is never a
     date, so such a mutation refuses before anything is written."""
     return _opf_emit._model_equal(a, b)
 
@@ -3590,6 +3590,28 @@ def _self_test_units(check):
           and "nested deeper than" in deep_probe
           and len(deep_probe) <= 512 + _opf_store._DISPLAY_MAX_CHARS + _opf_store._DISPLAY_MARKER_MAX)
 
+    # The below-supported spec_version refusal read through this verb names the manifest's own
+    # path (validate_manifest's manifest_rel, here the resolved machine store's manifest); falling
+    # back to the unnamed "the store manifest" wording is red. The operand read is replaced the
+    # way the deep homes probe replaces it, so the refusal is _load_manifest's own.
+    old_model = {_opf_store.STANDARD_TOKEN: {
+                     "standard": _opf_store.STANDARD_TOKEN, "spec_version": "1.1.0",
+                     "layout": "inline", "posture": "required", "import_status": "none"},
+                 "types": {"worklog": {"namespace": "WL"}}}
+    old_globals = globals()
+    old_read = old_globals["_read_operand"]
+    old_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, old_model)
+    old_refusal = None
+    try:
+        _load_manifest(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+    except RecordError as exc:
+        old_refusal = str(exc)
+    finally:
+        old_globals["_read_operand"] = old_read
+    check("an older manifest refusal names the manifest path",
+          old_refusal is not None
+          and "'.working/toml/manifest.toml' declares [opf].spec_version '1.1.0'" in old_refusal)
+
 
 def _self_test_contexts(check, root_fd, now):
     from types import SimpleNamespace
@@ -3650,7 +3672,7 @@ def _self_test_contexts(check, root_fd, now):
     ctx = ctx_of(imported_full)
     check("an imported row breaks the proof at the shipped support",
           _counter_state(ctx, ctx.counters.model)[1] != [])
-    # Schema markers are exact integers everywhere this verb reads one (codex QA3 F1's sibling checks):
+    # Schema markers are exact integers everywhere this verb reads one (the same rule at every site):
     # a bool or float marker (True == 1, 1.0 == 1 under ==) is refused, never read as schema 1.
     for marker in (True, 1.0):
         check("a non-integer index schema marker refuses ({!r})".format(marker), _refuses(
@@ -3915,7 +3937,7 @@ def _self_test_transitions(check, plan, post, full, now):
           and _recorded_pre_proposal(None, bi("done/proposed"), "BI-1", "done/proposed") is None
           and _recorded_pre_proposal(None, dict(bi("done/proposed"), proposed_from=3), "BI-1",
                                      "done/proposed") is None)
-    # -- the current row is validated before it is trusted or overwritten (QA4 F1) ------------------------------
+    # -- the current row is validated before it is trusted or overwritten ---------------------------------------
     check("a rejection refuses a schema-invalid proposed_from on the current row",
           _refuses(lambda: plan(reject, rows=[pbi(pre="open")], counters=counters), "not schema-valid"))
     check("done-with-receipt refuses a schema-invalid proposed_from on the current row",
@@ -4122,7 +4144,7 @@ def _self_test_supersession(check, plan, post, full, now):
           op.new_model["record"][1]["links"] == [{"rel": SUPERSEDES, "id": "PD-1"}])
     # The doctor's chain rule over the planned index, on every landing at unqualified decided: the record
     # already superseded by an open successor (with or without --supersedes, and on a ratification), a
-    # link to a chain head that still leaves the joined chain with none (QA1 Case A), and a plain decide
+    # link to a chain head that still leaves the joined chain with none, and a plain decide
     # that would make a second current resolution each refuse; the same shapes keeping one current pass.
     plain = ["transition", "PD-2", "decided", "--actor", "maintainer"] + decide
     shadowed = [pd(1, "decided"), pd(2, "open"), pd(3, "open", links=[("supersedes", "PD-2")])]

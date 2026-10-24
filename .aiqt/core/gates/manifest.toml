@@ -654,7 +654,7 @@ section 2 keyword lint over every pin of those tiled sections and those untiled 
 without MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D, red
 once a marked pin gains a keyword); the
 self-test proves synthetic cases, flips every marker and every keyword pin red, and reverts
-named QA5 rewrites red. The lint reads the registry marker, not the meaning, so a requirement
+the registered keyword rewrites red. The lint reads the registry marker, not the meaning, so a requirement
 wrongly marked descriptive stays green, which review of registry changes catches. The
 self-test also checks
 constructors, discovery reservations and inert writer defaults, plus in-memory boundary fixtures:

@@ -156,7 +156,9 @@ SUPPORTED_SPEC_VERSION = "1.2.0"       # the OPFiles base spec_version this tool
                                        # hand step that makes its tree foreign content (spec 9.2),
                                        # and one declaring a NEWER spec_version is fail-closed with an
                                        # upgrade-the-tooling finding, except only the reserved homes-2
-                                       # declaration pair, which stays gated on activation (spec 9.2/4.2)
+                                       # declaration pair (spec_version 2.0.0 with homes = 2), which this
+                                       # tooling grades under its 1.2.0 rules (spec 16.1) and which
+                                       # homes_generation() keeps at generation 1 while SUPPORTED_HOMES is 1
 
 # Resolution outcomes.
 RESOLVED = "RESOLVED"                  # a machine store was resolved and located
@@ -2880,7 +2882,7 @@ def self_test():
         root = build_store(make_working=False)
         check("no-store-not-adopted", resolve_store(root).status == NOT_ADOPTED)
 
-        # 3b (codex BLOCKER 1, TOCTOU): the product root is a readable directory when resolve_store opens
+        # 3b (TOCTOU): the product root is a readable directory when resolve_store opens
         # its fd, then is renamed/removed at the resolution boundary before the default-location check. That
         # disappearance is a product root that could no longer be evaluated (CANNOT-EVALUATE, exit 2), NEVER
         # a false NOT-ADOPTED that render --check would report as a clean NOT-APPLICABLE (exit 0). Simulate
@@ -3104,6 +3106,13 @@ def self_test():
                   and "first move the store manifest aside by hand" in f for f in mv_old.findings))
         check("spec-version-current-ok",
               validate_manifest(_t.loads(manifest_text(spec_version=SUPPORTED_SPEC_VERSION))).status == VALID)
+        # 10g1: load_manifest threads the RESOLVED manifest's own path into validation, so the
+        # older-spec_version refusal read through store resolution names that path, never the
+        # "the store manifest" fallback.
+        mv_old_loaded = load_manifest(resolve_store(
+            build_store(manifest=manifest_text(spec_version="1.0.0"))))
+        check("spec-version-floor-load-manifest-names-path",
+              mv_old_loaded.status == INVALID and floor_message in mv_old_loaded.findings)
 
         # 10g2 (spec 9.2): a store declaring a spec_version ABOVE SUPPORTED_SPEC_VERSION is fail-closed at
         # validation with its own named finding, so older tooling never certifies a newer store (a bare

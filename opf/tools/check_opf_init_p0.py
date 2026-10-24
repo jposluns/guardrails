@@ -197,6 +197,39 @@ def vectors(f):
             "compat/old-needs-upgrade/message")
         return got
     add("compat/old-needs-upgrade", old_needs_upgrade, "REFUSED", "VERSION")
+
+    def version_refusal(name, variant, message):
+        # Pinned whole, like compat/old-needs-upgrade: collapsing these refusals back into one
+        # shared hand-step message is red.
+        def case(m, variant=variant, message=message):
+            got = m.validate_compatibility(variant)
+            check([f[2] for f in got.findings] == [message], "compat/" + name + "/message")
+            return got
+        add("compat/" + name, case, "REFUSED", "VERSION")
+
+    # Each non-1.2.0 declaration gets its own pinned refusal: only a declaration below 2.0.0 is an
+    # older store and gets the hand step (spec 9.2); a newer, malformed or missing declaration is
+    # never offered it.
+    check(manifest.count(b'spec_version = "1.2.0"\n') == 1, "fixture/manifest-version-line")
+    version_refusal("newer-no-hand-step", manifest.replace(b'"1.2.0"', b'"2.0.0"'),
+                    "{} declares spec_version '2.0.0'; this bootstrap requires 1.2.0: a store "
+                    "declaring 2.0.0 or above is a store at a later version, never foreign "
+                    "content; use the tooling that implements it (fail-closed)".format(
+                        p0.MANIFEST_PATH))
+    version_refusal("between-gets-hand-step", manifest.replace(b'"1.2.0"', b'"1.3.0"'),
+                    "{0} declares spec_version '1.3.0'; this bootstrap requires 1.2.0: an older "
+                    "store needs opf upgrade, or, to adopt its tree instead, first move {0} aside "
+                    "by hand: its files are then ordinary foreign content for a first "
+                    "adoption".format(p0.MANIFEST_PATH))
+    version_refusal("malformed-version", manifest.replace(b'"1.2.0"', b'"x.y"'),
+                    "{} declares spec_version 'x.y', which is not a bare SemVer; this bootstrap "
+                    "requires 1.2.0 (fail-closed)".format(p0.MANIFEST_PATH))
+    version_refusal("missing-version", manifest.replace(b'spec_version = "1.2.0"\n', b''),
+                    "{} declares no spec_version; this bootstrap requires 1.2.0 "
+                    "(fail-closed)".format(p0.MANIFEST_PATH))
+    version_refusal("missing-opf-table", manifest.replace(b'[opf]\n', b'[other]\n'),
+                    "{} has no [opf] table; this bootstrap requires spec_version 1.2.0 "
+                    "(fail-closed)".format(p0.MANIFEST_PATH))
     add("compat/version-only-upgrade", lambda m: m.validate_upgrade_delta(old, d2a))
     invented = dict(d2a, **{operation.PROVENANCE_RELPATH: provenance})
     add("compat/no-invented-provenance",

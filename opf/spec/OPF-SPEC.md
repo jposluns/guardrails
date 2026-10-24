@@ -401,7 +401,10 @@ declaring a `spec_version` below 2.0.0, whatever its `[opf].homes`, is refused a
 (section 9.2): it MUST NOT be treated as authorizing initialization or adoption. A tree under
 such a manifest MUST NOT be adopted until the operator has moved that manifest aside by hand, a
 step no OPF command performs; its files are then ordinary foreign content for a section 14 first
-adoption (section 14.1). A discovered
+adoption (section 14.1). Files remaining under the reserved store control children
+(section 14.2) are the one exception: an adoption option MUST NOT select them, so the operator
+moves them aside by hand on the same terms, a step no OPF command performs, before that first
+adoption can complete. A discovered
 manifest declaring a `spec_version` of 2.0.0 or above whose `[opf].homes` is missing or not the
 integer 2 is refused as a store (section 9.2), never foreign content: it MUST NOT be treated as
 authorizing initialization or adoption. A manifest refused only at the section 9.2 version ceiling marks a store at a later version, never foreign
@@ -1563,6 +1566,9 @@ read as authorizing initialization or adoption (sections 4.5 and 14.1).
 A tree under a manifest so refused MUST NOT be adopted until the operator has moved that manifest
 aside by hand, a step no OPF command performs; its files are then ordinary foreign content for a
 section 14 first adoption (section 14.1).
+Files remaining under the reserved store control children (section 14.2) are the one exception:
+an adoption option MUST NOT select them, so the operator moves them aside by hand on the same
+terms, a step no OPF command performs, before that first adoption can complete.
 A manifest declaring a `spec_version` of 2.0.0 or above whose `[opf].homes` is missing or not the
 integer 2 is refused as a store by the `[opf].homes` refusal above, never foreign content: that
 refusal MUST NOT be read as authorizing initialization or adoption (sections 4.5, 8.2, and 14.1).

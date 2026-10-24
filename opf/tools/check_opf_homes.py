@@ -422,6 +422,7 @@ _CONTRACT = {
         'A zero-match outcome over a present .working/ MUST NOT be treated as authorizing initialization or adoption by itself: only a section 14 first adoption authorizes initialization there, through an investigation that distinguishes first adoption from re-adoption and records a digest-stamped inventory, and one approved plan that gives every foreign file a disposition before init-store (section 14.1).',
         'A discovered manifest that the section 9.2 validation refusals refuse for declaring a spec_version below 2.0.0, whatever its [opf].homes, is refused as a store (section 9.2): it MUST NOT be treated as authorizing initialization or adoption.',
         'A tree under such a manifest MUST NOT be adopted until the operator has moved that manifest aside by hand, a step no OPF command performs; its files are then ordinary foreign content for a section 14 first adoption (section 14.1).',
+        'Files remaining under the reserved store control children (section 14.2) are the one exception: an adoption option MUST NOT select them, so the operator moves them aside by hand on the same terms, a step no OPF command performs, before that first adoption can complete.',
         'A discovered manifest declaring a spec_version of 2.0.0 or above whose [opf].homes is missing or not the integer 2 is refused as a store (section 9.2), never foreign content: it MUST NOT be treated as authorizing initialization or adoption.',
         'A manifest refused only at the section 9.2 version ceiling marks a store at a later version, never foreign content: it MUST NOT be treated as authorizing initialization or adoption, and its remedy is the tooling upgrade alone (sections 8.2 and 9.2).',
     ),
@@ -781,6 +782,7 @@ _CONTRACT = {
         'A spec_version below 2.0.0 names no version this specification defines, and validation MUST refuse it as a fail-closed INVALID finding.',
         'A manifest so refused, whatever its [opf].homes, is refused as a store: that refusal MUST NOT be read as authorizing initialization or adoption (sections 4.5 and 14.1).',
         'A tree under a manifest so refused MUST NOT be adopted until the operator has moved that manifest aside by hand, a step no OPF command performs; its files are then ordinary foreign content for a section 14 first adoption (section 14.1).',
+        'Files remaining under the reserved store control children (section 14.2) are the one exception: an adoption option MUST NOT select them, so the operator moves them aside by hand on the same terms, a step no OPF command performs, before that first adoption can complete.',
         'A manifest declaring a spec_version of 2.0.0 or above whose [opf].homes is missing or not the integer 2 is refused as a store by the [opf].homes refusal above, never foreign content: that refusal MUST NOT be read as authorizing initialization or adoption (sections 4.5, 8.2, and 14.1).',
         'Before any command writes to a store, the claim, release, or reconciliation of the single-writer lease (section 5.7), a fast-forward by opf sync, and the recovery of sections 8.8, 14.1, and 14.2 included, every implementation MUST apply these validation refusals and the [opf].homes refusal above to the store manifest that discovery finds there, so a store they refuse stays byte-identical.',
         'For opf sync, these refusals and the [opf].homes refusal MUST also be applied to the store manifest the fetched state carries, before a fast-forward lands it, so a fast-forward never brings a refused manifest into the store.',
@@ -3496,7 +3498,7 @@ def boundary_self_test():
     return 1 if failures else 0
 
 
-# Named QA5 findings (fix 5a): (section, current keyword wording, pre-fix wording). The self-test
+# Registered keyword rewrites: (section, current keyword wording, pre-fix wording). The self-test
 # reverts each and requires the keyword lint, or the pin check, to turn red.
 _KEYWORD_REVERTS = (
     ('4.2', 'The first imported-series release MUST keep these files inline in either store layout and MUST NOT provide views over imported data;',
@@ -5858,6 +5860,12 @@ def _self_test_vectors():
              ('ordinary foreign content for a section 14 first adoption (section 14.1).',
               'the ancestry of a section 14 re-adoption (section 14.1).'),
             )),
+            # The reserved-children exception to the hand step: an adoption selecting them, or an
+            # OPF write in place of the operator's move, is red.
+            ('Files remaining under the reserved store control children', (
+             ('an adoption option MUST NOT select them, so the operator moves them aside by hand on the same terms, a step no OPF command performs,',
+              'an adoption option MAY select them with a disposition,'),
+            )),
             ('A manifest declaring a spec_version of 2.0.0 or above', (
              ('authorizing initialization or adoption (sections 4.5, 8.2, and 14.1).',
               'authorizing initialization or adoption, and the remedy adoption above does not apply to it (sections 4.5, 8.2, and 14.1).'),
@@ -5933,6 +5941,11 @@ def _self_test_vectors():
               'MAY be adopted once opf adopt has moved that manifest aside;'),
              ('ordinary foreign content for a section 14 first adoption (section 14.1).',
               'the ancestry of a section 14 re-adoption (section 14.1).'),
+            )),
+            # The reserved-children exception to the hand step, stated in 4.5 as in 9.2.
+            ('Files remaining under the reserved store control children', (
+             ('an adoption option MUST NOT select them, so the operator moves them aside by hand on the same terms, a step no OPF command performs,',
+              'an adoption option MAY select them with a disposition,'),
             )),
     ))
     # The journal-operand rule has no exception (maintainer ruling, 2026-10-24).
@@ -6473,7 +6486,7 @@ def _self_test_vectors():
         ('4.5', ('A discovered manifest that the section 9.2 validation refusals refuse',), (
             'A discovered manifest that the section 9.2 validation refusals refuse for declaring a spec_version below 2.0.0, whatever its [opf].homes, marks no store: for adoption, it and the files beneath its .working/ MUST be treated as foreign content, never as a store, so the section 9.2 remedy adoption over them is a section 14 first adoption (sections 8.2, 9.2, and 14.1).',
         )),
-        ('9.2', ('A spec_version below 2.0.0', 'A manifest so refused,', 'A tree under a manifest so refused', 'A manifest declaring a spec_version of 2.0.0 or above', 'Before any command writes to a store,'), (
+        ('9.2', ('A spec_version below 2.0.0', 'A manifest so refused,', 'A tree under a manifest so refused', 'Files remaining under the reserved store control children', 'A manifest declaring a spec_version of 2.0.0 or above', 'Before any command writes to a store,'), (
             "A spec_version below 2.0.0 names no version this specification defines, and validation MUST refuse it as a fail-closed INVALID finding naming the remedy, since this section defines no upgrade into 2.0.0: a fresh 2.0.0 store whose section 14 adoption gives the old store's files a disposition as foreign content.",
             "That adoption is a first adoption: a manifest refused for declaring a spec_version below 2.0.0, whatever its [opf].homes, and the files beneath its .working/ are foreign content for adoption, never a store (sections 4.5 and 14.1), no prior OPF ancestry exists to seed, and the new store's counters start at zero (section 8.2); the old tree's reserved-name children (archive/, imported/, staging/, and journals/) are part of that foreign content and take their dispositions under section 14.2.",
             "Because the new store's counters start at zero, a number the old tree's records carried can be issued again in the new store's own series; the old tree's records are foreign content, never the new store's history, so no series within one store ever reissues an ID (section 8.2).",
@@ -7694,7 +7707,7 @@ def _self_test_vectors():
             expected = "spec {} requirement without a section 2 keyword: {}".format(section, flipped)
             with patch.dict(registry, {section: fragments[:index] + (flipped,) + fragments[index + 1:]}):
                 check("keyword-flip-{}-{}".format(section, index), lambda e=expected: e in keyword_findings())
-    # Red on revert: each named fix-5a rewrite (QA5), reverted in the spec together with its pin
+    # Red on revert: each registered keyword rewrite, reverted in the spec together with its pin
     # (the matching registry edit tiling cannot see), turns the keyword lint red; reverted in the
     # spec alone, it turns the pin check red.
     for section, new, old in _KEYWORD_REVERTS:
