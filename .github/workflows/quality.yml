@@ -826,8 +826,8 @@ jobs:
   # release) and the job's suites in order, each held step with exactly name, run and shell: bash; its
   # jobs leg also runs outside these jobs, in the registry job (--jobs-only), so an edit here cannot
   # silence every CI run of it. Both are required through Quality gates. They run the OPF tooling
-  # self-test and the four git-fixture-env suites a second time in every run, including the run that an
-  # edit to a pull request's title or body starts.
+  # self-test and the four git-fixture-env suites a second time in every run; an edit to a pull request's
+  # title or body starts no Quality run.
   opf-host-patch:
     name: OPF tooling (host patch)
     runs-on: ubuntu-24.04
@@ -1012,6 +1012,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_clauses.py --genesis --with-manifest
 
+      - name: Rule placement self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite rule-placement-selftest
       - name: Rule placement
         shell: bash
         run: python3 -I -B tools/check_rule_placement.py
