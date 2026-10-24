@@ -1021,9 +1021,14 @@ rvwpin): once a review is dispatched against a worktree, that worktree is not mo
 review returns or is abandoned. The markers are adopter-provided: the pack ships the hook, the
 dispatcher writes the holds. Without a marker directory the hook is inert (a silent allow), so
 adopters who write no markers see nothing, as long as the payload carries an absolute `cwd`: a
-`cwd` that is missing, relative or carries a NUL byte hides the session's repository, so every git
+`cwd` that is missing, relative, carries a NUL byte or names no directory that exists hides the
+session's repository, so every git
 command outside the read-only grammar, and an absent command, is withheld as `UNVERIFIABLE`
-(fail closed), in the standalone preflight as in the composed hook. There is no host-wide view of
+(fail closed), in the standalone preflight as in the composed hook. A consulted directory whose
+git identity probe cannot answer (git could not be run, timed out, ran past the decision deadline,
+or answered unreadably) fails closed the same way: the probe failure is never read as "not a
+repository", which would hide a live hold there, while git answering that a directory is in no
+repository stays the inert allow. There is no host-wide view of
 holds: the hook reads only the markers of the repositories a command names or sits in.
 
 One marker file per live review lives in `GIT_COMMON_DIR/aiqt/review-holds/<dispatch-id>.json`,
@@ -1161,13 +1166,29 @@ signing and signature verification options, a signature placeholder in a format 
 `clone -u`, `-c` and `--config`, a merge `--strategy`, `--patch` and `--interactive`,
 `--trailer`, a `TRANSPORT::ADDRESS` URL, `--help`); the subcommands `mergetool`, `difftool`,
 `instaweb`, `web--browse`, `hook`, `shell`, `daemon`, `credential`, `send-email`, `imap-send`,
-`svn`, `verify-commit` and `verify-tag`; every `config` form outside the read-only grammar (a
+`svn`, `verify-commit` and `verify-tag`; `for-each-repo`, which runs a git command in EVERY
+repository a configuration key lists (a held one included, and an allowed command can write that
+key first), and `maintenance`, which writes that very list (`register`, `unregister`) and runs a
+platform scheduler over it (`start`, `stop`); the connection services `upload-pack`,
+`receive-pack`, `upload-archive` and `http-backend`, each of which runs in the repository its
+operand or request names (`receive-pack` runs that repository's hooks); every `config` form
+outside the read-only grammar (a
 write can install a `!` alias or a `core.*` program setting that a later git runs); `clone` and
 `init` with `--template` (the template's hooks, which clone runs at once through post-checkout);
-and `help` with `--web`, `--info` or `--man` (`-w`, `-i`, `-m`, a viewer). STATED OVER-REFUSAL:
+and `help` with `--web`, `--info` or `--man` (`-w`, `-i`, `-m`, a viewer). FILE-WRITING PATH
+OPTIONS: while ANY hold the rule can see is live, a git segment carrying an option that writes a
+file or tree at an arbitrary path operand is DENIED the same way, whatever the operand names:
+`checkout-index --prefix` (it re-roots the whole checkout under any prefix), the diff family's
+`--output` (`diff`, `log`, `show`, `whatchanged`, `stash` and the
+`diff-files`/`diff-index`/`diff-tree` plumbing), `archive -o`/`--output`, `format-patch
+-o`/`--output-directory`, `index-pack -o`, `fast-import --export-marks` and
+`--export-pack-edges`, and `mailsplit -o`. The operand is a path, not a directory move, so it
+joins no hold set and where it lands is not resolved: from a command whose resolved target is an
+unrelated unheld repository it can still write into the held worktree. STATED OVER-REFUSAL:
 while some hold is live, an unrelated `git -C <unheld repository> rebase -x 'make' HEAD` is
-refused, as are a harmless leading assignment (`LC_ALL=C git -C <unheld repository> commit`) and a
-`git config user.name` write in an unrelated repository, until the hold ends. With no hold the
+refused, as are a harmless leading assignment (`LC_ALL=C git -C <unheld repository> commit`), a
+`git config user.name` write in an unrelated repository, and a `git -C <unheld repository> diff
+--output=<file inside that repository>`, until the hold ends. With no hold the
 rule can see, each of these forms is allowed. While a hold is live in a repository the command
 reaches only through the session or the raw text and the target is an unrelated unheld
 repository, a segment with no program-running form is still withheld when its raw text carries
@@ -1259,7 +1280,11 @@ Limits:
   rule but not by this hook; extending the write-scope hook is a separate follow-on. A shell
   redirection (`>`, `>>`) is stripped from the one plain git segment before the grammar reads it, so
   a read verb redirected into a file inside the held worktree writes that file outside the grammar's
-  view, the same file-edit residual.
+  view, the same file-edit residual. The enumerated file-writing path OPTIONS above are refused
+  while a hold is live, but a git verb that writes at a POSITIONAL path operand (`worktree add`,
+  the `clone` and `init` directory operands, `bundle create`, `pack-objects`' base name,
+  `merge-file`, `mailinfo`) is not: a positional operand cannot be told from a ref or pathspec
+  without re-implementing each verb's grammar, so those forms stay in this file-edit residual.
 - Marker accuracy is the adopter's: a missing marker, an early removal, a wrong `workdir`, or a
   review that outlasts `expires_utc` are adopter errors the hook cannot judge.
 - A race between the check and the command running remains.
@@ -1277,9 +1302,15 @@ Limits:
   encloses a held worktree (a subdirectory target included) or cannot be read at all, every
   program-running form of the program gate while any hold the rule can see is live, however
   unrelated its certain target (an unrelated `rebase -x`, a harmless leading assignment such as
-  `LC_ALL=C` and a `git config` write in an unrelated repository included), every git command
+  `LC_ALL=C` and a `git config` write in an unrelated repository included), every file-writing
+  path option of the enumeration above while any hold the rule can see is live, however unrelated
+  its certain target and wherever its operand lands, every git command
   outside the read-only grammar, and an absent command, when the payload's `cwd` is missing,
-  relative or carries a NUL byte, even where no marker directory exists, a RELATIVE `-C`,
+  relative, carries a NUL byte or names no directory that exists, even where no marker directory
+  exists, the same commands when any consulted directory's git identity probe cannot answer
+  (git could not be run, timed out, ran past the decision deadline, or answered unreadably: the
+  holds there are exactly what cannot be read, so this fires even where no live hold is known),
+  a RELATIVE `-C`,
   `--git-dir`, `--work-tree`, `cd` or
   `GIT_`-assignment operand anywhere in the raw text while any reachable hold is live (`git
   commit -C HEAD` included), any directory step the resolved target does not account for while

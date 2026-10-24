@@ -465,6 +465,10 @@ ALLOWLIST = (
     ("tools/selftest_orch_hooks.py", "_main_isolated._recheck_under", "shell", 1,
      "self-test fault injector: picks the hook module's own os (or os.path) to patch one"
      " function its caller names from a fixed fault table; never runs a shell"),
+    ("tools/selftest_orch_hooks.py", "_rwh_cases", "shell", 1,
+     _SAVED + " (the hook module's own subprocess.run, reached as aiqt_hooks.subprocess.run;"
+     " the identity-probe stubs raise for the one probe argv they intercept and delegate every"
+     " other call unchanged)"),
     ("tools/selftest_orch_hooks.py", "_main_isolated", "shell", 1,
      "self-test fault injector: setattr on the hook module's own os with a function name from"
      " its fixed fault table; never runs a shell"),

@@ -19234,15 +19234,44 @@ _RWH_COUNT_RE = re.compile(r"-\d+")
 # sendmail or command options, imap-send imap.tunnel, verify-commit and verify-tag gpg.program,
 # and svn its --authors-prog; config writes the alias.* and core.* settings (a ! alias,
 # core.pager, core.editor, core.sshCommand, core.fsmonitor, core.hooksPath) a later git runs, so
-# every config form outside the read-only grammar counts. clone and init --template install the
+# every config form outside the read-only grammar counts. for-each-repo runs a git command in
+# EVERY repository a configuration key lists (a held one included, and an allowed command can
+# write that key first); maintenance writes that very list (register, unregister) and runs a
+# platform scheduler over it (start, stop), so a maintenance form can reach any registered
+# repository later; the connection services upload-pack, receive-pack, upload-archive and
+# http-backend each run in the repository their operand or request names, receive-pack that
+# repository's hooks among them. clone and init --template install the
 # template's hooks (clone runs its post-checkout hook at once), and help --web, --info and --man
 # (-w, -i, -m) run a viewer.
 _RWH_PROGRAM_SUBCOMMANDS = frozenset((
-    "config", "credential", "daemon", "difftool", "hook", "imap-send", "instaweb", "mergetool",
-    "send-email", "shell", "svn", "verify-commit", "verify-tag", "web--browse"))
+    "config", "credential", "daemon", "difftool", "for-each-repo", "hook", "http-backend",
+    "imap-send", "instaweb", "maintenance", "mergetool", "receive-pack", "send-email", "shell",
+    "svn", "upload-archive", "upload-pack", "verify-commit", "verify-tag", "web--browse"))
 _RWH_PROGRAM_SUB_OPTIONS = {"clone": ("--template",), "init": ("--template",),
                             "help": ("--web", "--info", "--man")}
 _RWH_PROGRAM_SUB_LETTERS = {"help": "wim"}
+# The file-writing path options the hold rule refuses while any hold it can see is live: each
+# writes a file or tree at an arbitrary path operand, which is not a directory move (it joins no
+# hold set and is never resolved), so from a command whose resolved target is an unrelated
+# repository it can still write into a held worktree. checkout-index --prefix redirects the
+# checkout under any prefix; the diff family's --output (diff, log, show, whatchanged, stash and
+# the diff-files/diff-index/diff-tree plumbing) writes the output to the named file; archive
+# -o/--output writes the archive; format-patch -o/--output-directory writes the patches under any
+# directory; index-pack -o writes the pack index at the named path; fast-import --export-marks and
+# --export-pack-edges write marks files; mailsplit -o writes the split messages under any
+# directory. Refused whatever the operand names, a stated over-refusal mirroring the program gate.
+# A path-writing POSITIONAL operand (worktree add, clone and init directory operands, bundle
+# create, pack-objects' base name, merge-file, mailinfo) is indistinguishable from a ref or
+# pathspec without re-implementing each verb's grammar and stays the disclosed file-edit residual.
+_RWH_WRITE_PATH_SUB_OPTIONS = {
+    "archive": ("--output",), "checkout-index": ("--prefix",), "diff": ("--output",),
+    "diff-files": ("--output",), "diff-index": ("--output",), "diff-tree": ("--output",),
+    "fast-import": ("--export-marks", "--export-pack-edges"),
+    "format-patch": ("--output-directory",), "index-pack": (), "log": ("--output",),
+    "mailsplit": (), "show": ("--output",), "stash": ("--output",), "whatchanged": ("--output",),
+}
+_RWH_WRITE_PATH_SUB_LETTERS = {"archive": "o", "format-patch": "o", "index-pack": "o",
+                               "mailsplit": "o"}
 
 
 def _rwh_real(path):
@@ -19312,11 +19341,23 @@ def _rwh_read_only_form(tokens):
     return True
 
 
+# The identity probe's cannot-evaluate: _review_git could not answer at all (git could not be
+# run, timed out, or the decision's deadline passed), or git answered unreadably. Distinct from
+# None (git RAN and answered that the directory is in no repository), so a probe failure is never
+# read as "not a repository", which would hide a live hold there and let a mutation through;
+# every caller fails closed on it instead.
+_RWH_VIEW_ERROR = "probe-error"
+
+
 def _rwh_view(directory, views):
     """The git identity of the worktree holding directory, cached per check: (absolute_git_dir,
-    common_dir), each fully resolved, or None when directory is not inside a git repository or git
-    cannot say (also on a git too old to answer --git-common-dir, where this hook stays inert, a
-    disclosed residual). Worktree identity is compared by git's absolute git directory, never by path
+    common_dir), each fully resolved; None when git RAN and answered that directory is not inside
+    a git repository (also on a git too old to answer --git-common-dir, which echoes the option
+    back: the hook stays inert there, a disclosed residual); or _RWH_VIEW_ERROR when the probe
+    could not answer (_review_git returned None, its documented cannot-evaluate: git could not be
+    run, timed out, or the decision's deadline passed, and a successful run whose answer cannot be
+    resolved to paths counts the same), which every caller fails closed, never reading it as "not
+    a repository". Worktree identity is compared by git's absolute git directory, never by path
     string, so a symlinked alias of a held worktree resolves to the same identity and a sibling path
     that merely shares a prefix does not. The cache key is the PHYSICALLY resolved path: a lexical
     key would collapse 'link/..' to the link's parent while git traverses the link, handing back a
@@ -19328,7 +19369,9 @@ def _rwh_view(directory, views):
         return views[key]
     view = None
     p = _review_git(directory, "rev-parse", "--absolute-git-dir", "--git-common-dir")
-    if p is not None and p.returncode == 0:
+    if p is None:
+        view = _RWH_VIEW_ERROR
+    elif p.returncode == 0:
         lines = p.stdout.decode("utf-8", "surrogateescape").split("\n")
         if len(lines) >= 3 and lines[0] and lines[1] and \
                 not lines[0].startswith("-") and not lines[1].startswith("-"):
@@ -19336,7 +19379,7 @@ def _rwh_view(directory, views):
                 view = (os.path.realpath(os.path.join(directory, lines[0])),
                         os.path.realpath(os.path.join(directory, lines[1])))
             except (OSError, ValueError):
-                view = None
+                view = _RWH_VIEW_ERROR
     views[key] = view
     return view
 
@@ -19687,11 +19730,21 @@ def _rwh_bad_text(detail):
 
 def _rwh_cwd_text(cwd):
     return ("AIQT rule rvwpin (fail-closed): the session cwd {!r} is missing, relative or carries a "
-            "NUL byte, so the session's repository and its review holds cannot be read and a git "
+            "NUL byte, or names no directory that exists, so the session's repository and its review "
+            "holds cannot be read and a git "
             "target with no absolute -C cannot be resolved; this Bash call (a git command outside "
             "the enumerated read-only form, or an absent command) is withheld. Commands in the "
             "read-only form, and non-git commands, are unaffected; send the call with an absolute "
-            "cwd.".format(cwd))
+            "cwd naming an existing directory.".format(cwd))
+
+
+def _rwh_probe_text(directory):
+    return ("AIQT rule rvwpin (fail-closed): the git identity of {!r} cannot be probed (git could "
+            "not be run, timed out, or ran past the decision deadline, or its answer could not be "
+            "read), so whether a repository there carries a live review hold cannot be read; this "
+            "git command outside the enumerated read-only form is withheld rather than read as "
+            "outside every repository. Commands in the read-only form, and non-git commands, are "
+            "unaffected; retry when git can answer there.".format(directory))
 
 
 def _rwh_deny_text(marker, path):
@@ -19754,6 +19807,17 @@ def _rwh_program_text(word, marker, path):
                 word, marker["dispatch_id"], marker["workdir"], marker["head"][:12], path))
 
 
+def _rwh_write_text(word, marker, path):
+    return ("AIQT rule rvwpin: this git command carries {!r}, an option that writes a file or tree "
+            "at an arbitrary path operand, and a review hold is live (dispatch {}, worktree {} held "
+            "at {}, marker {}). The operand is not a directory move, so where it lands is not "
+            "resolved, and from an unrelated target it can still write into the held worktree; "
+            "while any hold this rule can see is live every such option is refused, whatever its "
+            "operand names, a stated over-refusal. Drop the option, or end the hold first; the "
+            "dispatcher removes the marker when the review ends.".format(
+                word, marker["dispatch_id"], marker["workdir"], marker["head"][:12], path))
+
+
 def _rwh_program_word(eff):
     """The first word of one plain git segment that can make it run a program, or any global
     option other than a literal -C directory; None when it carries none this model knows. The
@@ -19810,6 +19874,36 @@ def _rwh_program_gate(segments):
     return None
 
 
+def _rwh_write_gate(segments):
+    """The first option word, in any segment whose command word is git (bare wrappers peeled), of a
+    file-writing path option of _RWH_WRITE_PATH_SUB_OPTIONS or _RWH_WRITE_PATH_SUB_LETTERS; None
+    when no such segment carries one. The caller refuses the command while any hold it can see is
+    live, WITHOUT resolving where the operand lands: the value is a path operand, not a directory
+    move, so it joins no hold set, and it can write into a held worktree from a segment whose
+    resolved target is an unrelated unheld repository. Like the program gate, the scan is a closed
+    enumeration judged on every token after the subcommand (a same-spelled word after -- is
+    over-refused, stated); a path-writing positional operand (worktree add, clone and init
+    directory operands, bundle create, pack-objects, merge-file, mailinfo) and a shell redirection
+    stay the disclosed file-edit residual."""
+    for tokens, _sep in segments:
+        eff = _expbnd_effective_tokens(tokens)
+        idx = _command_word_index(eff)
+        if idx >= len(eff) or eff[idx].rsplit("/", 1)[-1] != "git":
+            continue
+        sub, args = _git_subcommand_rest(eff)
+        if sub not in _RWH_WRITE_PATH_SUB_OPTIONS:
+            continue
+        options = _RWH_WRITE_PATH_SUB_OPTIONS[sub]
+        letters = _RWH_WRITE_PATH_SUB_LETTERS.get(sub, "")
+        for arg in args:
+            if options and _rdp_long_option(arg.split("=", 1)[0], options):
+                return arg
+            if letters and len(arg) > 1 and arg.startswith("-") and not arg.startswith("--") and \
+                    any(ch in letters for ch in arg[1:]):
+                return arg
+    return None
+
+
 def _rwh_wt_suffix(workdir, operand):
     """Whether a worktree operand matches git's name shorthand for workdir: git also accepts a
     worktree named by the last components of its path when they are unique among the registered
@@ -19840,10 +19934,10 @@ def _rwh_worktree_hit(args, base, live, views):
         if not _rwh_opaque_path(wt_path):
             resolved = wt_path if os.path.isabs(wt_path) else os.path.join(base, wt_path)
             wt_view = _rwh_view(resolved, views)
-            if wt_view is not None:
+            if isinstance(wt_view, tuple):
                 for marker, path in live:
                     held_view = _rwh_view(marker["workdir"], views)
-                    if held_view is not None and held_view[0] == wt_view[0]:
+                    if isinstance(held_view, tuple) and held_view[0] == wt_view[0]:
                         return ("deny", _rwh_deny_text(marker, path))
                 return None  # the operand resolves to a worktree no live hold pins
     return ("unverifiable", "AIQT rule rvwpin: the worktree this git 'worktree {}' names cannot be "
@@ -19857,7 +19951,7 @@ def _rwh_held_head_refs(marker, views):
     git directory) and main-worktree/HEAD for a held main worktree; () when the held worktree's
     identity cannot be read."""
     held_view = _rwh_view(marker["workdir"], views)
-    if held_view is None:
+    if not isinstance(held_view, tuple):
         return ()
     gitdir, common = held_view
     if gitdir == common:
@@ -19990,7 +20084,7 @@ def _rwh_symbolic_ref_hit(args, t_gitdir, live, views):
     for marker, path in live:
         if name == "HEAD":
             held_view = _rwh_view(marker["workdir"], views)
-            if held_view is not None and held_view[0] == t_gitdir:
+            if isinstance(held_view, tuple) and held_view[0] == t_gitdir:
                 return ("deny", _rwh_deny_text(marker, path))
         hit = _rwh_chain_hit(name, marker, path, views)
         if hit is not None:
@@ -20167,14 +20261,19 @@ def _rwh_set_state(dirs, views, holds, cw_cache, notes):
     EXPANDED through its configured core.worktree (a repository-file core.worktree moves the files
     a mutation writes, so the configured worktree's repository is consulted even though no command
     operand names it, behind a wrapper or an override included): ("bad", detail) when any marker
-    state there is unreadable or malformed, ("live", live_holds) when any has a live hold (live_holds
+    state there is unreadable or malformed, ("error", directory) when any candidate's identity
+    probe could not answer (_rwh_view's cannot-evaluate: whether a hold is live there cannot be
+    read, so the caller fails closed, never reading the failure as "not a repository"; a bad
+    marker state still wins, being the more specific refusal), ("live", live_holds) when any has a
+    live hold (live_holds
     is every such (marker, path) across the set, deduplicated by marker path, so a caller can judge
-    each one), ("clear", None) otherwise. A candidate that resolves to no repository contributes
-    nothing. Every named candidate is consulted; only the expansion chain is bounded, so a
+    each one), ("clear", None) otherwise. A candidate that git ANSWERS is in no repository
+    contributes nothing. Every named candidate is consulted; only the expansion chain is bounded, so a
     configuration cycle or an absurd chain ends (under-extending only what the chain added, never a
     named candidate)."""
     live = []
     live_paths = set()
+    error = None
     queue = list(dirs)
     seen = set()
     extra = 64
@@ -20186,6 +20285,10 @@ def _rwh_set_state(dirs, views, holds, cw_cache, notes):
             continue
         seen.add(directory)
         view = _rwh_view(directory, views)
+        if view is _RWH_VIEW_ERROR:
+            if error is None:
+                error = directory
+            continue
         if view is None:
             continue
         state, payload = _rwh_holds(view[1], holds, notes)
@@ -20202,6 +20305,10 @@ def _rwh_set_state(dirs, views, holds, cw_cache, notes):
             # core.worktree is read relative to the git directory
             queue.append(config_wt if os.path.isabs(config_wt)
                          else os.path.join(view[0], config_wt))
+    if error is not None:
+        # an unanswerable probe may hide a live hold, so it outranks live and clear: a "live"
+        # answer built on a partial view could still end in the caller's unrelated-target allow
+        return ("error", error)
     return ("live", live) if live else ("clear", None)
 
 
@@ -20230,9 +20337,14 @@ def _rwh_decide(data):
     """The review-workdir-hold decision for one Bash payload: ("allow"|"note"|"deny"|"unverifiable",
     message). INERT where no review-hold marker directory exists and the payload carries an absolute
     cwd: the only state read is the markers of the repositories the command names, so adopters who
-    write no markers see nothing. A cwd that is missing, relative or carries a NUL byte hides the
+    write no markers see nothing. A cwd that is missing, relative, carries a NUL byte or names no
+    directory that exists hides the
     session repository, so every git-word command outside the read-only grammar, and an absent
-    command, fails closed as UNVERIFIABLE whatever the markers say. The rule is
+    command, fails closed as UNVERIFIABLE whatever the markers say; a candidate directory whose
+    git identity probe cannot answer (_review_git's None: git could not be run, timed out or ran
+    past the decision deadline, or its answer could not be read) fails closed the same way, never
+    read as "not a repository" (which would hide a live hold there), while git answering that a
+    directory is in no repository stays the inert allow. The rule is
     ONE-PLAIN-GIT-or-fail-closed, judged from the RAW text, so shell grammar is never modelled case
     by case. A command whose raw text carries no git word (git as a word, the git of a git-<name>
     executable, the git ending an interpreter path) consults nothing beyond the session repository.
@@ -20245,7 +20357,12 @@ def _rwh_decide(data):
     curated program-option model, and the subcommands and options of _RWH_PROGRAM_SUBCOMMANDS,
     _RWH_PROGRAM_SUB_OPTIONS and _RWH_PROGRAM_SUB_LETTERS) DENIES with a plain reason, whatever
     its target and without resolving where the program runs (an unrelated rebase -x is refused
-    too, a stated over-refusal); otherwise the command DENIES as UNVERIFIABLE unless it is ONE plain git
+    too, a stated over-refusal); a git segment carrying a file-writing path option
+    (_rwh_write_gate: checkout-index --prefix, the diff family's --output, archive and
+    format-patch output options and the rest of _RWH_WRITE_PATH_SUB_OPTIONS and
+    _RWH_WRITE_PATH_SUB_LETTERS) DENIES the same way, whatever the operand names, since the
+    operand is not a directory move and where it lands is not resolved; otherwise the command
+    DENIES as UNVERIFIABLE unless it is ONE plain git
     segment: exactly one segment, no wrapper or reserved word before git (a bare
     command/exec/builtin/env/sudo prefix is peeled by the shared peel, as everywhere in this file),
     the command word the literal word git, and no $(, backquote or heredoc operator anywhere in the
@@ -20300,9 +20417,13 @@ def _rwh_decide(data):
     tool_input = data.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     views, holds, cw_cache, notes = {}, {}, {}, []
-    cwd_ok = isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd
+    # the NUL test runs before isdir, which raises on an embedded NUL; a nonexistent absolute cwd
+    # is the same fail-closed case (git cannot be asked anything there, so neither can its holds)
+    cwd_ok = isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd and \
+        os.path.isdir(cwd)
     sview = _rwh_view(cwd, views) if cwd_ok else None
-    s_state, s_payload = _rwh_holds(sview[1], holds, notes) if sview is not None else ("absent", [])
+    s_state, s_payload = _rwh_holds(sview[1], holds, notes) if isinstance(sview, tuple) \
+        else ("absent", [])
     s_live = s_payload if s_state == "ok" else []
     if not isinstance(command, str) or not command:
         if s_state == "bad":
@@ -20312,6 +20433,10 @@ def _rwh_decide(data):
                     "a review hold is live, so a mutation of the held worktree cannot be ruled out.")
         if not cwd_ok:
             return ("unverifiable", _rwh_cwd_text(cwd))
+        if sview is _RWH_VIEW_ERROR:
+            # the session repository's identity probe could not answer, so its holds are unread:
+            # an absent command fails closed exactly as it does for an unreadable cwd
+            return ("unverifiable", _rwh_probe_text(cwd))
         return ("allow", None)
     if _RWH_RAW_GIT_WORD_RE.search(command) is None:
         # no git word anywhere in the raw text: nothing here runs git by a spelling this rule
@@ -20350,6 +20475,12 @@ def _rwh_decide(data):
     bad_detail = s_payload if s_state == "bad" else (set_payload if set_state == "bad" else None)
     if bad_detail is not None:
         return ("deny", _rwh_bad_text(bad_detail))
+    if set_state == "error":
+        # a candidate directory's identity probe could not answer (_review_git's None, or an
+        # unreadable answer): whether a repository there carries a live hold cannot be read, so
+        # the probe failure is never read as "not a repository" (which would hide the hold and
+        # allow the mutation); every git-word command outside the read-only grammar fails closed
+        return ("unverifiable", _rwh_probe_text(set_payload))
     if not s_live and set_state != "live":
         return ("note", " ".join(notes)) if notes else ("allow", None)
     word = _rwh_program_gate(segments) if segments is not None else None
@@ -20359,6 +20490,13 @@ def _rwh_decide(data):
         # to the one-plain-git rule below, which withholds it)
         marker, path = ((set_payload if set_state == "live" else []) + list(s_live))[0]
         return ("deny", _rwh_program_text(word, marker, path))
+    word = _rwh_write_gate(segments) if segments is not None else None
+    if word is not None:
+        # a hold is live and the command carries a file-writing path option: its operand is not a
+        # directory move, so where it lands is not resolved, and from an unrelated target it can
+        # still write into the held worktree; refused whatever the operand names
+        marker, path = ((set_payload if set_state == "live" else []) + list(s_live))[0]
+        return ("deny", _rwh_write_text(word, marker, path))
     if raw_relative:
         # a live hold is reachable and the raw text carries a relative path after -C, --git-dir,
         # --work-tree, cd or a GIT_ assignment: the directory that runs it (an option value runs
@@ -20377,6 +20515,10 @@ def _rwh_decide(data):
         kind, target = _rwh_segment_target(simple, cwd if cwd_ok else None)
         if sub is not None and kind == "dir":
             tview = _rwh_view(target, views)
+            if tview is _RWH_VIEW_ERROR:
+                # the target's identity probe could not answer while a hold is live: whether it
+                # resolves outside every held worktree cannot be shown, so fail closed
+                return ("unverifiable", _rwh_probe_text(target))
             if tview is not None:
                 known, config_wt = _rwh_core_worktree(target, cw_cache)
                 if known and config_wt is None:
@@ -20428,7 +20570,11 @@ def _rwh_decide(data):
                         top = False  # the target's top level, resolved once, on first need
                         for marker, path in reach:
                             held_view = _rwh_view(marker["workdir"], views)
-                            if held_view is not None and held_view[0] == t_gitdir:
+                            if held_view is _RWH_VIEW_ERROR:
+                                # the held worktree's own identity probe could not answer, so the
+                                # target cannot be shown distinct from it: fail closed
+                                return ("unverifiable", _rwh_probe_text(marker["workdir"]))
+                            if isinstance(held_view, tuple) and held_view[0] == t_gitdir:
                                 return ("deny", _rwh_deny_text(marker, path))
                             held_real = _rwh_real(marker["workdir"])
                             if held_real is None:
@@ -20485,18 +20631,32 @@ def review_workdir_hold(data):
     GIT_COMMON_DIR/aiqt/review-holds/ naming the held worktree, its head at dispatch, a dispatch id
     and a required expiry; the dispatcher writes it before the reviewer starts and removes it when the
     review ends. INERT (silent allow) where no marker directory exists and the payload carries an
-    absolute cwd; a cwd that is missing, relative or carries a NUL byte fails closed (UNVERIFIABLE)
+    absolute cwd; a cwd that is missing, relative, carries a NUL byte or names no directory that
+    exists fails closed (UNVERIFIABLE)
     for every git-word command outside the read-only grammar and for an absent command, in the
-    standalone preflight as in the composed hook. The rule is ONE-PLAIN-GIT-
+    standalone preflight as in the composed hook, and so does any consulted directory whose git
+    identity probe cannot answer (git could not be run, timed out, ran past the decision deadline,
+    or answered unreadably): the probe failure is never read as "not a repository", which would
+    hide a live hold, while git answering that a directory is in no repository stays the inert
+    allow. The rule is ONE-PLAIN-GIT-
     or-fail-closed over the RAW command text: while any repository in the command's hold set (the
     session cwd and every literal -C, --git-dir, --work-tree, cd, pushd or GIT_-assignment path
     anywhere in the raw text, quotes stripped, each expanded through its configured core.worktree)
     has a live hold, a git segment carrying a form that runs a program or shell text (a leading
     assignment, any global option other than a literal -C, rebase -x, submodule foreach, bisect
     run, filter-branch, --upload-pack and the rest of the curated model, mergetool, difftool, a
-    config write, clone --template and the other _RWH_PROGRAM_* forms) DENIES with a plain reason
+    config write, clone --template, for-each-repo and maintenance (each runs git over the
+    repositories a configuration key lists, or writes that list and schedules runs over it), the
+    connection services upload-pack, receive-pack, upload-archive and http-backend (each runs in
+    the repository its operand or request names) and the other _RWH_PROGRAM_* forms) DENIES with a
+    plain reason
     whatever its target, without resolving where the program runs (an unrelated rebase -x is
-    refused too, a stated over-refusal), and
+    refused too, a stated over-refusal), a git segment carrying a file-writing path option
+    (checkout-index --prefix, the diff family's --output, archive -o/--output, format-patch
+    -o/--output-directory, index-pack -o, fast-import's marks exports, mailsplit -o) DENIES the
+    same way whatever the operand names (the operand is not a directory move, so where it lands is
+    not resolved, and from an unrelated target it can still write into the held worktree, a stated
+    over-refusal), and
     ANY other command whose raw text carries a git word (git, a git-<name> executable,
     a path ending in /git), inside quotes, substitutions, heredoc bodies or option values included,
     denies with an UNVERIFIABLE: prefix, EXCEPT one plain git segment (no second segment, wrapper
