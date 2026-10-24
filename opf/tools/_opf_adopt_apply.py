@@ -15622,7 +15622,12 @@ def _init_store_git_checks(check, ctx, refused):
         # first write (_opf_write_guard.init_ignore_refusal, which plain `opf init` calls too): a store git
         # would ignore refuses with no store entry written and no init operation recorded (the run's
         # transaction ends rolled back in the journal home), and git failing refuses the same way. Without
-        # the preflight both publish the store. Once no rule ignores the store a fresh run is admitted.
+        # the preflight both publish the store. The rolled-back journal PERSISTS under the journal home
+        # (spec 4.2 reserves `journals/<kind>/` as recovery state; spec 14.2 recovery resolves from the
+        # journal alone; the refused run id stays burnt, spec 14.1), so the refusal leaves `.working`
+        # holding only the journal: the same present-without-manifest posture a reversal leaves,
+        # CANNOT-EVALUATE fail-closed for resolution (plain `opf init` never scaffolds over it) and
+        # re-admitted by a fresh adoption run. Once no rule ignores the store a fresh run is admitted.
         from unittest import mock
         root = init_op._plain_repo(os.path.join(base, "ignored"), env)
         init_op._write(os.path.join(root, ".gitignore"), b".working/\n")
@@ -15633,8 +15638,12 @@ def _init_store_git_checks(check, ctx, refused):
         check("init-store-ignored-store-refused-nothing-written",
               refused(dispatch(row, ctx(root, run_id=run)), "git-ignored")
               and snap(root) == before and op_ids(root) == []
-              and store.resolve_store(root).status == store.NOT_ADOPTED
+              and store.resolve_store(root).status == store.CANNOT_EVALUATE
               and txn_state(root, run) == "rolled-back")
+        check("init-store-ignored-refusal-retains-working-with-journal-only",
+              sorted(os.listdir(os.path.join(root, store.WORKING_DIRNAME)))
+              == [store.JOURNALS_DIRNAME]
+              and _default_store_present_without_manifest(root))
         real_discovery = init_op._opf_observe._run_git_config_discovery
 
         def check_ignore_fails(git, store_root, args, *a, **k):
