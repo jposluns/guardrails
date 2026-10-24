@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OPF standalone-closure gate (OPF-SELF-CONTAIN, hold H-12 ratified).
+"""OPF standalone-closure gate (OPF-SELF-CONTAIN).
 
 This gate proves, by PHYSICAL ABSENCE, that the `opf/` subtree is dependency-closed: it materializes
 `opf/` ALONE into a throwaway temporary directory with NO AIQT checkout reachable, then runs the OPF
@@ -931,6 +931,11 @@ _CI_PLAIN_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*:(?=\s|$)")
 _CI_PLAIN_ITEM = re.compile(r"[A-Za-z0-9._/ -]+")
 _CI_BLOCK_HEADER = re.compile(r"([|>][0-9+-]*)(?:\s+#.*)?")
 _CI_QUOTED_VALUE = re.compile(r"""('(?:[^']|'')*'|"(?:[^"\\]|\\.)*")(?:\s+#.*)?""")
+_CI_FLOW_SEQUENCE = re.compile(r"\[[A-Za-z0-9._/ ,-]*\](?:\s+#.*)?")
+# The characters str.splitlines() ends a line at besides "\n" and "\r": a YAML 1.2 loader reads none of
+# them as a line break, a YAML 1.1 loader reads \x85, \u2028 and \u2029 as one, so a workflow holding
+# any of them has lines this parser and the loader GitHub runs need not agree on.
+_CI_OTHER_LINE_BREAKS = frozenset("\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 
 
 def _ci_value(rest):
@@ -956,6 +961,103 @@ def _ci_value(rest):
     return "plain", scalar
 
 
+def _ci_job_header(lines, job):
+    """Where `job` is declared in the workflow lines, as ((index of its header line, indentation of the
+    jobs mapping's own keys), None), or (None, reason) naming what could not be placed. The header must
+    be a DIRECT key of the top-level `jobs:` mapping, exactly once, with no value on its own line; a
+    line that merely reads like one inside a block scalar, under another top-level key, or nested
+    deeper inside jobs: is not a job, and the loader GitHub runs would not read it as one. Fail-closed:
+    every line of the file must be one this line parser places, so no header can hide inside structure
+    it does not read: a plain-key line (`KEY:` or `- KEY:`) whose value is empty, a block-scalar header,
+    or a single-line quoted, plain or plain-item flow-sequence scalar, an unquoted plain-scalar list
+    item, a comment or blank line, or the content of a block scalar a plain-key line opened. A
+    multi-line quoted or flow scalar (its opening line is not one of those forms), a line deeper than a
+    single-line value above it (a plain scalar continued, or no structure at all), a tab before a line's
+    content, a sequence at column 0, a second top-level jobs: key and a jobs: value that is not a
+    mapping are each refused BY NAME, never scanned around."""
+    top = None           # the top-level key the scan is under
+    jobs_line = None     # the index of the top-level jobs: key line
+    jobs_indent = None   # the indentation of the jobs mapping's own keys, from its first key line
+    block_column = None  # the key column of an open block scalar; deeper lines are its content
+    value_column = None  # the column of a single-line value's key or item; a deeper line continues it
+    found = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if block_column is not None:
+            if not stripped or indent > block_column:
+                continue  # block-scalar content, or a blank line inside it
+            block_column = None
+        if not stripped or stripped.startswith("#"):
+            continue
+        refusal = "line {} {!r} of the workflow ".format(index + 1, stripped)
+        if line[indent] == "\t":
+            return None, refusal + "has a tab before its content; cannot place the {} job".format(job)
+        if value_column is not None and indent > value_column:
+            return None, (refusal + "is deeper than the single-line value above it (a continued "
+                          "scalar, or no structure this parser reads); cannot place the {} "
+                          "job".format(job))
+        value_column = None
+        item, dashes = stripped, 0
+        while item.startswith("- "):
+            dashes += 1
+            item = item[2:].lstrip()
+        if dashes and indent == 0:
+            return None, refusal + "opens a sequence at column 0; cannot place the {} job".format(job)
+        if indent and top is None:
+            return None, refusal + "is indented before any top-level key; cannot place the {} job".format(
+                job)
+        match = _CI_PLAIN_KEY.match(item)
+        if not match:
+            if dashes and _CI_PLAIN_ITEM.fullmatch(item):
+                value_column = indent  # an unquoted plain-scalar list item
+                continue
+            return None, (refusal + "is not a form this parser places (a plain-key line, an unquoted "
+                          "plain-scalar list item, or block-scalar content); cannot place the {} "
+                          "job".format(job))
+        key, rest = match.group(0)[:-1], item[match.end():]
+        form, value = _ci_value(rest)
+        if form is None and _CI_FLOW_SEQUENCE.fullmatch(rest.strip()):
+            form = "flow"
+        if form is None:
+            return None, (refusal + "carries the value {!r}, a form this parser does not place (an "
+                          "alias, anchor, tag, multi-line quoted or flow scalar, or flow mapping); "
+                          "cannot place the {} job".format(value, job))
+        if form == "block":
+            block_column = indent + 2 * dashes
+        elif form != "nested":
+            value_column = indent + 2 * dashes
+        if indent == 0:
+            top = key
+            if key == "jobs":
+                if jobs_line is not None:
+                    return None, (refusal + "is a second top-level jobs: key; cannot place the {} "
+                                  "job".format(job))
+                if form != "nested":
+                    return None, (refusal + "gives jobs: a value that is not a mapping; cannot place "
+                                  "the {} job".format(job))
+                jobs_line = index
+            continue
+        if top != "jobs":
+            continue
+        if jobs_indent is None:
+            jobs_indent = indent
+        if indent < jobs_indent or (dashes and indent == jobs_indent):
+            return None, (refusal + "is neither a key of the jobs: mapping nor nested inside one; "
+                          "cannot place the {} job".format(job))
+        if indent == jobs_indent and key == job:
+            if form != "nested":
+                return None, (refusal + "gives the {} job a value that is not a mapping (cannot "
+                              "evaluate)".format(job))
+            found.append(index)
+    if jobs_line is None:
+        return None, "the workflow has no top-level jobs: key; cannot place the {} job".format(job)
+    if len(found) != 1:
+        return None, ("job {} appears {} times as a key of the top-level jobs: mapping (need exactly "
+                      "one)".format(job, len(found)))
+    return (found[0], jobs_indent), None
+
+
 def _ci_job_limit_s(workflow_text, job):
     """The time limit, in seconds, of `job` in the workflow text, as (seconds, None), or (None, reason)
     naming what could not be evaluated. The limit is the JOB-LEVEL timeout-minutes (a key at the job
@@ -974,17 +1076,25 @@ def _ci_job_limit_s(workflow_text, job):
     this parser would not, so no limit the job might carry there can be trusted. A timeout-minutes
     value is validated BEFORE any block-scalar skip, so `timeout-minutes: |` is refused by name, never
     skipped as content; it must be a plain decimal integer without a leading zero (`030` reads as 24
-    to a YAML 1.1 loader and as 30 to a YAML 1.2 one, and `30#x` is the string `30#x`, never 30). An
-    absent or duplicated job header also refuses by name."""
+    to a YAML 1.1 loader and as 30 to a YAML 1.2 one, and `30#x` is the string `30#x`, never 30). The
+    job header is placed structurally (_ci_job_header): one that is absent or duplicated as a direct
+    key of the top-level jobs: mapping, or that only reads like one inside a block scalar, under
+    another top-level key or deeper inside jobs:, refuses by name, as does a workflow holding a line
+    break this parser and a YAML loader need not agree on (_CI_OTHER_LINE_BREAKS)."""
+    breaks = sorted(set(workflow_text) & _CI_OTHER_LINE_BREAKS)
+    if breaks:
+        return None, ("the workflow holds {} (a line break str.splitlines and a YAML loader need not "
+                      "agree on); cannot place the {} job".format(
+                          ", ".join(repr(char) for char in breaks), job))
     lines = workflow_text.splitlines()
-    header = "  {}:".format(job)
-    if lines.count(header) != 1:
-        return None, "job {} appears {} times in the workflow (need exactly one)".format(
-            job, lines.count(header))
+    placed, reason = _ci_job_header(lines, job)
+    if placed is None:
+        return None, reason
+    start, jobs_indent = placed
     minutes = [_CI_DEFAULT_JOB_MINUTES]
     job_indent = None    # the indentation of the job mapping's own keys, from its first key line
     block_column = None  # the key column of an open block scalar; deeper lines are its content
-    for line in lines[lines.index(header) + 1:]:
+    for line in lines[start + 1:]:
         stripped = line.strip()
         indent = len(line) - len(line.lstrip(" "))
         if block_column is not None:
@@ -993,7 +1103,7 @@ def _ci_job_limit_s(workflow_text, job):
             block_column = None
         if not stripped or stripped.startswith("#"):
             continue
-        if indent <= 2:
+        if indent <= jobs_indent:
             break  # the next job, or a top-level key, ends this job
         item, dashes = stripped, 0
         while item.startswith("- "):
@@ -2169,6 +2279,56 @@ def _bounds_self_test(root):
     if blocky == text or ci_limit("ci-block-scalar-content-misread-as-a-key",
                                   blocky, _CI_JOBS[0]) != (default_s, None):
         raise _CheckFailure("closure/ci-block-scalar-content-misread-as-a-key")
+    # The job header is placed structurally: a line that reads like the header but is not a direct
+    # key of the top-level jobs: mapping declares no job, so with the real job renamed away it must be
+    # refused naming the job, never read for a limit. Each entry is (check, workflow text, the text
+    # its refusal must name). The header text inside a top-level block scalar (the real workflow, and
+    # the bare reproduction) or under another top-level key, a jobs mapping indented one column so the
+    # header line sits one level deeper (inside another job) and one indented three columns so it sits
+    # between jobs: and its keys, and a header-shaped line inside a multi-line flow, quoted or plain
+    # scalar, or split off by a line break a YAML loader need not read as one, are each refused.
+    renamed = text.replace(header, "  renamed-job:\n", 1)
+    if renamed == text:
+        raise _CheckFailure("closure/ci-header-outside-jobs-not-refused: the real workflow has no {} "
+                            "header to rename".format(_CI_JOBS[0]))
+    body = header + "    timeout-minutes: 30\n"
+    for check, placed_text, want_named in (
+            ("ci-header-in-a-top-level-block-scalar-read-as-a-job",
+             "x-note: |\n" + body + renamed, _CI_JOBS[0]),
+            ("ci-header-in-a-top-level-block-scalar-read-as-a-job",
+             "name: |\n" + header + "    timeout-minutes: 360\n", "no top-level jobs: key"),
+            ("ci-header-under-a-non-jobs-key-read-as-a-job", "env:\n" + body + renamed, _CI_JOBS[0]),
+            ("ci-header-nested-deeper-in-jobs-read-as-a-job",
+             "jobs:\n other:\n" + header + "   timeout-minutes: 30\n", _CI_JOBS[0]),
+            ("ci-header-nested-deeper-in-jobs-read-as-a-job",
+             "jobs:\n   other:\n     runs-on: ubuntu-latest\n" + body, "neither a key of the jobs"),
+            ("ci-header-in-a-multi-line-flow-scalar-read-as-a-job",
+             "x-note: [\n" + header + "  ]\n" + renamed, "x-note: ["),
+            ("ci-header-in-a-multi-line-quoted-scalar-read-as-a-job",
+             'x-note: "a\n' + header + '  b"\n' + renamed, 'x-note: "a'),
+            ("ci-header-in-a-continued-plain-scalar-read-as-a-job",
+             "x-note: a\n" + body + renamed, "deeper than the single-line value"),
+            ("ci-header-after-a-non-yaml-line-break-read-as-a-job",
+             "x-note: a\u2028" + body + renamed, "'\\u2028'")):
+        got_limit, got_reason = ci_limit(check, placed_text, _CI_JOBS[0])
+        if got_limit is not None or want_named not in (got_reason or ""):
+            raise _CheckFailure("closure/{}: {!r}".format(check, (got_limit, got_reason)))
+    # The same header as a direct jobs: key is read, whatever the jobs mapping's own indentation, and
+    # a comment after its colon is no value.
+    for check, placed_text in (
+            ("ci-direct-jobs-key-not-read",
+             "jobs:\n other:\n  runs-on: ubuntu-latest\n {}:\n  timeout-minutes: 30\n".format(
+                 _CI_JOBS[0])),
+            ("ci-direct-jobs-key-not-read", "jobs:\n  {}: # gate\n    timeout-minutes: 30\n".format(
+                _CI_JOBS[0]))):
+        got = ci_limit(check, placed_text, _CI_JOBS[0])
+        if got != (1800, None):
+            raise _CheckFailure("closure/{}: {!r}".format(check, got))
+    print("RED the {} header only inside a top-level block scalar, only under a non-jobs top-level "
+          "key, nested deeper inside jobs:, inside a multi-line flow, quoted or plain scalar, or after "
+          "a line break a YAML loader need not read -> each refused by name, never read for a limit; "
+          "the same header as a direct jobs: key (one-column jobs mapping, trailing comment) -> read; "
+          "the real workflow's five jobs -> read above".format(_CI_JOBS[0]))
     # Value forms, on a minimal job: each entry is (check, job body, the limit it must read, or None
     # with the text its refusal must name). A timeout-minutes value is validated before any
     # block-scalar skip; a value that opens structure this parser does not read (an alias, a flow
@@ -4363,7 +4523,7 @@ def _check_routing_self_test():
                  "SELF-TEST FAIL: closure/negative-verdict-not-red: bound-kill"),
                 ("ci-job-limit-cannot-evaluate", lambda: _bounds_self_test(tmp), {}, None, (2, None),
                  "SELF-TEST CANNOT EVALUATE: closure/ci-job-limit-cannot-evaluate: job opf-closure-a "
-                 "appears 0 times in the workflow (need exactly one)"),
+                 "appears 0 times as a key of the top-level jobs: mapping (need exactly one)"),
                 # REGRESSION COVERAGE: a fault creating the check's own temporary directory read as a
                 # harness fault before; it fails if the conversion were widened past the calls into
                 # the code under test.
