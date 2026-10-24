@@ -70,11 +70,12 @@ change that differs from the working-tree copy (it reads the working tree), and 
 
 REVIEW-ROUND LABEL RULE, WHOLE TRACKED TREE. The review-round label patterns (_REVIEW_LABELS: a reviewer
 family name followed by a QA round number, and a QA round number followed by a severity grade or a finding
-id, both case-insensitive) run inside the role rule above, over the same tracked set with the same
-internal-allow exemption, skips and fail-closed exits, and inside the scoped scan. "QA" alone, "quality", a
-bare grade word, a family name alone and a round number with neither a family name before it nor a grade or
-finding id after it are not matched, so a review label written in another shape (a family name after the
-round number, say) is outside this rule.
+id, in each case with at most one space between the parts, both case-insensitive) run inside the role rule
+above, over the same tracked set with the same internal-allow exemption, skips and fail-closed exits, and
+inside the scoped scan. "QA" alone, "quality", a bare grade word, a family name alone and a round number
+with neither a family name before it nor a grade or finding id after it are not matched, so a review label
+written in another shape (a family name after the round number, or a tab, two spaces or punctuation between
+the parts, say) is outside this rule.
 
 Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error or a tracked file the role
 rule cannot evaluate (fail-closed). `--self-test` proves the gate FAILS on a seeded internal name (a
@@ -162,13 +163,14 @@ _ROLE_NAMES = [
     (re.compile(r'\bArchitect\b'), "internal role name"),
 ]
 # Internal REVIEW-ROUND LABEL patterns: a reviewer family name followed by a QA round number, and a QA round
-# number followed by a severity grade (BLOCKER, MAJOR, MEDIUM or MINOR) or a finding id. A shipped comment or
-# message says what the code guards and why, never which review round asked for it. Case-insensitive, since
-# such labels are written in either case. Each needs the round NUMBER, so "QA" alone in prose, "quality", a
-# bare grade word, a family name alone and a round number with neither a family before it nor a grade after
-# it never match. Like the role-name pattern, these run over every tracked file, this one included; the
-# pattern sources do not match themselves because a family name here is followed by a bar or a parenthesis
-# and "QA" by a bracket.
+# number followed by a severity grade (BLOCKER, MAJOR, MEDIUM or MINOR) or a finding id, in each case with at
+# most one space between the parts (a tab, two spaces or punctuation there is not matched). A shipped
+# comment or message says what the code guards and why, never which review round asked for it.
+# Case-insensitive, since such labels are written in either case. Each needs the round NUMBER, so "QA" alone
+# in prose, "quality", a bare grade word, a family name alone and a round number with neither a family before
+# it nor a grade after it never match. Like the role-name pattern, these run over every tracked file, this
+# one included; the pattern sources do not match themselves because a family name here is followed by a bar
+# or a parenthesis and "QA" by a bracket.
 _REVIEW_LABELS = [
     (re.compile(r'\b(?:codex|claude|gemini)[ ]?QA[0-9]+', re.IGNORECASE), "internal review-round label"),
     (re.compile(r'\bQA[0-9]+[ ]?(?:BLOCKER|MAJOR|MEDIUM|MINOR|F[0-9])', re.IGNORECASE),
@@ -729,24 +731,26 @@ def _self_test(caller_env=None):
         #     the mutation it catches: dropping the round-number requirement in pattern 1 flags a family name
         #     before "QA" alone, dropping it in pattern 2 flags "QA" before a bare grade, dropping pattern
         #     1's leading word boundary flags a family name glued to a longer word, dropping pattern 2's
-        #     leading word boundary flags a round glued to a longer word, and dropping the grade or finding
-        #     id flags a round number alone. Every vector is assembled at runtime, so no contiguous label
-        #     sits in this source (the rule scans this file), and the three-digit round numbers in the
-        #     controls are synthetic values naming no real round.
+        #     leading word boundary flags a round glued to a longer word, dropping the grade or finding
+        #     id flags a round number alone, and dropping the digit from the finding id flags a round number
+        #     before a word that starts with F. Every vector is assembled at runtime, so no contiguous label
+        #     sits in this source (the rule scans this file). The three-digit round numbers in the hits, the
+        #     controls and the fixture below are synthetic values naming no real round, and the subjects are
+        #     neutral; the two-digit control repeats planted marker strings the opf self-tests use.
         write_hashes([])
         qa = "QA"
         review_label = "internal review-round label"
         label_hits = (
-            "codex " + qa + "32: the finally vector",
-            "Claude" + qa + "9 noted it",
-            "gemini " + qa.lower() + "35",
-            "codex/claude " + qa + "34",
-            qa + "16 MINOR-1: descriptors are closed",
-            qa + "4 MAJOR",
-            qa + "29 BLOCKER 1: a read-born fault",
-            qa.lower() + "7 medium",
-            qa + "19 F4: array is preloaded",
-            qa.lower() + "8f2",
+            "codex " + qa + "932: a sample note",
+            "Claude" + qa + "909 wrote this line",
+            "gemini " + qa.lower() + "935",
+            "codex/claude " + qa + "934",
+            qa + "916 MINOR-1: an example remark",
+            qa + "904 MAJOR",
+            qa + "929 BLOCKER 1: a placeholder item",
+            qa.lower() + "907 medium",
+            qa + "919 F4: a sample entry",
+            qa.lower() + "908f2",
         )
         label_controls = (
             "the quality gate passes",
@@ -758,8 +762,9 @@ def _self_test(caller_env=None):
             "a mutation vector of round " + qa + "901/" + qa + "902",
             "a planted " + qa + "15-CAUSE marker and a " + qa.lower() + "15-st-size probe",
             "vector:codex" + "901-1 and vector:claude" + "901-3",
-            "a glued token non" + qa + "3 F1 and pre" + qa + "16 MINOR",
+            "a glued token non" + qa + "903 F1 and pre" + qa + "916 MINOR",
             "an autocodex " + qa + "901 build and a preclaude " + qa + "902 run",
+            "the " + qa + "905 Final summary and a " + qa.lower() + "906 follow-up",
         )
         for text in label_hits:
             found = scan_role_text(text + "\n")
@@ -801,7 +806,7 @@ def _self_test(caller_env=None):
         (repo / "tools").mkdir()
         (repo / "docs" / "outside.md").write_text("Signed off by the Architect.\n", encoding="utf-8")  # internal-allow
         # A review-round label of each shape on lines 1 and 2 and a control on line 3, assembled at runtime (case 27).
-        (repo / "docs" / "labels.md").write_text("checked by codex " + qa + "32\n" + qa + "16 MINOR-1 asked for it\n"
+        (repo / "docs" / "labels.md").write_text("checked by codex " + qa + "932\n" + qa + "916 MINOR-1 in a sample\n"
                                                  "the QA suite runs every quality check\n", encoding="utf-8")
         (repo / "tools" / "check_leaks.py").write_text("# the Architect said so\n", encoding="utf-8")  # internal-allow
         (repo / "notes.txt").write_text("Architect kept here  # internal-allow\n"  # internal-allow
@@ -1516,7 +1521,8 @@ def _self_test(caller_env=None):
           "tracked-file rule and the scoped scan in either case, and by the real gate in a tracked file "
           "outside SCOPE_RELPATHS, while \"quality\", \"QA\" alone, a bare grade word, a family name alone, a "
           "family name before \"QA\" with no round number, \"QA\" before a grade with no round number, a "
-          "round number alone and a family name or a round glued to a longer word are not, and an "
+          "round number alone, a round number before a word that starts with F and a family name or a round "
+          "glued to a longer word are not, and an "
           "internal-allow line holding "
           "one is exempt; the real gate run on a fixture git repository "
           "catches the role name in a tracked file outside SCOPE_RELPATHS and in a tracked file whose basename "
