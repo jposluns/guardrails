@@ -734,8 +734,10 @@ def _self_test(caller_env=None):
         #     leading word boundary flags a round glued to a longer word, dropping the grade or finding
         #     id flags a round number alone, dropping the digit from the finding id flags a round number
         #     before a word that starts with F, and widening either pattern's one optional space (to any run
-        #     of spaces, any whitespace or any character) flags two spaces, a tab or punctuation between the
-        #     parts, the documented separator limit. Every vector is assembled at runtime, so no contiguous
+        #     of spaces, any whitespace, any character, or a set that adds any one ASCII punctuation
+        #     character) flags two spaces, a tab or that punctuation character between the parts, the
+        #     documented separator limit: each pattern has a control for two spaces, a tab and every
+        #     character of string.punctuation. Every vector is assembled at runtime, so no contiguous
         #     label sits in this source (the rule scans this file). The round numbers in the hits, the
         #     controls and the fixture below are synthetic three-digit values naming no real round, and the
         #     subjects are neutral.
@@ -772,6 +774,10 @@ def _self_test(caller_env=None):
             qa + "941  MINOR and " + qa + "942\tMAJOR, two spaces and a tab apart",
             qa + "943:F1 and " + qa + "944-BLOCKER, punctuation between",
         )
+        import string
+        for mark in string.punctuation:
+            label_controls += ("codex" + mark + qa + "947, one punctuation character between",
+                               qa + "948" + mark + "MINOR, one punctuation character between")
         for text in label_hits:
             found = scan_role_text(text + "\n")
             if not found or {item for _number, item in found} != {review_label}:
@@ -1528,7 +1534,8 @@ def _self_test(caller_env=None):
           "outside SCOPE_RELPATHS, while \"quality\", \"QA\" alone, a bare grade word, a family name alone, a "
           "family name before \"QA\" with no round number, \"QA\" before a grade with no round number, a "
           "round number alone, a round number before a word that starts with F, a family name or a round "
-          "glued to a longer word and parts separated by two spaces, a tab or punctuation are not, and an "
+          "glued to a longer word and parts separated by two spaces, a tab or any one ASCII punctuation "
+          "character are not, and an "
           "internal-allow line holding "
           "one is exempt; the real gate run on a fixture git repository "
           "catches the role name in a tracked file outside SCOPE_RELPATHS and in a tracked file whose basename "
