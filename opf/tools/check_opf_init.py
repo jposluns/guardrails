@@ -288,12 +288,7 @@ _ROUTE_ALLOWED_REFS = dict(
         "opened.st_dev", "opened.st_ino", "os.fstat",
     ]),
     _init_unignored=frozenset([
-        "RuntimeError", "_opf_observe._run_git_config_discovery",
-        "_opf_observe.indexed_ignore_availability",
-        "_opf_write_guard._ignore_file_candidates", "os.fsdecode",
-        "os.fsdecode().splitlines", "result.completed", "result.err",
-        "result.out", "result.rc", "root.relative_to", "sorted", "str",
-        "str-literal.format",
+        "RuntimeError", "_opf_write_guard.init_ignore_refusal", "root.relative_to",
     ]),
     _init_untracked=frozenset([
         "RuntimeError", "os.fsdecode", "root.relative_to", "sorted", "str",
@@ -1224,13 +1219,44 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and inert("store resolution refused") in output)
                 check("empty partial store preserved", _snapshot(empty_working) == before)
 
-                changelog = make_git("existing-changelog")
-                (changelog / "CHANGELOG.md").write_bytes(b"Existing changelog.\n")
-                rc, _output = run(changelog)
-                check("existing changelog permits source initialization",
-                      rc == EXIT_OK and valid_sources(changelog))
-                check("existing changelog preserved",
-                      (changelog / "CHANGELOG.md").read_bytes() == b"Existing changelog.\n")
+                # Spec 14.2: plain init never keeps an undispositioned root deliverable, so a
+                # pre-existing root CHANGELOG.md or VERSION is refused at preflight, nothing is
+                # written, and the refusal names opf adopt. The plain changelog has no level-2
+                # heading, so doctor would accept it beside the fresh ledger; it is refused all the
+                # same. The entry-heading changelog is the case doctor reports INVALID (its ##
+                # heading matches no release in the fresh, empty version ledger). Each name is read
+                # through lstat, so a symlink there (to an outside file, or dangling) is refused,
+                # never followed. DISCRIMINATOR: rc 0 against the pre-fix init, which kept the
+                # changelog and never read VERSION; a followed VERSION link passes the dangling
+                # vector (rc 0), and a followed CHANGELOG.md link leaves only the generic
+                # destination refusal, which lacks this text.
+                outside = base / "deliverable-outside"
+                outside.write_bytes(b"untouched\n")
+                dangling = base / "deliverable-absent"
+                for number, (label, name, content) in enumerate((
+                        ("existing changelog", "CHANGELOG.md", b"Existing changelog.\n"),
+                        ("existing changelog with an entry heading", "CHANGELOG.md",
+                         b"# History\n\n## 2.4.0\n"),
+                        ("existing changelog symlink", "CHANGELOG.md", outside),
+                        ("dangling changelog symlink", "CHANGELOG.md", dangling),
+                        ("existing VERSION", "VERSION", b"2.4.0\n"),
+                        ("dangling VERSION symlink", "VERSION", dangling))):
+                    target = make_git("deliverable-" + str(number))
+                    if isinstance(content, bytes):
+                        (target / name).write_bytes(content)
+                    else:
+                        (target / name).symlink_to(content)
+                    before = _snapshot(target)
+                    rc, output = run(target)
+                    check(label + " refused",
+                          rc == EXIT_ERROR and "during preflight: RuntimeError(" in output
+                          and inert("an existing " + name + " sits at") in output
+                          and inert("opf adopt") in output
+                          and "preflight refused; no publication attempted." in output)
+                    check(label + " preserved", _snapshot(target) == before)
+                check("deliverable symlink targets untouched (none followed or created)",
+                      outside.read_bytes() == b"untouched\n" and not dangling.exists()
+                      and not dangling.is_symlink())
 
                 # Symlinked root, containment-isolated: the symlink target is a REAL directory INSIDE
                 # the same git repo, and --root names the sibling symlink. _init_repo's repo-containment
@@ -1677,6 +1703,19 @@ def _suite_isolated(invoke):
                     created |= swept()
                     return sorted(created)
 
+                def init_store(root):
+                    # A store fixture's FIRST init. Plain init refuses a pre-existing root
+                    # CHANGELOG.md ahead of its history scan (spec 14.2), so a fixture that commits
+                    # this store and later deletes only the store paths would stop there, short of
+                    # the scan it exercises. The starter changelog is renamed to an inert file
+                    # before the fixture commits: the root still holds one non-store file once the
+                    # store is deleted (so git rm keeps the directory), and none at a deliverable
+                    # destination.
+                    result = run(root)
+                    if (root / "CHANGELOG.md").is_file():
+                        (root / "CHANGELOG.md").rename(root / "notes.txt")
+                    return result
+
                 # SPEC 8.2 ancestry (fix-init-ancestry): plain init must never restart counters
                 # over a store git HISTORY shows existed. Reproduction: init, commit the store,
                 # raise a counter high-water and commit, `git rm -r .working .opf.toml` and
@@ -1686,7 +1725,7 @@ def _suite_isolated(invoke):
                 # not the deletion commit), and give the remedy (restore, or `opf adopt`).
                 # DISCRIMINATOR: rc 0 against the pre-fix init.
                 ancestry = make_git("ancestry-prior-store")
-                rc, output = run(ancestry)
+                rc, output = init_store(ancestry)
                 check("ancestry fixture first init succeeds", rc == EXIT_OK)
                 git_call(ancestry, ["--literal-pathspecs", "add", "-A"])
                 git_call(ancestry, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -1729,6 +1768,28 @@ def _suite_isolated(invoke):
                       output == prior_store_output(ancestry, ancestry, held_commit,
                                                    [".opf.toml", ".working"], True))
                 check("ancestry: refusing init wrote nothing", _snapshot(ancestry) == before)
+                # The same reproduction with the starter CHANGELOG.md left in place (the file the
+                # fixture above renames away): plain init refuses that changelog at preflight,
+                # ahead of the history scan (spec 14.2), so the counters stay protected either way
+                # and nothing is written. DISCRIMINATOR: against the pre-fix init the history scan
+                # refuses instead, without the changelog text.
+                kept = make_git("ancestry-kept-changelog")
+                rc, output = run(kept)
+                check("ancestry kept-changelog fixture first init succeeds", rc == EXIT_OK)
+                git_call(kept, ["--literal-pathspecs", "add", "-A"])
+                git_call(kept, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                "commit", "-m", "store"])
+                git_call(kept, ["rm", "-r", "-q", "--", working, _opf_store.POINTER_REL])
+                git_call(kept, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                "commit", "-m", "drop store"])
+                before = _snapshot(kept)
+                rc, output = run(kept)
+                check("ancestry: a deleted store whose CHANGELOG.md stayed is refused at the "
+                      "changelog check, ahead of the history scan",
+                      rc == EXIT_ERROR and "during preflight: RuntimeError(" in output
+                      and inert("an existing CHANGELOG.md sits at") in output
+                      and "prior store" not in output)
+                check("ancestry: that changelog refusal wrote nothing", _snapshot(kept) == before)
 
                 # SPEC 8.2 ancestry, fail closed: a SHALLOW clone truncates the first-parent
                 # history, so it cannot prove no prior store existed -- the clipped commits of
@@ -1915,7 +1976,7 @@ def _suite_isolated(invoke):
                 # was the only thing hiding the store. DISCRIMINATOR: rc 0 and a re-zeroed
                 # counters.toml against a scan that lets git resolve grafts.
                 grafted = make_git("ancestry-graft")
-                rc, output = run(grafted)
+                rc, output = init_store(grafted)
                 check("ancestry graft fixture first init succeeds", rc == EXIT_OK)
                 git_call(grafted, ["--literal-pathspecs", "add", "-A"])
                 git_call(grafted, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -2274,7 +2335,7 @@ def _suite_isolated(invoke):
                     repo = make_git(fixture)
                     sub = repo / name
                     sub.mkdir()
-                    first_rc, first_output = run(sub)
+                    first_rc, first_output = init_store(sub)
                     git_call(repo, ["--literal-pathspecs", "add", "-A"])
                     git_call(repo, ["-c", "user.email=t@t", "-c", "user.name=t",
                                     "commit", "-m", "store"])
@@ -2399,7 +2460,7 @@ def _suite_isolated(invoke):
                 # DISCRIMINATOR: M-gate-ignores-repo ([str(repo)] dropped from the gate)
                 # prints a shell-ready command with a raw ESC and fails both checks.
                 ctl_repo = make_git("ancestry-repo\x1b[31mred")
-                rc, output = run(ctl_repo)
+                rc, output = init_store(ctl_repo)
                 check("ancestry control-character repository: fixture first init succeeds",
                       rc == EXIT_OK)
                 git_call(ctl_repo, ["--literal-pathspecs", "add", "-A"])
@@ -2435,7 +2496,7 @@ def _suite_isolated(invoke):
                 # follows the replacement in this fixture, so the byte comparison
                 # DISCRIMINATES M-no-replace-flag (the flag dropped from the printed command).
                 repl = make_git("ancestry-replace")
-                rc, output = run(repl)
+                rc, output = init_store(repl)
                 check("ancestry replacement fixture first init succeeds", rc == EXIT_OK)
                 git_call(repl, ["--literal-pathspecs", "add", "-A"])
                 git_call(repl, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -2488,7 +2549,7 @@ def _suite_isolated(invoke):
                 # probe removed) prints the round-3 single pointer-only command labelled as
                 # the store restore and fails the text and the byte comparison.
                 split = make_git("ancestry-split-working-first")
-                rc, output = run(split)
+                rc, output = init_store(split)
                 check("ancestry split-deletion fixture first init succeeds", rc == EXIT_OK)
                 git_call(split, ["--literal-pathspecs", "add", "-A"])
                 git_call(split, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -2526,7 +2587,7 @@ def _suite_isolated(invoke):
                 # pointer arm of the probe: the named commit holds .working alone and the
                 # additional command restores .opf.toml.
                 split2 = make_git("ancestry-split-pointer-first")
-                rc, output = run(split2)
+                rc, output = init_store(split2)
                 check("ancestry pointer-first split fixture first init succeeds",
                       rc == EXIT_OK)
                 git_call(split2, ["--literal-pathspecs", "add", "-A"])
@@ -2562,7 +2623,7 @@ def _suite_isolated(invoke):
                 # high-water deleted with no disclosure; it fails the complete text and the
                 # phrase bans below.
                 inside = make_git("ancestry-split-inside-counters")
-                rc, output = run(inside)
+                rc, output = init_store(inside)
                 check("ancestry counters-first inside-split fixture first init succeeds",
                       rc == EXIT_OK)
                 git_call(inside, ["--literal-pathspecs", "add", "-A"])
@@ -2612,7 +2673,7 @@ def _suite_isolated(invoke):
                 # and fails the complete text; a scan without working_gaps presents the
                 # manifest-less .working with no PARTIAL disclosure and fails it too.
                 minside = make_git("ancestry-split-inside-manifest")
-                rc, output = run(minside)
+                rc, output = init_store(minside)
                 check("ancestry manifest-first inside-split fixture first init succeeds",
                       rc == EXIT_OK)
                 git_call(minside, ["--literal-pathspecs", "add", "-A"])
@@ -2658,7 +2719,7 @@ def _suite_isolated(invoke):
                 wrepo = make_git("ancestry-withheld-split")
                 wsub = wrepo / wname
                 wsub.mkdir()
-                rc, wfirst = run(wsub)
+                rc, wfirst = init_store(wsub)
                 check("ancestry withheld-split fixture first init succeeds", rc == EXIT_OK)
                 git_call(wrepo, ["--literal-pathspecs", "add", "-A"])
                 git_call(wrepo, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -2918,7 +2979,7 @@ def _suite_isolated(invoke):
                 # says PARTIAL and names both. DISCRIMINATOR: the round-6 code prints this
                 # refusal with no PARTIAL block and fails the complete text.
                 sb = make_git("ancestry-split-both-structural")
-                rc, output = run(sb)
+                rc, output = init_store(sb)
                 check("ancestry split-both fixture first init succeeds", rc == EXIT_OK)
                 git_call(sb, ["--literal-pathspecs", "add", "-A"])
                 git_call(sb, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -2961,7 +3022,7 @@ def _suite_isolated(invoke):
                 # working_gaps without the history union sees a complete surviving
                 # subdirectory and prints no PARTIAL block, failing the complete text.
                 ws = make_git("ancestry-whole-subdir")
-                rc, output = run(ws)
+                rc, output = init_store(ws)
                 check("ancestry whole-subdir fixture first init succeeds", rc == EXIT_OK)
                 ws_zeta = ws / working / "zeta-machine"
                 ws_zeta.mkdir()
@@ -3085,6 +3146,31 @@ def _suite_isolated(invoke):
                       and "QA-DRIVE-FD2" in output
                       and "QA-DRIVE-CHILD" in output
                       and inert("qa capture probe") in output)
+
+                # The fresh changelog payload is UNCONDITIONAL: a CHANGELOG.md that appears after
+                # the deliverable refusal (planted here while the payloads are built, a stand-in
+                # for a concurrent writer) is refused by the destination check, never silently
+                # left out of the publication. DISCRIMINATOR: a payload built only when the file
+                # is absent skips it and publishes the store with no fresh changelog (rc 0).
+                late_repo = make_git("deliverable-late-changelog")
+                real_emit = opf._opf_emit
+
+                class _LateChangelogEmit:
+                    @staticmethod
+                    def emit_checked(document):
+                        (late_repo / "CHANGELOG.md").write_bytes(b"late\n")
+                        return real_emit.emit_checked(document)
+
+                rc, output = drive_cmd_init(late_repo, dict(_opf_emit=_LateChangelogEmit))
+                check("a CHANGELOG.md appearing after the refusal check is refused, never "
+                      "skipped",
+                      rc == EXIT_ERROR and inert("destination already exists") in output
+                      and "CHANGELOG.md" in output
+                      and "preflight refused; no publication attempted." in output)
+                check("that late CHANGELOG.md is the only new entry; nothing was published",
+                      sorted(entry.name for entry in late_repo.iterdir())
+                      == [".git", "CHANGELOG.md"]
+                      and (late_repo / "CHANGELOG.md").read_bytes() == b"late\n")
 
                 pp_repo = make_git("partial'$(touch PWNED)" + '"' + "`;#")
 
@@ -5094,7 +5180,7 @@ def _suite_isolated(invoke):
                 # and printed a false PARTIAL naming both of them, whose remedy
                 # ("supply each missing path") would create a second store.
                 rnm = make_git("ancestry-renamed-machine")
-                rc, output = run(rnm)
+                rc, output = init_store(rnm)
                 check("ancestry renamed-machine fixture first init succeeds",
                       rc == EXIT_OK)
                 git_call(rnm, ["--literal-pathspecs", "add", "-A"])
@@ -5132,7 +5218,7 @@ def _suite_isolated(invoke):
                 # DISCRIMINATOR: a walk that skipped every rename source, wherever
                 # its destination landed, would print no PARTIAL block here.
                 rno = make_git("ancestry-renamed-out")
-                rc, output = run(rno)
+                rc, output = init_store(rno)
                 check("ancestry renamed-out fixture first init succeeds",
                       rc == EXIT_OK)
                 rno_zeta = rno / working / "zeta-machine"
@@ -5904,7 +5990,7 @@ def _suite_isolated(invoke):
                 moved = make_git("ancestry-renamed-root")
                 old_root = moved / "old"
                 old_root.mkdir()
-                rc, output = run(old_root)
+                rc, output = init_store(old_root)
                 check("ancestry renamed-root fixture first init succeeds", rc == EXIT_OK)
                 git_call(moved, ["--literal-pathspecs", "add", "-A"])
                 git_call(moved, ["-c", "user.email=t@t", "-c", "user.name=t",

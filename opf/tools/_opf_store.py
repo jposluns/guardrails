@@ -140,6 +140,7 @@ GITIGNORE_BEGIN = "# >>> opf-managed >>>"
 GITIGNORE_END = "# <<< opf-managed <<<"
 DEFAULT_MACHINE_SUBDIR = "toml"        # standard machine-store subdir name, tried first (spec 4.4)
 MANIFEST_NAME = "manifest.toml"        # discovery marker filename (spec 4.5)
+COUNTERS_NAME = "counters.toml"        # the machine store's id high-water ledger (spec 8.2)
 STANDARD_TOKEN = "opf"          # exact discovery token in [opf].standard (spec 4.5)
 PRIOR_STANDARD_TOKEN = "devprocess"    # the RETIRED 1.0.0 discovery token (base table [devprocess]); the
                                        # OPFiles rebrand (1.1.0) renamed it to STANDARD_TOKEN. It is

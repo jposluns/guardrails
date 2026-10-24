@@ -364,6 +364,11 @@ ALLOWLIST = (
      _MUTANT + " (the descriptor cleanup and cancellation reverts)"),
     ("opf/tools/_opf_adopt_observe.py", "self_test.source_mutant", "code", 1,
      _MUTANT + " (source_mutant requires exactly one matching site)"),
+    ("opf/tools/_opf_adopt_apply.py", "_load_sweep_report_slice", "code", 1,
+     "self-test harness: exec_module loads, from a file under the self-test's temporary directory,"
+     " the sweep-reporting slice its only caller cuts from the repository's own _self_test_checks"
+     " (read from __file__, or one of its literal mutants), never registered in sys.modules; no"
+     " external input"),
     ("opf/tools/_opf_emit.py", "_fixture_main", "code", 1,
      "self-test fixture runner: runs the Python body its own supervisor passes after an"
      " explicit isolated sys.executable -I -B -c argv, the same trust as python3 -c; the body"
@@ -500,8 +505,10 @@ ALLOWLIST = (
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_mistakes_register.py", "self_test", "shell", 2,
      _SAVED + " (the saved real runs the git cat-file fault injectors delegate to and restore)"),
-    ("tools/orch_register.py", "self_test", "shell", 1,
-     _SAVED + " (the saved real run the git cat-file fault injector delegates to and restores)"),
+    ("tools/orch_register.py", "self_test", "shell", 3,
+     _SAVED + " (the saved real run the git cat-file fault injector delegates to and restores);"
+     " the descriptor fault vector's two setattr calls on os patch, then restore in a finally,"
+     " one name from its own fixed literal tuple (read, fstat, close); never runs a shell"),
     ("tools/gen_hooks.py", "self_test_main", "shell", 1,
      _SAVED + " (the saved real Popen the spawn-failure vector restores after patching)"),
     ("tools/gen_hooks.py", "self_test_main._communicate_fault_case", "shell", 3,
