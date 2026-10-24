@@ -60,12 +60,15 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 
 ## Getting started
 
-1. Run `opf init` (until the tooling ships: create `.working/toml/` by hand with `manifest.toml`
-   declaring `standard = "opf"`, `spec_version = "2.0.0"` and `homes = 2` in its `[opf]` table,
-   plus `counters.toml`,
-   `version.toml`, `worklog.toml`, and the eleven baseline `<type>.index.toml` files (worklog is the
-   exempt ledger listed above, not an index); specification
-   sections 4 and 9). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
+1. Create `.working/toml/` by hand with `manifest.toml` declaring `standard = "opf"`,
+   `spec_version = "2.0.0"` and `homes = 2` in its `[opf]` table, plus `counters.toml` (with the
+   imported counter row of each enabled type beside its clean row), `version.toml`,
+   `worklog.toml`, the eleven baseline `<type>.index.toml` files (worklog is the
+   exempt ledger listed above, not an index), the eleven `<type>.imported.index.toml` leaves, and
+   `worklog.imported.toml`, all empty to start; specification sections 4, 8 and 9 give the full
+   file baseline. The reference tooling's `opf init` does not scaffold this store yet: its
+   scaffold still writes a 1.2.0 store, a format the specification's validation refuses
+   (specification section 9.2). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
    (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory): keep it, migrate it
    for a later post-adoption import, move it, or retire it; nothing is absorbed or overwritten
@@ -161,9 +164,10 @@ Scaffolding, validation, rendering, and migration tooling ships in later release
 then the files are simple enough to keep by hand, and a conformance claim is self-asserted and says
 so. The specification defines one implementation model, with no conformance classes (OPF-SPEC
 section 16.1). Base 2.0.0, with `homes = 2`, is the only base version the specification
-defines, and the reference tooling does not yet implement it. The reference tooling accepts a
-manifest declaring `spec_version = "2.0.0"` with `homes = 2` and grades it under its 1.2.0 rules,
-so its VALID verdict on such a store says nothing about conformance to the specification.
+defines, and the reference tooling does not yet implement it. The reference tooling's `opf doctor`
+grades a manifest declaring `spec_version = "2.0.0"` with `homes = 2` under its 1.2.0 rules, so its
+VALID verdict on such a store says nothing about conformance to the specification; `opf upgrade`
+and `opf record` refuse such a store.
 
 The reference tooling requires Python 3.14 or newer.
 

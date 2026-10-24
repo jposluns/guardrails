@@ -436,7 +436,9 @@
         <code>import_status</code>. Register each enabled type in <code>[types.&lt;name&gt;]</code>,
         declare <code>[views]</code>, and supply the other tables the standard defines.</li>
       <li><b style="color:var(--ink)"><code>counters.toml</code></b>: the per-namespace ID
-        high-water marks, so an ID is never reused.</li>
+        high-water marks, so an ID is never reused. It holds the clean row and the imported counter
+        row (the quoted key <code>"imported:&lt;NS&gt;"</code>, at zero to start) of every enabled
+        type.</li>
       <li><b style="color:var(--ink)"><code>version.toml</code></b>: the version and release ledger
         (numbers, dates, spans, and digests, never release prose).</li>
       <li><b style="color:var(--ink)"><code>worklog.toml</code></b>: the durable operational record:
@@ -448,15 +450,19 @@
         <code>maintainer_decision</code>, <code>preference_pattern</code>, <code>block</code>,
         <code>handoff</code>, <code>reference</code>, and <code>contribution</code>, each as
         <code>&lt;type&gt;.index.toml</code> (empty to start).</li>
+      <li><b style="color:var(--ink)">The imported leaves</b>: one
+        <code>&lt;type&gt;.imported.index.toml</code> beside each of those eleven indexes, plus
+        <code>worklog.imported.toml</code> for the worklog, each empty to start. The standard
+        requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).</li>
     </ul>
     <p>Then write the committed pointer <code>.opf.toml</code> at your product repository root, so
       the store resolves from a stable location. A <code>[profiles.aiqt]</code> table is optional and
       is ignored by base-only tooling; a base adopter need not add it.</p>
     <p>The reference tooling does not yet implement spec 2.0.0, the only base version the standard
-      defines; it validates spec 1.2.0 stores, as described above. It accepts a manifest declaring
-      <code>spec_version = "2.0.0"</code> with <code>homes = 2</code> and grades it under its 1.2.0
-      rules, so its VALID verdict on such a store says nothing about conformance to the
-      standard.</p>
+      defines; it validates spec 1.2.0 stores, as described above. Its <code>opf doctor</code>
+      grades a manifest declaring <code>spec_version = "2.0.0"</code> with <code>homes = 2</code>
+      under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to
+      the standard; <code>opf upgrade</code> and <code>opf record</code> refuse such a store.</p>
     <p>The illustrative base <code>[opf]</code> table of a manifest, not a complete manifest:
       also register enabled types in <code>[types]</code> and declare views and other settings (see
       <a href="./standard">the standard</a> for the normative shape, and
