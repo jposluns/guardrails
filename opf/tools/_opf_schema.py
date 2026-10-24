@@ -43,7 +43,8 @@ Five things live here, all from OPF-SPEC.md section 8 (with the release triad's 
   5. THE IMPORTED ENVELOPE (spec 8.3). validate_imported_record is a pure validator for one imported
      record: the closed imported envelope (an `imported:<NS>-<n>` id, no `/proposed`, an importer actor
      with an id), the closed `import` provenance table, and the `unrecorded` missingness contract (exactly
-     one closed-reason row per omitted non-exempt field). It is not yet wired into the doctor.
+     one closed-reason row per omitted non-exempt field). The doctor wires it in as C-IMPORTED-SCHEMA,
+     one validation per imported leaf row.
 
 Every malformed, unknown, illegal, or unidentifiable input fails closed to an INVALID or CANNOT-EVALUATE
 outcome, never a silent VALID (spec 3 "Fail closed"; the check-fails-closed-on-unreadable rule: a
@@ -229,6 +230,9 @@ PROPOSER_KINDS = frozenset({"assistant", "automation"})
 # ride the 1.1.0 base-schema bump.
 LINK_RELS = ("supersedes", "resolves", "remediates", "receipt_of", "corrects", "follows", "relates",
              "exemplifies", "derives_from")
+# The relations a clean record MAY carry to an imported-series id (spec 8.6). `supersedes` is limited further
+# to a target of the source record's own type, which _validate_links judges against the record's namespace.
+CLEAN_TO_IMPORTED_RELS = frozenset({"relates", "derives_from", "follows", "supersedes"})
 # The closed reference-capture kinds (spec 8.6).
 REF_KINDS = ("path", "url", "doc")
 
@@ -655,9 +659,12 @@ def _validate_actor(record, findings, display=_safe_display):
     return kind
 
 
-def _validate_links(record, findings):
+def _validate_links(record, findings, namespace):
     """Validate the optional `links` array of {rel, id} (spec 8.6): rel from the closed vocabulary, id a
-    well-formed `<NS>-<n>` (any namespace, since a link may point at any type)."""
+    well-formed `<NS>-<n>` (any namespace, since a link may point at any type). A clean record MAY also
+    link an imported-series id `imported:<NS>-<n>` over IMPORTED_NAMESPACES, but only by `relates`,
+    `derives_from`, `follows`, or a `supersedes` whose target namespace is `namespace`, the record's own
+    type's (spec 8.6); every other clean-to-imported relation is refused."""
     if "links" not in record:
         return
     links = record.get("links")
@@ -679,6 +686,21 @@ def _validate_links(record, findings):
         elif link.get("rel") not in LINK_RELS:
             findings.append("{}.rel {!r} is not one of {} (spec 8.6)".format(
                 where, link.get("rel"), list(LINK_RELS)))
+        series = parse_series_id(link.get("id"))
+        if series is not None and series[0] != series[1]:
+            # A clean-to-imported link: its namespace must be one the imported series carries, and a
+            # vocabulary relation one of those spec 8.6 permits across series (a rel outside the vocabulary
+            # is already a finding above). C-LINKS resolves the target over the union of both series.
+            rel = link.get("rel")
+            if series[1] not in IMPORTED_NAMESPACES:
+                findings.append("{}.id {!r} uses namespace {!r}, which the imported series refuses: {}".format(
+                    where, link.get("id"), series[1], _imported_namespace_refusal(series[1])))
+            if isinstance(rel, str) and rel in LINK_RELS and (
+                    rel not in CLEAN_TO_IMPORTED_RELS or (rel == "supersedes" and series[1] != namespace)):
+                findings.append("{} {} -> {!r} is refused: a clean-to-imported link is limited to relates, "
+                                "derives_from, follows, and same-type supersedes (spec 8.6)".format(
+                                    where, rel, link.get("id")))
+            continue
         shape = _valid_id_shape(link.get("id"))
         if shape is None:
             findings.append("{}.id {} is not a well-formed <NS>-<n> id".format(
@@ -1202,7 +1224,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     if spec.reduced:
         _validate_worklog(record, spec, registered_vendors, findings, registered_kinds)
         _validate_actor(record, findings)
-        _validate_links(record, findings)
+        _validate_links(record, findings, spec.namespace)
         _validate_refs(record, findings)
         return RecordValidation(INVALID if findings else VALID, findings, rtype, rid)
 
@@ -1254,7 +1276,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     if "summary" in record and not isinstance(record.get("summary"), str):
         findings.append("summary must be a string when present")
 
-    _validate_links(record, findings)
+    _validate_links(record, findings, spec.namespace)
     _validate_refs(record, findings)
     _validate_proposed_from(record, spec, findings)
     _validate_type_specific(record, spec, findings, standing_auth)
@@ -3666,6 +3688,41 @@ def self_test():
           validate_record(envelope("contribution", 30, "proposed",
                                    links=[{"rel": "derives_from", "id": "FN-1"}],
                                    **contrib_base)).status == VALID)
+
+    # Clean-to-imported links (spec 8.6): relates, derives_from, follows and same-type supersedes are the
+    # only relations a clean record may carry to an imported-series id, judged on the full envelope and on
+    # the reduced worklog alike. Every other relation, a supersedes of another type, and an imported
+    # namespace the series refuses are each INVALID with exactly one named finding.
+    _xs_refused = "a clean-to-imported link is limited to relates, derives_from, follows, and same-type"
+
+    def _xs_one(v, text):
+        return v.status == INVALID and len(v.findings) == 1 and text in v.findings[0]
+
+    for _rel in ("relates", "derives_from", "follows"):
+        _xs = validate_record(envelope("finding", 40, "open", links=[{"rel": _rel, "id": "imported:BI-3"}]))
+        check("clean-to-imported-{}-ok".format(_rel), _xs.status == VALID and not _xs.findings)
+    _xs = validate_record(envelope("finding", 41, "open", links=[{"rel": "supersedes", "id": "imported:FN-3"}]))
+    check("clean-to-imported-same-type-supersedes-ok", _xs.status == VALID and not _xs.findings)
+    _xs = validate_record(dict(wl, links=[{"rel": "supersedes", "id": "imported:WL-2"}]), expected_type="worklog")
+    check("clean-to-imported-worklog-same-type-supersedes-ok", _xs.status == VALID and not _xs.findings)
+    for _rel, _tid in (("resolves", "imported:BI-3"), ("remediates", "imported:BI-3"),
+                       ("receipt_of", "imported:BI-3"), ("corrects", "imported:BI-3"),
+                       ("exemplifies", "imported:PP-3")):
+        _xs = validate_record(envelope("finding", 42, "open", links=[{"rel": _rel, "id": _tid}]))
+        check("clean-to-imported-{}-refused".format(_rel), _xs_one(_xs, _xs_refused))
+    _xs = validate_record(envelope("finding", 43, "open", links=[{"rel": "supersedes", "id": "imported:BI-3"}]))
+    check("clean-to-imported-cross-type-supersedes-refused", _xs_one(_xs, _xs_refused))
+    _xs = validate_record(dict(wl, links=[{"rel": "supersedes", "id": "imported:BI-2"}]), expected_type="worklog")
+    check("clean-to-imported-worklog-cross-type-supersedes-refused", _xs_one(_xs, _xs_refused))
+    # A clean done's receipt_of MUST target a clean backlog item (spec 8.6), so an imported one is refused.
+    _xs = validate_record(envelope("done", 40, "recorded", links=[{"rel": "receipt_of", "id": "imported:BI-3"}]))
+    check("clean-to-imported-done-receipt-refused", _xs_one(_xs, _xs_refused))
+    _xs = validate_record(envelope("finding", 44, "open", links=[{"rel": "relates", "id": "imported:LF-1"}]))
+    check("clean-to-imported-refused-namespace-invalid", _xs_one(_xs, "which the imported series refuses"))
+    # A relation outside the vocabulary is named once, by the vocabulary rule, and never again as a
+    # cross-series refusal.
+    _xs = validate_record(envelope("finding", 45, "open", links=[{"rel": "blesses", "id": "imported:BI-3"}]))
+    check("clean-to-imported-unknown-rel-one-finding", _xs_one(_xs, ".rel 'blesses' is not one of"))
 
     # The imported series (spec 8.2): `imported:<NS>-<n>` ids and `"imported:<NS>"` counters, opt-in, each
     # series on its own number line; with no opt-in every helper keeps its clean-only behaviour.
