@@ -598,9 +598,10 @@ class _Report:
 
 class _Rec:
     __slots__ = ("id", "rtype", "namespace", "state", "qual", "links", "actor_kind", "location", "scopes",
-                 "body")
+                 "body", "unparsed")
 
-    def __init__(self, rid, rtype, namespace, state, qual, links, actor_kind, location, scopes, body=None):
+    def __init__(self, rid, rtype, namespace, state, qual, links, actor_kind, location, scopes, body=None,
+                 unparsed=False):
         self.id = rid                 # the raw id value (a str for a well-formed record)
         self.rtype = rtype            # the record's type name
         self.namespace = namespace    # the two-letter namespace, or None when the id is malformed
@@ -610,36 +611,53 @@ class _Rec:
         self.actor_kind = actor_kind  # the actor.kind string, or None
         self.location = location      # "active", "archive/<YYYY>", or "imported" (an imported leaf row)
         self.scopes = scopes          # a block's scoped ids (list), or [] (spec 8.5)
-        self.body = body              # the raw record table (immutable-body preservation check; codex-3)
+        self.body = body              # the raw record table, read by the immutable-body preservation check
+        self.unparsed = unparsed      # True when a status or links value a current-state join reads did not parse
 
 
 def _make_rec(table, rtype, location):
     """Build a best-effort _Rec from a parsed record table. A malformed id yields namespace None (the
-    cross-record checks skip it); the per-record schema faults are reported separately by validate_record."""
+    cross-record checks skip it); the per-record schema faults are reported separately by validate_record.
+    `unparsed` is True when a field the current-state joins read could not be interpreted: the status of
+    a type with a shipped schema that is absent, not a string or does not parse, or a links value that is
+    not an array of tables with a string rel and a string id. A join over the readable fields of such a
+    record cannot stand in for one over the record, so the joins of its type grade the population as not
+    fully read (fail-closed); the per-record schema findings name the defect itself."""
     rid = table.get("id")
     shape = _valid_id_shape(rid)
     namespace = shape[0] if shape is not None else None
     spec = BASELINE_SPECS.get(rtype)
+    unparsed = False
     if rtype == "worklog":
         state, qual = "recorded", None            # the reduced envelope carries no status (spec 8.3)
     else:
         state = qual = None
-        status = table.get("status")
-        if spec is not None and isinstance(status, str):
-            parsed, _err = parse_status(status, spec)
+        if spec is not None:
+            status = table.get("status")
+            parsed = None
+            if isinstance(status, str):
+                parsed, _err = parse_status(status, spec)
             if parsed is not None:
                 state, qual = parsed
+            else:
+                unparsed = True
     links = []
     lk = table.get("links")
     if isinstance(lk, list):
         for l in lk:
             if isinstance(l, dict) and isinstance(l.get("rel"), str):
                 links.append((l.get("rel"), l.get("id")))
+                if not isinstance(l.get("id"), str):
+                    unparsed = True
+            else:
+                unparsed = True
+    elif lk is not None:
+        unparsed = True
     actor = table.get("actor")
     akind = actor.get("kind") if isinstance(actor, dict) and isinstance(actor.get("kind"), str) else None
     scopes = table.get("scopes")
     scopes = list(scopes) if isinstance(scopes, list) else []
-    return _Rec(rid, rtype, namespace, state, qual, links, akind, location, scopes, table)
+    return _Rec(rid, rtype, namespace, state, qual, links, akind, location, scopes, table, unparsed)
 
 
 def _status_string(state, qual):
@@ -785,8 +803,9 @@ def _list_contained(root_fd, reldir):
 def _list_dir(root_fd, reldir, rep, unread=None, types=()):
     """_list_contained with StoreError mapped to a CANNOT-EVALUATE naming the directory. A directory or
     entry name can carry control characters, so both the path and the error are rendered through
-    _safe_display rather than interpolated raw (F13). On that error the record `types` the directory holds
-    join `unread` (when given): a listing that failed leaves their population incomplete."""
+    _safe_display rather than interpolated raw, and no control character reaches the terminal. On that
+    error the record `types` the directory holds join `unread` (when given): a listing that failed leaves
+    their population incomplete."""
     try:
         return _list_contained(root_fd, reldir)
     except StoreError as exc:
@@ -1392,9 +1411,13 @@ def _gather_imported_records(root_fd, machine_rel, enabled_types, registered_ven
     no schema for. An absent leaf is an INVALID finding (spec 4.2: init and upgrade create every leaf, and
     a later-enabled type gains its leaf in the same act as its clean index); an unreadable or unparseable
     leaf, an unsupported schema, and a row the validator cannot identify are CANNOT-EVALUATE; an envelope
-    or missingness defect is an INVALID finding. Returns the _Rec list of the rows (location "imported")
-    for the cross-series checks."""
+    or missingness defect is an INVALID finding. Returns (recs, complete): the _Rec list of the rows
+    (location "imported") for the cross-series checks, and whether every imported row was seated.
+    `complete` is False when a leaf is unreadable, absent or malformed, or a row could not be identified:
+    the imported row set is then partial, so a cross-series resolution over it (C-LINKS) must not read
+    as a pass (the row skipped here could carry, or be, a link or scope target)."""
     recs = []
+    complete = True
     for tname in sorted(enabled_types):
         names = _opf_store.imported_leaf_names((tname,))
         if not names:
@@ -1403,25 +1426,29 @@ def _gather_imported_records(root_fd, machine_rel, enabled_types, registered_ven
         leaf_rel = _rel(machine_rel, leaf)
         data, st = _read_toml(root_fd, leaf_rel, rep)
         if st == "error":
+            complete = False
             continue
         if st == "absent":
             rep.finding("enabled type {!r} has no imported leaf {} (an imported-series store holds one for "
                         "every enabled type except legacy_fragment; spec 4.2)".format(tname, leaf))
+            complete = False
             continue
         rows = _imported_leaf_rows(data, leaf_rel, "entry" if tname in _LEDGER_TYPES else "record", rep)
         if rows is None:
+            complete = False
             continue
         for i, row in enumerate(rows):
             rw = "{}#{}".format(leaf_rel, i + 1)
             rv = validate_imported_record(row, expected_type=tname, registered_vendors=registered_vendors)
             if rv.status == CANNOT_EVALUATE:
                 rep.cant("{}: {}".format(rw, "; ".join(rv.findings)))
+                complete = False
                 continue
             if rv.status != VALID:
                 for f in rv.findings:
                     rep.finding("{}: {}".format(rw, f))
             recs.append(_make_rec(row, tname, "imported"))
-    return recs
+    return recs, complete
 
 
 def _worklog_legacy_conflict(_relpath):
@@ -1713,10 +1740,12 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     the rotation-eligibility (F4) findings are collected into a returned list for C-ROTATION. Returns
     (archive_recs, archive_worklogs, rotatable) where archive_worklogs maps a year to its WL-number -> entry
     map. Archive absent means no rotation (clean); a present bucket with no archive.toml is CANNOT-EVALUATE,
-    never 'no rotation happened'. No loop is sized by a declared span endpoint (F15). Every type whose
+    never 'no rotation happened'. No loop is sized by a declared span endpoint. Every type whose
     archived records could not all be seated joins `unread` (when given): an archived index that is
-    unreadable or malformed or a row that is skipped adds its type, and a bucket or archive tree that
-    cannot be walked adds every enabled type."""
+    unreadable or malformed or a row that is skipped adds its type, a bucket or archive tree that
+    cannot be walked adds every enabled type, and an enumerated moved id whose declared destination is
+    wrong or cannot confirm the record adds its declared type (that record is then confirmed seated
+    nowhere, so its type's population is incomplete for the current-state joins)."""
     if unread is None:
         unread = set()
     archive_recs = []
@@ -1729,7 +1758,10 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     archive_rel = _rel(machine_rel, ARCHIVE_DIRNAME)
     years, top_files = _list_dir(root_fd, archive_rel, rep, unread, enabled_types)
     if years is None:
-        return archive_recs, archive_worklogs, rotatable   # no archive/ tree: no rotation has happened (clean)
+        # An ABSENT archive/ tree means no rotation has happened (clean). A tree that EXISTS but cannot
+        # be listed takes the same return, with the cant and every enabled type already recorded unread
+        # by _list_dir above, so nothing downstream reads the unwalked tree as rotation-free.
+        return archive_recs, archive_worklogs, rotatable
     for fn_ in (top_files or []):
         # A regular file directly under archive/ is unmanaged: only <YYYY> bucket directories belong here.
         # C-CONTAINMENT skips the archive subtree, so its stray-path grading lives here (spec 12/14.2; B2).
@@ -1856,15 +1888,21 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             want_base = "{}{}".format(mtype, INDEX_SUFFIX)
             expected_dest = _rel(bucket_rel, want_base)
             if dest != expected_dest:
-                # M2(a): a rotation lands in its DECLARING bucket's own type index, never in the active tree
+                # A rotation lands in its DECLARING bucket's own type index, never in the active tree
                 # or another bucket. Exact-path equality subsumes the basename check and confines the
                 # destination to archive/<year>/ (spec 12); the wrong destination is not then opened.
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} destination {!r} is not this bucket's type index "
                             "{!r} (a rotation lands in its declaring bucket; spec 12)".format(
                                 mid, dest, expected_dest))
+                unread.add(mtype)
             elif not _dest_index_has_id(root_fd, machine_rel, dest, mid, rep):
                 rep.finding("C-ARCHIVE-ENUM: enumerated moved id {!r} is absent from its destination {!r} "
                             "(a rotation must land where it says; spec 12:981-982)".format(mid, dest))
+                # The store says this record was rotated here, yet no read confirmed it seated anywhere
+                # (an absent, unreadable or malformed destination, or one without the row): the type's
+                # record population is incomplete, so its current-state join must not read as a pass
+                # over the records that were found (spec 8.5).
+                unread.add(mtype)
             found_type = present_types.get(mid)
             if found_type is not None and found_type != mtype:
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} declares type {!r} but the archived record found "
@@ -1935,16 +1973,26 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
 def _check_receipts(recs, by_id, rep, unread=frozenset()):
     """C-RECEIPTS (R1): the done<->backlog_item receipt is one-to-one in BOTH directions (OPF-SPEC 8.5).
     Every ratified backlog_item (unqualified `done`) has exactly one done receipt; every done's receipt_of
-    target resolves to a backlog_item ratified at `done`. When the backlog_item or done records could not
-    all be read (`unread`, from the collectors) the join is CANNOT-EVALUATE and is not run: a missing
-    receipt or target could hide a defect or report a false one."""
+    target resolves to a backlog_item ratified at `done`. The section 8.6 firewall applies here as in
+    every current-state join, keyed on provenance alone (the maintainer ruling: OPF has never been
+    released, so no store predates the firewall): a record whose `actor.kind` is exactly `importer`, and
+    an imported-series row, neither owes a receipt nor confers one, so an importer-authored done never
+    satisfies a non-importer backlog_item's receipt and an importer-authored ratified backlog_item is
+    owed none. Only the exact kind is exempt; an unreadable kind (None) joins, fail-closed. When the
+    backlog_item or done records could not all be read, or a seated one's status or links could not be
+    interpreted (`unread` from the collectors, widened by _make_rec's `unparsed`), the join is
+    CANNOT-EVALUATE and is not run: a missing or unreadable receipt or target could hide a defect or
+    report a false one."""
+    unread = unread | {r.rtype for r in recs if r.location != "imported" and r.unparsed}
     if unread & {"backlog_item", "done"}:
-        rep.cant("C-RECEIPTS: the backlog_item and done records could not all be read (see C-RECORDS and "
-                 "C-ARCHIVE-ENUM); the receipt join is not evaluated over a partial set (spec 8.5)")
+        rep.cant("C-RECEIPTS: the backlog_item and done records could not all be read or interpreted (see "
+                 "C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the receipt join is not evaluated "
+                 "over a partial set (spec 8.5)")
         return
-    bi_state = {r.id: (r.state, r.qual) for r in recs if r.rtype == "backlog_item" and isinstance(r.id, str)}
+    joined = [r for r in recs if r.location != "imported" and r.actor_kind != "importer"]
+    bi_state = {r.id: (r.state, r.qual) for r in joined if r.rtype == "backlog_item" and isinstance(r.id, str)}
     done_targets = {}
-    for r in recs:
+    for r in joined:
         if r.rtype == "done" and isinstance(r.id, str):
             done_targets[r.id] = [tid for rel, tid in r.links if rel == "receipt_of" and isinstance(tid, str)]
     bi_to_dones = {}
@@ -1990,8 +2038,11 @@ def _check_handoff(recs, rep, unread=frozenset()):
     kind `importer` is exempt: a lookalike kind (another case, a prefix or an extension) counts, and a
     record whose actor kind cannot be read (None) counts, fail-closed (validate_record already names the
     unknown or unreadable actor), never a silent pass. When the handoff records could not all be read
-    (`unread`, from the collectors) the check is CANNOT-EVALUATE, never a pass over a partial count; a
-    count above one is still reported, since a record not read can only add to it."""
+    (`unread`, from the collectors), or a seated handoff's status or links could not be interpreted
+    (_make_rec's `unparsed`: a record read as 'not current' only because its status is unreadable is a
+    partial count, never a pass), the check is CANNOT-EVALUATE; a count above one is still reported,
+    since a record not read or not interpreted can only add to it."""
+    unread = unread | {r.rtype for r in recs if r.location != "imported" and r.unparsed}
     current = [r.id for r in recs if r.rtype == "handoff" and r.state == "current" and r.qual is None
                and r.location != "imported"
                and r.actor_kind != "importer"]
@@ -2000,7 +2051,8 @@ def _check_handoff(recs, rep, unread=frozenset()):
                     "most one current handoff exists among clean records not authored by a known "
                     "importer (spec 8.5/8.6)".format(len(current)))
     if "handoff" in unread:
-        rep.cant("C-HANDOFF: the handoff records could not all be read (see C-RECORDS and C-ARCHIVE-ENUM); "
+        rep.cant("C-HANDOFF: the handoff records could not all be read or interpreted (see C-RECORDS, "
+                 "C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); "
                  "the at-most-one-current count is not evaluated over a partial set (spec 8.5)")
 
 
@@ -2008,10 +2060,16 @@ def decision_chains(recs, by_id):
     """The pending_decision supersession chains THAT HAVE A RESOLUTION (OPF-SPEC 8.5), as (members, current)
     pairs in record order. A chain is a connected component over `supersedes` links, whatever their
     direction; a current effective resolution is a decided (unqualified) pending_decision that no other
-    supersedes. A wholly-undecided chain has no resolution yet and is not listed. The one derivation shared
-    by C-DECISION-CHAINS and opf record's pre-publication chain check (spec 8.8), so the verb never judges a
-    chain by a rule of its own."""
-    pds = [r for r in recs if r.rtype == "pending_decision" and isinstance(r.id, str)]
+    supersedes. A wholly-undecided chain has no resolution yet and is not listed. The section 8.6 firewall
+    applies here as in every current-state join, keyed on provenance alone (the maintainer ruling: OPF has
+    never been released, so no store predates the firewall): the chains are derived over clean records not
+    authored by an importer, so an importer-authored pending_decision neither resolves nor supersedes a
+    non-importer chain member and confers no decision authority. Only the exact kind `importer` is exempt;
+    a record whose actor kind cannot be read (None) joins, fail-closed. The one derivation shared by
+    C-DECISION-CHAINS and opf record's pre-publication chain check (spec 8.8), so the verb never judges a
+    chain by a rule of its own and both apply the firewall the same way."""
+    pds = [r for r in recs if r.rtype == "pending_decision" and isinstance(r.id, str)
+           and r.location != "imported" and r.actor_kind != "importer"]
     parent = {r.id: r.id for r in pds}
 
     def find(x):
@@ -2067,11 +2125,16 @@ def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
     carrying at least one decided member, the count of current resolutions must be exactly one, in BOTH
     directions: zero (the sole resolution superseded by a withdrawn or still-open successor) is a fail-open
     the count-only-over-one form missed (F14). A wholly-undecided chain legitimately has zero and is not
-    flagged. When the pending_decision records could not all be read (`unread`, from the collectors) the
-    check is CANNOT-EVALUATE and is not run: a member not read can split, join or resolve a chain."""
+    flagged. The section 8.6 provenance firewall lives in decision_chains itself, so the writer's
+    pre-publication chain check applies it identically. When the pending_decision records could not all
+    be read (`unread`, from the collectors), or a seated one's status or links could not be interpreted
+    (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not run: a member not read or not
+    interpreted can split, join or resolve a chain."""
+    unread = unread | {r.rtype for r in recs if r.location != "imported" and r.unparsed}
     if "pending_decision" in unread:
-        rep.cant("C-DECISION-CHAINS: the pending_decision records could not all be read (see C-RECORDS and "
-                 "C-ARCHIVE-ENUM); the chains are not evaluated over a partial set (spec 8.5)")
+        rep.cant("C-DECISION-CHAINS: the pending_decision records could not all be read or interpreted "
+                 "(see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the chains are not evaluated "
+                 "over a partial set (spec 8.5)")
         return
     for _members, current in decision_chains(recs, by_id):
         if len(current) != 1:
@@ -2080,7 +2143,8 @@ def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
                             len(current)))
 
 
-def _check_links(recs, by_id, all_ids, rep, imported_recs, imported_targets):
+def _check_links(recs, by_id, all_ids, rep, imported_recs, imported_targets, unread=frozenset(),
+                 imported_complete=True):
     """C-LINKS (R4): every links relation target resolves to an existing record, with the closed type
     constraints (OPF-SPEC 8.6). `follows` and `relates` relate records to records with a closed vocabulary,
     so a dangling `follows`/`relates` is a finding too ("advisory" constrains a link's EFFECT on state, not
@@ -2095,7 +2159,19 @@ def _check_links(recs, by_id, all_ids, rep, imported_recs, imported_targets):
     every other cross-record check reads clean records alone. A link or scope resolves only to one of
     `imported_targets`, the rows of `imported_recs` that the per-series id grading also reads as members
     of their own leaf series (spec 8.2), so a row C-ID-SPACE refuses as outside its series (a clean id, or
-    another type's namespace, in an imported leaf) never makes a link or scope resolve."""
+    another type's namespace, in an imported leaf) never makes a link or scope resolve. This check reads
+    every record of BOTH series as a link source and as a target, so its source set is complete only when
+    every collection was: when any record type could not be read in full (`unread`, from the collectors),
+    or the imported-row collection skipped an unreadable, absent or malformed leaf or an unidentifiable
+    row (`imported_complete` False), the check is CANNOT-EVALUATE and is not run. A target could lie in
+    the unread population (a false dangling finding) and an unread record's own links or scopes could
+    dangle unseen (a false pass), so neither direction is evaluated over a partial set."""
+    if unread or not imported_complete:
+        rep.cant("C-LINKS: the records of {} could not all be read (see C-RECORDS, C-PERRECORD-RECONCILE, "
+                 "C-ARCHIVE-ENUM and C-IMPORTED-SCHEMA); link and scope resolution is not evaluated over "
+                 "a partial set (spec 8.5/8.6)".format(
+                     ", ".join(repr(t) for t in sorted(unread)) if unread else "the imported series"))
+        return
     imported_by_id = {}
     for r in imported_targets:
         if isinstance(r.id, str):
@@ -3812,9 +3888,11 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # --- C-IMPORTED-SCHEMA (an active imported series only): every imported row against the imported
     # envelope, never through the schema deferral (spec 8.3) ------------------------------------------
     imported_recs = []
+    imported_complete = True
     if imported:
         rep.ran("C-IMPORTED-SCHEMA")
-        imported_recs = _gather_imported_records(root_fd, machine_rel, enabled_types, registered_vendors, rep)
+        imported_recs, imported_complete = _gather_imported_records(root_fd, machine_rel, enabled_types,
+                                                                    registered_vendors, rep)
 
     # --- C-ARCHIVE-ENUM: walk + reconcile the archive; collect rotation-eligibility for C-ROTATION -----
     rep.ran("C-ARCHIVE-ENUM")
@@ -3954,11 +4032,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-LINKS")
     # C-LINKS reads the rows C-IMPORTED-SCHEMA read, and resolves a target only among those the per-series
     # id grading above reads as series members, keyed by (series key, id) so a same-id row in another leaf
-    # never stands in for one.
+    # never stands in for one. It reads every record of both series, so it receives the whole collectors'
+    # `unread` set, and the imported side counts as complete only when BOTH imported collectors read
+    # every leaf and row (a leaf the per-series grading could not read also starves imported_targets).
     imported_members = {(key, rid) for key, rid, _row in imported_rows}
     imported_targets = [r for r in imported_recs if isinstance(r.id, str)
                         and (IMPORTED_PREFIX + str(enabled_types.get(r.rtype)), r.id) in imported_members]
-    _check_links(recs, by_id, all_ids, rep, imported_recs, imported_targets)
+    _check_links(recs, by_id, all_ids, rep, imported_recs, imported_targets, unread,
+                 imported_complete and not imported_unread)
 
     # --- the frozen-span / no-deletion / partition / contiguity checks (active + archive together) ----
     rep.ran("C-FROZEN-COVERAGE")
@@ -4834,7 +4915,9 @@ def self_test():
                              "prior": clean_prior()["prior"]}).status == INVALID)
 
         # round-7 BLOCKER: a schema-deferred PER-RECORD type still gets structural reconciliation. An orphan
-        # body (a valid-id .toml with no registry row) under a deferred type is a finding, not VALID.
+        # body (a valid-id .toml with no registry row) under a deferred type is a finding, never VALID; the
+        # orphan also leaves that type's population unread, so the store is CANNOT-EVALUATE (the resolution
+        # checks over an incomplete population are not evaluated), with the orphan finding named beside it.
         _orf = copy.deepcopy(pr_machine)
         _orf["manifest.toml"]["types"]["legacy_fragment"] = {"namespace": "LF"}
         _orf["counters.toml"] = counters(FN=2, BI=0, DN=0, WL=0, HO=0, LF=0)
@@ -4845,7 +4928,9 @@ def self_test():
                               "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open")}}}
         _oro = run(_orf, product=pr_product, obs=_orf_obs,
                    working={"toml/legacy_fragment/LF-99.toml": "x\n"})
-        check("perrecord-deferred-orphan-invalid", _oro is not None and _oro.status == INVALID)
+        check("perrecord-deferred-orphan-cannot-evaluate",
+              _oro is not None and _oro.status == CANNOT_EVALUATE
+              and _oro.checks.get("C-PERRECORD-RECONCILE") == "FINDING")
         check("perrecord-deferred-orphan-named",
               _oro is not None and any("LF-99" in f and "no registry row" in f for f in _oro.findings))
         # gemini round-7: a bracketed IPv6 scp-form remote canonicalizes to the same (host, path) as its
@@ -5052,10 +5137,14 @@ def self_test():
         pru = copy.deepcopy(pr_machine)
         pru["finding.index.toml"]["record"][0]["extra"] = "x"
         check("per-record-unknown-key-invalid", run(pru, product=pr_product, obs=pr_obs).status == INVALID)
-        # FN-1 row over an FN-2 body -> INVALID
+        # FN-1 row over an FN-9 body: the binding finding is named, the row is not seated, and the store
+        # is CANNOT-EVALUATE (an unseated row leaves the type's population unread for the resolution checks).
         prb = copy.deepcopy(pr_machine)
         prb["finding/FN-1.toml"] = envelope("FN-9", "finding", "open")
-        check("per-record-id-binding-invalid", run(prb, product=pr_product, obs=pr_obs).status == INVALID)
+        _prb_run = run(prb, product=pr_product, obs=pr_obs)
+        check("per-record-id-binding-fails-closed",
+              _prb_run is not None and _prb_run.status == CANNOT_EVALUATE
+              and any("does not match record-file id" in f for f in _prb_run.findings))
         # row state disagreeing with the body status -> INVALID
         prs = copy.deepcopy(pr_machine)
         prs["finding.index.toml"]["record"][0]["state"] = "fixed"
@@ -5889,8 +5978,10 @@ def self_test():
 
             # --- Block scopes over the union of both series (spec 8.5) ------------------------------
             # An imported block may scope either series (spec 8.1/8.2), so one scoping an existing
-            # imported id and an existing clean id resolves with no finding (red when C-LINKS resolves
-            # scopes against clean ids alone).
+            # imported id and an existing clean id resolves with no finding. This positive vector is
+            # acceptance coverage only: a scopes loop that never examined the imported block would also
+            # emit no finding here. The revert guard is imported-block-scopes-dangling-finding below,
+            # which goes red when the scopes loop reads clean records alone.
             _bs = act_machine()
             _bs["backlog_item.imported.index.toml"] = idx([imp_bi(1)])
             _bs["block.imported.index.toml"] = idx([imp_row(
@@ -5940,6 +6031,25 @@ def self_test():
             check("clean-block-scopes-imported-target-resolves",
                   _bs_run is not None and _bs_run.checks.get("C-LINKS") == "PASS"
                   and not any(f.startswith("C-LINKS:") for f in _bs_run.findings))
+            # C-LINKS resolves over BOTH series, so its source set is complete only when the imported-row
+            # collection was: an unreadable leaf, an absent leaf, and a row the imported validator cannot
+            # identify each leave C-LINKS CANNOT-EVALUATE, never a pass over the rows that were read (red
+            # when the collection's completeness is not carried into C-LINKS; the skipped row could carry,
+            # or be, a link or scope target).
+            def _xs_links_unread(res):
+                return (res is not None and res.checks.get("C-LINKS") == "CANNOT-EVALUATE"
+                        and any("link and scope resolution is not evaluated" in m
+                                for m in res.by_check.get("C-LINKS", [])))
+            _xl = act_machine()
+            _xl["backlog_item.imported.index.toml"] = "garbage = ["
+            check("r4-links-cannot-evaluate-when-imported-leaf-unreadable", _xs_links_unread(xs_run(_xl)))
+            _xl = act_machine()
+            del _xl["backlog_item.imported.index.toml"]
+            check("r4-links-cannot-evaluate-when-imported-leaf-missing", _xs_links_unread(xs_run(_xl)))
+            _xl = act_machine()
+            _xl["backlog_item.imported.index.toml"] = idx(["not a table"])
+            check("r4-links-cannot-evaluate-when-imported-row-unidentifiable",
+                  _xs_links_unread(xs_run(_xl)))
             # The writer/doctor agreement on a declaration-only activation: a 1.3.0 store on homes 1
             # whose [unmanaged] names an imported-leaf name certifies, the name not being a
             # managed leaf there, and plan_write_scope plans the SAME manifest without refusing (red
@@ -6457,7 +6567,7 @@ def self_test():
             _i3_gone = _i3_run(_i3_gone_m)
             check("imported-deleted-leaf-finding",
                   _i3_gone is not None
-                  and _i3_bad(_i3_gone) == {"C-NO-DELETION", "C-IMPORTED-SCHEMA"} | set(_imp_pending)
+                  and _i3_bad(_i3_gone) == {"C-NO-DELETION", "C-IMPORTED-SCHEMA", "C-LINKS"} | set(_imp_pending)
                   and _i3_pending(_i3_gone)
                   and _i3_gone.checks.get("C-IMPORTED-SCHEMA") == "FINDING"
                   and any("2 allocated imported:BI-<n> id(s) above imported:BI-0" in f
@@ -6874,8 +6984,10 @@ def self_test():
               run(wlr, product=pr_product, obs=pr_obs).status == INVALID)
         gbc = copy.deepcopy(pr_machine)
         gbc["finding/garbage.toml"] = "schema = 1"
-        check("perrecord-garbage-body-invalid",
-              run(gbc, product=pr_product, obs=pr_obs).status == INVALID)
+        _gbc_run = run(gbc, product=pr_product, obs=pr_obs)
+        check("perrecord-garbage-body-fails-closed",
+              _gbc_run is not None and _gbc_run.status == CANNOT_EVALUATE
+              and any("no registry row" in f for f in _gbc_run.findings))
         # F3: the imports/<run-id> interior is graded at steady state (import_status none): stray bytes
         # under a run dir and a leftover run each -> INVALID.
         RUNID0 = "imp-20260601T000000Z-0123456789abcdef"
@@ -7104,19 +7216,22 @@ def self_test():
             _r2_act_run = run(_r2_act, obs=_is2_prior())
             # The three-kind store while ACTIVE: this vector covers exactly that the one exemption stays
             # importer-only on an active store too, so widening it to the assistant or the automation
-            # kind drops the reported count below 3 and reads red here.
+            # kind drops the reported count below 3 and reads red here. The clean HO high-water is raised
+            # in place (replacing counters.toml would drop the imported high-waters act_machine() sets)
+            # and the run takes the empty imported baseline, as the other active-store vectors do, so the
+            # intended handoffs are the store's only defect.
             _r2k_act = act_machine()
             _r2k_act["handoff.index.toml"] = _three_kind_idx()
-            _r2k_act["counters.toml"] = counters(HO=3)
-            _r2k_act_run = run(_r2k_act)
+            _r2k_act["counters.toml"]["counters"]["HO"] = 3
+            _r2k_act_run = run(_r2k_act, obs=_is2_prior())
             # The unreadable actor while ACTIVE: None is never taken for an importer on an active store
             # either, fail-closed (red if the exemption ever widens to None).
             _r2na_act = act_machine()
             _r2na_row = ho(2)
             del _r2na_row["actor"]
             _r2na_act["handoff.index.toml"] = idx([ho(1), _r2na_row])
-            _r2na_act["counters.toml"] = counters(HO=2)
-            _r2na_act_run = run(_r2na_act)
+            _r2na_act["counters.toml"]["counters"]["HO"] = 2
+            _r2na_act_run = run(_r2na_act, obs=_is2_prior())
         finally:
             _opf_store.SUPPORTED_SPEC_VERSION = _r2_prev_ssv
             _opf_store.SUPPORTED_HOMES = _r2_prev_homes
@@ -7124,16 +7239,20 @@ def self_test():
               _r2_act_run is not None and not _r2_act_run.findings and not handoff_msgs(_r2_act_run)
               and _r2_act_run.checks.get("C-HANDOFF") == "PASS" and pending_only(_r2_act_run))
         check("r2-assistant-and-automation-handoffs-counted-while-active",
-              _r2k_act_run is not None and handoff_msgs(_r2k_act_run) == [_r2_three_msg])
+              _r2k_act_run is not None and handoff_msgs(_r2k_act_run) == [_r2_three_msg]
+              and _r2k_act_run.findings == [_r2_three_msg] and pending_only(_r2k_act_run))
         check("r2-unreadable-actor-handoff-counted-while-active",
               _r2na_act_run is not None and len(handoff_msgs(_r2na_act_run)) == 1
-              and any("missing required field: actor" in m for m in _r2na_act_run.findings))
+              and any("missing required field: actor" in m for m in _r2na_act_run.findings)
+              and pending_only(_r2na_act_run))
         # A handoff population the collectors could not read in full is never a C-HANDOFF pass: the
         # count over the records that were read cannot show that at most one is current. Each vector
-        # below leaves C-HANDOFF CANNOT-EVALUATE naming the cause (red if the check passes on a partial
-        # count): an index that cannot be read (a directory in its place), a malformed index (unparseable,
-        # or `record` not an array), an absent index, a row that is not a table, a malformed archived
-        # index, and, per-record, a registry row with no body and a body with no registry row.
+        # below leaves C-HANDOFF CANNOT-EVALUATE with the partial-population message, which points to the
+        # collector reports (C-RECORDS, C-PERRECORD-RECONCILE, C-ARCHIVE-ENUM) for the cause (red if the
+        # check passes on a partial count): an index that cannot be read (a directory in its place), a
+        # malformed index (unparseable, or `record` not an array), an absent index, a row that is not a
+        # table, a malformed archived index, and, per-record, a registry row with no body and a body with
+        # no registry row.
         def _handoff_unread(res):
             return (res is not None and res.checks.get("C-HANDOFF") == "CANNOT-EVALUATE"
                     and any("handoff records could not all be read" in m for m in handoff_msgs(res)))
@@ -7170,6 +7289,8 @@ def self_test():
         # backlog_item and done, and C-DECISION-CHAINS over pending_decision, are CANNOT-EVALUATE when
         # their records could not all be read (red if either passes over the partial set), while an
         # unread type that none of the three reads leaves all three a PASS (red if the scoping widens).
+        # C-LINKS reads EVERY type as a link source and target, so the same unread type leaves it
+        # CANNOT-EVALUATE (red if it passes over any partial collection).
         f = clean_machine()
         f["backlog_item.index.toml"] = {"schema": 1, "record": "BI-1"}
         _r1_part = run(f)
@@ -7199,6 +7320,229 @@ def self_test():
               _r2_other is not None and _r2_other.checks.get("C-RECORDS") == "CANNOT-EVALUATE"
               and all(_r2_other.checks.get(cid) == "PASS"
                       for cid in ("C-RECEIPTS", "C-HANDOFF", "C-DECISION-CHAINS")))
+
+        def _links_unread(res):
+            return (res is not None and res.checks.get("C-LINKS") == "CANNOT-EVALUATE"
+                    and any("link and scope resolution is not evaluated" in m
+                            for m in res.by_check.get("C-LINKS", [])))
+        check("r4-links-cannot-evaluate-when-type-unread", _links_unread(_r2_other))
+        f = clean_machine()
+        del f["reference.index.toml"]
+        f["reference.index.toml/stray.toml"] = idx([])
+        check("r4-links-cannot-evaluate-when-index-unreadable", _links_unread(run(f)))
+        f = clean_machine()
+        del f["reference.index.toml"]
+        check("r4-links-cannot-evaluate-when-index-missing", _links_unread(run(f)))
+        # Every remaining collector branch that records a population as unread, one vector each, asserting
+        # the check that reads the population (red when that branch alone is reverted). In order: a
+        # per-record type directory that cannot be listed, an archive tree that cannot be listed, an
+        # archive bucket that cannot be listed, an unreadable archive.toml, a malformed archive.toml, an
+        # unreadable archived index, an archived row that is not a table, and an archived row the record
+        # validator cannot identify (unreachable from store bytes today, so it is driven through a patched
+        # validator, the vanishing-reader idiom).
+        f = copy.deepcopy(pr_machine)
+        f["handoff"] = "not a directory"
+        check("r2-perrecord-type-dir-unlistable-cannot-evaluate",
+              _handoff_unread(run(f, product=pr_product, obs=pr_obs)))
+        f = clean_machine()
+        del f["archive/2026/archive.toml"]
+        del f["archive/2026/worklog.toml"]
+        f["archive"] = "not a directory"
+        _r2_tree = run(f)
+        check("current-state-joins-cannot-evaluate-when-archive-tree-unlistable",
+              _r2_tree is not None
+              and all(_r2_tree.checks.get(cid) == "CANNOT-EVALUATE"
+                      for cid in ("C-RECEIPTS", "C-HANDOFF", "C-DECISION-CHAINS", "C-LINKS")))
+        _real_list_contained = _list_contained
+
+        def _bucket_failing_list(fd, reldir):
+            if reldir.endswith("archive/2026"):
+                raise StoreError("synthetic: this bucket cannot be listed")
+            return _real_list_contained(fd, reldir)
+
+        globals()["_list_contained"] = _bucket_failing_list
+        try:
+            _r2_bkl = run(clean_machine())
+        finally:
+            globals()["_list_contained"] = _real_list_contained
+        check("current-state-joins-cannot-evaluate-when-bucket-unlistable",
+              _r2_bkl is not None
+              and any("could not be listed" in m for m in _r2_bkl.cannot_evaluate)
+              and all(_r2_bkl.checks.get(cid) == "CANNOT-EVALUATE"
+                      for cid in ("C-RECEIPTS", "C-HANDOFF", "C-DECISION-CHAINS", "C-LINKS")))
+        f = clean_machine()
+        f["archive/2026/archive.toml"] = "this is not valid toml === ["
+        _r2_amu = run(f)
+        f = clean_machine()
+        f["archive/2026/archive.toml"] = {"schema": 1, "moved": "HO-1",
+                                          "worklog_moved": [{"span": ["WL-1", "WL-2"],
+                                                             "destination": "archive/2026/worklog.toml"}]}
+        _r2_amm = run(f)
+        check("current-state-joins-cannot-evaluate-when-archive-manifest-unreadable",
+              _r2_amu is not None
+              and all(_r2_amu.checks.get(cid) == "CANNOT-EVALUATE"
+                      for cid in ("C-RECEIPTS", "C-HANDOFF", "C-DECISION-CHAINS")))
+        check("current-state-joins-cannot-evaluate-when-archive-manifest-malformed",
+              _r2_amm is not None
+              and all(_r2_amm.checks.get(cid) == "CANNOT-EVALUATE"
+                      for cid in ("C-RECEIPTS", "C-HANDOFF", "C-DECISION-CHAINS")))
+        f = clean_machine()
+        f["archive/2026/handoff.index.toml"] = "this is not valid toml === ["
+        check("r2-archived-handoff-index-unreadable-cannot-evaluate", _handoff_unread(run(f)))
+        f = clean_machine()
+        f["archive/2026/handoff.index.toml"] = idx(["HO-2"])
+        check("r2-archived-handoff-row-not-table-cannot-evaluate", _handoff_unread(run(f)))
+        _real_validate_record = validate_record
+
+        def _marked_row_unidentifiable(record, expected_type=None, specs=None,
+                                       registered_vendors=frozenset(), registered_kinds=None,
+                                       standing_auth=None):
+            if isinstance(record, dict) and record.get("title") == "unidentifiable for this vector":
+                return _real_validate_record("not a table")
+            return _real_validate_record(record, expected_type=expected_type, specs=specs,
+                                         registered_vendors=registered_vendors,
+                                         registered_kinds=registered_kinds, standing_auth=standing_auth)
+
+        f = clean_machine()
+        _r2_arow = envelope("HO-2", "handoff", "superseded", title="unidentifiable for this vector")
+        f["archive/2026/archive.toml"]["moved"] = [
+            {"id": "HO-2", "type": "handoff", "destination": "archive/2026/handoff.index.toml"}]
+        f["archive/2026/handoff.index.toml"] = idx([_r2_arow])
+        f["counters.toml"] = counters(HO=2)
+        globals()["validate_record"] = _marked_row_unidentifiable
+        try:
+            _r2_aun = run(f)
+        finally:
+            globals()["validate_record"] = _real_validate_record
+        check("r2-archived-row-unidentifiable-cannot-evaluate", _handoff_unread(_r2_aun))
+        # The done half of the C-RECEIPTS guard: a malformed done index alone is CANNOT-EVALUATE for the
+        # receipt join (red when the guard narrows to backlog_item).
+        f = clean_machine()
+        f["done.index.toml"] = {"schema": 1, "record": "DN-1"}
+        _r1_done = run(f)
+        check("r1-receipts-done-population-unread-cannot-evaluate",
+              _r1_done is not None and _r1_done.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
+              and any("receipt join is not evaluated" in m for m in _r1_done.by_check.get("C-RECEIPTS", [])))
+        # A count above one is still reported while the population is unread: two readable current
+        # handoffs beside a malformed archived handoff index yield BOTH the count finding and the
+        # unread cant on C-HANDOFF (red when the guard returns before counting, or when the unread set
+        # suppresses the count).
+        f = clean_machine()
+        f["handoff.index.toml"] = idx([ho(1), ho(2)])
+        f["counters.toml"] = counters(HO=2)
+        f["archive/2026/handoff.index.toml"] = {"schema": 1, "record": "HO-9"}
+        _r2_cnt = run(f)
+        check("r2-count-above-one-reported-while-unread",
+              _r2_cnt is not None and _r2_cnt.checks.get("C-HANDOFF") == "CANNOT-EVALUATE"
+              and _r2_two_msg in handoff_msgs(_r2_cnt)
+              and any("could not all be read" in m for m in handoff_msgs(_r2_cnt)))
+        # A record archive.toml enumerates as moved but that its declared destination cannot confirm (an
+        # absent destination here; the same branch covers a removed row, an unreadable destination and a
+        # malformed one) is confirmed seated nowhere: the type's population is incomplete, so its join is
+        # CANNOT-EVALUATE beside the destination finding, for each join the collectors feed (red when the
+        # reconciliation stops recording the type unread). A destination outside the declaring bucket's
+        # own index is the same incompleteness through the sibling branch.
+        def _moved_fixture(mid, mtype, dest, **cnt):
+            m = clean_machine()
+            m["archive/2026/archive.toml"]["moved"] = [{"id": mid, "type": mtype, "destination": dest}]
+            m["counters.toml"] = counters(**cnt)
+            return run(m)
+        _r2_mv = _moved_fixture("HO-2", "handoff", "archive/2026/handoff.index.toml", HO=2)
+        check("r2-moved-handoff-missing-from-destination-cannot-evaluate",
+              _handoff_unread(_r2_mv)
+              and any("absent from its destination" in f_ for f_ in _r2_mv.findings))
+        check("r2-moved-handoff-wrong-destination-cannot-evaluate",
+              _handoff_unread(_moved_fixture("HO-2", "handoff", "archive/2026/done.index.toml", HO=2)))
+        _r1_mv = _moved_fixture("DN-2", "done", "archive/2026/done.index.toml", DN=2)
+        check("r1-moved-done-missing-from-destination-cannot-evaluate",
+              _r1_mv is not None and _r1_mv.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
+              and any("receipt join is not evaluated" in m for m in _r1_mv.by_check.get("C-RECEIPTS", [])))
+        _r3_mv = _moved_fixture("PD-1", "pending_decision", "archive/2026/pending_decision.index.toml", PD=1)
+        check("r3-moved-decision-missing-from-destination-cannot-evaluate",
+              _r3_mv is not None and _r3_mv.checks.get("C-DECISION-CHAINS") == "CANNOT-EVALUATE"
+              and any("chains are not evaluated" in m for m in _r3_mv.by_check.get("C-DECISION-CHAINS", [])))
+        # A seated record whose status cannot be interpreted is never read as 'not current' (or 'not
+        # ratified', or 'not decided'): the join of its type is CANNOT-EVALUATE beside the per-record
+        # schema finding, for an unknown token, a non-string status, and an absent status alike (red when
+        # the joins read only the records whose status parsed).
+        _r2_hs = ho(2)
+        _r2_hs["status"] = "bogus"
+        _r2_hi = ho(2)
+        _r2_hi["status"] = 7
+        _r2_hm = ho(2)
+        del _r2_hm["status"]
+        _r2_bad = []
+        for _row in (_r2_hs, _r2_hi, _r2_hm):
+            f = clean_machine()
+            f["handoff.index.toml"] = idx([ho(1), _row])
+            f["counters.toml"] = counters(HO=2)
+            _r2_bad.append(_handoff_unread(run(f)))
+        check("r2-malformed-status-handoff-cannot-evaluate", all(_r2_bad))
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([envelope("BI-1", "backlog_item", "bogus")])
+        _r1_bsr = run(f)
+        check("r1-malformed-status-backlog-item-cannot-evaluate",
+              _r1_bsr is not None and _r1_bsr.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
+              and any("receipt join is not evaluated" in m for m in _r1_bsr.by_check.get("C-RECEIPTS", [])))
+        _r3_ps = envelope("PD-1", "pending_decision", "bogus")
+        _r3_m = clean_machine()
+        _r3_m["pending_decision.index.toml"] = idx([_r3_ps])
+        _r3_m["counters.toml"] = counters(PD=1)
+        _r3_psr = run(_r3_m)
+        check("r3-malformed-status-decision-cannot-evaluate",
+              _r3_psr is not None and _r3_psr.checks.get("C-DECISION-CHAINS") == "CANNOT-EVALUATE"
+              and any("chains are not evaluated" in m
+                      for m in _r3_psr.by_check.get("C-DECISION-CHAINS", [])))
+        # A done whose links value cannot be interpreted could carry the receipt the join no longer sees:
+        # CANNOT-EVALUATE, never a false 'ratified backlog_item has no receipt' finding (red when the
+        # malformed links value is read as 'no links').
+        _r1_ml = envelope("DN-1", "done", "recorded", links="receipt_of BI-1")
+        _r1_mlm = clean_machine()
+        _r1_mlm["done.index.toml"] = idx([_r1_ml])
+        _r1_mlr = run(_r1_mlm)
+        check("r1-malformed-links-done-cannot-evaluate",
+              _r1_mlr is not None and _r1_mlr.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
+              and not any("has no done receipt" in f_ for f_ in _r1_mlr.findings))
+        # The section 8.6 firewall on the sibling joins (the maintainer ruling: keyed on provenance, on
+        # every store): an importer-authored done confers no receipt on a non-importer ratified
+        # backlog_item (red when the receipt join reads importer-authored records).
+        f = clean_machine()
+        _r1_impdn = dn(1, "BI-1")
+        _r1_impdn["actor"] = {"kind": "importer", "id": "import-assistant"}
+        f["done.index.toml"] = idx([_r1_impdn])
+        _r1_imp = run(f)
+        check("r1-importer-authored-receipt-confers-no-authority",
+              _r1_imp is not None and _r1_imp.status == INVALID
+              and any("has no done receipt" in f_ for f_ in _r1_imp.by_check.get("C-RECEIPTS", [])))
+        # ... and an importer-authored ratified backlog_item is owed no receipt: exempt history, the store
+        # stays VALID (red when the join starts requiring receipts of importer-authored records again).
+        f = clean_machine()
+        _r1_impbi = envelope("BI-1", "backlog_item", "done",
+                             actor={"kind": "importer", "id": "import-assistant"})
+        f["backlog_item.index.toml"] = idx([_r1_impbi, bi(2, "open")])
+        f["done.index.toml"] = idx([])
+        f["counters.toml"] = counters(DN=0)
+        _r1_impo = clean_prior()
+        _r1_impo["prior"]["counters_high"] = counters(DN=0)["counters"]
+        del _r1_impo["prior"]["records"]["DN-1"]
+        del _r1_impo["prior"]["digests"]["DN-1"]
+        del _r1_impo["prior"]["held"]["DN"]
+        check("r1-importer-authored-backlog-item-owes-no-receipt",
+              run(f, obs=_r1_impo).status == VALID)
+        # An importer-authored decided pending_decision confers no resolution: a chain whose only
+        # non-superseded decided member is importer-authored has zero current effective resolutions
+        # (red when the chain derivation reads the importer record as the resolution).
+        f = clean_machine()
+        _r3_imppd = pd(3, supersedes="PD-2")
+        _r3_imppd["actor"] = {"kind": "importer", "id": "import-assistant"}
+        f["pending_decision.index.toml"] = idx([pd(1), pd(2, status="withdrawn", supersedes="PD-1"),
+                                                _r3_imppd])
+        f["counters.toml"] = counters(PD=3)
+        _r3_imp = run(f)
+        check("r3-importer-authored-resolution-confers-no-authority",
+              _r3_imp is not None and _r3_imp.status == INVALID
+              and any("has 0 current effective resolutions" in f_
+                      for f_ in _r3_imp.by_check.get("C-DECISION-CHAINS", [])))
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1), pd(2, supersedes="PD-1"), pd(3, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=3)
@@ -7263,7 +7607,10 @@ def self_test():
         check("r6-corrupt-counters-cannot-eval", run(f).status == CANNOT_EVALUATE)
         f = clean_machine()
         del f["finding.index.toml"]
-        check("roster-missing-index-invalid", run(f).status == INVALID)
+        _rmi_run = run(f)
+        check("roster-missing-index-fails-closed",
+              _rmi_run is not None and _rmi_run.status == CANNOT_EVALUATE
+              and any("has no finding.index.toml" in f_ for f_ in _rmi_run.findings))
 
         # --- frozen / partition / no-deletion / contiguity --------------------------------------------
         f = clean_machine()
@@ -7313,7 +7660,10 @@ def self_test():
             "moved": [{"id": "RF-9", "type": "reference", "destination": "archive/2026/reference.index.toml"}],
             "worklog_moved": [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]}
         f["archive/2026/reference.index.toml"] = idx([])
-        check("f5-enumerated-id-absent-from-dest-invalid", run(f).status == INVALID)
+        _f5a_run = run(f)
+        check("f5-enumerated-id-absent-from-dest-fails-closed",
+              _f5a_run is not None and _f5a_run.status == CANNOT_EVALUATE
+              and any("absent from its destination" in f_ for f_ in _f5a_run.findings))
         f = clean_machine()
         # F12: a moved row whose declared type disagrees with its id namespace
         f["archive/2026/archive.toml"] = {
@@ -7322,7 +7672,10 @@ def self_test():
             "worklog_moved": [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]}
         f["archive/2026/handoff.index.toml"] = idx([])
         f["counters.toml"] = counters(RF=9)
-        check("f12-moved-type-mismatch-invalid", run(f).status == INVALID)
+        _f12_run = run(f)
+        check("f12-moved-type-mismatch-fails-closed",
+              _f12_run is not None and _f12_run.status == CANNOT_EVALUATE
+              and any("but the id namespace is" in f_ for f_ in _f12_run.findings))
         f = clean_machine()
         f["archive/2027/worklog.toml"] = {"schema": 1, "entry": []}
         check("f5-bucket-without-archive-toml-cannot-eval", run(f).status == CANNOT_EVALUATE)
@@ -7532,7 +7885,10 @@ def self_test():
             "schema": 1,
             "moved": [{"id": "BI-1", "type": "backlog_item", "destination": "backlog_item.index.toml"}],
             "worklog_moved": [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]}
-        check("m2-moved-dest-outside-bucket-invalid", run(m2a).status == INVALID)
+        _m2a_run = run(m2a)
+        check("m2-moved-dest-outside-bucket-fails-closed",
+              _m2a_run is not None and _m2a_run.status == CANNOT_EVALUATE
+              and any("is not this bucket's type index" in f_ for f_ in _m2a_run.findings))
         m2b = clean_machine()
         m2b["archive/2026/archive.toml"] = {"schema": 1, "moved": [],
                                             "worklog_moved": [{"span": ["WL-1", "WL-2"],
@@ -8007,7 +8363,8 @@ def self_test():
         check("receipts-target-not-ratified-invalid", r is not None and r.status == INVALID)
         check("receipts-target-not-ratified-named",
               r is not None and any("not ratified" in x for x in r.findings))
-        # gemini: a moved row whose destination index FILE is entirely absent -> a finding (not a cant).
+        # A moved row whose destination index FILE is entirely absent: the absence is a named finding, and
+        # the record, confirmed seated nowhere, leaves its type's population unread (CANNOT-EVALUATE).
         f = clean_machine()
         f["archive/2026/archive.toml"] = {
             "schema": 1,
@@ -8016,7 +8373,7 @@ def self_test():
         f["counters.toml"] = counters(RF=9)
         # archive/2026/reference.index.toml is deliberately NOT created (destination file absent)
         r = run(f)
-        check("archive-dest-file-absent-invalid", r is not None and r.status == INVALID)
+        check("archive-dest-file-absent-fails-closed", r is not None and r.status == CANNOT_EVALUATE)
         check("archive-dest-file-absent-named", r is not None and any("does not exist" in x for x in r.findings))
         # F6.1: inline record schema-fault forwarding (_gather_inline) - a finding missing its title.
         f = clean_machine()
