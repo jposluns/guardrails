@@ -18,7 +18,7 @@ wall clock, and the order in which results arrive or complete. Where an explicit
 and unused, the action is bound to it; where only an ambient binding exists, the execution target is
 confirmed by observation before the action runs, per the confirm-execution-target discipline.
 
-This manifests in three recurring forms. An asynchronous result is correlated to the dispatch that
+This manifests in four recurring forms. An asynchronous result is correlated to the dispatch that
 produced it only through the authoritative identifier that dispatch returns, a handle, a path, or an
 id, never by wall-clock proximity or arrival order, because two dispatches can complete out of order
 or at the same instant and ambient timing cannot tell them apart; a result with no identifier is
@@ -35,11 +35,16 @@ or broad operation takes its scope from the specific thing under change, an enum
 rather than from ambient whole-tree state; a breadth selector that stages, commits, or discards
 whatever the tree currently holds can sweep in unrelated work, and where committed state is needed
 for a fixture or test, an isolated checkout provides it rather than reshaping the shared working
-tree in place.
+tree in place. At its start, a relied-on check, one whose result gates a merge, release, or
+completion claim, binds every repository it reads (any worktree or mirror of it) other than the tree
+it checks to an identified immutable snapshot, or holds a lock no writer of that repository can
+bypass for the duration of those reads, and otherwise refuses, naming that repository, even where
+the confirm-by-observation fallback above would apply; comparing HEAD at start and end is a
+diagnostic, not a binding.
 
-The preference is to remove the ambient dependency, not merely to check it: an explicit binding
-removes that ambient dependency, whereas a confirmed ambient binding is correct only until the
-surrounding state next shifts. This is the prefer-removing-a-path preference applied to how an
+The preference is to remove the ambient dependency, as an explicit binding does, not merely to check
+it: a confirmed ambient binding is correct only until the surrounding state next shifts.
+This is the prefer-removing-a-path preference applied to how an
 action names its referent, and it sits beside confirm-execution-target, which governs the residual
 case where only an ambient binding exists, and absolute-paths, its file-path instance. An explicit
 binding is still not proof of intent: a named target can be the wrong target, and confirming it is

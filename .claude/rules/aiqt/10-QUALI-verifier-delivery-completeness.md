@@ -31,5 +31,5 @@ cannot-evaluate outcome guard-input-soundness names, identifying the input it co
 terminal fail-closed result, not the transient degraded delivery above that a re-dispatch can cure, so it
 is treated as not-passed and resolved by fixing the input, never a clean, passing, or finding-free verdict.
 A clean verdict asserted over an input the verifier never actually read is the same false-clean this rule
-already guards against, applied to the unreadable-required-input case, meeting the fail-closed posture
-check-fails-closed-on-unreadable requires of a gate that cannot read its own input.
+guards against, meeting the fail-closed posture check-fails-closed-on-unreadable requires of a gate
+that cannot read its own input.

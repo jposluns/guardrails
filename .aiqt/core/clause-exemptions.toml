@@ -19,7 +19,7 @@ reason = "Scope note on the rule itself; no obligation of its own."
 
 [[exempt]]
 corpus-id = "citint"
-text = "This rule narrows the reference-capture rule (refcap) to the reviewed commit: refcap requires the\nspecific reference captured when the claim is made, never reconstructed from memory, and the\nobligations above scope that capture to a file opened this session at the commit under review."
+text = "This rule narrows the reference-capture rule (refcap), which requires the specific reference captured\nwhen the claim is made, never reconstructed from memory, to a file opened this session at the commit\nunder review."
 reason = "Cross-reference explaining how citint.1 to citint.3 narrow the reference-capture rule (refcap); no obligation of its own."
 
 [[exempt]]
@@ -164,7 +164,7 @@ reason = "Rationale for vfxcmt.1; no obligation of its own."
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "A commit message that asserts a fix, with no matching change in the commit, is an inaccurate record; verify the artefact before the claim."
+text = "A commit message asserting a fix its commit lacks is an inaccurate record; verify the artefact before the claim."
 reason = "Restates vfxcmt.1 (confirm the fix is in its commit before claiming it); it adds no obligation."
 
 [[exempt]]
@@ -179,13 +179,13 @@ reason = "Opens the disclosed-residual paragraph of vfxcmt.3 to vfxcmt.11; no ob
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual: a planned-but-uncommitted path, absent from both the commit and the declaration, leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it."
+text = "It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it."
 reason = "Disclosed residuals of vfxcmt.3 to vfxcmt.11; the closing clause restates vfxcmt.10 (the verifier reads the declared revision)."
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, so no replacement ref, grafts entry, or commit-graph cache can rewrite the parent the base is taken against; in a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base."
-reason = "Restates vfxcmt.7 and its cannot-evaluate case inside the disclosure paragraph; it adds no obligation."
+text = "In a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base."
+reason = "Restates vfxcmt.7's absent-parent cannot-evaluate case inside the disclosure paragraph; it adds no obligation."
 
 [[exempt]]
 corpus-id = "vfxcmt"
@@ -224,8 +224,8 @@ reason = "Defines the ambient context that expbnd.1 to expbnd.5 govern; no oblig
 
 [[exempt]]
 corpus-id = "expbnd"
-text = "This manifests in three recurring forms."
-reason = "Signpost to the three forms that expbnd.2 to expbnd.4 govern; no obligation of its own."
+text = "This manifests in four recurring forms."
+reason = "Signpost to the four forms that expbnd.2 to expbnd.4 and expbnd.6 govern; no obligation of its own."
 
 [[exempt]]
 corpus-id = "expbnd"
@@ -234,7 +234,7 @@ reason = "Scope carve-out bounding expbnd.3 that defers to the confirm-execution
 
 [[exempt]]
 corpus-id = "expbnd"
-text = "The preference is to remove the ambient dependency, not merely to check it: an explicit binding\nremoves that ambient dependency, whereas a confirmed ambient binding is correct only until the\nsurrounding state next shifts."
+text = "The preference is to remove the ambient dependency, as an explicit binding does, not merely to check\nit: a confirmed ambient binding is correct only until the surrounding state next shifts."
 reason = "Rationale for the preference expbnd.5 states; no obligation of its own."
 
 [[exempt]]
@@ -284,7 +284,7 @@ reason = "Rationale for trkasy.1 and trkasy.2; no obligation of its own."
 
 [[exempt]]
 corpus-id = "trkasy"
-text = "Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work no less\nthan an explicit background dispatch does: the foreground call returns while the detached child runs on,\nso its result and its failure are lost unless they are collected."
+text = "Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work no less\nthan an explicit background dispatch does: the foreground call returns while the detached child runs on,\nso its result and failure are lost unless collected."
 reason = "Classifies a detached child as launched asynchronous work, so trkasy.6 applies; no obligation of its own."
 
 [[exempt]]
@@ -319,7 +319,7 @@ reason = "Scope note bounding dfdpth.1; no obligation of its own."
 
 [[exempt]]
 corpus-id = "dfdpth"
-text = "A layer that over-fires is not cheap: one that raises false alarms trains its own bypass and\nerodes trust in the controls around it, so a noisy layer is not the low-cost overlap this prefers, and adding\none is not warranted by this rule."
+text = "A layer that over-fires is not cheap: its false alarms train its own bypass and erode trust\nin the controls around it, so it is not the low-cost overlap this prefers, and this rule does not warrant\nsuch a layer."
 reason = "Scope note: an over-firing layer is outside what dfdpth.1 recommends; no obligation of its own."
 
 [[exempt]]
@@ -334,12 +334,12 @@ reason = "Rationale for kltwat.1; no obligation of its own."
 
 [[exempt]]
 corpus-id = "kltwat"
-text = "An environment override meant to grant a longer wait can be silently stripped when it crosses a\nprivilege boundary, for instance when it is placed on the wrong side of a privilege-elevation command,\nso the intended wait never reaches the callee and its default applies unseen"
+text = "An environment override meant to grant a longer wait can be silently stripped when it crosses a\nprivilege boundary, as when it is placed on the wrong side of a privilege-elevation command,\nso the intended wait never reaches the callee and its default applies unseen"
 reason = "States the hazard that kltwat.4, the clause after the ';', guards against; no obligation of its own."
 
 [[exempt]]
 corpus-id = "kltwat"
-text = "This is the companion of\nthe bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust resources, while this\none keeps a bound that is meant to allow completion from being set below the callee's own end-to-end\nbudget, so a command that is waiting correctly is not cut short and then misread as the failure it was\ntolerating."
+text = "This is the companion of\nthe bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust resources, while this\none keeps a bound meant to allow completion from being set below the callee's own end-to-end budget, so\na command that is waiting correctly is not cut short and then misread as the failure it was tolerating."
 reason = "Cross-reference to the bounded-consumption rule; no obligation of its own."
 
 [[exempt]]

@@ -18,6 +18,6 @@ completion: the completion signal must carry the full result, never a truncated 
 
 Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work no less
 than an explicit background dispatch does: the foreground call returns while the detached child runs on,
-so its result and its failure are lost unless they are collected. Such work is launched through a tracked
+so its result and failure are lost unless collected. Such work is launched through a tracked
 background mechanism that keeps its completion observable; where its result and completion are genuinely
 not needed, detaching it is a deliberate, recorded choice, not a reflex.
