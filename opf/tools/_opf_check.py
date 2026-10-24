@@ -87,7 +87,7 @@ from _opf_store import (  # noqa: E402
 from _opf_schema import (  # noqa: E402
     validate_record, validate_counters, check_unique_ids, check_ids_within_counters, check_monotonic,
     validate_transition, parse_status, BASELINE_SPECS, ACTOR_KINDS, LINK_RELS, _valid_id_shape,
-    SUPPORTED_SCHEMA, _valid_timestamp, IMPORTED_NAMESPACES, validate_imported_record,
+    SUPPORTED_SCHEMA, _valid_timestamp, IMPORTED_NAMESPACES, IMPORTED_PREFIX, validate_imported_record,
 )
 # U3 supplies the ledger validators, the frozen/rotation/partition guards, and the across-time append-only.
 from _opf_release import (  # noqa: E402
@@ -2029,23 +2029,42 @@ def _check_decision_chains(recs, by_id, rep):
                             len(current)))
 
 
-def _check_links(recs, by_id, all_ids, rep):
+def _check_links(recs, by_id, all_ids, rep, imported_recs):
     """C-LINKS (R4): every links relation target resolves to an existing record, with the closed type
     constraints (OPF-SPEC 8.6). `follows` and `relates` relate records to records with a closed vocabulary,
     so a dangling `follows`/`relates` is a finding too ("advisory" constrains a link's EFFECT on state, not
     its right to resolve; F13). receipt_of targets a backlog_item; supersedes targets the same type; the
     rest need only an existing target. Every block's `scopes` id is resolved against the same union
     (spec 8.5: a block scopes enumerated record IDs; an unresolvable scope corrupts the actionability
-    join)."""
-    for r in recs:
+    join). Links and scopes resolve over the union of both series (spec 8.6): `imported_recs` are the
+    imported rows C-IMPORTED-SCHEMA read (none when no imported series is read), an `imported:<NS>-<n>`
+    target resolves against them, and the links and block `scopes` of those rows are resolved too, so a
+    dangling link or scope from either series is a finding. An imported row's link to a clean id is
+    refused by C-IMPORTED-SCHEMA and is not resolved here. The imported rows join this resolution only;
+    every other cross-record check reads clean records alone."""
+    imported_by_id = {}
+    for r in imported_recs:
+        if isinstance(r.id, str):
+            imported_by_id.setdefault(r.id, r)
+    for r in list(recs) + list(imported_recs):
         for rel, tid in r.links:
             if rel not in LINK_RELS or not isinstance(tid, str):
                 continue
-            if tid not in all_ids:
+            imported_target = tid.startswith(IMPORTED_PREFIX)
+            if r.location == "imported" and not imported_target:
+                continue
+            if imported_target:
+                target = imported_by_id.get(tid)
+                if target is None:
+                    rep.finding("C-LINKS: {} {} link -> {!r} resolves to no record in either series (a "
+                                "dangling link over the union of both series; spec 8.6)".format(r.id, rel, tid))
+                    continue
+            elif tid not in all_ids:
                 rep.finding("C-LINKS: {} {} link -> {!r} resolves to no record in the store (a dangling "
                             "link; spec 8.6)".format(r.id, rel, tid))
                 continue
-            target = by_id.get(tid)
+            else:
+                target = by_id.get(tid)
             if target is None:
                 continue
             if rel == "receipt_of" and target.rtype != "backlog_item":
@@ -2054,12 +2073,12 @@ def _check_links(recs, by_id, all_ids, rep):
             elif rel == "supersedes" and target.rtype != r.rtype:
                 rep.finding("C-LINKS: {} (type {!r}) supersedes -> {!r} of type {!r}; supersession links "
                             "the same type (spec 8.6)".format(r.id, r.rtype, tid, target.rtype))
-    for r in recs:
+    for r in list(recs) + list(imported_recs):
         if r.rtype == "block":
             for sid in r.scopes:
-                if isinstance(sid, str) and sid not in all_ids:
-                    rep.finding("C-LINKS: block {} scopes {!r} which resolves to no record in the store "
-                                "(spec 8.5)".format(r.id, sid))
+                if isinstance(sid, str) and sid not in all_ids and sid not in imported_by_id:
+                    rep.finding("C-LINKS: block {} scopes {!r} which resolves to no record in either "
+                                "series (spec 8.5)".format(r.id, sid))
 
 
 # A run id suffix in every journal kind run grammar: with the prefix of a kind it names a placeholder run, so
@@ -3530,9 +3549,10 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-IMPORTED-SCHEMA (an active imported series only): every imported row against the imported
     # envelope, never through the schema deferral (spec 8.3) ------------------------------------------
+    imported_recs = []
     if imported:
         rep.ran("C-IMPORTED-SCHEMA")
-        _gather_imported_records(root_fd, machine_rel, enabled_types, registered_vendors, rep)
+        imported_recs = _gather_imported_records(root_fd, machine_rel, enabled_types, registered_vendors, rep)
 
     # --- C-ARCHIVE-ENUM: walk + reconcile the archive; collect rotation-eligibility for C-ROTATION -----
     rep.ran("C-ARCHIVE-ENUM")
@@ -3654,7 +3674,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-DECISION-CHAINS")
     _check_decision_chains(recs, by_id, rep)
     rep.ran("C-LINKS")
-    _check_links(recs, by_id, all_ids, rep)
+    _check_links(recs, by_id, all_ids, rep, imported_recs)
 
     # --- the frozen-span / no-deletion / partition / contiguity checks (active + archive together) ----
     rep.ran("C-FROZEN-COVERAGE")
@@ -5399,6 +5419,161 @@ def self_test():
             check("imported-row-registered-vendor-accepted",
                   _vd_run is not None and not _vd_run.findings
                   and _vd_run.checks.get("C-IMPORTED-SCHEMA") == "PASS" and pending_only(_vd_run))
+
+            # --- Links over the union of both series (spec 8.6) -------------------------------------
+            # The store holds clean BI-1 (done), BI-2 and BI-3, and imported BI-1, WL-1 and PP-1; the
+            # clean BI-3 and the imported BI-2 each carry the one link under test.
+            def xs_machine(clean_link=None, imported_link=None):
+                m = act_machine()
+                m["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open"), envelope(
+                    "BI-3", "backlog_item", "open", **({"links": [clean_link]} if clean_link else {}))])
+                m["counters.toml"] = counters(BI=3)
+                m["backlog_item.imported.index.toml"] = idx([imp_bi(1), imp_bi(
+                    2, **({"links": [imported_link]} if imported_link else {}))])
+                m["worklog.imported.toml"] = {"schema": 1, "entry": [imp_wl(1)]}
+                m["preference_pattern.imported.index.toml"] = idx([imp_row(
+                    "imported:PP-1", "preference_pattern", "active", created_at=TS, updated_at=TS,
+                    context="when X", rationale="because Y")])
+                return m
+
+            def xs_resolved(res):
+                return (res is not None and not res.findings and res.checks.get("C-LINKS") == "PASS"
+                        and pending_only(res))
+
+            def xs_dangling(src, rel, tid):
+                return ["C-LINKS: {} {} link -> {!r} resolves to no record in either series (a dangling "
+                        "link over the union of both series; spec 8.6)".format(src, rel, tid)]
+
+            _xs_refused = "a clean-to-imported link is limited to relates, derives_from, follows, and same-type"
+            # Clean to imported: each permitted relation resolves over the union, and nothing is a
+            # finding (red when the per-record validator refuses the imported id, or when C-LINKS
+            # resolves clean ids alone).
+            for _rel in ("relates", "derives_from", "follows", "supersedes"):
+                check("clean-to-imported-{}-resolves".format(_rel),
+                      xs_resolved(run(xs_machine({"rel": _rel, "id": "imported:BI-1"}))))
+            # Every other relation is refused per record while its target resolves, so the refusal is
+            # the schema's and never a dangling-link side effect (red when the relation limit is dropped).
+            for _rel, _tid in (("resolves", "imported:BI-1"), ("remediates", "imported:BI-1"),
+                               ("receipt_of", "imported:BI-1"), ("corrects", "imported:BI-1"),
+                               ("exemplifies", "imported:PP-1")):
+                _xs_run = run(xs_machine({"rel": _rel, "id": _tid}))
+                check("clean-to-imported-{}-refused".format(_rel),
+                      _xs_run is not None and _xs_run.status != VALID
+                      and _xs_run.checks.get("C-LINKS") == "PASS"
+                      and len(_xs_run.findings) == 1 and _xs_refused in _xs_run.findings[0])
+            # A supersedes of another type is refused per record, and C-LINKS, resolving the imported
+            # target, names the same-type rule as well (red when the per-record same-type limit is
+            # dropped, or when C-LINKS never reaches the imported target's type).
+            _xs_run = run(xs_machine({"rel": "supersedes", "id": "imported:WL-1"}))
+            check("clean-to-imported-cross-type-supersedes-refused",
+                  _xs_run is not None and _xs_run.status != VALID and len(_xs_run.findings) == 2
+                  and any(_xs_refused in f for f in _xs_run.findings)
+                  and "C-LINKS: BI-3 (type 'backlog_item') supersedes -> 'imported:WL-1' of type 'worklog'; "
+                      "supersession links the same type (spec 8.6)" in _xs_run.findings)
+            # A permitted link to an imported id that resolves in neither series is a C-LINKS finding
+            # (red when C-LINKS skips an unresolved imported target).
+            _xs_run = run(xs_machine({"rel": "relates", "id": "imported:BI-9"}))
+            check("clean-to-imported-dangling-finding",
+                  _xs_run is not None and _xs_run.checks.get("C-LINKS") == "FINDING"
+                  and _xs_run.findings == xs_dangling("BI-3", "relates", "imported:BI-9"))
+            # Imported to imported: every declared relation resolves, subject to its type constraints
+            # (red when C-LINKS reports an existing imported target as dangling; the imported finding
+            # vectors below are the ones that go red when it reads clean records alone).
+            for _rel in LINK_RELS:
+                _tid = "imported:PP-1" if _rel == "exemplifies" else "imported:BI-1"
+                check("imported-to-imported-{}-resolves".format(_rel),
+                      xs_resolved(run(xs_machine(imported_link={"rel": _rel, "id": _tid}))))
+            # The type constraints hold across imported rows too: a supersedes of another type and a
+            # receipt_of to a non-backlog item are C-LINKS findings (red when the links of imported rows
+            # are not resolved).
+            _xs_run = run(xs_machine(imported_link={"rel": "supersedes", "id": "imported:WL-1"}))
+            check("imported-to-imported-cross-type-supersedes-finding",
+                  _xs_run is not None and _xs_run.checks.get("C-IMPORTED-SCHEMA") == "PASS"
+                  and _xs_run.findings == [
+                      "C-LINKS: imported:BI-2 (type 'backlog_item') supersedes -> 'imported:WL-1' of type "
+                      "'worklog'; supersession links the same type (spec 8.6)"])
+            _xs_run = run(xs_machine(imported_link={"rel": "receipt_of", "id": "imported:WL-1"}))
+            check("imported-to-imported-receipt-of-non-backlog-finding",
+                  _xs_run is not None and _xs_run.checks.get("C-IMPORTED-SCHEMA") == "PASS"
+                  and _xs_run.findings == [
+                      "C-LINKS: imported:BI-2 receipt_of -> 'imported:WL-1' is a worklog, not a backlog_item "
+                      "(spec 8.1/8.5)"])
+            _xs_run = run(xs_machine(imported_link={"rel": "relates", "id": "imported:BI-9"}))
+            check("imported-to-imported-dangling-finding",
+                  _xs_run is not None and _xs_run.checks.get("C-IMPORTED-SCHEMA") == "PASS"
+                  and _xs_run.findings == xs_dangling("imported:BI-2", "relates", "imported:BI-9"))
+            # Imported to clean is refused by C-IMPORTED-SCHEMA whether or not the clean target exists,
+            # and C-LINKS does not resolve it, so the refusal is the one finding, for each relation a
+            # clean record may carry across the series (red when C-LINKS resolves an imported row's
+            # clean target and reports the dangling one again).
+            for _rel in ("relates", "derives_from", "follows", "supersedes"):
+                for _name, _tid in (("existing", "BI-1"), ("dangling", "BI-9")):
+                    _xs_run = run(xs_machine(imported_link={"rel": _rel, "id": _tid}))
+                    check("imported-to-clean-{}-{}-refused".format(_rel, _name),
+                          _xs_run is not None and _xs_run.checks.get("C-LINKS") == "PASS"
+                          and len(_xs_run.findings) == 1
+                          and "an imported-to-clean link MUST be refused" in _xs_run.findings[0])
+            # A clean link into an imported namespace the series refuses (the importer-only LF) is the
+            # per-record validator's finding, and the target, resolving in neither series, is a C-LINKS
+            # dangling finding beside it; the doctor reports both (red when the namespace refusal is
+            # dropped from the link validator, which leaves only the dangling finding).
+            _xs_run = run(xs_machine({"rel": "relates", "id": "imported:LF-1"}))
+            check("clean-to-imported-refused-namespace-doctor-finding",
+                  _xs_run is not None and _xs_run.status != VALID
+                  and _xs_run.checks.get("C-LINKS") == "FINDING"
+                  and any("which the imported series refuses" in f for f in _xs_run.findings))
+
+            # --- Block scopes over the union of both series (spec 8.5) ------------------------------
+            # An imported block may scope either series (spec 8.1/8.2), so one scoping an existing
+            # imported id and an existing clean id resolves with no finding (red when C-LINKS resolves
+            # scopes against clean ids alone).
+            _bs = act_machine()
+            _bs["backlog_item.imported.index.toml"] = idx([imp_bi(1)])
+            _bs["block.imported.index.toml"] = idx([imp_row(
+                "imported:BL-1", "block", "active", created_at=TS, updated_at=TS,
+                scopes=["imported:BI-1", "BI-1"])])
+            _bs_run = run(_bs)
+            check("imported-block-scopes-union-resolves",
+                  _bs_run is not None and not _bs_run.findings
+                  and _bs_run.checks.get("C-LINKS") == "PASS" and pending_only(_bs_run))
+            # An imported block's scope that resolves in neither series is a C-LINKS finding, one per
+            # unresolved id (red when the scopes loop reads clean records alone and never sees the
+            # imported block).
+            _bs = act_machine()
+            _bs["block.imported.index.toml"] = idx([imp_row(
+                "imported:BL-1", "block", "active", created_at=TS, updated_at=TS,
+                scopes=["imported:BI-9", "FN-99"])])
+            _bs_run = run(_bs)
+            check("imported-block-scopes-dangling-finding",
+                  _bs_run is not None and _bs_run.checks.get("C-LINKS") == "FINDING"
+                  and _bs_run.findings == [
+                      "C-LINKS: block imported:BL-1 scopes 'imported:BI-9' which resolves to no record "
+                      "in either series (spec 8.5)",
+                      "C-LINKS: block imported:BL-1 scopes 'FN-99' which resolves to no record in "
+                      "either series (spec 8.5)"])
+            # A clean block's scope naming a missing imported id is a C-LINKS finding over the union
+            # (beside the per-record shape finding: a clean block's scopes stay clean-shaped), never a
+            # silent pass (red when an unresolved scope is skipped).
+            _bs = act_machine()
+            _bs["block.index.toml"] = idx([envelope("BL-1", "block", "active", scopes=["imported:BI-9"])])
+            _bs["counters.toml"] = counters(BL=1)
+            _bs_run = run(_bs)
+            check("clean-block-scopes-dangling-imported-finding",
+                  _bs_run is not None and _bs_run.checks.get("C-LINKS") == "FINDING"
+                  and ("C-LINKS: block BL-1 scopes 'imported:BI-9' which resolves to no record in "
+                       "either series (spec 8.5)") in _bs_run.findings)
+            # A clean block's scope naming an EXISTING imported id resolves over the union, so C-LINKS
+            # adds no dangling finding beside the per-record shape finding (red when the clean block's
+            # scopes resolve against clean ids alone).
+            _bs = act_machine()
+            _bs["backlog_item.imported.index.toml"] = idx([imp_bi(1)])
+            _bs["block.index.toml"] = idx([envelope("BL-1", "block", "active",
+                                                    scopes=["BI-1", "imported:BI-1"])])
+            _bs["counters.toml"] = counters(BL=1)
+            _bs_run = run(_bs)
+            check("clean-block-scopes-imported-target-resolves",
+                  _bs_run is not None and _bs_run.checks.get("C-LINKS") == "PASS"
+                  and not any(f.startswith("C-LINKS:") for f in _bs_run.findings))
             # The writer/doctor agreement on a declaration-only activation: a 1.3.0 store on homes 1
             # whose [unmanaged] names an imported-leaf name certifies, the name not being a
             # managed leaf there, and plan_write_scope plans the SAME manifest without refusing (red
@@ -6046,6 +6221,17 @@ def self_test():
                                                  links=[{"rel": "follows", "id": "FN-99"}])])
         f["counters.toml"] = counters(FN=1)
         check("r4-dangling-follows-invalid", run(f).status == INVALID)
+        # A store that reads no imported row leaves a clean record's permitted link to an imported id
+        # dangling: a C-LINKS finding, never a silent pass.
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open"), envelope(
+            "BI-3", "backlog_item", "open", links=[{"rel": "relates", "id": "imported:BI-1"}])])
+        f["counters.toml"] = counters(BI=3)
+        r = run(f)
+        check("r4-dangling-cross-series-invalid",
+              r is not None and r.status == INVALID and r.checks.get("C-LINKS") == "FINDING"
+              and r.findings == ["C-LINKS: BI-3 relates link -> 'imported:BI-1' resolves to no record in "
+                                 "either series (a dangling link over the union of both series; spec 8.6)"])
         f = clean_machine()
         f["block.index.toml"] = idx([envelope("BL-1", "block", "active", scopes=["FN-99"])])
         f["counters.toml"] = counters(BL=1)
