@@ -212,9 +212,16 @@ def _manifest(raw):
 
 
 def _compatibility(manifest, provenance):
-    _require(type(manifest.get("opf")) is dict
-             and manifest["opf"].get("spec_version") == "1.2.0",
-             "VERSION", "manifest", "requires spec_version 1.2.0; older stores need opf upgrade")
+    # The refusal names the manifest path and the declared spec_version, and states the hand step
+    # spec 9.2 gives a tree under a refused older manifest (moved aside by hand, never by OPF).
+    base = manifest.get("opf")
+    declared = store._safe_display(base.get("spec_version") if type(base) is dict else None)
+    _require(type(base) is dict and base.get("spec_version") == "1.2.0",
+             "VERSION", "manifest",
+             "{} declares spec_version {}; this bootstrap requires 1.2.0: an older store needs opf "
+             "upgrade, or, to adopt its tree instead, first move {} aside by hand: its files are then "
+             "ordinary foreign content for a first adoption".format(MANIFEST_PATH, declared,
+                                                                     MANIFEST_PATH))
     _require(store.SUPPORTED_HOMES == 1 and store.homes_generation(manifest) == 1,
              "HOMES", "manifest", "this bootstrap keeps homes generation 1")
     checked = store.validate_manifest(manifest)

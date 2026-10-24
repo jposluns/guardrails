@@ -519,7 +519,8 @@ def _load_inputs(resolution, product_root):
     # its [vendors]: an invalid manifest is a fail-closed cannot-evaluate, never a silent partial pass.
     # validate_manifest returns CANNOT-EVALUATE for a non-table / non-opf manifest and INVALID for a
     # schema violation; either is fail-closed here.
-    mv = _opf_store.validate_manifest(manifest_data)
+    mv = _opf_store.validate_manifest(
+        manifest_data, manifest_rel=resolution.machine_rel + "/" + _opf_store.MANIFEST_NAME)
     if mv.status != VALID:
         return None, None, None, frozenset(), ("manifest.toml does not validate against the manifest "
                                                 "schema: {} (fail-closed, spec 4.5/9)".format(

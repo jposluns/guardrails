@@ -348,7 +348,8 @@ def _scope(root_fd, root, inputs, charge):
             # MemoryError under pressure (F-TOML-BARE-VALUEERROR-CLASS). Each maps to the discovery
             # PlanError, cannot-evaluate.
             raise planning.PlanError("resolved manifest does not parse: {}".format(exc)) from exc
-        checked = store.validate_manifest(manifest)
+        checked = store.validate_manifest(
+            manifest, manifest_rel=resolution.machine_rel + "/" + store.MANIFEST_NAME)
         if checked.status != store.VALID:
             raise planning.PlanError("resolved manifest is not valid: " + "; ".join(checked.findings))
         unmanaged = planning._resolved_unmanaged(manifest, resolution.machine_rel)

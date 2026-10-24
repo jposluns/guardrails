@@ -617,7 +617,7 @@ def _load_manifest(ctx):
     """Read and validate the manifest (never an operand of this verb). It must be doctor-grade VALID at
     the tooling spec_version, in the inline layout: an older store takes `opf upgrade` first."""
     manifest = _read_operand(ctx.root_fd, ctx.rel(_opf_store.MANIFEST_NAME)).model
-    mv = _opf_store.validate_manifest(manifest)
+    mv = _opf_store.validate_manifest(manifest, manifest_rel=ctx.rel(_opf_store.MANIFEST_NAME))
     if mv.status != _opf_store.VALID:
         raise RecordError("the store manifest is not VALID ({}); fail-closed".format("; ".join(mv.findings)))
     base = manifest.get(_opf_store.STANDARD_TOKEN)

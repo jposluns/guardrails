@@ -8,7 +8,7 @@ the relocator `opf migrate`, the
 synchronizer `opf sync`, the schema-upgrader `opf upgrade`, the absorber `opf absorb`, and the
 record author `opf record`,
 ship in later releases).
-Date: 2026-10-23 (UTC).
+Date: 2026-10-24 (UTC).
 
 OPFiles is a neutral, self-contained operational-files standard published under the Apache
 License 2.0 (except vendored third-party material, which remains under its own terms). AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand,
@@ -398,7 +398,10 @@ investigation that distinguishes first adoption from re-adoption and records a d
 inventory, and one approved plan that gives every foreign file a disposition before `init-store`
 (section 14.1). A discovered manifest that the section 9.2 validation refusals refuse for
 declaring a `spec_version` below 2.0.0, whatever its `[opf].homes`, is refused as a store
-(section 9.2): it MUST NOT be treated as authorizing initialization or adoption. A discovered
+(section 9.2): it MUST NOT be treated as authorizing initialization or adoption. A tree under
+such a manifest MUST NOT be adopted until the operator has moved that manifest aside by hand, a
+step no OPF command performs; its files are then ordinary foreign content for a section 14 first
+adoption (section 14.1). A discovered
 manifest declaring a `spec_version` of 2.0.0 or above whose `[opf].homes` is missing or not the
 integer 2 is refused as a store (section 9.2), never foreign content: it MUST NOT be treated as
 authorizing initialization or adoption. A manifest refused only at the section 9.2 version ceiling marks a store at a later version, never foreign
@@ -1557,6 +1560,9 @@ A `spec_version` below 2.0.0 names no version this specification defines, and va
 refuse it as a fail-closed INVALID finding.
 A manifest so refused, whatever its `[opf].homes`, is refused as a store: that refusal MUST NOT be
 read as authorizing initialization or adoption (sections 4.5 and 14.1).
+A tree under a manifest so refused MUST NOT be adopted until the operator has moved that manifest
+aside by hand, a step no OPF command performs; its files are then ordinary foreign content for a
+section 14 first adoption (section 14.1).
 A manifest declaring a `spec_version` of 2.0.0 or above whose `[opf].homes` is missing or not the
 integer 2 is refused as a store by the `[opf].homes` refusal above, never foreign content: that
 refusal MUST NOT be read as authorizing initialization or adoption (sections 4.5, 8.2, and 14.1).
@@ -2321,7 +2327,7 @@ The gates in this standard are strong where they are strong and say so where the
   A mistyped or altered token makes the store undiscoverable, which resolves to cannot-evaluate
   (fail-closed), never to a silent empty store. The token is stable, and this
   specification gives a store-breaking rename no path: every later base-schema version bump stays
-  additive and keeps every existing adopter's manifest discoverable through this exact token
+  additive and keeps every manifest discoverable through the exact base discovery token `opf`
   (sections 4.5 and 9.2), so no bump this specification permits renames the token.
 - The section 16.1 runtime check compares the installed copy of a release's declaration file with
   the shipped-file digest the implementation carries, so it detects an edit of that copy alone,

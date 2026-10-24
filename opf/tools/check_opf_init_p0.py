@@ -186,8 +186,17 @@ def vectors(f):
     add("compat/bad-provenance",
         lambda m: m.validate_compatibility(manifest, provenance=b"not toml"),
         "REFUSED", "COMPATIBILITY")
-    add("compat/old-needs-upgrade", lambda m: m.validate_compatibility(old[p0.MANIFEST_PATH]),
-        "REFUSED", "VERSION")
+    def old_needs_upgrade(m):
+        # The refusal names the manifest path and the declared spec_version and states the hand
+        # step (spec 9.2), pinned whole: rewording it, or dropping either, is red.
+        got = m.validate_compatibility(old[p0.MANIFEST_PATH])
+        check([f[2] for f in got.findings] == [
+            "{0} declares spec_version '1.1.0'; this bootstrap requires 1.2.0: an older store needs "
+            "opf upgrade, or, to adopt its tree instead, first move {0} aside by hand: its files are "
+            "then ordinary foreign content for a first adoption".format(p0.MANIFEST_PATH)],
+            "compat/old-needs-upgrade/message")
+        return got
+    add("compat/old-needs-upgrade", old_needs_upgrade, "REFUSED", "VERSION")
     add("compat/version-only-upgrade", lambda m: m.validate_upgrade_delta(old, d2a))
     invented = dict(d2a, **{operation.PROVENANCE_RELPATH: provenance})
     add("compat/no-invented-provenance",

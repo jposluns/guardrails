@@ -309,7 +309,7 @@ _CONTRACT = {
         _D('Public brand: OPFiles (opfiles.ai).'),
         _D('Base discovery token: opf.'),
         _D('Status: draft (specification only; schemas and the reference tooling, the scaffolder opf init, the adopter opf adopt, the post-adoption importer opf import, the validator opf doctor, the renderer opf render, the relocator opf migrate, the synchronizer opf sync, the schema-upgrader opf upgrade, the absorber opf absorb, and the record author opf record, ship in later releases).'),
-        _D('Date: 2026-10-23 (UTC).'),
+        _D('Date: 2026-10-24 (UTC).'),
         _D('OPFiles is a neutral, self-contained operational-files standard published under the Apache License 2.0 (except vendored third-party material, which remains under its own terms).'),
         _D('AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand, not a legal entity, and the standard is authored and maintained by its lead maintainer.'),
         _D('A project conforms to OPFiles with this specification and its own checks; the AIQT Guardrails pack is the reference enforcement suite and a consumer of the standard, not its definition.'),
@@ -421,6 +421,7 @@ _CONTRACT = {
         'An ambiguous outcome and an input that discovery cannot read or parse are a failed discovery of an existing store and MUST NOT be treated as an absent store that permits initialization or adoption.',
         'A zero-match outcome over a present .working/ MUST NOT be treated as authorizing initialization or adoption by itself: only a section 14 first adoption authorizes initialization there, through an investigation that distinguishes first adoption from re-adoption and records a digest-stamped inventory, and one approved plan that gives every foreign file a disposition before init-store (section 14.1).',
         'A discovered manifest that the section 9.2 validation refusals refuse for declaring a spec_version below 2.0.0, whatever its [opf].homes, is refused as a store (section 9.2): it MUST NOT be treated as authorizing initialization or adoption.',
+        'A tree under such a manifest MUST NOT be adopted until the operator has moved that manifest aside by hand, a step no OPF command performs; its files are then ordinary foreign content for a section 14 first adoption (section 14.1).',
         'A discovered manifest declaring a spec_version of 2.0.0 or above whose [opf].homes is missing or not the integer 2 is refused as a store (section 9.2), never foreign content: it MUST NOT be treated as authorizing initialization or adoption.',
         'A manifest refused only at the section 9.2 version ceiling marks a store at a later version, never foreign content: it MUST NOT be treated as authorizing initialization or adoption, and its remedy is the tooling upgrade alone (sections 8.2 and 9.2).',
     ),
@@ -779,6 +780,7 @@ _CONTRACT = {
         'A store refused only at that ceiling is a store at a later version, never foreign content: that refusal MUST NOT authorize adoption over it, and the section 8.2 zero-seed ban stands (sections 4.5, 8.2, and 14.1).',
         'A spec_version below 2.0.0 names no version this specification defines, and validation MUST refuse it as a fail-closed INVALID finding.',
         'A manifest so refused, whatever its [opf].homes, is refused as a store: that refusal MUST NOT be read as authorizing initialization or adoption (sections 4.5 and 14.1).',
+        'A tree under a manifest so refused MUST NOT be adopted until the operator has moved that manifest aside by hand, a step no OPF command performs; its files are then ordinary foreign content for a section 14 first adoption (section 14.1).',
         'A manifest declaring a spec_version of 2.0.0 or above whose [opf].homes is missing or not the integer 2 is refused as a store by the [opf].homes refusal above, never foreign content: that refusal MUST NOT be read as authorizing initialization or adoption (sections 4.5, 8.2, and 14.1).',
         'Before any command writes to a store, the claim, release, or reconciliation of the single-writer lease (section 5.7), a fast-forward by opf sync, and the recovery of sections 8.8, 14.1, and 14.2 included, every implementation MUST apply these validation refusals and the [opf].homes refusal above to the store manifest that discovery finds there, so a store they refuse stays byte-identical.',
         'For opf sync, these refusals and the [opf].homes refusal MUST also be applied to the store manifest the fetched state carries, before a fast-forward lands it, so a fast-forward never brings a refused manifest into the store.',
@@ -1054,7 +1056,7 @@ _CONTRACT = {
         'Fail-safe-for-unknown-profiles is scoped to a tool that does not cover the profile; a profile-aware tool MUST fail closed on its own profile.',
         _D('- The base discovery token opf is a single exact string carried in every adopter manifest.'),
         _D('A mistyped or altered token makes the store undiscoverable, which resolves to cannot-evaluate (fail-closed), never to a silent empty store.'),
-        _D("The token is stable, and this specification gives a store-breaking rename no path: every later base-schema version bump stays additive and keeps every existing adopter's manifest discoverable through this exact token (sections 4.5 and 9.2), so no bump this specification permits renames the token."),
+        _D("The token is stable, and this specification gives a store-breaking rename no path: every later base-schema version bump stays additive and keeps every manifest discoverable through the exact base discovery token opf (sections 4.5 and 9.2), so no bump this specification permits renames the token."),
         _D("- The section 16.1 runtime check compares the installed copy of a release's declaration file with the shipped-file digest the implementation carries, so it detects an edit of that copy alone, which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy and the digest the implementation carries to match it, or one that changes the installed copy together with the implementation's comparison code so that the comparison no longer refuses that copy, and an anchor outside the installation, such as a signature over that file that the implementation verifies, is the stronger option only against an edit that does not also change the implementation's verification key or its anchor check; section 16.1 does not require one."),
         _D("Whether a release's runtime check compares the installed copy's bytes with the digest the implementation carries at all, and whether that digest sits at the place the documentation states, are established only by an inspection of the implementation, never by a reference run: every reference run's installed copy holds the shipped bytes, over which a runtime check that skips that comparison and one that makes it can yield the same report."),
         _D("Section 16.1 verdicts are observer-local: each rests on a checker's own knowledge of its stock baseline and of what it changed, so an alteration the checker did not detect, such as an organization-wide package-manager configuration file taken for part of the stock install, can mislead that checker."),
@@ -1407,7 +1409,7 @@ _TOOLING_ONLY_RESERVATIONS = ("imports",)
 # this registry's shape, so dropping an entry turns the self-test red.
 _SURFACE = {
     QUICKSTART: (
-        'Date: 2026-10-23 (UTC).',
+        'Date: 2026-10-24 (UTC).',
         'Create .working/toml/ by hand with manifest.toml declaring standard = "opf", spec_version = "2.0.0" and homes = 2 in its [opf] table, plus counters.toml (with the imported counter row of each enabled type beside its clean row), version.toml, worklog.toml, the eleven baseline .index.toml files (worklog is the exempt ledger listed above, not an index), the eleven .imported.index.toml leaves, and worklog.imported.toml, all empty to start; specification sections 4, 8 and 9 give the full file baseline.',
         "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the specification's validation refuses (specification section 9.2).",
         'The specification defines one implementation model, with no conformance classes (OPF-SPEC section 16.1).',
@@ -5677,6 +5679,12 @@ def _self_test_vectors():
             )),
     ))
     spec_vectors("17", (
+            # Section 17 states the discovery guarantee in section 9.2's every-manifest wording
+            # (maintainer ruling, 2026-10-24): the narrower adopter-manifest wording restored is red.
+            ('The token is stable,', (
+             ('keeps every manifest discoverable through the exact base discovery token `opf`',
+              "keeps every existing adopter's manifest discoverable through this exact token"),
+            )),
             ('- The section 16.1 runtime check compares', (
              ('so it detects an edit of that copy alone,',
               'so it detects any edit,'),
@@ -5843,6 +5851,13 @@ def _self_test_vectors():
              ('(sections 4.5 and 14.1).',
               '(sections 4.5 and 14.1), apart from the section 14 adoption the remedy above names.'),
             )),
+            # The hand step of the same ruling, stated where 9.2 describes the refusal.
+            ('A tree under a manifest so refused', (
+             ('MUST NOT be adopted until the operator has moved that manifest aside by hand, a step no OPF command performs;',
+              'MAY be adopted once opf adopt has moved that manifest aside;'),
+             ('ordinary foreign content for a section 14 first adoption (section 14.1).',
+              'the ancestry of a section 14 re-adoption (section 14.1).'),
+            )),
             ('A manifest declaring a spec_version of 2.0.0 or above', (
              ('authorizing initialization or adoption (sections 4.5, 8.2, and 14.1).',
               'authorizing initialization or adoption, and the remedy adoption above does not apply to it (sections 4.5, 8.2, and 14.1).'),
@@ -5909,6 +5924,15 @@ def _self_test_vectors():
             ('A discovered manifest that the section 9.2 validation refusals refuse', (
              ('is refused as a store (section 9.2): it MUST NOT be treated as authorizing initialization or adoption.',
               'marks no store: for adoption, it and the files beneath it MUST be treated as foreign content.'),
+            )),
+            # A tree under a refused older manifest is adopted only after the operator moves that
+            # manifest aside by hand (maintainer ruling, 2026-10-24): an OPF write in place of the hand
+            # step, or the tree read as ancestry, is red.
+            ('A tree under such a manifest', (
+             ('MUST NOT be adopted until the operator has moved that manifest aside by hand, a step no OPF command performs;',
+              'MAY be adopted once opf adopt has moved that manifest aside;'),
+             ('ordinary foreign content for a section 14 first adoption (section 14.1).',
+              'the ancestry of a section 14 re-adoption (section 14.1).'),
             )),
     ))
     # The journal-operand rule has no exception (maintainer ruling, 2026-10-24).
@@ -6449,7 +6473,7 @@ def _self_test_vectors():
         ('4.5', ('A discovered manifest that the section 9.2 validation refusals refuse',), (
             'A discovered manifest that the section 9.2 validation refusals refuse for declaring a spec_version below 2.0.0, whatever its [opf].homes, marks no store: for adoption, it and the files beneath its .working/ MUST be treated as foreign content, never as a store, so the section 9.2 remedy adoption over them is a section 14 first adoption (sections 8.2, 9.2, and 14.1).',
         )),
-        ('9.2', ('A spec_version below 2.0.0', 'A manifest so refused,', 'A manifest declaring a spec_version of 2.0.0 or above', 'Before any command writes to a store,'), (
+        ('9.2', ('A spec_version below 2.0.0', 'A manifest so refused,', 'A tree under a manifest so refused', 'A manifest declaring a spec_version of 2.0.0 or above', 'Before any command writes to a store,'), (
             "A spec_version below 2.0.0 names no version this specification defines, and validation MUST refuse it as a fail-closed INVALID finding naming the remedy, since this section defines no upgrade into 2.0.0: a fresh 2.0.0 store whose section 14 adoption gives the old store's files a disposition as foreign content.",
             "That adoption is a first adoption: a manifest refused for declaring a spec_version below 2.0.0, whatever its [opf].homes, and the files beneath its .working/ are foreign content for adoption, never a store (sections 4.5 and 14.1), no prior OPF ancestry exists to seed, and the new store's counters start at zero (section 8.2); the old tree's reserved-name children (archive/, imported/, staging/, and journals/) are part of that foreign content and take their dispositions under section 14.2.",
             "Because the new store's counters start at zero, a number the old tree's records carried can be issued again in the new store's own series; the old tree's records are foreign content, never the new store's history, so no series within one store ever reissues an ID (section 8.2).",

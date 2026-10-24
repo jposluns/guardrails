@@ -628,7 +628,7 @@ def _inventory(root, sources, targets):
             raw = manifest_raw
             manifest_budget(len(raw), manifest_path)
             manifest = tomllib.loads(raw.decode("utf-8"))
-            checked = store.validate_manifest(manifest)
+            checked = store.validate_manifest(manifest, manifest_rel=manifest_path)
             if checked.status != store.VALID:
                 raise PlanError("resolved manifest is not valid: " + "; ".join(checked.findings))
             excluded.append({"path": resolution.machine_rel, "reason": "machine-store"})

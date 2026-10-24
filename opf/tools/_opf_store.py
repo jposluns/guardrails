@@ -152,7 +152,8 @@ MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (ma
                                        # store input is refused rather than read unboundedly (SECA)
 SUPPORTED_SPEC_VERSION = "1.2.0"       # the OPFiles base spec_version this tooling implements; a store
                                        # declaring an OLDER spec_version is fail-closed with a distinct
-                                       # migration-needed finding naming the `opf upgrade` remedy (spec 9.x),
+                                       # migration-needed finding naming the `opf upgrade` remedy and the
+                                       # hand step that makes its tree foreign content (spec 9.2),
                                        # and one declaring a NEWER spec_version is fail-closed with an
                                        # upgrade-the-tooling finding, except only the reserved homes-2
                                        # declaration pair, which stays gated on activation (spec 9.2/4.2)
@@ -2149,9 +2150,12 @@ def _materialize_majors(value):
     return out
 
 
-def validate_manifest(data, supported_profiles=None):
+def validate_manifest(data, supported_profiles=None, *, manifest_rel=None):
     """Validate a parsed manifest against the base schema and, for each SUPPORTED profile, the profile
     schema. Returns a ManifestValidation.
+
+    manifest_rel is the store-relative path the manifest was read from, where the caller knows it; the
+    refusal of an older spec_version names it (spec 9.2), and None names "the store manifest" instead.
 
     supported_profiles is a mapping {profile_name: iterable of supported MAJOR ints}; empty or None
     means BASE-ONLY (every declared profile is recorded as present-but-unevaluated, never enforced,
@@ -2214,7 +2218,7 @@ def validate_manifest(data, supported_profiles=None):
 
     findings = []
     _validate_top_level(data, findings)
-    spec_tuple = _validate_base(base, findings)
+    spec_tuple = _validate_base(base, findings, manifest_rel)
     _validate_store_section(data.get("store"), findings)
     modules_enabled = _validate_modules(data.get("modules"), findings)
     registered_vendors = _validate_vendors(data.get("vendors"), findings)
@@ -2284,8 +2288,9 @@ def _check_enum(table, key, allowed, where, findings):
     return value
 
 
-def _validate_base(base, findings):
-    """Validate the [opf] base table; returns the parsed spec_version tuple or None."""
+def _validate_base(base, findings, manifest_rel=None):
+    """Validate the [opf] base table; returns the parsed spec_version tuple or None. manifest_rel is
+    the path validate_manifest was given, named by the older-spec_version refusal."""
     extra = set(base) - OPF_KEYS - OPF_OPTIONAL_KEYS
     if extra:
         findings.append("[opf] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
@@ -2312,11 +2317,19 @@ def _validate_base(base, findings):
             # the census in _opf_manifest_regressions pins the validator's reviewed emission-site set, and
             # a message selected above a shared censused append keeps each wording reviewable without
             # widening that set.
+            # The older refusal names the manifest path and the declared spec_version, and states the
+            # hand step spec 9.2 gives a tree under a refused older manifest: the operator moves that
+            # manifest aside by hand (no OPF command writes it), after which its files are ordinary
+            # foreign content for a first adoption.
             if spec_tuple < _parse(SUPPORTED_SPEC_VERSION):
-                mismatch = ("[opf].spec_version {} is older than the {} this tooling implements; "
-                            "run the store schema upgrade (`opf upgrade`) to migrate this store to {} "
-                            "(spec 9.x; fail-closed)".format(
-                                _safe_display(sv), SUPPORTED_SPEC_VERSION, SUPPORTED_SPEC_VERSION))
+                where = "the store manifest" if manifest_rel is None else _safe_display(manifest_rel)
+                mismatch = ("{} declares [opf].spec_version {}, older than the {} this tooling "
+                            "implements; run the store schema upgrade (`opf upgrade`) to migrate this "
+                            "store to {}, or, to adopt this tree instead, first move {} aside by hand: "
+                            "its files are then ordinary foreign content for a first adoption "
+                            "(spec 9.2; fail-closed)".format(
+                                where, _safe_display(sv), SUPPORTED_SPEC_VERSION,
+                                SUPPORTED_SPEC_VERSION, where))
             else:
                 mismatch = ("[opf].spec_version {} is above the {} this tooling implements; "
                             "upgrade the tooling before operating on this store "
@@ -2707,7 +2720,7 @@ def load_manifest(resolution, supported_profiles=None):
     if data is None:
         # Discovery already read this file, so its disappearance now is a race/fail-closed error.
         return ManifestValidation(CANNOT_EVALUATE, ["{} vanished after discovery".format(manifest_rel)])
-    return validate_manifest(data, supported_profiles)
+    return validate_manifest(data, supported_profiles, manifest_rel=manifest_rel)
 
 
 # --- self-test ---------------------------------------------------------------------------------------
@@ -3074,6 +3087,21 @@ def self_test():
         check("spec-version-floor-invalid", mv_old.status == INVALID)
         check("spec-version-floor-named",
               any("older than the" in f and "opf upgrade" in f for f in mv_old.findings))
+        # The older refusal names the manifest path and the declared spec_version and states the hand
+        # step (spec 9.2), pinned whole: rewording it, or dropping the path or the hand step, is red.
+        floor_rel = ".working/toml/manifest.toml"
+        floor_message = (
+            "'.working/toml/manifest.toml' declares [opf].spec_version '1.0.0', older than the 1.2.0 "
+            "this tooling implements; run the store schema upgrade (`opf upgrade`) to migrate this "
+            "store to 1.2.0, or, to adopt this tree instead, first move '.working/toml/manifest.toml' "
+            "aside by hand: its files are then ordinary foreign content for a first adoption "
+            "(spec 9.2; fail-closed)")
+        check("spec-version-floor-message-pinned",
+              SUPPORTED_SPEC_VERSION == "1.2.0"
+              and floor_message in validate_manifest(m_old, manifest_rel=floor_rel).findings)
+        check("spec-version-floor-message-unnamed-path",
+              any(f.startswith("the store manifest declares [opf].spec_version '1.0.0',")
+                  and "first move the store manifest aside by hand" in f for f in mv_old.findings))
         check("spec-version-current-ok",
               validate_manifest(_t.loads(manifest_text(spec_version=SUPPORTED_SPEC_VERSION))).status == VALID)
 
