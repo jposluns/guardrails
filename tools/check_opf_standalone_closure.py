@@ -91,7 +91,8 @@ broken, or a self-test check fails, which it reports by
 raising _CheckFailure), and 2 when a leg or the flip could not be evaluated (a bound kill, a signal, a
 harness failure or fault, a temporary directory that cannot be created, a bound that cannot be derived,
 a check that cannot evaluate what it checks (_CannotEvaluate: the CI job limit, or the config lanes'
-roster or deadlines, cannot be read), any
+roster or deadlines, cannot be read, or there is no opf/tools/ directory and the roster itself has
+no drift), any
 other exception or a SystemExit in the fast phase, an AssertionError of any other type included
 whatever its message, any exception or SystemExit running or judging the positive leg (the flip still
 runs), building or running the flipped copy (a source that cannot be decoded included) or escaping the
@@ -927,11 +928,50 @@ def _lane_budget_faults(bounds, deadlines, members):
     return faults
 
 
-_CI_PLAIN_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*:(?=\s|$)")
-_CI_PLAIN_ITEM = re.compile(r"[A-Za-z0-9._/ -]+")
-_CI_BLOCK_HEADER = re.compile(r"([|>][0-9+-]*)(?:\s+#.*)?")
-_CI_QUOTED_VALUE = re.compile(r"""('(?:[^']|'')*'|"(?:[^"\\]|\\.)*")(?:\s+#.*)?""")
-_CI_FLOW_SEQUENCE = re.compile(r"\[[A-Za-z0-9._/ ,-]*\](?:\s+#.*)?")
+# The workflow reader below is a STRICT ALLOWLIST of the YAML forms .github/workflows/quality.yml
+# itself uses, each held to its exact YAML 1.2 grammar; it never parses YAML in general, and a line it
+# cannot place under one of these forms makes the job-limit read cannot evaluate. Whitespace is
+# YAML's: indentation is ASCII spaces only, and tokens are separated by spaces or tabs; no other
+# character (a no-break space, U+3000 or any other Unicode space) is ever stripped as whitespace, so
+# it stays part of the text it sits in, as it does for a YAML loader. The forms:
+#   * a blank line (spaces and tabs only), or a comment line (`#` after any spaces and tabs);
+#   * a plain-key line, `KEY:` (KEY starts with a letter or `_` and holds letters, digits, `_`, `.`
+#     and `-`; the colon follows it directly, then whitespace or the line end), optionally after ONE
+#     sequence-entry indicator written `- ` (a dash, one space, then the key), whose value is:
+#       - empty, or a comment: a nested mapping or sequence follows;
+#       - the literal block-scalar header `|` with no indicator (clip chomping, its indentation
+#         detected), then optionally whitespace and a comment; its content is every following line
+#         deeper than the key, with the blank lines among them;
+#       - a single-quoted scalar on one line, whose only escape is `''` (YAML defines no other in
+#         that style), as in `python-version: '3.14'`;
+#       - a flow sequence on one line of plain items, as in `branches: [main]` and
+#         `types: [opened, synchronize, reopened]`;
+#       - a plain scalar on one line, by YAML's own rules: it starts with no indicator character
+#         (`-`, `?` and `:` only when a non-space follows), holds no `: ` and no ` #`, holds only
+#         printable characters, and ends before any trailing whitespace or comment;
+#   * a plain-scalar sequence entry, `- ITEM` (letters, digits, `_`, `.`, `/`, `-` and spaces,
+#     starting with no `-`), as in the needs: list.
+# Everything else is refused BY NAME: a double-quoted scalar (quality.yml uses none, so no escape in
+# that style is ever read), a block-scalar header with an indicator (`|-`, `|2`, `>`) or a malformed
+# one (`|++`, `|0`), a sequence entry not written `- ` then content, an alias, anchor, tag or flow
+# mapping, and a value holding a character YAML does not print (a control character).
+# A comment's text, like a comment line's and block-scalar content, is data: it is never read for
+# structure, so its characters are not checked.
+_CI_QUOTED_CHAR = "[\t\x20-\x26\x28-\x7e\xa0-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]"
+_CI_NON_SPACE = "[\x21-\x7e\xa0-\ud7ff\ue000-\ufefe\uff00-\ufffd\U00010000-\U0010ffff]"
+_CI_TRAILER = "(?:[ \t]+(?:#.*)?)?"
+_CI_FLOW_ITEM = r"[A-Za-z0-9_./][A-Za-z0-9_./-]*"
+_CI_PLAIN_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*:(?=[ \t]|$)")
+_CI_PLAIN_ITEM = re.compile(r"[A-Za-z0-9_./][A-Za-z0-9_./ -]*")
+_CI_NESTED_VALUE = re.compile("(?:#.*)?")
+_CI_BLOCK_HEADER = re.compile(r"(\|)" + _CI_TRAILER)
+_CI_QUOTED_VALUE = re.compile("('(?:" + _CI_QUOTED_CHAR + "|'')*')" + _CI_TRAILER)
+_CI_FLOW_SEQUENCE = re.compile(r"(\[[ \t]*(?:" + _CI_FLOW_ITEM + r"(?:[ \t]*,[ \t]*" + _CI_FLOW_ITEM
+                               + r")*)?[ \t]*\])" + _CI_TRAILER)
+_CI_PLAIN_VALUE = re.compile(
+    "((?:(?![-?:,\\[\\]{}#&*!|>'\"%@`])" + _CI_NON_SPACE + "|[-?:](?=" + _CI_NON_SPACE + "))"
+    "(?:[ \t]*(?:(?![:#])" + _CI_NON_SPACE + "|(?<![ \t])#|:(?=" + _CI_NON_SPACE + ")))*)"
+    + _CI_TRAILER)
 # The characters str.splitlines() ends a line at besides "\n" and "\r": a YAML 1.2 loader reads none of
 # them as a line break, a YAML 1.1 loader reads \x85, \u2028 and \u2029 as one, so a workflow holding
 # any of them has lines this parser and the loader GitHub runs need not agree on.
@@ -939,92 +979,99 @@ _CI_OTHER_LINE_BREAKS = frozenset("\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 
 
 def _ci_value(rest):
-    """The form of the text after a plain key's colon, as (form, value): ("nested", "") for an empty or
-    comment-only value (nested lines follow, and are scanned in turn), ("block", header) for a
-    block-scalar header, ("quoted", text) for a single-line quoted scalar, ("plain", text) for a
-    single-line plain scalar (a comment begins only at whitespace then `#`, so `30#x` is the scalar
-    `30#x`), and (None, text) for any other value: an alias, anchor or tag, a flow collection, a
-    multi-line or unterminated quoted scalar, or a plain scalar carrying a mapping colon introduces
-    structure this line parser does not read."""
-    text = rest.strip()
-    if not text or text.startswith("#"):
+    """The form of the text after a plain key's colon (empty, or whitespace first), as (form, value):
+    ("nested", "") for an empty or comment-only value (nested lines follow, and are scanned in turn),
+    ("block", "|") for the bare literal block-scalar header, ("quoted", text) for a single-line
+    single-quoted scalar, ("flow", text) for a single-line flow sequence of plain items, ("plain",
+    text) for a single-line plain scalar (a comment begins only at whitespace then `#`, so `30#x` is
+    the scalar `30#x`), and (None, text) for any other value: no other form is on the allowlist above
+    (a double-quoted scalar, any other block-scalar header, an alias, anchor or tag, a flow mapping, a
+    multi-line or unterminated quoted scalar, a plain scalar carrying a mapping colon or a control
+    character). Only spaces and tabs are stripped, never other Unicode whitespace."""
+    text = rest.lstrip(" \t")
+    if _CI_NESTED_VALUE.fullmatch(text):
         return "nested", ""
-    block = _CI_BLOCK_HEADER.fullmatch(text)
-    if block:
-        return "block", block.group(1)
-    quoted = _CI_QUOTED_VALUE.fullmatch(text)
-    if quoted:
-        return "quoted", quoted.group(1)
-    scalar = re.split(r"\s+#", text, maxsplit=1)[0]
-    if text[0] in "-?:,[]{}#&*!|>'\"%@`" or re.search(r":(\s|$)", scalar):
-        return None, text
-    return "plain", scalar
+    for form, pattern in (("block", _CI_BLOCK_HEADER), ("quoted", _CI_QUOTED_VALUE),
+                          ("flow", _CI_FLOW_SEQUENCE), ("plain", _CI_PLAIN_VALUE)):
+        match = pattern.fullmatch(text)
+        if match:
+            return form, match.group(1)
+    return None, text
 
 
 def _ci_job_header(lines, job):
     """Where `job` is declared in the workflow lines, as ((index of its header line, indentation of the
-    jobs mapping's own keys), None), or (None, reason) naming what could not be placed. The header must
-    be a DIRECT key of the top-level `jobs:` mapping, exactly once, with no value on its own line; a
-    line that merely reads like one inside a block scalar, under another top-level key, or nested
-    deeper inside jobs: is not a job, and the loader GitHub runs would not read it as one. Fail-closed:
-    every line of the file must be one this line parser places, so no header can hide inside structure
-    it does not read: a plain-key line (`KEY:` or `- KEY:`) whose value is empty, a block-scalar header,
-    or a single-line quoted, plain or plain-item flow-sequence scalar, an unquoted plain-scalar list
-    item, a comment or blank line, or the content of a block scalar a plain-key line opened. A
-    multi-line quoted or flow scalar (its opening line is not one of those forms), a line deeper than a
-    single-line value above it (a plain scalar continued, or no structure at all), a tab before a line's
-    content, a sequence at column 0, a second top-level jobs: key and a jobs: value that is not a
-    mapping are each refused BY NAME, never scanned around."""
+    jobs mapping's own keys, the placed lines), None), or (None, reason) naming what could not be
+    placed. The placed lines are the plain-key lines and plain-scalar sequence entries, in file order,
+    each as (index, indentation, sequence-entry indicators (0 or 1), key (None for an entry), value
+    form (_ci_value; "item" for an entry), value); blank and comment lines and block-scalar content
+    are not among them. The header must be a DIRECT key of the top-level `jobs:` mapping, exactly
+    once, with no value on its own line; a line that merely reads like one inside a block scalar, under
+    another top-level key, or nested deeper inside jobs: is not a job, and the loader GitHub runs would
+    not read it as one. Fail-closed: every line of the file must be one of the allowlisted forms (the
+    allowlist above _ci_value), so no header can hide inside structure this reader does not read.
+    Each of these is refused BY NAME, never scanned around: a line of no allowlisted form (a quoted or
+    escaped key, a sequence entry not written `- ` then content, a line starting with a character
+    YAML does not read as whitespace, such as a no-break space), a value of no allowlisted form (a
+    multi-line quoted or flow scalar, whose opening line is not one, a double-quoted scalar, a
+    block-scalar header other than a bare `|`), a line deeper than a single-line value above it (a
+    plain scalar continued, or no structure at all), a tab before a line's content, a sequence at
+    column 0, a line indented before any top-level key, a second top-level jobs: key, a jobs: value
+    that is not a mapping, a line inside jobs: that is neither one of its keys nor nested inside one,
+    a job header with a value on its line, no top-level jobs: key, and the job absent or repeated."""
     top = None           # the top-level key the scan is under
     jobs_line = None     # the index of the top-level jobs: key line
     jobs_indent = None   # the indentation of the jobs mapping's own keys, from its first key line
     block_column = None  # the key column of an open block scalar; deeper lines are its content
     value_column = None  # the column of a single-line value's key or item; a deeper line continues it
     found = []
+    placed = []
     for index, line in enumerate(lines):
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip(" "))
+        body = line.lstrip(" ")
+        indent = len(line) - len(body)
+        content = body.lstrip(" \t")
         if block_column is not None:
-            if not stripped or indent > block_column:
+            if not content or indent > block_column:
                 continue  # block-scalar content, or a blank line inside it
             block_column = None
-        if not stripped or stripped.startswith("#"):
+        if not content or content.startswith("#"):
             continue
-        refusal = "line {} {!r} of the workflow ".format(index + 1, stripped)
-        if line[indent] == "\t":
+        refusal = "line {} {!r} of the workflow ".format(index + 1, content)
+        if body[0] == "\t":
             return None, refusal + "has a tab before its content; cannot place the {} job".format(job)
         if value_column is not None and indent > value_column:
             return None, (refusal + "is deeper than the single-line value above it (a continued "
                           "scalar, or no structure this parser reads); cannot place the {} "
                           "job".format(job))
         value_column = None
-        item, dashes = stripped, 0
-        while item.startswith("- "):
-            dashes += 1
-            item = item[2:].lstrip()
+        item, dashes = body, 0
+        if body.startswith("- ") and body[2:3] not in ("", " ", "\t"):
+            item, dashes = body[2:], 1
         if dashes and indent == 0:
             return None, refusal + "opens a sequence at column 0; cannot place the {} job".format(job)
         if indent and top is None:
             return None, refusal + "is indented before any top-level key; cannot place the {} job".format(
                 job)
         match = _CI_PLAIN_KEY.match(item)
-        if not match:
-            if dashes and _CI_PLAIN_ITEM.fullmatch(item):
-                value_column = indent  # an unquoted plain-scalar list item
-                continue
+        if match:
+            key = match.group(0)[:-1]
+            form, value = _ci_value(item[match.end():])
+            if form is None:
+                return None, (refusal + "carries the value {!r}, a form this parser does not place "
+                              "(an alias, anchor, tag, double-quoted, multi-line quoted or flow scalar, "
+                              "flow mapping, or a block-scalar header other than a bare |); cannot "
+                              "place the {} job".format(value, job))
+        elif dashes and _CI_PLAIN_ITEM.fullmatch(item):
+            key, form, value = None, "item", item  # an unquoted plain-scalar list item
+        else:
             return None, (refusal + "is not a form this parser places (a plain-key line, an unquoted "
                           "plain-scalar list item, or block-scalar content); cannot place the {} "
                           "job".format(job))
-        key, rest = match.group(0)[:-1], item[match.end():]
-        form, value = _ci_value(rest)
-        if form is None and _CI_FLOW_SEQUENCE.fullmatch(rest.strip()):
-            form = "flow"
-        if form is None:
-            return None, (refusal + "carries the value {!r}, a form this parser does not place (an "
-                          "alias, anchor, tag, multi-line quoted or flow scalar, or flow mapping); "
-                          "cannot place the {} job".format(value, job))
+        placed.append((index, indent, dashes, key, form, value))
         if form == "block":
             block_column = indent + 2 * dashes
+        elif form == "item":
+            value_column = indent
         elif form != "nested":
             value_column = indent + 2 * dashes
         if indent == 0:
@@ -1055,7 +1102,7 @@ def _ci_job_header(lines, job):
     if len(found) != 1:
         return None, ("job {} appears {} times as a key of the top-level jobs: mapping (need exactly "
                       "one)".format(job, len(found)))
-    return (found[0], jobs_indent), None
+    return (found[0], jobs_indent, placed), None
 
 
 def _ci_job_limit_s(workflow_text, job):
@@ -1065,16 +1112,15 @@ def _ci_job_limit_s(workflow_text, job):
     hosted-runner job that sets none. Job and step limits are DISTINCT: a step's own timeout-minutes is
     parsed and validated but does not cap the job budget (it kills that one step, a loud step failure,
     without shrinking the time the gate steps get). Fail-closed: before ANY limit (the default
-    included) is returned, every line of the job must be one this line parser evaluates: a plain-key
-    line (`KEY:` or `- KEY:`, the key a plain unquoted scalar with the colon directly after it) whose
-    value is a form _ci_value reads (empty, a block-scalar header, or a single-line quoted or plain
-    scalar), an UNQUOTED plain-scalar list item (no quote, colon or `#`), a comment or blank line, or
-    the content of a block scalar that a plain-key line opened. A quoted, escaped, tagged, anchored or
-    aliased key or step, a quoted list item, a value that is an alias, anchor, tag or flow collection
-    (`steps: *closure_steps`, `steps: [{run: echo ok, timeout-minutes: 1}]`), and any other line shape
-    are refused BY NAME, never scanned around: the YAML loader GitHub runs would evaluate them where
-    this parser would not, so no limit the job might carry there can be trusted. A timeout-minutes
-    value is validated BEFORE any block-scalar skip, so `timeout-minutes: |` is refused by name, never
+    included) is returned, every line of the WHOLE workflow must be one of the allowlisted forms (the
+    allowlist above _ci_value; _ci_job_header places them, and this reads the job's lines from what
+    it placed). A quoted, escaped, tagged, anchored or aliased key or step, a quoted list item, a
+    value that is an alias, anchor, tag, double-quoted scalar or flow mapping (`steps:
+    *closure_steps`, `steps: [{run: echo ok, timeout-minutes: 1}]`, `run: "echo \\q"`), a
+    block-scalar header other than a bare `|` (`|++`, `|0`), and any other line shape are refused BY
+    NAME, never scanned around: the YAML loader GitHub runs would evaluate (or reject) them where this
+    parser would not, so no limit the job might carry there can be trusted. A timeout-minutes value
+    is validated BEFORE any block-scalar skip, so `timeout-minutes: |` is refused by name, never
     skipped as content; it must be a plain decimal integer without a leading zero (`030` reads as 24
     to a YAML 1.1 loader and as 30 to a YAML 1.2 one, and `30#x` is the string `30#x`, never 30). The
     job header is placed structurally (_ci_job_header): one that is absent or duplicated as a direct
@@ -1086,54 +1132,28 @@ def _ci_job_limit_s(workflow_text, job):
         return None, ("the workflow holds {} (a line break str.splitlines and a YAML loader need not "
                       "agree on); cannot place the {} job".format(
                           ", ".join(repr(char) for char in breaks), job))
-    lines = workflow_text.splitlines()
-    placed, reason = _ci_job_header(lines, job)
+    placed, reason = _ci_job_header(workflow_text.splitlines(), job)
     if placed is None:
         return None, reason
-    start, jobs_indent = placed
+    start, jobs_indent, entries = placed
     minutes = [_CI_DEFAULT_JOB_MINUTES]
     job_indent = None    # the indentation of the job mapping's own keys, from its first key line
-    block_column = None  # the key column of an open block scalar; deeper lines are its content
-    for line in lines[start + 1:]:
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip(" "))
-        if block_column is not None:
-            if not stripped or indent > block_column:
-                continue  # block-scalar content, or a blank line inside it
-            block_column = None
-        if not stripped or stripped.startswith("#"):
+    for index, indent, dashes, key, form, value in entries:
+        if index <= start:
             continue
         if indent <= jobs_indent:
             break  # the next job, or a top-level key, ends this job
-        item, dashes = stripped, 0
-        while item.startswith("- "):
-            dashes += 1
-            item = item[2:].lstrip()
-        match = _CI_PLAIN_KEY.match(item)
-        if not match:
-            if dashes and _CI_PLAIN_ITEM.fullmatch(item):
-                continue  # an unquoted plain-scalar list item carries no key and no step mapping
-            return None, ("line {!r} in the {} job is not a form this parser evaluates (a plain-key "
-                          "line, an unquoted plain-scalar list item, or block-scalar content); cannot "
-                          "evaluate the job limit".format(stripped, job))
+        if key is None:
+            continue  # an unquoted plain-scalar list item carries no key and no step mapping
         if job_indent is None and dashes == 0:
             job_indent = indent
-        form, value = _ci_value(item[match.end():])
-        if match.group(0)[:-1] == "timeout-minutes":
+        if key == "timeout-minutes":
             if form != "plain" or not re.fullmatch(r"0|[1-9][0-9]*", value):
                 return None, ("timeout-minutes value {!r} in the {} job is not a plain decimal "
                               "integer without a leading zero (cannot evaluate)".format(
                                   value, job))
             if dashes == 0 and indent == job_indent:
                 minutes.append(int(value))
-            continue
-        if form is None:
-            return None, ("value {!r} of key {!r} in the {} job is not a form this parser evaluates "
-                          "(an alias, anchor, tag or flow collection introduces structure it does not "
-                          "read); cannot evaluate the job limit".format(
-                              value, match.group(0)[:-1], job))
-        if form == "block":
-            block_column = indent + 2 * dashes
     return 60 * min(minutes), None
 
 
@@ -1280,8 +1300,10 @@ def _script_fault(tools_dir, script):
 
 
 def _check_roster_registration(subset, tools_dir=None):
-    """The WHOLE closure roster, every row. Every leg of _LEG_CEILING_S (each row of which records a
-    measured run of that leg) must be a row of subset exactly once, and subset must name no other leg;
+    """The WHOLE closure roster, every row. Every leg of _LEG_CEILING_S (each row of which records
+    that leg's ceiling, INFERRED for this tree: most rows carry a run measured at an earlier tree, and
+    two record a figure no run measured) must be a row of subset exactly once, and subset must name no
+    other leg;
     the ceiling table's legs must be the count and digest _ROSTER_PIN records (_roster_pin), so a row
     removed, added or renamed together with its ceiling row, which leaves the two tables agreeing, is
     still named. Every row's script must be a plain file name (_plain_file_name), so no row names a
@@ -1347,9 +1369,17 @@ def _roster_registration_self_test(root):
     outside opf/tools/ again with no opf/tools/ to check), and a script the isolated copy leaves out (a
     *.pyc name, with and without an opf/tools/ to check, and __pycache__); with no opf/tools/ to
     check, a plain script's presence is not checked, never failed. The symlink shapes need a tree of
-    their own, so _harness_routing_self_test holds them through run()."""
+    their own, so _harness_routing_self_test holds them through run(). As in run(), drift in the
+    real roster itself is a failure (1) whether or not root has an opf/tools/, and with a clean
+    roster no opf/tools/ is cannot evaluate (2): the scripts are absent, not drifted
+    (_check_routing_self_test holds this through self_test_main)."""
     tools_dir = Path(root) / "opf" / "tools"
-    _under_test("roster-registration", _check_roster_registration, _SUBSET, tools_dir)
+    present = tools_dir.is_dir()
+    _under_test("roster-registration", _check_roster_registration, _SUBSET,
+                tools_dir if present else None)
+    if not present:
+        raise _CannotEvaluate("closure/roster-registration-cannot-evaluate: opf/tools/ not found under "
+                              "{}, so the roster's scripts cannot be checked".format(root))
     print("PASS closure/roster-registration")
 
     def renamed_leg(rows):
@@ -2329,13 +2359,97 @@ def _bounds_self_test(root):
           "a line break a YAML loader need not read -> each refused by name, never read for a limit; "
           "the same header as a direct jobs: key (one-column jobs mapping, trailing comment) -> read; "
           "the real workflow's five jobs -> read above".format(_CI_JOBS[0]))
+    # Each refusal of the header reader, by name, on an input it alone stops: each entry is (check,
+    # workflow text, the text its refusal must name). With that refusal removed the input reads a
+    # limit or reaches another refusal, so each entry fails without it. Whitespace is YAML's: only
+    # spaces indent and only spaces and tabs separate, so a no-break or ideographic space next to a
+    # job header is part of the line's text, and the line is no key.
+    minimal = "jobs:\n  {}:\n    runs-on: ubuntu-latest\n".format(_CI_JOBS[0])
+    for check, placed_text, want_named in (
+            ("ci-tab-before-content-read", "jobs:\n  {}:\n\t  timeout-minutes: 30\n".format(_CI_JOBS[0]),
+             "has a tab before its content"),
+            ("ci-column-0-sequence-read", "- x\n" + minimal, "opens a sequence at column 0"),
+            ("ci-line-indented-before-any-top-level-key-read", "  x: 1\n" + minimal,
+             "is indented before any top-level key"),
+            ("ci-second-top-level-jobs-key-read",
+             minimal + "jobs:\n  other:\n    runs-on: ubuntu-latest\n", "is a second top-level jobs: key"),
+            ("ci-jobs-value-not-a-mapping-read", "jobs: |\n" + minimal[len("jobs:\n"):],
+             "gives jobs: a value that is not a mapping"),
+            ("ci-job-value-not-a-mapping-read", "jobs:\n  {}: x\n".format(_CI_JOBS[0]),
+             "gives the {} job a value that is not a mapping".format(_CI_JOBS[0])),
+            ("ci-duplicate-job-header-read",
+             minimal + "  {}:\n    runs-on: ubuntu-latest\n".format(_CI_JOBS[0]),
+             "appears 2 times as a key of the top-level jobs: mapping"),
+            ("ci-sequence-entry-in-the-jobs-mapping-read", minimal + "  - x\n",
+             "neither a key of the jobs"),
+            ("ci-unicode-space-before-the-header-read",
+             "jobs:\n  \xa0{}:\n    timeout-minutes: 30\n".format(_CI_JOBS[0]),
+             "is not a form this parser places"),
+            ("ci-unicode-space-before-the-header-read",
+             "jobs:\n  \u3000{}:\n    timeout-minutes: 30\n".format(_CI_JOBS[0]),
+             "is not a form this parser places"),
+            ("ci-unicode-space-after-the-header-read",
+             "jobs:\n  {}:\xa0\n    timeout-minutes: 30\n".format(_CI_JOBS[0]),
+             "is not a form this parser places"),
+            ("ci-unicode-space-line-read-as-blank", minimal + "\xa0\n",
+             "is not a form this parser places")):
+        got_limit, got_reason = ci_limit(check, placed_text, _CI_JOBS[0])
+        if got_limit is not None or want_named not in (got_reason or ""):
+            raise _CheckFailure("closure/{}: {!r}".format(check, (got_limit, got_reason)))
+    print("RED a tab before a line's content, a sequence at column 0, a line indented before any "
+          "top-level key, a second top-level jobs: key, a value of jobs: or of the {} job that is not "
+          "a mapping, the {} header twice, a sequence entry in the jobs mapping, a no-break or "
+          "ideographic space before or after the header, and a line holding only a no-break space "
+          "-> each refused by its own name".format(
+              _CI_JOBS[0], _CI_JOBS[0]))
     # Value forms, on a minimal job: each entry is (check, job body, the limit it must read, or None
     # with the text its refusal must name). A timeout-minutes value is validated before any
     # block-scalar skip; a value that opens structure this parser does not read (an alias, a flow
     # collection) is refused by name; a comment begins only at whitespace then `#`; a leading zero is
     # refused; a quoted list item is not a plain-scalar item, an unquoted one is; and an indentless
     # step sequence (its `- ` at the job keys' own column) keeps a step's timeout off the job budget.
+    # The allowlist holds each form to its own grammar: a double-quoted scalar (quality.yml uses none,
+    # so `\q`, which YAML defines no meaning for, is never read as an escape), a malformed block-scalar
+    # header (`|++`, `|0`), one with an indicator (`|-`, `>`), a control character in a plain scalar,
+    # a sequence entry not written `- ` then content (`-  key`, `- - item`), a flow sequence with an
+    # empty item, and a no-break space before a key, after its colon or after a `|` header are each
+    # refused by name; a bare `|` with a comment, the `''` escape of a single-quoted
+    # scalar, a tab separating a value and its comment, and a one-line flow sequence of plain items
+    # are read.
     for check, body, want_limit, want_named in (
+            ("ci-double-quoted-invalid-escape-read", '    steps:\n      - run: "echo \\q"\n', None,
+             "carries the value " + repr('"echo \\q"')),
+            ("ci-double-quoted-scalar-read", '    steps:\n      - run: "echo ok"\n', None,
+             "carries the value " + repr('"echo ok"')),
+            ("ci-malformed-block-header-read", "    steps:\n      - run: |++\n          echo ok\n",
+             None, "carries the value '|++'"),
+            ("ci-malformed-block-header-read", "    steps:\n      - run: |0\n          echo ok\n",
+             None, "carries the value '|0'"),
+            ("ci-indicated-block-header-read", "    steps:\n      - run: |-\n          echo ok\n",
+             None, "carries the value '|-'"),
+            ("ci-indicated-block-header-read", "    steps:\n      - run: >\n          echo ok\n",
+             None, "carries the value '>'"),
+            ("ci-control-character-value-read", "    steps:\n      - run: echo \x01\n", None,
+             "carries the value " + repr("echo \x01")),
+            ("ci-sequence-entry-spacing-read", "    steps:\n      -  run: echo ok\n", None,
+             "is not a form this parser places"),
+            ("ci-nested-sequence-entry-read", "    needs:\n      - - lint\n", None,
+             "is not a form this parser places"),
+            ("ci-malformed-flow-sequence-read", "    needs: [lint,,test]\n", None,
+             "carries the value '[lint,,test]'"),
+            ("ci-unicode-space-after-a-block-header-read",
+             "    steps:\n      - run: |\xa0# script\n          echo ok\n", None,
+             "carries the value " + repr("|\xa0# script")),
+            ("ci-unicode-space-before-a-key-read", "    \xa0timeout-minutes: 30\n", None,
+             "is not a form this parser places"),
+            ("ci-unicode-space-after-a-colon-read", "    timeout-minutes:\xa030\n", None,
+             "is not a form this parser places"),
+            ("ci-bare-block-header-not-read", "    steps:\n      - run: | # script\n          echo ok\n",
+             default_s, None),
+            ("ci-single-quote-escape-not-read", "    steps:\n      - run: 'it''s'\n", default_s, None),
+            ("ci-tab-separation-not-read", "    timeout-minutes:\t30\t# half an hour\n", 1800, None),
+            ("ci-flow-sequence-value-not-read", "    needs: [lint, test]\n    timeout-minutes: 30\n",
+             1800, None),
             ("ci-block-scalar-timeout-not-refused-by-name", "    timeout-minutes: |\n      1\n", None,
              "timeout-minutes value '|'"),
             ("ci-alias-steps-value-not-refused-by-name", "    steps: *closure_steps\n", None,
@@ -2359,10 +2473,14 @@ def _bounds_self_test(root):
             raise _CheckFailure("closure/{}: {!r}".format(check, (got_limit, got_reason)))
     print("RED ci-job-30-minutes -> does not fit; ci-job-absent, a non-integer value, a quoted key, an "
           "escaped key, an alias step, a block-scalar timeout-minutes, an alias or flow steps value, "
-          "timeout-minutes 30#x and 030, and a quoted list item -> each refused by name; a step's own "
-          "timeout-minutes: 1 (first key or not, and in an indentless step sequence) -> parsed, the "
-          "job budget stays {}s; `30 # comment` -> 30 minutes; an unquoted list item -> accepted; "
-          "quoted text inside a block scalar -> content, not a key".format(default_s))
+          "timeout-minutes 30#x and 030, a quoted list item, a double-quoted scalar (a `\\q` escape "
+          "included), a block-scalar header |++, |0, |- or >, a control character in a plain scalar, "
+          "a sequence entry `-  key` or `- - item`, a flow sequence [lint,,test], and a no-break "
+          "space before a key, after its colon or after a | header -> each refused by name; a step's "
+          "own timeout-minutes: 1 (first key or not, and in an indentless step sequence) -> parsed, the job budget stays {}s; `30 # comment` and a tab-separated "
+          "`30<TAB># comment` -> 30 minutes; an unquoted list item, a bare | with a comment, a "
+          "single-quoted '' escape and a one-line flow sequence -> accepted; quoted text inside a "
+          "block scalar -> content, not a key".format(default_s))
     # The config-lane deadline, read from the lane runner on every run. EVERY leg whose command is a
     # member of the runner's own roster (_registered_selftests over root's registries, never a list
     # kept here) must reach the deadline the config lanes give that command, plus the launch margin,
@@ -3797,7 +3915,8 @@ def _self_test_phase(phase):
     the reason printed. The exception's TYPE routes it, never its message. A _CheckFailure, a check
     failing on its own assertion, is a self-test failure (1); that includes a crash or a SystemExit in
     the code under test a check calls, which the check converts into one (_under_test). A
-    _CannotEvaluate, a check that cannot evaluate what it checks (the CI job limit cannot be read), is
+    _CannotEvaluate, a check that cannot evaluate what it checks (the CI job limit cannot be read, or
+    there is no opf/tools/), is
     cannot evaluate (2), named by its message. Every other exception, and a SystemExit raised outside
     such a call, is a harness fault, cannot evaluate (2), named by its type, never a self-test failure,
     never a traceback and never the exit a SystemExit carries: a _BoundError (a bound that cannot be
@@ -4455,7 +4574,9 @@ def _check_routing_self_test():
     limit. A FAULT IN THE CHECK'S OWN WORK outside its calls into the code under test (its temporary
     directory, as on a full disk) stays a harness fault (2), so the conversion covers those calls and
     nothing more; a check's own assertions, those about its fixtures included (a readiness file that
-    never appears), are its failures (1) like any other. Each case launches no process."""
+    never appears), are its failures (1) like any other. self_test_main from a root with no
+    opf/tools/ (its closure legs stubbed to pass) cannot evaluate (2), never a failure (1). Each case
+    launches no process."""
     def crashing(name, exc):
         def crashed(*_args, **_kwargs):
             raise exc
@@ -4548,13 +4669,29 @@ def _check_routing_self_test():
             if got != want or said_want not in said:
                 raise _CheckFailure("closure/check-routing: {} -> {!r}, want {!r} naming {!r}: "
                                     "{!r}".format(label, got, want, said_want, said[-2000:]))
+        # --self-test from a root with no opf/tools/ cannot evaluate (2), never a failure (1): the
+        # roster's scripts are absent, not drifted. The closure legs are stubbed to pass, so a fast
+        # phase that let the missing tree through would read 0 here.
+        bare = tmp / "no-opf"
+        os.makedirs(bare)
+        out = io.StringIO()
+        with _swapped(repo_root=lambda: bare, _closure_legs=lambda *_args, **_kwargs: 0):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                got = self_test_main()
+        said = out.getvalue()
+        said_want = ("SELF-TEST CANNOT EVALUATE: closure/roster-registration-cannot-evaluate: "
+                     "opf/tools/ not found under {}".format(bare))
+        if got != 2 or said_want not in said:
+            raise _CheckFailure("closure/check-routing: no-opf-tools -> {!r}, want 2 naming {!r}: "
+                                "{!r}".format(got, said_want, said[-2000:]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("RED a crash in the code under test (_negative_verdict, _leg_bounds, _positive_verdict, a "
           "registration check, the whole-roster check, _run_one, _kill_and_reap) and a SystemExit it "
           "raises (_negative_verdict, _kill_and_reap) -> the calling check's FAIL naming it, exit 1; "
           "a wrong answer -> FAIL, exit 1; the CI job limit that cannot be read -> CANNOT EVALUATE, "
-          "exit 2; a fault in a check's own temporary directory -> CANNOT EVALUATE, exit 2")
+          "exit 2; a fault in a check's own temporary directory -> CANNOT EVALUATE, exit 2; "
+          "--self-test from a root with no opf/tools/ -> CANNOT EVALUATE, exit 2")
 
 
 def _fast_vectors(root):
