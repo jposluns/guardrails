@@ -194,8 +194,9 @@ _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
 HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # The four imported-series checks spec 8.3 names, which activation MUST add to the doctor roster (spec
 # 4.2). They join the roster only for a store whose imported series is ACTIVE (imported_series_active
-# below), appended after its homes roster, so an inactive store's roster, and so its report, is
-# unchanged. All four are graded here on an active store; result()'s roster reconciliation still routes
+# below), appended after its homes roster, so an inactive store's roster is unchanged (its report can
+# still gain the section 8.6 firewall residuals, which are keyed on provenance, not on activation; see
+# _FIREWALL_RESIDUALS). All four are graded here on an active store; result()'s roster reconciliation still routes
 # any of them that does not run to CANNOT-EVALUATE (a check that never runs is never a pass), so no
 # active store certifies VALID on a partial imported roster. While this roster is
 # non-empty the activation tripwire in _check_containment stays disarmed, and the self-test asserts
@@ -441,9 +442,12 @@ _FIREWALL_RESIDUALS = (
     "outcome, an artifact's promoted state, a release's published state, a maintainer_action's done) are "
     "not graded, because no record schema for those types ships in the baseline validator: a store holding "
     "such a clean record is CANNOT-EVALUATE under the module-tier schema deferral, and an imported one is a "
-    "C-IMPORTED-SCHEMA finding, so neither certifies VALID until those schemas ship. A ratified active "
-    "preference_pattern enters no check of this engine, so the firewall obligation on it binds the readers "
-    "of those records.",
+    "C-IMPORTED-SCHEMA finding, so neither certifies VALID until those schemas ship. No check of this "
+    "engine joins preference_pattern records into current state: C-RECORDS grades their records and C-LINKS "
+    "resolves links to them, but nothing reads a ratified active status as current authority, and C-VIEW-DRIFT "
+    "compares the decisions view only against the views planner, which lists an importer-authored active "
+    "pattern as active, so the firewall obligation on an importer-authored active preference_pattern binds "
+    "the readers of those records.",
     "The section 8.6 receipt remedy is accepted on its machine-checkable shape alone: a maintainer-"
     "authored clean maintainer_decision whose `corrects` link targets the ratified done item. Whether its "
     "decision text records that the item's completion stands is prose the specification gives no "
@@ -1956,8 +1960,15 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
 def _check_receipts(recs, by_id, rep):
     """C-RECEIPTS (R1): the done<->backlog_item receipt is one-to-one in BOTH directions (OPF-SPEC 8.5).
     Every ratified backlog_item (unqualified `done`) has exactly one done receipt; every done's receipt_of
-    target resolves to a backlog_item ratified at `done`."""
-    bi_state = {r.id: (r.state, r.qual) for r in recs if r.rtype == "backlog_item" and isinstance(r.id, str)}
+    target resolves to a backlog_item ratified at `done`. The count covers every clean done receipt,
+    whoever authored it: it grades the receipt link structure, not a current-state join (spec 8.6), since a
+    done receipt is a created-terminal record whose `recorded` status confers no current authority, and a
+    legacy importer-authored receipt keeps its bytes and its place in the clean series. So an importer
+    receipt beside a non-importer one is a second receipt and a finding, never discounted to make the item
+    pass. The writer never mints that store (done-with-receipt refuses an item that already has a
+    receipt); the remedy spec 8.6 defines for an item whose only receipt is importer-authored is a
+    maintainer-authored `corrects` decision, which _check_importer_receipts accepts."""
+    bi_state ={r.id: (r.state, r.qual) for r in recs if r.rtype == "backlog_item" and isinstance(r.id, str)}
     done_targets = {}
     for r in recs:
         if r.rtype == "done" and isinstance(r.id, str):
@@ -7369,7 +7380,8 @@ def self_test():
                   and any("'BI-1'" in m for m in _i3_msgs(_i3_rmo, "C-IMPORTED-SEGREGATION")))
             # The receipt firewall's edges: an item holding one importer and one maintainer receipt
             # holds a clean receipt, so the firewall passes while C-RECEIPTS reports the one-to-one
-            # finding (red when its all() weakens to any()); a proposed done item is not ratified, so
+            # finding, since that count covers importer-authored receipts too (see _check_receipts; red
+            # when its all() weakens to any()); a proposed done item is not ratified, so
             # it is not graded (red when the qualifier guard is dropped).
             _i3_mx = _i3_machine()
             _i3_mx["done.index.toml"] = idx([copy.deepcopy(_i3_idn), dn(2, "BI-1")])
@@ -7442,10 +7454,11 @@ def self_test():
                   and any("'BI-1'" in m for m in _i3_msgs(_i3_rmxr, "C-IMPORTED-SEGREGATION")))
             # The section 8.6 residuals: an active store discloses the firewall entries and the
             # imported-series entry, and the inactive clean store, which holds no importer-authored record,
-            # discloses neither (red when either disclosure is dropped or widened). The pins are independent
+            # discloses neither (red when either disclosure is dropped or widened); the firewall-inactive
+            # checks cover an inactive store that holds one. The pins are independent
             # of the live constants: sha256 over each tuple's entries joined by a newline, UTF-8, so a
             # changed, dropped, added or reordered entry fails here until the pin is renewed with it.
-            check("imported-residuals-disclosed-active-only",
+            check("imported-residuals-disclosed-active-not-clean",
                   _i3_ok is not None
                   and all(x in _i3_ok.residuals for x in _FIREWALL_RESIDUALS + _IMPORTED_RESIDUALS)
                   and clean is not None
@@ -7453,7 +7466,7 @@ def self_test():
             check("imported-residuals-pinned",
                   len(_FIREWALL_RESIDUALS) == 3
                   and hashlib.sha256("\n".join(_FIREWALL_RESIDUALS).encode("utf-8")).hexdigest()
-                  == "0af7442b20b5ffd35e0f7ee963f9e1aea3dc47aeff43f5b28a083c3d1114d8a3"
+                  == "55680668b6b21cd3d7ac0ee3c4870e92032695d7efdc6f9b24f1ad3010d4d4c8"
                   and len(_IMPORTED_RESIDUALS) == 1
                   and hashlib.sha256("\n".join(_IMPORTED_RESIDUALS).encode("utf-8")).hexdigest()
                   == "15be7339b7047adcc7f4831e29a52a00c87b93eca3cfbe58ea8a65045176dfbf")
