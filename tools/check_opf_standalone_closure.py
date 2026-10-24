@@ -84,7 +84,8 @@ healthy leg's bound and exit 2 (see _LOAD_HEADROOM).
 registration drift, the flipped copy is NOT caught, or a self-test check fails, which it reports by
 raising _CheckFailure), and 2 when a leg or the flip could not be evaluated (a bound kill, a signal, a
 harness failure or fault, a temporary directory that cannot be created, a bound that cannot be derived,
-a check that cannot evaluate what it checks (_CannotEvaluate: the CI job limit cannot be read), any
+a check that cannot evaluate what it checks (_CannotEvaluate: the CI job limit, or the config lanes'
+roster or deadlines, cannot be read), any
 other exception or a SystemExit in the fast phase, an AssertionError of any other type included
 whatever its message, any exception or SystemExit running or judging the positive leg (the flip still
 runs), building or running the flipped copy (a source that cannot be decoded included) or escaping the
@@ -2237,7 +2238,13 @@ def _bounds_self_test(root):
         if got != (floored if short else []):
             raise _CheckFailure("closure/lane-deadline-flip (every floored member's floor {:+d}s from "
                                 "its need): named {!r}".format(delta, got))
-    # Membership is the roster's, never a list kept here.
+    # Membership is the roster's, never a list kept here. The vectors below use two fixed commands, so
+    # they need the homes self-test in the roster, the bare homes command outside it, and the bare
+    # command's leg bounded below the lane default plus the margin. RESIDUAL: three legitimate future
+    # changes break those preconditions (registering the bare opf/tools/check_opf_homes.py as a lane
+    # member, dropping the homes self-test from the registries, raising opf-homes-contract's bound to
+    # the lane default plus the margin or more), and each turns every closure self-test into
+    # cannot-evaluate (exit 2) until these vectors are updated to other commands.
     home_name, home_argv = "opf-homes-selftest", ("opf/tools/check_opf_homes.py", "--self-test")
     bare_name, bare_argv = "opf-homes-contract", ("opf/tools/check_opf_homes.py",)
     if (home_argv not in roster or bare_argv in roster or home_name not in members

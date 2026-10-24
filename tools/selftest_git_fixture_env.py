@@ -987,9 +987,9 @@ def _config_poison_fixture(base):
 # members, 116 of them in the malformed lane, 17 of them outside the account. On 2026-10-23 the
 # change registers a third, --ci-job opf-closure-c (then the closure job that held
 # opf-homes-selftest alone), and then a fourth and a fifth, --ci-job opf-closure-d and
-# --ci-job opf-closure-e (once every closure leg whose command these lanes run was bounded at or
-# above its deadline here, which the closure work no longer fit in three jobs), so each of those
-# three counts is three higher on a tree carrying all three.
+# --ci-job opf-closure-e (added when every closure leg whose command these lanes run was bounded
+# at or above its deadline here, since the closure work then no longer fit in fewer than five
+# jobs), so each of those three counts is three higher on a tree carrying all three new members.
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
 # malformed lane's configuration for every member of that lane outside SIZING_MALFORMED_MEASURED;
 # and the fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and
@@ -1026,10 +1026,14 @@ def _config_poison_fixture(base):
 # the members have standalone times of the pre-split whole self-test only, but for one standalone
 # time of the opf-closure-c member when it held one leg, none a config-lane time, and each carries
 # its own entry below, sized outside SIZING. On the merged tree of 2026-10-20
-# (counted by _roster_figures; dated, not pinned), 29 roster members have no time in the account:
-# 27 have no recorded time (the 12 account members the account does not name, and the 15 later
-# members SIZING_LATER_MEASURED does not cover), and the closure gate's two self-test halves have
-# pre-split standalone times only; 106 malformed-lane members are not measured in that lane.
+# (counted by _roster_figures; dated, not pinned), 29 roster members had no time in the account:
+# 27 had no recorded time (the 12 account members the account does not name, and the 15 later
+# members SIZING_LATER_MEASURED does not cover), and the closure gate's two self-test halves had
+# pre-split standalone times only; 106 malformed-lane members were not measured in that lane.
+# The three --ci-job members registered on 2026-10-23 each carry a SIZING_LATER_MEASURED entry,
+# so on a tree carrying all three the 27 is unchanged, 32 members have no time in the account
+# (those 27 and the five --ci-job members), and 109 malformed-lane members are not measured in
+# that lane (config/member-roster-figures prints the live figures).
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
 # proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
