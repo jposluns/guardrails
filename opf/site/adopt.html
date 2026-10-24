@@ -142,7 +142,9 @@
       <code>opf init</code>, review and commit, <code>opf render --write</code>, commit, then
       <code>opf doctor --require-store</code> and <code>opf render --check</code>. That route
       initializes a store; it is not an adoption. It records no plan, approval, receipt or
-      completion check, and installs no enforcement.</p>
+      completion check, and installs no enforcement. The reference tooling's <code>opf init</code>
+      does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the
+      standard's validation refuses (specification section 9.2).</p>
   </div>
 </section>
 
@@ -414,10 +416,12 @@
       schemas as cannot-evaluate.
       For a store with module-tier or importer records, or a per-record store that declares views,
       doctor's overall verdict is cannot-evaluate (exit 2).</p>
-    <p>The shape of the manual path is short: create the store (either run <code>opf init</code> to
-      scaffold it, or write the files from the specification and schemas), commit it, generate the views
+    <p>The shape of the manual path is short: create the store (write the files from the
+      specification and schemas), commit it, generate the views
       with <code>opf render --write</code> for a supported store or your own renderer, and then work
-      records-first. Conformance you
+      records-first. The reference tooling's <code>opf init</code> does not scaffold this store yet:
+      its scaffold still writes a 1.2.0 store, a format the standard's validation refuses
+      (specification section 9.2). Conformance you
       assert by hand is self-asserted, and you should say so wherever you claim it, because no validator
       has checked it for you yet. The steps below fill that in.</p>
   </div>
@@ -431,12 +435,15 @@
     <ul class="clean">
       <li><b style="color:var(--ink)"><code>manifest.toml</code></b>: the control document and
         discovery marker. It declares <code>standard = "opf"</code> (the exact discovery token) in
-        its <code>[opf]</code> table, along with the base <code>spec_version</code> you conform to,
-        the storage <code>layout</code>, the enforcement <code>posture</code>, and
+        its <code>[opf]</code> table, along with the base <code>spec_version</code> you conform to
+        (<code>"2.0.0"</code>), the homes generation <code>homes = 2</code>, the storage
+        <code>layout</code>, the enforcement <code>posture</code>, and
         <code>import_status</code>. Register each enabled type in <code>[types.&lt;name&gt;]</code>,
         declare <code>[views]</code>, and supply the other tables the standard defines.</li>
       <li><b style="color:var(--ink)"><code>counters.toml</code></b>: the per-namespace ID
-        high-water marks, so an ID is never reused.</li>
+        high-water marks, so an ID is never reused. It holds the clean row and the imported counter
+        row (the quoted key <code>"imported:&lt;NS&gt;"</code>, at zero to start) of every enabled
+        type.</li>
       <li><b style="color:var(--ink)"><code>version.toml</code></b>: the version and release ledger
         (numbers, dates, spans, and digests, never release prose).</li>
       <li><b style="color:var(--ink)"><code>worklog.toml</code></b>: the durable operational record:
@@ -448,10 +455,19 @@
         <code>maintainer_decision</code>, <code>preference_pattern</code>, <code>block</code>,
         <code>handoff</code>, <code>reference</code>, and <code>contribution</code>, each as
         <code>&lt;type&gt;.index.toml</code> (empty to start).</li>
+      <li><b style="color:var(--ink)">The imported leaves</b>: one
+        <code>&lt;type&gt;.imported.index.toml</code> beside each of those eleven indexes, plus
+        <code>worklog.imported.toml</code> for the worklog, each empty to start. The standard
+        requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).</li>
     </ul>
     <p>Then write the committed pointer <code>.opf.toml</code> at your product repository root, so
       the store resolves from a stable location. A <code>[profiles.aiqt]</code> table is optional and
       is ignored by base-only tooling; a base adopter need not add it.</p>
+    <p>The reference tooling does not yet implement spec 2.0.0, the only base version the standard
+      defines; it validates spec 1.2.0 stores, as described above. Its <code>opf doctor</code>
+      grades a manifest declaring <code>spec_version = "2.0.0"</code> with <code>homes = 2</code>
+      under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to
+      the standard; <code>opf upgrade</code> and <code>opf record</code> refuse such a store.</p>
     <p>The illustrative base <code>[opf]</code> table of a manifest, not a complete manifest:
       also register enabled types in <code>[types]</code> and declare views and other settings (see
       <a href="./standard">the standard</a> for the normative shape, and
@@ -460,7 +476,8 @@
       <div class="codecard-bar">.working/toml/manifest.toml</div>
       <div class="codebody"><span class="tok-tbl">[opf]</span>
 <span class="tok-key">standard</span> = <span class="tok-str">"opf"</span>          # discovery token; exact value required
-<span class="tok-key">spec_version</span> = <span class="tok-str">"1.2.0"</span>    # the base spec version this store conforms to
+<span class="tok-key">spec_version</span> = <span class="tok-str">"2.0.0"</span>    # the base spec version this store conforms to
+<span class="tok-key">homes</span> = <span class="tok-num">2</span>                 # the homes generation; required, and 2 is the only value
 <span class="tok-key">layout</span> = <span class="tok-str">"inline"</span>         # "inline" or "per-record"
 <span class="tok-key">posture</span> = <span class="tok-str">"required"</span>      # "off", "warn", or "required" (section 11)
 <span class="tok-key">import_status</span> = <span class="tok-str">"none"</span>    # "none", "partial", or "complete"</div>

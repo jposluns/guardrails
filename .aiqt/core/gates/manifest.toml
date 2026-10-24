@@ -629,7 +629,7 @@ default = "block"
 class = "c"
 residue = """
 The default entry checks the homes spec contract and rendered gitignore block, and tiles the
-spec sections the 1.3.0 bump touches (the preamble and sections 1, 2, 4.2, 4.4 to 4.6, 5.7, 6.1,
+spec sections the 2.0.0 baseline touches (the preamble and sections 1, 2, 4.2, 4.4 to 4.6, 5.7, 6.1,
 8.1 to 8.6, 8.8, 9, 9.2, 11, 12, 14 to 14.3, 15, 16, 16.1, 17) with ordered contract pins whose
 space-joined concatenation must equal each section's normalized text, so deleting any sentence
 there, prose, list row, table row or fenced block included, turns the gate red; the self-test
@@ -637,14 +637,19 @@ proves that tiling equality and a dropped-pin flip per section, proves each pin 
 section, and deletes each pinned operative occurrence independently (never a replace-all),
 including in 4.2. Under the default entry alone added text stays green, but the self-test's
 per-section tiling equality turns red on any addition inside a tiled section, so the live
-residuals are additions to untiled sections (for example 8.7, 9.1, 10 and 13), a default-gate
+residuals are additions to untiled sections (for example 8.7, 9.1, 10 and 13; in such a section
+only a registered retired fragment, such as the section 13 one, is refused), a default-gate
 run without the self-test, and an addition landed together with a matching registry edit,
-which review of registry changes catches. Section 9.1 stays untiled over its lowercase-may
-profile rule, but its implementation-class paragraph is pinned sentence by sentence, each pin
-proven unique and deletion-red by the self-test, so only the rest of 9.1 and additions to it
-stay unprotected. The quickstart's implementation-class sentences and the opfiles.ai disclosure
-page's fresh-only item are pinned the same way over tag-stripped text, outside the keyword lint,
-so the rest of those files and additions to them stay unprotected. The default entry also runs a
+which review of registry changes catches. Section 9.1 stays untiled and unpinned: its
+implementation-class paragraph is retired, since the base defines one implementation model (spec
+16.1), so restoring one of its sentences there is red under the default entry, and the rest of 9.1
+and additions to it stay unprotected. The quickstart's implementation-model sentences, the
+opfiles.ai disclosure page's implementations item, and the adopt page's and adoption guide's
+reference-tooling sentences are pinned sentence by sentence over
+tag-stripped text, outside the keyword lint, each pin proven unique and deletion-red by the
+self-test; each sentence of the disclosure page's retired fresh-only item, and the quickstart's
+retired conformance-class sentence, is red there, so
+the rest of those files and additions to them stay unprotected. The default entry also runs a
 section 2 keyword lint over every pin of those tiled sections and those untiled pins: a pin
 without MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D, red
 once a marked pin gains a keyword); the
@@ -665,13 +670,14 @@ adopter state, or the whole input space. Evidence membership relies on immutable
 inventories; deleting a whole bundle, inventory and payload together, requires independent
 history to detect. Journals are deliberately outside doctor coverage, except that on homes 2 doctor
 lists the id reservation home of each kind there and reads each reservation file's bytes, for the
-reserved numbers alone (a legacy store lists and reads none); that read awaits the homes-2 revision of
-spec 4.2. On homes 2 C-NO-DELETION does not report a reserved number missing where the prior commit
+reserved numbers alone (a legacy store lists and reads none); spec 4.2 and 8.2 at 2.0.0 define that
+read. On homes 2 C-NO-DELETION does not report a reserved number missing where the prior commit
 (HEAD) held no record with that id, so a deletion already committed in HEAD is visible only to a doctor
 run before that commit: a published record whose number a reservation records and whose deletion is
 committed is then graded as an orphaned reservation's number and not reported missing, unlike homes 1,
-where the counters high-water keeps that deletion a C-NO-DELETION finding. The homes-2 revision of spec
-4.2 must settle this before homes 2 is activated. Writer activation and
+where the counters high-water keeps that deletion a C-NO-DELETION finding. Spec 8.2 settles this
+direction: the doctor treats a reserved number as issued wherever its checks would otherwise report
+it missing. Writer activation and
 inventory publication remain inactive; homes 2 has no homes migration and no legacy journal
 transport (spec 4.2). The existing runtime suites must still validate integration before activation.
 """

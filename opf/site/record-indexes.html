@@ -192,7 +192,7 @@
           <span class="chip"><code>opf init</code></span>
           <span class="chip"><code>opf render</code></span>
           <span class="chip"><code>opf doctor</code></span>
-          <p>Created by <code>opf init</code> (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the pre-1.3.0 importer, now retired, or post-adoption import, which the reference CLI does not implement yet); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by <code>opf render</code> (DONE.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, the one-to-one receipt link).</p>
+          <p>Created by <code>opf init</code> (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the reference CLI's retired importer, or post-adoption import, which the reference CLI does not implement yet); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by <code>opf render</code> (DONE.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, the one-to-one receipt link).</p>
         </dd>
       </div>
     </dl>
@@ -1021,8 +1021,8 @@
       </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13h4l1.5 3h5L16 13h4"/><path d="M4 13 6 5h12l2 8v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg></span>
-        <h4>Importer-only</h4>
-        <p>No module toggle: <code>legacy_fragment</code> (<code>LF</code>, <code>quarantined &#8594; resolved | ignored</code>) is deprecated for new stores and never scaffolded. It held whatever an import under the pre-1.3.0 contract could not confidently map; nothing in the reference CLI creates it now.</p>
+        <h4>Reserved namespace</h4>
+        <p>No module toggle: the standard reserves <code>LF</code> unassigned, with no record type on it (spec section 8.1). The reference tooling still recognizes <code>legacy_fragment</code> (<code>LF</code>, <code>quarantined &#8594; resolved | ignored</code>) in stores that hold such records from its retired import path; nothing in the reference CLI creates it now.</p>
       </div>
     </div>
 
@@ -1041,14 +1041,15 @@
     tier_assessment     TA   recorded
   Concurrent-operation module
     session_lease       SL   held &#8594; released | reconciled
-  Importer-only (no module toggle)
-    legacy_fragment     LF   quarantined &#8594; resolved | ignored
   Reserved
     transaction         TX   excluded from the adopter standard; name and namespace reserved
     (none)              CL   reserved unassigned, so it can never half-collide with "changelog"
+    (none)              LF   reserved unassigned; the reference tooling still recognizes
+                             legacy_fragment (quarantined &#8594; resolved | ignored) in stores
+                             holding such records from its retired import path
   </pre></div>
     <p>These are outline state sets; the full module record schemas ship with the module schemas release. The delivery-assurance <code>release</code> record, where enabled, references a <code>version.toml</code> release row by version string: the ledger row is the fact, the record is the delivery-assurance envelope around it.</p>
-    <p><code>legacy_fragment</code> is deprecated for new stores as of spec 1.3.0 and never scaffolded. Under the pre-1.3.0 import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped. Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates <code>legacy_fragment</code> records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains for existing stores and evidence. A new store's counters file has no LF namespace; a store scaffolded by tooling before spec 1.3.0 may carry LF (at zero, or higher if it imported records), and doctor and re-adoption accept it. In a store that holds <code>legacy_fragment</code> records, as in a store with module-tier records, doctor reports cannot-evaluate, <code>opf render --write</code> refuses, and <code>opf upgrade</code> exits 2 without offering the change, because the baseline validator does not validate those records' content schemas. If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
+    <p>The standard reserves the <code>LF</code> namespace unassigned and defines no <code>legacy_fragment</code> type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it. Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped. Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates <code>legacy_fragment</code> records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence. A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard: a 1.2.0 store is one the standard's section 9.2 validation refuses, so an adoption over it is a first adoption under its section 14.1, never a re-adoption. In a store that holds <code>legacy_fragment</code> records, as in a store with module-tier records, doctor reports cannot-evaluate, <code>opf render --write</code> refuses, and <code>opf upgrade</code> exits 2 without offering the change, because the baseline validator does not validate those records' content schemas. If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Not every project needs delivery assurance or operational-policy records on day one.</blockquote>
