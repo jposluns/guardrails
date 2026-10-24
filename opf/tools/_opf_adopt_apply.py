@@ -25,7 +25,13 @@ planting of a pack member that passed the b.5 trust gate, verify_pack_member), r
 publication of the render engine's planned bytes, composed into the journaled transaction) and record-adoption (the immutable receipt core and its genesis outcome event in the
 run's own evidence bundle, adoption_record). The apply-time preservation pass (compose_preservation)
 composes the spec 14.2 preservation of the approved plan's sources into a transaction; it is a composition
-pass, not a dispatch entry, and the stage driver does not call it yet. PR3 slice 2 makes `enable-hook`
+pass, not a dispatch entry, which the stage driver composes ahead of the plan rows. Of the sources that
+require an apply-stage archive copy (a retire or migrate source, and an occupying move source; a kept
+source and a non-occupying move source take none), the pass archives only those no plan retire-file or
+move-file row binds (a migrate source takes no op row); such a row archives its own source. The driver
+then requires exactly one archive copy of each source requiring one, at the source's approved digest, in
+its base transaction (_require_archived_once), so a row that skipped its copy, or archived other bytes
+at its path, refuses the apply. PR3 slice 2 makes `enable-hook`
 executable, in the run's
 base (apply-stage) transaction only, as does slice 4 with the two structured-edit ops (_REGISTRATION_OPS:
 register-unmanaged, repoint-consumer). The stage driver
@@ -33,7 +39,7 @@ adds the plan-v2 apply-input gate, the one approval and the apply stage (spec 14
 re-proves a frozen plan from its own bytes, re-derives it over the live tree and prints the approval
 binding its plan_digest and inventory_digest, writing nothing; `opf adopt apply` admits only that approved
 pair, persists both in the run's evidence bundle within the run's one base transaction, and dispatches
-every plan op through the table and then the driver's mandatory receipt stage (which mints the
+every plan op through the dispatch table and then the driver's mandatory receipt stage (which mints the
 record-adoption row and assembles the receipt core), so while any plan op or the driver's mandatory
 receipt stage is unlanded, apply refuses before anything is written. Every other op returns a
 refusing not-yet-executable verdict: pack installation (install-pack), the completion checks, the stage
@@ -110,16 +116,24 @@ git query) must equal the plan's bound revision, and re-derivation, the planner 
 with the worksheet that froze the plan and the plan's own run instant and nonce, must reproduce the plan
 byte for byte; a moved revision, a changed observed item (sources, targets, store identity, ancestry) or
 a changed worksheet refuses into a fresh plan with its own single approval. Replay admission precedes
-freshness: a run whose base transaction exists refuses on the one-apply rule itself. Apply dispatches
-every plan op in plan order in the apply stage through one context table (`ops`, the transaction's
-ApplyOps; `plan`; `approval`; `product_root`; `stage`), the seam the op slices compose through, then
-composes the driver's mandatory receipt stage (DRIVER_STAGES; spec 14 ends apply with the receipt and its
-outcome-event chain, which no plan row can carry), and refuses any composed remove or write of a plan
-source that occupies no managed destination: such a source stays frozen in place until the retirement
-stage after a green completion check, and apply takes only its preimage. The driver, not handler
-convention, enforces the composition rules: handlers run under a per-thread composition guard that
-refuses any direct filesystem or process effect and any transaction of their own (so a slice composes
-into `ops`, init-store's substrate included), and composition first runs as a write-free preflight
+freshness: a run whose base transaction exists refuses on the one-apply rule itself. A plan row whose
+handler needs what this driver cannot supply (_DRIVER_UNSUPPLIED: planned create-file bytes, a consumer
+postimage model, a pack, observations, a receipt, init-store's own sequencing) refuses before anything is
+written, naming it. Apply then composes, into the one base transaction, the preservation pass
+(compose_preservation), then every plan op in plan order in the apply stage, each handler with its typed
+context (_driver_contexts: ONE OpContext for the file ops, ONE RegistrationContext for the registration
+ops, a HookContext for enable-hook) or, for every other handler, the context table (`ops`, the
+transaction's ApplyOps; `plan`; `approval`; `product_root`, run_apply's own argument; `stage`), then
+the driver's mandatory receipt stage (DRIVER_STAGES; spec 14 ends apply with the receipt and its
+outcome-event chain, which no plan row can carry). It refuses any composed remove or write of a plan
+source that occupies no managed destination (such a source stays frozen in place until the retirement
+stage after a green completion check, and apply takes only its preimage), and any source requiring an
+apply-stage archive copy that the composition does not archive exactly once at its approved digest. The
+driver, not handler convention, enforces the composition rules: handlers run under a per-thread
+composition guard that refuses any direct filesystem or process effect and any transaction of their own
+(so a slice composes into `ops`; init-store's substrate is its own journaled run, sequenced outside the
+base transaction, which this driver does not sequence: apply refuses an init-store row by name,
+_DRIVER_UNSUPPLIED), and composition first runs as a write-free preflight
 before the journal is prepared, so a preflight refusal writes nothing at all; a refusal of the second
 composition, under the journal lock, releases the lock and removes the journal directories the run
 created, so it too leaves the tree as it found it, unless a release or a removal fails or may not be
@@ -1196,12 +1210,35 @@ def _classify_source(run_id, label, row):
     return path, digest, ("archived-removed" if occupying else "preserved")
 
 
+def _file_op_archived(plan):
+    """The (disposition, path, digest) of every plan source a plan file-op row archives in the apply stage: a
+    retire-file row its retire source and a move-file row its occupying move source (_compose_retire_file,
+    _compose_move_file), so the preservation pass leaves each of them to that row. A plan with no `ops`
+    names none; `ops` that is not a list refuses. A row that is not a table, or whose path or digest is not
+    a string, names nothing: dispatch refuses it, and leaving its source to this pass can only compose a
+    second archive copy, which refuses, never a source that nothing archives."""
+    rows = plan.get("ops", [])
+    if not isinstance(rows, list):
+        raise AdoptApplyError("cannot evaluate the preservation pass: the plan's ops is not a list; nothing "
+                              "composed (fail-closed)")
+    owned = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("op")
+        bound = ((row.get("path"), row.get("preimage_digest")) if name == "retire-file"
+                 else (row.get("source"), row.get("source_digest")) if name == "move-file" else None)
+        if bound is not None and all(isinstance(value, str) for value in bound):
+            owned.add(("retire" if name == "retire-file" else "move",) + bound)
+    return owned
+
+
 def compose_preservation(ops, plan):
     """The apply-time preservation pass (spec 14.1, 14.2), driven by the approved plan's `sources` rows and
     composed into ONE adoption transaction's ApplyOps. ALL OR NOTHING: first every row is classified from
     the plan alone, with no live read, so a plan or row the pass cannot read or classify (a non-table plan
-    or row, a plan naming another run, sources that are not a list, a closed-keyset violation, a malformed
-    path or digest, a disposition outside DISPOSITIONS, a non-boolean occupying flag, a duplicate path, a
+    or row, a plan naming another run, sources or ops that are not a list, a closed-keyset violation, a
+    malformed path or digest, a disposition outside DISPOSITIONS, a non-boolean occupying flag, a duplicate path, a
     kept source that occupies a destination or records a preservation, a missing preservation) refuses the
     whole pass as cannot-evaluate, never a silent skip. Then, in plan order, every live read and every op is
     composed into an ISOLATED copy of the caller's ops, staged bytes and directory bookkeeping
@@ -1210,6 +1247,12 @@ def compose_preservation(ops, plan):
     preserved (its byte-identical archive copy created) and left frozen in place (ApplyOps.preserve), its
     removal waiting for the green completion check; a kept source and a non-occupying move source take no
     op here (a non-occupying move is preserved at its move destination by move-file, not by this pass).
+    Nor does a retire source, or an occupying move source, that a retire-file or move-file row of the
+    plan's `ops` binds at its path and digest (_file_op_archived): that file op composes its archive copy in
+    the apply stage, so the stage driver, which composes this pass and then every plan row into ONE
+    ApplyOps, archives each source that requires an apply-stage archive copy exactly once, and refuses a
+    composition that does not (_require_archived_once); a migrate source takes no op row, so its archive
+    copy is this pass's alone.
     Every source the pass archives must record exactly archive_rel(run_id, path) as its preservation, or
     the plan is refused. A drifted, absent or unreadable source, or an occupied archive destination,
     refuses through ApplyOps.preserve. Only after the whole pass succeeds, and its accounting is built, is
@@ -1221,7 +1264,8 @@ def compose_preservation(ops, plan):
     a fault inside a composing method lands on the fork, never on the caller). A sealed caller's fork
     stays sealed, so a pass that would compose any op over it refuses with the seal reason. Returns the
     (path, action) accounting of every row in plan order, the action one of "preserved",
-    "archived-removed" or "none"; raises AdoptApplyError on every refusal. DISCLOSED-RESIDUAL: the pass
+    "archived-removed", "file-op" (its plan file-op row archives it) or "none"; raises AdoptApplyError on
+    every refusal. DISCLOSED-RESIDUAL: the pass
     holds only the rows it reads. It does not re-run validate_plan or check the approval binding
     (apply_plan's later slice), and it takes the `occupying` flag as the planner recorded it, never
     re-deriving the plan's managed destinations."""
@@ -1239,6 +1283,7 @@ def compose_preservation(ops, plan):
     if not isinstance(rows, list):
         raise AdoptApplyError("cannot evaluate the preservation pass: the plan's sources is not a list; "
                               "nothing composed (fail-closed)")
+    owned = _file_op_archived(plan)
     classified = []
     seen = set()
     for i, row in enumerate(rows):
@@ -1248,6 +1293,8 @@ def compose_preservation(ops, plan):
             raise AdoptApplyError("cannot evaluate {}: its path {!r} is a duplicate of an earlier row; the "
                                   "preservation pass composes nothing (fail-closed)".format(label, path))
         seen.add(path)
+        if action != "none" and (row["disposition"], path, digest) in owned:
+            action = "file-op"
         classified.append((path, digest, action))
     work = ops._fork()
     for path, digest, action in classified:
@@ -3972,9 +4019,11 @@ def _init_store_postcondition(root_fd, product_root, members, operation_id):
 
 
 def _init_store(op_row, context=None):
-    """init-store (spec 14, 14.2): scaffold the default machine store by COMPOSING the coupled-init
-    substrate's journaled, create-only operation (`_opf_init_operation.run_init_operation`) INSIDE
-    this engine's own adoption transaction — never the thin `opf init` CLI path and never
+    """init-store (spec 14, 14.2): scaffold the default machine store by RUNNING the coupled-init
+    substrate's journaled, create-only operation (`_opf_init_operation.run_init_operation`) as this
+    run's OWN init-store transaction under the one shared journal lock, sequenced OUTSIDE the apply
+    stage's base transaction (the stage driver does not sequence that run and refuses an init-store
+    row by name, _DRIVER_UNSUPPLIED) — never the thin `opf init` CLI path and never
     re-implemented here. `context` carries `product_root` (absolute), `plan` (its `run_id`, `store`
     identity and `sources` dispositions), `ancestral` (the pinned evidence commit of a re-adoption's
     counters seed, else None) and `recover` (default False: EXPLICIT recovery, never implicit).
@@ -5093,8 +5142,10 @@ def _compose_retire_file(op_row, context):
     non-occupying one takes its retirement preimage and stays frozen in place. Retirement stage: a frozen
     source is removed once its committed preimage re-verifies; an occupying source, already out of the
     live tree, only has its archived bytes re-verified (recording its retirement is the receipt's, a later
-    slice). Drift refuses in both stages. Reversal before commit is the journal's rollback, which restores
-    a removed source from its digest-checked preimage."""
+    slice). Drift refuses in both stages. The apply-stage archive copy is this op's own: the preservation
+    pass leaves a source this row binds to it (compose_preservation), so the driver archives it once.
+    Reversal before commit is the journal's rollback, which restores a removed source from its digest-checked
+    preimage."""
     ops, path, digest = context.ops, op_row["path"], op_row["preimage_digest"]
     occupying = _bound_occupying(context, path, "retire", digest)
     if _stage(ops) == "apply":
@@ -5113,7 +5164,10 @@ def _compose_move_file(op_row, context):
     beneath the Move root (the planner's rule, spec 14.2; protected_destination alone exempts this run's
     own archive and bundle, where a move would plant a forged preimage or evidence payload). Apply stage:
     the destination must be absent; an occupying source is archived and removed preserve-first, a
-    non-occupying one is only drift-checked and stays frozen. Retirement stage (spec 14.2: the relocation
+    non-occupying one is only drift-checked and stays frozen; an occupied destination is a collision
+    finding, never an overwrite, and the occupying source's archive copy is this op's own, never the
+    preservation pass's (compose_preservation), so the driver archives it once. Retirement stage (spec
+    14.2: the relocation
     runs only after the green check): ApplyOps.relocate. The default destination
     `.working/archive/moved/<source-path>` is the planner's (store.moved_dest). Reversal before commit is
     the journal's rollback: the destination create is undone and a removed source restored."""
@@ -5380,6 +5434,93 @@ def _receipt_not_yet_composable(context=None):
 # any other row; the receipt slice reconciles that row with this stage.
 DRIVER_STAGES = {RECEIPT_STAGE: _receipt_not_yet_composable}
 
+# What a landed handler needs that this driver cannot supply: a value neither the sealed plan nor its captured
+# approval carries, or (init-store) a step the driver does not sequence. run_apply refuses a plan with such a
+# row before anything is written, naming what is missing, and never composes the row over a default. Keyed
+# by (handler, op), or (handler, None) for every op of that handler; the slice that supplies the value from
+# a bound source, or sequences the step, removes its entry.
+_DRIVER_UNSUPPLIED = {
+    (_init_store, None): ("its own journaled substrate run, sequenced outside the base transaction (the "
+                          "composition guard refuses a handler's own transaction), and for a re-adoption "
+                          "context ancestral (the pinned ancestral snapshot its counters seed from); this "
+                          "driver sequences neither, a later unit"),
+    (_execute_file_op, "create-file"): ("the created file's planned bytes (the plan binds only its "
+                                        "content_digest, and no bound source supplies the bytes)"),
+    (_execute_registration_op, "repoint-consumer"): ("the consumer's planned postimage model (the plan binds "
+                                                     "only its new_digest)"),
+    (_plant_governance, None): ("context pack (the release manifest, root.txt and member bytes, which only "
+                                "the trust-anchor gather can supply)"),
+    (_render_views, None): ("context observations (the inert git observations the store checks read, which "
+                            "this driver does not gather)"),
+    (_record_adoption, None): ("context receipt and now (the receipt core and its instant, which only the "
+                               "receipt stage assembles)"),
+}
+
+
+def _unsupplied(rows):
+    """Each plan row whose handler needs what this driver cannot supply (_DRIVER_UNSUPPLIED), named with
+    it; empty when the driver supplies every row."""
+    found = []
+    for i, row in enumerate(rows):
+        handler = OP_HANDLERS.get(row["op"])
+        need = _DRIVER_UNSUPPLIED.get((handler, row["op"]), _DRIVER_UNSUPPLIED.get((handler, None)))
+        if need is not None:
+            found.append("plan op[{}] ({!r}) needs {}".format(i, row["op"], need))
+    return found
+
+
+def _driver_contexts(ops, plan_doc, approval, product_root):
+    """The contexts the plan op handlers of ONE apply-stage composition take, built from the sealed plan, the
+    captured approval and `product_root`, run_apply's own argument (the root it admitted the plan against
+    and re-derived it over), never from other ambient state (spec 14.1); only the table carries
+    `product_root` and `approval`, and no typed context carries either. Returns (table, typed). `typed` maps
+    each handler that composes through a typed context to it: the file-op handler to ONE OpContext over the
+    plan's source rows (so its claims span every file-op row), the registration handler to ONE
+    RegistrationContext over the plan's frozen store identity and each keep source's approved digest (so a
+    registration chain extends link by link), and the enable-hook handler to a HookContext. Every other
+    handler, and the receipt stage, takes `table` (`ops`, `plan`, `approval`, `product_root`, `stage`).
+    No typed context carries a value the plan does not bind: the OpContext holds no planned bytes, the
+    RegistrationContext no consumer model and the HookContext only `ops`, and run_apply refuses a row that
+    needs a value no context carries (_DRIVER_UNSUPPLIED) before anything is composed."""
+    table = dict(ops=ops, plan=plan_doc, approval=approval, product_root=product_root, stage=APPLY_STAGE)
+    kept = dict((row["path"], row["digest"]) for row in plan_doc["sources"] if row["disposition"] == "keep")
+    typed = {_execute_file_op: OpContext(ops, plan_doc["sources"]),
+             _execute_registration_op: RegistrationContext(ops, plan_doc["store"], kept=kept),
+             _execute_enable_hook: HookContext(ops)}
+    return table, typed
+
+
+def _require_archived_once(ops, plan_doc):
+    """Refuse a composed apply stage unless every plan source that requires an apply-stage archive copy (a
+    retire or migrate source, and an occupying move source: _classify_source; a kept source and a
+    non-occupying move source take none) has exactly one create at its archive path (archive_rel), and
+    that create's content digest equals the source row's approved digest. The preservation pass and the
+    retire-file and move-file rows divide those copies between them (compose_preservation,
+    _file_op_archived); this holds the division, and the copied bytes, to the composed result, not to
+    handler convention, so a row that skips its copy, or archives other bytes at its path, refuses the
+    apply (ApplyOps.create already refuses a second copy at one path, and check_apply_ops refuses a
+    create whose staged bytes do not hash to its own content digest, so a digest-equal create carries
+    the approved bytes before commit)."""
+    creates = {}
+    for op in ops.ops:
+        if op.get("op") == "create":
+            creates.setdefault(op["path"], []).append((op.get("poststate") or {}).get("content-sha256"))
+    wrong = []
+    for row in plan_doc["sources"]:
+        if row["disposition"] == "keep" or (row["disposition"] == "move" and not row["occupying"]):
+            continue
+        found = creates.get(archive_rel(ops.run_id, row["path"]), [])
+        if len(found) != 1:
+            wrong.append("{} ({} archive copies)".format(row["path"], len(found)))
+        elif found[0] != _plan_hex(row["digest"]):
+            wrong.append("{} (an archive copy at another digest than the approved source's)".format(
+                row["path"]))
+    if wrong:
+        raise AdoptApplyError("the apply stage composes other than exactly one archive copy, at the approved "
+                              "source digest, of plan source(s) {}; each such source takes exactly one, "
+                              "byte-identical under its approved digest, from the preservation pass or the "
+                              "file-op row that binds it (spec 14.2, fail-closed)".format(", ".join(wrong)))
+
 
 def _canonical_toml(data, label):
     """Parse `data` as TOML that is byte-identical to its own emit_checked rendering, or refuse: a frozen
@@ -5564,18 +5705,28 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     apply_plan (the approval binds this plan's plan_digest and inventory_digest and follows its plan);
     refuse over a non-clean adoption journal; refuse a run already applied (_require_unapplied, replay
     admission ahead of freshness); re-derive the plan over the live tree and its observed revision
-    (rederive_or_refuse); and refuse while any plan op's slice, or the driver's mandatory receipt stage
+    (rederive_or_refuse); refuse while any plan op's slice, or the driver's mandatory receipt stage
     (DRIVER_STAGES), has not landed, so an unlanded step refuses the whole apply fail-closed by
-    construction, never half of it.
+    construction, never half of it; and refuse a row whose handler needs what this driver cannot supply
+    (_DRIVER_UNSUPPLIED: a value neither the sealed plan nor its approval carries, or init-store's own
+    sequencing), naming it, never composing the row over a default.
 
     Composition is the driver's, and so are its rules. One compose function stages the plan and approval
-    bytes in the run's evidence bundle, dispatches EVERY plan op in plan order in the apply stage, each with
-    one context table (`ops`, the transaction's ApplyOps; `plan`; `approval`; `product_root`; `stage`), then
-    composes the mandatory receipt stage whatever rows the plan carries; the first refusing verdict refuses
-    the whole composition. Handlers run under the composition guard (_composing): a handler only stages into
-    `ops`, so a direct filesystem or process effect, or a transaction of its own, refuses the composition (a
-    slice that would delegate to its own journaled operation, init-store's substrate included, composes into
-    `ops` instead). Retirement partition (spec 14.1, 14.2): a plan source that occupies no managed
+    bytes in the run's evidence bundle, composes the preservation pass (compose_preservation: the archive
+    copy of each source requiring one that no plan file-op row archives, a migrate source's), dispatches
+    EVERY plan op in plan
+    order in the apply stage, each with the context its handler requires, built from the sealed plan, its
+    approval and this call's `product_root` (_driver_contexts: an OpContext, a RegistrationContext or a
+    HookContext, else the context table of `ops`, the transaction's ApplyOps; `plan`; `approval`;
+    `product_root`; `stage`), then composes the mandatory receipt stage whatever rows the plan carries; the
+    first refusing verdict refuses the whole composition, and so does a composition that does not archive
+    each source requiring an apply-stage archive copy exactly once at its approved digest
+    (_require_archived_once). Handlers run
+    under the composition guard (_composing): a handler only stages into
+    `ops`, so a direct filesystem or process effect, or a transaction of its own, refuses the composition
+    (init-store's substrate is its own journaled run, sequenced outside the base transaction; this driver
+    does not sequence it and refuses an init-store row by name, _DRIVER_UNSUPPLIED).
+    Retirement partition (spec 14.1, 14.2): a plan source that occupies no managed
     destination stays frozen, byte-identical in place, until the retirement stage after a green completion
     check, so the apply stage may take only its preimage: a composed remove or write of any non-occupying
     plan source refuses. The compose function first runs as a write-free preflight against the live tree,
@@ -5608,26 +5759,21 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     if unlanded:
         raise AdoptApplyError("{} not yet executable in this build; a later adoption slice lands each, and apply "
                               "refuses before anything is written (fail-closed)".format(" and ".join(unlanded)))
+    unsupplied = _unsupplied(rows)
+    if unsupplied:
+        raise AdoptApplyError("{}; this driver supplies only what the sealed plan, its approval and the product "
+                              "root carry, and apply never composes a row over a default, so it refuses before "
+                              "anything is written (fail-closed)".format("; ".join(unsupplied)))
     frozen = set(row["path"] for row in plan_doc["sources"] if not row["occupying"])
 
     def compose(ops):
         with _composing():
             ops.create(plan_rel(run_id), plan_bytes)
             ops.create(approval_rel(run_id), approval_bytes)
-            # KNOWN GAP, unreachable in this build: the finish ops read context keys this driver does not
-            # supply yet: plant-governance reads `pack` (the release manifest, root.txt and members it
-            # verifies), render-views reads `observations` (the inert git observations it renders from),
-            # and record-adoption reads `receipt` and `now`. The receipt-stage gate above refuses every plan
-            # before this compose runs, so none of them is reached. The slice that lands the receipt stage
-            # must also gather and pass those four keys here; until then (read from the code, not run) an
-            # absent pack or receipt refuses, and absent observations leave the store checks that need them
-            # cannot-evaluate. Likewise the file-op handlers compose only through an OpContext (the plan's
-            # source rows and each create-file path's planned bytes), which this table is not, so a file-op
-            # row dispatched here refuses (fail-closed) until that slice binds the two.
-            context = dict(ops=ops, plan=plan_doc, approval=approval, product_root=product_root,
-                           stage=APPLY_STAGE)
+            compose_preservation(ops, plan_doc)
+            context, typed = _driver_contexts(ops, plan_doc, approval, product_root)
             for i, row in enumerate(rows):
-                verdict = dispatch(row, context)
+                verdict = dispatch(row, typed.get(OP_HANDLERS.get(row["op"]), context))
                 if verdict.status != store.VALID:
                     raise AdoptApplyError("plan op[{}] ({!r}) refused: {}".format(
                         i, row["op"], "; ".join(verdict.findings)))
@@ -5642,6 +5788,7 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
                                   "each stays frozen, byte-identical in place, until the retirement stage after "
                                   "a green completion check (spec 14.1, 14.2), and apply takes only its "
                                   "preimage (fail-closed)".format(", ".join(touched)))
+        _require_archived_once(ops, plan_doc)
 
     root_fd = _open_product_root(product_root)
     try:
@@ -5746,6 +5893,21 @@ def self_test():
         return 2
 
 
+_NO_CENSUS = "no /proc/self/fd descriptor census on this platform"
+_NO_EVENTFD = "os.eventfd is unavailable on this platform"
+
+
+def _eventfd_skip_reason(census, has_eventfd):
+    """Why the replaced-eventfd census vector cannot run, or None when it can: a platform without the
+    /proc/self/fd census is named as missing the census, and a platform with the census but without
+    os.eventfd is named as missing the eventfd facility, never as missing the census."""
+    if not census:
+        return _NO_CENSUS
+    if not has_eventfd:
+        return _NO_EVENTFD
+    return None
+
+
 def _self_test_checks():
     import errno
     import fcntl
@@ -5757,10 +5919,11 @@ def _self_test_checks():
     failure_details = {}
     checked = [0]
     skipped = []    # (check, why): a check this platform cannot evaluate, named, never silently dropped
+    bound_expired = []  # each child bound that expired, named: its checks did not run (exit 2, never a pass)
     # The descriptor census the inode-reuse, handoff and NFS vectors use is /proc/self/fd; a platform
     # without it (macOS) skips exactly those vectors, each named with this note, never a partial run.
     census = Path("/proc/self/fd").is_dir()
-    no_census = "no /proc/self/fd descriptor census on this platform"
+    no_census = _NO_CENSUS
 
     # The REAL stat family, taken before any vector patches it; every descriptor census below reads
     # through it, never through a patched os.fstat.
@@ -5897,8 +6060,9 @@ def _self_test_checks():
     # Round 8: a distinct eventfd at a reused number is a new pair (red against the stat and flags tuple
     # alone: every eventfd shares one anonymous inode). The original is retained by a duplicate, so its
     # eventfd-id stays live and the replacement's differs.
-    if not census or not hasattr(os, "eventfd"):
-        skipped.append(("self-test-census-reports-replaced-eventfd", no_census))
+    efd_skip = _eventfd_skip_reason(census, hasattr(os, "eventfd"))
+    if efd_skip is not None:
+        skipped.append(("self-test-census-reports-replaced-eventfd", efd_skip))
     else:
         first_efd = os.eventfd(0)
         kept_efd = os.dup(first_efd)
@@ -7145,6 +7309,7 @@ def _self_test_checks():
                      "journal-pid-start-close-fault-keeps-the-read-interrupt",
                      "verify-missing-ancestor-opened-once"):
             skipped.append((name, no_census))
+        skipped.extend(_class_sweep_skip_entries(no_census))
     else:
         import dis
 
@@ -8392,16 +8557,15 @@ def _self_test_checks():
         # in _close_class_sweep_checks) runs in a fresh interpreter (--selftest-class-sweep-child, python -I
         # -B), so every descriptor its runs leave open (the disclosed windows) dies with that child, and this
         # process (and every module a self-test run loads after this one) is untouched by construction: the
-        # sweep closes nothing it did not open itself. Fail closed: a nonzero exit, a timeout, or a result
-        # that is missing, incomplete or does not name exactly those checks in order fails every one of them,
-        # named with the reason. This process's descriptor set is the same after the child as before it.
+        # sweep closes nothing it did not open itself. Fail closed: a nonzero exit, stderr beside exit 0,
+        # or a result that is missing, incomplete or does not name exactly those checks in order fails
+        # every one of them, named with the reason. The child reaching its bound fails none of them: it is
+        # recorded in bound_expired and reported as the bound expiring (exit 2), since those checks did
+        # not run (_class_sweep_record).
+        # This process's descriptor set is the same after the child as before it.
         sweep_before = _fds_open()
-        sweep_rows, sweep_why = _run_class_sweep_child()
-        for sweep_index, sweep_name in enumerate(_CLASS_SWEEP_CHECKS):
-            if sweep_rows is None:
-                check(sweep_name, False, observed="class sweep child: " + sweep_why)
-            else:
-                check(sweep_name, sweep_rows[sweep_index][1], observed=sweep_rows[sweep_index][2])
+        _class_sweep_record(check, bound_expired)
+        _class_sweep_expiry_probe_self_test(check)
         sweep_after = _fds_open()
         check("class-sweep-child-leaves-this-process-descriptors-unchanged", sweep_after == sweep_before,
               observed="opened={!r} closed={!r}".format(sorted(sweep_after - sweep_before),
@@ -8755,6 +8919,13 @@ def _self_test_checks():
                            "component closes after the injection={!r} leaked={!r}".format(
                                None if control is None else (control[0], control[2], control[3]), raised,
                                popped, after, leaked))
+    # The sweep's transport classification, recording, exit mapping, wiring, executed reporting slice and
+    # declared-bound checks are
+    # pure in-process vectors: they run on every platform. Only the real sweep child and its expiry probe
+    # above need the descriptor census, and a platform without one names each of them in the skip report
+    # (_class_sweep_skip_entries). The placement check pins both of these calls to function level.
+    _class_sweep_bound_self_test(check)
+    _class_sweep_placement_self_test(check)
     # 6a'''b3e: within ONE list, _close_held re-raises the FIRST exception its close-out met, each later
     # one recorded on it as a note, and still closes every other descriptor. Three closes of a five
     # descriptor list are injected (the patched close-out raises instead of closing): the first is the
@@ -10632,6 +10803,43 @@ def _self_test_checks():
                        ("legacy/KEEP.md", "none"), ("legacy/MOVE.md", "none")]
               and [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
               == [("create", archive_rel(rid, "legacy/OLD.md")), ("create", todo_copy), ("remove", todo)])
+        # a retire source and an occupying move source that a plan file-op row binds at their path and
+        # digest are that row's to archive (B3: one archive copy per source), so the pass composes nothing for
+        # them and accounts them "file-op", while a migrate source beside them stays the pass's (red on
+        # revert: the pre-B3 pass archives all three; red against a _file_op_archived that binds nothing).
+        moving = pres_row("legacy/MOVE.md", "move", True)
+        owner_rows = [dict(op="retire-file", path=todo, preimage_digest=occupying["digest"]),
+                      dict(op="retire-file", path="legacy/RETIRE.md", preimage_digest=retire["digest"]),
+                      dict(op="move-file", source="legacy/MOVE.md", destination="adopter/MOVE.md",
+                           source_digest=moving["digest"])]
+        acct, why, composed, _staged = bare_compose(root, dict(pres_plan(migrate, occupying, retire, moving),
+                                                               ops=owner_rows))
+        check("preservation-file-op-sources-left-to-their-rows",
+              why is None and acct == [("legacy/OLD.md", "preserved"), (todo, "file-op"),
+                                       ("legacy/RETIRE.md", "file-op"), ("legacy/MOVE.md", "file-op")]
+              and [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"]
+              == [("create", archive_rel(rid, "legacy/OLD.md"))], observed=why)
+        # GREEN-ON-REVERT GUARD: a row at another digest binds nothing, so the pass keeps that source (the
+        # pre-B3 pass keeps it too); red against a pass that defers on the path alone.
+        stale_row = [dict(owner_rows[1], preimage_digest=plan_digest(b"another preimage\n"))]
+        acct, why, composed, _staged = bare_compose(root, dict(pres_plan(retire), ops=stale_row))
+        check("preservation-row-at-another-digest-binds-nothing",
+              why is None and acct == [("legacy/RETIRE.md", "preserved")]
+              and [(op["op"], op["path"]) for op in composed if op["op"] != "mkdir"] == [("create", retire_copy)])
+        # ops that is not a list refuses by the pass's own rule (red on revert: the pre-B3 pass ignores
+        # ops and preserves the migrate source; red against a pass that reads it as no rows).
+        acct, why, composed, staged = bare_compose(root, dict(pres_plan(migrate), ops=nothing))
+        check("preservation-ops-not-list-refused-by-its-own-rule",
+              acct is None and "the plan's ops is not a list" in (why or "") and composed == []
+              and staged == nothing)
+        # GREEN-ON-REVERT GUARD (the action != "none" rule): a non-occupying move source takes no apply-stage
+        # op, so a move-file row binding it at its path and digest leaves it "none", never "file-op" (the
+        # pre-B3 pass has no "file-op" label); red against a pass that relabels every bound source.
+        still = [dict(owner_rows[2], source_digest=move["digest"])]
+        acct, why, composed, staged = bare_compose(root, dict(pres_plan(move), ops=still))
+        check("preservation-non-occupying-move-row-stays-none",
+              why is None and acct == [("legacy/MOVE.md", "none")] and composed == [] and staged == nothing,
+              observed=why or acct)
         for label, row in (("foreign", pres_row("legacy/OLD.md", "migrate", False,
                                                   preservation="legacy/elsewhere.md")),
                            ("other-run", pres_row("legacy/OLD.md", "retire", False,
@@ -11357,6 +11565,331 @@ def _self_test_checks():
         check("driver-approve-after-apply-refused", "already has its transaction" in
               (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or "")
               and _snapshot(root) == applied)
+
+    # 11b: the driver's typed contexts and its one preservation pass (B2, B3), over a planner-frozen fixture
+    # with a kept file (register-unmanaged), a non-occupying retire source (retire-file), a non-occupying
+    # migrate source (no op row) and an adopter registration its enable-hook row merges. The rows whose
+    # handlers this build cannot run under the driver (init-store, which _DRIVER_UNSUPPLIED names;
+    # render-views and install-pack) and the receipt stage are stand-ins; the retire-file, register-unmanaged
+    # and enable-hook rows run their REAL handlers, the first two spied at their per-op composers, which a
+    # handler reaches only through its typed context. Each check names the mutant it is red against, or
+    # says it is a fixture PRECONDITION or a GREEN-ON-REVERT GUARD (green against the pre-B2/B3 driver too).
+    def _sheet_with(root, revision, decisions, hook_op=None):
+        sheet = _sheet(root, revision)
+        sheet["sources"] = sorted(d["path"] for d in decisions)
+        sheet["decisions"] = decisions
+        if hook_op is not None:
+            # the hook row installs the claude-code enforcement member (its new_digest), so install-pack
+            # plants the other platforms' members only (the planner's rule).
+            for row in sheet["bindings"]["enforcement"]:
+                if row["platform"] == "claude-code":
+                    row["members"] = [dict(path=hook_op["registration_path"], digest=hook_op["new_digest"])]
+            others = [row for row in sheet["bindings"]["enforcement"] if row["platform"] != "claude-code"]
+            sheet["ops"] = sheet["ops"][:2] + [schema.enforcement_install_op(others), hook_op]
+        obs = planner.investigate(root, sources=sheet["sources"], targets=sheet["targets"])
+        sheet["expected_observation_digest"] = (
+            tomllib.loads(obs.observation.decode("utf-8"))["observation_digest"] if obs.observation else "")
+        return sheet
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        typed_files = {"keep.md": b"kept\n", "legacy.md": b"legacy rules\n", "old.md": b"old notes\n"}
+        for rel, payload in typed_files.items():
+            (root / rel).write_bytes(payload)
+        hook_rel = ".claude/settings.json"
+        hook_old = hook._emit(hook.canonical_registration())
+        hook_new = hook.merge_registration(hook_old, "opf-governance").new_bytes
+        (root / hook_rel).parent.mkdir()
+        (root / hook_rel).write_bytes(hook_old)
+        head = _selftest_git_commit(root)
+        hook_op = dict(op="enable-hook", registration_path=hook_rel, plugin_entry="opf-governance",
+                       old_digest=plan_digest(hook_old), new_digest=plan_digest(hook_new))
+        sheet = _sheet_with(root, head, [dict(path="keep.md", disposition="keep", actor="fixture"),
+                                         dict(path="legacy.md", disposition="retire", actor="fixture"),
+                                         dict(path="old.md", disposition="migrate", actor="fixture")], hook_op)
+        typed_plan = _freeze(root, sheet) or b""
+        typed_doc = tomllib.loads(typed_plan.decode("utf-8")) if typed_plan else dict(
+            run_id=rid, ops=[], sources=[], store=dict(store_root=".", machine_rel=".working/toml"))
+        trid = typed_doc["run_id"]
+        typed_approval = attempt(capture_approval, root, typed_plan, sheet, "adopter", now)[0] or b""
+        typed_ops = [row["op"] for row in typed_doc["ops"]]
+        # PRECONDITION: the fixture froze and was approved, carrying the rows the checks below drive.
+        check("driver-typed-fixture-frozen-and-approved", bool(typed_plan) and bool(typed_approval)
+              and {"retire-file", "register-unmanaged", "enable-hook", "init-store"} <= set(typed_ops)
+              and "move-file" not in typed_ops)
+        manifest_rel = schema.store_manifest(typed_doc["store"])
+        manifest_bytes = _opf_init.build_manifest().encode("utf-8")
+        reached = []
+        composed_creates = []
+        stand_in_names = ("init-store", "render-views", "install-pack")
+
+        def scaffold(op_row, context):
+            # init-store's stand-in: the scaffolded manifest the registration chain starts from, staged
+            # through the context table; over any other context it refuses, never raises.
+            reached.append((op_row["op"], type(context).__name__))
+            if not isinstance(context, dict):
+                return schema._cannot("the init-store stand-in composes only through the context table")
+            context["ops"].create(manifest_rel, manifest_bytes)
+            return schema._ok()
+
+        def benign(op_row, context):
+            reached.append((op_row["op"], type(context).__name__))
+            return schema._ok()
+
+        def spy(name, real):
+            def spying(op_row, context):
+                reached.append((name, type(context).__name__))
+                return real(op_row, context)
+            return spying
+
+        def skipping(op_row, context):
+            # a retire-file composer that drift-checks its source but composes no archive copy of it.
+            reached.append(("retire-file", type(context).__name__))
+            context.ops.frozen(op_row["path"], op_row["preimage_digest"])
+
+        def receipt_stage(context):
+            composed_creates.append([op["path"] for op in context["ops"].ops if op.get("op") == "create"])
+            return schema._ok()
+
+        def typed_driver(stand_ins, retire=None):
+            stack = contextlib.ExitStack()
+            stack.enter_context(mock.patch.dict(OP_HANDLERS, stand_ins))
+            stack.enter_context(mock.patch.dict(DRIVER_STAGES, {RECEIPT_STAGE: receipt_stage}))
+            stack.enter_context(mock.patch.dict(_FILE_OPS, {"retire-file": retire or spy(
+                "retire-file", _FILE_OPS["retire-file"])}))
+            stack.enter_context(mock.patch.dict(_REGISTRATION_OPS, {"register-unmanaged": spy(
+                "register-unmanaged", _REGISTRATION_OPS["register-unmanaged"])}))
+            return stack
+
+        before = _snapshot(root)
+        stood_in = dict(zip(stand_in_names, (scaffold, benign, benign)))
+        # each refusal still refuses before anything is written: render-views keeps its REAL handler, which
+        # reads observations this driver does not gather, so apply names that value and writes nothing (red
+        # against a run_apply without its _unsupplied gate, which composes the row over an absent value).
+        with typed_driver({"init-store": scaffold, "install-pack": benign}):
+            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+        check("driver-apply-unsupplied-observations-refused", "render-views" in (err or "")
+              and "needs context observations" in (err or "") and "before anything is written" in (err or "")
+              and not reached and _snapshot(root) == before, observed=err)
+        # init-store keeps its REAL handler: apply names its unsequenced substrate run before anything is
+        # written (red against a _DRIVER_UNSUPPLIED without the init-store entry, where the real handler
+        # dispatches and refuses at its member-set precondition instead, the substrate run unnamed).
+        with typed_driver({"render-views": benign, "install-pack": benign}):
+            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+        check("driver-apply-init-store-named-refused",
+              "('init-store') needs its own journaled substrate run" in (err or "")
+              and "before anything is written" in (err or "") and not reached and _snapshot(root) == before,
+              observed=err)
+        # the driver holds the archive division to its composed result: a retire-file composer that skips
+        # its source's copy refuses the apply, naming the source, with nothing written (red against a
+        # run_apply without _require_archived_once, where the apply commits with legacy.md never archived).
+        with typed_driver(stood_in, retire=skipping):
+            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+        check("driver-apply-unarchived-source-refused", "other than exactly one archive copy" in (err or "")
+              and "legacy.md (0 archive copies)" in (err or "") and ("retire-file", "OpContext") in reached
+              and _snapshot(root) == before, observed=err)
+
+        def wrong_payload(op_row, context):
+            # a retire-file composer that archives OTHER bytes at the expected archive path: the guard
+            # holds the copied bytes too, never path cardinality alone (codex round 2).
+            reached.append(("retire-file", type(context).__name__))
+            _data, mode = context.ops.frozen(op_row["path"], op_row["preimage_digest"])
+            context.ops.create(archive_rel(context.ops.run_id, op_row["path"]), b"WRONG ARCHIVE\n", mode)
+        # red against a _require_archived_once that counts creates by path alone, where the apply commits
+        # and publishes the wrong archive bytes; the migrate source's pass copy stays right, so only the
+        # retire source is named, and nothing is written.
+        with typed_driver(stood_in, retire=wrong_payload):
+            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+        check("driver-apply-wrong-retire-archive-payload-refused", "at the approved" in (err or "")
+              and "legacy.md (an archive copy at another digest" in (err or "")
+              and "old.md" not in (err or "") and ("retire-file", "OpContext") in reached
+              and _snapshot(root) == before, observed=err)
+
+        def preserve_wrong(self, source_path, plan_digest):
+            # a faulty pass: every ApplyOps.preserve drift-checks its source, then archives OTHER bytes,
+            # so the migrate source's copy (the pass's own) and the retire source's are both wrong.
+            _data, mode = self.frozen(source_path, plan_digest)
+            self.create(archive_rel(self.run_id, source_path), b"WRONG ARCHIVE\n", mode)
+            return _data, mode
+        # red against the path-cardinality guard, where the apply commits; the enable-hook preimage goes
+        # through preserve_masked, so only the two plan sources are named, and nothing is written.
+        with typed_driver(stood_in), mock.patch.object(ApplyOps, "preserve", preserve_wrong):
+            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+        check("driver-apply-wrong-migrate-archive-payload-refused",
+              "old.md (an archive copy at another digest" in (err or "")
+              and "legacy.md (an archive copy at another digest" in (err or "")
+              and _snapshot(root) == before, observed=err)
+        del reached[:], composed_creates[:]
+        with typed_driver(stood_in):
+            ttxn, terr = attempt(run_apply, root, typed_plan, typed_approval, sheet)
+        after = _snapshot(root)
+        # red against the plain context table for every handler, against typed contexts missing or mis-keying
+        # any of the three handlers (that row takes the table and refuses), against a pass that also archives
+        # a file-op row's source (the second create refuses), and against a driver that skips the pass
+        # (_require_archived_once refuses the unarchived migrate source).
+        check("driver-apply-typed-contexts-commit", ttxn == trid and terr is None, observed=terr)
+        # red against the plain table or a missing file-op mapping (the handler refuses before its composer).
+        check("driver-file-op-row-reaches-handler-with-opcontext", ("retire-file", "OpContext") in reached
+              and ("retire-file", "dict") not in reached)
+        try:
+            registered = tomllib.loads(after.get(manifest_rel, b"").decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            registered = dict()
+        # red against the plain table or a missing registration mapping (the handler refuses first).
+        check("driver-registration-row-reaches-handler-with-registrationcontext",
+              ("register-unmanaged", "RegistrationContext") in reached
+              and registered.get("unmanaged", dict()).get("paths") == ["keep.md"])
+        # red against typed contexts that omit or mis-key the enable-hook handler (it takes the table and
+        # refuses): the approved postimage landed and the live preimage is archived byte-exact.
+        check("driver-hook-row-reaches-handler-with-hookcontext",
+              after.get(hook_rel) == hook_new and after.get(archive_rel(trid, hook_rel)) == hook_old)
+        # GREEN-ON-REVERT GUARD (the pre-B2 driver gives every handler the table too): red against a driver
+        # whose fallback is a typed context, and never vacuous: every stand-in row was reached in both the
+        # preflight and the transaction, each with the table.
+        took = sorted((name, kind) for name, kind in reached if name in stand_in_names)
+        check("driver-other-rows-take-the-context-table",
+              took == sorted([(name, "dict") for name in stand_in_names] * 2), observed=took)
+        retire_copy_rel, migrate_copy_rel = archive_rel(trid, "legacy.md"), archive_rel(trid, "old.md")
+        # red against a pass that also archives a retire-file row's source (the second create refuses, so no
+        # pass reaches the receipt stage) and against a driver that skips the pass (no migrate copy).
+        check("driver-retire-and-migrate-each-archived-once-per-pass", len(composed_creates) == 2 and all(
+            creates.count(retire_copy_rel) == 1 and creates.count(migrate_copy_rel) == 1
+            for creates in composed_creates), observed=composed_creates)
+        typed_rows = tomllib.loads((after.get(inventory_rel(trid)) or b"").decode("utf-8")).get("file", [])
+        # red against a driver that skips the pass (no migrate copy) or the plain table (nothing commits).
+        check("driver-retire-and-migrate-preserved-sources-frozen",
+              after.get(retire_copy_rel) == typed_files["legacy.md"]
+              and after.get(migrate_copy_rel) == typed_files["old.md"]
+              and all(after.get(rel) == payload for rel, payload in typed_files.items())
+              and verify_bundle(root, trid).status == VALID
+              and sorted(r["path"] for r in typed_rows)
+              == sorted([plan_rel(trid), approval_rel(trid), retire_copy_rel, migrate_copy_rel,
+                         archive_rel(trid, hook_rel)]))
+
+    # the unsupplied values are keyed by the handler that needs them, each named: red against a
+    # _DRIVER_UNSUPPLIED missing any one entry (for example the init-store entry).
+    named = _unsupplied([schema.canonical_op(name) for name in (
+        "create-file", "repoint-consumer", "plant-governance", "record-adoption", "render-views", "init-store",
+        "retire-file", "move-file", "register-unmanaged", "enable-hook")])
+    check("driver-unsupplied-names-each-missing-value", len(named) == 6 and all(
+        any(needle in finding for finding in named) for needle in (
+            "('create-file') needs the created file's planned bytes",
+            "('repoint-consumer') needs the consumer's planned postimage model",
+            "('plant-governance') needs context pack", "('record-adoption') needs context receipt and now",
+            "('render-views') needs context observations",
+            "('init-store') needs its own journaled substrate run")), observed=named)
+    # a stand-in handler for the same op needs none of them (red against an _unsupplied keyed by op name
+    # alone), and the ops the driver supplies in full name nothing.
+    with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, lambda op_row, context=None: schema._ok())):
+        check("driver-unsupplied-keyed-by-handler", _unsupplied([schema.canonical_op("create-file")]) == [])
+
+    # 11c: the driver's archive rule over a planner-frozen MOVE fixture (claude round 2, MEDIUM-2): one
+    # occupying move source (.working/TODO.md, a declared view target) and one non-occupying one
+    # (legacy/MOVE.md). The real move-file composer archives the occupying source exactly once and leaves
+    # the non-occupying source frozen with no archive copy, so the commit below is red against a
+    # _require_archived_once that requires a copy for non-occupying move sources too (it would refuse
+    # every planner-valid plan carrying one), and the skipping and wrong-payload composers are red
+    # against one that skips every move source, or counts creates by path alone.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        move_files = dict([(".working/TODO.md", b"todo\n"), ("legacy/MOVE.md", b"keep moving\n")])
+        for rel, payload in move_files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(payload)
+        head = _selftest_git_commit(root)
+        sheet = _sheet_with(root, head, [dict(path=".working/TODO.md", disposition="move", actor="fixture"),
+                                         dict(path="legacy/MOVE.md", disposition="move", actor="fixture")])
+        move_plan = _freeze(root, sheet) or b""
+        move_doc = tomllib.loads(move_plan.decode("utf-8")) if move_plan else dict(
+            run_id=rid, ops=[], sources=[], store=dict(store_root=".", machine_rel=".working/toml"))
+        mrid = move_doc["run_id"]
+        move_approval = attempt(capture_approval, root, move_plan, sheet, "adopter", now)[0] or b""
+        move_sources = dict((row["path"], row) for row in move_doc["sources"])
+        # PRECONDITION: the fixture froze and was approved, carrying one occupying and one non-occupying
+        # move source (a failed freeze turns this and every check below red: run_apply(b"") refuses).
+        check("driver-move-fixture-frozen-and-approved", bool(move_plan) and bool(move_approval)
+              and [row["op"] for row in move_doc["ops"]].count("move-file") == 2
+              and move_sources.get(".working/TODO.md", dict()).get("occupying") is True
+              and move_sources.get("legacy/MOVE.md", dict()).get("occupying") is False)
+        taken = []
+
+        def move_scaffold(op_row, context):
+            # init-store's stand-in, as in 11b: the scaffolded manifest, staged through the context table.
+            if not isinstance(context, dict):
+                return schema._cannot("the init-store stand-in composes only through the context table")
+            context["ops"].create(schema.store_manifest(move_doc["store"]),
+                                  _opf_init.build_manifest().encode("utf-8"))
+            return schema._ok()
+
+        def move_benign(op_row, context):
+            return schema._ok()
+
+        def move_receipt(context):
+            taken.append([op["path"] for op in context["ops"].ops if op.get("op") == "create"])
+            return schema._ok()
+
+        def move_driver(move=None):
+            stack = contextlib.ExitStack()
+            stack.enter_context(mock.patch.dict(OP_HANDLERS, dict([
+                ("init-store", move_scaffold), ("render-views", move_benign),
+                ("install-pack", move_benign)])))
+            stack.enter_context(mock.patch.dict(DRIVER_STAGES, dict([(RECEIPT_STAGE, move_receipt)])))
+            if move is not None:
+                stack.enter_context(mock.patch.dict(_FILE_OPS, dict([("move-file", move)])))
+            return stack
+
+        before = _snapshot(root)
+
+        def move_skipping(op_row, context):
+            # a move-file composer that drift-checks both sources but archives neither, treating the
+            # occupying source as frozen too.
+            context.ops.require_absent(op_row["destination"])
+            context.ops.frozen(op_row["source"], op_row["source_digest"])
+        # red against a _require_archived_once that skips every move source, where the apply commits with
+        # .working/TODO.md never archived; only the occupying source is named (red also against a guard
+        # that requires a copy for the non-occupying source, which it would name too), nothing written.
+        with move_driver(move=move_skipping):
+            err = refusal(run_apply, root, move_plan, move_approval, sheet)
+        check("driver-apply-move-skipped-archive-refused",
+              "other than exactly one archive copy" in (err or "")
+              and ".working/TODO.md (0 archive copies)" in (err or "")
+              and "legacy/MOVE.md" not in (err or "") and _snapshot(root) == before, observed=err)
+
+        def move_wrong(op_row, context):
+            # the occupying source's copy lands at the right path with OTHER bytes, so path cardinality
+            # alone would accept it (codex round 2, over the move class).
+            context.ops.require_absent(op_row["destination"])
+            _data, mode = context.ops.frozen(op_row["source"], op_row["source_digest"])
+            if op_row["source"] == ".working/TODO.md":
+                context.ops.create(archive_rel(context.ops.run_id, op_row["source"]),
+                                   b"WRONG ARCHIVE\n", mode)
+        # red against a _require_archived_once that counts creates by path alone, where the apply commits
+        # and publishes the wrong archive bytes; nothing is written.
+        with move_driver(move=move_wrong):
+            err = refusal(run_apply, root, move_plan, move_approval, sheet)
+        check("driver-apply-move-wrong-archive-payload-refused",
+              ".working/TODO.md (an archive copy at another digest" in (err or "")
+              and _snapshot(root) == before, observed=err)
+        # the REAL composer commits: red against a _require_archived_once that requires a copy for
+        # non-occupying move sources too (it would refuse this planner-valid plan before anything runs).
+        del taken[:]
+        with move_driver():
+            mtxn, merr = attempt(run_apply, root, move_plan, move_approval, sheet)
+        check("driver-apply-move-sources-commit", mtxn == mrid and merr is None, observed=merr)
+        after = _snapshot(root)
+        todo_copy = archive_rel(mrid, ".working/TODO.md")
+        # the occupying source is archived byte-exact exactly once (in the preflight and the transaction
+        # alike) and removed; the non-occupying source stays frozen in place with NO archive copy; both
+        # move destinations wait for the retirement stage; and the bundle claims the one copy.
+        check("driver-apply-move-occupying-archived-once-non-occupying-none",
+              after.get(todo_copy) == move_files[".working/TODO.md"]
+              and ".working/TODO.md" not in after
+              and after.get("legacy/MOVE.md") == move_files["legacy/MOVE.md"]
+              and archive_rel(mrid, "legacy/MOVE.md") not in after
+              and store.moved_dest(".working/TODO.md") not in after
+              and store.moved_dest("legacy/MOVE.md") not in after
+              and len(taken) == 2 and all(c.count(todo_copy) == 1 for c in taken)
+              and verify_bundle(root, mrid).status == VALID)
 
     # 12: the finish ops (slice 5), see _finish_ops_self_test.
     _finish_ops_self_test(check)
@@ -12253,6 +12786,52 @@ def _self_test_checks():
         check("retirement-without-committed-preimage-refused-untouched-save-journal-dirs",
               why is not None and "committed base" in why and untouched_save_journal_dirs(before, root))
 
+    # 16c2 (B3): the driver's order, the preservation pass and then every file-op row composed into ONE
+    # ApplyOps, archives exactly once each of the four fixture sources that requires an apply-stage archive
+    # copy (its non-occupying move source takes none): the retire and occupying move sources by their rows, the
+    # migrate source (no op row) by the pass; and an occupied move destination stays a collision finding
+    # (spec 14.2) with the tree untouched. Red against a pass that also archives a file-op row's source
+    # (the second archive create refuses the whole transaction).
+    mig_rel, mig_bytes = "legacy/OLD.md", b"old notes\n"
+    mig_row = dict(path=mig_rel, disposition="migrate", occupying=False, digest=plan_digest(mig_bytes),
+                   preservation=archive_rel(rid, mig_rel))
+    b3_plan = dict(run_id=rid, sources=fx_sources + [mig_row], ops=[fx_create] + fx_disposed)
+    b3_creates = []
+
+    def preserve_then_rows(plan):
+        def compose(ops):
+            compose_preservation(ops, plan)
+            compose_rows(plan["ops"], plan["sources"], {fx_new: fx_new_bytes})(ops)
+            b3_creates.append([op["path"] for op in ops.ops if op.get("op") == "create"])
+        return compose
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = file_fixture(temp)
+        (root / mig_rel).write_bytes(mig_bytes)
+        txn, why = attempt(run_adopt_transaction, root, rid, preserve_then_rows(b3_plan))
+        after = snapshot(root)
+        copies = [archive_rel(rid, p) for p in ("legacy/RULES.md", ".working/TODO.md", "docs/VIEW.md", mig_rel)]
+        check("preservation-then-file-ops-commit", txn == rid and why is None and lock_free(root), observed=why)
+        check("preservation-then-file-ops-each-source-archived-once", b3_creates != [] and all(
+            creates.count(rel) == 1 for creates in b3_creates for rel in copies), observed=b3_creates)
+        check("preservation-then-file-ops-copies-byte-equal",
+              after.get(copies[0]) == fx_files["legacy/RULES.md"]
+              and after.get(copies[1]) == fx_files[".working/TODO.md"]
+              and after.get(copies[2]) == fx_files["docs/VIEW.md"] and after.get(copies[3]) == mig_bytes
+              and after.get(mig_rel) == mig_bytes and after.get("legacy/RULES.md") == fx_files["legacy/RULES.md"]
+              and ".working/TODO.md" not in after and "docs/VIEW.md" not in after
+              and verify_bundle(root, rid).status == VALID)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = file_fixture(temp)
+        (root / mig_rel).write_bytes(mig_bytes)
+        (root / fx_moved).parent.mkdir(parents=True)
+        (root / fx_moved).write_bytes(b"already here\n")
+        before = tree_state(root)
+        _txn, why = attempt(run_adopt_transaction, root, rid, preserve_then_rows(b3_plan))
+        check("preservation-then-move-occupied-destination-collision-untouched-save-journal-dirs",
+              why is not None and "occupied" in why and "never an overwrite" in why
+              and untouched_save_journal_dirs(before, root) and lock_free(root), observed=why)
+
     # 16d: create-file's own preconditions and the plan bindings the handlers require, each refused with
     # the tree untouched: an occupied path, bytes that do not match content_digest, a path in the store
     # control area (this run's own archive, which check_apply_ops alone would admit), a source no plan row
@@ -12823,16 +13402,7 @@ def _self_test_checks():
         skipped.append(("self-test-leaves-no-descriptor-open", no_census))
     for name, why in skipped:
         print("  SKIPPED: {} ({})".format(name, why))
-    if failures:
-        print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
-        for f in failures:
-            print("  FAILED: {}".format(f))
-            if f in failure_details:
-                print("    observed: {}".format(failure_details[f]))
-        return 1
-    print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; ten executable ops: the file ops, "
-          "init-store, the registration ops, enable-hook and the finish ops)".format(checked[0]))
-    return 0
+    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)
 
 
 def _st_fixture_plan(run_id_):
@@ -12990,38 +13560,726 @@ _CLASS_SWEEP_CHECKS = ("class-run-leaves-a-foreign-thread-descriptor-open",
 _CLASS_SWEEP_FORMAT = "opf.adopt-apply.class-sweep/v1"
 
 
-def _run_class_sweep_child(timeout=1800):
+# The class sweep child's bound, the timeout default below, sized as follows. It stays an int literal: the
+# standalone closure gate reads literal timeout defaults to size its legs, and the self-test check
+# class-sweep-bound-declared-literal refuses any other form or figure.
+#   MEASURED (2026-10-19, 24 CPUs, three serial child runs, each passing all 13 checks): 115.68 s,
+#   117.38 s and 120.28 s wall; 112.54 s, 113.41 s and 115.41 s child CPU (user plus system); load5
+#   from 24.06 to 29.87 over the three runs.
+#   REPORTED, not reproduced here: one child run of 3,866 s at load5 about 45 to 55 (2026-10-13), before
+#   the sweep's descriptor census was bounded; that change measured 644.5 s before and 357.4 s after on
+#   one host in the same window, load not stated.
+#   ESTIMATED: 3,866 * 357.4 / 644.5 = 2,144 s for the current sweep at load5 45 to 55, assuming the
+#   census change saves the same share under load.
+# 3000 s is 1.40 times that estimate and 24.9 times the slowest measured run. It cannot rise above 3,120 s
+# while the closure gate's other legs keep their bounds: the gate bounds two legs at this wait plus 60 s,
+# and at 3,121 s its leg bounds and setup would exceed the 21,600 s job limit. When the bound expires the
+# self-test reports the bound, not the sweep's checks (_class_sweep_record).
+def _run_class_sweep_child(timeout=3000):
     """Run the close-fault class sweep in a fresh interpreter of this module (python -I -B,
     --selftest-class-sweep-child), with a bounded wait: (the rows (check, passed, observed) in
-    _CLASS_SWEEP_CHECKS order, None) on exit 0 with a complete result, else (None, why). A crash, a
-    nonzero exit, a timeout (the child is killed), or a result that is missing, malformed or names other
-    checks is the (None, why) failure."""
+    _CLASS_SWEEP_CHECKS order, None, False) on exit 0 with a complete result and no stderr bytes at all;
+    (None, why, False) on a launch failure, a crash, a nonzero exit, any stderr bytes beside exit 0
+    including whitespace-only stderr (a shutdown fault after the result was
+    written), or a result that is missing, malformed or names other checks; and (None, why, True) when
+    the child is still running at the bound and is killed. That expiry means only that the sweep did not
+    finish within its bound: either the host was too slow or the code under test hangs, and this parent
+    cannot tell which (_class_sweep_record)."""
     import tempfile
+    import time
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-sweep-") as temp:
         result_path = Path(temp) / "class-sweep-result.json"
+        started = time.monotonic()
         try:
             proc = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__),
                                    "--selftest-class-sweep-child", str(result_path)],
                                   stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
-            return None, "no result within " + str(timeout) + "s (killed)"
+            return None, ("killed at its {}s bound after {:.1f}s: the sweep did not finish within its "
+                          "bound (either the host was too slow or the code under test hangs)").format(
+                timeout, time.monotonic() - started), True
         except OSError as exc:
-            return None, "could not start: " + repr(exc)
+            return None, "could not start: " + repr(exc), False
         said = proc.stderr.decode("utf-8", "replace").strip()[-800:]
         if proc.returncode != 0:
-            return None, "exit " + str(proc.returncode) + " (" + said + ")"
+            return None, "exit " + str(proc.returncode) + " (" + said + ")", False
+        if proc.stderr:
+            # The refusal tests the RAW stderr bytes: whitespace-only stderr beside exit 0 is still a
+            # fault (only the displayed diagnostic is stripped, shown as the raw repr when it strips away).
+            return None, ("exit 0 with stderr, a fault after the sweep ran ("
+                          + (said or repr(proc.stderr[-800:])) + ")"), False
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            return None, "no readable result: " + repr(exc)
+            return None, "no readable result: " + repr(exc), False
     rows = result.get("checks") if isinstance(result, dict) else None
     if not (isinstance(rows, list) and result.get("format") == _CLASS_SWEEP_FORMAT
             and result.get("complete") is True
             and all(isinstance(row, list) and len(row) == 3 and type(row[1]) is bool
                     and (row[2] is None or isinstance(row[2], str)) for row in rows)
             and [row[0] for row in rows] == list(_CLASS_SWEEP_CHECKS)):
-        return None, ("incomplete or malformed result: " + repr(result))[:800]
-    return [tuple(row) for row in rows], None
+        return None, ("incomplete or malformed result: " + repr(result))[:800], False
+    return [tuple(row) for row in rows], None, False
+
+
+def _class_sweep_record(check, bound_expired, run=None):
+    """Run the class sweep child (run, by default _run_class_sweep_child) and record its outcome. A result
+    records each of _CLASS_SWEEP_CHECKS through check as the child judged it; a failure to produce one (a
+    crash, a nonzero exit, stderr beside exit 0, a missing or malformed result) fails every one of them,
+    named with the reason (fail-closed). The child reaching its bound records none of them: it appends one
+    entry to bound_expired naming the bound and every check left unevaluated, so the run reports the bound
+    expiring (exit 2, _self_test_outcome), never those checks failing or passing."""
+    rows, why, expired = (_run_class_sweep_child if run is None else run)()
+    if expired:
+        bound_expired.append("class sweep child {} (checks not evaluated: {})".format(
+            why, ", ".join(_CLASS_SWEEP_CHECKS)))
+        return
+    for index, name in enumerate(_CLASS_SWEEP_CHECKS):
+        if rows is None:
+            check(name, False, observed="class sweep child: " + why)
+        else:
+            check(name, rows[index][1], observed=rows[index][2])
+
+
+def _self_test_outcome(failures, failure_details, checked, bound_expired):
+    """Print the run's verdict and return its exit code: 1 when a check failed (each bound that expired is
+    named beside the failures), 2 when the only problem is a bound that expired (cannot evaluate: the
+    checks behind it did not run, because either the host was too slow or the code under test hangs, and
+    the expiry does not tell which), else 0."""
+    if failures:
+        print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
+        for f in failures:
+            print("  FAILED: {}".format(f))
+            if f in failure_details:
+                print("    observed: {}".format(failure_details[f]))
+        for entry in bound_expired:
+            print("  BOUND EXPIRED: {}".format(entry))
+        return 1
+    if bound_expired:
+        for entry in bound_expired:
+            print("  BOUND EXPIRED: {}".format(entry))
+        print("OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE ({} bound(s) expired: the checks behind each "
+              "did not run, because either the host was too slow or the code under test hangs; the other "
+              "{} checks passed)".format(len(bound_expired), checked))
+        return 2
+    print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; ten executable ops: the file ops, "
+          "init-store, the registration ops, enable-hook and the finish ops)".format(checked))
+    return 0
+
+
+def _declared_sweep_bound(tree):
+    """The default of the timeout parameter of _run_class_sweep_child in the module tree, when it is an int
+    literal (the form the standalone closure gate's declared-wait scan reads, so the gate's leg bound covers
+    this wait); None when the function or that default is missing or is any other form (a name, a call,
+    arithmetic, a float or a bool), which that scan would not count."""
+    import ast
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_class_sweep_child":
+            spec = node.args
+            positional = spec.posonlyargs + spec.args
+            pairs = list(zip(positional[len(positional) - len(spec.defaults):], spec.defaults))
+            for arg, default in pairs:
+                if arg.arg == "timeout" and isinstance(default, ast.Constant) and type(default.value) is int:
+                    return default.value
+    return None
+
+
+def _class_sweep_skip_entries(reason):
+    """Every class-sweep check only a platform with the /proc/self/fd census can run, as (check, reason)
+    entries for the skip report: the 13 sweep checks the child judges, the parent's descriptor comparison
+    around the child, and the real-child expiry probe. The child's own checks need the census, so none of
+    these can be evaluated without it; naming each keeps the skip report complete."""
+    names = list(_CLASS_SWEEP_CHECKS) + ["class-sweep-child-leaves-this-process-descriptors-unchanged",
+                                         "class-sweep-bound-expiry-attributed-to-the-bound"]
+    return [(name, reason) for name in names]
+
+
+def _sweep_wiring(tree):
+    """How _self_test_checks in the module tree wires the class sweep into the run's report: (records,
+    outcomes, skips), where records lists the second-argument name of each _class_sweep_record call,
+    outcomes lists the fourth-argument name of each _self_test_outcome call (any other argument form
+    reads as "?"), and skips counts the `if not census:` statements whose body builds
+    _class_sweep_skip_entries while the opposite branch runs _class_sweep_record. The wiring check
+    requires exactly (["bound_expired"], ["bound_expired"], 1). This reads NAMES at the call sites only:
+    it does not establish that the skip entries reach the skip report or that the expiry list keeps its
+    contents to the verdict; _sweep_report_source slices and RUNS those statements for that."""
+    import ast
+
+    def _arg_name(call, index):
+        if len(call.args) > index and isinstance(call.args[index], ast.Name):
+            return call.args[index].id
+        return "?"
+
+    def _calls(nodes, name):
+        found = []
+        for node in nodes:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == name:
+                    found.append(sub)
+        return found
+
+    records, outcomes, skips = [], [], 0
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_self_test_checks":
+            records = [_arg_name(call, 1) for call in _calls([node], "_class_sweep_record")]
+            outcomes = [_arg_name(call, 3) for call in _calls([node], "_self_test_outcome")]
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.If) and isinstance(sub.test, ast.UnaryOp)
+                        and isinstance(sub.test.op, ast.Not) and isinstance(sub.test.operand, ast.Name)
+                        and sub.test.operand.id == "census"
+                        and _calls(sub.orelse, "_class_sweep_record")
+                        and _calls(sub.body, "_class_sweep_skip_entries")):
+                    skips += 1
+    return records, outcomes, skips
+
+
+# The names whose statements make up the sweep's reporting path inside _self_test_checks: the expiry
+# list and its verdict read, the sweep recording, and the no-census skip entries.
+_SWEEP_REPORT_NAMES = ("bound_expired", "_class_sweep_record", "_class_sweep_skip_entries",
+                       "_self_test_outcome")
+
+
+def _sweep_report_source(tree):
+    """The sweep-reporting slice of _self_test_checks in the module tree, as the source of one function
+    `skeleton(census, no_census, check, failures, failure_details, checked, skipped,
+    _class_sweep_record, _class_sweep_skip_entries, _self_test_outcome)`: every statement of the real
+    function body (descending into the branches of each `if`) that names one of _SWEEP_REPORT_NAMES, or
+    that names both `skipped` and `print` (the skip report's emission), kept in order and otherwise
+    verbatim; None when the function is missing or nothing matches. Running the slice executes the REAL
+    recording, skip and verdict statements, so dropping or diverting the skip extend, rebinding the
+    expiry list before the verdict, or removing the report's emission changes what the slice reports.
+    The slice holds ONLY the statements the rule above keeps: an inserted statement that names nothing
+    beyond `skipped` (an erasure such as skipped.clear()) never reaches it, so what the slice proves is
+    the sanctioned statements' behaviour, not the absence of writes between them; _skip_list_write_sites
+    pins those write shapes at the source instead."""
+    import ast
+
+    def _names(stmt):
+        return {node.id for node in ast.walk(stmt) if isinstance(node, ast.Name)}
+
+    def _kept(stmts):
+        kept = []
+        for stmt in stmts:
+            if isinstance(stmt, ast.If):
+                body, orelse = _kept(stmt.body), _kept(stmt.orelse)
+                if body or orelse:
+                    kept.append(ast.If(test=stmt.test, body=body or [ast.Pass()], orelse=orelse))
+            else:
+                got = _names(stmt)
+                if got & set(_SWEEP_REPORT_NAMES) or {"skipped", "print"} <= got:
+                    kept.append(stmt)
+        return kept
+
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_self_test_checks":
+            body = _kept(node.body)
+            if not body:
+                return None
+            text = ast.unparse(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])))
+            header = ("def skeleton(census, no_census, check, failures, failure_details, checked, "
+                      "skipped, _class_sweep_record, _class_sweep_skip_entries, _self_test_outcome):\n")
+            return header + "".join("    " + line + "\n" for line in text.splitlines())
+    return None
+
+
+def _load_sweep_report_slice(slice_source, directory, tag):
+    """The `skeleton` function of the given slice source, written under `directory` and loaded as its own
+    module (importlib over a real file, never an exec of a string)."""
+    import importlib.util
+    path = Path(directory) / ("sweep-report-slice-" + tag + ".py")
+    path.write_text(slice_source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("_opf_sweep_report_slice_" + tag, str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.skeleton
+
+
+def _skip_list_write_sites(tree):
+    """How _self_test_checks touches its `skipped` list, read from the module tree: (inits, foreign),
+    where inits counts the bindings of `skipped` to a literal empty list (the run must have exactly one,
+    its creation) and foreign lists every other appearance of the string `skipped` in ANY field of ANY
+    node of the function; None when the function is missing. The scan reads raw node fields, not only
+    ast.Name nodes, so it also sees the bindings Python stores as plain strings (a match or star
+    capture, a mapping-pattern rest, an import alias, an except-as target, a global or nonlocal
+    declaration's name list) and the string wherever else it occurs (a keyword argument name, an
+    attribute name, a string constant equal to `skipped`). Sanctioned, and so not foreign: the one
+    initialisation, a statement-level skipped.append(...) or skipped.extend(...) call, and `skipped` as
+    a for statement's iterable (the skip report's read). The skip report is honest only while nothing
+    erases, rebinds or hands off the list between a skip's recording and the report, and the executed
+    reporting slice (_sweep_report_source) never contains a statement naming only `skipped`, so any
+    unsanctioned field carrying the string is refused HERE. Residual: an erasure that reaches the list
+    object without the string `skipped` in any field (through another name already bound to the same
+    object, or an indirect read of the frame's locals) is outside this reader's scope."""
+    import ast
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_self_test_checks":
+            inits, sanctioned = 0, set()
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Assign) and len(sub.targets) == 1
+                        and isinstance(sub.targets[0], ast.Name) and sub.targets[0].id == "skipped"
+                        and isinstance(sub.value, ast.List) and not sub.value.elts):
+                    inits += 1
+                    sanctioned.add(id(sub.targets[0]))
+                elif (isinstance(sub, ast.Expr) and isinstance(sub.value, ast.Call)
+                        and isinstance(sub.value.func, ast.Attribute)
+                        and sub.value.func.attr in ("append", "extend")
+                        and isinstance(sub.value.func.value, ast.Name)
+                        and sub.value.func.value.id == "skipped"):
+                    sanctioned.add(id(sub.value.func.value))
+                elif (isinstance(sub, ast.For) and isinstance(sub.iter, ast.Name)
+                        and sub.iter.id == "skipped"):
+                    sanctioned.add(id(sub.iter))
+            foreign = sorted(
+                "line {}: {}.{}".format(getattr(sub, "lineno", 0), type(sub).__name__, field)
+                for sub in ast.walk(node) if id(sub) not in sanctioned
+                for field, value in ast.iter_fields(sub)
+                if value == "skipped" or (isinstance(value, list) and "skipped" in value))
+            return inits, foreign
+    return None
+
+
+def _eventfd_skip_call_sites(tree):
+    """Each _eventfd_skip_reason call in _self_test_checks in the module tree, as the shape of its
+    arguments: "census,hasattr(os.eventfd)" for the live form (the census flag and the real presence of
+    os.eventfd, no keywords), else "?". The call-site check requires exactly one live-form call, so the
+    replaced-eventfd vector's skip reason keeps being derived from the census AND the facility, never
+    from a constant."""
+    import ast
+    sites = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_self_test_checks":
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                        and sub.func.id == "_eventfd_skip_reason"):
+                    shape = "?"
+                    if (len(sub.args) == 2 and not sub.keywords
+                            and isinstance(sub.args[0], ast.Name) and sub.args[0].id == "census"
+                            and isinstance(sub.args[1], ast.Call)
+                            and isinstance(sub.args[1].func, ast.Name)
+                            and sub.args[1].func.id == "hasattr"
+                            and len(sub.args[1].args) == 2
+                            and isinstance(sub.args[1].args[0], ast.Name)
+                            and sub.args[1].args[0].id == "os"
+                            and isinstance(sub.args[1].args[1], ast.Constant)
+                            and sub.args[1].args[1].value == "eventfd"):
+                        shape = "census,hasattr(os.eventfd)"
+                    sites.append(shape)
+    return sites
+
+
+def _function_level_sweep_suite_calls(tree):
+    """The sweep-suite self-tests _self_test_checks in the module tree calls as DIRECT function-level
+    statements (never nested under a branch, so they run on every platform), in order: the calls among
+    _class_sweep_bound_self_test and _class_sweep_placement_self_test."""
+    import ast
+    wanted = ("_class_sweep_bound_self_test", "_class_sweep_placement_self_test")
+    found = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_self_test_checks":
+            for stmt in node.body:
+                if (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+                        and isinstance(stmt.value.func, ast.Name) and stmt.value.func.id in wanted):
+                    found.append(stmt.value.func.id)
+    return found
+
+
+def _class_sweep_placement_self_test(check):
+    """The platform-independent sweep suite is CALLED, at function level: _self_test_checks runs
+    _class_sweep_bound_self_test and this placement check as direct statements, so neither can be moved
+    under a census (or any other) branch without this going red, and deleting one call leaves the other
+    to refuse the roster. Run from inside the suite itself, this cannot catch deleting BOTH calls
+    together; it guards the silent drop of one."""
+    import ast
+    live = _function_level_sweep_suite_calls(
+        ast.parse(Path(os.path.abspath(__file__)).read_text(encoding="utf-8")))
+    good = ("def _self_test_checks():\n"
+            "    _class_sweep_bound_self_test(check)\n"
+            "    _class_sweep_placement_self_test(check)\n")
+    probes = {
+        "good": _function_level_sweep_suite_calls(ast.parse(good)),
+        "moved-under-census": _function_level_sweep_suite_calls(ast.parse(
+            good.replace("    _class_sweep_bound_self_test(check)",
+                         "    if census:\n        _class_sweep_bound_self_test(check)"))),
+        "suite-call-deleted": _function_level_sweep_suite_calls(ast.parse(
+            good.replace("    _class_sweep_bound_self_test(check)\n", ""))),
+        "placement-call-deleted": _function_level_sweep_suite_calls(ast.parse(
+            good.replace("    _class_sweep_placement_self_test(check)\n", ""))),
+    }
+    want = ["_class_sweep_bound_self_test", "_class_sweep_placement_self_test"]
+    check("class-sweep-suite-called-at-function-level",
+          live == want and probes["good"] == want
+          and probes["moved-under-census"] == ["_class_sweep_placement_self_test"]
+          and probes["suite-call-deleted"] == ["_class_sweep_placement_self_test"]
+          and probes["placement-call-deleted"] == ["_class_sweep_bound_self_test"],
+          observed="live={!r} probes={!r}".format(live, probes))
+
+
+def _class_sweep_expiry_probe_self_test(check):
+    """The real sweep child, given a 1 s bound it cannot finish in, is killed at that bound and the
+    expiry is attributed to the bound with the honest reason: the sweep did not finish within it, which
+    may be a slow host or a hang in the code under test. Run only with the descriptor census (the child's
+    checks need it, so without one the child exits before the bound instead of being killed at it);
+    a platform without the census names this probe in the skip report (_class_sweep_skip_entries)."""
+    import time
+    started = time.monotonic()
+    got = _run_class_sweep_child(timeout=1)
+    took = time.monotonic() - started
+    check("class-sweep-bound-expiry-attributed-to-the-bound",
+          len(got) == 3 and got[0] is None and got[2] is True
+          and str(got[1]).startswith("killed at its 1s bound after ")
+          and "the sweep did not finish within its bound" in str(got[1])
+          and "either the host was too slow or the code under test hangs" in str(got[1]) and took < 60,
+          observed="returned {!r} in {:.1f}s".format(got, took))
+
+
+def _class_sweep_bound_self_test(check):
+    """The class sweep child's transport and reporting: the real runner classifies each controlled child
+    outcome (failing closed on a launch failure and on any stderr bytes beside exit 0, whitespace-only
+    stderr included), an expiry is reported
+    as the bound and never as the sweep's checks failing or passing, the expiry list and the no-census
+    skips are wired into the run's own report (the reporting statements are also sliced from this
+    module's source and EXECUTED over a controlled expiry, a controlled no-census run and a controlled
+    clean result, asserting the final exit code and the emitted entries), the skip list's writes keep
+    their sanctioned shapes (an erasure the slice cannot see is refused by shape,
+    _skip_list_write_sites), and the bound's size stays the int literal recorded above
+    _run_class_sweep_child. Every vector here is in-process and platform-independent."""
+    import ast
+    import io
+    from unittest import mock
+    rows = [(name, True, None) for name in _CLASS_SWEEP_CHECKS]
+    names = list(_CLASS_SWEEP_CHECKS)
+    # The REAL _run_class_sweep_child over a controlled child (subprocess.run replaced for exactly one
+    # call each): its classification of a launch failure (the interpreter could not start), a signal
+    # death, an ordinary nonzero exit, exit 0 with no result, exit 0 with a malformed result, exit 0 with
+    # stderr text, exit 0 with WHITESPACE-ONLY stderr beside a complete result (the refusal must test the
+    # raw bytes, not the stripped text), a kill at the bound, and a clean result. Only
+    # the kill at the bound may read as expired: every child FAILURE must keep the expired flag False
+    # (red against a classifier that converts a child failure into a bound expiry).
+    payload = json.dumps(dict(format=_CLASS_SWEEP_FORMAT, complete=True,
+                              checks=[list(row) for row in rows]))
+    scenarios = {"launch": (None, b"", None),
+                 "signal": (-9, b"", None), "nonzero": (2, b"class sweep child: harness error X()", None),
+                 "missing": (0, b"", None), "malformed": (0, b"", "{}"),
+                 "stderr": (0, b"Exception ignored in: boom", payload),
+                 "blank-stderr": (0, b" \t\r\n", payload), "killed": (None, b"", None),
+                 "clean": (0, b"", payload)}
+    transported, commands = {}, []
+
+    def _fake_run(scenario):
+        def run(cmd, **kwargs):
+            commands.append(list(cmd))
+            returncode, stderr, body = scenarios[scenario]
+            if scenario == "launch":
+                raise OSError("no interpreter")
+            if scenario == "killed":
+                raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+            if body is not None:
+                Path(cmd[-1]).write_text(body, encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, returncode, stdout=b"", stderr=stderr)
+        return run
+    for scenario in ("launch", "signal", "nonzero", "missing", "malformed", "stderr", "blank-stderr",
+                     "killed", "clean"):
+        with mock.patch.object(subprocess, "run", _fake_run(scenario)):
+            transported[scenario] = _run_class_sweep_child(timeout=5)
+    got = transported
+    check("class-sweep-child-transport-classifies-each-outcome",
+          all(len(got[s]) == 3 for s in got)
+          and got["launch"][0] is None
+          and str(got["launch"][1]).startswith("could not start: ")
+          and got["launch"][2] is False
+          and got["signal"][0] is None and str(got["signal"][1]).startswith("exit -9 (")
+          and got["signal"][2] is False
+          and got["nonzero"][0] is None
+          and str(got["nonzero"][1]).startswith("exit 2 (class sweep child: harness error")
+          and got["nonzero"][2] is False
+          and got["missing"][0] is None and str(got["missing"][1]).startswith("no readable result: ")
+          and got["missing"][2] is False
+          and got["malformed"][0] is None
+          and str(got["malformed"][1]).startswith("incomplete or malformed result: ")
+          and got["malformed"][2] is False
+          and got["killed"][0] is None
+          and str(got["killed"][1]).startswith("killed at its 5s bound after ")
+          and "either the host was too slow or the code under test hangs" in str(got["killed"][1])
+          and got["killed"][2] is True
+          and got["clean"] == ([tuple(row) for row in rows], None, False)
+          and len(commands) == 9
+          and all(cmd[-2] == "--selftest-class-sweep-child" and cmd[1:3] == ["-I", "-B"]
+                  for cmd in commands),
+          observed=repr(got))
+    check("class-sweep-child-exit0-stderr-fails-closed",
+          got["stderr"][0] is None
+          and str(got["stderr"][1]).startswith("exit 0 with stderr, a fault after the sweep ran (")
+          and "boom" in str(got["stderr"][1]) and got["stderr"][2] is False
+          and got["blank-stderr"][0] is None
+          and str(got["blank-stderr"][1]).startswith("exit 0 with stderr, a fault after the sweep ran (")
+          and got["blank-stderr"][2] is False,
+          observed=repr((got["stderr"], got["blank-stderr"])))
+    # How each child outcome is recorded: an expiry records no check and one bound entry naming every
+    # unevaluated check; a crash, a nonzero exit or a malformed result fails all of them, naming why; a
+    # result records each row.
+    expired_why = ("killed at its 3000s bound after 3000.2s: the sweep did not finish within its bound "
+                   "(either the host was too slow or the code under test hangs)")
+    recorded = {}
+    for label, outcome in (("expired", (None, expired_why, True)),
+                           ("crashed", (None, "exit 2 (class sweep child: harness error)", False)),
+                           ("malformed", (None, "incomplete or malformed result: {}", False)),
+                           ("result", (rows[:6] + [(rows[6][0], False, "seen")] + rows[7:], None, False))):
+        calls, expired = [], []
+        _class_sweep_record(lambda name, cond, observed=None: calls.append((name, bool(cond), observed)),
+                            expired, run=lambda: outcome)
+        recorded[label] = (calls, expired)
+    calls, expired = recorded["expired"]
+    check("class-sweep-bound-expiry-not-a-check-failure",
+          calls == [] and expired == ["class sweep child {} (checks not evaluated: {})".format(
+              expired_why, ", ".join(names))]
+          and all(name in expired[0] for name in names),
+          observed=repr(recorded["expired"]))
+    check("class-sweep-child-failure-still-fails-every-check",
+          all(recorded[label][1] == [] and [c[0] for c in recorded[label][0]] == names
+              and all(c[1] is False and c[2] == "class sweep child: " + outcome_why for c in recorded[label][0])
+              for label, outcome_why in (("crashed", "exit 2 (class sweep child: harness error)"),
+                                         ("malformed", "incomplete or malformed result: {}")))
+          and recorded["result"] == ([(name, index != 6, "seen" if index == 6 else None)
+                                      for index, name in enumerate(names)], []),
+          observed=repr({label: recorded[label] for label in ("crashed", "malformed", "result")}))
+    # The exit mapping: 2 for a bound alone, 1 for a failure (the bound named beside it), 0 when clean.
+    said = {}
+    for label, args in (("bound", ([], {}, 40, ["class sweep child killed at its 3000s bound"])),
+                        ("both", (["x"], {"x": "y"}, 41, ["class sweep child killed at its 3000s bound"])),
+                        ("fail", (["x"], {}, 41, [])),
+                        ("clean", ([], {}, 41, []))):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = _self_test_outcome(*args)
+        said[label] = (code, out.getvalue())
+    bound_line = "  BOUND EXPIRED: class sweep child killed at its 3000s bound\n"
+    check("self-test-exit-bound-expiry-cannot-evaluate",
+          said["bound"][0] == 2 and bound_line in said["bound"][1] and "CANNOT EVALUATE" in said["bound"][1]
+          and "either the host was too slow or the code under test hangs" in said["bound"][1]
+          and "not a failure of the code" not in said["bound"][1]
+          and "FAIL" not in said["bound"][1] and "PASS" not in said["bound"][1]
+          and said["both"][0] == 1 and bound_line in said["both"][1] and "FAILED: x" in said["both"][1]
+          and said["fail"][0] == 1 and "BOUND EXPIRED" not in said["fail"][1]
+          and said["clean"][0] == 0 and "SELF-TEST: PASS (41 " in said["clean"][1]
+          and "BOUND EXPIRED" not in said["clean"][1],
+          observed=repr(said))
+    # The no-census skip roster: every census-only sweep check is named, each with the given reason, in
+    # _CLASS_SWEEP_CHECKS order, then the parent comparison and the expiry probe, and nothing else.
+    entries = _class_sweep_skip_entries("probe reason")
+    check("class-sweep-no-census-skips-every-sweep-check-named",
+          [name for name, _why in entries] == names
+          + ["class-sweep-child-leaves-this-process-descriptors-unchanged",
+             "class-sweep-bound-expiry-attributed-to-the-bound"]
+          and all(why == "probe reason" for _name, why in entries),
+          observed=repr(entries))
+    # The eventfd vector's skip reason names the missing facility: the census when there is none (with or
+    # without eventfd), the eventfd facility when only it is missing, and no skip when both exist.
+    check("self-test-eventfd-skip-reason-names-the-missing-facility",
+          _eventfd_skip_reason(False, True) == _NO_CENSUS
+          and _eventfd_skip_reason(False, False) == _NO_CENSUS
+          and _eventfd_skip_reason(True, False) == _NO_EVENTFD
+          and _NO_EVENTFD != _NO_CENSUS and "eventfd" in _NO_EVENTFD
+          and _eventfd_skip_reason(True, True) is None,
+          observed=repr((_eventfd_skip_reason(False, True), _eventfd_skip_reason(True, False),
+                         _eventfd_skip_reason(True, True))))
+    # The bound is an int literal default equal to the sized figure (3000 s, recorded above
+    # _run_class_sweep_child): a name, a call, a float, a bool or another figure is refused, so the closure
+    # gate's scan of literal waits keeps covering it and a resize goes through the sizing record.
+    source_text = Path(os.path.abspath(__file__)).read_text(encoding="utf-8")
+    source_tree = ast.parse(source_text)
+    live = _declared_sweep_bound(source_tree)
+    probes = {}
+    for default in ("2999", "3000", "3001", "_BOUND", "3000.0", "True", "1500 * 2"):
+        probes[default] = _declared_sweep_bound(ast.parse(
+            "def _run_class_sweep_child(timeout={}):\n    pass\n".format(default)))
+    check("class-sweep-bound-declared-literal",
+          live == 3000 and probes == {"2999": 2999, "3000": 3000, "3001": 3001, "_BOUND": None,
+                                      "3000.0": None, "True": None, "1500 * 2": None}
+          and [d for d, v in probes.items() if v == 3000] == ["3000"]
+          and _declared_sweep_bound(ast.parse("def other(timeout=3000):\n    pass\n")) is None,
+          observed="live={!r} probes={!r}".format(live, probes))
+    # The wiring into the run's report, read from this module's own source BY NAME: the sweep's recording
+    # call names the same bound_expired list the run's verdict call names (a fresh list there would let an
+    # expiry exit 0 as PASS), and the no-census branch opposite the sweep run calls the skip-entry
+    # builder. Name reading alone does not prove the entries survive to the report; the executed
+    # reporting slice below runs the sanctioned statements, and the skip-list write-shape pin refuses
+    # an unsanctioned write between them.
+    live_wiring = _sweep_wiring(source_tree)
+    good = ("def _self_test_checks():\n"
+            "    if not census:\n"
+            "        skipped.extend(_class_sweep_skip_entries(no_census))\n"
+            "    else:\n"
+            "        _class_sweep_record(check, bound_expired)\n"
+            "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)\n")
+    wiring_probes = {}
+    for label, text in (("good", good),
+                        ("fresh-list", good.replace("_class_sweep_record(check, bound_expired)",
+                                                    "_class_sweep_record(check, [])")),
+                        ("other-list", good.replace(
+                            "_self_test_outcome(failures, failure_details, checked[0], bound_expired)",
+                            "_self_test_outcome(failures, failure_details, checked[0], [])")),
+                        ("no-skips", good.replace(
+                            "        skipped.extend(_class_sweep_skip_entries(no_census))",
+                            "        pass"))):
+        wiring_probes[label] = _sweep_wiring(ast.parse(text))
+    want_wiring = (["bound_expired"], ["bound_expired"], 1)
+    check("class-sweep-expiry-wired-to-the-run-report",
+          live_wiring == want_wiring and wiring_probes["good"] == want_wiring
+          and wiring_probes["fresh-list"] == (["?"], ["bound_expired"], 1)
+          and wiring_probes["other-list"] == (["bound_expired"], ["?"], 1)
+          and wiring_probes["no-skips"] == (["bound_expired"], ["bound_expired"], 0),
+          observed="live={!r} probes={!r}".format(live_wiring, wiring_probes))
+    # The reporting, proved by RUNNING the real statements: the sweep-reporting slice of this module's
+    # own _self_test_checks (_sweep_report_source) is executed with the sweep child controlled, asserting
+    # the final exit code and the emitted entries. A controlled no-census run must put every sweep check
+    # into the skip report and still exit 0; a controlled expiry must exit 2 with the bound entry emitted
+    # and no sweep check recorded; a controlled clean result must record all 13 checks and exit 0.
+
+    def _slice_outcomes(module_text):
+        slice_source = _sweep_report_source(ast.parse(module_text))
+        if slice_source is None:
+            return None
+        import tempfile
+        outcomes = {}
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-report-slice-") as slice_dir:
+            for label, census_flag, child in (("no-census", False, None),
+                                              ("expiry", True, (None, expired_why, True)),
+                                              ("clean", True, (rows, None, False))):
+                skipped_list, recorded_calls = [], []
+
+                def _record(check_fn, expiry_list, child=child):
+                    _class_sweep_record(check_fn, expiry_list, run=lambda: child)
+                skeleton = _load_sweep_report_slice(slice_source, slice_dir, label)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = skeleton(census_flag, "slice probe",
+                                    lambda name, cond, observed=None: recorded_calls.append(
+                                        (name, bool(cond))),
+                                    [], {}, [7], skipped_list, _record,
+                                    _class_sweep_skip_entries, _self_test_outcome)
+                outcomes[label] = (code, list(skipped_list), recorded_calls, out.getvalue())
+        return outcomes
+    live_report = _slice_outcomes(source_text)
+    check("class-sweep-reporting-slice-reports-skips-and-expiry",
+          live_report is not None
+          and live_report["no-census"][0] == 0
+          and [entry[0] for entry in live_report["no-census"][1]] == names
+          + ["class-sweep-child-leaves-this-process-descriptors-unchanged",
+             "class-sweep-bound-expiry-attributed-to-the-bound"]
+          and all(why == "slice probe" for _name, why in live_report["no-census"][1])
+          and all("  SKIPPED: {} (slice probe)".format(entry[0]) in live_report["no-census"][3]
+                  for entry in live_report["no-census"][1])
+          and live_report["no-census"][2] == []
+          and live_report["expiry"][0] == 2 and live_report["expiry"][2] == []
+          and "  BOUND EXPIRED: class sweep child " + expired_why in live_report["expiry"][3]
+          and "CANNOT EVALUATE" in live_report["expiry"][3]
+          and all(name in live_report["expiry"][3] for name in names)
+          and live_report["clean"][0] == 0
+          and live_report["clean"][2] == [(name, True) for name in names]
+          and "SELF-TEST: PASS" in live_report["clean"][3],
+          observed=repr(live_report))
+    # Negative controls: each reporting mutation, applied to this module's source, must change what the
+    # executed slice reports. A bare call that drops the skip entries, an extend into a throwaway list,
+    # and a rebinding of the expiry list to empty just before the verdict each keep the name-reading
+    # wiring check above green; the executed slice refuses all three.
+    extend_stmt = "        skipped.extend(_class_sweep_skip_entries(no_census))"
+    verdict_stmt = "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)"
+    mutated = {
+        "discard": source_text.replace(extend_stmt, "        _class_sweep_skip_entries(no_census)", 1),
+        "throwaway": source_text.replace(
+            extend_stmt, "        [].extend(_class_sweep_skip_entries(no_census))", 1),
+        "rebind": source_text.replace(verdict_stmt, "    bound_expired = []\n" + verdict_stmt, 1),
+    }
+    mutant_reports = {label: _slice_outcomes(text) for label, text in mutated.items()}
+    check("class-sweep-reporting-slice-refuses-dropped-skips-and-rebound-expiry",
+          all(mutated[label] != source_text and mutant_reports[label] is not None for label in mutated)
+          and mutant_reports["discard"]["no-census"][1] == []
+          and "SKIPPED" not in mutant_reports["discard"]["no-census"][3]
+          and mutant_reports["throwaway"]["no-census"][1] == []
+          and "SKIPPED" not in mutant_reports["throwaway"]["no-census"][3]
+          and mutant_reports["rebind"]["expiry"][0] == 0
+          and "BOUND EXPIRED" not in mutant_reports["rebind"]["expiry"][3]
+          and "CANNOT EVALUATE" not in mutant_reports["rebind"]["expiry"][3],
+          observed=repr({label: None if report is None else
+                         (report["no-census"][0], len(report["no-census"][1]), report["expiry"][0])
+                         for label, report in mutant_reports.items()}))
+    # The skip list's binding sites, pinned at the source: the executed slice above keeps only statements
+    # naming a report name or the report's emission, so an inserted erasure that names nothing beyond
+    # `skipped` (a skipped.clear() right after the sweep extend, say) never reaches the slice and leaves
+    # every slice outcome unchanged. _skip_list_write_sites refuses any unsanctioned node field carrying
+    # the string `skipped` instead: a clear, a rebind, a slice assignment, a del, a pop, a handoff of the
+    # list into any call, and the bindings stored as plain string fields rather than ast.Name nodes (a
+    # match or star capture, a mapping-pattern rest, an import alias, an except-as target, a global
+    # declaration, a keyword argument name); the cleared_live probe applies the exact clearing mutation
+    # to this module's real source.
+    live_shapes = _skip_list_write_sites(source_tree)
+    shape_good = ("def _self_test_checks():\n"
+                  "    skipped = []\n"
+                  "    if not census:\n"
+                  "        skipped.append((name, no_census))\n"
+                  "        skipped.extend(_class_sweep_skip_entries(no_census))\n"
+                  "    for name, why in skipped:\n"
+                  "        print(name, why)\n")
+    report_loop = "    for name, why in skipped:"
+    shape_probes = {}
+    for label, inserted in (("good", None),
+                            ("cleared", "    skipped.clear()\n"),
+                            ("rebound", "    skipped = []\n"),
+                            ("slice-assigned", "    skipped[:] = []\n"),
+                            ("deleted", "    del skipped[:]\n"),
+                            ("handed-off", "    _some_helper(skipped)\n"),
+                            ("popped", "    skipped.pop()\n"),
+                            ("match-captured",
+                             "    match []:\n        case skipped:\n            pass\n"),
+                            ("star-captured",
+                             "    match ():\n        case [*skipped]:\n            pass\n"),
+                            ("mapping-rest",
+                             "    match {}:\n        case {**skipped}:\n            pass\n"),
+                            ("import-aliased", "    from sys import warnoptions as skipped\n"),
+                            ("except-bound",
+                             "    try:\n        pass\n"
+                             "    except Exception as skipped:\n        pass\n"),
+                            ("global-declared", "    global skipped\n"),
+                            ("keyword-named", "    _some_helper(skipped=[])\n")):
+        text = shape_good if inserted is None else shape_good.replace(
+            report_loop, inserted + report_loop, 1)
+        shape_probes[label] = _skip_list_write_sites(ast.parse(text))
+    cleared_live = _skip_list_write_sites(ast.parse(source_text.replace(
+        extend_stmt, extend_stmt + "\n        skipped.clear()", 1)))
+    captured_live = _skip_list_write_sites(ast.parse(source_text.replace(
+        extend_stmt,
+        extend_stmt + "\n        match []:\n            case skipped:\n                pass", 1)))
+    check("class-sweep-skip-list-write-shapes-pinned",
+          live_shapes == (1, []) and shape_probes["good"] == (1, [])
+          and shape_probes["rebound"] == (2, [])
+          and all(shape_probes[label][0] == 1 and shape_probes[label][1] != []
+                  for label in ("cleared", "slice-assigned", "deleted", "handed-off", "popped",
+                                "match-captured", "star-captured", "mapping-rest", "import-aliased",
+                                "except-bound", "global-declared", "keyword-named"))
+          and cleared_live is not None and cleared_live[0] == 1 and cleared_live[1] != []
+          and captured_live is not None and captured_live[0] == 1 and captured_live[1] != []
+          and _skip_list_write_sites(ast.parse("def other():\n    skipped = []\n")) is None,
+          observed="live={!r} probes={!r} cleared_live={!r} captured_live={!r}".format(
+              live_shapes, shape_probes, cleared_live, captured_live))
+    # The eventfd skip reason's CALL SITE is pinned, not only the helper: _self_test_checks must derive
+    # the vector's skip reason from the census flag and from the real presence of os.eventfd, exactly
+    # once; a constant second argument or a removed call is refused.
+    efd_good = ('def _self_test_checks():\n'
+                '    efd_skip = _eventfd_skip_reason(census, hasattr(os, "eventfd"))\n')
+    efd_live = _eventfd_skip_call_sites(source_tree)
+    efd_probes = {
+        "good": _eventfd_skip_call_sites(ast.parse(efd_good)),
+        "constant": _eventfd_skip_call_sites(ast.parse(
+            efd_good.replace('hasattr(os, "eventfd")', 'True'))),
+        "absent": _eventfd_skip_call_sites(ast.parse(
+            efd_good.replace('efd_skip = _eventfd_skip_reason(census, hasattr(os, "eventfd"))',
+                             'pass'))),
+    }
+    check("self-test-eventfd-skip-wired-at-the-call-site",
+          efd_live == ["census,hasattr(os.eventfd)"]
+          and efd_probes["good"] == ["census,hasattr(os.eventfd)"]
+          and efd_probes["constant"] == ["?"] and efd_probes["absent"] == [],
+          observed="live={!r} probes={!r}".format(efd_live, efd_probes))
 
 
 def _class_sweep_child_main(args):
@@ -14109,6 +15367,42 @@ def _init_store_git_checks(check, ctx, refused):
         check("init-store-fixed-digest-refused-pre-write",
               refused(dispatch(dict(row, members=wrongf), ctx(root, run_id=rid())), "builders fix")
               and init_op._tree_snapshot(root) == before)
+
+        # Spec 5.1 through the ONE shared ignore preflight the substrate runs under its mutex before its
+        # first write (_opf_write_guard.init_ignore_refusal, which plain `opf init` calls too): a store git
+        # would ignore refuses with no store entry written and no init operation recorded (the run's
+        # transaction ends rolled back in the journal home), and git failing refuses the same way. Without
+        # the preflight both publish the store. Once no rule ignores the store a fresh run is admitted.
+        from unittest import mock
+        root = init_op._plain_repo(os.path.join(base, "ignored"), env)
+        init_op._write(os.path.join(root, ".gitignore"), b".working/\n")
+        init_op._git(["add", "--", ".gitignore"], root, env)
+        init_op._git(["commit", "-q", "-m", "ignore rules"], root, env)
+        before = snap(root)
+        run = rid()
+        check("init-store-ignored-store-refused-nothing-written",
+              refused(dispatch(row, ctx(root, run_id=run)), "git-ignored")
+              and snap(root) == before and op_ids(root) == []
+              and store.resolve_store(root).status == store.NOT_ADOPTED
+              and txn_state(root, run) == "rolled-back")
+        real_discovery = init_op._opf_observe._run_git_config_discovery
+
+        def check_ignore_fails(git, store_root, args, *a, **k):
+            if "check-ignore" in args:
+                return init_op._opf_observe._GitOutcome(True, 128, b"", "fatal: injected")
+            return real_discovery(git, store_root, args, *a, **k)
+
+        init_op._write(os.path.join(root, ".gitignore"), store.LOCAL_POINTER_REL.encode("ascii") + b"\n")
+        init_op._git(["add", "--", ".gitignore"], root, env)
+        init_op._git(["commit", "-q", "-m", "ignore only the local pointer"], root, env)
+        before = snap(root)
+        with mock.patch.object(init_op._opf_observe, "_run_git_config_discovery", check_ignore_fails):
+            res = dispatch(row, ctx(root, run_id=rid()))
+        check("init-store-ignore-check-git-failure-refused-nothing-written",
+              refused(res, "check-ignore failed (rc=128)") and snap(root) == before and op_ids(root) == [])
+        res = dispatch(row, ctx(root, run_id=rid()))
+        check("init-store-unignored-store-admitted", res.status == valid
+              and store.resolve_store(root).status == store.RESOLVED)
 
         # Reconcile-first: an unreadable adoption journal lock refuses before the substrate.
         root = init_op._plain_repo(os.path.join(base, "journal"), env)
