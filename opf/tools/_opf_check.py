@@ -7093,13 +7093,15 @@ def self_test():
             # The same maintainer + importer pair as the inactive vector: the importer-authored record is
             # exempt history here too (spec 8.6), so no finding at all, C-HANDOFF evaluates to an explicit
             # PASS and the only cants are the pending imported checks (red if the exemption is removed or
-            # if C-HANDOFF, or anything else, goes unevaluated).
+            # if C-HANDOFF, or anything else, goes unevaluated). The clean HO high-water is raised in
+            # place so the imported counter high-waters act_machine() sets survive, and the run takes
+            # the empty imported baseline the across-time checks need on an active store.
             _r2_act = act_machine()
             _r2_act["handoff.index.toml"] = idx([ho(1), envelope("HO-2", "handoff", "current",
                                                                  actor={"kind": "importer",
                                                                         "id": "import-assistant"})])
-            _r2_act["counters.toml"] = counters(HO=2)
-            _r2_act_run = run(_r2_act)
+            _r2_act["counters.toml"]["counters"]["HO"] = 2
+            _r2_act_run = run(_r2_act, obs=_is2_prior())
             # The three-kind store while ACTIVE: this vector covers exactly that the one exemption stays
             # importer-only on an active store too, so widening it to the assistant or the automation
             # kind drops the reported count below 3 and reads red here.
