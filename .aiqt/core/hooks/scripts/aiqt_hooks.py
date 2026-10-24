@@ -19239,8 +19239,15 @@ _RWH_RAW_GIT_ASSIGN_RE = re.compile(r"GIT_[A-Za-z0-9_]*\+?=(?:" + _RWH_RAW_OPERA
 # one more hold-set candidate, never a resolution base and never a directory step. The preceding
 # character must not belong to a word ('..' stays relative, an attached short-option value such as
 # -o/abs/path is left to the token scan, and a ':'-glued spelling such as a URL or a ref:path is
-# not a filesystem operand).
-_RWH_RAW_ABS_PATH_RE = re.compile(r"(?<![\w$/.~:-])/[\w.+,@%^~-]+(?:/[\w.+,@%^~-]+)*")
+# not a filesystem operand). The leading '/' may be a RUN of slashes: the kernel reads '//x' and
+# '///x' as '/x', so a doubled-slash spelling must reach the same screens the single-slash form
+# reaches (the candidate is collapsed to one leading slash before any lookup).
+_RWH_RAW_ABS_PATH_RE = re.compile(r"(?<![\w$/.~:-])/+[\w.+,@%^~-]+(?:/[\w.+,@%^~-]+)*")
+# A QUOTED span that is one whole absolute path, spaces included: the character-class scan above
+# cannot cross a space, so a quoted operand such as "/held tree/out" inside a shell body would be
+# truncated at the space and consulted at the wrong directory. Additive only, like the scan above;
+# an UNQUOTED path containing spaces stays unreadable (a disclosed residual).
+_RWH_RAW_QUOTED_ABS_RE = re.compile(r"\"(/+[^\"\n]*)\"|'(/+[^'\n]*)'")
 # The shell words that change which variables a later segment sees (export GIT_DIR=..., unset
 # GIT_DIR); an assignment-shaped token is caught separately by _RWH_GIT_ASSIGN_RE.
 _RWH_ENV_WORDS = frozenset(("export", "unset", "declare", "typeset", "local", "readonly"))
@@ -19515,21 +19522,52 @@ def _rwh_real(path):
         return None
 
 
+def _rwh_collapse_root(path):
+    """A run of leading slashes collapsed to one. POSIX path arithmetic (os.path.normpath,
+    os.path.join) preserves exactly two leading slashes, while the Linux kernel resolves '//x'
+    and '///x' as '/x': left uncollapsed, a doubled-slash spelling would pass a screen written
+    for the single-slash form and still land in the same directory. Applied before every screen
+    and scan that judges an absolute path lexically."""
+    if path.startswith("//"):
+        return "/" + path.lstrip("/")
+    return path
+
+
 def _rwh_process_relative(path):
     """Whether a path's meaning depends on the process that opens it, so the hook cannot resolve
     it on anyone's behalf: /proc/self/... and /proc/<pid>/... name the OPENING process's own view
     (/proc/self/cwd is git's working directory after its own -C chdir, never this hook's), and
-    /dev/fd/... with the /dev/std* aliases name its open descriptors. Judged on the LEXICALLY
-    normalised text, never on realpath: resolving /proc/self/cwd here would substitute this
-    process's answer for git's. Every structural candidate (an operand, an option value, a -C, cd
+    /dev/fd/... with the /dev/std* aliases name its open descriptors. Judged on the LITERAL
+    components, never on realpath and never on a fully collapsed normpath: resolving
+    /proc/self/cwd here would substitute this process's answer for git's, and collapsing '..'
+    textually erases a traversal the kernel resolves through the magic link FIRST
+    ('/proc/self/cwd/../../../x' normalises to '/x' while the kernel walks through the opening
+    process's cwd), so the walk below reads the components in order and fires as soon as any
+    lexical prefix lands on /proc, /dev/fd or a /dev/std* alias; a run of leading slashes is
+    collapsed first ('//proc' and '/proc' name the same kernel object). A '..' pops one ordinary
+    component, which can over-fire on a spelling such as '/proc/..' (the kernel reads it as '/'),
+    a safe over-hold. Every structural candidate (an operand, an option value, a -C, cd
     or pushd target, a --git-dir or --work-tree value, a GIT_ assignment, a link operand) that is
     process-relative withholds the command outside the read-only grammar (it counts as held and
-    its holds cannot be read); one seen only in the raw-text widening withholds while a hold is
-    live."""
-    norm = os.path.normpath(path)
-    return norm == "/proc" or norm.startswith("/proc/") or \
-        norm == "/dev/fd" or norm.startswith("/dev/fd/") or \
-        norm in ("/dev/stdin", "/dev/stdout", "/dev/stderr")
+    its holds cannot be read); one seen only in the raw-text widening is named as the cause of
+    the withhold while a hold is live."""
+    path = _rwh_collapse_root(path)
+    if not path.startswith("/"):
+        return False
+    stack = []
+    for comp in path.split("/"):
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            if stack:
+                stack.pop()
+            continue
+        stack.append(comp)
+        if stack == ["proc"] or stack == ["dev", "fd"] or \
+                (len(stack) == 2 and stack[0] == "dev" and
+                 stack[1] in ("stdin", "stdout", "stderr")):
+            return True
+    return False
 
 
 def _rwh_hold_candidate(path):
@@ -19547,6 +19585,7 @@ def _rwh_hold_candidate(path):
     inspects it and its failure fails closed. A symlink that already points THROUGH a
     process-relative magic link is resolved in this process, a disclosed residual (the caller
     screens the candidate text itself for process-relative spellings before this walk)."""
+    path = _rwh_collapse_root(path)
     real = _rwh_real(path)
     cur = real if real is not None else path
     while True:
@@ -19652,18 +19691,25 @@ def _rwh_view(directory, views):
     could not answer (_review_git returned None, its documented cannot-evaluate: git could not be
     run, timed out, or the decision's deadline passed), answered with ANY other failure (a
     nonzero exit such as a dubious-ownership fatal, or a negative code from a signal), or exited
-    0 with a reply that is not EXACTLY the expected two newline-terminated path lines (empty, one
-    line, extra lines, a missing final newline, a dash-leading echo
-    of the option as a git too old to know --git-common-dir prints, or paths the filesystem
+    0 with a reply that is not EXACTLY the expected two newline-terminated path lines, the first
+    absolute (empty, one line, extra lines, a missing final newline, a dash-leading echo
+    of the option as a git too old to know --git-common-dir prints, a relative FIRST line, which
+    the documented --absolute-git-dir answer never is and which would otherwise be converted into
+    an invented identity whose missing marker directory then reads as clean, while the common-dir
+    line may be relative and is resolved against the candidate, or paths the filesystem
     cannot resolve); every caller fails closed on _RWH_VIEW_ERROR, never reading it as "not
-    a repository". Worktree identity is compared by git's absolute git directory, never by path
+    a repository". A directory path realpath cannot even process (a NUL byte, an OS error) is the
+    same cannot-evaluate: whatever repository it names cannot be examined, so it too is never read
+    as "no repository". Worktree identity is compared by git's absolute git directory, never by path
     string, so a symlinked alias of a held worktree resolves to the same identity and a sibling path
     that merely shares a prefix does not. The cache key is the PHYSICALLY resolved path: a lexical
     key would collapse 'link/..' to the link's parent while git traverses the link, handing back a
     cached identity for a directory the command never binds to."""
     key = _rwh_real(directory)
     if key is None:
-        return None
+        # the path cannot be resolved at all, so the repository it names, and its holds, cannot
+        # be examined: the probe error, never "no repository" (which would hide a live hold)
+        return _RWH_VIEW_ERROR
     if key in views:
         return views[key]
     # a path that names no directory roots no repository, so it stays the inert None (a target
@@ -19694,11 +19740,15 @@ def _rwh_view(directory, views):
         view = _RWH_VIEW_ERROR
     else:
         lines = p.stdout.decode("utf-8", "surrogateescape").split("\n")
-        # EXACTLY the two path lines, each newline-terminated and nothing after them: a reply
-        # carrying extra lines, a missing final newline, or a dash-leading echo is not the
-        # documented two-path answer, and reading any of it as an identity can point marker
-        # lookup at a directory with no markers
+        # EXACTLY the two path lines, each newline-terminated and nothing after them, the FIRST
+        # ABSOLUTE (--absolute-git-dir documents an absolute answer; --git-common-dir may answer
+        # a relative path such as '.git', resolved against the candidate below): a reply carrying
+        # extra lines, a missing final newline, a dash-leading echo or a relative first line is
+        # not the documented answer, and reading any of it as an identity can point marker lookup
+        # at a directory with no markers (a relative first line joined onto the candidate builds
+        # an invented identity whose absent marker directory reads as clean)
         if len(lines) == 3 and lines[2] == "" and lines[0] and lines[1] and \
+                os.path.isabs(lines[0]) and \
                 not lines[0].startswith("-") and not lines[1].startswith("-"):
             try:
                 view = (os.path.realpath(os.path.join(directory, lines[0])),
@@ -19707,8 +19757,8 @@ def _rwh_view(directory, views):
                 view = _RWH_VIEW_ERROR
         else:
             # an exit-0 reply that is not exactly the expected two lines (empty, one line, extra
-            # lines, a missing final newline, or an echoed
-            # option) is unreadable, never "not a repository"
+            # lines, a missing final newline, an echoed
+            # option, or a relative line) is unreadable, never "not a repository"
             view = _RWH_VIEW_ERROR
     views[key] = view
     return view
@@ -19972,12 +20022,16 @@ def _rwh_segment_target(eff, eff_cwd):
             if value != "":
                 if _rwh_opaque_path(value):
                     return ("opaque", None)
-                cur = value if os.path.isabs(value) else (
+                cur = _rwh_collapse_root(value) if os.path.isabs(value) else (
                     os.path.join(cur, value) if cur is not None else None)
                 if cur is None or _rwh_process_relative(cur):
                     # a process-relative step (/proc/self/..., /dev/fd/...) binds git to a
                     # directory only git's own process can resolve; realpath here would
-                    # substitute this hook's answer for git's, so the target is unresolvable
+                    # substitute this hook's answer for git's, so the target is unresolvable.
+                    # The decision layer already withholds every structural process-relative
+                    # sighting outright before it resolves a target, so no known spelling
+                    # reaches this branch; it stays so this resolver is sound on its own,
+                    # whatever its caller screened first (defence in depth, not dead weight)
                     return ("opaque", None)
             i += 2
             continue
@@ -20110,6 +20164,25 @@ def _rwh_probe_text(directory):
             "git command outside the enumerated read-only form is withheld rather than read as "
             "outside every repository. Commands in the read-only form, and non-git commands, are "
             "unaffected; retry when git can answer there.".format(directory))
+
+
+def _rwh_config_probe_text(directory):
+    return ("AIQT rule rvwpin (fail-closed): the core.worktree configuration of {!r} cannot be "
+            "probed (git answered its lookup with neither the set nor the unset reply, or with an "
+            "ambiguous one), so a configured worktree, and its repository's review holds, may "
+            "exist unread; this git command outside the enumerated read-only form is withheld. "
+            "Commands in the read-only form, and non-git commands, are unaffected; retry when git "
+            "can answer there.".format(directory))
+
+
+def _rwh_config_procrel_text(directory, value):
+    return ("AIQT rule rvwpin (fail-closed): the repository at {!r} configures core.worktree to "
+            "the process-relative path {!r} (a /proc or /dev/fd spelling), whose meaning depends "
+            "on the process that opens it, so the worktree a mutation there writes, and its "
+            "review holds, cannot be resolved by this hook; it counts as held, and this git "
+            "command outside the enumerated read-only form is withheld. Commands in the read-only "
+            "form, and non-git commands, are unaffected; configure a literal absolute "
+            "core.worktree there, or unset it.".format(directory, value))
 
 
 def _rwh_deny_text(marker, path):
@@ -20582,10 +20655,16 @@ def _rwh_hold_dirs(command, segments, cwd):
     one level of surrounding quotes stripped, so a quoted `sh -c '...'` body, a heredoc body or an
     eval string still contributes), every OTHER literal ABSOLUTE path any segment's tokens carry
     (a bare operand, the payload after the first = of any token, and an attached short-option
-    value), every operand of an ln segment (the target and the name of a link the command
-    creates, a relative one resolved against the directory the segment runs from), every literal
+    value), every operand of an ln segment (the name of a link the command creates resolved
+    against the directory the segment runs from; a relative TARGET resolved against the LINK'S
+    OWN directory, the way the kernel resolves it, never against the shell cwd; and the plain
+    two-operand link recorded so a later candidate stepping through it is also consulted where
+    the link will point), every literal
     ABSOLUTE path anywhere in the raw text (_RWH_RAW_ABS_PATH_RE, so a held path inside a quoted
-    shell body or heredoc body still surfaces its hold), plus every GIT_-class path in the hook's
+    shell body or heredoc body still surfaces its hold, a run of leading slashes collapsed first),
+    every QUOTED span that is one whole absolute path (_RWH_RAW_QUOTED_ABS_RE, so a quoted path
+    containing spaces is read whole rather than truncated at the space),
+    plus every GIT_-class path in the hook's
     own environment. Every candidate is resolved PHYSICALLY first and a missing one consulted at
     its NEAREST EXISTING directory ancestor
     (_rwh_hold_candidate, realpath first, so '..' and symlink components are applied as the
@@ -20618,8 +20697,10 @@ def _rwh_hold_dirs(command, segments, cwd):
     True when a raw-text operand was relative, which the caller withholds while a hold is live (the
     multi-base resolution only widens the hold set, it cannot prove where the operand lands);
     proc_strict and proc_live carry the first process-relative path a structural candidate and the
-    raw-text widening saw (None otherwise), which the caller withholds outright and while a hold
-    is live respectively; link_unresolved is True when an ln operand could not be resolved, which
+    raw-text widening saw (None otherwise): the caller withholds a structural sighting outright,
+    and names a raw-text sighting as the cause while a hold is live; link_unresolved is True when
+    an ln operand could not be resolved or the ln form's destination is unmodelled
+    (-t/--target-directory), which
     the caller withholds while a hold is live (the created link's destination is unknown)."""
     dirs = []
     raw_dirs = []
@@ -20629,6 +20710,7 @@ def _rwh_hold_dirs(command, segments, cwd):
     link_unresolved = False
     bases = []
     seen = set()
+    links = []  # (link path, resolved target) for each two-operand link this command creates
 
     def add(value, rel_base, structural=True):
         nonlocal proc_strict, proc_live
@@ -20638,12 +20720,15 @@ def _rwh_hold_dirs(command, segments, cwd):
             if rel_base is None:
                 return None
             value = os.path.join(rel_base, value)
+        # a run of leading slashes collapses to one before every screen below: the kernel reads
+        # '//x' as '/x', so an uncollapsed spelling would dodge a screen written for '/x'
+        value = _rwh_collapse_root(value)
         if _rwh_process_relative(value):
             # the path's meaning depends on the process that opens it, so the hook cannot
             # resolve it or read the holds where it lands: a structural candidate (an operand,
             # option value, -C, cd, override, GIT_ assignment or link operand) withholds the
-            # command outright; a sighting only the raw-text widening made withholds while a
-            # hold is live
+            # command outright; a sighting only the raw-text widening made names the cause
+            # while a hold is live
             if structural:
                 if proc_strict is None:
                     proc_strict = value
@@ -20658,6 +20743,19 @@ def _rwh_hold_dirs(command, segments, cwd):
             # repository it lands in; the returned value stays the lexical path, which the -C
             # chain and the raw-step accounting read
             dirs.append(_rwh_hold_candidate(value))
+            # a candidate that steps THROUGH a link an earlier segment of this same command
+            # creates lands where that link points, not at the link's own (not yet existing)
+            # path: the rewritten path is consulted too, so create-link-then-step still reads
+            # the markers of the repository the step lands in (a link toward a held worktree's
+            # PARENT included, whose own path shows no repository); one rewrite level only, in
+            # text order, so a chain of created links, or a loop running a later segment first,
+            # stays a disclosed residual
+            for name, target in links:
+                if value == name or value.startswith(name + os.sep):
+                    stepped = target + value[len(name):]
+                    if stepped not in seen and not _rwh_process_relative(stepped):
+                        seen.add(stepped)
+                        dirs.append(_rwh_hold_candidate(stepped))
         return value
 
     add(cwd, None)
@@ -20703,16 +20801,52 @@ def _rwh_hold_dirs(command, segments, cwd):
         word = _command_word(eff)
         if word == "ln":
             # a link this command creates re-points a later directory step at the link's TARGET,
-            # so every ln operand (the target and the link name, however ln's options order
-            # them) joins the hold set, a relative one resolved against the directory the
-            # segment runs from; an operand that cannot be resolved (relative with the shell cwd
-            # unknown, or expansion-built) leaves the created link's destination unknown, which
-            # the caller withholds while a hold is live
-            for operand in eff[_command_word_index(eff) + 1:]:
-                if not operand or operand.startswith("-"):
-                    continue
-                if add(operand, c_chain) is None:
-                    link_unresolved = True
+            # so every ln operand joins the hold set. The LINK NAME (the last operand of the
+            # plain form) is a filesystem path of the shell's, resolved against the directory
+            # the segment runs from; a relative TARGET is resolved by the KERNEL against the
+            # directory that holds the link, never against the shell cwd, so it is resolved
+            # against the link's directory here (the link name itself when that names an
+            # existing directory, since the link is then created inside it, otherwise the link
+            # name's parent). An operand that cannot be resolved (relative with the needed base
+            # unknown, or expansion-built), and a -t/--target-directory form whose destination
+            # this scan does not model, leave the created link's destination unknown, which the
+            # caller withholds while a hold is live. The plain two-operand link is also recorded
+            # so a later candidate stepping through it is consulted where it will point.
+            rest = eff[_command_word_index(eff) + 1:]
+            operands = [o for o in rest if o and not o.startswith("-")]
+            if any(o == "-t" or o.startswith("--target-directory") or
+                   (o.startswith("-") and not o.startswith("--") and "t" in o[1:])
+                   for o in rest if o.startswith("-")):
+                # the destination directory travels in an option this scan does not pair with
+                # its value: every operand still joins the hold set best-effort, and the
+                # unmodelled destination withholds while a hold is live
+                for operand in operands:
+                    add(operand, c_chain)
+                link_unresolved = True
+            else:
+                dest_abs = None
+                dest_is_dir = False
+                if len(operands) > 1:
+                    dest_abs = add(operands[-1], c_chain)
+                    if dest_abs is None:
+                        link_unresolved = True
+                    else:
+                        try:
+                            dest_is_dir = stat.S_ISDIR(os.stat(dest_abs).st_mode)
+                        except (OSError, ValueError):
+                            dest_is_dir = False
+                if dest_abs is not None:
+                    link_dir = dest_abs if dest_is_dir else os.path.dirname(dest_abs)
+                else:
+                    # the one-operand form creates the link in the shell cwd, which the
+                    # accumulated chain approximates
+                    link_dir = c_chain if len(operands) == 1 else None
+                for operand in (operands[:-1] if len(operands) > 1 else operands):
+                    target = add(operand, link_dir)
+                    if target is None:
+                        link_unresolved = True
+                    elif dest_abs is not None and not dest_is_dir and len(operands) == 2:
+                        links.append((dest_abs, target))
         if word in _CD_BUILTINS:
             dest = _rwh_cd_dest(eff)
             if dest is not None and (os.path.isabs(dest) or chain is not None):
@@ -20763,6 +20897,12 @@ def _rwh_hold_dirs(command, segments, cwd):
     # session outside every held repository
     for match in _RWH_RAW_ABS_PATH_RE.finditer(command):
         add(match.group(0), None, structural=False)
+    # a QUOTED span that is one whole absolute path joins the hold set too, spaces included: the
+    # character-class scan above stops at a space, which would consult a quoted operand such as
+    # "/held tree/out" at the wrong directory; additive only, like the scan above, and an
+    # UNQUOTED path containing spaces stays a disclosed residual
+    for match in _RWH_RAW_QUOTED_ABS_RE.finditer(command):
+        add(next(g for g in match.groups() if g is not None), None, structural=False)
     for key in _RDP_AMBIENT_GIT:
         add(os.environ.get(key), None)
     return dirs, raw_dirs, raw_relative, proc_strict, proc_live, link_unresolved
@@ -20773,10 +20913,12 @@ def _rwh_set_state(dirs, views, holds, cw_cache, notes):
     EXPANDED through its configured core.worktree (a repository-file core.worktree moves the files
     a mutation writes, so the configured worktree's repository is consulted even though no command
     operand names it, behind a wrapper or an override included): ("bad", detail) when any marker
-    state there is unreadable or malformed, ("error", directory) when any candidate's identity
+    state there is unreadable or malformed, ("error", message) when any candidate's identity
     probe could not answer, its core.worktree lookup could not answer, or its configured worktree
     is process-relative and so unresolvable here (_rwh_view's cannot-evaluate: whether a hold is live there cannot be
-    read, so the caller fails closed, never reading the failure as "not a repository"; a bad
+    read, so the caller fails closed, never reading the failure as "not a repository", and the
+    message names the SPECIFIC cause, since a refusal naming the identity probe for a
+    configuration failure sends the operator to the wrong repair; a bad
     marker state still wins, being the more specific refusal), ("live", live_holds) when any has a
     live hold (live_holds
     is every such (marker, path) across the set, deduplicated by marker path, so a caller can judge
@@ -20800,7 +20942,7 @@ def _rwh_set_state(dirs, views, holds, cw_cache, notes):
         view = _rwh_view(directory, views)
         if view is _RWH_VIEW_ERROR:
             if error is None:
-                error = directory
+                error = _rwh_probe_text(directory)
             continue
         if view is None:
             continue
@@ -20814,37 +20956,48 @@ def _rwh_set_state(dirs, views, holds, cw_cache, notes):
                     live.append((marker, path))
         known, config_wt = _rwh_core_worktree(directory, cw_cache)
         if not known:
-            # the core.worktree lookup could not answer: a configured worktree, and the holds of
-            # its repository, may exist unread, so the failed lookup is the same cannot-evaluate
-            # as a failed identity probe, never a clean expansion
+            # the core.worktree lookup could not answer, or answered ambiguously: a configured
+            # worktree, and the holds of its repository, may exist unread, so the failed lookup
+            # is the same cannot-evaluate as a failed identity probe, never a clean expansion,
+            # and the refusal names the configuration lookup, not the identity probe
             if error is None:
-                error = directory
+                error = _rwh_config_probe_text(directory)
         elif config_wt is not None and extra > 0:
             extra -= 1
             # core.worktree is read relative to the git directory; a configured worktree that
             # does not exist yet is consulted at its nearest existing ancestor, like every other
             # hold-set candidate, and one whose meaning depends on the process that opens it
-            # cannot be resolved here at all, the same cannot-evaluate
+            # cannot be resolved here at all, the same cannot-evaluate, named as the
+            # configuration cause rather than as an identity-probe failure
             resolved_wt = config_wt if os.path.isabs(config_wt) \
                 else os.path.join(view[0], config_wt)
             if _rwh_process_relative(resolved_wt):
                 if error is None:
-                    error = directory
+                    error = _rwh_config_procrel_text(directory, config_wt)
             else:
                 queue.append(_rwh_hold_candidate(resolved_wt))
     if error is not None:
         # an unanswerable probe may hide a live hold, so it outranks live and clear: a "live"
-        # answer built on a partial view could still end in the caller's unrelated-target allow
+        # answer built on a partial view could still end in the caller's unrelated-target allow;
+        # the payload is the cause-specific refusal message
         return ("error", error)
     return ("live", live) if live else ("clear", None)
 
 
 def _rwh_core_worktree(directory, cache):
     """(known, value) for the core.worktree configuration git reads at directory: (True, None) when
-    provably unset, (True, value) when set, (False, None) when git cannot say, which every caller
-    fails closed on: hold-set discovery reads the failed lookup as the probe error (a configured
-    worktree, and its repository's holds, may exist unread), and the certain-target pass reads it
-    as set. A set core.worktree moves the files a mutation writes away from the
+    provably unset, (True, value) when set, (False, None) when git cannot say OR the reply is
+    ambiguous, which every caller fails closed on: hold-set discovery reads the failed lookup as
+    the probe error (a configured worktree, and its repository's holds, may exist unread), and the
+    certain-target pass reads it as set. A set value is kept BYTE-EXACT apart from the one
+    trailing newline git's --get reply ends with: trimming other whitespace would move a
+    configured path whose name carries it onto a DIFFERENT directory, whose repository's holds
+    would then be read in place of the real destination's. Ambiguous replies, each read as
+    cannot-say rather than guessed: an exit-0 reply that is empty or not newline-terminated (not
+    git's documented answer), an exit-0 value that is empty once its final newline is removed (a
+    core.worktree set to the empty string, whose meaning this hook does not model), and an exit-1
+    reply carrying output (git's unset answer prints nothing, so output there contradicts it). A
+    set core.worktree moves the files a mutation writes away from the
     directory git was pointed at, so a lexical target no longer proves which worktree is mutated."""
     if directory in cache:
         return cache[directory]
@@ -20852,10 +21005,15 @@ def _rwh_core_worktree(directory, cache):
     if p is None:
         result = (False, None)
     elif p.returncode == 0:
-        text = p.stdout.decode("utf-8", "surrogateescape").strip()
-        result = (True, text or None)
-    elif p.returncode == 1:
-        result = (True, None)
+        text = p.stdout.decode("utf-8", "surrogateescape")
+        if text.endswith("\n"):
+            text = text[:-1]
+        else:
+            text = ""  # not git's newline-terminated reply: ambiguous, never a usable value
+        # exit 0 answers "set": an empty or unreadable value is ambiguous, never provably unset
+        result = (True, text) if text else (False, None)
+    elif p.returncode == 1 and not p.stdout:
+        result = (True, None)  # git's specific unset answer, which carries no output
     else:
         result = (False, None)
     cache[directory] = result
@@ -20891,12 +21049,17 @@ def _rwh_decide(data):
     forms), cd, pushd or a GIT_ assignment (quotes stripped; quoted bodies, heredocs and option
     values included), of every other literal ABSOLUTE path any segment's tokens carry (a bare
     operand, an option-value payload after = or attached to a short option), of every ln
-    operand (the target and name of a link the command creates, a relative one resolved against
-    the directory the segment runs from), and of every literal ABSOLUTE path anywhere in the raw
-    text (a quoted shell body or heredoc body included), a candidate resolved physically and one
+    operand (the name of a link the command creates resolved against the directory the segment
+    runs from; a relative target resolved against the LINK'S OWN directory, the way the kernel
+    resolves it; the plain two-operand link recorded so a later candidate stepping through it is
+    consulted where the link will point), and of every literal ABSOLUTE path anywhere in the raw
+    text (a quoted shell body or heredoc body included; a quoted span that is one whole absolute
+    path read whole, spaces included; a run of leading slashes collapsed first), a candidate
+    resolved physically and one
     that names no existing directory consulted at its nearest existing ancestor, each expanded
-    through its configured core.worktree (an expansion or lookup that cannot answer fails
-    closed). While ANY repository in
+    through its configured core.worktree (a lookup that cannot answer, an ambiguous reply, and a
+    process-relative configured worktree each fail
+    closed, the refusal naming the configuration cause). While ANY repository in
     that set has a live hold, a git segment carrying a form that runs a program or shell text
     (_rwh_program_gate: a leading assignment, any global option other than a literal -C, the
     curated program-option model, and the subcommands and options of _RWH_PROGRAM_SUBCOMMANDS,
@@ -21028,11 +21191,12 @@ def _rwh_decide(data):
     if bad_detail is not None:
         return ("deny", _rwh_bad_text(bad_detail))
     if set_state == "error":
-        # a candidate directory's identity probe could not answer (_review_git's None, or an
-        # unreadable answer): whether a repository there carries a live hold cannot be read, so
-        # the probe failure is never read as "not a repository" (which would hide the hold and
-        # allow the mutation); every git-word command outside the read-only grammar fails closed
-        return ("unverifiable", _rwh_probe_text(set_payload))
+        # a candidate directory's identity probe or core.worktree lookup could not answer, or a
+        # configured worktree is process-relative: whether a repository there carries a live hold
+        # cannot be read, so the failure is never read as "not a repository" (which would hide
+        # the hold and allow the mutation); every git-word command outside the read-only grammar
+        # fails closed, with the payload already naming the specific cause
+        return ("unverifiable", set_payload)
     if proc_strict is not None:
         # an operand, option value, directory step, override, GIT_ assignment or link operand
         # names a process-relative path: its meaning depends on the process that opens it
@@ -21241,17 +21405,29 @@ def review_workdir_hold(data):
     consulted at its nearest
     existing ancestor, so a directory the command itself creates first, and a write operand's
     file path, still read the markers of the repository each lands in; a structural candidate
-    that is PROCESS-RELATIVE (/proc/self/..., /proc/<pid>/..., /dev/fd/...) cannot be resolved
+    that is PROCESS-RELATIVE (/proc/self/..., /proc/<pid>/..., /dev/fd/..., judged on the literal
+    components with a run of leading slashes collapsed first, so '//proc' and a '..' spelling
+    that a textual collapse would erase are read as the kernel reads them) cannot be resolved
     by this hook at all (its meaning depends on the process that opens it) and withholds the
-    command outright, a core.worktree expansion or lookup that cannot answer fails closed the
-    same way, and a marker-directory path that exists but does not lead to a directory (a
+    command outright, a core.worktree lookup that cannot answer or answers ambiguously, and a
+    configured worktree that is process-relative, fail closed the same way with the refusal
+    naming the configuration cause (a set value is kept byte-exact apart from its final newline,
+    so a configured path carrying whitespace is consulted where git writes), an identity reply
+    whose first line is not absolute is the probe error, a candidate path realpath cannot even
+    process is the probe error too, never "no repository",
+    and a marker-directory path that exists but does not lead to a directory (a
     dangling review-holds or aiqt symlink) is malformed state, never absence. The rule is ONE-PLAIN-GIT-
     or-fail-closed over the RAW command text: while any repository in the command's hold set (the
     session cwd, every literal -C, --git-dir, --work-tree, cd, pushd or GIT_-assignment path
     anywhere in the raw text, quotes stripped, every other literal ABSOLUTE path any
     segment's tokens carry, a bare operand, an = payload or an attached short-option value
-    included, every ln operand of a link the command creates, and every literal ABSOLUTE path
-    anywhere in the raw text, a quoted shell body or heredoc body included,
+    included, every ln operand of a link the command creates (the link name resolved against the
+    directory the segment runs from, a relative target against the link's own directory as the
+    kernel resolves it, the plain two-operand link recorded so a later candidate stepping through
+    it is consulted where the link will point, and an unresolved operand or a -t form withheld
+    while a hold is live), and every literal ABSOLUTE path
+    anywhere in the raw text, a quoted shell body or heredoc body included, a quoted span that is
+    one whole absolute path read whole with its spaces, and a run of leading slashes collapsed,
     each expanded through its configured core.worktree)
     has a live hold, a git segment carrying a form that runs a program or shell text (a leading
     assignment, any global option other than a literal -C, rebase -x, submodule foreach, bisect
@@ -21322,6 +21498,27 @@ def review_workdir_hold(data):
     leading assignment or a global option other than a literal -C, and a read option outside the
     closed per-verb set each deny while a hold is live, stated safe over-denies). A crash reaches
     main's PreToolUse fail-closed exit 2.
+    THIS HOOK IS A BEST-EFFORT GUARD; judge it against this stated claim. What it does NOT catch,
+    from a session outside every held repository whose command text names no held path: a path
+    the shell builds at RUN TIME (a parameter or command substitution, a glob or brace pattern, a
+    tilde, a CDPATH-resolved cd), since the hold set is built from literal text only; a link
+    created by a LATER command or by another tool, and a chain of two links or two relative steps
+    created by one command (the created-link rewrite is one level, in text order); a held path
+    carried only in CONTENT (a patch, stream, file or stdin the command reads), which no argv or
+    raw-text scan sees, so the input-path admissions are refused only while some hold is visible;
+    an UNQUOTED path containing spaces in raw text (only a quoted span is read whole); a relative
+    path inside a quoted body that no -C or cd spelling introduces, an attached short-option
+    value that appears only inside a quoted body, and the fragment a quote-spliced operand
+    leaves; a pre-existing symlink that points through a process-relative magic link, resolved by
+    this hook's own process; git reached through an opaque program name (an alias, a function, a
+    wrapper script) or through configuration (hooks, core.fsmonitor, diff.external, a pager);
+    movers outside this hook (another session or terminal without it, a non-Bash tool, cron),
+    caught only after the fact by the drift note unless the adopter's tool runs the preflight;
+    file edits inside a held worktree by non-git means (Write/Edit tools, sed -i, cp, a shell
+    redirection), a separate write-scope follow-on; and marker accuracy, which is the adopter's
+    (the marker directory stays writable by the assistant, the suite-level limit already
+    disclosed). Each of these is a residual by design of a hold set built from literal command
+    text; no further widening rounds are planned against them.
     Hookless dispatchers and resync tools run it as a preflight: `aiqt_hooks.py review_workdir_hold`
     with the payload on stdin."""
     if data.get("hook_event_name") != PRETOOL:

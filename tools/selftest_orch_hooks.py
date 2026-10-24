@@ -2761,9 +2761,10 @@ def _rwh_cases(tmp):
     # position (an operand, option value or directory step) cannot be resolved by the hook (its
     # meaning depends on the process that opens it), so the command is withheld outright, with
     # the hold reader reverted too (the holds where it lands are exactly what cannot be read);
-    # the read-only grammar still passes a process-relative -C, and a sighting only the raw-text
-    # scan made (inside a shell body) withholds while a hold is live and is allowed with the
-    # hold reader reverted (red on revert for both screens).
+    # the read-only grammar still passes a process-relative -C. The shell-body leg here is
+    # withheld by the one-plain-git rule whichever screen reads it, so it pins no screen of its
+    # own; the raw-text process-relative screen is pinned by its dedicated decision-changing
+    # vector further down (red on revert there, not here).
     pr = ["git -C " + str(free) + " -C /proc/self/cwd/../held reset --hard " + seed,
           "git -C " + str(free) + " bundle create /proc/self/cwd/../held/zpw HEAD",
           "git -C " + str(free) + " commit --allow-empty -F /dev/fd/3"]
@@ -2901,6 +2902,142 @@ def _rwh_cases(tmp):
     (dang / ".git" / "aiqt").unlink()
     check("rwh/dangling-marker-symlink-fails-closed-red-on-revert",
           d1_got, ["deny", True, "allow", "allow", "deny"])
+    # a RELATIVE target of a link the command creates is resolved by the kernel against the
+    # directory that holds the link, never the shell cwd: resolved here against the link's own
+    # directory, the create-link-then-step shape is withheld from a session OUTSIDE that
+    # directory too (red when the target is resolved against the session cwd again: the session
+    # resolution names no repository and the reset is allowed); and a link the command creates
+    # toward the held worktree's PARENT is followed one level, so a later candidate stepping
+    # through it is consulted where the link will point (red when the created-link rewrite is
+    # reverted). The free-target link and the hold-reader revert legs stay allowed.
+    ld = "ln -s held " + str(base) + "/zld && git -C " + str(base) + "/zld reset --hard " + seed
+    lp = "ln -s " + str(base) + " " + str(base) + "/zlp && git -C " + str(base) + \
+        "/zlp/held reset --hard " + seed
+    check("rwh/created-link-destination-directory-denies-red-on-revert",
+          [kind(out, ld), kind(out, lp),
+           kind(out, "ln -s free " + str(base) + "/zldf && git -C " + str(base) +
+                "/zldf reset --hard " + seed),
+           _rwh_without_hold(lambda: kind(out, ld)),
+           _rwh_without_hold(lambda: kind(out, lp))],
+          ["unverifiable", "unverifiable", "allow", "allow", "allow"])
+    # a run of leading slashes collapses to one before every screen: the kernel reads '//x' as
+    # '/x', so '//proc' and '///proc' spellings are process-relative (withheld outright), a '..'
+    # spelling that a textual collapse would erase stays process-relative (the components are
+    # read in order, the way the kernel resolves them), and a '//'-prefixed held path inside a
+    # quoted shell body is read by the raw-text widening (red when the collapse, the component
+    # walk or the widened pattern is reverted: each spelling then reads as clean and is
+    # allowed); the same body naming the free tree, and the hold-reader revert leg, stay allowed.
+    ds = ["git -C " + str(free) + " -C //proc/self/cwd/../held reset --hard " + seed,
+          "git -C " + str(free) + " -C ///proc/self/cwd/../held reset --hard " + seed,
+          "git -C " + str(free) + " -C /proc/self/cwd/../../../zx reset --hard " + seed]
+    db = 'bash -c "git -C ' + str(free) + ' bundle create /' + str(held) + '/zdb HEAD"'
+    ds0_res = run(base, ds[0])
+    check("rwh/leading-slash-run-collapsed-fails-closed-red-on-revert",
+          [_rdp_kind(ds0_res), "process-relative" in _rwh_reason(ds0_res)] +
+          [kind(base, c) for c in ds[1:]] +
+          [kind(base, db),
+           kind(base, 'bash -c "git -C ' + str(free) + ' bundle create /' + str(free) +
+                '/zdb HEAD"'),
+           _rwh_without_hold(lambda: kind(base, db))],
+          ["unverifiable", True, "unverifiable", "unverifiable", "unverifiable",
+           "allow", "allow"])
+    # a QUOTED span that is one whole absolute path is read whole, spaces included: a quoted
+    # write operand into a worktree of the held repository whose name carries a space surfaces
+    # the hold from an outside session (red when the quoted-span widening is reverted: the
+    # character-class scan truncates the path at the space, the truncated prefix names no
+    # repository, and the body is allowed); the same span into the free tree, and the
+    # hold-reader revert leg, stay allowed.
+    spwt = base / "zsp tree"
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(spwt), tip)
+    sp = "bash -c 'git -C " + str(free) + ' bundle create "' + str(spwt) + '/out" HEAD\''
+    check("rwh/quoted-span-space-path-denies-red-on-revert",
+          [kind(base, sp),
+           kind(base, "bash -c 'git -C " + str(free) + ' bundle create "' + str(free) +
+                '/sub dir/out" HEAD\''),
+           _rwh_without_hold(lambda: kind(base, sp))],
+          ["unverifiable", "allow", "allow"])
+    # a configured core.worktree value is kept byte-exact apart from its final newline: a
+    # configured path whose name ends in a space is consulted at the directory git writes (red
+    # when the value is whitespace-trimmed again: the trimmed path names no repository and the
+    # command is allowed); an ambiguous lookup reply (exit 0 with empty output, exit 1 carrying
+    # output) is cannot-say, never provably unset (red when either reply is read as a clean
+    # answer again), with the refusal naming the configuration lookup; the unset control stays
+    # allowed, and the withhold does not come from the hold reader (clear state allows).
+    bytewt = base / "hs "
+    _rdp_git(main, "worktree", "add", "-q", "--detach", str(bytewt), tip)
+
+    def _cw_reply_stub(rc, out_bytes):
+        def stub(repo, *args, **kw):
+            if args and args[0] == "config" and "core.worktree" in args and \
+                    str(repo) == str(free):
+                return _RwhReply(rc, out_bytes)
+            return saved_idp(repo, *args, **kw)
+        return stub
+
+    _rdp_git(free, "config", "core.worktree", str(bytewt))
+    bw = "git -C " + str(free) + " add -A"
+    bw_got = [kind(base, bw), _rwh_without_hold(lambda: kind(base, bw))]
+    _rdp_git(free, "config", "--unset", "core.worktree")
+    for rc, stub_out in ((0, b""), (1, b"/zcw\n")):
+        aiqt_hooks._review_git = _cw_reply_stub(rc, stub_out)
+        try:
+            amb_res = run(base, "git -C " + str(free) + " commit --allow-empty -m x")
+        finally:
+            aiqt_hooks._review_git = saved_idp
+        bw_got += [_rdp_kind(amb_res), "core.worktree" in _rwh_reason(amb_res)]
+    bw_got.append(kind(base, bw))
+    check("rwh/config-worktree-reply-byte-exact-and-unambiguous-red-on-revert",
+          bw_got, ["unverifiable", "allow", "unverifiable", True, "unverifiable", True, "allow"])
+    # a configured core.worktree that is PROCESS-RELATIVE cannot be resolved by the hook (its
+    # meaning depends on the process that opens it): it counts as held and fails closed, with
+    # the refusal naming the configured worktree rather than the identity probe (red when the
+    # branch is reverted: the hook's own process then resolves the magic link and discovery
+    # finishes wherever that lands); the hold reader is not what carries this withhold (it stays
+    # withheld with the reader reverted), and the unset control stays allowed.
+    _rdp_git(free, "config", "core.worktree", "/proc/self/cwd")
+    pw = "git -C " + str(free) + " add -A"
+    pw_res = run(base, pw)
+    pw_got = [_rdp_kind(pw_res), "core.worktree" in _rwh_reason(pw_res),
+              "process-relative" in _rwh_reason(pw_res),
+              _rwh_without_hold(lambda: kind(base, pw))]
+    _rdp_git(free, "config", "--unset", "core.worktree")
+    pw_got.append(kind(base, pw))
+    check("rwh/config-worktree-process-relative-fails-closed-red-on-revert",
+          pw_got, ["unverifiable", True, True, "unverifiable", "allow"])
+    # the exact-two-line identity test holds each conjunct on its own: an exit-0 reply of three
+    # split parts whose third is NOT empty (a junk line with no final newline), and one of MORE
+    # than three parts whose third IS empty (a blank extra line), are each the probe error (red
+    # when either conjunct is loosened: the junk reply builds an identity whose marker directory
+    # never exists, every hold reads as absent, and the held reset is allowed); a relative FIRST
+    # line is the probe error too, never joined into an invented identity (red when the
+    # absoluteness test is reverted), and a path realpath cannot even process is the probe error
+    # rather than "no repository" (red when the unresolvable view is read as absent again). The
+    # unstubbed control still denies.
+    cj_got = []
+    for stub_out in (b"/nonexistent/gitdir\n/nonexistent/common\nzz",
+                     b"/nonexistent/gitdir\n/nonexistent/common\n\n",
+                     b"relative/gitdir\nrelative/common\n"):
+        aiqt_hooks._review_git = _reply_stub(0, out=stub_out)
+        try:
+            cj_res = run(base, rh)
+            cj_got += [_rdp_kind(cj_res), "cannot be probed" in _rwh_reason(cj_res)]
+        finally:
+            aiqt_hooks._review_git = saved_idp
+    cj_got.append(aiqt_hooks._rwh_view(str(base) + "/zv\x00", {}) is aiqt_hooks._RWH_VIEW_ERROR)
+    cj_got.append(kind(base, rh))
+    check("rwh/identity-reply-conjuncts-fail-closed-red-on-revert",
+          cj_got, ["unverifiable", True] * 3 + [True, "deny"])
+    # a process-relative path seen ONLY by the raw-text widening (no structural token carries
+    # it: here it sits inside a quoted message operand with spaces) withholds while a hold is
+    # live, naming the cause. This is the one shape where that screen DECIDES: the segment is
+    # otherwise one plain git segment with a certain unheld target, so with the screen reverted
+    # the command is ALLOWED (red on revert); without the hold it is allowed too.
+    pm = "git -C " + str(free) + ' commit --allow-empty -m "see /proc/self/cwd there"'
+    pm_res = run(main, pm)
+    check("rwh/raw-text-process-relative-decides-red-on-revert",
+          [_rdp_kind(pm_res), "process-relative" in _rwh_reason(pm_res),
+           _rwh_without_hold(lambda: kind(main, pm))],
+          ["unverifiable", True, "allow"])
     # every allowlisted verb carries a closed read-only option set: a verb present in one set but
     # not the other would either fail closed forever or skip the option check
     check("rwh/read-only-option-table-covers-allowlist",
