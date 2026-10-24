@@ -416,24 +416,48 @@ _HOMES2_RESIDUALS = (
     "release cut reads no reservation and refuses the unreleased tail while such a number stands below the "
     "highest worklog entry, so a VALID doctor result does not mean the unreleased tail can be cut.",
 )
-# Disclosed only on a report whose imported series is active, so an inactive report's residuals are
-# unchanged. C-IMPORTED-SEGREGATION grades part of the section 8.6 authority firewall, so its PASS must
-# never read as full section 8.6 coverage: every section 8.6 obligation no doctor check grades is named
-# here, beside the one acceptance this engine cannot judge beyond its shape.
-_IMPORTED_RESIDUALS = (
-    "Section 8.6 obligations C-IMPORTED-SEGREGATION does not grade, so its PASS is not full section 8.6 "
-    "coverage: the current-state joins over the state-bearing types other than the pending_decision chain "
-    "(the section 8.5 current handoff, an active waiver, a held session_lease, an active mode, a ratified "
-    "active preference_pattern) are not filtered for importer-authored records; importer-authored blocks "
-    "granting a current stop, importer-authored open or active items joining actionability, an "
-    "importer-authored record discharging a required supersession obligation outside a pending_decision "
-    "chain, and field-borne authority (a gate_run verdict, a tier_assessment outcome, an artifact's "
-    "promoted state, a release's published state, a maintainer_action's done) are likewise not graded by "
-    "any check of this engine.",
+# The section 8.6 authority firewall is keyed on provenance (an importer actor.kind), never on whether the
+# imported series is active, so these are disclosed on the report of every store that holds an
+# importer-authored clean record or an active imported series; a store with neither holds no record the
+# firewall governs, and its residuals are unchanged. The firewall arms this engine grades (the receipt
+# firewall and the pending_decision chain arm, _check_importer_receipts and _check_importer_chains, and
+# C-HANDOFF's importer exclusion) are part of section 8.6 only, so their PASS must never read as full
+# section 8.6 coverage: the section 8.6 obligations this engine is known to leave ungraded are named here,
+# beside the one acceptance it cannot judge beyond its shape. The self-test pins these entries, so
+# changing or dropping one fails it.
+_FIREWALL_RESIDUALS = (
+    "Section 8.6 firewall obligations no check of this engine grades, so a pass of the firewall arms it "
+    "grades (the receipt firewall, the pending_decision chain arm and the at-most-one-current handoff "
+    "exclusion) is not full section 8.6 coverage: importer-authored blocks granting a current stop, "
+    "importer-authored open or active backlog items joining actionability, and the decision register "
+    "listing an importer-authored decision as an effective resolution are not graded, since this engine "
+    "has no actionability or decision-register join of its own and C-VIEW-DRIFT compares committed views "
+    "only against the views planner, which does not filter importer-authored records there; an "
+    "importer-authored record discharging a required supersession outside a pending_decision chain is not "
+    "graded, nor is a required supersession that no record discharges at all; and an importer-authored "
+    "record satisfying a current approval obligation is not interpreted by any check.",
+    "The section 8.6 current-state joins over the module-tier types (an active waiver, a held "
+    "session_lease, an active mode) and field-borne authority (a gate_run verdict, a tier_assessment "
+    "outcome, an artifact's promoted state, a release's published state, a maintainer_action's done) are "
+    "not graded, because no record schema for those types ships in the baseline validator: a store holding "
+    "such a clean record is CANNOT-EVALUATE under the module-tier schema deferral, and an imported one is a "
+    "C-IMPORTED-SCHEMA finding, so neither certifies VALID until those schemas ship. A ratified active "
+    "preference_pattern enters no check of this engine, so the firewall obligation on it binds the readers "
+    "of those records.",
     "The section 8.6 receipt remedy is accepted on its machine-checkable shape alone: a maintainer-"
     "authored clean maintainer_decision whose `corrects` link targets the ratified done item. Whether its "
     "decision text records that the item's completion stands is prose the specification gives no "
-    "machine-checkable test for, so no validator grades it.",
+    "machine-checkable test for, so no validator grades it. A later record that links back to overturn "
+    "that decision is not read either, since the specification names no link relation that overturns a "
+    "maintainer_decision, so an overturned remedy is still accepted.",
+)
+# Disclosed only on a report whose imported series is active, so an inactive report's residuals are
+# unchanged: the imported-series part of section 8.6 that no check grades. The self-test pins it too.
+_IMPORTED_RESIDUALS = (
+    "Section 8.6 bars the imported series from supplying current authority through a link, an extension, "
+    "or an adoption approval. The link part is graded (C-IMPORTED-SCHEMA refuses an imported-to-clean "
+    "link); authority carried by an extension field or an adoption approval on an imported record is not "
+    "interpreted by any check of this engine.",
 )
 # Disclosed only on a report of a homes-1 store that has adopted (its adoption home exists), so a legacy
 # report residuals are unchanged.
@@ -534,7 +558,14 @@ class _Report:
         if homes >= 2:
             self.residuals.extend(_HOMES2_RESIDUALS)
         if imported:
+            self.disclose_firewall()
             self.residuals.extend(_IMPORTED_RESIDUALS)
+
+    def disclose_firewall(self):
+        # The section 8.6 firewall residuals, once per report: on an active imported series, and on any
+        # store whose clean records include an importer-authored one (the firewall is keyed on provenance).
+        if _FIREWALL_RESIDUALS[0] not in self.residuals:
+            self.residuals.extend(_FIREWALL_RESIDUALS)
 
     def ran(self, check_id):
         # Register a required check as executed and make it the attribution target. A second ran() for the
@@ -2637,44 +2668,34 @@ _CLEAN_TO_IMPORTED_RELS = frozenset({"relates", "derives_from", "follows", "supe
 
 def _check_imported_segregation(recs, by_id, unevaluated, rep):
     """C-IMPORTED-SEGREGATION (spec 8.3: it "enforces section 8.6"; spec 8.6: it "enforces this firewall
-    over importer-authored records in both series"). It grades the section 8.6 rules a parse-only
-    doctor decides from the clean record set `recs` (active, archived, and worklog entries) alone:
+    over importer-authored records in both series"), graded on a store whose imported series is active.
+    It grades the section 8.6 rules a parse-only doctor decides from the clean record set `recs` (active,
+    archived, and worklog entries) alone:
       - clean-to-imported links: a clean record's link to an imported:<NS>-<n> id uses `relates`,
         `derives_from`, `follows`, or `supersedes` to the same type. Namespaces map one-to-one to types
         within each series (spec 8.2), so the type is judged by namespace and the target need not resolve
         here; resolution over the union of both series (spec 8.6: "a dangling cross-series link MUST be a
         finding") is C-LINKS work. A clean `done` record's `receipt_of` to an imported id falls
         outside the permitted set, so it is refused here too ("A clean `done` record's `receipt_of` MUST
-        target a clean backlog item");
-      - the receipt firewall: "a clean backlog item reaching ratified `done` MUST hold a clean receipt
-        authored by a non-importer actor". A non-importer item at unqualified `done` whose every receipt
-        is importer-authored is a finding; one with no receipt at all is the C-RECEIPTS finding and is not
-        repeated. An importer-authored item is not graded here, since spec 8.6 lets its legacy receipt
-        satisfy it as recorded history. The one exception spec 8.6 defines is accepted: "a
-        maintainer-authored clean `maintainer_decision` that links `corrects` to that item and records
-        that its completion stands MUST satisfy the item's receipt obligation in place of the withdrawn
-        receipt ... doctor and the upgrade MUST accept it". Its machine-checkable shape is the
-        maintainer-authored (never importer-authored) clean maintainer_decision whose `corrects` link
-        targets the item; whether its text records that the completion stands is prose the spec gives no
-        machine-checkable test for, so any such decision satisfies (_IMPORTED_RESIDUALS discloses this);
-      - decision chains: "An importer-authored decision MUST NOT be treated as the current effective
-        resolution of a clean `pending_decision` chain; resolving such a chain now MUST take a new clean
-        decision linking back." A chain whose current effective resolution (decision_chains, the one
-        derivation C-DECISION-CHAINS shares) is an importer-authored pending_decision is a finding,
-        whoever authored the rest of the chain: a state-bearing status on an importer-authored record
-        confers nothing now (spec 8.6), so the join never seats it as current.
+        target a clean backlog item"). The targets of these links exist only in the imported leaves, so
+        this arm runs only with the imported series active;
+      - the receipt firewall (_check_importer_receipts) and the decision-chain arm
+        (_check_importer_chains), keyed on provenance. The firewall covers every importer-authored record,
+        whether or not the imported series is active (spec 8.6), so on a store whose series is inactive,
+        where this check is not on the roster (spec 4.2), the driver grades those two arms under C-RECEIPTS
+        and C-DECISION-CHAINS, the joins they guard, exactly as C-HANDOFF's join excludes importer-authored
+        handoffs on every store.
     The imported-to-clean link refusal is per-record (validate_imported_record, under
     C-IMPORTED-SCHEMA), and an imported row never joins `recs`, so no imported record enters a clean
-    join here. Every other section 8.6 obligation (the current-state joins over the other state-bearing
-    types, blocks granting a stop, actionability, supersession discharge outside a pending_decision
-    chain, field-borne authority) is NOT graded here and is named in _IMPORTED_RESIDUALS, so a PASS never
-    reads as full section 8.6 coverage. `unevaluated` names the clean-record checks that did not
-    evaluate: the firewall is then CANNOT-EVALUATE over the records they could not seat, never a pass."""
+    join here. The section 8.6 obligations this engine is known not to grade (blocks granting a stop,
+    actionability, supersession discharge outside a pending_decision chain, the module-tier current-state
+    joins, field-borne authority, approval, and extension or adoption-approval authority) are named in
+    _FIREWALL_RESIDUALS and _IMPORTED_RESIDUALS, so a PASS never reads as full section 8.6 coverage.
+    `unevaluated` names the clean-record checks that did not evaluate: the firewall is then
+    CANNOT-EVALUATE over the records they could not seat, never a pass."""
     if unevaluated:
         rep.cant("C-IMPORTED-SEGREGATION: {} did not evaluate, so the authority firewall (spec 8.6) is not "
                  "evaluated over the clean records it could not seat".format(", ".join(unevaluated)))
-    receipts = {}
-    remedied = set()
     for r in recs:
         own_ns = _ROSTER_NAMESPACES.get(r.rtype)
         for rel, tid in r.links:
@@ -2689,6 +2710,27 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep):
                 rep.finding("C-IMPORTED-SEGREGATION: clean record {} (type {!r}) supersedes -> {!r} of "
                             "another type; a clean-to-imported supersedes is same-type only (spec "
                             "8.6)".format(_safe_display(r.id), r.rtype, tid))
+    _check_importer_receipts(recs, rep, "C-IMPORTED-SEGREGATION")
+    _check_importer_chains(recs, by_id, rep, "C-IMPORTED-SEGREGATION")
+
+
+def _check_importer_receipts(recs, rep, cid):
+    """The section 8.6 receipt firewall over the clean record set `recs`, keyed on provenance and reported
+    under `cid` (C-IMPORTED-SEGREGATION with the imported series active, C-RECEIPTS otherwise): "a clean
+    backlog item reaching ratified `done` MUST hold a clean receipt authored by a non-importer actor". A
+    non-importer item at unqualified `done` whose every receipt is importer-authored is a finding; one with
+    no receipt at all is the C-RECEIPTS finding and is not repeated. An importer-authored item is not
+    graded here, since spec 8.6 lets its legacy receipt satisfy it as recorded history. The one exception
+    spec 8.6 defines is accepted: "a maintainer-authored clean `maintainer_decision` that links `corrects`
+    to that item and records that its completion stands MUST satisfy the item's receipt obligation in
+    place of the withdrawn receipt ... doctor and the upgrade MUST accept it". Its machine-checkable shape
+    is the maintainer-authored (never importer-authored) clean maintainer_decision whose `corrects` link
+    targets the item; whether its text records that the completion stands, and whether a later record
+    overturns it, are not machine-checkable from the spec, so any such decision satisfies
+    (_FIREWALL_RESIDUALS discloses both)."""
+    receipts = {}
+    remedied = set()
+    for r in recs:
         if r.rtype == "done":
             for rel, tid in r.links:
                 if rel == "receipt_of" and isinstance(tid, str):
@@ -2705,18 +2747,28 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep):
             continue
         mine = receipts.get(r.id, ())
         if mine and r.id not in remedied and all(d.actor_kind == "importer" for d in mine):
-            rep.finding("C-IMPORTED-SEGREGATION: ratified backlog_item {!r} is authored by a non-importer "
-                        "actor but its only receipt(s) {} are importer-authored; it MUST hold a clean receipt "
-                        "authored by a non-importer actor, or a maintainer-authored maintainer_decision "
-                        "correcting it (spec 8.6)".format(
-                            r.id, ", ".join(sorted(_safe_display(d.id) for d in mine))))
+            rep.finding("{}: ratified backlog_item {!r} is authored by a non-importer actor but its only "
+                        "receipt(s) {} are importer-authored; it MUST hold a clean receipt authored by a "
+                        "non-importer actor, or a maintainer-authored maintainer_decision correcting it "
+                        "(spec 8.6)".format(cid, r.id, ", ".join(sorted(_safe_display(d.id) for d in mine))))
+
+
+def _check_importer_chains(recs, by_id, rep, cid):
+    """The section 8.6 decision-chain arm over the clean record set `recs`, keyed on provenance and
+    reported under `cid` (C-IMPORTED-SEGREGATION with the imported series active, C-DECISION-CHAINS
+    otherwise): "An importer-authored decision MUST NOT be treated as the current effective resolution of a
+    clean `pending_decision` chain; resolving such a chain now MUST take a new clean decision linking
+    back." A chain whose current effective resolution (decision_chains, the one derivation
+    C-DECISION-CHAINS shares) is an importer-authored pending_decision is a finding, whoever authored the
+    rest of the chain: a state-bearing status on an importer-authored record confers nothing now (spec
+    8.6), so the join never seats it as current. A resolution by any other actor is not graded here."""
     for _members, current in decision_chains(recs, by_id):
-        for cid in current:
-            cur = by_id.get(cid)
+        for pid in current:
+            cur = by_id.get(pid)
             if cur is not None and cur.actor_kind == "importer":
-                rep.finding("C-IMPORTED-SEGREGATION: importer-authored pending_decision {!r} is the current "
-                            "effective resolution of a clean pending_decision chain; resolving it now takes "
-                            "a new clean decision linking back (spec 8.6)".format(cid))
+                rep.finding("{}: importer-authored pending_decision {!r} is the current effective resolution "
+                            "of a clean pending_decision chain; resolving it now takes a new clean decision "
+                            "linking back (spec 8.6)".format(cid, pid))
 
 
 def _verify_immutable_body(rid, cur, prior_digests, rep):
@@ -4120,12 +4172,23 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             imported_tee.finding("C-ID-SPACE: imported series: {}".format(f))
 
     # --- the cross-record checks ----------------------------------------------------------------------
+    # The section 8.6 firewall is keyed on provenance, never on activation (spec 8.6: it covers every
+    # importer-authored record). With the imported series active C-IMPORTED-SEGREGATION grades its receipt
+    # and decision-chain arms below; otherwise that check is off the roster (spec 4.2), so the two arms
+    # report under C-RECEIPTS and C-DECISION-CHAINS, the joins they guard. A store holding an
+    # importer-authored clean record discloses the firewall residuals either way.
+    if any(r.actor_kind == "importer" for r in recs):
+        rep.disclose_firewall()
     rep.ran("C-RECEIPTS")
     _check_receipts(recs, by_id, rep)
+    if not imported:
+        _check_importer_receipts(recs, rep, "C-RECEIPTS")
     rep.ran("C-HANDOFF")
     _check_handoff(recs, rep)
     rep.ran("C-DECISION-CHAINS")
     _check_decision_chains(recs, by_id, rep)
+    if not imported:
+        _check_importer_chains(recs, by_id, rep, "C-DECISION-CHAINS")
     rep.ran("C-LINKS")
     # C-LINKS reads the rows C-IMPORTED-SCHEMA read, and resolves a target only among those the per-series
     # id grading above reads as series members, keyed by (series key, id) so a same-id row in another leaf
@@ -4136,7 +4199,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     _check_links(recs, by_id, all_ids, rep, imported_recs, imported_targets)
     # --- C-IMPORTED-SEGREGATION (an active imported series only): the section 8.6 authority firewall over
     # the clean record set the cross-record checks above read, fail-closed on any clean-record reader that
-    # did not evaluate (spec 8.3/8.6) ----------------------------------------------------------------------
+    # did not evaluate (spec 8.3/8.6); its provenance-keyed arms run on an inactive store too (above) ------
     if imported:
         unseated = [cid for cid in ("C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM")
                     if rep.checks.get(cid) == "CANNOT-EVALUATE"]
@@ -5945,6 +6008,26 @@ def self_test():
                   and any(f.startswith(".working/toml/artifact.imported.index.toml#1: ")
                           and "'artifact' is not a supported record type" in f for f in imp_msgs(_mt_run))
                   and not any(_SCHEMA_DEFERRAL in m for m in imp_msgs(_mt_run)))
+            # The section 8.6 tripwire for the module-tier current-state joins: a clean importer-authored
+            # waiver at `active` on an active store never certifies, because its type's schema is deferred
+            # (red when the inline deferral cant is removed, which seats the waiver ungraded and VALID).
+            # When the module schemas ship, this vector fails until their joins carry the firewall filter.
+            _wv = act_machine()
+            _wv["manifest.toml"]["modules"] = {"delivery_assurance": True}
+            _wv["counters.toml"]["counters"].update(
+                {"AR": 0, "GR": 0, "RL": 0, "WV": 1,
+                 "imported:AR": 0, "imported:GR": 0, "imported:RL": 0, "imported:WV": 0})
+            for _t, _ns in _mt_types.items():
+                _wv["manifest.toml"]["types"][_t] = {"namespace": _ns}
+                _wv[_t + ".index.toml"] = idx([])
+            for _leaf in _opf_store.imported_leaf_names(_mt_types):
+                _wv[_leaf] = idx([])
+            _wv["waiver.index.toml"] = idx([envelope("WV-1", "waiver", "active", actor={"kind": "importer"})])
+            _wv_run = run(_wv, obs=_is2_prior())
+            check("imported-active-importer-waiver-not-valid",
+                  _wv_run is not None and _wv_run.status != VALID
+                  and any(m.startswith(".working/toml/waiver.index.toml: 1 schema-deferred record(s) of type "
+                                       "'waiver'") and _SCHEMA_DEFERRAL in m for m in _wv_run.cannot_evaluate))
             # Each row is validated against its LEAF's type: a finding row planted in the backlog-item
             # leaf is refused (red when the leaf type is not passed as the expected type); a row that
             # is not a table is CANNOT-EVALUATE naming it (red when that verdict is dropped); and a
@@ -7183,9 +7266,10 @@ def self_test():
             # Clean-to-imported links (spec 8.6): relates, derives_from, follows and same-type supersedes
             # pass this check; any other relation, and supersedes to another type, is its finding (red
             # when the relation set widens or the same-type arm is dropped). C-RECORDS and C-LINKS also
-            # grade such a link (the clean validator takes a <NS>-<n> link id only, and C-LINKS resolves
-            # clean ids only), so this check is judged on its own verdict; the flip disables it on the
-            # refused relation.
+            # grade such a link (the clean validator refuses the same relations to an imported id, and
+            # C-LINKS resolves an imported target over the union of both series, so a target absent from
+            # the imported leaves is its dangling-link finding), so this check is judged on its own
+            # verdict; the flip disables it on the refused relation.
             def _i3_link(rel, tid):
                 m = _i3_machine()
                 m["backlog_item.index.toml"] = idx([bi(1, "done"),
@@ -7343,6 +7427,36 @@ def self_test():
             check("imported-segregation-chain-flip-disabled-passes",
                   _i3_off(_i3_flip("_check_imported_segregation", _i3_chain(cur_actor="importer")),
                           "C-IMPORTED-SEGREGATION"))
+            # The chain arm grades importer authorship only: a chain whose current resolution an assistant
+            # or automation actor authored (ratified, so unqualified) certifies (red when the arm widens
+            # to every non-maintainer actor). A maintainer decision that links the item by any relation
+            # but `corrects` is no remedy (red when the remedy accepts any relation).
+            check("imported-segregation-non-importer-resolution-passes",
+                  _i3_clean_active(_i3_run(_i3_chain(cur_actor="assistant")))
+                  and _i3_clean_active(_i3_run(_i3_chain(cur_actor="automation"))))
+            _i3_rmx = _i3_remedy()
+            _i3_rmx["maintainer_decision.index.toml"]["record"][0]["links"] = [{"rel": "relates", "id": "BI-1"}]
+            _i3_rmxr = _i3_run(_i3_rmx, obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-non-corrects-remedy-confers-nothing",
+                  _i3_rmxr is not None and _i3_rmxr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and any("'BI-1'" in m for m in _i3_msgs(_i3_rmxr, "C-IMPORTED-SEGREGATION")))
+            # The section 8.6 residuals: an active store discloses the firewall entries and the
+            # imported-series entry, and the inactive clean store, which holds no importer-authored record,
+            # discloses neither (red when either disclosure is dropped or widened). The pins are independent
+            # of the live constants: sha256 over each tuple's entries joined by a newline, UTF-8, so a
+            # changed, dropped, added or reordered entry fails here until the pin is renewed with it.
+            check("imported-residuals-disclosed-active-only",
+                  _i3_ok is not None
+                  and all(x in _i3_ok.residuals for x in _FIREWALL_RESIDUALS + _IMPORTED_RESIDUALS)
+                  and clean is not None
+                  and not any(x in clean.residuals for x in _FIREWALL_RESIDUALS + _IMPORTED_RESIDUALS))
+            check("imported-residuals-pinned",
+                  len(_FIREWALL_RESIDUALS) == 3
+                  and hashlib.sha256("\n".join(_FIREWALL_RESIDUALS).encode("utf-8")).hexdigest()
+                  == "0af7442b20b5ffd35e0f7ee963f9e1aea3dc47aeff43f5b28a083c3d1114d8a3"
+                  and len(_IMPORTED_RESIDUALS) == 1
+                  and hashlib.sha256("\n".join(_IMPORTED_RESIDUALS).encode("utf-8")).hexdigest()
+                  == "15be7339b7047adcc7f4831e29a52a00c87b93eca3cfbe58ea8a65045176dfbf")
             # A leaf row that is not a table: C-IMPORTED-PROVENANCE is CANNOT-EVALUATE naming it,
             # never a pass over evidence nothing read (the series grammar flags the row under
             # C-ID-SPACE; red when such a row is silently skipped).
@@ -7593,6 +7707,72 @@ def self_test():
         _r2_imp = run(f)
         check("r2-importer-current-handoff-excluded",
               _r2_imp.status == VALID and not any("C-HANDOFF" in x for x in _r2_imp.findings))
+        # The section 8.6 firewall is keyed on provenance, so it applies on this inactive store too, where
+        # C-IMPORTED-SEGREGATION is off the roster: the receipt arm reports under C-RECEIPTS and the
+        # decision-chain arm under C-DECISION-CHAINS (each red when the driver runs them only with the
+        # imported series active, which leaves these stores VALID). A store holding an importer-authored
+        # clean record discloses the firewall residuals, never the imported-series one.
+        def _fw_run(machine, extra_digests=None):
+            o = clean_prior()
+            o["prior"]["digests"].update(extra_digests or {})
+            return run(machine, obs=o)
+
+        def _fw_disclosed(r):
+            return (r is not None and all(x in r.residuals for x in _FIREWALL_RESIDUALS)
+                    and not any(x in r.residuals for x in _IMPORTED_RESIDUALS))
+
+        _fw_idn = dict(dn(1, "BI-1"), actor={"kind": "importer"})
+        _fw_dig = {"DN-1": _record_digest(_fw_idn)}
+
+        def _fw_receipt(*mds):
+            m = clean_machine()
+            m["done.index.toml"] = idx([copy.deepcopy(_fw_idn)])
+            if mds:
+                m["maintainer_decision.index.toml"] = idx(list(mds))
+                m["counters.toml"] = counters(MD=len(mds))
+            return m
+
+        _fw_rc = _fw_run(_fw_receipt(), _fw_dig)
+        check("firewall-inactive-importer-receipt-finding",
+              _fw_rc is not None and _fw_rc.status == INVALID
+              and {c for c, v in _fw_rc.checks.items() if v != "PASS"} == {"C-RECEIPTS"}
+              and _fw_rc.by_check.get("C-RECEIPTS")
+              == ["C-RECEIPTS: ratified backlog_item 'BI-1' is authored by a non-importer actor but its only "
+                  "receipt(s) 'DN-1' are importer-authored; it MUST hold a clean receipt authored by a "
+                  "non-importer actor, or a maintainer-authored maintainer_decision correcting it (spec 8.6)"]
+              and _fw_disclosed(_fw_rc))
+        # The spec 8.6 remedy is accepted on this store too; a maintainer decision that links the item by
+        # any relation but `corrects` is no remedy (red when the remedy accepts any relation).
+        _fw_rm = _fw_run(_fw_receipt(md(1, links=[{"rel": "corrects", "id": "BI-1"}])), _fw_dig)
+        _fw_rl = _fw_run(_fw_receipt(md(1, links=[{"rel": "relates", "id": "BI-1"}])), _fw_dig)
+        check("firewall-inactive-corrects-remedy-accepted",
+              _fw_rm is not None and _fw_rm.status == VALID and _fw_disclosed(_fw_rm))
+        check("firewall-inactive-non-corrects-remedy-confers-nothing",
+              _fw_rl is not None and _fw_rl.checks.get("C-RECEIPTS") == "FINDING"
+              and any("'BI-1'" in m and "importer-authored" in m for m in _fw_rl.by_check.get("C-RECEIPTS", [])))
+        f = clean_machine()
+        f["pending_decision.index.toml"] = idx([pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})])
+        f["counters.toml"] = counters(PD=2)
+        _fw_ch = run(f)
+        check("firewall-inactive-importer-current-resolution-finding",
+              _fw_ch is not None and _fw_ch.status == INVALID
+              and {c for c, v in _fw_ch.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and _fw_ch.by_check.get("C-DECISION-CHAINS")
+              == ["C-DECISION-CHAINS: importer-authored pending_decision 'PD-2' is the current effective "
+                  "resolution of a clean pending_decision chain; resolving it now takes a new clean decision "
+                  "linking back (spec 8.6)"]
+              and _fw_disclosed(_fw_ch))
+        # Legacy importer-authored clean history the firewall leaves alone: an importer-authored item ratified
+        # at done with its importer-authored receipt, and an importer-authored decision a maintainer decision
+        # supersedes, certify VALID (red when either arm grades importer-authored history it must not).
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([dict(bi(1, "done"), actor={"kind": "importer"}), bi(2, "open")])
+        f["done.index.toml"] = idx([copy.deepcopy(_fw_idn)])
+        f["pending_decision.index.toml"] = idx([dict(pd(1), actor={"kind": "importer"}), pd(2, supersedes="PD-1")])
+        f["counters.toml"] = counters(PD=2)
+        _fw_hist = _fw_run(f, _fw_dig)
+        check("firewall-inactive-legacy-history-valid",
+              _fw_hist is not None and _fw_hist.status == VALID and _fw_disclosed(_fw_hist))
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1), pd(2, supersedes="PD-1"), pd(3, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=3)
@@ -8350,6 +8530,22 @@ def self_test():
               mmr is not None and any("U2M" in m for m in mmr.cannot_evaluate))
         check("f4-module-record-not-false-invalid",
               mmr is not None and not any("not a supported record type" in f for f in mmr.findings))
+        # The section 8.6 tripwire behind the module-tier residual: every module type the firewall names
+        # (current-state joins and field-borne authority) is schema-deferred, so no store holding one of
+        # its records certifies VALID before its schema ships (red when the deferral stops covering one).
+        # The same clean importer-authored waiver at `active` on this inactive store never certifies either.
+        check("imported-firewall-module-types-schema-deferred",
+              all(_schema_deferred(t) for t in ("waiver", "session_lease", "mode", "gate_run",
+                                                "tier_assessment", "artifact", "release", "maintainer_action")))
+        mw = copy.deepcopy(mm)
+        mw["artifact.index.toml"] = idx([])
+        mw["counters.toml"] = counters(AR=0, GR=0, RL=0, WV=1)
+        mw["waiver.index.toml"] = idx([envelope("WV-1", "waiver", "active", actor={"kind": "importer"})])
+        mwr = run(mw)
+        check("importer-waiver-inactive-not-valid",
+              mwr is not None and mwr.status != VALID
+              and any(m.startswith(".working/toml/waiver.index.toml: 1 schema-deferred record(s) of type "
+                                   "'waiver'") and _SCHEMA_DEFERRAL in m for m in mwr.cannot_evaluate))
 
         # ===== draft-2 discriminating vectors ========================================================
         # F4/codex-9: a malformed prior record id is a MALFORMED observation (cant), never store INVALID.
