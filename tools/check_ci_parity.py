@@ -69,8 +69,8 @@ does not read. defaults (run.shell) and container replace the program or image e
 run: step executes in, so a gate command need not run at all. The other job keys
 cannot turn a failing gate into a success result: if:, needs:, timeout-minutes,
 concurrency and environment can only skip, cancel or fail a job, which Quality gates
-reads as not success (the LANES rule still holds if: and concurrency to their
-pinned text); a strategy matrix job's result is failure when any leg fails
+reads as not success (the LANES rule still holds a job-level if: to its pinned
+text and refuses a job-level concurrency:); a strategy matrix job's result is failure when any leg fails
 (GitHub behaviour, not observed here); name, runs-on, permissions, outputs, env, services,
 with and secrets do not decide a result (with and secrets apply only under uses).
 The step-level keys that could (continue-on-error, if:, timeout-minutes, and any
@@ -174,26 +174,34 @@ job-level if: is read only by the LANES rule below, which refuses one on any job
 outside the heavy jobs of quality.yml, the scan's job included). Any of
 them can stop the scan workflow on an edited event; reachability is outside
 token-parity scope (the reachability residual below).
-LANES. quality.yml may carry one top-level concurrency: block, exactly
+LANES. quality.yml must carry one top-level concurrency: block, exactly
 CONCURRENCY_BLOCK line for line once blank and whole-line comment lines are
 dropped: a pull request run's group is keyed by its pull request number with
 cancel-in-progress on, so a newer run of that pull request cancels the
 superseded one, and every other run's group is keyed by its own run id with
 cancel-in-progress off, so a push-to-main run is never cancelled or queued
 behind another run (GitHub's documented concurrency behaviour, not observed
-here). A job-level if: on any job but the Quality gates job (whose always() the
-REQUIRED STATUS rule holds) is accepted only as the exact line
-HEAVY_JOB_IF_LINE, and only on a HEAVY_JOBS job of quality.yml: those jobs run
-on a push and on a pull request whose head is a merge-train-* branch of this
-repository, and are skipped on every other pull request, which Quality gates
-reads as not success, so such a pull request merges only by riding a train. A
-departing concurrency: block, a concurrency: block in any other workflow, a
-job-level concurrency: key on any job, a departing if: line on a heavy job and
-the if: line on any other job are each a lane finding (exit 1). Not read:
-whether GitHub evaluates the pinned expressions as their text says (this rule
-compares text), and a cancelled run left on a live head (a reopen while its
-run is in progress, or a push back to an earlier head), which tools/ci-status.sh
-then refuses until a new head commit.
+here). Each HEAVY_JOBS job that quality.yml carries must carry the job-level
+if: HEAVY_JOB_IF_LINE, and a job-level if: on any job but the Quality gates job
+(whose always() the REQUIRED STATUS rule holds) is accepted only as that exact
+line with no continuation line, and only on a HEAVY_JOBS job of quality.yml:
+those jobs run on a push and on a pull request whose head is a merge-train-*
+branch of this repository, and are skipped on every other pull request, which
+Quality gates reads as not success, so such a pull request merges only by
+riding a train. The if: value is read whole: every non-blank, non-comment line
+deeper than the key before the job's next property is a continuation line,
+which YAML folds into the condition. A missing or departing concurrency: block
+in quality.yml, a concurrency: block in msg-leaks.yml, a job-level
+concurrency: key on any job of either file, a heavy job without the if:, a
+departing if: value on a heavy job and the if: on any other job are each a
+lane finding (exit 1). Not read: workflows outside CI_WORKFLOWS (the scheduled
+currency.yml among them, DISCLOSED RESIDUAL); whether a heavy job is present
+(a HEAVY_JOBS job removed, or renamed so that it runs without the if:, is not
+a lane finding, though its members still count for parity); whether GitHub
+evaluates the pinned expressions as their text says (this rule compares text);
+and a cancelled run left on a live head (a reopen while its run is in progress,
+or a push back to an earlier head), which tools/ci-status.sh then refuses until
+a new head commit.
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
@@ -523,7 +531,7 @@ REQUIRED_STATUS_JOB = (
     '          echo "Quality gates: PASS, every needed job concluded success"',
 )
 
-# The one top-level concurrency: block quality.yml may carry, compared line for line
+# The one top-level concurrency: block quality.yml must carry, compared line for line
 # once blank and whole-line comment lines are dropped (module docstring, LANES). A
 # pull request run's group is keyed by its number with cancel-in-progress on, so a
 # newer run of that pull request cancels the superseded one; every other run's group
@@ -538,7 +546,7 @@ CONCURRENCY_BLOCK = (
 )
 
 # The one job-level if: line a job other than Quality gates may carry, exactly as
-# written, and the quality.yml jobs that may carry it (module docstring, LANES): a
+# written, and the quality.yml jobs that must carry it (module docstring, LANES): a
 # heavy job runs on a push and on a pull request whose head is a merge-train-*
 # branch of this repository, and is skipped on every other pull request, which
 # Quality gates reads as not success.
@@ -553,7 +561,7 @@ HEAVY_JOBS = frozenset({
     "git-fixture-env-host-patch", "byte-canon-matrix",
 })
 
-MSG_LEAKS_SCAN ="tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
+MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
 # The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan and that
 # scan's self-test. Any other member there is a relocation finding, because that workflow's status
 # is separate from the aggregated Quality gates and re-runs on every PR metadata edit, so a gate
@@ -2340,11 +2348,21 @@ def _top_level_block(lines, key):
 
 
 def _lane_findings(job_ids, job_fields, lines, source):
-    """Hold the concurrency: block and every job-level if: other than the Quality
-    gates job's to the pinned lane text (module docstring, LANES)."""
+    """Require the pinned concurrency: block in quality.yml and the pinned if: on
+    each of its heavy jobs, and hold every job-level if: other than the Quality
+    gates job's, continuation lines included, to the pinned lane text (module
+    docstring, LANES)."""
     findings = []
     block = _top_level_block(lines, "concurrency")
-    if block is not None and source != CI_SOURCE:
+    if block is None and source == CI_SOURCE:
+        findings.append(Finding(
+            "lane",
+            "concurrency",
+            "{} carries no top-level concurrency: block; the pinned "
+            "CONCURRENCY_BLOCK is required, so a newer run of a pull request "
+            "cancels its superseded run".format(source),
+        ))
+    elif block is not None and source != CI_SOURCE:
         findings.append(Finding(
             "lane",
             "concurrency",
@@ -2372,11 +2390,22 @@ def _lane_findings(job_ids, job_fields, lines, source):
                 "cancel the job in a push-to-main run; only the pinned "
                 "top-level CONCURRENCY_BLOCK is accepted".format(job, source),
             ))
-        if ("if" not in fields
-                or _unquote(fields.get("name", (0, ""))[1])
-                == REQUIRED_STATUS_NAME):
+        if _unquote(fields.get("name", (0, ""))[1]) == REQUIRED_STATUS_NAME:
             continue
-        raw = lines[fields["if"][0] - 1]
+        if "if" not in fields:
+            if source == CI_SOURCE and job in HEAVY_JOBS:
+                findings.append(Finding(
+                    "lane",
+                    job,
+                    "heavy job {!r} of {} carries no job-level if:; the pinned "
+                    "HEAVY_JOB_IF_LINE is required, so the job runs only on a "
+                    "push and on a merge-train-* pull request of this "
+                    "repository".format(job, source),
+                ))
+            continue
+        # The whole value: the key's own line and every continuation line.
+        value = [lines[fields["if"][0] - 1]] + [
+            text for _number, text in fields.get("if-continued", ())]
         if source != CI_SOURCE or job not in HEAVY_JOBS:
             findings.append(Finding(
                 "lane",
@@ -2386,15 +2415,17 @@ def _lane_findings(job_ids, job_fields, lines, source):
                 "where it must run".format(
                     job, source, fields["if"][0], CI_SOURCE),
             ))
-        elif raw != HEAVY_JOB_IF_LINE:
+        elif value != [HEAVY_JOB_IF_LINE]:
             findings.append(Finding(
                 "lane",
                 job,
                 "the job-level if: of heavy job {!r} at line {} departs from "
-                "the pinned HEAVY_JOB_IF_LINE: got {!r}; only the pinned line "
-                "is known to run the job on a push and on a merge-train-* "
-                "pull request of this repository alone".format(
-                    job, fields["if"][0], raw.strip()),
+                "the pinned HEAVY_JOB_IF_LINE: got {!r}; only the pinned line, "
+                "with no continuation line, is known to run the job on a push "
+                "and on a merge-train-* pull request of this repository "
+                "alone".format(
+                    job, fields["if"][0],
+                    " ".join(text.strip() for text in value)),
             ))
     return findings
 
@@ -2861,6 +2892,11 @@ def extract_ci(text, source=CI_SOURCE):
             if last_job_key == "needs" and indent == 6:
                 job_fields[current_job[:-1]].setdefault(
                     "needs-items", []).append((line_number, stripped))
+            if in_jobs and last_job_key == "if":
+                # A deeper line under a job-level if: continues its value (YAML
+                # folds it into the condition), so the lane rule reads it too.
+                job_fields[current_job[:-1]].setdefault(
+                    "if-continued", []).append((line_number, stripped))
             if re.match(r"(?:-\s+)?run:", stripped):
                 diagnostics.append(_diagnostic(
                     source,
@@ -3982,9 +4018,10 @@ def self_test():
         lines.extend(tail)
         return "\n".join(lines) + "\n"
 
-    def ci_fixture(commands=(), extra_steps=()):
-        lines = [
-            "name: Test",
+    # A quality.yml fixture carries the pinned concurrency: block, which the
+    # LANES rule requires there; a msg-leaks.yml fixture passes top=().
+    def ci_fixture(commands=(), extra_steps=(), top=CONCURRENCY_BLOCK):
+        lines = ["name: Test"] + list(top) + [
             "jobs:",
             "  quality:",
             "    runs-on: ubuntu-latest",
@@ -5763,7 +5800,7 @@ def self_test():
     # without the change.
     def multi_job_ci(aggregator, first=("python3 tools/a.py",),
                      second=("python3 tools/b.py",), run_tail=()):
-        lines = ["name: Test", "jobs:"]
+        lines = ["name: Test"] + list(CONCURRENCY_BLOCK) + ["jobs:"]
         for job, commands in (("one", common + first), ("two", second)):
             lines.extend((
                 "  " + job + ":",
@@ -6291,7 +6328,7 @@ def self_test():
     defaults = pr_types("[opened, synchronize, reopened]")
     edited = pr_types("[opened, synchronize, reopened, edited]")
     quality_side = with_on(ci_fixture(common), defaults)
-    scan_text = ci_fixture((msg_selftest, msg_scan))
+    scan_text = ci_fixture((msg_selftest, msg_scan), top=())
     msg_side = ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, edited)),)
 
     def scan_case(name, quality, scan, want_code, kinds=(), local_only=None,
@@ -6605,7 +6642,8 @@ def self_test():
               with_on(ci_fixture(tuple(
                   item for item in common if item != moved)), defaults),
               ((MSG_LEAKS_CI_SOURCE, with_on(
-                  ci_fixture((msg_selftest, msg_scan, moved)), edited)),),
+                  ci_fixture((msg_selftest, msg_scan, moved), top=()),
+                  edited)),),
               1, ("relocation",))
 
     # The step-shell rule is pinned on msg-leaks.yml by its own
@@ -6660,7 +6698,7 @@ def self_test():
             expr_report = evaluate(
                 local_msg, quality_side, msg_waiver,
                 ((MSG_LEAKS_CI_SOURCE, with_on(
-                    ci_fixture((msg_selftest, msg_scan), expr_step),
+                    ci_fixture((msg_selftest, msg_scan), expr_step, top=()),
                     edited)),))
             expr_source = MSG_LEAKS_CI_SOURCE
         case("35x a GitHub expression in a run: shell comment is "
@@ -7059,13 +7097,15 @@ def self_test():
             "{!r}".format(glob_literal.diagnostics))
 
     # 39 LANES: the pinned concurrency: block and the pinned heavy-job if:
-    # line pass; any other concurrency: spelling, a concurrency: block outside
-    # quality.yml, a job-level concurrency: key, a widened if: and the if: on
-    # a job outside HEAVY_JOBS are each a lane finding. Without the rule the
-    # pinned block was an unknown top-level key (exit 2) and every if: passed,
-    # so each vector below fails on revert; each red vector names its finding.
-    def lane_ci(heavy_if=HEAVY_JOB_IF_LINE, light_if=None, top=(),
-                job_tail=()):
+    # line pass; a missing block, a heavy job without the if:, any other
+    # concurrency: spelling, a concurrency: block outside quality.yml, a
+    # job-level concurrency: key, a widened if: (a continuation line included)
+    # and the if: on a job outside HEAVY_JOBS are each a lane finding. Without
+    # the rule the pinned block was an unknown top-level key (exit 2) and every
+    # if: passed, so each vector below fails on revert; each red vector names
+    # its finding.
+    def lane_ci(heavy_if=HEAVY_JOB_IF_LINE, light_if=None,
+                top=CONCURRENCY_BLOCK, job_tail=()):
         lines = ["name: Test"] + list(top) + ["jobs:"]
         for job, commands, condition in (
                 ("secrets", common + ("python3 tools/a.py",), light_if),
@@ -7104,9 +7144,24 @@ def self_test():
     pinned_top = CONCURRENCY_BLOCK
     group_line, cancel_line = CONCURRENCY_BLOCK[1], CONCURRENCY_BLOCK[2]
     lane_case("39a the pinned concurrency: block and heavy-job if: pass",
-              evaluate(multi_local, lane_ci(top=pinned_top), ()), 0)
-    lane_case("39b control: neither the block nor the if: is required",
-              evaluate(multi_local, lane_ci(heavy_if=None), ()), 0)
+              evaluate(multi_local, lane_ci(), ()), 0)
+    # Both are required: quality.yml as it was before the lane change (no
+    # block, no if: on a heavy job) is red, and so is each removal alone.
+    for label, report, needles in (
+            ("the concurrency: block removed",
+             evaluate(multi_local, lane_ci(top=()), ()),
+             ("carries no top-level concurrency: block",)),
+            ("the pinned if: removed from a heavy job",
+             evaluate(multi_local, lane_ci(heavy_if=None), ()),
+             ("heavy job 'opf' of {} carries no job-level if:".format(
+                 CI_SOURCE),)),
+            ("both removed, the workflow before the lane change",
+             evaluate(multi_local, lane_ci(heavy_if=None, top=()), ()),
+             ("carries no top-level concurrency: block",
+              "carries no job-level if:"))):
+        for needle in needles:
+            lane_case("39b a missing lane setting is a lane finding: "
+                      + label + " (" + needle + ")", report, 1, needle)
     lane_case("39c control: a whole-line comment and a blank line inside the "
               "block are dropped",
               evaluate(multi_local, lane_ci(top=(
@@ -7153,6 +7208,35 @@ def self_test():
                   "finding: " + label,
                   evaluate(multi_local, lane_ci(heavy_if=line), ()), 1,
                   "departs from the pinned HEAVY_JOB_IF_LINE")
+    # A deeper line under the pinned if: continues its value (YAML folds it
+    # into the condition), so the pinned first line with any continuation line
+    # is a departure; a whole-line comment under it is not part of the value.
+    for label, tail in (
+            ("|| true", ("      || true",)),
+            ("== false", ("      == false",)),
+            ("&& false", ("      && false",)),
+            ("a bare trailing operator", ("      ||",)),
+            ("|| true at indent 8", ("        || true",)),
+            ("|| true after a blank line", ("", "      || true")),
+            ("|| true after a whole-line comment",
+             ("      # widened", "      || true"))):
+        lane_case("39e a continuation line under the pinned heavy-job if: is a "
+                  "lane finding: " + label,
+                  evaluate(multi_local, lane_ci(
+                      heavy_if="\n".join((HEAVY_JOB_IF_LINE,) + tail)), ()),
+                  1, "departs from the pinned HEAVY_JOB_IF_LINE")
+    lane_case("39e control: a whole-line comment under the pinned heavy-job if: "
+              "passes",
+              evaluate(multi_local, lane_ci(
+                  heavy_if=HEAVY_JOB_IF_LINE + "\n      # heavy jobs"), ()), 0)
+    # The Quality gates job's if: always() is held by the REQUIRED STATUS pin,
+    # which reads a continuation line under it as a departure.
+    case("39e a continuation line under the Quality gates if: always() is a "
+         "required-status finding",
+         evaluate(multi_local, lane_ci().replace(
+             "\n".join(always) + "\n",
+             "\n".join(always) + "\n      && false\n", 1), ()),
+         1, kinds=("required-status",))
     lane_case("39f the pinned if: on a job outside HEAVY_JOBS is a lane "
               "finding",
               evaluate(multi_local, lane_ci(light_if=HEAVY_JOB_IF_LINE), ()),
