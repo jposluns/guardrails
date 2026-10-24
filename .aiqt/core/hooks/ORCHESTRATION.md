@@ -83,7 +83,10 @@ the doctor and the resume audit report and arm from it):
   rest of that line as commands, so where such a body ends is unknown; whether such a substitution
   is open is read from the scan's own count of unquoted `$(`, `<(` and `>(` openers as well as from
   its nesting stack, because a bare case pattern's `)` pops the stack's parenthesis, as in
-  `x=$(case y in y) :;; esac; cat <<EOF`, and once a `case` keyword has been read in command
+  `x=$(case y in y) :;; esac; cat <<EOF`; the count falls only at a `)` that same stack matches
+  against a `(` on top, so a `)` that is text inside a `${...}` expansion or a backquote span, as
+  in `x=$(echo ${y%)}; ...)`, closes nothing and the substitution stays counted open to the end of
+  the command, and once a `case` keyword has been read in command
   position no `)` is counted as closing a substitution, so a here-document after a closed one in
   such a command draws the note too, an over-note), a body with a
   backslash-newline

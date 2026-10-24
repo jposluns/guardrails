@@ -10091,6 +10091,24 @@ def _main_isolated(report_path=None):
                  _fg("cat <(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
                 ("trunc/oos-heredoc-after-case-parenthesised-pattern-notes",
                  _fg("x=$(case y in (y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                # A `)` that is text inside a `${...}` expansion is matched against nothing on the
+                # nesting stack, so it closes nothing on the substitution count either: the
+                # substitution stays counted open, the here-document after the bare case pattern
+                # still notes, and the real detach after it is never silently allowed (a count any
+                # `)` lowered read the substitution as closed there and skipped the body at a wrong
+                # line, so the detach got no note).
+                ("trunc/oos-heredoc-after-expansion-paren-cmdsubst-notes",
+                 _fg("x=$(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"),
+                 "warn"),
+                ("trunc/oos-heredoc-after-expansion-paren-default-notes",
+                 _fg("x=$(echo ${y:-)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"),
+                 "warn"),
+                ("trunc/oos-heredoc-after-expansion-paren-procsub-notes",
+                 _fg("cat <(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"),
+                 "warn"),
+                ("trunc/oos-heredoc-after-expansion-paren-setsid-notes",
+                 _fg("x=$(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\n"
+                     "setsid -f long_job"), "warn"),
                 # Disclosed SILENT miss (the manifest residue): an unquoted expansion as the command
                 # word can vanish, so bash runs the word after it as the command; this scan reads
                 # that word as an argument and stays silent.
@@ -10135,6 +10153,20 @@ def _main_isolated(report_path=None):
         _oos_note = (_oos[1] or {}).get("systemMessage", "")
         check("trunc/oos-note-names-mechanism",
               (_verdict(_oos), "run_in_background" in _oos_note, "setsid" in _oos_note), ("warn", True, True))
+        # The unreadable note's text is pinned: it names the causes the scan cannot read with
+        # certainty, including a substitution open or not provably closed and a scan that ends
+        # inside an open quote (without this pin, reverting the note's wording to an older text
+        # that omits those causes would pass every check).
+        _unr = aiqt_hooks.orch_truncation_guard(ti.payload(
+            "PreToolUse", "Bash", _fg("msg=$(cat <<EOF\nhello\nEOF)\necho done")))
+        _unr_note = (_unr[1] or {}).get("systemMessage", "")
+        check("trunc/oos-unreadable-note-text-pins-causes",
+              (_verdict(_unr),
+               "a here-document opened while a parenthesis, '${...}' or backquote substitution is "
+               "open or not provably closed" in _unr_note,
+               "or a scan that ends inside an open quote), so work that detaches and runs on after "
+               "this call returns cannot be ruled out" in _unr_note),
+              ("warn", True, True))
         # The whole dispatcher, in a child process: a here-document delimiter the note scan cannot read
         # with certainty (here an ANSI-C escape whose `\c` form once raised out of the handler and
         # blocked) stays a NOTE with exit 0 outside registry scope: stdout is one JSON object whose keys
@@ -10203,6 +10235,20 @@ def _main_isolated(report_path=None):
               aiqt_hooks._orch_foreground_note_kind(
                   "case a in a) :;; esac\nx=$(true)\ncat <<EOF\nhi\nEOF"),
               "unreadable")
+        # Scanner-level: the count falls only at a `)` the nesting stack itself matches against a
+        # `(` on top. A `)` that is text inside a `${...}` expansion closes nothing, so the
+        # substitution stays counted open and the here-document inside it notes (a count any `)`
+        # lowered read it as closed and skipped the body at a wrong line). The closed row is the
+        # boundary: the same expansion inside a substitution the stack does prove closed leaves a
+        # later here-document silently skipped, exactly as one with no `)` in it.
+        check("trunc/scan-heredoc-after-expansion-paren-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "x=$(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\necho done"),
+              "unreadable")
+        check("trunc/scan-heredoc-after-expansion-closed-subst-skips-silently",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "x=$(echo ${y%)}; true)\ncat <<EOF\nhello & 'hi\nEOF"),
+              None)
         # The note scan reads a `#` by the in-scope scan's comment rule: a `#` whose reading depends on
         # context (at a word start inside an open ${...} or backquote substitution, right after a `)`, or
         # after a blank inside a double-quoted "$(...)") notes as unreadable, where the deny scan denies it.
@@ -10242,6 +10288,11 @@ def _main_isolated(report_path=None):
             # registry the guard denies nothing), so that sentence is pinned, not only the mode name.
             check("trunc/registry-required-reason-pins-default-wording",
                   "instead of the default, in which this guard denies nothing" in rr_reason, True)
+            # The repair sentence's closing clause is pinned too: it restates the default scoping
+            # that unsetting the variable restores, so a reworded reason that drops it fails here.
+            check("trunc/registry-required-reason-pins-restore-wording",
+                  "restore the default scoping (with no registry this guard denies nothing and "
+                  "allows)." in rr_reason, True)
             check("trunc/registry-required-present-plain-allows", _verdict(bg("python3 build.py")),
                   "allow")
             check("trunc/registry-required-present-detach-denies",

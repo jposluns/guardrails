@@ -15446,9 +15446,14 @@ def _orch_note_scan(command, bash_word_starts):
     misread where such a body ends), so the note is emitted rather than guessing where the
     body ends or reading the remainder as code. Whether such a substitution is open is read from the
     scan's own count of unquoted `$(`, `<(` and `>(` openers as well as from the stack, because a bare
-    case pattern's `)` pops the stack's parenthesis (x=$(case y in y) :;; esac; cat <<EOF): the count
-    falls only at a `)` met before any `case` keyword was read in command position, since a later `)`
-    cannot be told from a bare pattern's, so after a `case` a closed substitution stays counted open
+    case pattern's `)` pops the stack's parenthesis (x=$(case y in y) :;; esac; cat <<EOF): from the
+    first such opener to the end of the command a here-document draws the note unless the count proves
+    every substitution closed, and the count falls only at a `)` the stack itself matches against a
+    `(` on top (one met while a `${...}` or a backquote is innermost is text to bash, as in
+    x=$(echo ${y%)}; ...), so it closes nothing on the count, and the text after it up to the
+    expansion's real `}` is read in command position, which can only over-note) and met before any
+    `case` keyword was read in command position, since a later `)` cannot be told from a bare
+    pattern's, so after a `case` a closed substitution stays counted open
     and a later here-document in the same command draws the note, an over-note; a here-document opened
     inside a double-quoted command substitution (the commit-message form) is NOT recognized and is read as
     double-quoted text, whose own double quotes toggle that reading, so a body `&` there can draw an extra
@@ -15483,9 +15488,12 @@ def _orch_note_scan(command, bash_word_starts):
     backslash-newline line continuation is not read in command position; an unquoted expansion as the
     command word hides the detacher after it ($SUDO setsid -f job, $(true) nohup job: an empty
     expansion vanishes to bash, which runs the word after it as the command, while this scan reads
-    that word as an argument); a `case` keyword hidden from command position the same way (one after a
-    backslash-newline line continuation) is not read, so a bare pattern's `)` after it can still lower
-    the substitution count and a later here-document inside that substitution can be skipped at a
+    that word as an argument); a `case` keyword hidden from command position is not read, in every
+    spelling (one after a backslash-newline line continuation, one followed by a backslash-newline,
+    which is no word break to this raw scan although bash removes the continuation, one split by a
+    continuation inside the keyword, and one after coproc, which is not a recognized command prefix),
+    so a bare pattern's `)` after it still reads as a substitution's close on the count exactly as it
+    pops the stack, and a later here-document inside that substitution can be skipped at a
     wrong line; a command substitution inside
     skipped arithmetic is skipped with it; a `<<` inside the old-style $[ ... ] arithmetic reads as a
     here-document opener and skips the lines after it; a redirect target written as an arithmetic
@@ -15519,9 +15527,13 @@ def _orch_note_scan(command, bash_word_starts):
     groups = []  # (glued, next_command, index, is_subst) saved at each unquoted `(`, restored at its `)`
     # Open command and process substitutions, counted apart from the nesting stack: a bare case
     # pattern's `)` pops that stack's parenthesis, so the stack alone would read the substitution as
-    # closed while bash still ends a here-document body inside it early. The count falls only at a `)`
-    # that cannot be a case pattern's (none read after a `case` keyword in command position can be
-    # ruled out, so after one the count never falls: an over-note, never a missed body misread).
+    # closed while bash still ends a here-document body inside it early. From a substitution's opener
+    # to the end of the command a here-document draws the note unless this count proves every such
+    # substitution closed, and the count falls only at a `)` the nesting stack matches against a `(`
+    # on top (one met while a `${...}` or a backquote is innermost is text to bash and closes
+    # nothing) and that cannot be a case pattern's (none read after a `case` keyword in command
+    # position can be ruled out, so after one the count never falls: an over-note, never a missed
+    # body misread).
     subst_open = 0
     case_word = False  # a `case` keyword was read in command position: a later `)` may be a bare pattern
     heredocs = []  # (delimiter, strip_tabs) opened on the current line; their bodies follow its newline
@@ -15686,7 +15698,9 @@ def _orch_note_scan(command, bash_word_starts):
                 # and read real commands as data. Where the body ends is unknown, so the scan notes.
                 # The substitution count is read as well as the stack: a bare case pattern's `)`
                 # pops the stack's parenthesis (x=$(case y in y) :;; esac; cat <<EOF), but it cannot
-                # close a command or process substitution on the count, so the body is still noted.
+                # close a command or process substitution on the count, and neither can a `)` the
+                # stack does not match against a `(` on top (text inside a `${...}` expansion or a
+                # backquote span, x=$(echo ${y%)}; ...)), so the body is still noted.
                 return "unreadable"
             parsed = _orch_plain_heredoc_delim(command, i + 2, n)
             if parsed is None:
@@ -15744,7 +15758,13 @@ def _orch_note_scan(command, bash_word_starts):
             subst_open += is_subst
             command_position = next_command = True
         elif ch == ")":
-            if groups:
+            if groups and nest and nest[-1] == "(":
+                # Only a `)` the nesting stack itself matches against a `(` on top closes a group
+                # here: one met while a `${...}` or a backquote is innermost is text to bash, as in
+                # x=$(echo ${y%)}; ...), so it closes nothing on the substitution count below
+                # either. From its opener to the end of the command a substitution stays counted
+                # open unless this same stack proves it closed (a count any `)` lowered read that
+                # substitution as closed and skipped a later here-document body at a wrong line).
                 glued, saved, opened, is_subst = groups.pop()
                 if is_subst and not case_word:
                     # The `)` of a closed command or process substitution. After a `case` keyword it
@@ -15763,7 +15783,10 @@ def _orch_note_scan(command, bash_word_starts):
                     next_command = saved
                     command_position = False
             else:
-                command_position = next_command = True  # a case pattern's `)`: a command follows
+                # A case pattern's `)`, or one the stack does not match (text inside a `${...}`
+                # expansion or a backquote span): a command can follow, and a wrong restore can
+                # only over-note, never miss.
+                command_position = next_command = True
         elif ch in "<>|":
             # a redirect: the operand that follows is its target, not a command, so the pending command
             # position (next_command) must survive the operator, any blanks, and the whole target operand
