@@ -184,8 +184,8 @@ reason = "Disclosed residuals of vfxcmt.3 to vfxcmt.11; the closing clause resta
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, so no replacement ref, grafts entry, or commit-graph cache can rewrite the parent the base is taken against; in a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base."
-reason = "Restates vfxcmt.7 and its cannot-evaluate case inside the disclosure paragraph; it adds no obligation."
+text = "In a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base."
+reason = "Restates vfxcmt.7's absent-parent cannot-evaluate case inside the disclosure paragraph; it adds no obligation."
 
 [[exempt]]
 corpus-id = "vfxcmt"
