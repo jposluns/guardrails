@@ -216,8 +216,8 @@
       starter changelog, all left untracked for your review; <code>init</code> does not
       stage or commit them. See <a href="./core-files">core store files</a> for what the scaffold writes
       into the manifest. Publication is create-only but not transactional: a later failure can leave
-      partial output for review. The lock and the lease exclude other OPF runs in the same
-      repository, not other writers; a run that stopped partway can leave its lock record, which
+      partial output for review. The lock and the lease exclude other OPF runs on the same
+      store, not other writers, and not runs on another store in the same repository; a run that stopped partway can leave its lock record, which
       <code>opf init --recover</code> clears once its holder is confirmed dead. A successful
       scaffold is not a whole-store validity verdict.</p>
     <p class="refchips"><code>opf init</code> <code>opf init --root .</code> <code>opf init --recover</code></p>

@@ -3626,6 +3626,39 @@ def _suite_isolated(invoke):
                       and not (uw_repo / ".git" / "opf-oplock" / "active.toml").exists()
                       and anchor_free(uw_repo))
 
+                # Spec 5.7 unwind after the detach: once the lease is detached, the capability is
+                # spent and the mutex is held through the holder the detach returned, so a
+                # failure in the final observation must release THAT holder. The failure is
+                # injected on the first published-path observation (the disclosure's own
+                # observation afterwards runs for real), and the stand-in records that the lease
+                # and its active record were already gone when it struck, so the failure is
+                # demonstrably after the detach. DISCRIMINATOR: an unwind that releases only the
+                # original (spent) holder leaves the detached holder's flock held in this process,
+                # so the later acquisition below is refused.
+                dt_repo = make_git("lease-unwind-after-detach")
+                dt_real_observed = opf._init_observed
+                dt_seen = []
+
+                def dt_fail_first_observed(root_fd, directories, payloads):
+                    if not dt_seen:
+                        dt_seen.append((
+                            (dt_repo / working / machine_name / "lease.toml").exists(),
+                            (dt_repo / ".git" / "opf-oplock" / "active.toml").exists()))
+                        raise RuntimeError("driven observation failure after the detach")
+                    return dt_real_observed(root_fd, directories, payloads)
+
+                rc, output = drive_cmd_init(dt_repo, {"_init_observed": dt_fail_first_observed})
+                check("lease: a failure after the lease detach releases the detached holder, "
+                      "leaving no lease or active record and the anchor free",
+                      rc == EXIT_ERROR
+                      and inert("driven observation failure after the detach") in output
+                      and "during observing-published-source-paths" in output
+                      and "publication may be partial" in output
+                      and dt_seen == [(False, False)]
+                      and not (dt_repo / working / machine_name / "lease.toml").exists()
+                      and not (dt_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                      and anchor_free(dt_repo))
+
                 # QA round 12 C (claude round-11 MEDIUM 2): a non-Exception raised
                 # after publication started (an interrupt or SystemExit) must still
                 # produce the partial-publication disclosure, then exit 2. On the

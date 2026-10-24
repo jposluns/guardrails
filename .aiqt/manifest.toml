@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "efe91c66a60baa3e7c978273558ada476de9566b32a04d3bcdfc28001bb61362"
+tree-sha256 = "9e5ed9b3442395d8a87e0ca46f966246952e9faa9cc824245b13d991f37a87af"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2551,8 +2551,8 @@ sha256 = "44fabb8f383a49b5344a6d3e1ff0b4e2ef3afe2411e3d2f0c0b00829bafecccb"
 
 [[sources]]
 path = "opf/site/adopt.html"
-bytes = 43520
-sha256 = "1af888535b43c00caed20798db2be30c3417407a044bbde4aed0d45aadc495ec"
+bytes = 43569
+sha256 = "d15ffd8731baf39c4b5897e421a26faf0d5db5f0838d0427a812068884d92bb1"
 
 [[sources]]
 path = "opf/site/adopt.md"
@@ -2571,8 +2571,8 @@ sha256 = "c58ea0e725419000149f7dab3d4d2e4bb3e86b70a440eeef3c7d8b6d2e2dcedc"
 
 [[sources]]
 path = "opf/site/disclosure.html"
-bytes = 13238
-sha256 = "4646b43e0a15361c14cb3225d276fb123d85d5ba30cf08ff24162fa2ff01250f"
+bytes = 13294
+sha256 = "c8e80a5e131b8f1e1342b3ad5d51e7c79c0c911d0b35551dd7e4300c7781e3ef"
 
 [[sources]]
 path = "opf/site/favicon.svg"
@@ -3011,8 +3011,8 @@ sha256 = "181a809502d0e340561a932d6bb193c599162d483b7b6b6a53994480daba24b0"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
-bytes = 453422
-sha256 = "94f2d844948159960ab3882c5e11fad37ae6691605ec40c55c284831da5f53a1"
+bytes = 455706
+sha256 = "3554bdc0089d432dfa318425468fc74451dc74672c3209b3399966c463e573ac"
 
 [[sources]]
 path = "opf/tools/check_opf_init_contract.py"
