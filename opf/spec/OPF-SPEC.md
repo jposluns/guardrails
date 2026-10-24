@@ -319,6 +319,15 @@ those of an open transaction being recovered, MUST NOT equal, descend from, or c
 the one exception is a section 9.2 remedy adoption's disposition of the old tree's files under that
 name, which are foreign content the store being adopted into never wrote, not its journal state
 (sections 9.2 and 14.2).
+A section 9.2 remedy adoption bounds this grading the same way: from the recorded approval until
+its retirement is recorded, an old-tree file under `imported/`, `archive/`, `staging/` or
+`journals/` that the approved plan enumerates as a frozen retire, move or migrate source
+(section 14.2) is bounded adoption state, never the adopted-into store's own evidence or staging,
+and, while its live bytes still match its plan digest, C-EVIDENCE-ENUM and this staging grading
+MUST grade it as migration_incomplete detail under the section 11 bounded treatment, never as a
+finding or cannot-evaluate, so the section 14.1 completion check stays reachable while the file
+stays frozen in place; a drifted or vanished source and an unenumerated path take no bounded
+treatment (section 11).
 Capability-bound journal APIs MUST derive their destinations from kind and run
 identity. An ID reservation under `allocations/` MUST be created exclusively and create-only,
 made durable before it is relied on and never rewritten, so an interrupted publication leaves
@@ -400,12 +409,15 @@ or adoption by itself: only a section 14 first adoption authorizes initializatio
 investigation that distinguishes first adoption from re-adoption and records a digest-stamped
 inventory, and one approved plan that gives every foreign file a disposition before `init-store`
 (section 14.1). A discovered manifest that the section 9.2 validation refusals refuse for
-declaring a `spec_version` below 2.0.0, or for omitting `[opf].homes`, marks no store: for
+declaring a `spec_version` below 2.0.0, whatever its `[opf].homes`, marks no store: for
 adoption, it and the files beneath its `.working/` MUST be treated as foreign content, never as a
 store, so the section 9.2 remedy adoption over them is a section 14 first adoption
-(sections 8.2, 9.2, and 14.1). A manifest refused only at the section 9.2 version ceiling marks a
-store at a later version, never foreign content: it MUST NOT be treated as authorizing
-initialization or adoption, and its remedy is the tooling upgrade alone (sections 8.2 and 9.2).
+(sections 8.2, 9.2, and 14.1). A discovered manifest declaring a `spec_version` of 2.0.0 or above
+whose `[opf].homes` is missing or not the integer 2 is refused as a store (section 9.2), never
+foreign content: it MUST NOT be treated as authorizing initialization or adoption. A manifest
+refused only at the section 9.2 version ceiling marks a store at a later version, never foreign
+content: it MUST NOT be treated as authorizing initialization or adoption, and its remedy is the
+tooling upgrade alone (sections 8.2 and 9.2).
 
 ### 4.6 Casing convention and rationale
 
@@ -896,12 +908,15 @@ MUST NOT be reused, even when a record is superseded, refuted, or its work rever
 rewrites, and store relocation MUST NOT touch `counters.toml`. Re-adoption MUST seed both series
 from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed
 prior ancestry. Only a genuinely first adoption MAY start its counters at zero. A store manifest
-the section 9.2 validation refusals refuse for declaring a `spec_version` below 2.0.0, or for
-omitting `[opf].homes`, is foreign content for adoption, never a store (sections 4.5 and 14.1), so
+the section 9.2 validation refusals refuse for declaring a `spec_version` below 2.0.0, whatever
+its `[opf].homes`, is foreign content for adoption, never a store (sections 4.5 and 14.1), so
 the section 9.2 remedy adoption over it is a genuinely first adoption: no prior OPF ancestry
-exists to seed, and its counters start at zero. A store refused only at the section 9.2 version
-ceiling keeps its ancestry: it is never foreign content, it MUST NOT be zero-seeded, and its
-remedy is the tooling upgrade alone (sections 4.5 and 9.2).
+exists to seed, and its counters start at zero. A store manifest declaring a `spec_version` of
+2.0.0 or above whose `[opf].homes` is missing or not the integer 2 is refused as a store
+(section 9.2), never foreign content: that refusal MUST NOT authorize adoption over it, and the
+zero-seed ban above stands (sections 4.5 and 14.1). A store refused only at the section 9.2
+version ceiling keeps its ancestry: it is never foreign content, it MUST NOT be zero-seeded, and
+its remedy is the tooling upgrade alone (sections 4.5 and 9.2).
 
 The claim additionally begins with one irrevocable reservation,
 `journals/<kind>/allocations/<run-id>.toml` (sections 4.2 and 8.8), which MUST hold exactly
@@ -1559,7 +1574,7 @@ refuse it as a fail-closed INVALID finding naming the remedy, since this section
 upgrade into 2.0.0: a fresh 2.0.0 store whose section 14 adoption gives the old store's files a
 disposition as foreign content.
 That adoption is a first adoption: a manifest refused for declaring a `spec_version` below 2.0.0,
-or for omitting `[opf].homes`, and the files beneath its `.working/` are foreign content for
+whatever its `[opf].homes`, and the files beneath its `.working/` are foreign content for
 adoption, never a store (sections 4.5 and 14.1), no prior OPF ancestry exists to seed, and the new
 store's counters start at zero (section 8.2); the old tree's reserved-name children (`archive/`,
 `imported/`, `staging/`, and `journals/`) are part of that foreign content and take their
@@ -1567,6 +1582,10 @@ dispositions under section 14.2.
 Because the new store's counters start at zero, a number the old tree's records carried can be
 issued again in the new store's own series; the old tree's records are foreign content, never the
 new store's history, so no series within one store ever reissues an ID (section 8.2).
+A manifest declaring a `spec_version` of 2.0.0 or above whose `[opf].homes` is missing or not the
+integer 2 is refused as a store by the `[opf].homes` refusal above, never foreign content: that
+refusal MUST NOT be read as authorizing initialization or adoption, and the remedy adoption above
+does not apply to it (sections 4.5, 8.2, and 14.1).
 Before any command writes to a store, the claim, release, or reconciliation of the single-writer
 lease (section 5.7), a fast-forward by `opf sync`, and the recovery of sections 8.8, 14.1, and 14.2
 included, every implementation MUST apply these validation refusals and the `[opf].homes`
@@ -1788,11 +1807,14 @@ success.
 ### 14.1 One approval and completion
 
 Investigation MUST treat an adoption over a discovered manifest that the section 9.2 validation
-refusals refuse for declaring a `spec_version` below 2.0.0, or for omitting `[opf].homes`, as a
+refusals refuse for declaring a `spec_version` below 2.0.0, whatever its `[opf].homes`, as a
 first adoption: that manifest is foreign content for adoption, never a store (sections 4.5 and
 9.2), every file of the old tree, its reserved-name children included, takes a disposition under
-section 14.2, and the new store's counters start at zero (section 8.2). A manifest refused only at
-the section 9.2 version ceiling marks a store at a later version, never foreign content:
+section 14.2, and the new store's counters start at zero (section 8.2). A manifest declaring a
+`spec_version` of 2.0.0 or above whose `[opf].homes` is missing or not the integer 2 is refused
+as a store (section 9.2), never foreign content: investigation over it MUST fail closed and MUST
+NOT read that refusal as authorizing any adoption (sections 4.5 and 8.2). A manifest refused only
+at the section 9.2 version ceiling marks a store at a later version, never foreign content:
 investigation over it MUST fail closed, naming the tooling-upgrade remedy, and MUST NOT read that
 refusal as authorizing any adoption (sections 4.5 and 8.2).
 
@@ -2348,11 +2370,10 @@ The gates in this standard are strong where they are strong and say so where the
   that does not cover the profile; a profile-aware tool MUST fail closed on its own profile.
 - The base discovery token `opf` is a single exact string carried in every adopter manifest.
   A mistyped or altered token makes the store undiscoverable, which resolves to cannot-evaluate
-  (fail-closed), never to a silent empty store. The token is stable within a base-schema major
-  line, and this specification gives a store-breaking rename no path: every later base-schema
-  version bump MUST stay additive and MUST keep every existing adopter's manifest discoverable
-  through this exact token (sections 4.5 and 9.2), so no bump this specification permits renames
-  the token.
+  (fail-closed), never to a silent empty store. The token is stable, and this
+  specification gives a store-breaking rename no path: every later base-schema version bump stays
+  additive and keeps every existing adopter's manifest discoverable through this exact token
+  (sections 4.5 and 9.2), so no bump this specification permits renames the token.
 - The section 16.1 runtime check compares the installed copy of a release's declaration file with
   the shipped-file digest the implementation carries, so it detects an edit of that copy alone,
   which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy

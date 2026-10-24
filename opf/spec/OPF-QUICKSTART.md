@@ -73,13 +73,18 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory and an existing root
    `CHANGELOG.md` or `VERSION`): keep it, migrate it for a later post-adoption import, move it, or
    retire it; nothing is absorbed or overwritten silently. `opf init` also refuses when the git
-   history of HEAD's first-parent line shows a prior store (specification section 8.2: counters
-   never restart, so record ids are never
-   reissued). That scan follows the first-parent line only: a store that never reached a tree on
+   history of HEAD's first-parent line shows a prior store (specification section 8.2: within one
+   store, counters never restart, so a store's own record ids are never reissued; the
+   specification's section 9.2 remedy adoption starts a new store whose counters start at zero, so
+   a number the old tree's records carried can appear again in the new store's own
+   series). That scan follows the first-parent line only: a store that never reached a tree on
    HEAD's first-parent line (for example one created and deleted on a side branch, merged or not)
    is not detected. The scan also has a path limit: the scan checks the root's current path only
    (a store committed under another directory, for example before a rename, is not detected).
-   `opf adopt` is the path for re-adopting any prior ancestry. When the scan does find a prior
+   `opf adopt` is the path for re-adopting any prior ancestry; under the specification, a tree
+   whose manifest declares a `spec_version` below 2.0.0 is foreign content for adoption, so
+   adoption over it is a first adoption (specification sections 9.2 and 14.1), never a
+   re-adoption. When the scan does find a prior
    store, the refusal also prints a `git checkout` command for restoring the store paths the
    named commit holds, under `--no-replace-objects` (so a replacement ref cannot substitute
    other bytes for that commit's) and `--literal-pathspecs`; when the store was deleted across
