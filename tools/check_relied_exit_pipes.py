@@ -101,7 +101,9 @@ Exit convention (matches the repo's gates):
      __pycache__ entry (directory, symlink or regular file), or non-regular file met in a directory
      walk, a non-regular or non-UTF-8 declared surface, a declared command inside or after shell the
      gate cannot parse (an unquoted heredoc, a here-string, a process substitution, an unterminated
-     construct; the refusal covers the file's remainder from that point), a declared command inside
+     construct; the refusal covers the file's remainder from that point), a lexed segment whose
+     offset in the file cannot be proven (it is never guessed; no known input reaches this through
+     the shared lexer, so it guards against a lexer change), a declared command inside
      the raw text of an `sh -c`, `bash -c`, `dash -c`, `zsh -c`, `ksh -c` or `eval` argument
      (clustered options such as `-ec` included), among the argument words of `xargs`, `flock` or
      `find`, beside a `coproc`, possibly hidden behind a wrapper's option words (any option word
@@ -950,6 +952,36 @@ def _declared_regex(commands):
     return re.compile(r"(?<![A-Za-z0-9_.-])(?:{})(?![A-Za-z0-9_./-])".format(alts))
 
 
+def _unjudged_readings(hooks, text):
+    """The readings _scan_context maps where even a partial lex of the readings raises (more uncertain
+    '#' than the lexer's reading bound, or a reading that does not lex): ONE empty, INCOMPLETE reading,
+    so its stop is offset 0 and the WHOLE context is the unparsed tail. A single partial lex here would
+    stop only at the first uncertain '#' and could leave a declared pipeline before it reading as
+    parsed (a finding where the file is unjudgeable), and a complete empty reading would read the
+    whole context as clean."""
+    return [([], False, False)]
+
+
+def _segment_offset(text, raw, cursor, rel, binding):
+    """The offset of a lexed segment's non-empty raw text in its reading, found at or after that
+    reading's cursor. Text that cannot be found there has no provable offset, so it fails closed
+    (GateError, exit 2): a guessed offset could read a short or empty unparsed tail."""
+    pos = text.find(raw, cursor)
+    if pos < 0:
+        raise GateError("{}: binding {!r}: a lexed segment cannot be located in the surface text, so "
+                        "its offsets are unprovable; cannot evaluate".format(rel, binding["id"]))
+    return pos
+
+
+def _earliest_stop(unparsed_at, stop):
+    """The start of the unparsed tail once one more reading has stopped at stop (None when that reading
+    parsed whole): the EARLIEST stop across the readings so far, so the largest tail is judged and a
+    declared command after the first place any reading stopped never reads clean."""
+    if stop is not None and (unparsed_at is None or stop < unparsed_at):
+        return stop
+    return unparsed_at
+
+
 def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, declared_re):
     """Scan one context. The shared lexer judges a command holding an uncertain '#' under BOTH
     readings of each one and returns the segments of every reading one reading after another, so
@@ -958,12 +990,13 @@ def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, 
     two readings would run past the point where a reading really stopped, and a guessed offset could
     read a short or empty unparsed tail where the real tail still holds a declared command. A
     segment whose non-empty raw text cannot be found at or after its reading's cursor has no
-    provable offset, so it fails closed (GateError, exit 2), never a guess. The unparsed-tail
-    refusal is judged at the EARLIEST stop across the readings (the largest tail, so the strictest
-    reading decides): a declared command in or after shell this gate cannot parse must never read
-    clean, whichever reading stopped first. Where the readings themselves cannot be judged (the
-    lexer's own reading bound, or a reading that does not lex), the WHOLE context is the unparsed
-    tail. A pending finding a second reading repeats is appended once."""
+    provable offset, so it fails closed (_segment_offset: GateError, exit 2), never a guess. The
+    unparsed-tail refusal is judged at the EARLIEST stop across the readings (_earliest_stop: the
+    largest tail, so the strictest reading decides): a declared command in or after shell this gate
+    cannot parse must never read clean, whichever reading stopped first. Where the readings
+    themselves cannot be judged (the lexer's own reading bound, or a reading that does not lex), the
+    WHOLE context is the unparsed tail (_unjudged_readings). A pending finding a second reading
+    repeats is appended once."""
     hooks = _hooks()
     try:
         readings = [(segs, True, False) for segs in hooks._lex_readings(ctx.text)]
@@ -971,7 +1004,7 @@ def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, 
         try:
             readings = hooks._lex_readings(ctx.text, partial=True)
         except ValueError:
-            readings = [([], False, False)]
+            readings = _unjudged_readings(hooks, ctx.text)
 
     mapped = []
     unparsed_at = ctx.truncated
@@ -980,11 +1013,7 @@ def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, 
         cursor = 0
         for seg in segments:
             if seg.raw:
-                pos = ctx.text.find(seg.raw, cursor)
-                if pos < 0:
-                    raise GateError("{}: binding {!r}: a lexed segment cannot be located in the "
-                                    "surface text, so its offsets are unprovable; cannot evaluate"
-                                    .format(rel, binding["id"]))
+                pos = _segment_offset(ctx.text, seg.raw, cursor, rel, binding)
                 offs.append(pos)
                 cursor = pos + len(seg.raw)
             else:
@@ -997,8 +1026,7 @@ def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, 
         elif not complete:
             stop = cursor
         mapped.append((kept, offs))
-        if stop is not None and (unparsed_at is None or stop < unparsed_at):
-            unparsed_at = stop
+        unparsed_at = _earliest_stop(unparsed_at, stop)
     if unparsed_at is not None:
         tail = ctx.text[unparsed_at:]
         if declared_re.search(tail):
@@ -1651,11 +1679,13 @@ def run(root):
 # also run reverted (the enable dropped; the producer piped again) and must then be flagged;
 # C45 is caught by the ignore-pipefail mutant and C46 by the flag-every-pipe mutant. Every
 # cannot-evaluate case
-# X1..X17 must exit 2 AND print the diagnostic of its OWN check (asserted by a substring no other
+# X1..X19 must exit 2 AND print the diagnostic of its OWN check (asserted by a substring no other
 # check prints: the grouped-producer backstop's wording shares no needle with the construct
 # refusals), so a removed guard cannot hide behind another refusal reaching the same exit code (such
 # as unmatched-selector reconciliation or that backstop); the for/until loop entries and the find
-# executor entry are additionally pinned by roster mutants, and scan_file's pre-open layer is called
+# executor entry are additionally pinned by roster mutants, the earliest-stop rule, the
+# whole-context lex fallback and the locate refusal by mutants of their own helpers (the locate
+# refusal forced through readings flattened into one), and scan_file's pre-open layer is called
 # directly. A case that cannot run (no tempdir, no symlink or FIFO support, permission checks
 # bypassed) is a NAMED failure, never a skip.
 
@@ -2630,14 +2660,16 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
             # the EARLIEST stop across the readings: one flat cursor walked across both readings
             # runs past the real stopping point, reads a short or empty tail, and passes the
             # declared pipeline after the unparseable construct as clean (exit 0 instead of 2).
-            # X16a..X16d are the vectors for that regression; X16e and X16f are the controls (the
-            # heredoc alone with no uncertain '#', and the uncertain-'#' prefix with no parsed
-            # declared command before the stop), refused under either offset reading.
-            _case("X16a", CFG, "tool write > rows.out\nrc=$?\n(\n  # note\n  echo hi\n)\n"
-                               "cat <<EOF\nx\nEOF\ntool write | tail -1\n", 2,
-                  "an unquoted heredoc after an uncertain '#': the declared pipeline in the tail is "
-                  "cannot-evaluate, never clean",
-                  needle="sits in shell this gate cannot parse")
+            # X16a..X16d are the vectors for that regression. X16e has no uncertain '#', so both
+            # offset readings agree on it and it is the control: the heredoc alone already refuses.
+            # X16f is a vector too: under the old flat offset reading its unparsed-tail refusal is
+            # lost and its exit 2 comes only from unmatched-selector reconciliation (no declared
+            # command is left in the parsed text), which its needle tells apart.
+            x16a = _case("X16a", CFG, "tool write > rows.out\nrc=$?\n(\n  # note\n  echo hi\n)\n"
+                                      "cat <<EOF\nx\nEOF\ntool write | tail -1\n", 2,
+                         "an unquoted heredoc after an uncertain '#': the declared pipeline in the "
+                         "tail is cannot-evaluate, never clean",
+                         needle="sits in shell this gate cannot parse")
             _case("X16b", CFG, "tool write > rows.out\nrc=$?\n(\n  # note\n  echo hi\n)\n"
                                "cat <<< x\ntool write | tail -1\n", 2,
                   "a here-string after an uncertain '#' still refuses the declared tail",
@@ -2657,9 +2689,117 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                   "tail", needle="sits in shell this gate cannot parse")
             _case("X16f", CFG, "(\n  # note\n  echo hi\n)\ncat <<EOF\nx\nEOF\n"
                                "tool write | tail -1\n", 2,
-                  "control: with no parsed declared command before the stop, the whole declared use "
-                  "sits in the tail and the file still refuses",
-                  needle="sits in shell this gate cannot parse")
+                  "with no parsed declared command before the stop, the whole declared use sits in "
+                  "the tail and the unparsed-tail check itself refuses, not only selector "
+                  "reconciliation", needle="sits in shell this gate cannot parse")
+            # X16g..X16i: the readings of the uncertain '#' stop at DIFFERENT places. Under the
+            # comment reading the here-string or unquoted heredoc on line 4 stops the lex before the
+            # declared pipeline; under the word-text reading the '#' opens a quote that closes past
+            # that pipeline, so that reading (lexed last) stops only at a later here-string or
+            # heredoc, whose tail holds no declared command. Only the EARLIEST stop sees the
+            # pipeline, so each vector must flip clean under a judge that keeps the later stop or the
+            # last stopping reading's stop.
+            x16g = _case("X16g", CFG, "tool write > rows.out\nrc=$?\n(true)#\"\ncat <<<x\n"
+                                      "tool write | tail -1\n#\"\ncat <<EOF\nx\nEOF\n", 2,
+                         "a double quote the uncertain '#' opens as word text: the readings stop at "
+                         "the here-string and at the later heredoc, and the earlier stop refuses the "
+                         "declared pipeline", needle="sits in shell this gate cannot parse")
+            x16h = _case("X16h", CFG, "tool write > rows.out\nrc=$?\n(true)#'\ncat <<EOF\nx\nEOF\n"
+                                      "tool write | tail -1\necho '\ncat <<EOF\ny\nEOF\n", 2,
+                         "a single quote the uncertain '#' opens as word text: the readings stop at "
+                         "two different heredocs, and the earlier stop refuses the declared pipeline",
+                         needle="sits in shell this gate cannot parse")
+            x16i = _case("X16i", CFG, "tool write > rows.out\nrc=$?\n(true)#'\ncat <<< x\n"
+                                      "tool write | tail -1\necho '\ncat <<< y\n", 2,
+                         "the here-string form of X16h: the readings stop at two different "
+                         "here-strings, and the earlier stop refuses the declared pipeline",
+                         needle="sits in shell this gate cannot parse")
+            real_earliest = this._earliest_stop
+            for label, weak in (("later-stop",
+                                 lambda at, stop: stop if stop is not None and (at is None or stop > at)
+                                 else at),
+                                ("last-stop", lambda at, stop: stop if stop is not None else at)):
+                for name, root_dir in (("X16g", x16g), ("X16h", x16h), ("X16i", x16i)):
+                    this._earliest_stop = weak
+                    try:
+                        rc, _text = _run_quiet(root_dir)
+                    finally:
+                        this._earliest_stop = real_earliest
+                    if rc != 0:
+                        failures.append("{} under the {} '_earliest_stop' mutant: expected exit 0, "
+                                        "got {} (the readings do not stop at different places, so "
+                                        "the case does not pin the earliest-stop rule)".format(
+                                            name, label, rc))
+            # X18: where even a partial lex of the readings raises (here five uncertain '#', past the
+            # lexer's reading bound), the WHOLE context is the unparsed tail (_unjudged_readings).
+            # X18a holds its declared pipeline BEFORE the first uncertain '#': a single partial lex
+            # would parse it and stop at that '#', turning the refusal into a finding (exit 1). X18b
+            # holds its file's only declared pipeline after the '#' run, beside a clean file that
+            # satisfies selector reconciliation: a complete, empty reading would pass the run clean.
+            x18a = _case("X18a", CFG, "tool write | tail -1\n" + "(true)#x\n" * 5, 2,
+                         "a declared pipeline before more uncertain '#' than the lexer reads is in "
+                         "the unparsed tail, never a parsed finding",
+                         needle="sits in shell this gate cannot parse")
+            x18b = _case("X18b", CFG_PREFIX, "(true)#x\n" * 5 + "tool write | tail -1\n", 2,
+                         "a declared pipeline after more uncertain '#' than the lexer reads is "
+                         "refused even beside a clean declared use in another file",
+                         needle="sits in shell this gate cannot parse",
+                         files={"cmd/a.sh": "tool write > rows.out\n"})
+            real_unjudged = this._unjudged_readings
+            for name, root_dir, label, weak, wrong_rc in (
+                    ("X18a", x18a, "single partial lex",
+                     lambda hooks, text: [hooks._lex_command(text, partial=True)], 1),
+                    ("X18b", x18b, "complete empty reading",
+                     lambda hooks, text: [([], True, False)], 0)):
+                this._unjudged_readings = weak
+                try:
+                    rc, _text = _run_quiet(root_dir)
+                finally:
+                    this._unjudged_readings = real_unjudged
+                if rc != wrong_rc:
+                    failures.append("{} under the {} '_unjudged_readings' mutant: expected exit {}, "
+                                    "got {} (the case does not pin the whole-context fallback)".format(
+                                        name, label, wrong_rc, rc))
+            # X19: a lexed segment that cannot be found at or after its reading's cursor has no
+            # provable offset, so the context fails closed (exit 2). No known input reaches it through
+            # the real lexer, so the case forces it: the lexer is patched in-process to return the
+            # readings of X16a's uncertain '#' flattened into ONE reading, whose second-reading
+            # segments then lie before the cursor. With an offset guess (pos = cursor) in place of
+            # the refusal the same run must pass clean, the regression the refusal guards.
+            hooks_mod = this._hooks()
+            real_readings = hooks_mod._lex_readings
+
+            def _flat_readings(command, partial=False, locale=False, skip_empty=False,
+                               _real=real_readings):
+                readings = _real(command, partial, locale, skip_empty)
+                if partial:
+                    return [([seg for segs, _done, _open in readings for seg in segs],
+                             all(done for _segs, done, _open in readings), readings[-1][2])]
+                return [[seg for segs in readings for seg in segs]]
+
+            def _guessed_offset(text, raw, cursor, rel, binding):
+                pos = text.find(raw, cursor)
+                return cursor if pos < 0 else pos
+
+            real_offset = this._segment_offset
+            hooks_mod._lex_readings = _flat_readings
+            try:
+                rc, text = _run_quiet(x16a)
+                this._segment_offset = _guessed_offset
+                try:
+                    rc_guess, _text = _run_quiet(x16a)
+                finally:
+                    this._segment_offset = real_offset
+            finally:
+                hooks_mod._lex_readings = real_readings
+            if rc != 2 or "cannot be located in the surface text" not in text:
+                failures.append("X19: under readings flattened into one, expected exit 2 naming the "
+                                "segment that cannot be located, got exit {} with {!r}".format(
+                                    rc, text.strip()[:300]))
+            if rc_guess != 0:
+                failures.append("X19 under the offset-guessing '_segment_offset' mutant: expected "
+                                "exit 0, got {} (the case does not pin the locate refusal)".format(
+                                    rc_guess))
             # X17: a NUL in a path selector is a malformed selector with a NAMED fail-closed reason,
             # never a bare ValueError traceback out of os.lstat (whose exit would read as a finding).
             _case("X17", CFG.replace('paths = ["cmd/job.sh"]', 'paths = ["cmd/job\\u0000.sh"]'),
@@ -3192,11 +3332,15 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
           "bare env and ionice wrappers, a clean find, and quoted 'select' command names with and "
           "without a plain same-spelled argument) "
           "each stay clean and the patchable ones catch their over-broad mutants; and the "
-          "cannot-evaluate cases X1-X17 (unmatched selectors, unparseable shell beside a plain, "
+          "cannot-evaluate cases X1-X19 (unmatched selectors, unparseable shell beside a plain, "
           "path-qualified or quote-split declared command, unparsed tails judged at the EARLIEST "
-          "stop across the readings of an uncertain '#' (with the heredoc-alone and "
-          "uncertain-prefix-alone controls), a NUL in a path selector named rather than crashed "
-          "on, sh -c/bash -c/dash -c/zsh -c/ksh -c/eval "
+          "stop across the readings of an uncertain '#' (readings stopping at different places "
+          "caught under a later-stop and a last-stop judge, the heredoc-alone control, and the "
+          "uncertain-prefix vector a flat offset reading sends to the selector backstop), the "
+          "whole context read as the unparsed tail where the readings cannot be judged (caught "
+          "under a single partial lex and a complete empty reading), a lexed segment that cannot "
+          "be located (forced through flattened readings and caught under an offset guess), a NUL "
+          "in a path selector named rather than crashed on, sh -c/bash -c/dash -c/zsh -c/ksh -c/eval "
           "strings with plain, clustered and quote-split contents, wrapper-option and subcommand "
           "opacity, quoted and escaped declared names behind wrappers and groups, declared commands "
           "in subshells, brace groups (a space-indented continued '{' included), while/until/for "
