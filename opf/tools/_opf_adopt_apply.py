@@ -1597,21 +1597,27 @@ def reconcile(product_root):
     return outcomes
 
 
-def _default_store_present_without_manifest(product_root):
+def _default_store_present_without_manifest(product_root, root_fd=None):
     """True ONLY for the one CANNOT-EVALUATE posture adoption exists for (spec 14.2): neither pointer file
     exists (the resolver reached the DEFAULT location) and a FRESH discovery at the product root reports
     `.working/` present with no machine store ("present": a foreign store-shaped tree awaiting
     dispositions). "multiple" (ambiguous), "one" (a store raced in), "absent" (the resolver's
-    cannot-evaluate came from something else), and every discovery error read False (fail-closed)."""
+    cannot-evaluate came from something else), and every discovery error read False (fail-closed).
+    With `root_fd` (a product-root descriptor the caller HOLDS), the discovery reads through that
+    descriptor and this function opens and closes nothing: a transaction already anchored on the product
+    root re-proves the posture against its anchor's own identity and holds ONE product-root descriptor,
+    whose close stays with the anchor's close-out, so no second close can fail apart from it."""
     held = []
     try:
+        if root_fd is None:
+            try:
+                held.append(_open_product_root(product_root))
+            except AdoptApplyError as exc:
+                _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never read as False
+                return False
         try:
-            held.append(_open_product_root(product_root))
-        except AdoptApplyError as exc:
-            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never read as False
-            return False
-        try:
-            status, _machine, _detail = store.discover_machine_store(held[0], Path(product_root))
+            status, _machine, _detail = store.discover_machine_store(
+                held[0] if held else root_fd, Path(product_root))
         except (store.StoreError, OSError) as exc:
             _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never read as False
             return False
@@ -1632,7 +1638,7 @@ def _default_store_present_without_manifest(product_root):
     return status == "present"
 
 
-def _store_posture_or_refuse(product_root):
+def _store_posture_or_refuse(product_root, root_fd=None):
     """Spec 5.7: a run MUST hold the single-writer lease before mutating a store, and this slice has no
     lease join, so a product root that resolves a store refuses, and a pointer that resolves one OUTSIDE
     the product root is refused by name (adoption evidence and archives belong at that store root, which
@@ -1640,7 +1646,10 @@ def _store_posture_or_refuse(product_root):
     unreadable pointer, multiple machine stores, an undiscoverable root) fails closed too. ONLY the two
     first-adoption states adoption exists for are admitted, neither of which has a store or a lease home:
     NOT-ADOPTED, and the DEFAULT location's `.working/` present WITHOUT a valid manifest, re-proved by a
-    fresh discovery (never inferred from the resolver's detail text)."""
+    fresh discovery (never inferred from the resolver's detail text). `root_fd`, when given, is a
+    product-root descriptor the caller HOLDS: the discovery probe reads through it instead of opening a
+    second product-root descriptor of its own (a transaction's journal preparation creates `.working`,
+    so its posture re-check reaches the probe; the transaction keeps its one anchor)."""
     res = store.resolve_store(product_root)
     if res.status == store.RESOLVED:
         if res.pointer_source != "default" and (
@@ -1654,7 +1663,7 @@ def _store_posture_or_refuse(product_root):
                               "(fail-closed)".format(res.machine_rel))
     if res.status == store.NOT_ADOPTED:
         return
-    if res.pointer_source == "default" and _default_store_present_without_manifest(product_root):
+    if res.pointer_source == "default" and _default_store_present_without_manifest(product_root, root_fd):
         return
     raise AdoptApplyError("the store posture cannot be evaluated ({}); an ambiguous, malformed or "
                           "unreadable store input refuses (spec 14.2, "
@@ -2645,7 +2654,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None, plan_digest
         # the run before it writes anything.
         before = _journal_listing(root_fd, keep=held_components)
         journal_clean_or_refuse(root_fd, journal_root)
-        _store_posture_or_refuse(product_root)
+        _store_posture_or_refuse(product_root, root_fd)
         txn = _next_attempt_or_refuse(root_fd, journal_root, run_id, phase)
         committed, committed_modes = {}, {}
         if phase is not None:
@@ -2716,7 +2725,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None, plan_digest
                                       "lock was acquired and must be reconciled first (run "
                                       "reconcile()); nothing written (fail-closed)".format(
                                           ", ".join(opened)))
-            _store_posture_or_refuse(product_root)
+            _store_posture_or_refuse(product_root, root_fd)
             try:
                 prior = _journal._lstat_contained(root_fd, JOURNAL_REL + "/" + txn)
             except (_journal.JournalError, OSError) as exc:
@@ -4192,7 +4201,7 @@ def _init_store_run(op_row, context):
         record = _init_store_record(product_root)
         if record is not None:
             _init_store_orphan_or_refuse(product_root, root_fd, jr_fd, journal_root, record, recover)
-        _store_posture_or_refuse(product_root)
+        _store_posture_or_refuse(product_root, root_fd)
         _init_store_dispositions_or_refuse(root_fd, plan)
         # The row decided whether CHANGELOG.md is a creation; the live tree must agree: a
         # pre-existing (dispositioned) changelog is preserved, never a member, and an absent one is
@@ -11933,12 +11942,12 @@ def _self_test_checks():
 
     real_gate = _store_posture_or_refuse
 
-    def leased_gate(product_root):
+    def leased_gate(product_root, root_fd=None):
         res = store.resolve_store(product_root)
         if (res.status == store.RESOLVED and res.store_root is not None
                 and Path(os.path.abspath(res.store_root)) == Path(os.path.abspath(product_root))):
             return None
-        return real_gate(product_root)
+        return real_gate(product_root, root_fd)
 
     def lease_join():
         return mock.patch.dict(globals(), dict(_store_posture_or_refuse=leased_gate))
@@ -15484,7 +15493,7 @@ def _finish_ops_self_test(check):
         # admits the fixture's resolved store so the composed render transaction is exercised end to end:
         # exactly the seam the lease-join slice will occupy. The UNPATCHED refusal is pinned below
         # (render-views-resolved-store-refused-without-lease).
-        return mock.patch.object(_this, "_store_posture_or_refuse", lambda product_root: None)
+        return mock.patch.object(_this, "_store_posture_or_refuse", lambda product_root, root_fd=None: None)
 
     def built_store(parent, name, changelog=True):
         root = Path(parent).resolve() / name
