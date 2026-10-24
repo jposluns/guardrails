@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "bd921c1a6f9278c2c605399dba46ad71b6a999dd2016aed26be0e2d2303759d8"
+tree-sha256 = "d1cb5bbdd08f6608c2ede196dda09601536c33cbd07d21f9bf34c9606b4b4b8b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 448891
-sha256 = "ecfc1be20ca82276f8115fb246450ac212d929f3d046b4b58428b2df4551301d"
+bytes = 449035
+sha256 = "b9c28ad314249d016a3b1fe47bf7f6eaa5741e8c380a3dd8234cc070a72cdb66"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -821,8 +821,8 @@ sha256 = "7854ba7c7fa8221a2b408deaf73505b492ff2d39f67d5addac1b20ed98ac2ba6"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 700136
-sha256 = "1e9fab5e8113938198cc418fb83b27b174bb6205a0bd063589c9ec9bb78f84de"
+bytes = 700280
+sha256 = "0da09d7573d4dcb5912770938ddfd6dd96da800ff4b28c6021b11d9874c19286"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2356,8 +2356,8 @@ sha256 = "b9ab84064341340be432438f6a2e7a6c914b0b64ea56249edd9b22b83d09b6a1"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 415634
-sha256 = "0025ce2566618d8a2f2febadf0784c204ee8d1c8d258c49ecb67ee5eb28d60d8"
+bytes = 415778
+sha256 = "a79fa5f1b9b951b668008470ccc2099dd23b389abe435fadd7acf7c6952c2b95"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3171,8 +3171,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 472067
-sha256 = "8114185bbb8e5b0b84f4fc1764261164d9b187fc7688c8e8667b91d6ad9cedb2"
+bytes = 472211
+sha256 = "347816ab7917d8583f16c33c74900290a97161941b0a02f5f13859e135176e1f"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3526,8 +3526,8 @@ sha256 = "89d29e534757397ed1cd6e10ad8a5d2259f3e84aa15691ef59d5e3b175378721"
 
 [[sources]]
 path = "tools/check_relied_exit_pipes.py"
-bytes = 196819
-sha256 = "cf5f0c75281eec047a283f9d7683f7f5416ec1ab6aadfff9ef590d2541893aca"
+bytes = 207490
+sha256 = "f8f11f89c2fa30ad8f7d2d6417828ee6acbfc9a67dc15c79eeec540d27c9c1a5"
 
 [[sources]]
 path = "tools/check_rule_placement.py"

@@ -55,7 +55,10 @@ sourced from a file this gate never reads), and modelling which files may keep t
 new spellings that skip it, so the gate grants no credit for it at all. The remedies are
 `set -o pipefail` in effect for the pipeline (E1 above), or running the relied-on command outside the
 pipeline with its own status saved (`tool write > rows.out` then `rc=$?` on its own line, with the former sink
-reading rows.out afterwards). This over-refuses (disclosed): an ordinary script that saves PIPESTATUS
+reading rows.out afterwards). The same skip hazards reach that remedy's own `rc=$?` line: the remedy is
+sound because no pipe discards the producer's status any more, not because the save provably runs, and
+whether a LATER line masks a NON-PIPE status is outside this gate's scope (non-pipe masking belongs to
+gatdis and its hook, as the residue states). This over-refuses (disclosed): an ordinary script that saves PIPESTATUS
 correctly right after the pipeline is flagged until it adopts one of those remedies. Under E1 the save
 line has to go as well: its '$' takes the line outside the closed grammar and withdraws the pipefail
 credit for the whole file, and pipefail already carries the producer's failure to the pipeline's status.
@@ -92,7 +95,9 @@ Exit convention (matches the repo's gates):
      not held; a PIPESTATUS read after the pipeline does not clear it)
   2  cannot evaluate, fail-closed: a malformed, unreadable, uninspectable or non-regular (e.g. FIFO)
      configuration, an unmatched path, command or subcommand selector, a selector with an empty, '.'
-     or '..' component or a symlinked component, a symlinked directory, symlinked file, .git or
+     or '..' component or a symlinked component, a selector containing a NUL character (no file path
+     can hold one, so it is a malformed selector, named rather than crashed on), a symlinked
+     directory, symlinked file, .git or
      __pycache__ entry (directory, symlink or regular file), or non-regular file met in a directory
      walk, a non-regular or non-UTF-8 declared surface, a declared command inside or after shell the
      gate cannot parse (an unquoted heredoc, a here-string, a process substitution, an unterminated
@@ -916,18 +921,16 @@ def _executes(seg):
 
 def _judge(pending, events):
     """The final findings: every pending non-final relied stage whose pipeline the E1 pipefail
-    exemption does not clear (no PIPESTATUS read clears one). A stage inside a function
-    body or any other nested block (depth > 0) may run later than it sits in the text, so for it E1
-    holds only when no disable follows anywhere in the file: the enclosing body could otherwise run
-    after the disable."""
+    exemption does not clear (no PIPESTATUS read clears one). Only a TOP-LEVEL stage (depth 0) can
+    be cleared: a nested stage (an if or case arm, the only walked blocks) can never in fact be
+    exempt, because the block opener's own line sits outside the closed credit grammar and withdraws
+    the whole-file credit, so no credited file holds one; the depth guard keeps that fail-closed (a
+    nested stage stays flagged) should the grammar ever admit an opener."""
     ordered = sorted(events)
     kept = []
     for rec in pending:
-        if _e1_exempt(ordered, rec["offset"]):
-            if rec["depth"] == 0:
-                continue
-            if not any(kind == "off" and off >= rec["offset"] for off, kind in ordered):
-                continue
+        if rec["depth"] == 0 and _e1_exempt(ordered, rec["offset"]):
+            continue
         kept.append(rec)
     return kept
 
@@ -948,10 +951,77 @@ def _declared_regex(commands):
 
 
 def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, declared_re):
-    """Scan one context's segments: record set-pipefail events (crediting an enable only when it
-    provably reaches this shell AND its line is the standalone column-1 closed form) and
-    command/subcommand telemetry, raise GateError (exit 2) on a declared command inside unparseable
-    shell, inside an sh -c / bash -c / dash -c / zsh -c / ksh -c / eval argument (clustered options
+    """Scan one context. The shared lexer judges a command holding an uncertain '#' under BOTH
+    readings of each one and returns the segments of every reading one reading after another, so
+    this takes the readings apart (hooks._lex_readings) and maps and scans each reading on its own
+    (_scan_reading), with a fresh forward cursor and its own offsets: one flat cursor walked across
+    two readings would run past the point where a reading really stopped, and a guessed offset could
+    read a short or empty unparsed tail where the real tail still holds a declared command. A
+    segment whose non-empty raw text cannot be found at or after its reading's cursor has no
+    provable offset, so it fails closed (GateError, exit 2), never a guess. The unparsed-tail
+    refusal is judged at the EARLIEST stop across the readings (the largest tail, so the strictest
+    reading decides): a declared command in or after shell this gate cannot parse must never read
+    clean, whichever reading stopped first. Where the readings themselves cannot be judged (the
+    lexer's own reading bound, or a reading that does not lex), the WHOLE context is the unparsed
+    tail. A pending finding a second reading repeats is appended once."""
+    hooks = _hooks()
+    try:
+        readings = [(segs, True, False) for segs in hooks._lex_readings(ctx.text)]
+    except ValueError:
+        try:
+            readings = hooks._lex_readings(ctx.text, partial=True)
+        except ValueError:
+            readings = [([], False, False)]
+
+    mapped = []
+    unparsed_at = ctx.truncated
+    for segments, complete, in_progress in readings:
+        offs = []
+        cursor = 0
+        for seg in segments:
+            if seg.raw:
+                pos = ctx.text.find(seg.raw, cursor)
+                if pos < 0:
+                    raise GateError("{}: binding {!r}: a lexed segment cannot be located in the "
+                                    "surface text, so its offsets are unprovable; cannot evaluate"
+                                    .format(rel, binding["id"]))
+                offs.append(pos)
+                cursor = pos + len(seg.raw)
+            else:
+                offs.append(cursor)
+        kept = list(segments)
+        stop = None
+        if in_progress:
+            kept = kept[:-1]
+            stop = offs[-1] if offs else 0
+        elif not complete:
+            stop = cursor
+        mapped.append((kept, offs))
+        if stop is not None and (unparsed_at is None or stop < unparsed_at):
+            unparsed_at = stop
+    if unparsed_at is not None:
+        tail = ctx.text[unparsed_at:]
+        if declared_re.search(tail):
+            line = original_text.count("\n", 0, min(ctx.base + unparsed_at, len(original_text))) + 1
+            raise GateError("{}:{}: binding {!r}: a declared command sits in shell this gate cannot "
+                            "parse (an unquoted heredoc, a here-string, a process substitution, or an "
+                            "unterminated construct); cannot evaluate".format(rel, line, binding["id"]))
+    for kept, offs in mapped:
+        fresh = []
+        _scan_reading(ctx, original_text, rel, binding, telemetry, events, fresh, declared_re,
+                      kept, offs)
+        for rec in fresh:
+            if rec not in pending:
+                pending.append(rec)
+
+
+def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, declared_re,
+                  kept, offs):
+    """Scan the segments of ONE reading of one context (offsets already mapped against that
+    reading's own fresh cursor by _scan_context): record set-pipefail events (crediting an enable
+    only when it provably reaches this shell AND its line is the standalone column-1 closed form)
+    and command/subcommand telemetry, raise GateError (exit 2) on a declared command
+    inside an sh -c / bash -c / dash -c / zsh -c / ksh -c / eval argument (clustered options
     included), in the argument list of xargs, flock or find, beside a coproc, possibly hidden behind
     wrapper option words or an ambiguous subcommand position, inside a subshell, brace group, loop
     body or function body (a one-line `function NAME { ... }` definition included), beside a function
@@ -964,43 +1034,8 @@ def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, 
     quote-tolerant declared regex (substitution bodies included), so a quoted, split or escaped
     spelling, or a mention living only inside $( ), cannot slip a refused construct; a declared NAME
     counts even where it is only another command's argument data, a disclosed over-refusal."""
-    hooks = _hooks()
     commands = set(binding["commands"])
     subcommands = set(binding.get("subcommands") or ())
-    try:
-        segments = hooks._lex_command(ctx.text)
-        complete, in_progress = True, False
-    except ValueError:
-        segments, complete, in_progress = hooks._lex_command(ctx.text, partial=True)
-
-    offs = []
-    cursor = 0
-    for seg in segments:
-        if seg.raw:
-            pos = ctx.text.find(seg.raw, cursor)
-            if pos < 0:
-                pos = cursor
-            offs.append(pos)
-            cursor = pos + len(seg.raw)
-        else:
-            offs.append(cursor)
-
-    kept = list(segments)
-    unparsed_at = None
-    if in_progress:
-        kept = kept[:-1]
-        unparsed_at = offs[-1]
-    elif not complete:
-        unparsed_at = cursor
-    if ctx.truncated is not None and (unparsed_at is None or ctx.truncated < unparsed_at):
-        unparsed_at = ctx.truncated
-    if unparsed_at is not None:
-        tail = ctx.text[unparsed_at:]
-        if declared_re.search(tail):
-            line = original_text.count("\n", 0, min(ctx.base + unparsed_at, len(original_text))) + 1
-            raise GateError("{}:{}: binding {!r}: a declared command sits in shell this gate cannot "
-                            "parse (an unquoted heredoc, a here-string, a process substitution, or an "
-                            "unterminated construct); cannot evaluate".format(rel, line, binding["id"]))
 
     def line_of(abs_offset):
         return original_text.count("\n", 0, min(abs_offset, len(original_text))) + 1
@@ -1361,6 +1396,13 @@ def resolve_surface(root, selector):
     every match must be a regular file, and it must decode as UTF-8 when read by the caller; a selector
     matching zero files fails closed (an unmatched declared surface is never 'nothing to scan').
     Returns a sorted list."""
+    if "\x00" in selector:
+        # No file path can hold a NUL character: os.lstat and Path.resolve raise a bare ValueError
+        # on one, which would surface as a traceback with the wrong exit. Name the malformed
+        # selector here instead, before any filesystem call sees it.
+        raise GateError("configuration {}: path selector {!r} contains a NUL character; no file "
+                        "path can hold one, so the selector is malformed".format(
+                            CONFIG_REL, selector))
     root_resolved = root.resolve()
     if Path(selector).is_absolute():
         raise GateError("configuration {}: path selector {!r} is absolute; a repo-relative selector is "
@@ -1481,21 +1523,31 @@ def scan_file(root, path, binding, telemetry):
     except RecursionError:
         raise GateError("configuration {} binding {!r}: surface {} exceeds the scanner's nesting bounds; "
                         "cannot evaluate".format(CONFIG_REL, binding["id"], rel))
+    credit_withdrawn = False
     if events and not _e1_file_credit(text):
         # The file holds a pipefail mention outside the standalone column-1 enable form, or a line
         # outside the closed credit grammar (anything but a blank, a comment, the standalone enable, a
         # plain assignment, or a plain simple-command line): the whole file loses the pipefail credit.
         # Disables stay recorded; they only ever refuse, and they hold this gate's verdict even under
-        # a regression of the whole-file credit (two independent layers).
+        # a regression of the whole-file credit (two independent layers). When an ENABLE was recorded
+        # and is withdrawn here, each finding below says so: telling a file that already sets pipefail
+        # only to set pipefail would hide the real repair (bringing every line into the credited set).
+        credit_withdrawn = any(kind == "on" for _off, kind in events)
         events = [event for event in events if event[1] == "off"]
     findings = []
     for rec in _judge(pending, events):
-        findings.append("{}:{}: binding {!r}: relied-on command {!r} (stage {} of {}) pipes into {!r}; "
-                        "the pipe discards its exit status, so put set -o pipefail in effect for this "
-                        "pipeline, or run the command outside the pipeline with its own status saved "
-                        "(a PIPESTATUS read is not credited)".format(
-                            rec["rel"], rec["line"], rec["binding"], rec["command"],
-                            rec["stage"] + 1, rec["nstages"], rec["final"]))
+        msg = ("{}:{}: binding {!r}: relied-on command {!r} (stage {} of {}) pipes into {!r}; "
+               "the pipe discards its exit status, so put set -o pipefail in effect for this "
+               "pipeline, or run the command outside the pipeline with its own status saved "
+               "(a PIPESTATUS read is not credited)".format(
+                   rec["rel"], rec["line"], rec["binding"], rec["command"],
+                   rec["stage"] + 1, rec["nstages"], rec["final"]))
+        if credit_withdrawn:
+            msg += ("; this file's own pipefail enable earned no credit: a line outside the closed "
+                    "credit grammar (anything but a blank, a comment, the standalone enable, a plain "
+                    "assignment, or a plain simple-command line) withdraws the whole-file pipefail "
+                    "credit, so bring every line into that set or use the separate-save remedy")
+        findings.append(msg)
     return findings
 
 
@@ -1572,7 +1624,7 @@ def run(root):
 
 
 # --- self-test ---------------------------------------------------------------------------------------
-# Every refuse case (R1..R140 plus Rb1, with R24 retired and the PIPESTATUS-read vectors R10a, R10b,
+# Every refuse case (R1..R141 plus Rb1, with R24 retired and the PIPESTATUS-read vectors R10a, R10b,
 # R22, R23, R25, R36..R40, R46, R48..R50, R52, R69..R75, R80, R81, R84, R86, R92..R94 and R100..R135
 # retired with the read credit) runs against the real gate (exit 1) AND against a mutant that never
 # reports (exit 0), so each case is shown to discriminate; targeted mutants additionally pin the
@@ -1593,10 +1645,13 @@ def run(root):
 # and the read-credit controls C22, C28..C30 and C34..C44 retired, plus C3a-C3c and C23b) runs
 # against the real gate (exit 0) and names the over-broad implementation it catches; where that
 # implementation is a patchable predicate, the over-broad mutant is also run and must reach the
-# named wrong exit. The two remedy controls C45 (pipefail) and C46 (a separate save line) are each
-# also run reverted (the enable dropped; the producer piped again) and must then be flagged, and
-# C45 is caught by the ignore-pipefail mutant. Every cannot-evaluate case
-# X1..X15 must exit 2 AND print the diagnostic of its OWN check (asserted by a substring no other
+# named wrong exit. The two remedy controls C45 (pipefail) and C46 (the producer run outside any
+# pipeline, an undeclared pipe kept; the gate reads nothing from its rc=$? save line, which only
+# documents the remedy's full shape) are each
+# also run reverted (the enable dropped; the producer piped again) and must then be flagged;
+# C45 is caught by the ignore-pipefail mutant and C46 by the flag-every-pipe mutant. Every
+# cannot-evaluate case
+# X1..X17 must exit 2 AND print the diagnostic of its OWN check (asserted by a substring no other
 # check prints: the grouped-producer backstop's wording shares no needle with the construct
 # refusals), so a removed guard cannot hide behind another refusal reaching the same exit code (such
 # as unmatched-selector reconciliation or that backstop); the for/until loop entries and the find
@@ -2161,6 +2216,10 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("R140", CFG, "tool write |\n  tail -1\n",
                  "a pipe at the end of a line continues the pipeline on the next executing line, so "
                  "the finding names that line's tail as the final stage"),
+                ("R141", CFG, "(\n  # note\n  echo hi\n)\ntool write | tail -1\n",
+                 "an uncertain '#' inside a subshell makes the lexer return the segments of two "
+                 "readings; the pipeline after it is found once, at its real line (asserted below), "
+                 "never duplicated at a line past the end of the file"),
             ]
             roots = {}
             for name, config, body, note in refuse:
@@ -2185,6 +2244,22 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
             if rc != 1 or "pipes into 'tail'" not in text:
                 failures.append("R140: expected the finding to name 'tail' as the final stage, got "
                                 "exit {} with {!r}".format(rc, text.strip()[:200]))
+            # R141 must report exactly ONE finding, at the pipeline's real line: one flat offset
+            # cursor walked across BOTH readings of the uncertain '#' maps the second reading's
+            # segments past the first reading's, duplicating the finding at a line past the end of
+            # the five-line file.
+            rc, text = _run_quiet(roots["R141"])
+            if rc != 1 or "FAIL: 1 relied-exit-pipes finding(s)" not in text \
+                    or "cmd/job.sh:5:" not in text:
+                failures.append("R141: expected exactly one finding, at cmd/job.sh:5, got exit {} "
+                                "with {!r}".format(rc, text.strip()[:300]))
+            # R139's finding must say WHY the file's existing enable earned no credit: that file
+            # already sets pipefail, so a finding telling it only to set pipefail would hide the
+            # real repair (bringing every line into the credited set, or the separate-save remedy).
+            rc, text = _run_quiet(roots["R139"])
+            if rc != 1 or "earned no credit" not in text:
+                failures.append("R139: expected the finding to name the withdrawn pipefail credit, "
+                                "got exit {} with {!r}".format(rc, text.strip()[:300]))
 
             # Each refuse case must FAIL (exit 0) against the mutant that removes the reporting it
             # covers: a gate that never reports anything.
@@ -2441,22 +2516,30 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                         0, "catches a double-quote decoder blind to the backslash-newline removal")
             # C45/C46: the two remedies the finding names each clear the PIPESTATUS-saving pipeline
             # of R136. C45 puts pipefail in effect for the same pipeline and drops the save line (a
-            # kept save takes the file outside the pipefail grammar, R139); C46 runs the relied-on
-            # command outside the pipeline and saves its own status on a separate line. Each is
-            # also run REVERTED below (the enable dropped; the producer piped again in front of the
-            # same save line), and the reverted file must be flagged, so neither control passes for
-            # a reason other than its remedy.
+            # kept save takes the file outside the pipefail grammar, R139). C46 runs the relied-on
+            # producer outside any pipeline; what clears it is exactly that absence of a pipe around
+            # the producer (the gate reads nothing from the rc=$? line, which only documents the
+            # remedy's full shape), so the file KEEPS a pipe among undeclared commands: the pass is
+            # then attributable to the producer's position, not to a gate blind to pipes, and the
+            # over-broad mutant below (flag every pipe once any command counts as declared) reaches
+            # the wrong exit on it. Each control is also run REVERTED (the enable dropped; the
+            # producer piped again in front of the same save line, the undeclared pipe kept), and
+            # the reverted file must be flagged for the producer's pipe alone.
             c45 = _case("C45", CFG, "set -o pipefail\ntool write --row 7 | tail -1\n", 0,
                         "catches 'pipefail does not clear a pipeline that used to save PIPESTATUS'")
-            _case("C46", CFG, "tool write --row 7 > rows.out\nrc=$?\ntail -1 rows.out\n", 0,
-                  "catches 'flag a relied-on command run outside the pipeline with its own status "
-                  "saved'")
+            c46 = _case("C46", CFG_NOSUB,
+                        "tool write --row 7 > rows.out\nrc=$?\ntail -1 rows.out | cat\n", 0,
+                        "catches 'flag every pipe in a file that runs a declared command': the "
+                        "producer runs outside any pipeline and the remaining pipe joins only "
+                        "undeclared commands")
             _case("C45-reverted", CFG, "tool write --row 7 | tail -1\n", 1,
                   "with the enable dropped, the C45 pipeline must be flagged",
                   needle="pipes into 'tail'")
-            _case("C46-reverted", CFG, "tool write --row 7 | tee rows.out\nrc=$?\ntail -1 rows.out\n",
-                  1, "with the producer piped again, the same save line reads the pipe's status and "
-                  "the C46 file must be flagged", needle="pipes into 'tee'")
+            _case("C46-reverted", CFG_NOSUB,
+                  "tool write --row 7 | tee rows.out\nrc=$?\ntail -1 rows.out | cat\n",
+                  1, "with the producer piped again (the undeclared pipe and the save line both "
+                  "kept), the C46 file must be flagged for the producer's pipe alone",
+                  needle="pipes into 'tee'")
 
             # The C33 mutant is SPECIFIC to the double-quote continuation branch: it behaves as the
             # real decoder everywhere, and only a segment whose double-quoted span holds a
@@ -2487,6 +2570,10 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("C33", c33, "_leading_plain", _dq_continuation_blind,
                  "keep the double-quoted backslash-newline, so exactly the continued quoted "
                  "command start becomes unresolvable", 2),
+                ("C46", c46, "_declared_command", lambda base, commands: bool(base),
+                 "flag every pipe in a file that runs a declared command: the kept undeclared "
+                 "pipe must then be flagged, so C46's clean pass is shown to come from the "
+                 "producer's position outside any pipeline", 1),
             ]
             for name, root_dir, attr, broad, label, wrong_rc in overbroad:
                 real = getattr(this, attr)
@@ -2537,6 +2624,48 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                   "a QUOTE-SPLIT declared name in unparseable shell is still seen: the quote-tolerant "
                   "regex establishes its identity in the raw tail",
                   needle="sits in shell this gate cannot parse")
+            # X16: an uncertain '#' (a comment inside a subshell, or a '#' right after a group) makes
+            # the shared lexer return the segments of BOTH readings one reading after another. Each
+            # reading is mapped with its own fresh cursor and the unparsed-tail refusal is judged at
+            # the EARLIEST stop across the readings: one flat cursor walked across both readings
+            # runs past the real stopping point, reads a short or empty tail, and passes the
+            # declared pipeline after the unparseable construct as clean (exit 0 instead of 2).
+            # X16a..X16d are the vectors for that regression; X16e and X16f are the controls (the
+            # heredoc alone with no uncertain '#', and the uncertain-'#' prefix with no parsed
+            # declared command before the stop), refused under either offset reading.
+            _case("X16a", CFG, "tool write > rows.out\nrc=$?\n(\n  # note\n  echo hi\n)\n"
+                               "cat <<EOF\nx\nEOF\ntool write | tail -1\n", 2,
+                  "an unquoted heredoc after an uncertain '#': the declared pipeline in the tail is "
+                  "cannot-evaluate, never clean",
+                  needle="sits in shell this gate cannot parse")
+            _case("X16b", CFG, "tool write > rows.out\nrc=$?\n(\n  # note\n  echo hi\n)\n"
+                               "cat <<< x\ntool write | tail -1\n", 2,
+                  "a here-string after an uncertain '#' still refuses the declared tail",
+                  needle="sits in shell this gate cannot parse")
+            _case("X16c", CFG, "tool write > rows.out\nrc=$?\n(\n  # note\n  echo hi\n)\n"
+                               "diff <(echo a) <(echo b)\ntool write | tail -1\n", 2,
+                  "a process substitution after an uncertain '#' still refuses the declared tail",
+                  needle="sits in shell this gate cannot parse")
+            _case("X16d", CFG, "tool write > rows.out\nrc=$?\n(true)#x\ncat <<EOF\nx\nEOF\n"
+                               "tool write | tail -1\n", 2,
+                  "a '#' right after a subshell is uncertain too; the heredoc behind it still "
+                  "refuses the declared tail",
+                  needle="sits in shell this gate cannot parse")
+            _case("X16e", CFG, "tool write > rows.out\nrc=$?\ncat <<EOF\nx\nEOF\n"
+                               "tool write | tail -1\n", 2,
+                  "control: the heredoc alone, with no uncertain '#', already refuses the declared "
+                  "tail", needle="sits in shell this gate cannot parse")
+            _case("X16f", CFG, "(\n  # note\n  echo hi\n)\ncat <<EOF\nx\nEOF\n"
+                               "tool write | tail -1\n", 2,
+                  "control: with no parsed declared command before the stop, the whole declared use "
+                  "sits in the tail and the file still refuses",
+                  needle="sits in shell this gate cannot parse")
+            # X17: a NUL in a path selector is a malformed selector with a NAMED fail-closed reason,
+            # never a bare ValueError traceback out of os.lstat (whose exit would read as a finding).
+            _case("X17", CFG.replace('paths = ["cmd/job.sh"]', 'paths = ["cmd/job\\u0000.sh"]'),
+                  "tool write --row 9\n", 2,
+                  "a NUL in a path selector is cannot-evaluate with a named reason",
+                  needle="contains a NUL character")
             _case("X3a", CFG, "bash -c 'tool write | tail -1'\n", 2,
                   "a declared command inside a bash -c string is cannot-evaluate",
                   needle="bash -c")
@@ -3018,7 +3147,7 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: the refuse cases R1-R140 (R24 and the read-credit vectors retired) and "
+    print("SELF-TEST PASS: the refuse cases R1-R141 (R24 and the read-credit vectors retired) and "
           "Rb1 (the seed, substitution "
           "bodies, AND lists, if conditions, |&, bare wrappers including ionice, absolute paths, "
           "every enable outside the standalone column-1 closed form (piped, backgrounded, "
@@ -3034,7 +3163,9 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
           "whole-array PIPESTATUS save right after the pipeline (none credited), a line "
           "continuation (joined pipelines AND continued keywords, bare, space-indented, "
           "tab-indented and repeated), a pipe ending its line with the next line's final stage "
-          "named, a first and a "
+          "named, a single finding at its real line for the pipeline after an uncertain '#' "
+          "(never duplicated past the end of the file), the withdrawn-credit reason named beside "
+          "a kept enable, a first and a "
           "MIDDLE pipeline stage asserted by index, a nested dir/** finding asserted by file, "
           "quoted declared and reserved-word command names (behind a leading redirection too), and "
           "the enable-after-pipeline boundary) each fire and each catches the never-report mutant; "
@@ -3052,16 +3183,20 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
           "and C20 became the refusals R136-R138 and C13 the refusal R140 when the PIPESTATUS read "
           "credit was removed; the read-credit controls C22, C28-C30 and C34-C44 retired) plus C23b "
           "(no config, undeclared producers, the accepted pipefail spellings, pipefail clearing the "
-          "pipeline that used to save PIPESTATUS, a relied-on command run outside the pipeline with "
-          "its own status saved on a separate line, each of those two also run reverted and "
+          "pipeline that used to save PIPESTATUS, a relied-on command run outside every pipeline "
+          "with its own status saved on a separate line and an undeclared pipe kept, each of those "
+          "two also run reverted and "
           "flagged, a double-quoted line continuation inside a command word, a final-stage "
           "command, quoted and commented text, an OR list, a quoted program string, an undeclared "
           "subcommand, a quoted heredoc body, a redirect, an unrelated shopt, a clean dir/** walk, "
           "bare env and ionice wrappers, a clean find, and quoted 'select' command names with and "
           "without a plain same-spelled argument) "
           "each stay clean and the patchable ones catch their over-broad mutants; and the "
-          "cannot-evaluate cases X1-X15 (unmatched selectors, unparseable shell beside a plain, "
-          "path-qualified or quote-split declared command, sh -c/bash -c/dash -c/zsh -c/ksh -c/eval "
+          "cannot-evaluate cases X1-X17 (unmatched selectors, unparseable shell beside a plain, "
+          "path-qualified or quote-split declared command, unparsed tails judged at the EARLIEST "
+          "stop across the readings of an uncertain '#' (with the heredoc-alone and "
+          "uncertain-prefix-alone controls), a NUL in a path selector named rather than crashed "
+          "on, sh -c/bash -c/dash -c/zsh -c/ksh -c/eval "
           "strings with plain, clustered and quote-split contents, wrapper-option and subcommand "
           "opacity, quoted and escaped declared names behind wrappers and groups, declared commands "
           "in subshells, brace groups (a space-indented continued '{' included), while/until/for "
