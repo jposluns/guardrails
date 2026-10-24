@@ -1938,11 +1938,10 @@ def _check_handoff(recs, rep):
     "covers every record whose `actor.kind` is `importer`, in the imported series or written into the
     clean series by the pre-1.3.0 legacy importer", and "every current-state join, including the section
     8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer
-    actors". Whether that firewall binds a store below spec 1.3.0 is a reading the maintainer has not yet
-    ruled on (sections 8.6 and 9.2 describe the 1.2.0 to 1.3.0 upgrade as the step that withdraws a legacy
-    importer-authored record's current authority). This check applies the exemption on every store, keyed
-    on provenance alone, for consistency with the record writer's current-handoff join
-    (_opf_record._current_handoffs) and the HANDOFF view (_opf_views.render_handoff), which apply it the
+    actors". OPF has never been released, so no store predates that firewall, and it applies on every
+    store: this check applies the exemption keyed on provenance alone, in agreement with the record
+    writer's current-handoff join (_opf_record._current_handoffs) and the HANDOFF view
+    (_opf_views.render_handoff), which apply it the
     same way. An imported-series row never counts either (_validate_opened_store builds the graded record
     list from the active, archive and worklog records and never adds an imported-series row; the skip
     matches that routing for a direct caller). Only the exact kind `importer` is exempt: a lookalike kind
