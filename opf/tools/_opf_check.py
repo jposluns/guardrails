@@ -2074,10 +2074,10 @@ def _reserved_numbers(root_fd, rep):
     """Homes 2: the clean-series numbers the id reservations hold, as {namespace: set of numbers}, and
     whether every reservation evaluated. C-NO-DELETION and C-CONTIGUITY skip such a number only where no
     present record carries it and the prior committed snapshot held no record with that id
-    (_split_reserved), so this reads each reservation read-only and for that purpose alone. Spec 8.2
-    defines the reservation and the next-ID derivation, not this grading; reading the journals at all is
-    the one exception to the spec 4.2 sentence that doctor excludes journals, and it awaits the homes-2
-    revision of that section (a release dependency). The homes are the allocations/ home under journals/
+    (_split_reserved), so this reads each reservation read-only and for that purpose alone. Spec 8.2 at
+    2.0.0 defines the reservation, the next-ID derivation and this grading (the doctor treats a reserved
+    number as issued), and spec 4.2 names this read-only reservation read as the one exception to its
+    rule that doctor excludes journals. The homes are the allocations/ home under journals/
     of every kind in _opf_store.JOURNAL_KINDS (read at call time), each derived through
     _opf_store.allocation_record, listed and read through the contained no-follow readers; no journal
     frame, projection or run directory is opened. A reservation is judged as the record writer judges

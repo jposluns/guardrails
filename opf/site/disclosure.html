@@ -121,15 +121,17 @@
         that its manifest matches the member bytes; it does not authenticate them or review what
         they say. The interim clean-start route initializes a store with <code>opf init</code>; it
         is not an adoption, and a later <code>opf adopt</code> run reads that store as
-        re-adoption.</li>
+        re-adoption. That reading is the reference tooling's 1.2.0 behaviour and diverges from the
+        specification: a 1.2.0 store is one the section 9.2 validation refusals refuse, so an
+        adoption over it is a first adoption under section 14.1, never a re-adoption.</li>
       <li><b style="color:var(--ink)">A base tool</b> enforces only the base standard and the profiles
         it supports; a profile it does not support is recorded as present-but-unevaluated rather than
         failing base validation.</li>
       <li><b style="color:var(--ink)">The discovery token</b> is a single exact string. A mistyped
         or altered token is a cannot-evaluate that stops the tool, never a silent empty store. A rename
-        would be a store-breaking change: it ships only as a later base-schema version bump, with the
-        tested in-place <code>opf upgrade</code> the specification requires of every such bump
-        (specification section 9.2).</li>
+        would be a store-breaking change the specification gives no path: every base-schema version
+        bump stays additive and keeps the exact token, so no bump the specification permits renames
+        it (specification sections 4.5 and 9.2).</li>
       <li><b style="color:var(--ink)">Implementations</b> (specification section 16.1): the
         specification defines one implementation model, with no conformance classes, and base 2.0.0,
         with <code>homes = 2</code>, is the only base version it defines. The reference tooling does

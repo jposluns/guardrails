@@ -142,7 +142,9 @@
       <code>opf init</code>, review and commit, <code>opf render --write</code>, commit, then
       <code>opf doctor --require-store</code> and <code>opf render --check</code>. That route
       initializes a store; it is not an adoption. It records no plan, approval, receipt or
-      completion check, and installs no enforcement.</p>
+      completion check, and installs no enforcement. The reference tooling's <code>opf init</code>
+      does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the
+      standard's validation refuses (specification section 9.2).</p>
   </div>
 </section>
 
@@ -413,10 +415,12 @@
       schemas as cannot-evaluate.
       For a store with module-tier or importer records, or a per-record store that declares views,
       doctor's overall verdict is cannot-evaluate (exit 2).</p>
-    <p>The shape of the manual path is short: create the store (either run <code>opf init</code> to
-      scaffold it, or write the files from the specification and schemas), commit it, generate the views
+    <p>The shape of the manual path is short: create the store (write the files from the
+      specification and schemas), commit it, generate the views
       with <code>opf render --write</code> for a supported store or your own renderer, and then work
-      records-first. Conformance you
+      records-first. The reference tooling's <code>opf init</code> does not scaffold this store yet:
+      its scaffold still writes a 1.2.0 store, a format the standard's validation refuses
+      (specification section 9.2). Conformance you
       assert by hand is self-asserted, and you should say so wherever you claim it, because no validator
       has checked it for you yet. The steps below fill that in.</p>
   </div>
