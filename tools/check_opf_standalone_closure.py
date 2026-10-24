@@ -20,10 +20,14 @@ load); the commonmark selftests exercise the vendored parser and its manifest.
 
 Exit convention (matches the repo's gates):
   0  the isolated opf/ subtree verifies (closure holds)
-  1  a real finding (a subset gate failed in isolation: closure is broken)
+  1  a real finding (a subset gate failed in isolation: closure is broken). A leg's own exit 2 counts as
+     a finding UNLESS its final output lines carry the positive marker CANNOT EVALUATE: exit 2 also
+     carries real failures (a helper that cannot be imported, a self-check that exits 2, a subset script
+     missing from the copy), so an unmarked exit 2 is never read as closure-not-evaluated (fail-closed)
   2  malformed input or a harness error (fail-closed): opf/ absent/unreadable, copy failed, no interpreter,
-     a per-leg bound that cannot be derived, or a leg killed at its wall-clock bound (named as the bound
-     tripping, never as a failure the leg reported; see _LEG_CEILING_S for how each bound is derived)
+     a per-leg bound that cannot be derived, a leg killed at its wall-clock bound (named as the bound
+     tripping, never as a failure the leg reported; see _LEG_CEILING_S for how each bound is derived), or
+     a leg that exited 2 AND printed CANNOT EVALUATE (the leg itself said its checks did not run)
 """
 import sys
 
@@ -149,6 +153,15 @@ _LEG_CEILING_S = {
 _LOAD_HEADROOM = 2
 _LAUNCH_MARGIN_S = 60
 _MIN_LEG_BOUND_S = 120
+
+# The positive cannot-evaluate marker. A subset leg that exits 2 is read as "could not evaluate its own
+# checks" ONLY when its captured final lines carry this marker (the convention the adopt-apply self-test
+# prints on an expired inner bound). Exit 2 WITHOUT it is a finding, because exit 2 also carries real
+# failures: opf.py maps a helper import failure (exactly what a surviving upward edge produces) to exit 2
+# with a lowercase "(cannot evaluate)", the commonmark conformance selftest exits 2 on its own self-check
+# failures, and this gate's runner returns 2 for a subset script missing from the copy. Each of those is
+# closure broken, never closure-not-evaluated, so only the uppercase marker counts.
+_CANNOT_EVALUATE_MARKER = "CANNOT EVALUATE"
 
 _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 _CI_JOB = "opf-closure"
@@ -410,25 +423,48 @@ def _run_subset(opf_root, run_dir, bounds):
     return results
 
 
+def _said_cannot_evaluate(row):
+    """Whether this result row is a leg's own positive cannot-evaluate declaration: exit 2 AND the
+    marker in its captured final lines. Anything else a leg exits 2 with is a finding (_report)."""
+    return row[1] == 2 and _CANNOT_EVALUATE_MARKER in (row[2] or "")
+
+
 def _report(results):
     """Print one line per leg and the verdict, and return the exit code. A leg that exited non-zero is a
-    finding (1). A leg killed at its bound is reported as the bound tripping, never as a failure the leg
-    reported; with no finding beside it the gate cannot evaluate closure (2), and never reads as clean."""
-    failed = [row for row in results if row[1] not in (0, None)]
+    finding (1) unless it exited 2 AND printed CANNOT EVALUATE in its final lines (the subset members'
+    positive declaration of a harness error or an expired inner bound): exit 2 alone also carries real
+    failures (a helper import failure, a self-check that exits 2, a script missing from the copy), so an
+    unmarked exit 2 is reported as closure broken, fail-closed. A leg that declared cannot-evaluate, and
+    a leg killed at its bound (reported as the bound tripping, never as a failure the leg reported), mean
+    closure was not evaluated for that leg: with no finding beside either, the gate cannot evaluate
+    closure (2), and never reads as clean. A finding beside either still returns 1, with every
+    unevaluated leg named."""
+    failed = [row for row in results if row[1] not in (0, None) and not _said_cannot_evaluate(row)]
+    cannot = [row for row in results if _said_cannot_evaluate(row)]
     timed_out = [row for row in results if row[1] is None]
-    for name, rc, _tail_text, elapsed, bound in results:
+    for row in results:
+        name, rc, _tail_text, elapsed, bound = row
         if rc == 0:
             status = "OK ({:.1f}s of its {}s bound)".format(elapsed, bound)
         elif rc is None:
             status = "TIMED OUT (killed at its {}s bound)".format(bound)
+        elif _said_cannot_evaluate(row):
+            status = "CANNOT EVALUATE rc=2 ({:.1f}s)".format(elapsed)
         else:
             status = "FAILED rc={} ({:.1f}s)".format(rc, elapsed)
         print("  {:38s} {}".format(name, status))
     if failed:
-        print("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself):",
+        print("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself; an exit 2 "
+              "without the {} marker counts as a failure, fail-closed):".format(_CANNOT_EVALUATE_MARKER),
               file=sys.stderr)
         for name, rc, tail, _elapsed, _bound in failed:
             print("  {} (rc={}): {}".format(name, rc, tail.replace("\n", " | ")), file=sys.stderr)
+    if cannot:
+        print("STANDALONE CLOSURE: LEG CANNOT EVALUATE (each leg below exited 2 and printed the {} "
+              "marker: it said it could not evaluate its own checks, so closure was not evaluated "
+              "for it):".format(_CANNOT_EVALUATE_MARKER), file=sys.stderr)
+        for name, _rc, tail, _elapsed, _bound in cannot:
+            print("  {} (rc=2): {}".format(name, tail.replace("\n", " | ")), file=sys.stderr)
     if timed_out:
         print("STANDALONE CLOSURE: LEG BOUND EXCEEDED (the gate killed each leg below at its wall-clock bound; "
               "the bound tripped, not a failure the leg reported, so closure was not evaluated for it):",
@@ -438,7 +474,7 @@ def _report(results):
                 name, bound, elapsed, tail.replace("\n", " | ") or "(none)"), file=sys.stderr)
     if failed:
         return 1
-    if timed_out:
+    if cannot or timed_out:
         return 2
     print("STANDALONE CLOSURE: OK (opf/ verifies itself with no AIQT tree reachable)")
     return 0
@@ -446,7 +482,9 @@ def _report(results):
 
 def run(root):
     """Materialize opf/ alone and run the subset in isolation. Returns 0 (closure holds), 1 (a subset gate
-    failed: closure broken), or 2 (harness error, opf/ unreadable, or a leg killed at its bound), fail-closed."""
+    failed, including a leg that exited 2 without printing CANNOT EVALUATE: closure broken), or 2 (harness
+    error, opf/ unreadable, a leg killed at its bound, or a leg that exited 2 and printed CANNOT EVALUATE
+    and so said it could not evaluate its own checks), fail-closed."""
     opf_src = Path(root) / "opf"
     if not (opf_src.is_dir() and (opf_src / "tools" / "opf.py").is_file()):
         print("error: opf/ subtree not found under {} (cannot evaluate closure)".format(root),
@@ -557,7 +595,11 @@ _TIME_SCALE = 300  # the bound vectors run the real _run_one and _report at 1/30
 def _timeout_vectors_self_test(required):
     """Time-scaled stub legs through the real runner: the slowest recorded correct opf-adopt-apply run
     (672 s) is killed by the former flat 600 s bound and finishes inside its derived bound, and a genuine
-    hang is still cut off at that bound and reported as the bound tripping, not as a leg failure."""
+    hang is still cut off at that bound and reported as the bound tripping, not as a leg failure. The
+    report vectors then hold the exit mapping: a kill at the bound, or a leg's own exit 2 WITH the
+    printed CANNOT EVALUATE marker, is exit 2 alone and exit 1 beside a real failure, never clean; a
+    leg's exit 2 WITHOUT the marker (a bootstrap import failure's lowercase "(cannot evaluate)" does not
+    count, nor does a missing subset script) is closure broken, exit 1."""
     leg = "opf-adopt-apply-selftest"
     bound = required[leg][0]
     scaled = bound / _TIME_SCALE
@@ -580,6 +622,13 @@ def _timeout_vectors_self_test(required):
         rc, tail, elapsed = _run_one(stub_root, "stub_sleep.py", ["3600"], tmp, env, scaled)
         if rc is not None or not scaled <= elapsed < scaled + 30:
             raise AssertionError("closure/hang-not-cut-off (rc={!r}, {:.1f}s)".format(rc, elapsed))
+        cannot_tail = "OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE (1 bound(s) expired)"
+        # The unmarked exit-2 tails below are the three real shapes exit 2 carries: a bootstrap import
+        # failure (its lowercase "(cannot evaluate)" must NOT count as the marker), a conformance
+        # self-check failure, and this gate's own missing-script row.
+        bootstrap_tail = "opf: cannot bootstrap: check_versions (cannot evaluate)"
+        conformance_tail = "CONFORMANCE SELF-CHECK FAIL: the verdict did not reject a duplicate example id"
+        missing_tail = "missing subset script in the copy: opf/tools/check_opf_homes.py"
         for rows, want_code, want, refused in (
                 ([(leg, None, tail, elapsed, bound)], 2,
                  ("TIMED OUT (killed at its {}s bound)".format(bound), "LEG BOUND EXCEEDED",
@@ -587,6 +636,28 @@ def _timeout_vectors_self_test(required):
                  ("BROKEN", "CLOSURE: OK")),
                 ([(leg, None, tail, elapsed, bound), ("opf-homes-contract", 1, "boom", 1.0, 120)], 1,
                  ("BROKEN", "opf-homes-contract (rc=1): boom", "{}: killed at its {}s bound".format(leg, bound)),
+                 ("CLOSURE: OK",)),
+                ([(leg, 2, cannot_tail, 354.2, bound)], 2,
+                 ("CANNOT EVALUATE rc=2 (354.2s)", "LEG CANNOT EVALUATE",
+                  "{} (rc=2): {}".format(leg, cannot_tail), "closure was not evaluated"),
+                 ("BROKEN", "CLOSURE: OK")),
+                ([(leg, 2, cannot_tail, 354.2, bound), ("opf-homes-contract", 1, "boom", 1.0, 120)], 1,
+                 ("BROKEN", "opf-homes-contract (rc=1): boom", "LEG CANNOT EVALUATE",
+                  "{} (rc=2): {}".format(leg, cannot_tail)),
+                 ("CLOSURE: OK",)),
+                ([("opf-tooling-selftest", 2, bootstrap_tail, 1.2, bound)], 1,
+                 ("FAILED rc=2 (1.2s)", "BROKEN",
+                  "opf-tooling-selftest (rc=2): {}".format(bootstrap_tail)),
+                 ("LEG CANNOT EVALUATE", "CLOSURE: OK")),
+                ([("commonmark-conformance", 2, conformance_tail, 0.3, 120),
+                  ("opf-homes-selftest", 2, missing_tail, 0.0, 1200)], 1,
+                 ("BROKEN", "commonmark-conformance (rc=2): {}".format(conformance_tail),
+                  "opf-homes-selftest (rc=2): {}".format(missing_tail)),
+                 ("LEG CANNOT EVALUATE", "CLOSURE: OK")),
+                ([(leg, 2, cannot_tail, 354.2, bound),
+                  ("opf-tooling-selftest", 2, bootstrap_tail, 1.2, bound)], 1,
+                 ("BROKEN", "opf-tooling-selftest (rc=2): {}".format(bootstrap_tail),
+                  "LEG CANNOT EVALUATE", "{} (rc=2): {}".format(leg, cannot_tail)),
                  ("CLOSURE: OK",))):
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
@@ -595,7 +666,10 @@ def _timeout_vectors_self_test(required):
             if code != want_code or not all(w in said for w in want) or any(r in said for r in refused):
                 raise AssertionError("closure/timeout-report (exit {}): {!r}".format(code, said))
         print("RED hang -> cut off at its bound and reported as LEG BOUND EXCEEDED (exit 2; exit 1 beside a "
-              "real failure)")
+              "real failure); a leg's own exit 2 with the printed CANNOT EVALUATE marker -> LEG CANNOT "
+              "EVALUATE (exit 2; exit 1 beside a real failure); exit 2 without the marker (a bootstrap "
+              "import failure, a conformance self-check failure, a missing subset script) -> BROKEN "
+              "(exit 1)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -606,9 +680,12 @@ def self_test_main():
     legs show the former flat bound killing a correct leg while a hang is still cut off and named. The
     positive leg runs run() over the real opf/ and requires 0. The negative leg materializes opf/ alone, then
     RE-INTRODUCES the pre-move upward edge (opf/tools/_opf_store.py importing `_parse` from AIQT
-    `check_versions` instead of the extracted `_semver`); with no AIQT tree reachable that import fails, so
-    the subset must exit non-zero (a leg killed at its bound does not count as caught). A gate that passed
-    the deliberately-broken copy would provide no coverage."""
+    `check_versions` instead of the extracted `_semver`); with no AIQT tree reachable that import fails, and
+    the flipped leg's result must go through _report and come back as closure BROKEN with exit 1 (a leg
+    killed at its bound does not count as caught, and a report of closure-not-evaluated does not count
+    either: the flip exits 2 with the lowercase bootstrap message, a real break, not a declared
+    cannot-evaluate). A gate that passed the deliberately-broken copy, or that reported the break as not
+    evaluated, would provide no coverage."""
     root = repo_root()
     try:
         _pack_manifest_registration_self_test()
@@ -640,13 +717,23 @@ def self_test_main():
             store.write_text(flipped, encoding="utf-8")
             env = _isolated_env()
             bound = required["opf-tooling-selftest"][0]
-            rc, _tail_text, _elapsed = _run_one(opf_root, "opf.py", ["--self-test"], tmp, env, bound)
+            rc, tail_text, elapsed = _run_one(opf_root, "opf.py", ["--self-test"], tmp, env, bound)
             if rc is None:
                 failures.append("negative: the flipped opf.py --self-test was killed at its {}s bound "
                                 "(the bound tripped; the flip was not evaluated)".format(bound))
-            elif rc == 0:
-                failures.append("negative: a re-introduced upward edge (import check_versions) was NOT "
-                                "caught in isolation (the gate would give no coverage)")
+            else:
+                # The flipped run's REAL result goes through _report: the upward edge must be reported
+                # as closure BROKEN with exit 1, never as closure-not-evaluated (the flip's bootstrap
+                # failure exits 2 with a lowercase "(cannot evaluate)", which is not the marker).
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                    code = _report([("opf-tooling-selftest", rc, tail_text, elapsed, bound)])
+                said = out.getvalue()
+                if code != 1 or "STANDALONE CLOSURE: BROKEN" not in said:
+                    failures.append("negative: a re-introduced upward edge (import check_versions) was "
+                                    "NOT reported as closure broken (the gate would give no coverage): "
+                                    "_report returned {} on the leg's rc={!r} and said {!r}".format(
+                                        code, rc, said))
     except OSError as exc:
         failures.append("negative: harness error building the broken copy: {}".format(exc))
     finally:
