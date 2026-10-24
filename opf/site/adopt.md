@@ -26,6 +26,8 @@ What the reference CLI runs today:
 
 What it does not run yet: `opf adopt approve`, `apply`, `complete` and `reconcile` refuse with exit 2, so no approval is recorded, nothing is applied, and nothing is retired. Installing the enforcement pack through adoption, and post-adoption import, are not available either. An assistant following the pack stops at the approval step and reports, rather than doing the missing stages by hand.
 
+Recovery after a refused or reversed run: when an adoption transaction is refused after its intent opens, or is reversed, the engine retains `.working/` holding only the adoption journal (`.working/journals/adoption/`). That journal is recovery state: the transaction record and its preimages, and the durable record that the refused run id can never rerun. In that posture the store does not resolve, and plain `opf init` refuses over the retained `.working/` exactly as over any other existing one. Recovery needs no cleanup: investigation reads a `.working/` holding only the journal as a first adoption, so a fresh `opf adopt` plan with its own run id re-admits the tree. Do not delete `.working/` to unblock `opf init`; that discards the journal, and with it the record that the refused run id is burnt.
+
 For a project with no prior records, the clean-start guidance describes one interim route: `opf init`, review and commit, `opf render --write`, commit, then `opf doctor --require-store` and `opf render --check`. That route initializes a store; it is not an adoption. It records no plan, approval, receipt or completion check, and installs no enforcement. If you are adopting AIQT, include OPFiles in the plan.
 
 ## Adopting by hand

@@ -93,8 +93,10 @@ interrupted apply MUST resolve from the apply journal alone and MUST NOT require
 resolve as a store (spec 14.2): an apply that archived and removed an occupying manifest leaves no store
 to resolve. reconcile() therefore never resolves the store. An rmdir may target only a directory the
 same transaction created and apply never removes a pre-existing directory, so `.working/` itself
-survives every rollback and the journal stays reachable at the fixed path while nothing resolves. OPF
-writes no state under `.aiqt/`, which is AIQT-owned material (spec 4.2, 15). A preparation that created
+survives every rollback and the journal stays reachable at the fixed path while nothing resolves. This
+engine writes no state under `.aiqt/`: in homes 2 that is AIQT-owned material, never an OPF state home
+(spec 4.2, 15). That no-write rule is the homes-2 store's; homes-1 tooling still writes the legacy
+record journal at `.aiqt/record/journal` (_opf_record), outside this engine. A preparation that created
 `.working/` for the journal pins it to the planned store directory mode (_pin_created_working), so the
 mkdir's umask artefact never becomes the mode init-store's admission later holds `.working/` to.
 
@@ -173,7 +175,8 @@ or non-directory `journals` component: the journal home itself lives there and m
 it is OPF control area, never adopter content (spec 14.2). The `.working/` the journal preparation
 created or found is admitted to the substrate as a pre-existing planned directory, so a fully reversed
 first adoption leaves `.working/` holding only the retained journal (the present-without-manifest
-first-adoption posture, re-admitted by a fresh run), never literal NOT-ADOPTED; plain `opf init`
+first-adoption posture, re-admitted by a fresh run: the planner reads the retained journal as recovery
+state, never ancestry, so the fresh plan is a first adoption again), never literal NOT-ADOPTED; plain `opf init`
 and the bare substrate stay unweakened (an existing `.working/` still refuses a plain fresh init exactly
 as before, a journal-only one included, pinned by the substrate's own self-test). Disclosed residuals of
 these slices, none of them a
@@ -3484,8 +3487,8 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
     # The admitted-directory MODE is pre-checked HERE, before the run's intent opens, so a
     # wrong-mode pre-existing tree (a umask-002 adopter) refuses with nothing written and
     # the run id never burnt; the substrate re-proves the same fact under its mutex. The
-    # comparison reads the SAME full stat.S_IMODE value the substrate compares (codex
-    # round 4, finding 2): observe_inventory's entries mask to 0o777, so a special bit
+    # comparison reads the SAME full stat.S_IMODE value the substrate compares:
+    # observe_inventory's entries mask to 0o777, so a special bit
     # (a setgid 02755 directory) would otherwise pass here and burn the run id on the
     # substrate's own post-intent refusal.
     for dpath in admitted_dirs:
@@ -3501,7 +3504,7 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
             # to 0o777 and re-compares the FULL stat.S_IMODE against that record under its
             # mutex, and refuses a group- or world-writable mode; the SAME two facts are
             # pre-checked HERE so a special-bit or writable `.working` refuses BEFORE the
-            # run's intent opens and never burns the run id (claude round 5, N2).
+            # run's intent opens and never burns the run id.
             wmode = stat.S_IMODE(dst.st_mode)
             if wmode != (wmode & 0o777):
                 raise AdoptApplyError("admitted pre-existing directory {} holds mode {}, "
@@ -15532,6 +15535,47 @@ def _init_store_git_checks(check, ctx, refused):
             return mint_run_id(datetime.datetime(2026, 9, 17, 12, 0, 0,
                                                  tzinfo=datetime.timezone.utc), next(nonce))
 
+        def planned_fresh_run(root):
+            """The RECOVERY PATH END TO END: the real planner's fresh plan over the live tree,
+            then the init-store dispatch built from THAT plan's own frozen bytes (run id, store
+            identity, sources), never a hand-built context. A `.working` retained holding only
+            the journal of a refused or reversed run must re-plan as a FIRST adoption, with the
+            journal in no ancestry trace (it is recovery state: a re-adoption here would demand
+            an ancestral counter seed that a reversed or refused first adoption never published,
+            refusing every later run), and init-store must admit that plan. Returns the parsed
+            observation and plan (None, None when a stage refuses) and the dispatch verdict."""
+            import _opf_adopt_plan as plan_mod
+            bindings = schema.canonical_plan_bindings()
+            default = tomllib.loads(_opf_init.build_manifest())
+            targets = [schema.PACK_MIRROR_ROOT]
+            inv = plan_mod.investigate(root, sources=[], targets=targets)
+            if inv.status != valid:
+                return None, None, inv
+            obs = tomllib.loads(inv.observation.decode("utf-8"))
+            ops_rows = [
+                dict(op="init-store", store_root=".",
+                     members=[dict(path=manifest_rel, digest="sha256:" + _sha256(
+                         _opf_init.build_manifest().encode("utf-8")))]),
+                dict(op="render-views", store_root=".",
+                     members=[dict(path=v, digest="sha256:" + _sha256(v.encode("utf-8")))
+                              for v in sorted(t["target"] for t in default["views"].values())]),
+                schema.enforcement_install_op(bindings["enforcement"]),
+            ]
+            frozen = plan_mod.plan(root, sources=[], targets=targets,
+                                   expected_observation_digest=obs["observation_digest"],
+                                   product="opf", decisions=[], ops=ops_rows,
+                                   now=datetime.datetime(2026, 9, 17, 12, 0, 0,
+                                                         tzinfo=datetime.timezone.utc),
+                                   run_nonce=next(nonce), bindings=bindings)
+            if frozen.status != valid or frozen.plan is None:
+                return obs, None, frozen
+            doc = tomllib.loads(frozen.plan.decode("utf-8"))
+            res = dispatch(row, dict(product_root=root,
+                                     plan=dict(run_id=doc["run_id"], store=doc["store"],
+                                               sources=doc["sources"]),
+                                     ancestral=None))
+            return obs, doc, res
+
         def plant(root, rel, data):
             """Write a fixture file, setting every directory the write creates to EXACTLY 0755,
             the mode the substrate plans and admits. A planted directory otherwise takes the
@@ -15605,8 +15649,14 @@ def _init_store_git_checks(check, ctx, refused):
               and _default_store_present_without_manifest(root))
         check("init-store-reversed-run-never-reruns",
               refused(dispatch(row, ctx(root, run_id=run)), "was reversed"))
-        res = dispatch(row, ctx(root, run_id=rid()))
-        check("init-store-fresh-run-after-reversal", res.status == valid
+        # The fresh run goes through the REAL planner (planned_fresh_run): the retained journal
+        # reads as recovery state, never ancestry, so the fresh plan is a first adoption with no
+        # traces, and the dispatch built from that plan resolves the store.
+        obs_doc, plan_doc, res = planned_fresh_run(root)
+        check("init-store-reversal-fresh-plan-first-adoption",
+              plan_doc is not None and plan_doc["store"]["adoption"] == "first-adoption"
+              and obs_doc is not None and obs_doc["ancestry"]["traces"] == [])
+        check("init-store-fresh-run-after-reversal", plan_doc is not None and res.status == valid
               and store.resolve_store(root).status == store.RESOLVED)
 
         # A wrong PLAN-FIXED digest refuses before anything at all is written (no journal home).
@@ -15659,9 +15709,62 @@ def _init_store_git_checks(check, ctx, refused):
             res = dispatch(row, ctx(root, run_id=rid()))
         check("init-store-ignore-check-git-failure-refused-nothing-written",
               refused(res, "check-ignore failed (rc=128)") and snap(root) == before and op_ids(root) == [])
-        res = dispatch(row, ctx(root, run_id=rid()))
-        check("init-store-unignored-store-admitted", res.status == valid
+        # The same end-to-end recovery over the REFUSED (git-ignored, rolled-back) run's retained
+        # journal: once no rule ignores the store, the real planner's fresh plan reads first
+        # adoption and the dispatch built from it is admitted.
+        obs_doc, plan_doc, res = planned_fresh_run(root)
+        check("init-store-refusal-fresh-plan-first-adoption",
+              plan_doc is not None and plan_doc["store"]["adoption"] == "first-adoption"
+              and obs_doc is not None and obs_doc["ancestry"]["traces"] == [])
+        check("init-store-unignored-store-admitted", plan_doc is not None and res.status == valid
               and store.resolve_store(root).status == store.RESOLVED)
+
+        # THE UMASK PIN: under umask 002 the journal preparation's mkdir would leave `.working`
+        # at 0775, which the admission's mode pre-check refuses (and the substrate re-proves), so
+        # a successful run under umask 002 proves _pin_created_working published the planned
+        # store directory mode. The same dispatch counts the engine's product-root opens: a
+        # transaction holds ONE anchor descriptor, and the posture re-check's discovery probe
+        # reads through it instead of opening a product-root descriptor of its own.
+        root = init_op._plain_repo(os.path.join(base, "umask"), env)
+        real_open_root = globals()["_open_product_root"]
+        opened_roots = []
+
+        def counting_open(product_root):
+            opened_roots.append(product_root)
+            return real_open_root(product_root)
+
+        prior_umask = os.umask(0o002)
+        try:
+            with mock.patch.dict(globals(), dict(_open_product_root=counting_open)):
+                res = dispatch(row, ctx(root, run_id=rid()))
+        finally:
+            os.umask(prior_umask)
+        wmode = stat.S_IMODE(os.lstat(os.path.join(root, store.WORKING_DIRNAME)).st_mode)
+        check("init-store-umask-pins-created-working", res.status == valid
+              and store.resolve_store(root).status == store.RESOLVED
+              and wmode == init_op.DIR_MODE)
+        check("init-store-one-product-root-descriptor", len(opened_roots) == 1)
+
+        # The shared transaction shell takes the same pin and the same one-anchor rule.
+        root = init_op._plain_repo(os.path.join(base, "txnmode"), env)
+        opened_txn = []
+
+        def counting_open_txn(product_root):
+            opened_txn.append(product_root)
+            return real_open_root(product_root)
+
+        run = rid()
+        prior_umask = os.umask(0o002)
+        try:
+            with mock.patch.dict(globals(), dict(_open_product_root=counting_open_txn)):
+                done = run_adopt_transaction(root, run, lambda ops: None)
+        finally:
+            os.umask(prior_umask)
+        wmode = stat.S_IMODE(os.lstat(os.path.join(root, store.WORKING_DIRNAME)).st_mode)
+        check("adopt-transaction-umask-pins-created-working",
+              done == run and wmode == init_op.DIR_MODE
+              and os.path.isdir(os.path.join(root, JOURNAL_REL, run)))
+        check("adopt-transaction-one-product-root-descriptor", len(opened_txn) == 1)
 
         # Reconcile-first: an unreadable adoption journal lock refuses before the substrate.
         root = init_op._plain_repo(os.path.join(base, "journal"), env)

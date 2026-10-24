@@ -8,7 +8,12 @@ subtrees is NOT covered. Companion stores refuse in this slice. Detection is by
 path only: a candidate is neither a parsed registration nor a working pipeline.
 Ancestry marks re-adoption when a pointer, a resolved store manifest, or unresolved
 content at an OPF-reserved .working name (ANCESTRY_RESERVED) is present, so store
-debris never reads as a zero-seedable first adoption. first-adoption only means none
+debris never reads as a zero-seedable first adoption. The journals control subtree
+(.working/journals) is NOT ancestry: it records transactions, refused and reversed
+runs included, whose counters never published, a reversal retains it (spec 14.2), and
+counters are never seeded from it, so a .working holding only the adoption journal is
+the present-without-manifest first-adoption posture a fresh run re-admits.
+first-adoption only means none
 of these: git history is not read, and a manifestless store under any other .working
 name reads as foreign content. Durable OPF history outside .working also reads as
 first-adoption on its own, including: root import-promotion state (.aiqt/import,
@@ -99,10 +104,17 @@ DETECTION_ROOTS = (
     "VERSION", "CHANGELOG.md", "release-notes.toml",
 )
 # OPF-reserved .working names, from the store module's own constants: the standard machine
-# subdirectory and every reserved store control subdirectory. Content at any is ancestry.
+# subdirectory and every reserved store control subdirectory EXCEPT the journals control
+# subtree. Content at any is ancestry. The journals subtree is recovery state, never
+# ancestry: it records transactions, refused and reversed runs included, whose counters
+# never published, a reversal retains it holding only the journal (spec 14.2), and no
+# counter is ever seeded from a journal, so that retained posture must re-plan as the
+# first adoption a fresh run re-admits, not as a re-adoption demanding an ancestral
+# seed that never existed.
 ANCESTRY_RESERVED = tuple(sorted(
     store.WORKING_DIRNAME + "/" + name
-    for name in (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS))
+    for name in (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS
+    if name != store.JOURNALS_DIRNAME))
 RESIDUALS = (
     "Only the enumerated scope is covered; detection is by path, not semantics.",
     "Machine-store and unmanaged exclusions are not inspected for foreign files.",
@@ -111,7 +123,9 @@ RESIDUALS = (
     "Resolver reads retain the resolver limits; inventory caps are not a process sandbox.",
     "No coherent snapshot; apply must recheck inventory, preimages and absences.",
     "No commit, merge, network, journal, import staging, rendering or hook effects.",
-    "Ancestry reads pointers, the resolved manifest and reserved .working names; git history "
+    "Ancestry reads pointers, the resolved manifest and reserved .working names outside the "
+    "journals control subtree (the retained adoption journal of a refused or reversed run is "
+    "recovery state, never ancestry); git history "
     "and a manifestless store under another .working name are not read as ancestry. "
     "Durable OPF history outside .working also reads as first-adoption on its own, including: "
     "root import-promotion state (.aiqt/import, .aiqt/import/journal, .aiqt/import-archive), "
@@ -661,7 +675,9 @@ def _inventory(root, sources, targets):
         entries = dict((row["path"], row) for row in observed["entries"])
         if resolution.status != store.RESOLVED:
             # With no resolved store, content at a reserved name (for example counters and
-            # records, or import runs, left without a manifest) is still prior ancestry.
+            # records, or import runs, left without a manifest) is still prior ancestry. The
+            # journals control subtree is carved out of ANCESTRY_RESERVED: the retained
+            # adoption journal of a refused or reversed run is recovery state, not ancestry.
             traces += [path for path in ANCESTRY_RESERVED
                        if entries.get(path, {}).get("kind") in ("file", "directory")]
         check_fd = store._open_dir_nofollow(root)
@@ -704,8 +720,10 @@ def _inventory(root, sources, targets):
             "ancestry": {
                 "adoption": "re-adoption" if traces else "first-adoption",
                 "traces": traces,
-                "evidence": "live pointers, resolved manifest and reserved .working names; "
-                            "git history and other .working names are not ancestry. "
+                "evidence": "live pointers, resolved manifest and reserved .working names "
+                            "outside the journals control subtree (the retained adoption "
+                            "journal of a refused or reversed run is recovery state, never "
+                            "ancestry); git history and other .working names are not ancestry. "
                             "Durable OPF history outside .working also reads as first-adoption "
                             "on its own, including: root import-promotion state (.aiqt/import, "
                             ".aiqt/import/journal, .aiqt/import-archive), the record journal "
@@ -1842,9 +1860,13 @@ def self_test():
 
             def ancestry():
                 return tomllib.loads(self.observation().observation.decode())["ancestry"]
-            # Oracle derived from the store constants, not from this module's own set.
+            # Oracle derived from the store constants, not from this module's own set. The
+            # journals control subtree is tested separately below: the retained adoption
+            # journal of a refused or reversed run is recovery state, never ancestry.
+            journals = store.WORKING_DIRNAME + "/" + store.JOURNALS_DIRNAME
             reserved = [store.WORKING_DIRNAME + "/" + name for name in
-                        (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS]
+                        (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS
+                        if store.WORKING_DIRNAME + "/" + name != journals]
             run = ".working/imports/imp-20260102T030405Z-0123456789abcdef"
             cases = [(".working/toml", [".working/toml/counters.toml"], [".working/toml/records"]),
                      (".working/imports", [run + "/run.toml"], [])]
@@ -1878,6 +1900,24 @@ def self_test():
                                          ("re-adoption", [name]))
                     finally:
                         shutil.rmtree(self.root / ".working")
+            # The journals control subtree alone is NOT ancestry: a refused or reversed first
+            # adoption retains .working holding only the adoption journal (no counter ever
+            # published), and a fresh run plans that posture as a first adoption again, never
+            # as a re-adoption demanding an ancestral seed that never existed (spec 14.2).
+            txn = journals + "/adoption/journal/adopt-20260102T030405Z-0123456789abcdef"
+            (self.root / txn).mkdir(parents=True)
+            (self.root / txn / "frames.log").write_bytes(b"{}\n")
+            doc = tomllib.loads(self.observation().observation.decode())
+            self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
+            self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
+                             ("first-adoption", []))
+            # Beside another reserved name the journal still never appears among the traces.
+            (self.root / ".working/staging").mkdir()
+            (self.root / ".working/staging/leftover.toml").write_bytes(b"[x]\n")
+            doc = tomllib.loads(self.observation().observation.decode())
+            self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
+                             ("re-adoption", [".working/staging"]))
+            shutil.rmtree(self.root / ".working")
             # Foreign .working content, even a nested reserved-looking name, stays first-adoption.
             (self.root / ".working/notes").mkdir(parents=True)
             (self.root / ".working/notes/toml").write_bytes(b"notes")
