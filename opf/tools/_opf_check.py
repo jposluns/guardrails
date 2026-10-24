@@ -1689,6 +1689,18 @@ def _archive_unmanaged(rep, partial_active, path):
                     "archive artefact nor a <YYYY> bucket (spec 12/14.2)".format(path))
 
 
+def _archive_triaged_file(archive_rel, path):
+    """Whether _validate_archive routes the file `path` under `archive_rel` through _archive_unmanaged: a
+    file directly under archive/, any file beneath a bucket subdirectory, or a bucket file that is neither
+    archive.toml, worklog.toml nor a <type>.index.toml. Every other archive file (a bucket's manifest,
+    worklog or index, whatever the bucket's name) is never only triaged there: it is graded, or named in a
+    finding or a CANNOT-EVALUATE, at any import status."""
+    parts = path[len(archive_rel) + 1:].split("/")
+    if len(parts) != 2:
+        return True
+    return parts[1] not in (ARCHIVE_MANIFEST_NAME, WORKLOG_NAME) and not parts[1].endswith(INDEX_SUFFIX)
+
+
 def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=1):
     """Walk the archive tree, validating each bucket's archive.toml, its archived non-worklog records, and
     its archived worklog, and reconciling the enumeration BIDIRECTIONALLY against what is actually present
@@ -2935,10 +2947,14 @@ def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, impor
     journals beside it. NOT every machine-store TOML file is graded, by design: a valid [unmanaged]
     declaration and the legacy imports staging are skipped (_check_containment grades them); during a
     partial import substantiated by an active imports/<run-id> run (the same predicate _check_containment
-    and _validate_archive use) a file outside the classifier's managed set is left to the triage posture
-    those walks apply, so a stray they only triage is never a canonical-bytes finding; and a file that
-    cannot be read or parsed is left to the check that reads it, EXCEPT init.toml, whose only reader is
-    this leg, so its faults are graded here (unreadable is a CANNOT-EVALUATE, unparseable a finding),
+    and _validate_archive use) only the stray paths those walks triage are skipped: outside the archive
+    tree, a file outside the classifier's managed set (the containment walk's stray, which it triages, or
+    in an adopting store grades as a finding that already fails the store), and inside it, a path
+    _validate_archive routes through _archive_unmanaged (_archive_triaged_file). A triaged stray is
+    therefore never a canonical-bytes finding, while a bucket's archive.toml, worklog.toml and
+    <type>.index.toml, which _validate_archive grades, keep this check during the partial import. A file
+    that cannot be read or parsed is left to the check that reads it, EXCEPT init.toml, whose only reader
+    is this leg, so its faults are graded here (unreadable is a CANNOT-EVALUATE, unparseable a finding),
     never a silent pass. A non-canonical managed or archived file is advised to be restored from the
     integration base; an unregistered stray has no base version, so its finding advises removal or
     re-admission through opf instead. It proves serialization only: a hand edit that leaves canonical
@@ -2963,9 +2979,12 @@ def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, impor
             if not f.endswith(".toml") or _under_any(full, skipped):
                 continue
             managed = cls.managed_file(full)
-            if partial_active and not managed:
-                # A substantiated partial import triages (or, adopting, grades) this path in the
-                # containment and archive walks; a path those walks only triage must not fail here.
+            archived = _under_any(full, (cls.archive_root,))
+            if partial_active and (_archive_triaged_file(cls.archive_root, full) if archived else not managed):
+                # Under a substantiated partial import, skip only the strays those walks own: outside the
+                # archive, a file the containment walk triages (or, adopting, reports as a finding); inside
+                # it, a path _validate_archive sends to _archive_unmanaged. A bucket's archive.toml,
+                # worklog.toml and <type>.index.toml are graded there, so they keep this check.
                 continue
             raw = rep.toml_reads.get(full)
             try:
@@ -2997,7 +3016,7 @@ def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, impor
                                 full, _safe_display(str(exc))))
                 continue
             if not _opf_emit.matches_store_bytes(raw, fresh):
-                if managed or _under_any(full, (cls.archive_root,)):
+                if managed or archived:
                     rep.finding("C-CONTAINMENT: machine-store file {!r} is not in canonical emitted form "
                                 "(it carries comments or non-canonical serialization, which no sanctioned "
                                 "writer produces); restore it from the integration base and redo the "
@@ -4988,6 +5007,44 @@ def self_test():
         check("canonical-partial-stray-triaged-valid",
               _cpr is not None and _cpr.status == VALID
               and any("'.working/toml/legacy.toml'" in t for t in _cpr.triage))
+        # The exemption covers only what those walks triage. Under the same substantiated partial, a
+        # bucket's worklog.toml and archive.toml are graded by _validate_archive, never triaged, so a
+        # non-canonical one is still the named canonical-bytes finding, while a non-index stray file in a
+        # bucket (an _archive_unmanaged path) stays in triage and the store VALID. Flip: widening the
+        # exemption back to every file outside the classifier's managed set turns the first two VALID;
+        # dropping it turns the third INVALID.
+        def _partial_archive(rel, edit):
+            pa = clean_machine()
+            pa["manifest.toml"] = base_manifest()
+            pa["manifest.toml"]["opf"]["import_status"] = "partial"
+            pa[rel] = edit(pa.get(rel))
+            return run(pa, working={"imports/{}/plan.toml".format(RUNID): "schema = 1"})
+
+        for label, rel, edit in (
+                ("worklog-blank-line", "archive/2026/worklog.toml", lambda m: _opf_emit.emit(m) + "\n"),
+                ("manifest-comment", "archive/2026/archive.toml",
+                 lambda m: _opf_emit.emit(m) + "# a hand comment\n")):
+            _par = _partial_archive(rel, edit)
+            check("canonical-partial-archive-{}-invalid".format(label),
+                  _par is not None and _par.status == INVALID
+                  and any("'.working/toml/{}'".format(rel) in m and _canon in m
+                          and "integration base" in m
+                          for m in _par.by_check.get("C-CONTAINMENT", [])))
+        _pas = _partial_archive("archive/2026/notes.toml", lambda _m: "a = 1 # a hand comment\n")
+        check("canonical-partial-archive-stray-triaged-valid",
+              _pas is not None and _pas.status == VALID
+              and any("'.working/toml/archive/2026/notes.toml'" in t for t in _pas.triage))
+        # The archive scope itself, path by path: a bucket's manifest, worklog and index (in any bucket
+        # name) are graded; a file directly under archive/, a non-index bucket file and anything beneath a
+        # bucket subdirectory are the _archive_unmanaged paths.
+        _ar = ".working/toml/archive"
+        check("canonical-archive-triage-scope",
+              not any(_archive_triaged_file(_ar, _ar + "/" + p) for p in (
+                  "2026/archive.toml", "2026/worklog.toml", "2026/finding.index.toml", "x/worklog.toml",
+                  "2026/junk.index.toml"))
+              and all(_archive_triaged_file(_ar, _ar + "/" + p) for p in (
+                  "notes.toml", "2026/notes.toml", "2026/sub/archive.toml", "2026/sub/deeper/worklog.toml",
+                  "2026/archive.toml.toml")))
         # Staged ids join the C-ID-SPACE uniqueness union under a substantiated partial (spec 11: uniqueness
         # across active, archive, and staging). Containment only triages the run interior there, so a
         # staged BI-1 duplicating committed BI-1 is caught by the staged-id enumeration alone; without

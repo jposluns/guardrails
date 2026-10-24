@@ -417,6 +417,11 @@ def _self_test():
             old = load_worklog_at(fd, ".working/custom")
             check("legacy-model", old == {"schema": 1, "entry": [entry]})
             check("legacy-bytes", load_worklog_at(fd, ".working/custom", with_raw=True)[0] == raw)
+            # on_read hands each source file's raw bytes to the caller once (doctor's canonical-bytes
+            # leg proves them instead of reading the file again).
+            reads = []
+            load_worklog_at(fd, ".working/custom", on_read=lambda rel, got: reads.append((rel, got)))
+            check("legacy-on-read", reads == [(".working/custom/" + LEGACY_NAME, raw)])
             resolved = _opf_store.resolve_store(root)
             check("resolved-entry-point", load_worklog(resolved) == old)
             import _opf_views
@@ -457,6 +462,10 @@ def _self_test():
             (archive / LEGACY_NAME).write_bytes(raw)
             check("archive-stays-legacy", load_archive_worklog_at(
                 fd, ".working/custom/archive/2026/worklog.toml") == old)
+            reads = []
+            load_archive_worklog_at(fd, ".working/custom/archive/2026/worklog.toml",
+                                    on_read=lambda rel, got: reads.append((rel, got)))
+            check("archive-on-read", reads == [(".working/custom/archive/2026/worklog.toml", raw)])
             body = raw.split(b"[[entry]]\n", 1)[1]
             record = directory / "WL-1.toml"
             record.write_bytes(body)
@@ -465,6 +474,13 @@ def _self_test():
             provisional = directory / "WL-2.abcd.toml"
             provisional.write_bytes(body.replace(b'WL-1', b'WL-2.abcd'))
             check("provisional-loaded", len(load_worklog_at(fd, ".working/custom")["entry"]) == 2)
+            # Generation 2 reports every entry file, in load order, with the bytes it parsed. Only this
+            # self-test reaches it (the build supports generation 1 alone; see self_test).
+            reads = []
+            load_worklog_at(fd, ".working/custom", on_read=lambda rel, got: reads.append((rel, got)))
+            check("gen2-on-read", reads == [
+                (".working/custom/worklog/WL-1.toml", body),
+                (".working/custom/worklog/WL-2.abcd.toml", body.replace(b'WL-1', b'WL-2.abcd'))])
             provisional.write_bytes(body.replace(b'WL-1', b'WL-2.abcd').replace(b'summary = "x"', b'summary = "corrected"'))
             check("suffix-not-recomputed", load_worklog_at(fd, ".working/custom")["entry"][1]["summary"] == "corrected")
             record.write_bytes(body + b'aliases = ["WL-2.abcd"]\n')
