@@ -776,14 +776,17 @@ def _list_contained(root_fd, reldir):
             _journal._yield_close_exceptions(parent_inflight, [exc])
 
 
-def _list_dir(root_fd, reldir, rep):
+def _list_dir(root_fd, reldir, rep, unread=None, types=()):
     """_list_contained with StoreError mapped to a CANNOT-EVALUATE naming the directory. A directory or
     entry name can carry control characters, so both the path and the error are rendered through
-    _safe_display rather than interpolated raw (F13)."""
+    _safe_display rather than interpolated raw (F13). On that error the record `types` the directory holds
+    join `unread` (when given): a listing that failed leaves their population incomplete."""
     try:
         return _list_contained(root_fd, reldir)
     except StoreError as exc:
         rep.cant("cannot list {}: {}".format(_safe_display(reldir), _safe_display(str(exc))))
+        if unread is not None:
+            unread.update(types)
         return None, None
 
 
@@ -1171,14 +1174,17 @@ def _gather_inline(tname, rows, where, registered_vendors, rep):
     return recs
 
 
-def _gather_perrecord(root_fd, machine_rel, tname, namespace, rows, where, registered_vendors, rep, recon, schema_deferred=False):
+def _gather_perrecord(root_fd, machine_rel, tname, namespace, rows, where, registered_vendors, rep, recon, schema_deferred=False,
+                      unread=None):
     """Gather the per-record-layout records of one type: each registry row is `{id, state, path, digest}`,
     its body lives at `<type>/<id>.toml`, and the row must bind to the body (id, state, digest; OPF-SPEC
     9:839, 13). Record-body SCHEMA faults are emitted directly (C-RECORDS focus); the RECONCILIATION
     problems (row keyset, path canonicality, missing / orphan bodies, id/state binding, digest mismatch)
     are collected into `recon` for the caller to replay under C-PERRECORD-RECONCILE. Reconciliation is
     BIDIRECTIONAL: a registry row with no body file, and a body file with no registry row, are both
-    findings."""
+    findings. A body file with no registry row, or a type directory that cannot be listed, also puts
+    `tname` in `unread` (when given), since a record the store carries was then not seated; the caller
+    adds it for a registry row that is not seated."""
     recs = []
     seen_ids = set()
     for i, row in enumerate(rows):
@@ -1253,7 +1259,7 @@ def _gather_perrecord(root_fd, machine_rel, tname, namespace, rows, where, regis
                           "file disagree; spec 13:999-1001)".format(rw, rid)))
         recs.append(_make_rec(body, tname, "active"))
     # Reverse direction: every record file under <type>/ must have a registry row.
-    _subdirs, files = _list_dir(root_fd, _rel(machine_rel, tname), rep)
+    _subdirs, files = _list_dir(root_fd, _rel(machine_rel, tname), rep, unread, (tname,))
     if files is not None:
         for fn_ in files:
             if not fn_.endswith(".toml"):
@@ -1262,13 +1268,20 @@ def _gather_perrecord(root_fd, machine_rel, tname, namespace, rows, where, regis
             if fid not in seen_ids:
                 recon.append(("finding", "{}/{}: record file {!r} has no registry row in {} (a record with "
                               "no index row; spec 13:999-1001)".format(tname, fn_, fid, where)))
+                if unread is not None:
+                    unread.add(tname)
     return recs
 
 
-def _gather_active_records(root_fd, machine_rel, enabled_types, layout, registered_vendors, rep):
+def _gather_active_records(root_fd, machine_rel, enabled_types, layout, registered_vendors, rep, unread=None):
     """Gather every active non-worklog record across the enabled type indexes. Returns (recs, recon) where
     `recon` carries the per-record-layout reconciliation problems for C-PERRECORD-RECONCILE. A declared
-    enabled type with no `<type>.index.toml` is an INVALID finding (a declared input is absent; spec 11)."""
+    enabled type with no `<type>.index.toml` is an INVALID finding (a declared input is absent; spec 11).
+    Every type whose records could not all be seated (an index that is unreadable, malformed or absent, or
+    a row or record file that is skipped) joins `unread` (when given), so a cross-record check over that
+    type reports CANNOT-EVALUATE rather than a pass over a partial population."""
+    if unread is None:
+        unread = set()
     recs = []
     recon = []
     # Read the enabled-type roster PLUS any importer type (legacy_fragment) whose index is PRESENT. Per the
@@ -1287,6 +1300,7 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
         idx_rel = _rel(machine_rel, "{}{}".format(tname, INDEX_SUFFIX))
         data, st = _read_toml(root_fd, idx_rel, rep)
         if st == "error":
+            unread.add(tname)
             continue
         if st == "absent":
             if tname in IMPORTER_TYPES and tname not in enabled_types:
@@ -1295,9 +1309,11 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
                 continue
             rep.finding("enabled type {!r} has no {}{} (a declared input is absent; spec 11)".format(
                 tname, tname, INDEX_SUFFIX))
+            unread.add(tname)
             continue
         rows = _index_rows(data, idx_rel, rep)
         if rows is None:
+            unread.add(tname)
             continue
         if _schema_deferred(tname):
             # F4/round-5 F-2: a record whose schema has not shipped in the baseline validator (a module-tier
@@ -1308,8 +1324,8 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
                 # row/body id-state-digest binding, path canonicality, the reverse body-file scan) even when
                 # the content schema is deferred, so a valid-id .toml body with no registry row is a finding,
                 # never a silently-managed leaf. Only the content schema defers (inside _gather_perrecord).
-                recs.extend(_gather_perrecord(root_fd, machine_rel, tname, namespace, rows, idx_rel,
-                                              registered_vendors, rep, recon, schema_deferred=True))
+                seated = _gather_perrecord(root_fd, machine_rel, tname, namespace, rows, idx_rel,
+                                           registered_vendors, rep, recon, schema_deferred=True, unread=unread)
             else:
                 # Inline: the index rows ARE the records, so there are no separate body files to reconcile;
                 # defer the content schema and seat the ids best-effort so the id-space, no-deletion, and
@@ -1317,15 +1333,16 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
                 if rows:
                     rep.cant("{}: {} schema-deferred record(s) of type {!r}; {}".format(
                         idx_rel, len(rows), tname, _SCHEMA_DEFERRAL))
-                for row in rows:
-                    if isinstance(row, dict):
-                        recs.append(_make_rec(row, tname, "active"))
-            continue
-        if layout == "per-record":
-            recs.extend(_gather_perrecord(root_fd, machine_rel, tname, namespace, rows, idx_rel,
-                                          registered_vendors, rep, recon))
+                seated = [_make_rec(row, tname, "active") for row in rows if isinstance(row, dict)]
+        elif layout == "per-record":
+            seated = _gather_perrecord(root_fd, machine_rel, tname, namespace, rows, idx_rel,
+                                       registered_vendors, rep, recon, unread=unread)
         else:
-            recs.extend(_gather_inline(tname, rows, idx_rel, registered_vendors, rep))
+            seated = _gather_inline(tname, rows, idx_rel, registered_vendors, rep)
+        # Each gatherer seats at most one record per row, so a shorter result means a row was skipped.
+        if len(seated) != len(rows):
+            unread.add(tname)
+        recs.extend(seated)
     return recs, recon
 
 
@@ -1682,14 +1699,20 @@ def _archive_unmanaged(rep, partial_active, path):
                     "archive artefact nor a <YYYY> bucket (spec 12/14.2)".format(path))
 
 
-def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=1):
+def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=1,
+                      unread=None):
     """Walk the archive tree, validating each bucket's archive.toml, its archived non-worklog records, and
     its archived worklog, and reconciling the enumeration BIDIRECTIONALLY against what is actually present
     (OPF-SPEC 12/13). Enumeration and record-schema faults attribute to the caller's C-ARCHIVE-ENUM focus;
     the rotation-eligibility (F4) findings are collected into a returned list for C-ROTATION. Returns
     (archive_recs, archive_worklogs, rotatable) where archive_worklogs maps a year to its WL-number -> entry
     map. Archive absent means no rotation (clean); a present bucket with no archive.toml is CANNOT-EVALUATE,
-    never 'no rotation happened'. No loop is sized by a declared span endpoint (F15)."""
+    never 'no rotation happened'. No loop is sized by a declared span endpoint (F15). Every type whose
+    archived records could not all be seated joins `unread` (when given): an archived index that is
+    unreadable or malformed or a row that is skipped adds its type, and a bucket or archive tree that
+    cannot be walked adds every enabled type."""
+    if unread is None:
+        unread = set()
     archive_recs = []
     archive_worklogs = {}
     rotatable = []
@@ -1698,7 +1721,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     # grading), matching C-CONTAINMENT.
     partial_active = import_status == "partial" and _has_active_import_run(root_fd, machine_rel, rep, homes)
     archive_rel = _rel(machine_rel, ARCHIVE_DIRNAME)
-    years, top_files = _list_dir(root_fd, archive_rel, rep)
+    years, top_files = _list_dir(root_fd, archive_rel, rep, unread, enabled_types)
     if years is None:
         return archive_recs, archive_worklogs, rotatable   # no archive/ tree: no rotation has happened (clean)
     for fn_ in (top_files or []):
@@ -1714,6 +1737,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
         sub, bfiles = _list_dir(root_fd, bucket, rep)
         if bfiles is None:
             rep.cant("archive bucket {} could not be listed".format(bucket))
+            unread.update(enabled_types)
             continue
         for d in (sub or []):
             # A subdirectory inside a bucket is unmanaged: a bucket holds only files (archive.toml,
@@ -1723,12 +1747,15 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
         if ARCHIVE_MANIFEST_NAME not in bfiles:
             rep.cant("archive bucket {} has no {} (cannot evaluate the rotation; spec 12)".format(
                 bucket, ARCHIVE_MANIFEST_NAME))
+            unread.update(enabled_types)
             continue
         amf, ast = _read_toml(root_fd, _rel(bucket, ARCHIVE_MANIFEST_NAME), rep)
         if ast != "ok":
+            unread.update(enabled_types)
             continue
         moved, wl_moved = _parse_archive_manifest(amf, bucket, rep)
         if moved is None:
+            unread.update(enabled_types)
             continue
         if moved and not wl_moved:
             # gemini/claude round-11 BLOCKER: per-bucket rotation binding. A bucket that rotates non-worklog
@@ -1763,9 +1790,11 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             idx_rel = _rel(bucket, fn_)
             data, st = _read_toml(root_fd, idx_rel, rep)
             if st != "ok":
+                unread.add(tname)
                 continue
             rows = _index_rows(data, idx_rel, rep)
             if rows is None:
+                unread.add(tname)
                 continue
             deferred = _schema_deferred(tname)
             if deferred and rows:
@@ -1778,11 +1807,13 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 rw = "{}#{}".format(idx_rel, i + 1)
                 if not isinstance(row, dict):
                     rep.cant("{}: archived record row is not a table".format(rw))
+                    unread.add(tname)
                     continue
                 if not deferred:
                     rv = validate_record(row, expected_type=tname, registered_vendors=registered_vendors)
                     if rv.status == CANNOT_EVALUATE:
                         rep.cant("{}: {}".format(rw, "; ".join(rv.findings)))
+                        unread.add(tname)
                         continue
                     if rv.status != VALID:
                         for f in rv.findings:
@@ -1895,10 +1926,16 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
 
 # --- the cross-record checks -------------------------------------------------------------------------
 
-def _check_receipts(recs, by_id, rep):
+def _check_receipts(recs, by_id, rep, unread=frozenset()):
     """C-RECEIPTS (R1): the done<->backlog_item receipt is one-to-one in BOTH directions (OPF-SPEC 8.5).
     Every ratified backlog_item (unqualified `done`) has exactly one done receipt; every done's receipt_of
-    target resolves to a backlog_item ratified at `done`."""
+    target resolves to a backlog_item ratified at `done`. When the backlog_item or done records could not
+    all be read (`unread`, from the collectors) the join is CANNOT-EVALUATE and is not run: a missing
+    receipt or target could hide a defect or report a false one."""
+    if unread & {"backlog_item", "done"}:
+        rep.cant("C-RECEIPTS: the backlog_item and done records could not all be read (see C-RECORDS and "
+                 "C-ARCHIVE-ENUM); the receipt join is not evaluated over a partial set (spec 8.5)")
+        return
     bi_state = {r.id: (r.state, r.qual) for r in recs if r.rtype == "backlog_item" and isinstance(r.id, str)}
     done_targets = {}
     for r in recs:
@@ -1932,7 +1969,7 @@ def _check_receipts(recs, by_id, rep):
                                 "at 'done' (state {!r}; spec 8.5)".format(did, tid, state))
 
 
-def _check_handoff(recs, rep):
+def _check_handoff(recs, rep, unread=frozenset()):
     """C-HANDOFF (R2): at most one `current` handoff among clean records authored by non-importer actors
     (OPF-SPEC 8.5). Section 8.6 keys the importer firewall "on provenance rather than on series alone": it
     "covers every record whose `actor.kind` is `importer`, in the imported series or written into the
@@ -1941,13 +1978,14 @@ def _check_handoff(recs, rep):
     actors". OPF has never been released, so no store predates that firewall, and it applies on every
     store: this check applies the exemption keyed on provenance alone, in agreement with the record
     writer's current-handoff join (_opf_record._current_handoffs) and the HANDOFF view
-    (_opf_views.render_handoff), which apply it the
-    same way. An imported-series row never counts either (_validate_opened_store builds the graded record
-    list from the active, archive and worklog records and never adds an imported-series row; the skip
-    matches that routing for a direct caller). Only the exact kind `importer` is exempt: a lookalike kind
-    (another case, a prefix or an extension) counts, and a record whose actor kind cannot be read (None)
-    counts, fail-closed (validate_record already names the unknown or unreadable actor), never a silent
-    pass."""
+    (_opf_views.render_handoff), which apply it the same way. An imported-series row never counts either
+    (_validate_opened_store builds the graded record list from the active, archive and worklog records and
+    never adds an imported-series row; the skip matches that routing for a direct caller). Only the exact
+    kind `importer` is exempt: a lookalike kind (another case, a prefix or an extension) counts, and a
+    record whose actor kind cannot be read (None) counts, fail-closed (validate_record already names the
+    unknown or unreadable actor), never a silent pass. When the handoff records could not all be read
+    (`unread`, from the collectors) the check is CANNOT-EVALUATE, never a pass over a partial count; a
+    count above one is still reported, since a record not read can only add to it."""
     current = [r.id for r in recs if r.rtype == "handoff" and r.state == "current" and r.qual is None
                and r.location != "imported"
                and r.actor_kind != "importer"]
@@ -1955,6 +1993,9 @@ def _check_handoff(recs, rep):
         rep.finding("C-HANDOFF: {} clean handoffs not authored by a known importer are 'current'; at "
                     "most one current handoff exists among clean records not authored by a known "
                     "importer (spec 8.5/8.6)".format(len(current)))
+    if "handoff" in unread:
+        rep.cant("C-HANDOFF: the handoff records could not all be read (see C-RECORDS and C-ARCHIVE-ENUM); "
+                 "the at-most-one-current count is not evaluated over a partial set (spec 8.5)")
 
 
 def decision_chains(recs, by_id):
@@ -2014,13 +2055,18 @@ def archived_records(root_fd, machine_rel, enabled_types, registered_vendors, im
     return archive_recs, rep.cannot + rep.findings + rotatable
 
 
-def _check_decision_chains(recs, by_id, rep):
+def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
     """C-DECISION-CHAINS (R3): exactly one current effective resolution per pending_decision supersession
     chain THAT HAS A RESOLUTION (OPF-SPEC 8.5), over the chains decision_chains derives. For a chain
     carrying at least one decided member, the count of current resolutions must be exactly one, in BOTH
     directions: zero (the sole resolution superseded by a withdrawn or still-open successor) is a fail-open
     the count-only-over-one form missed (F14). A wholly-undecided chain legitimately has zero and is not
-    flagged."""
+    flagged. When the pending_decision records could not all be read (`unread`, from the collectors) the
+    check is CANNOT-EVALUATE and is not run: a member not read can split, join or resolve a chain."""
+    if "pending_decision" in unread:
+        rep.cant("C-DECISION-CHAINS: the pending_decision records could not all be read (see C-RECORDS and "
+                 "C-ARCHIVE-ENUM); the chains are not evaluated over a partial set (spec 8.5)")
+        return
     for _members, current in decision_chains(recs, by_id):
         if len(current) != 1:
             rep.finding("C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution "
@@ -3524,8 +3570,9 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-RECORDS: gather + validate every active record; collect per-record reconciliation ----------
     rep.ran("C-RECORDS")
+    unread = set()          # the record types whose population a collector could not read in full
     active_recs, recon = _gather_active_records(root_fd, machine_rel, enabled_types, layout,
-                                                registered_vendors, rep)
+                                                registered_vendors, rep, unread=unread)
     try:
         active_worklog = _gather_worklog(
             root_fd, _rel(machine_rel, WORKLOG_NAME), registered_vendors, rep,
@@ -3557,7 +3604,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-ARCHIVE-ENUM")
     archive_recs, archive_worklogs, rotatable = _validate_archive(root_fd, machine_rel, enabled_types,
                                                                   registered_vendors, import_status, rep,
-                                                                  homes=homes)
+                                                                  homes=homes, unread=unread)
 
     # --- C-EVIDENCE-ENUM (homes 2 only): reconcile the evidence homes against their inventories -------
     if homes >= 2:
@@ -3667,11 +3714,11 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- the cross-record checks ----------------------------------------------------------------------
     rep.ran("C-RECEIPTS")
-    _check_receipts(recs, by_id, rep)
+    _check_receipts(recs, by_id, rep, unread)
     rep.ran("C-HANDOFF")
-    _check_handoff(recs, rep)
+    _check_handoff(recs, rep, unread)
     rep.ran("C-DECISION-CHAINS")
-    _check_decision_chains(recs, by_id, rep)
+    _check_decision_chains(recs, by_id, rep, unread)
     rep.ran("C-LINKS")
     _check_links(recs, by_id, all_ids, rep, imported_recs)
 
@@ -6169,22 +6216,24 @@ def self_test():
             _opf_store.SUPPORTED_HOMES = 2
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
             # The same maintainer + importer pair as the inactive vector: the importer-authored record is
-            # exempt history here too (spec 8.6), so no finding at all (red if the exemption is removed).
+            # exempt history here too (spec 8.6), so no finding at all, C-HANDOFF evaluates to an explicit
+            # PASS and the only cants are the pending imported checks (red if the exemption is removed or
+            # if C-HANDOFF, or anything else, goes unevaluated).
             _r2_act = act_machine()
             _r2_act["handoff.index.toml"] = idx([ho(1), envelope("HO-2", "handoff", "current",
                                                                  actor={"kind": "importer",
                                                                         "id": "import-assistant"})])
             _r2_act["counters.toml"] = counters(HO=2)
             _r2_act_run = run(_r2_act)
-            # The three-kind store while ACTIVE: this vector covers exactly that the active-series
-            # exemption stays importer-only, so widening it to the assistant or the automation kind
-            # drops the reported count below 3 and reads red here.
+            # The three-kind store while ACTIVE: this vector covers exactly that the one exemption stays
+            # importer-only on an active store too, so widening it to the assistant or the automation
+            # kind drops the reported count below 3 and reads red here.
             _r2k_act = act_machine()
             _r2k_act["handoff.index.toml"] = _three_kind_idx()
             _r2k_act["counters.toml"] = counters(HO=3)
             _r2k_act_run = run(_r2k_act)
-            # The unreadable actor while ACTIVE: None is never taken for an importer even where the
-            # exemption applies, fail-closed (red if the active exemption ever widens to None).
+            # The unreadable actor while ACTIVE: None is never taken for an importer on an active store
+            # either, fail-closed (red if the exemption ever widens to None).
             _r2na_act = act_machine()
             _r2na_row = ho(2)
             del _r2na_row["actor"]
@@ -6195,12 +6244,84 @@ def self_test():
             _opf_store.SUPPORTED_SPEC_VERSION = _r2_prev_ssv
             _opf_store.SUPPORTED_HOMES = _r2_prev_homes
         check("r2-importer-current-handoff-exempt-when-active",
-              _r2_act_run is not None and not _r2_act_run.findings and not handoff_msgs(_r2_act_run))
+              _r2_act_run is not None and not _r2_act_run.findings and not handoff_msgs(_r2_act_run)
+              and _r2_act_run.checks.get("C-HANDOFF") == "PASS" and pending_only(_r2_act_run))
         check("r2-assistant-and-automation-handoffs-counted-while-active",
               _r2k_act_run is not None and handoff_msgs(_r2k_act_run) == [_r2_three_msg])
         check("r2-unreadable-actor-handoff-counted-while-active",
               _r2na_act_run is not None and len(handoff_msgs(_r2na_act_run)) == 1
               and any("missing required field: actor" in m for m in _r2na_act_run.findings))
+        # A handoff population the collectors could not read in full is never a C-HANDOFF pass: the
+        # count over the records that were read cannot show that at most one is current. Each vector
+        # below leaves C-HANDOFF CANNOT-EVALUATE naming the cause (red if the check passes on a partial
+        # count): an index that cannot be read (a directory in its place), a malformed index (unparseable,
+        # or `record` not an array), an absent index, a row that is not a table, a malformed archived
+        # index, and, per-record, a registry row with no body and a body with no registry row.
+        def _handoff_unread(res):
+            return (res is not None and res.checks.get("C-HANDOFF") == "CANNOT-EVALUATE"
+                    and any("handoff records could not all be read" in m for m in handoff_msgs(res)))
+        f = clean_machine()
+        del f["handoff.index.toml"]
+        f["handoff.index.toml/stray.toml"] = idx([ho(1)])
+        check("r2-handoff-index-unreadable-cannot-evaluate", _handoff_unread(run(f)))
+        f = clean_machine()
+        f["handoff.index.toml"] = "this is not valid toml === ["
+        _r2_unparsed = run(f)
+        f = clean_machine()
+        f["handoff.index.toml"] = {"schema": 1, "record": "HO-1"}
+        check("r2-handoff-index-malformed-cannot-evaluate",
+              _handoff_unread(_r2_unparsed) and _handoff_unread(run(f)))
+        f = clean_machine()
+        del f["handoff.index.toml"]
+        check("r2-handoff-index-missing-cannot-evaluate", _handoff_unread(run(f)))
+        f = clean_machine()
+        f["handoff.index.toml"] = "schema = 1\nrecord = [\"HO-1\"]\n"
+        check("r2-handoff-row-not-table-cannot-evaluate", _handoff_unread(run(f)))
+        f = clean_machine()
+        f["archive/2026/handoff.index.toml"] = {"schema": 1, "record": "HO-1"}
+        check("r2-archived-handoff-index-malformed-cannot-evaluate", _handoff_unread(run(f)))
+        f = copy.deepcopy(pr_machine)
+        f["handoff.index.toml"] = {"schema": 1, "record": [
+            {"id": "HO-1", "state": "current", "path": "handoff/HO-1.toml", "digest": "sha256:" + "0" * 64}]}
+        check("r2-perrecord-handoff-row-without-body-cannot-evaluate",
+              _handoff_unread(run(f, product=pr_product, obs=pr_obs)))
+        f = copy.deepcopy(pr_machine)
+        f["handoff/HO-1.toml"] = ho(1)
+        check("r2-perrecord-handoff-body-without-row-cannot-evaluate",
+              _handoff_unread(run(f, product=pr_product, obs=pr_obs)))
+        # The same holds for the sibling current-state joins fed by the same collectors: C-RECEIPTS over
+        # backlog_item and done, and C-DECISION-CHAINS over pending_decision, are CANNOT-EVALUATE when
+        # their records could not all be read (red if either passes over the partial set), while an
+        # unread type that none of the three reads leaves all three a PASS (red if the scoping widens).
+        f = clean_machine()
+        f["backlog_item.index.toml"] = {"schema": 1, "record": "BI-1"}
+        _r1_part = run(f)
+        check("r1-receipts-partial-population-cannot-evaluate",
+              _r1_part is not None and _r1_part.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
+              and any("receipt join is not evaluated" in m for m in _r1_part.by_check.get("C-RECEIPTS", [])))
+        f = clean_machine()
+        f["pending_decision.index.toml"] = {"schema": 1, "record": "PD-1"}
+        _r3_part = run(f)
+        check("r3-chains-partial-population-cannot-evaluate",
+              _r3_part is not None and _r3_part.checks.get("C-DECISION-CHAINS") == "CANNOT-EVALUATE"
+              and any("chains are not evaluated" in m for m in _r3_part.by_check.get("C-DECISION-CHAINS", [])))
+        # An archive bucket with no archive.toml is never walked, so none of its records is read: all
+        # three joins are CANNOT-EVALUATE (red if an unwalked bucket leaves any of them a pass).
+        f = clean_machine()
+        del f["archive/2026/archive.toml"]
+        f["archive/2026/handoff.index.toml"] = idx([])
+        _r2_bucket = run(f)
+        check("current-state-joins-cannot-evaluate-when-bucket-unwalked",
+              _r2_bucket is not None
+              and all(_r2_bucket.checks.get(cid) == "CANNOT-EVALUATE"
+                      for cid in ("C-RECEIPTS", "C-HANDOFF", "C-DECISION-CHAINS")))
+        f = clean_machine()
+        f["finding.index.toml"] = {"schema": 1, "record": "FN-1"}
+        _r2_other = run(f)
+        check("current-state-joins-pass-when-another-type-unread",
+              _r2_other is not None and _r2_other.checks.get("C-RECORDS") == "CANNOT-EVALUATE"
+              and all(_r2_other.checks.get(cid) == "PASS"
+                      for cid in ("C-RECEIPTS", "C-HANDOFF", "C-DECISION-CHAINS")))
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1), pd(2, supersedes="PD-1"), pd(3, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=3)
