@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "81e94bf5ea39909b0a16a49e09bf96119ce10f2191a7d5ff3f096204b4b9fa59"
+tree-sha256 = "814c0e40362b3b4caf2e731cf8492e607079b881b6fb813b0e76e388430b06d8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2406,8 +2406,8 @@ sha256 = "42db2862ae33cce674febff7be58c91263cd2932b69d641157c46f08a6eac398"
 
 [[sources]]
 path = "TODO.md"
-bytes = 21034
-sha256 = "4fdb82c0cd46b35786f7da8f36fe3d0ecb310c56d12f8924d9c54e39b592dc28"
+bytes = 20299
+sha256 = "9af1151703862da7069a443e22ac98c82ad43afc46d99f74513211227d6e8c68"
 
 [[sources]]
 path = "VERSION"
@@ -2726,8 +2726,8 @@ sha256 = "785012cc91281f47261281a8bb412f8c56cd0201815d7e1ce43e1d1ee4010697"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 490187
-sha256 = "dcc3b364ff1eb0e017c43c32d573df139a08771551451e3f1f2ffbf4eec24805"
+bytes = 554922
+sha256 = "a63979e9e9b5a98f2e5c497a85c3384634069881067d832c22dd6870ede64062"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
@@ -2786,8 +2786,8 @@ sha256 = "80bedee0a9245cac9f2480e1af7e523f3933f1f752d310c9887cd2ac0156ce1c"
 
 [[sources]]
 path = "opf/tools/_opf_observe.py"
-bytes = 103658
-sha256 = "950249bd7a69a3ef0d59ac59cc07b846fc62aacb0603a5ea1e3f736d22930e1d"
+bytes = 120041
+sha256 = "d3b563c5ce5947278a83ee8a81e0605b48bea150fdb20c8523c2b2a252ba3f41"
 
 [[sources]]
 path = "opf/tools/_opf_oplock.py"
@@ -2801,8 +2801,8 @@ sha256 = "0d9e538618029fbc77e6e92abcf327013eb4f4245cbd4ddf6767ccaabda67af2"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
-bytes = 304043
-sha256 = "c81375081c85b05ef5dc9279746058d9f9d01029497bc32c65cc3469f0662d34"
+bytes = 307574
+sha256 = "6e529ced60101d7be8ffc6df232190b8f2ac064b089985e35a422975c9ce6e7d"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
@@ -3832,7 +3832,7 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
 bytes = 28682
-sha256 = "cf0bfad42b42e21046447eebcc8ec778512c9699171a2b431c6369ccdfa32c69"
+sha256 = "b65e28c3f70b86c7e3c72241cbb7074b1f78b579d0b3909cea9420f07a1307b1"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"
