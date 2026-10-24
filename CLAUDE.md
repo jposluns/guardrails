@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.9** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.10** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -77,7 +77,7 @@ the exact patch release the maintainer host runs, named in `.aiqt/python-host.to
 up none); with `check-latest` off, setup-python may resolve that pin to a 3.14 already on the runner rather
 than the newest patch release. Every other job in `quality.yml` stays required. The host jobs add CI time,
 a cost accepted for this signal: the OPF tooling self-test and the four git-fixture-env suites each run twice in
-every run, and an edit to a pull request's title or body starts a run. A passing local suite on the host
+every run, and an edit to a pull request's title or body starts no Quality run. A passing local suite on the host
 patch then predicts a required CI leg; a failure on the `3.14` legs alone is diagnostic evidence of a
 patch-release difference, not proof that the change is innocent (a change once passed every local suite and
 failed only in CI on a newer patch release). The runner image is pinned beside the patch: on 2026-10-12 the
