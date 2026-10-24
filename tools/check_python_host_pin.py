@@ -23,13 +23,16 @@ Legs, in order:
                convert.
   jobs         .github/workflows/quality.yml carries each HOST_JOBS job, and its top level and each such
                job are whole (JOB_RULES):
-                 workflow-keys  the workflow carries no top-level key but name, on, permissions and jobs
-                                (TOP_KEYS): a top-level defaults: or env: changes how every run step of
-                                every job executes (defaults: run: shell: true {0} makes each step exit 0
-                                without running its command);
-                 job-keys       the job carries no key but name, runs-on and steps (an if:,
-                                continue-on-error:, env:, defaults:, container: or strategy: can skip, mask,
-                                move or change what it runs);
+                 workflow-keys  the workflow carries no top-level key but name, on, permissions,
+                                concurrency and jobs (TOP_KEYS): a top-level defaults: or env: changes how
+                                every run step of every job executes (defaults: run: shell: true {0} makes
+                                each step exit 0 without running its command); and a concurrency: block is
+                                exactly CONCURRENCY_BLOCK once blank and comment lines are dropped (another
+                                group or cancel-in-progress can cancel a push-to-main run);
+                 job-keys       the job carries no key but name, runs-on and steps, and the one if: line
+                                HEAVY_JOB_IF_LINE exactly as written (any other if:, a continue-on-error:,
+                                env:, defaults:, container: or strategy: can skip, mask, move or change
+                                what it runs);
                  runner         runs-on is RUNNER, ubuntu-24.04: the setup-python versions manifest lists a
                                 patch release's Linux builds by Ubuntu version, so the job names its image;
                  checkout       the first step is the checkout step as written (uses: CHECKOUT_USES and a
@@ -147,7 +150,10 @@ Legs, in order:
                                 so the judge's job stays env-free); each env: and judge-step-key
                                 diagnostic names the recorded line of its key and says whether the
                                 carrying step is the counted judge or an unresolved judge-shaped
-                                step. Because every outside job is read whole, a line of any of them
+                                step; and no job that carries a counted or judge-shaped step carries
+                                a job-level if: (the pinned heavy-job line among them, which would skip
+                                the judge on every pull request but a merge-train-* one). Because every
+                                outside job is read whole, a line of any of them
                                 the extended model cannot read (a job property at an unexpected
                                 indent, a quoted or explicit key, a flow mapping, a block opener
                                 carrying an indentation indicator, an anchor or an alias among them),
@@ -190,7 +196,9 @@ Legs, in order:
                                 gate unread, and tools/check_ci_parity.py is the holder there
                                 (measured at this commit: a run: splicing a variable into this gate's
                                 path is exit 2 there, dynamic-target).
-               So a top-level key outside TOP_KEYS, another runner or checkout, an env: on a
+               So a top-level key outside TOP_KEYS, a concurrency: block other than CONCURRENCY_BLOCK,
+               a job-level if: other than HEAVY_JOB_IF_LINE on a host-patch job or any if: on the
+               judge's job, another runner or checkout, an env: on a
                host-patch job or on any of its steps, removing or moving a
                host-patch job, its setup-python step, its Python host pin step or one of its suite steps,
                omitting, reordering, repeating or adding a suite step, changing a job id or the command a held
@@ -368,9 +376,11 @@ build's downstream patches and the system libraries an interpreter links (OpenSS
 others) can differ between the host and the runner, and this gate does not compare them. It does not check
 that the committed patch is what the host runs: when the host interpreter changes, the maintainer updates the
 source and both host-patch pins in one reviewed change, and until then every local run fails on the
-interpreter leg. CI cost: the two jobs run the OPF tooling self-test and the four git-fixture-env suites a
-second time in every run of the workflow, and an edit to a pull request's title or body starts no Quality run (the
-workflow does not run on edited).
+interpreter leg. CI cost: the two jobs carry the pinned heavy-job if:, so they run the OPF tooling self-test
+and the four git-fixture-env suites a second time in every run on a push or on a merge-train-* pull request of
+this repository and in no other pull request run, and an edit to a pull request's title or body starts no
+Quality run (the workflow does not run on edited). This gate compares the concurrency: block and the if: line
+as text; whether GitHub evaluates them as their text says is not observed here.
 
 Run this gate isolated: python3 -I -B tools/check_python_host_pin.py
 """
@@ -432,9 +442,26 @@ GATE_RUN = "python3 -I -B " + GATE_PATH
 # would fail the jobs once it moves to an image the host patch has no build for.
 RUNNER = "ubuntu-24.04"
 # The top-level keys the workflow may carry: a defaults: or env: block changes how every run step of every
-# job executes.
-TOP_KEYS = ("name", "on", "permissions", "jobs")
+# job executes. concurrency: is accepted only as CONCURRENCY_BLOCK, line for line once blank and comment
+# lines are dropped: a pull request run's group is its pull request number with cancel-in-progress on, and
+# every other run's group is its own run id with cancel-in-progress off, so no push-to-main run of a
+# host-patch job is ever cancelled. tools/check_ci_parity.py pins the same block; the self-test holds the
+# two copies equal.
+TOP_KEYS = ("name", "on", "permissions", "concurrency", "jobs")
+CONCURRENCY_BLOCK = (
+    "concurrency:",
+    "  group: quality-${{ github.event_name == 'pull_request' && format('pr-{0}', "
+    "github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+)
+# The keys a host-patch job may carry, and the one job-level if: line it may also carry, exactly as written
+# (a trailing comment included): it runs the job on a push and on a pull request whose head is a
+# merge-train-* branch of this repository. tools/check_ci_parity.py pins the same line (HEAVY_JOB_IF_LINE
+# there); the self-test holds the two copies equal. No job that carries the --jobs-only judge carries an
+# if: at all (outside-judge), so the jobs leg still runs outside these jobs on every event.
 JOB_KEYS = {"name", "runs-on", "steps"}
+HEAVY_JOB_IF_LINE = ("    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && "
+                     "github.event.pull_request.head.repo.full_name == github.repository)")
 # The first step of each host-patch job, as written: another ref, repository or path can put another tree
 # under the gate and the suite.
 CHECKOUT_USES = "actions/checkout@v4"
@@ -1137,9 +1164,12 @@ def _host_job_findings(job, tree, want):
     found = []
     if "job-keys" in JOB_RULES:
         for key in tree:
+            if key == "if" and getattr(tree[key], "written", None) == HEAVY_JOB_IF_LINE:
+                continue
             if key not in JOB_KEYS:
                 found.append("{} carries {}:, which can skip, mask, move or change what it runs (a host-patch "
-                             "job carries only name, runs-on and steps)".format(where, key))
+                             "job carries only name, runs-on, steps and the pinned if: line "
+                             "HEAVY_JOB_IF_LINE)".format(where, key))
     if "runner" in JOB_RULES and tree.get("runs-on") != RUNNER:
         found.append("{} runs on {!r}, not {!r}: the setup-python versions manifest lists the host patch's "
                      "Linux builds by Ubuntu version, so the job names its image".format(
@@ -1435,6 +1465,11 @@ def _judge_findings(host_judges, other_lines, other_raw, headers):
             found.append("{}:{}: the job {} carries {} and sets a job-level env:, which in CI can "
                          "silence every step of that job, the carrying step included".format(
                              WORKFLOW_REL, tree.lines["env"], job, job_step_kind))
+        if "if" in tree:
+            found.append("{}:{}: the job {} carries {} and a job-level if:, which can skip every step of "
+                         "that job, the carrying step included (the pinned heavy-job line among them, which "
+                         "skips it on every pull request but a merge-train-* one); the judge's job carries "
+                         "no if:".format(WORKFLOW_REL, tree.lines["if"], job, job_step_kind))
         for position, step in enumerate(tree["steps"]):
             if not isinstance(step, dict):
                 continue
@@ -1495,6 +1530,8 @@ def job_findings(root, patch):
     entries = {job: [] for job in HOST_JOBS}
     host_judges, other_lines, other_raw, headers = [], {}, {}, {}
     seen, tops, in_jobs, job = set(), {}, False, None
+    # The lines of the top-level concurrency: block, its key line first, blank and comment lines dropped.
+    concurrency, in_concurrency = None, False
     for number, line in enumerate(_read_text(root / WORKFLOW_REL).split("\n"), 1):
         line = line[:-1] if line.endswith("\r") else line
         for char, label in LINE_BREAKS.items():
@@ -1517,7 +1554,13 @@ def job_findings(root, patch):
                 raise CannotEvaluate("{}:{}: the top-level key {} repeats line {}; this line model cannot "
                                      "tell which YAML keeps".format(WORKFLOW_REL, number, key, tops[key]))
             tops[key] = number
+            in_concurrency = key == "concurrency"
+            if in_concurrency:
+                concurrency = [line]
             in_jobs, job = line.split("#", 1)[0].rstrip(" \t") == "jobs:", None
+            continue
+        if in_concurrency and not comment:
+            concurrency.append(line)
             continue
         if in_jobs and not comment:
             header = JOB_RE.fullmatch(line)
@@ -1559,6 +1602,10 @@ def job_findings(root, patch):
                 findings.append("{}:{}: carries the top-level key {}:, which can change how every run step "
                                 "of every job executes (a defaults: or env: block among them); the workflow "
                                 "carries only {}".format(WORKFLOW_REL, number, key, ", ".join(TOP_KEYS)))
+        if concurrency is not None and tuple(concurrency) != CONCURRENCY_BLOCK:
+            findings.append("{}:{}: carries a top-level concurrency: block that departs from the pinned block "
+                            "(CONCURRENCY_BLOCK): another group or cancel-in-progress can cancel a push-to-main "
+                            "run of a host-patch job".format(WORKFLOW_REL, tops["concurrency"]))
     if "outside-judge" in JOB_RULES:
         findings.extend(_judge_findings(host_judges, other_lines, other_raw, headers))
     for name in HOST_JOBS:
@@ -2120,6 +2167,14 @@ def _job_cases():
          "adds " + HOST_SUITES[GFE][0], "suite-step"),
         ("jobs/job-if-finding", ((OPF, runs, "    if: false\n" + runs),), (),
          "opf-host-patch carries if:", "job-keys"),
+        # HEAVY_JOB_IF_LINE is the one if: a host-patch job may carry: a widened condition (the
+        # same-repository check dropped) and the pinned line respelled with a trailing comment are each
+        # refused by job-keys.
+        ("jobs/job-if-widened-finding",
+         ((OPF, runs, "    if: github.event_name == 'push' || startsWith(github.head_ref, 'merge-train-')\n"
+           + runs),), (), "opf-host-patch carries if:", "job-keys"),
+        ("jobs/job-if-pinned-line-commented-finding", ((GFE, runs, HEAVY_JOB_IF_LINE + "  # heavy\n" + runs),),
+         (), GFE + " carries if:", "job-keys"),
         ("jobs/job-continue-on-error-finding", ((GFE, runs, "    continue-on-error: true\n" + runs),), (),
          GFE + " carries continue-on-error:", "job-keys"),
         ("jobs/job-container-finding", ((OPF, runs, "    container: python:3.14.8\n" + runs),), (),
@@ -2140,6 +2195,15 @@ def _job_cases():
          "carries the top-level key defaults:", "workflow-keys"),
         ("jobs/workflow-env-finding", ((None, "jobs:\n", "env:\n  FOO: bar\n\njobs:\n"),), (),
          "carries the top-level key env:", "workflow-keys"),
+        # The concurrency: block is CONCURRENCY_BLOCK exactly: a group keyed by the ref (which groups a
+        # push-to-main run with the next one) and cancel-in-progress: true are each refused.
+        ("jobs/workflow-concurrency-group-mutated-finding",
+         ((None, "jobs:\n", "\n".join((CONCURRENCY_BLOCK[0], "  group: quality-${{ github.ref }}",
+                                       CONCURRENCY_BLOCK[2])) + "\n\njobs:\n"),), (),
+         "departs from the pinned block", "workflow-keys"),
+        ("jobs/workflow-concurrency-cancel-in-progress-true-finding",
+         ((None, "jobs:\n", "\n".join(CONCURRENCY_BLOCK[:2] + ("  cancel-in-progress: true",))
+           + "\n\njobs:\n"),), (), "departs from the pinned block", "workflow-keys"),
         ("jobs/job-defaults-finding",
          ((OPF, runs, "    defaults:\n      run:\n        shell: echo {0}\n" + runs),), (),
          "opf-host-patch carries defaults:", "job-keys"),
@@ -2182,6 +2246,11 @@ def _job_cases():
         ("jobs/jobs-only-job-env-finding",
          (("registry", "    runs-on: ", "    env:\n      BASH_ENV: '$(: > \"$0\")'\n    runs-on: "),), (),
          "sets a job-level env:", "outside-judge"),
+        # The pinned heavy-job if: on the judge's job would skip the judge on every pull request but a
+        # merge-train-* one, so any if: there is refused.
+        ("jobs/jobs-only-job-if-finding",
+         (("registry", "    runs-on: ", HEAVY_JOB_IF_LINE + "\n    runs-on: "),), (),
+         "carries the --jobs-only judge step and a job-level if:", "outside-judge"),
         # A command-shaped value that is not a step's own run: property never counts as the judge (a
         # with: input of the registry checkout step, and a job-level run:), and an env: on an earlier
         # step of the judge's job (whose GITHUB_ENV write reaches the judge step) is a finding.
@@ -2443,6 +2512,15 @@ def _self_test_cases(base):
             ("pins/trailing-comment-passes", "'3.14.4'  # the host patch")):
         check(check_id, evaluate(_fixture(base, workflow=_workflow(((OPF, PIN, "python-version: " + pin),))),
                                  HOST)[0], 0)
+    # The pinned concurrency: block (a whole-line comment inside it dropped) and the pinned if: line on
+    # both host-patch jobs pass; before the change each was a workflow-keys or job-keys finding.
+    check("jobs/workflow-concurrency-pinned-passes", evaluate(_fixture(base, workflow=_workflow(((
+        None, "jobs:\n", "\n".join(CONCURRENCY_BLOCK) + "\n\njobs:\n"),))), HOST)[0], 0)
+    check("jobs/workflow-concurrency-comment-line-passes", evaluate(_fixture(base, workflow=_workflow(((
+        None, "jobs:\n", "\n".join(CONCURRENCY_BLOCK[:1] + ("  # superseded pull request runs",)
+                                   + CONCURRENCY_BLOCK[1:]) + "\n\njobs:\n"),))), HOST)[0], 0)
+    check("jobs/host-jobs-pinned-if-passes", evaluate(_fixture(base, workflow=_workflow(tuple(
+        (job, "    runs-on: ", HEAVY_JOB_IF_LINE + "\n    runs-on: ") for job in HOST_JOBS))), HOST)[0], 0)
     check("jobs/extra-step-after-gate-passes", evaluate(_fixture(base, workflow=_workflow(((
         OPF, GATE_STEP, GATE_STEP + "      - name: Python host pin self-test\n        run: " + GATE_RUN
         + " --self-test\n\n"),))), HOST)[0], 0)
@@ -3539,6 +3617,12 @@ def _self_test_cases(base):
           (tuple(floor.HOST_JOBS), floor.HOST_WORKFLOW_REL, floor.HOST_SOURCE_REL,
            floor.HOST_PATCH_RE.pattern, floor.LINE_BREAKS),
           (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE.pattern, LINE_BREAKS))
+    # The CI parity gate pins the same concurrency: block and heavy-job if: line, and counts both host-patch
+    # jobs among the jobs that may carry that line: its copies must be these.
+    parity = _copy(base, "ci_parity_lane_pins", _read_text(ROOT / "tools" / "check_ci_parity.py"))
+    check("real/ci-parity-lane-pins-agree",
+          (parity.CONCURRENCY_BLOCK, parity.HEAVY_JOB_IF_LINE, set(HOST_JOBS) <= parity.HEAVY_JOBS),
+          (CONCURRENCY_BLOCK, HEAVY_JOB_IF_LINE, True))
     _red_on_revert(base)
 
 

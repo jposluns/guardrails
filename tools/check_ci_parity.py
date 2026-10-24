@@ -69,7 +69,8 @@ does not read. defaults (run.shell) and container replace the program or image e
 run: step executes in, so a gate command need not run at all. The other job keys
 cannot turn a failing gate into a success result: if:, needs:, timeout-minutes,
 concurrency and environment can only skip, cancel or fail a job, which Quality gates
-reads as not success; a strategy matrix job's result is failure when any leg fails
+reads as not success (the LANES rule still holds if: and concurrency to their
+pinned text); a strategy matrix job's result is failure when any leg fails
 (GitHub behaviour, not observed here); name, runs-on, permissions, outputs, env, services,
 with and secrets do not decide a result (with and secrets apply only under uses).
 The step-level keys that could (continue-on-error, if:, timeout-minutes, and any
@@ -168,15 +169,37 @@ event or types: key, an item that is not a plain name, or a sequence item at
 indent 4, which YAML reads as an indentless sequence). NOT READ
 (disclosed): the push trigger, and every filter or condition that can keep a
 listed event from scheduling the workflow or a job: branches:,
-branches-ignore:, paths:, paths-ignore:, and a job- or step-level if:. Any of
+branches-ignore:, paths:, paths-ignore:, and a job- or step-level if: (a
+job-level if: is read only by the LANES rule below, which refuses one on any job
+outside the heavy jobs of quality.yml, the scan's job included). Any of
 them can stop the scan workflow on an edited event; reachability is outside
 token-parity scope (the reachability residual below).
+LANES. quality.yml may carry one top-level concurrency: block, exactly
+CONCURRENCY_BLOCK line for line once blank and whole-line comment lines are
+dropped: a pull request run's group is keyed by its pull request number with
+cancel-in-progress on, so a newer run of that pull request cancels the
+superseded one, and every other run's group is keyed by its own run id with
+cancel-in-progress off, so a push-to-main run is never cancelled or queued
+behind another run (GitHub's documented concurrency behaviour, not observed
+here). A job-level if: on any job but the Quality gates job (whose always() the
+REQUIRED STATUS rule holds) is accepted only as the exact line
+HEAVY_JOB_IF_LINE, and only on a HEAVY_JOBS job of quality.yml: those jobs run
+on a push and on a pull request whose head is a merge-train-* branch of this
+repository, and are skipped on every other pull request, which Quality gates
+reads as not success, so such a pull request merges only by riding a train. A
+departing concurrency: block, a concurrency: block in any other workflow, a
+job-level concurrency: key on any job, a departing if: line on a heavy job and
+the if: line on any other job are each a lane finding (exit 1). Not read:
+whether GitHub evaluates the pinned expressions as their text says (this rule
+compares text), and a cancelled run left on a live head (a reopen while its
+run is in progress, or a push back to an earlier head), which tools/ci-status.sh
+then refuses until a new head commit.
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
      stale or reversed, and every mandatory member is present on both sides
   1  an evaluated parity finding, stale or reversed exception, missing mandatory
-     member, or required-status finding
+     member, required-status, trigger, relocation or lane finding
   2  cannot-evaluate, including an unreadable input, malformed control input, empty
      extraction, unsupported shell or YAML shape, unresolved command value, hidden
      action, circular runner invocation, or shadow-scan discrepancy
@@ -500,7 +523,37 @@ REQUIRED_STATUS_JOB = (
     '          echo "Quality gates: PASS, every needed job concluded success"',
 )
 
-MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
+# The one top-level concurrency: block quality.yml may carry, compared line for line
+# once blank and whole-line comment lines are dropped (module docstring, LANES). A
+# pull request run's group is keyed by its number with cancel-in-progress on, so a
+# newer run of that pull request cancels the superseded one; every other run's group
+# is keyed by its own run id with cancel-in-progress off, so a push-to-main run is
+# never cancelled or queued behind another run.
+CONCURRENCY_BLOCK = (
+    "concurrency:",
+    "  group: quality-${{ github.event_name == 'pull_request' && "
+    "format('pr-{0}', github.event.pull_request.number) || "
+    "format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+)
+
+# The one job-level if: line a job other than Quality gates may carry, exactly as
+# written, and the quality.yml jobs that may carry it (module docstring, LANES): a
+# heavy job runs on a push and on a pull request whose head is a merge-train-*
+# branch of this repository, and is skipped on every other pull request, which
+# Quality gates reads as not success.
+HEAVY_JOB_IF_LINE = (
+    "    if: github.event_name == 'push' || "
+    "(startsWith(github.head_ref, 'merge-train-') && "
+    "github.event.pull_request.head.repo.full_name == github.repository)")
+HEAVY_JOBS = frozenset({
+    "opf", "selftest-execution", "git-fixture-env-core",
+    "git-fixture-env-config-combined", "git-fixture-env-config-malformed",
+    "git-fixture-env-config-system", "opf-host-patch",
+    "git-fixture-env-host-patch", "byte-canon-matrix",
+})
+
+MSG_LEAKS_SCAN ="tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
 # The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan and that
 # scan's self-test. Any other member there is a relocation finding, because that workflow's status
 # is separate from the aggregated Quality gates and re-runs on every PR metadata edit, so a gate
@@ -624,7 +677,9 @@ EXPECTED_RUN_GATE_BODY = (
 # cannot-evaluate rather than silently ignored (honouring the fail-closed guarantee).
 # Deeper nested non-gate YAML (under on:, env:, with:, strategy:) is not exhaustively
 # schema-validated; the shadow scan still prevents any tools/* gate from hiding there.
-TOP_LEVEL_KEYS = frozenset({"name", "on", "permissions", "jobs"})
+# A top-level concurrency: key is recognized only to be held to CONCURRENCY_BLOCK by
+# the lane rule (_lane_findings).
+TOP_LEVEL_KEYS = frozenset({"name", "on", "permissions", "concurrency", "jobs"})
 JOB_PROPERTY_KEYS = frozenset({
     "name", "runs-on", "steps", "strategy", "needs", "env", "permissions",
     "if", "timeout-minutes", "continue-on-error", "defaults", "outputs",
@@ -2263,6 +2318,87 @@ def _required_status_findings(
     return findings
 
 
+def _top_level_block(lines, key):
+    """Return the raw lines of the first top-level key block, from its key line to
+    the next top-level line, blank and whole-line comment lines dropped; None when
+    the workflow carries no such key."""
+    block = None
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if raw[:1] not in (" ", "\t"):
+            if block is not None:
+                break
+            code = _strip_comment(raw).strip()
+            if (code.split(":", 1)[0] if ":" in code else code) == key:
+                block = [raw]
+            continue
+        if block is not None:
+            block.append(raw)
+    return None if block is None else tuple(block)
+
+
+def _lane_findings(job_ids, job_fields, lines, source):
+    """Hold the concurrency: block and every job-level if: other than the Quality
+    gates job's to the pinned lane text (module docstring, LANES)."""
+    findings = []
+    block = _top_level_block(lines, "concurrency")
+    if block is not None and source != CI_SOURCE:
+        findings.append(Finding(
+            "lane",
+            "concurrency",
+            "{} carries a top-level concurrency: block; only {} carries one, "
+            "the pinned CONCURRENCY_BLOCK, so no other workflow's run is "
+            "cancelled on a live head".format(source, CI_SOURCE),
+        ))
+    elif block is not None and block != CONCURRENCY_BLOCK:
+        findings.append(Finding(
+            "lane",
+            "concurrency",
+            "the top-level concurrency: block of {} departs from the pinned "
+            "CONCURRENCY_BLOCK: got {!r}; only the pinned block is known to "
+            "cancel a pull request run alone and never a push-to-main "
+            "run".format(
+                source, list(block)),
+        ))
+    for job in job_ids:
+        fields = job_fields[job]
+        if "concurrency" in fields["keys"]:
+            findings.append(Finding(
+                "lane",
+                job,
+                "job {!r} of {} carries a job-level concurrency: key, which can "
+                "cancel the job in a push-to-main run; only the pinned "
+                "top-level CONCURRENCY_BLOCK is accepted".format(job, source),
+            ))
+        if ("if" not in fields
+                or _unquote(fields.get("name", (0, ""))[1])
+                == REQUIRED_STATUS_NAME):
+            continue
+        raw = lines[fields["if"][0] - 1]
+        if source != CI_SOURCE or job not in HEAVY_JOBS:
+            findings.append(Finding(
+                "lane",
+                job,
+                "job {!r} of {} carries a job-level if: at line {}, but it is "
+                "not a heavy job of {} (HEAVY_JOBS), so it would be skipped "
+                "where it must run".format(
+                    job, source, fields["if"][0], CI_SOURCE),
+            ))
+        elif raw != HEAVY_JOB_IF_LINE:
+            findings.append(Finding(
+                "lane",
+                job,
+                "the job-level if: of heavy job {!r} at line {} departs from "
+                "the pinned HEAVY_JOB_IF_LINE: got {!r}; only the pinned line "
+                "is known to run the job on a push and on a merge-train-* "
+                "pull request of this repository alone".format(
+                    job, fields["if"][0], raw.strip()),
+            ))
+    return findings
+
+
 def _edit_event_types(lines, source, diagnostics):
     """Return {event: types} for each EDIT_EVENTS trigger of the top-level on:.
 
@@ -3015,6 +3151,7 @@ def extract_ci(text, source=CI_SOURCE):
 
     findings = _required_status_findings(
         job_ids, job_fields, lines, source, diagnostics)
+    findings.extend(_lane_findings(job_ids, job_fields, lines, source))
     findings.extend(_trigger_findings(lines, members, source, diagnostics))
     findings.extend(_relocation_findings(members, source))
     findings.extend(_step_shell_findings(steps))
@@ -6920,6 +7057,126 @@ def self_test():
         failures.append(
             "38 equals-form glob literal: unexpected diagnostics: "
             "{!r}".format(glob_literal.diagnostics))
+
+    # 39 LANES: the pinned concurrency: block and the pinned heavy-job if:
+    # line pass; any other concurrency: spelling, a concurrency: block outside
+    # quality.yml, a job-level concurrency: key, a widened if: and the if: on
+    # a job outside HEAVY_JOBS are each a lane finding. Without the rule the
+    # pinned block was an unknown top-level key (exit 2) and every if: passed,
+    # so each vector below fails on revert; each red vector names its finding.
+    def lane_ci(heavy_if=HEAVY_JOB_IF_LINE, light_if=None, top=(),
+                job_tail=()):
+        lines = ["name: Test"] + list(top) + ["jobs:"]
+        for job, commands, condition in (
+                ("secrets", common + ("python3 tools/a.py",), light_if),
+                ("opf", ("python3 tools/b.py",), heavy_if)):
+            lines.extend(("  " + job + ":", "    name: Job " + job))
+            if condition is not None:
+                lines.append(condition)
+            lines.extend(job_tail)
+            lines.extend(("    runs-on: ubuntu-latest", "    steps:",
+                          "      - uses: actions/checkout@v4"))
+            for number, command in enumerate(commands, 1):
+                lines.extend((
+                    "      - name: Gate {}".format(number),
+                    "        shell: bash",
+                    "        run: " + command,
+                ))
+        lines.extend(aggregator_head + always
+                     + ("    needs:", "      - secrets", "      - opf"))
+        lines.extend(REQUIRED_STATUS_JOB[
+            REQUIRED_STATUS_JOB.index(REQUIRED_STATUS_NEEDS_SLOT) + 1:])
+        return "\n".join(lines) + "\n"
+
+    def lane_case(name, report, want_code, needle=None):
+        case(name, report, want_code,
+             kinds=("lane",) if needle is not None else ())
+        if needle is not None and not any(
+                needle in finding.message for finding in report.findings
+                if finding.kind == "lane"):
+            failures.append("{}: no lane finding mentions {!r}: {!r}".format(
+                name, needle, report.findings))
+        if needle is None and any(
+                finding.kind == "lane" for finding in report.findings):
+            failures.append("{}: unexpected lane finding: {!r}".format(
+                name, report.findings))
+
+    pinned_top = CONCURRENCY_BLOCK
+    group_line, cancel_line = CONCURRENCY_BLOCK[1], CONCURRENCY_BLOCK[2]
+    lane_case("39a the pinned concurrency: block and heavy-job if: pass",
+              evaluate(multi_local, lane_ci(top=pinned_top), ()), 0)
+    lane_case("39b control: neither the block nor the if: is required",
+              evaluate(multi_local, lane_ci(heavy_if=None), ()), 0)
+    lane_case("39c control: a whole-line comment and a blank line inside the "
+              "block are dropped",
+              evaluate(multi_local, lane_ci(top=(
+                  pinned_top[0], "  # superseded pull request runs", "",
+                  group_line, cancel_line)), ()), 0)
+    for label, block in (
+            ("a group keyed by the ref for every event",
+             (pinned_top[0], "  group: quality-${{ github.ref }}",
+              cancel_line)),
+            ("a group keyed by the pull request number for every event",
+             (pinned_top[0],
+              "  group: quality-${{ github.event.pull_request.number }}",
+              cancel_line)),
+            ("the push branch of the group keyed by the ref",
+             (pinned_top[0],
+              group_line.replace("github.run_id", "github.ref"),
+              cancel_line)),
+            ("cancel-in-progress: true",
+             (pinned_top[0], group_line, "  cancel-in-progress: true")),
+            ("cancel-in-progress on for every event",
+             (pinned_top[0], group_line,
+              "  cancel-in-progress: ${{ github.event_name != '' }}")),
+            ("cancel-in-progress dropped", (pinned_top[0], group_line)),
+            ("an extra key", pinned_top + ("  queue: max",)),
+            ("a one-line group name", ("concurrency: quality",)),
+            ("a trailing comment on the group line",
+             (pinned_top[0], group_line + "  # pr or run", cancel_line))):
+        lane_case("39d a departing concurrency: block is a lane finding: "
+                  + label,
+                  evaluate(multi_local, lane_ci(top=block), ()), 1,
+                  "departs from the pinned CONCURRENCY_BLOCK")
+    for label, line in (
+            ("the same-repository check dropped",
+             "    if: github.event_name == 'push' || "
+             "startsWith(github.head_ref, 'merge-train-')"),
+            ("the train prefix dropped",
+             HEAVY_JOB_IF_LINE.replace("'merge-train-'", "''")),
+            ("an appended || true", HEAVY_JOB_IF_LINE + " || true"),
+            ("always()", "    if: always()"),
+            ("the line wrapped in ${{ }}",
+             "    if: ${{ " + HEAVY_JOB_IF_LINE[8:] + " }}"),
+            ("a trailing comment", HEAVY_JOB_IF_LINE + "  # heavy")):
+        lane_case("39e a widened or respelled heavy-job if: is a lane "
+                  "finding: " + label,
+                  evaluate(multi_local, lane_ci(heavy_if=line), ()), 1,
+                  "departs from the pinned HEAVY_JOB_IF_LINE")
+    lane_case("39f the pinned if: on a job outside HEAVY_JOBS is a lane "
+              "finding",
+              evaluate(multi_local, lane_ci(light_if=HEAVY_JOB_IF_LINE), ()),
+              1, "job 'secrets' of {} carries a job-level if:".format(
+                  CI_SOURCE))
+    lane_case("39g a job-level concurrency: key is a lane finding",
+              evaluate(multi_local, lane_ci(
+                  job_tail=("    concurrency: lane",)), ()),
+              1, "carries a job-level concurrency: key")
+    concurrent_scan = with_on(scan_text, edited).replace(
+        "jobs:\n", "\n".join(pinned_top) + "\njobs:\n", 1)
+    lane_case("39h the pinned concurrency: block in msg-leaks.yml is a lane "
+              "finding",
+              evaluate(local_msg, quality_side, msg_waiver,
+                       ((MSG_LEAKS_CI_SOURCE, concurrent_scan),)),
+              1, "{} carries a top-level concurrency: block".format(
+                  MSG_LEAKS_CI_SOURCE))
+    conditional_scan = with_on(scan_text, edited).replace(
+        "    runs-on:", HEAVY_JOB_IF_LINE + "\n    runs-on:", 1)
+    lane_case("39i the pinned if: in msg-leaks.yml is a lane finding",
+              evaluate(local_msg, quality_side, msg_waiver,
+                       ((MSG_LEAKS_CI_SOURCE, conditional_scan),)),
+              1, "job 'quality' of {} carries a job-level if:".format(
+                  MSG_LEAKS_CI_SOURCE))
 
     if failures:
         print("SELF-TEST FAIL:")

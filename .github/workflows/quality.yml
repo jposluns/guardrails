@@ -22,6 +22,16 @@ on:
 permissions:
   contents: read
 
+# A newer run of the same pull request cancels its superseded run, which then reads red (Quality gates
+# fails on a cancelled job), never green. A push run gets a group of its own (its run id), so a
+# push-to-main run is never cancelled and never queued behind another run. A cancelled run stays on its
+# commit and tools/ci-status.sh refuses a commit with any non-success run, so a cancelled run on a live
+# head (a reopen while its run is in progress, or a push back to an earlier head) needs a new head
+# commit. tools/check_ci_parity.py and tools/check_python_host_pin.py accept exactly this block.
+concurrency:
+  group: quality-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # The gates run as parallel jobs, so the run takes about as long as its longest single step
   # rather than the sum of all of them. Every job repeats the same pinned checkout and setup:
@@ -40,6 +50,12 @@ jobs:
   # the local runner runs check_ci_parity.
   # Within a job the steps keep their original relative order. The Quality gates job at the end
   # is the one required status of this workflow and aggregates every job (msg-leaks.yml is a second).
+  # The heavy jobs (opf, selftest-execution, the four git-fixture-env lanes, the two host-patch jobs and
+  # byte-canon-matrix) carry one pinned job-level if:, so they run only on a push and on a pull request
+  # whose head is a merge-train-* branch of this repository; every other job runs on every event. On any
+  # other pull request the heavy jobs are skipped and Quality gates fails by design (skipped is not
+  # success): such a change merges only by riding a train. tools/check_ci_parity.py accepts that if:
+  # line exactly, and only on those jobs.
   secrets:
     name: Secrets and leaks
     runs-on: ubuntu-latest
@@ -198,6 +214,7 @@ jobs:
 
   opf:
     name: OPF tooling
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -692,6 +709,7 @@ jobs:
 
   selftest-execution:
     name: Execution-reconciled self-tests
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -736,6 +754,7 @@ jobs:
 
   git-fixture-env-core:
     name: Git-fixture-env core self-test
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -753,6 +772,7 @@ jobs:
 
   git-fixture-env-config-combined:
     name: Git-fixture-env combined config lane
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -770,6 +790,7 @@ jobs:
 
   git-fixture-env-config-malformed:
     name: Git-fixture-env malformed config lane
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -787,6 +808,7 @@ jobs:
 
   git-fixture-env-config-system:
     name: Git-fixture-env system config lane
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -809,17 +831,20 @@ jobs:
   # .aiqt/python-host.toml names, so a passing local suite predicts a required CI leg, and a failure on the
   # '3.14' legs alone is diagnostic evidence of a patch-release difference, not proof that the change is
   # innocent. tools/check_python_host_pin.py holds this workflow's top-level keys (name, on, permissions,
-  # jobs) and each job whole: runs-on ubuntu-24.04 (on 2026-10-12 the Python versions manifest listed Linux
-  # x64 builds of 3.14.4 for Ubuntu 22.04 and 24.04 only, so ubuntu-latest would fail these jobs on an image
-  # without one), this checkout step as written, no env: on the job or any step, one Python setup step
-  # pinning that release, the gate itself as the next step (it fails when the job does not run that
-  # release) and the job's suites in order, each held step with exactly name, run and shell: bash; its
-  # jobs leg also runs outside these jobs, in the registry job (--jobs-only), so an edit here cannot
-  # silence every CI run of it. Both are required through Quality gates. They run the OPF tooling
-  # self-test and the four git-fixture-env suites a second time in every run; an edit to a pull request's
-  # title or body starts no Quality run.
+  # jobs, and concurrency only as the pinned block) and each job whole: no job key but name, runs-on,
+  # steps and the pinned heavy-job if: line, runs-on ubuntu-24.04 (on 2026-10-12 the Python versions
+  # manifest listed Linux x64 builds of 3.14.4 for Ubuntu 22.04 and 24.04 only, so ubuntu-latest would
+  # fail these jobs on an image without one), this checkout step as written, no env: on the job or any
+  # step, one Python setup step pinning that release, the gate itself as the next step (it fails when the
+  # job does not run that release) and the job's suites in order, each held step with exactly name, run
+  # and shell: bash; its jobs leg also runs outside these jobs, in the registry job (--jobs-only), which
+  # carries no if:, so an edit here cannot silence every CI run of it. Both are required through Quality
+  # gates. They are heavy jobs, so they run the OPF tooling self-test and the four git-fixture-env suites
+  # a second time in every run on a push or on a merge-train-* pull request of this repository, and in no
+  # other pull request run; an edit to a pull request's title or body starts no Quality run.
   opf-host-patch:
     name: OPF tooling (host patch)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -845,6 +870,7 @@ jobs:
 
   git-fixture-env-host-patch:
     name: Git-fixture-env self-test (host patch)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -1117,6 +1143,7 @@ jobs:
   # would surface as a carriage-return finding, failing the job.
   byte-canon-matrix:
     name: Byte canon vectors (${{ matrix.os }})
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
