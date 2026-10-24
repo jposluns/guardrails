@@ -16,7 +16,7 @@ default entry alone: a retired fragment (_RETIRED) restored in its own section, 
 with homes 2 is the only base version (spec 4.2 and 9.2) and the base defines one implementation
 model (spec 16.1). Each fragment names a retired term (homes, legacy state, activation, a target
 contract, a pre-2.0.0 base version, an implementation class or its admission check, the
-legacy_fragment type, or the imports reserved name), so a sentence on
+legacy_fragment type, the imports reserved name, or the removed section 9.2 remedy adoption), so a sentence on
 another upgrade, such as a future 2.x or worklog-generation upgrade, matches none. A retired sentence is quoted, to say it no longer applies, in one exact form, a retired-text
 quotation block: a block quote whose first line is exactly "> Retired text, quoted and not in
 force:", with no line directly above it that opens with ">" after at most three spaces (a
@@ -56,9 +56,9 @@ core-files page's changed
 sentences are pinned the same way over tag-stripped text (_SURFACE), outside the keyword lint,
 and the self-test pins the registry's shape, so dropping a _SURFACE entry turns the self-test
 red; each sentence of the disclosure page's retired fresh-only item, the quickstart's retired
-conformance-class sentence, and the record-indexes page's deleted importer-only legacy_fragment
-rows, is searched over its whole file's normalized text and is red wherever
-it lands (_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
+conformance-class sentence, the record-indexes page's deleted importer-only legacy_fragment
+rows, and those three files' wording of the removed section 9.2 remedy adoption, is searched over
+its whole file's normalized text and is red wherever it lands (_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
 and beyond those registered retired sentences no retired-text check reads them, so any other
 deleted sentence restored there stays green.
 
@@ -400,8 +400,7 @@ _CONTRACT = {
         _D('The existing staged-plan presence test also recognizes import and ingest runs in their typed staging homes.'),
         _D('Partial status is receipt-bound under section 11, not inferred from staging.'),
         'Doctor MUST NOT consult a journal to decide partial status and makes no claim that a staged plan has a recoverable transaction.',
-        "Ordinary transaction operands, including those of an open transaction being recovered, MUST NOT equal, descend from, or contain journals/; the one exception is a section 9.2 remedy adoption's disposition of the old tree's files under that name, which are foreign content the store being adopted into never wrote, not its journal state (sections 9.2 and 14.2).",
-        "A section 9.2 remedy adoption bounds this grading the same way: from the recorded approval until its retirement is recorded, an old-tree file under imported/, archive/, staging/ or journals/ that the approved plan enumerates as a frozen retire, move or migrate source (section 14.2) is bounded adoption state, never the adopted-into store's own evidence or staging, and, while its live bytes still match its plan digest, C-EVIDENCE-ENUM and this staging grading MUST grade it as migration_incomplete detail under the section 11 bounded treatment, never as a finding or cannot-evaluate, so the section 14.1 completion check stays reachable while the file stays frozen in place; a drifted or vanished source and an unenumerated path take no bounded treatment (section 11).",
+        'Ordinary transaction operands, including those of an open transaction being recovered, MUST NOT equal, descend from, or contain journals/.',
         'Capability-bound journal APIs MUST derive their destinations from kind and run identity.',
         'An ID reservation under allocations/ MUST be created exclusively and create-only, made durable before it is relied on and never rewritten, so an interrupted publication leaves no reservation or the complete one (section 8.2).',
         _D('These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently cased or composed spelling can alias a reserved home and is not caught.'),
@@ -421,7 +420,7 @@ _CONTRACT = {
         _D('Profiles declared under [profiles.<name>] are enumerated after the base is validated; a profile a tool does not support is ignored for enforcement and recorded as unevaluated, never treated as a base-validation failure (section 9).'),
         'An ambiguous outcome and an input that discovery cannot read or parse are a failed discovery of an existing store and MUST NOT be treated as an absent store that permits initialization or adoption.',
         'A zero-match outcome over a present .working/ MUST NOT be treated as authorizing initialization or adoption by itself: only a section 14 first adoption authorizes initialization there, through an investigation that distinguishes first adoption from re-adoption and records a digest-stamped inventory, and one approved plan that gives every foreign file a disposition before init-store (section 14.1).',
-        'A discovered manifest that the section 9.2 validation refusals refuse for declaring a spec_version below 2.0.0, whatever its [opf].homes, marks no store: for adoption, it and the files beneath its .working/ MUST be treated as foreign content, never as a store, so the section 9.2 remedy adoption over them is a section 14 first adoption (sections 8.2, 9.2, and 14.1).',
+        'A discovered manifest that the section 9.2 validation refusals refuse for declaring a spec_version below 2.0.0, whatever its [opf].homes, is refused as a store (section 9.2): it MUST NOT be treated as authorizing initialization or adoption.',
         'A discovered manifest declaring a spec_version of 2.0.0 or above whose [opf].homes is missing or not the integer 2 is refused as a store (section 9.2), never foreign content: it MUST NOT be treated as authorizing initialization or adoption.',
         'A manifest refused only at the section 9.2 version ceiling marks a store at a later version, never foreign content: it MUST NOT be treated as authorizing initialization or adoption, and its remedy is the tooling upgrade alone (sections 8.2 and 9.2).',
     ),
@@ -524,7 +523,6 @@ _CONTRACT = {
         'Rotation, index rewrites, and store relocation MUST NOT touch counters.toml.',
         'Re-adoption MUST seed both series from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed prior ancestry.',
         'Only a genuinely first adoption MAY start its counters at zero.',
-        _D('A store manifest the section 9.2 validation refusals refuse for declaring a spec_version below 2.0.0, whatever its [opf].homes, is foreign content for adoption, never a store (sections 4.5 and 14.1), so the section 9.2 remedy adoption over it is a genuinely first adoption: no prior OPF ancestry exists to seed, and its counters start at zero.'),
         'A store manifest declaring a spec_version of 2.0.0 or above whose [opf].homes is missing or not the integer 2 is refused as a store (section 9.2), never foreign content: that refusal MUST NOT authorize adoption over it, and the zero-seed ban above stands (sections 4.5 and 14.1).',
         'A store refused only at the section 9.2 version ceiling keeps its ancestry: it is never foreign content, it MUST NOT be zero-seeded, and its remedy is the tooling upgrade alone (sections 4.5 and 9.2).',
         'The claim additionally begins with one irrevocable reservation, journals/<kind>/allocations/<run-id>.toml (sections 4.2 and 8.8), which MUST hold exactly format = "opf.journal.allocation/v1", the run\'s kind, run_id and operation_id, and a non-empty [claims] table mapping each claimed counter key, a record namespace or, for a run of the import engine (kind import or ingest, section 4.2), a quoted imported-series "imported:<NS>" key, to that run\'s new high-water value, an integer of at least 1 and at most 2**63 - 1 so every conforming TOML reader can parse it.',
@@ -760,6 +758,7 @@ _CONTRACT = {
         _D('Base spec 2.0.0 is the baseline, and it declares the homes generation with the required integer [opf].homes = 2 (section 4.2).'),
         'A store that omits [opf].homes, or declares any value other than the integer 2, MUST be refused.',
         _D('This specification defines no earlier base version, so this section defines no upgrade into 2.0.0; its rules bind each later base-schema version bump.'),
+        'Every later base-schema version bump MUST keep every manifest discoverable through the exact base discovery token opf (section 4.5).',
         "A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published implementation (section 16.1), the reference tooling, so that a store below the new version has an upgrade path; the path holds only within this section's preconditions and refusals and that implementation's disclosed residuals.",
         _D('Every requirement of this section on an upgrade, its deltas, preconditions, refusals, and remedies binds every implementation that provides opf upgrade.'),
         "Every implementation MUST apply the version ceiling's refusal at the end of this section.",
@@ -778,12 +777,10 @@ _CONTRACT = {
         _D('Repeated upgrade is a verified no-op only after full doctor VALID.'),
         "Declaring a spec_version above the tooling's supported version MUST be refused at validation as a fail-closed INVALID finding naming the tooling-upgrade remedy, never treated as supported.",
         'A store refused only at that ceiling is a store at a later version, never foreign content: that refusal MUST NOT authorize adoption over it, and the section 8.2 zero-seed ban stands (sections 4.5, 8.2, and 14.1).',
-        "A spec_version below 2.0.0 names no version this specification defines, and validation MUST refuse it as a fail-closed INVALID finding naming the remedy, since this section defines no upgrade into 2.0.0: a fresh 2.0.0 store whose section 14 adoption gives the old store's files a disposition as foreign content.",
-        _D("That adoption is a first adoption: a manifest refused for declaring a spec_version below 2.0.0, whatever its [opf].homes, and the files beneath its .working/ are foreign content for adoption, never a store (sections 4.5 and 14.1), no prior OPF ancestry exists to seed, and the new store's counters start at zero (section 8.2); the old tree's reserved-name children (archive/, imported/, staging/, and journals/) are part of that foreign content and take their dispositions under section 14.2."),
-        _D("Because the new store's counters start at zero, a number the old tree's records carried can be issued again in the new store's own series; the old tree's records are foreign content, never the new store's history, so no series within one store ever reissues an ID (section 8.2)."),
-        'A manifest declaring a spec_version of 2.0.0 or above whose [opf].homes is missing or not the integer 2 is refused as a store by the [opf].homes refusal above, never foreign content: that refusal MUST NOT be read as authorizing initialization or adoption, and the remedy adoption above does not apply to it (sections 4.5, 8.2, and 14.1).',
-        'Before any command writes to a store, the claim, release, or reconciliation of the single-writer lease (section 5.7), a fast-forward by opf sync, and the recovery of sections 8.8, 14.1, and 14.2 included, every implementation MUST apply these validation refusals and the [opf].homes refusal above to the store manifest that discovery finds there, so a store they refuse stays byte-identical; the one exception is the section 14 adoption that the remedy above names, every write that adoption requires included: its investigation, its staged plan and approval, its apply, and the recovery of that apply (sections 14.1 and 14.2).',
-        'Before that apply, every write of that adoption into the discovered .working/ tree MUST land under the reserved control-area children of section 4.2, its staging and evidence homes, and MUST leave every discovered file, the refused manifest included, byte-identical; only the apply gives a discovered file its disposition.',
+        'A spec_version below 2.0.0 names no version this specification defines, and validation MUST refuse it as a fail-closed INVALID finding.',
+        'A manifest so refused, whatever its [opf].homes, is refused as a store: that refusal MUST NOT be read as authorizing initialization or adoption (sections 4.5 and 14.1).',
+        'A manifest declaring a spec_version of 2.0.0 or above whose [opf].homes is missing or not the integer 2 is refused as a store by the [opf].homes refusal above, never foreign content: that refusal MUST NOT be read as authorizing initialization or adoption (sections 4.5, 8.2, and 14.1).',
+        'Before any command writes to a store, the claim, release, or reconciliation of the single-writer lease (section 5.7), a fast-forward by opf sync, and the recovery of sections 8.8, 14.1, and 14.2 included, every implementation MUST apply these validation refusals and the [opf].homes refusal above to the store manifest that discovery finds there, so a store they refuse stays byte-identical.',
         'For opf sync, these refusals and the [opf].homes refusal MUST also be applied to the store manifest the fetched state carries, before a fast-forward lands it, so a fast-forward never brings a refused manifest into the store.',
     ),
     "11": (
@@ -842,7 +839,6 @@ _CONTRACT = {
         'A bootstrap views-ready milestone alone MUST NOT count as adoption success.',
     ),
     "14.1": (
-        'Investigation MUST treat an adoption over a discovered manifest that the section 9.2 validation refusals refuse for declaring a spec_version below 2.0.0, whatever its [opf].homes, as a first adoption: that manifest is foreign content for adoption, never a store (sections 4.5 and 9.2), every file of the old tree, its reserved-name children included, takes a disposition under section 14.2, and the new store\'s counters start at zero (section 8.2).',
         'A manifest declaring a spec_version of 2.0.0 or above whose [opf].homes is missing or not the integer 2 is refused as a store (section 9.2), never foreign content: investigation over it MUST fail closed and MUST NOT read that refusal as authorizing any adoption (sections 4.5 and 8.2).',
         'A manifest refused only at the section 9.2 version ceiling marks a store at a later version, never foreign content: investigation over it MUST fail closed, naming the tooling-upgrade remedy, and MUST NOT read that refusal as authorizing any adoption (sections 4.5 and 8.2).',
         'Exactly one adopter approval MUST follow each concrete plan.',
@@ -925,13 +921,13 @@ _CONTRACT = {
         'The reversal MAY also discard retirement preimages written by that uncommitted apply for non-occupying sources, since each such source remains frozen, live and byte-identical in place and is never removed at apply.',
         _D("That reversal undoes the uncommitted apply's own writes; it is not the section 14.1 restore, whose fresh-plan rule governs an archived file only once apply commits."),
         'Recovery of an interrupted apply MUST resolve from the apply journal alone and MUST NOT require the live tree to resolve as a store: on restart the one transaction either completes forward from its durably committed journal or reverses fully as above, so an interruption that removed an occupying machine-store file, the manifest included, never leaves the store unresolvable or waiting on a plan it cannot form.',
-        _D('A fully reversed first adoption leaves .working/ holding its retained journal, so the store location reads as present without a manifest (section 4.5), and journal state that a foreign tree planted there is touched only by a fail-closed refusal, never consumed as recovery state; clearing it is the operator\'s own act outside any OPF operation, a same-user residual of the class section 14.1 discloses, except where a section 9.2 remedy adoption\'s approved plan dispositions it as foreign content (the reserved-names rule below).'),
+        _D('A fully reversed first adoption leaves .working/ holding its retained journal, so the store location reads as present without a manifest (section 4.5), and journal state that a foreign tree planted there is touched only by a fail-closed refusal, never consumed as recovery state; clearing it is the operator\'s own act outside any OPF operation, a same-user residual of the class section 14.1 discloses.'),
         _D('After the archival the destination is an ordinary managed path: apply initializes the machine file or renders the view immediately, and no writer carries an occupied-destination obligation afterward.'),
         _D("The archived copy is the disposition's preserved original: the retire preimage, the source import reads for migrate, or the bytes a move relocation copies out after the green check."),
         _D("Archival is preservation, not retirement: the green completion check of section 14.1 remains the one gate that records each disposition's retirement."),
         'An old file at no managed destination takes no archival at apply beyond its retirement preimage under completion check 3, preserved at apply for a retire-disposed and a migrate-disposed file alike: it MUST stay frozen, byte-identical in place, and MUST be removed or relocated only after the applicable green check, exactly as section 14.1 orders.',
         _D("The adoption archive is immutable in each archived file's store-relative identity and bytes."),
-        "Once apply commits, a file the store's own apply archived under .working/archive/adoption/<run-id>/ MUST keep that store-relative path and those exact bytes: it MUST NOT be written, rewritten, relocated or removed within its store by any OPF operation, and the enforcement pack MUST deny writes there (section 14.1).",
+        "Once apply commits, a file under .working/archive/adoption/<run-id>/ MUST keep that store-relative path and those exact bytes: it MUST NOT be written, rewritten, relocated or removed within its store by any OPF operation, and the enforcement pack MUST deny writes there (section 14.1).",
         "A section 5.4 whole-store relocation MAY carry the archive, and only as part of the whole .working/ tree it relocates: every archived file keeps its store-relative path and its exact bytes, opf migrate --store MUST re-verify every carried archived copy's digest against the plan at the destination before the old tree is removed, and the enforcement pack's write denial with the completion check 5 probe (section 14.1) binds .working/archive/adoption/<run-id>/ within the resolved store, at the destination after that relocation as before it.",
         "The completion check MUST re-verify every archived copy's digest against the plan (section 14.1, check 3), import MUST re-verify an archived source's digest against the plan before reading it, and a missing, unreadable or digest-mismatched archived copy MUST fail closed at required, naming the path.",
         'Once apply commits, restoring an archived file to the live tree MUST be a fresh plan with its own single approval (section 14.1); no other operation restores it, and the pre-commit abort reversal above is not restoration.',
@@ -943,10 +939,6 @@ _CONTRACT = {
         'Reports MUST retain migration_incomplete until the declared work is resolved.',
         _D('The reserved children archive/, imported/, staging/, and journals/ are OPF control area.'),
         'Detection MUST NOT surface them as adopter content, an adoption option MUST NOT select them, and an [unmanaged] declaration MUST NOT equal, contain, or lie within them.',
-        _D('Those rules protect the control area of the store being adopted into.'),
-        "In the section 9.2 remedy adoption the refused manifest marks no store (sections 4.5 and 9.2), so the old tree's files under those reserved names are foreign content, not OPF control area: detection MUST surface each of them, and each MUST take a migrate, move or retire disposition, never keep, because the rule above keeps every [unmanaged] declaration outside the reserved names.",
-        _D('The section 4.2 journal-operand rule, the archive-immutability rule above, and the evidence-immutability rule below likewise protect only what the store being adopted into wrote: its own journal state, the files its own applies archived, and the evidence its own runs committed.'),
-        "The old tree's files under the reserved names are foreign content that store never wrote, so those rules do not reach them: executing their dispositions MUST handle each one as an ordinary foreign operand, journaled, digest-verified and recorded like every other disposition, and MUST NOT consume any of them as journal, recovery, archive or evidence state (sections 4.2 and 9.2).",
         "Adoption evidence MUST be committed and immutable under .working/imported/adoption/<run-id>/; append-only outcome events retain the receipt's history.",
         "Every adoption evidence inventory MUST carry the section 4.2 [adoption] identity table, naming its own run id, its phase and the approved plan's plan_digest.",
         _D('Transaction records live under .working/journals/adoption/.'),
@@ -1107,8 +1099,9 @@ _PINNED = {
 # or wrapped across quoted lines, so restoring one does not wait for the self-test's tiling equality.
 # Each fragment names a retired term (_RETIRED_TERMS): homes, legacy state, activation, a target
 # contract, a pre-2.0.0 base version, an implementation class or the fresh-only admission check
-# (spec 16.1 defines one implementation model), the legacy_fragment type and its LF quarantine, or
-# the imports reserved name. Retired sentences that name none are not fragments, since a
+# (spec 16.1 defines one implementation model), the legacy_fragment type and its LF quarantine, the
+# imports reserved name, or the removed section 9.2 remedy adoption (its old tree, the old store's
+# files and the store being adopted into). Retired sentences that name none are not fragments, since a
 # future 2.x upgrade could state them again: "The owning writer or migration MUST derive each
 # inventory" and the containment and discovery sentences reworded for 2.0.0 (4.2), the 8.1 governance
 # note's last two sentences, the 1.1.0 delta's "The upgrade weakens nothing" and the generic rules of
@@ -1120,7 +1113,10 @@ _PINNED = {
 # defined so that the section 9.2 refusal" (8.6), "Their evidence inventories and readers remain
 # available" and "Old import and ingest orchestration MUST be retired" (14.1), "In a first
 # adoption, its apply also archives" (14.2), and the 16.1 and 17 sentences on classless
-# declarations, candidates, the recheck and the fixtures that name no retired term. Restored in
+# declarations, candidates, the recheck and the fixtures that name no retired term; and of the
+# removal of the section 9.2 remedy adoption, "Before that apply, every write of that adoption"
+# (9.2) and the narrowed archive-immutability wording "a file the store's own apply archived"
+# (14.2). Restored in
 # place of the current text they stay red through the pins they displace (the retired-run vectors
 # below); restored beside it, through the tiling equality, or, in untiled 9.1, not at all.
 # Untiled section 13 carries one fragment of its own, so the retired imported-series sentence
@@ -1173,6 +1169,8 @@ _RETIRED = {
         'The recognized legacy format opf.ingest.evidence-inventory/v1',
         'refuses such an inventory earlier, as unsupported-legacy-state',
         'The legacy imports/ exclusion remains registered',
+        "the one exception is a section 9.2 remedy adoption's disposition",
+        'A section 9.2 remedy adoption bounds this grading',
     ),
     "4.4": (
         'The names imports, imported, archive',
@@ -1185,6 +1183,7 @@ _RETIRED = {
         'A fresh-only implementation MUST NOT treat a zero-match outcome',
         'it MUST run the section 16.1 legacy-state search',
         'holds no recognized legacy candidate and no section 16.1 legacy-state item',
+        'so the section 9.2 remedy adoption over them is a section 14 first adoption',
     ),
     "8.1": (
         "are baseline as of spec_version 1.1.0",
@@ -1201,6 +1200,7 @@ _RETIRED = {
         "applies per series key: at homes 2 the next ID",
         'since new imports do not use LF quarantine',
         'one for each enabled type except legacy_fragment',
+        'so the section 9.2 remedy adoption over it is a genuinely first adoption',
     ),
     "8.3": (
         'This legacy permission does not replace',
@@ -1267,6 +1267,11 @@ _RETIRED = {
         'binds an upgrade-capable implementation; a fresh-only implementation implements none',
         'a fresh-only implementation at its section 16.1 admission check',
         'Unproven legacy .archive/ entries MUST remain in place',
+        "a fresh 2.0.0 store whose section 14 adoption gives the old store's files",
+        "the old tree's reserved-name children",
+        "a number the old tree's records carried can be issued again",
+        'and the remedy adoption above does not apply to it',
+        'the one exception is the section 14 adoption that the remedy above names',
     ),
     "11": (
         'or that a pre-1.3.0 legacy import finished',
@@ -1291,12 +1296,18 @@ _RETIRED = {
         "Preserved legacy run evidence is that run's durable archive",
         'provides none of these legacy readers',
         'Pending legacy review MUST NOT become implicit approval',
+        'every file of the old tree, its reserved-name children included',
     ),
     "14.2": (
         "the section 9.2 upgrade into 1.3.0 refuses a store",
         "homes 1 retains its legacy journal paths",
         'by this rule, and by the section 16.1 admission check',
         'A fresh-only implementation (section 16.1) performs that recovery',
+        "except where a section 9.2 remedy adoption's approved plan",
+        'Those rules protect the control area of the store being adopted into.',
+        'In the section 9.2 remedy adoption the refused manifest marks no store',
+        'likewise protect only what the store being adopted into wrote',
+        "The old tree's files under the reserved names are foreign content",
     ),
     "14.3": (
         "This remains the historical-release path at 1.3.0",
@@ -1377,7 +1388,8 @@ _RETIRED = {
 _RETIRED_TERMS = ("homes", "legacy", "activat", "target contract", "pre-1.", "1.0.0", "1.1.0", "1.2.0",
                   "1.3.0", "fresh-only", "upgrade-capable", "conformance class", "implementation's class",
                   "devprocess", "admission check", "pre-scan", "recovery bound", "quarantine", "fragment",
-                  "except lf", "imports")
+                  "except lf", "imports", "remedy adoption", "remedy above", "old tree", "old store's",
+                  "being adopted into")
 # Machine-subdirectory names the reference tooling still reserves (store.RESERVED_MACHINE_SUBDIRS) that
 # spec 4.4 no longer reserves: the legacy staging name imports, dropped from the spec by the maintainer
 # ruling of 2026-10-23 while the tooling keeps refusing a machine store so named until its own change.
@@ -1402,17 +1414,16 @@ _SURFACE = {
         'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling does not yet implement it.',
         'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
         'This supersedes the earlier aiqt-opf token; the interim devprocess token and [devprocess] table are retired by the OPFiles rebrand.',
-        "opf init also refuses when the git history of HEAD's first-parent line shows a prior store (specification section 8.2: within one store, counters never restart, so a store's own record ids are never reissued; the specification's section 9.2 remedy adoption starts a new store whose counters start at zero, so a number the old tree's records carried can appear again in the new store's own series).",
-        'opf adopt is the path for re-adopting any prior ancestry; under the specification, a tree whose manifest declares a spec_version below 2.0.0 is foreign content for adoption, so adoption over it is a first adoption (specification sections 9.2 and 14.1), never a re-adoption.',
+        "opf init also refuses when the git history of HEAD's first-parent line shows a prior store (specification section 8.2: counters never restart, so record ids are never reissued).",
+        'opf adopt is the path for re-adopting any prior ancestry.',
     ),
     DISCLOSURE: (
         "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
-        "That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification: a 1.2.0 store is one the section 9.2 validation refusals refuse, so an adoption over it is a first adoption under section 14.1, never a re-adoption.",
+        "That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a store.",
         'A rename would be a store-breaking change the specification gives no path: every base-schema version bump stays additive and keeps the exact token, so no bump the specification permits renames it (specification sections 4.5 and 9.2).',
         'Implementations (specification section 16.1): the specification defines one implementation model, with no conformance classes, and base 2.0.0, with homes = 2, is the only base version it defines.',
         'The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification.',
         'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
-        "An older store has no upgrade into 2.0.0; its remedy is a fresh 2.0.0 store whose adoption takes the old store's files as foreign content.",
     ),
     ADOPT_PAGE: (
         "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
@@ -1439,7 +1450,7 @@ _SURFACE = {
         'The standard reserves the LF namespace unassigned and defines no legacy_fragment type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it.',
         "Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped.",
         'Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates legacy_fragment records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.',
-        "A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard: a 1.2.0 store is one the standard's section 9.2 validation refuses, so an adoption over it is a first adoption under its section 14.1, never a re-adoption.",
+        "A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.",
     ),
     CORE_FILES: (
         'The base [opf] table carries the exact discovery token standard = "opf", the spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:',
@@ -1449,13 +1460,17 @@ _SURFACE = {
     ),
 }
 # Retired surface wording: the disclosure page's fresh-only item, the quickstart's
-# conformance-class sentence, retired with the implementation classes (spec 16.1), and the
+# conformance-class sentence, retired with the implementation classes (spec 16.1), the
 # record-indexes page's deleted importer-only legacy_fragment rows, retired with the reserved
-# unassigned LF namespace (spec 8.1). Each sentence present in its file's normalized text is a
-# finding.
+# unassigned LF namespace (spec 8.1), and the quickstart's, the disclosure page's and the
+# record-indexes page's wording of the removed section 9.2 remedy adoption, retired with it (spec
+# 9.2 defines no path for a manifest below 2.0.0). Each sentence present in its file's normalized
+# text is a finding.
 _SURFACE_RETIRED = {
     QUICKSTART: (
         'An implementation declares a conformance class: an upgrade-capable one carries older stores forward',
+        "the specification's section 9.2 remedy adoption starts a new store whose counters start at zero, so a number the old tree's records carried can appear again in the new store's own series",
+        'under the specification, a tree whose manifest declares a spec_version below 2.0.0 is foreign content for adoption, so adoption over it is a first adoption (specification sections 9.2 and 14.1), never a re-adoption.',
     ),
     DISCLOSURE: (
         'A fresh-only implementation (specification section 16.1) proves tested admission and refusal behaviour, not authenticated history: it refuses by name an older store or one in which its admission check detects an item on the closed legacy-state list.',
@@ -1465,10 +1480,13 @@ _SURFACE_RETIRED = {
         'It offers no upgrade, repair, or continuity, so a store holding legacy state needs an upgrade-capable implementation.',
         'The upgrade into base 1.3.0 is still a target that the reference tooling does not yet perform, and the reference-tooling residuals above name stores its current upgrade cannot carry.',
         'A class claim is self-asserted until validation tooling ships.',
+        'a 1.2.0 store is one the section 9.2 validation refusals refuse, so an adoption over it is a first adoption under section 14.1, never a re-adoption.',
+        "An older store has no upgrade into 2.0.0; its remedy is a fresh 2.0.0 store whose adoption takes the old store's files as foreign content.",
     ),
     RECORD_INDEXES: (
         'Importer-only (no module toggle)',
         'legacy_fragment LF quarantined &#8594; resolved | ignored',
+        "a 1.2.0 store is one the standard's section 9.2 validation refuses, so an adoption over it is a first adoption under its section 14.1, never a re-adoption.",
     ),
 }
 
@@ -5369,10 +5387,10 @@ def _self_test_vectors():
     # pinned, so dropping a file or any of its pins turns the self-test red.
     check("surface-registry", lambda: tuple(_SURFACE) == (
         QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, RECORD_INDEXES, CORE_FILES) and
-          tuple(map(len, _SURFACE.values())) == (9, 7, 9, 5, 7, 4))
+          tuple(map(len, _SURFACE.values())) == (9, 6, 9, 5, 7, 4))
     # Each retired surface sentence is absent from its live file, and planting it back turns the
     # gate red with its own finding.
-    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (1, 7, 2) and
+    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (3, 9, 3) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])
@@ -5812,19 +5830,42 @@ def _self_test_vectors():
               'than the integer `2`, MAY be graded as legacy homes.'),
             )),
             ('A spec_version below 2.0.0', (
-             ('and validation MUST refuse it as a fail-closed INVALID finding naming the remedy,',
-              'and validation MAY grade it as a legacy store,'),
-             ("a fresh 2.0.0 store whose section 14 adoption gives the old store's files a disposition as foreign content.",
-              'an upgrade of the store in place.'),
+             ('and validation MUST refuse it as a fail-closed INVALID finding.',
+              'and validation MAY grade it as a legacy store.'),
+             ('refuse it as a fail-closed INVALID finding.',
+              'refuse it as a fail-closed INVALID finding naming the remedy, a fresh 2.0.0 store.'),
             )),
-            # Refuse before write: each operative clause reworded away turns the gate red.
+            # A manifest below 2.0.0 is refused as a store and authorizes nothing (maintainer ruling,
+            # 2026-10-24): rewording the refusal, or restoring a path over it, turns the gate red.
+            ('A manifest so refused,', (
+             ('is refused as a store: that refusal MUST NOT be read as authorizing initialization or adoption',
+              'is foreign content: that refusal MAY be read as authorizing a first adoption'),
+             ('(sections 4.5 and 14.1).',
+              '(sections 4.5 and 14.1), apart from the section 14 adoption the remedy above names.'),
+            )),
+            ('A manifest declaring a spec_version of 2.0.0 or above', (
+             ('authorizing initialization or adoption (sections 4.5, 8.2, and 14.1).',
+              'authorizing initialization or adoption, and the remedy adoption above does not apply to it (sections 4.5, 8.2, and 14.1).'),
+            )),
+            # Refuse before write: each operative clause reworded away, or an exception restored, turns
+            # the gate red.
             ('Before any command writes to a store,', (
              ('every implementation MUST apply these validation refusals',
               'an implementation MAY apply these validation refusals'),
-             ('so a store they refuse stays byte-identical;',
-              'so a store they refuse is repaired first;'),
+             ('so a store they refuse stays byte-identical.',
+              'so a store they refuse is repaired first.'),
+             ('refuse stays byte-identical.',
+              'refuse stays byte-identical; the one exception is the section 14 adoption that the remedy above names.'),
              ('the recovery of sections 8.8, 14.1, and 14.2 included,',
               'the recovery of sections 8.8, 14.1, and 14.2 excepted,'),
+            )),
+            # Every later bump keeps every manifest discoverable through the exact token (maintainer
+            # ruling, 2026-10-24): the requirement reworded to a permission, or a rename admitted, is red.
+            ('Every later base-schema version bump MUST keep', (
+             ('Every later base-schema version bump MUST keep every manifest discoverable',
+              'A later base-schema version bump MAY rename the token that keeps every manifest discoverable'),
+             ('through the exact base discovery token `opf`',
+              'through the base discovery token `opf` or a renamed one'),
             )),
     ))
     # The maintainer ruling of 2026-10-23: one implementation model, the generic upgrade rule, the
@@ -5863,15 +5904,32 @@ def _self_test_vectors():
              ('MUST NOT be treated as authorizing initialization or adoption by itself:',
               'MAY authorize initialization by itself:'),
             )),
+            # A manifest below 2.0.0 is refused as a store and authorizes nothing (maintainer ruling,
+            # 2026-10-24).
+            ('A discovered manifest that the section 9.2 validation refusals refuse', (
+             ('is refused as a store (section 9.2): it MUST NOT be treated as authorizing initialization or adoption.',
+              'marks no store: for adoption, it and the files beneath it MUST be treated as foreign content.'),
+            )),
+    ))
+    # The journal-operand rule has no exception (maintainer ruling, 2026-10-24).
+    spec_vectors("4.2", (
+            ('Ordinary transaction operands,', (
+             ('or contain `journals/`.',
+              "or contain `journals/`; the one exception is a section 9.2 remedy adoption's disposition of the old tree's files under that name."),
+            )),
     ))
     spec_vectors("14.2", (
             ('A fully reversed first adoption', (
              ('is touched only by a fail-closed refusal, never consumed as recovery state;',
               'is recovered automatically by the next command;'),
+             ('a same-user residual of the class section 14.1 discloses.',
+              "a same-user residual of the class section 14.1 discloses, except where a section 9.2 remedy adoption's approved plan dispositions it as foreign content."),
             )),
-            ('In the section 9.2 remedy adoption the refused manifest marks no store', (
-             ('each MUST take a `migrate`, `move` or `retire` disposition, never `keep`,',
-              'each MAY take any disposition, `keep` included,'),
+            # The adoption archive binds every file under its home, never only those the store's own
+            # apply archived (maintainer ruling, 2026-10-24).
+            ('Once apply commits, a file under', (
+             ('a file under `.working/archive/adoption/<run-id>/` MUST keep',
+              "a file the store's own apply archived under `.working/archive/adoption/<run-id>/` MUST keep"),
             )),
     ))
     # No section carries a homes-1 store, a homes migration, an activation framing or a 1.x upgrade
@@ -6364,9 +6422,6 @@ def _self_test_vectors():
         ('4.2', ('Deleting a whole bundle',), (
             'Deleting a whole bundle, inventory and payload together, is outside this local snapshot check; independent history is required to detect that loss.',
         )),
-        ('9.2', ('A spec_version below 2.0.0', 'That adoption is a first adoption', "Because the new store's counters start at zero", 'A manifest declaring a spec_version of 2.0.0 or above', 'Before any command writes to a store,', 'Before that apply, every write of that adoption', 'For opf sync, these refusals'), (
-            'A spec_version below 2.0.0 names no version this specification defines, and validation MUST refuse it as a fail-closed INVALID finding.',
-        )),
         ('16.1', ('The following writes, and no others, are not store operations', 'A run that stops as cannot-evaluate and writes nothing', 'Every other write within a store the run resolved'), (
             'A write this section or section 5.7 itself requires is not a store operation under this section, for the runtime-result comparison and the store part below alike: the claim of the single-writer lease a command takes, its release, the session_lease record of that claim and of that release, and the lease reconciliation and recovery writes sections 5.7, 8.8, 14.1, and 14.2 require, so a run that stops as cannot-evaluate and writes nothing but what section 5.7 requires to end its own claim performed no store operation.',
         )),
@@ -6383,9 +6438,51 @@ def _self_test_vectors():
             '- Adoption and import run with C-EVIDENCE-ENUM, which re-enumerates their control areas (.working/imported/<kind>/<run-id>/, .working/archive/adoption/<run-id>/ and .working/archive/moved/) on every doctor run, and the section 14.1 completion checks still verify their evidence digests themselves when they run; C-EVIDENCE-ENUM asserts membership, not authenticated actor history, and deleting a whole bundle, inventory and payload together, is outside its local snapshot check (section 4.2).',
         )),
     )
+    # The maintainer ruling of 2026-10-24 removed the section 9.2 remedy adoption and every special
+    # case that existed only for it: each row restores the pins it removed or rewrote, verbatim, in
+    # place of the pins that replaced them.
+    retired_runs += (
+        ('4.2', ('Ordinary transaction operands,',), (
+            "Ordinary transaction operands, including those of an open transaction being recovered, MUST NOT equal, descend from, or contain journals/; the one exception is a section 9.2 remedy adoption's disposition of the old tree's files under that name, which are foreign content the store being adopted into never wrote, not its journal state (sections 9.2 and 14.2).",
+            "A section 9.2 remedy adoption bounds this grading the same way: from the recorded approval until its retirement is recorded, an old-tree file under imported/, archive/, staging/ or journals/ that the approved plan enumerates as a frozen retire, move or migrate source (section 14.2) is bounded adoption state, never the adopted-into store's own evidence or staging, and, while its live bytes still match its plan digest, C-EVIDENCE-ENUM and this staging grading MUST grade it as migration_incomplete detail under the section 11 bounded treatment, never as a finding or cannot-evaluate, so the section 14.1 completion check stays reachable while the file stays frozen in place; a drifted or vanished source and an unenumerated path take no bounded treatment (section 11).",
+        )),
+        ('4.5', ('A discovered manifest that the section 9.2 validation refusals refuse',), (
+            'A discovered manifest that the section 9.2 validation refusals refuse for declaring a spec_version below 2.0.0, whatever its [opf].homes, marks no store: for adoption, it and the files beneath its .working/ MUST be treated as foreign content, never as a store, so the section 9.2 remedy adoption over them is a section 14 first adoption (sections 8.2, 9.2, and 14.1).',
+        )),
+        ('9.2', ('A spec_version below 2.0.0', 'A manifest so refused,', 'A manifest declaring a spec_version of 2.0.0 or above', 'Before any command writes to a store,'), (
+            "A spec_version below 2.0.0 names no version this specification defines, and validation MUST refuse it as a fail-closed INVALID finding naming the remedy, since this section defines no upgrade into 2.0.0: a fresh 2.0.0 store whose section 14 adoption gives the old store's files a disposition as foreign content.",
+            "That adoption is a first adoption: a manifest refused for declaring a spec_version below 2.0.0, whatever its [opf].homes, and the files beneath its .working/ are foreign content for adoption, never a store (sections 4.5 and 14.1), no prior OPF ancestry exists to seed, and the new store's counters start at zero (section 8.2); the old tree's reserved-name children (archive/, imported/, staging/, and journals/) are part of that foreign content and take their dispositions under section 14.2.",
+            "Because the new store's counters start at zero, a number the old tree's records carried can be issued again in the new store's own series; the old tree's records are foreign content, never the new store's history, so no series within one store ever reissues an ID (section 8.2).",
+            'A manifest declaring a spec_version of 2.0.0 or above whose [opf].homes is missing or not the integer 2 is refused as a store by the [opf].homes refusal above, never foreign content: that refusal MUST NOT be read as authorizing initialization or adoption, and the remedy adoption above does not apply to it (sections 4.5, 8.2, and 14.1).',
+            'Before any command writes to a store, the claim, release, or reconciliation of the single-writer lease (section 5.7), a fast-forward by opf sync, and the recovery of sections 8.8, 14.1, and 14.2 included, every implementation MUST apply these validation refusals and the [opf].homes refusal above to the store manifest that discovery finds there, so a store they refuse stays byte-identical; the one exception is the section 14 adoption that the remedy above names, every write that adoption requires included: its investigation, its staged plan and approval, its apply, and the recovery of that apply (sections 14.1 and 14.2).',
+            'Before that apply, every write of that adoption into the discovered .working/ tree MUST land under the reserved control-area children of section 4.2, its staging and evidence homes, and MUST leave every discovered file, the refused manifest included, byte-identical; only the apply gives a discovered file its disposition.',
+        )),
+        ('14.2', ('A fully reversed first adoption',), (
+            "A fully reversed first adoption leaves .working/ holding its retained journal, so the store location reads as present without a manifest (section 4.5), and journal state that a foreign tree planted there is touched only by a fail-closed refusal, never consumed as recovery state; clearing it is the operator's own act outside any OPF operation, a same-user residual of the class section 14.1 discloses, except where a section 9.2 remedy adoption's approved plan dispositions it as foreign content (the reserved-names rule below).",
+        )),
+        ('14.2', ('Once apply commits, a file under',), (
+            "Once apply commits, a file the store's own apply archived under .working/archive/adoption/<run-id>/ MUST keep that store-relative path and those exact bytes: it MUST NOT be written, rewritten, relocated or removed within its store by any OPF operation, and the enforcement pack MUST deny writes there (section 14.1).",
+        )),
+    )
     retired_known['9.2'] = retired_known['9.2'] + (
         'Unproven legacy .archive/ entries MUST remain in place with a standing finding until dispositioned.',
     )
+    # Deleted outright with the section 9.2 remedy adoption (maintainer ruling, 2026-10-24).
+    for section, sentences in (
+        ('8.2', (
+            'A store manifest the section 9.2 validation refusals refuse for declaring a spec_version below 2.0.0, whatever its [opf].homes, is foreign content for adoption, never a store (sections 4.5 and 14.1), so the section 9.2 remedy adoption over it is a genuinely first adoption: no prior OPF ancestry exists to seed, and its counters start at zero.',
+        )),
+        ('14.1', (
+            "Investigation MUST treat an adoption over a discovered manifest that the section 9.2 validation refusals refuse for declaring a spec_version below 2.0.0, whatever its [opf].homes, as a first adoption: that manifest is foreign content for adoption, never a store (sections 4.5 and 9.2), every file of the old tree, its reserved-name children included, takes a disposition under section 14.2, and the new store's counters start at zero (section 8.2).",
+        )),
+        ('14.2', (
+            'Those rules protect the control area of the store being adopted into.',
+            "In the section 9.2 remedy adoption the refused manifest marks no store (sections 4.5 and 9.2), so the old tree's files under those reserved names are foreign content, not OPF control area: detection MUST surface each of them, and each MUST take a migrate, move or retire disposition, never keep, because the rule above keeps every [unmanaged] declaration outside the reserved names.",
+            'The section 4.2 journal-operand rule, the archive-immutability rule above, and the evidence-immutability rule below likewise protect only what the store being adopted into wrote: its own journal state, the files its own applies archived, and the evidence its own runs committed.',
+            "The old tree's files under the reserved names are foreign content that store never wrote, so those rules do not reach them: executing their dispositions MUST handle each one as an ordinary foreign operand, journaled, digest-verified and recorded like every other disposition, and MUST NOT consume any of them as journal, recovery, archive or evidence state (sections 4.2 and 9.2).",
+        )),
+    ):
+        retired_known[section] = retired_known.get(section, ()) + sentences
     for section, starts, old in retired_runs:
         pins = _CONTRACT[section]
         at = [i for i, f in enumerate(pins) if f.startswith(starts[0])]
@@ -6433,7 +6530,7 @@ def _self_test_vectors():
         # Emptying or narrowing the registry would retire its vectors silently: its shape is pinned.
         check("spec-retired-registry", lambda: tuple(_RETIRED) == (
             "4.2", "4.4", "4.5", "8.1", "8.2", "8.3", "8.5", "8.6", "8.8", "9", "9.1", "9.2", "11", "12", "13", "14.1", "14.2", "14.3", "15", "16.1", "17") and
-              tuple(map(len, _RETIRED.values())) == (45, 2, 6, 6, 6, 2, 1, 5, 8, 2, 3, 31, 5, 2, 1, 8, 4, 1, 3, 44, 17))
+              tuple(map(len, _RETIRED.values())) == (47, 2, 7, 6, 7, 2, 1, 5, 8, 2, 3, 36, 5, 2, 1, 9, 9, 1, 3, 44, 17))
         near_misses = (
             ("plain", "Retired text, quoted and not in force:\n{}"),
             ("inline", "> Retired text, quoted and not in force: {}"),

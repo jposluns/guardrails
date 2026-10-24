@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "80676e2a4684b98dcad21c4359950ceb1d29d646413cecf7610d10bbc7fa3a9e"
+tree-sha256 = "ffe41db2229a66970f9528809d331ac39b7c7ea26b6e82c03c2f3cdad960c2c8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2571,8 +2571,8 @@ sha256 = "97ad1875184e57196979e12b57cf08bd5537ea1c2a0ebfaac520ab77eab25a39"
 
 [[sources]]
 path = "opf/site/disclosure.html"
-bytes = 12659
-sha256 = "ce56f04080b7b681036eaa59f4946e7a86349d1c20e4eaccf4df9a5e29e8eedb"
+bytes = 12437
+sha256 = "6d551a1f2e8313fc1582a1c74b7579c1220cb25411fa525ad211aa3e611f960a"
 
 [[sources]]
 path = "opf/site/favicon.svg"
@@ -2591,8 +2591,8 @@ sha256 = "9516b469eb83cd4d9ff746cb0df720580b92a466a72a5a9ae8bc5a3009bcedf2"
 
 [[sources]]
 path = "opf/site/record-indexes.html"
-bytes = 70615
-sha256 = "139100ad48950a219615804e5baf71cddacf360757a51823940a9d966d7fc281"
+bytes = 70525
+sha256 = "02ecf8fdb1ca813a5ed4731c8437a7587367daf799cec8c743191f46eabd0dad"
 
 [[sources]]
 path = "opf/site/roadmap.html"
@@ -2646,13 +2646,13 @@ sha256 = "4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec"
 
 [[sources]]
 path = "opf/spec/OPF-QUICKSTART.md"
-bytes = 16979
-sha256 = "70de42f93799d12c14bcc94d624112f953b7ec8918493d0c51fcdcb17db2cf4c"
+bytes = 16523
+sha256 = "3b7c93e963e103a0de93e99b2b26682c7a59b8d8360a594581f3712edefff834"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
-bytes = 188390
-sha256 = "ee412acc70167ed60927ebc3e508b668df20a2bb50ca1ac489e907a6283da5c6"
+bytes = 183910
+sha256 = "f5c34b3775c65eb7b3cd79ac65d81ef2421bce08d6fdf17cc2bfa4c0933abe8f"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
@@ -3006,8 +3006,8 @@ sha256 = "150620e6013e9cc95cc0b2a6c1ffc3e38dce3bd3c851cb4802c742413faf6153"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 681555
-sha256 = "7331609ca68fa5014010c70ff1565db1d662a506e3a6ebfb6ee04cb3ccab839c"
+bytes = 689440
+sha256 = "732addfcf3dd74b05e8288f9f35a5ebc08b4bd8d1d93bc849bd3209c18a205fb"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
