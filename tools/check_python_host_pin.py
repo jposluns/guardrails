@@ -2094,7 +2094,7 @@ def _job_cases():
     runs = "    runs-on: "
     pinned_if = HEAVY_JOB_IF_LINE + "\n"
     block = "\n".join(CONCURRENCY_BLOCK) + "\n"
-    second ="  second:\n    runs-on: ubuntu-latest\n    steps:\n"
+    second = "  second:\n    runs-on: ubuntu-latest\n    steps:\n"
     decoy = ("  decoy:\n    runs-on: ubuntu-latest\n    steps:\n"
              "      - name: Decoy judge\n        run: " + JOBS_ONLY_RUN + "\n        if: false\n")
     return (
