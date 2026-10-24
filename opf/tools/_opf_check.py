@@ -241,8 +241,9 @@ def imported_series_active(manifest_data):
     and the across-time checks; classify_containment derives it internally from the manifest for the
     C-CONTAINMENT registration and every consumer of the classification (the write guard,
     _opf_write_guard.plan_write_scope, included), with _check_containment reading it again only for
-    its emptied-roster tripwire; and the observer's prior imported baseline
-    (_opf_observe._reconstruct_imported) reads it too. So they cannot disagree on which stores carry
+    its emptied-roster tripwire; and the observer's prior imported baseline (_opf_observe._reconstruct_prior,
+    which reads _reconstruct_imported only where it holds) and the record counter proof
+    (_opf_record._counter_state) read it too. So they cannot disagree on which stores carry
     the imported series or on the imported managed set."""
     return (_opf_store.homes_generation(manifest_data) >= 2
             and _opf_store.imported_series_declared(manifest_data))
@@ -6313,6 +6314,14 @@ def self_test():
                     and r.checks.get("C-IMPORTED-SCHEMA") == "PASS"
                     and pending_only(r) and _i3_bad(r) == set(_imp_pending))
 
+        def _i3_rows_refused_inactive(r):
+            # C-COUNTERS on an INACTIVE store holding every imported row: each row, and nothing else,
+            # draws the former finding that refuses an imported key as a clean two-letter namespace.
+            return (r is not None and r.checks.get("C-COUNTERS") == "FINDING"
+                    and sorted(_i3_msgs(r, "C-COUNTERS")) == sorted(
+                        "counters.toml: [counters] key {!r} is not a two-letter uppercase namespace".format(
+                            "imported:" + ns) for ns in _i3_ns))
+
         _i3_bi2 = {"backlog_item.imported.index.toml": idx([_i3_row("imported:BI-1"), _i3_row("imported:BI-2")])}
         _i3_prev_homes = _opf_store.SUPPORTED_HOMES
         _i3_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
@@ -6500,6 +6509,19 @@ def self_test():
                   and any("1 reserved imported:BI number(s)" in m and "the first imported:BI-2" in m
                           for m in _i3_msgs(_i3_rnob, "C-NO-DELETION"))
                   and not any("allocated imported:BI-<n>" in m for m in _i3_msgs(_i3_rnob, "C-NO-DELETION")))
+            # A malformed imported baseline decides nothing either: a clean key (BI-9) in the prior's
+            # imported member makes it malformed, so the exemption is the same named CANNOT-EVALUATE even
+            # though the member also lists imported:BI-2 (red when the malformed-baseline arm of
+            # _imported_prior_holdings is dropped: the partial baseline then reads as holding nothing and
+            # the reserved number is exempted).
+            _i3_rmf = _i3_rrun(_i3_machine(imp={"imported:BI": 2}, leaves=copy.deepcopy(_i3_one_rsv)), (2,),
+                               obs=_i3_obs({"BI-9": _record_digest(_i3_row("imported:BI-1")),
+                                            "imported:BI-2": _record_digest(_i3_row("imported:BI-2"))}))
+            check("imported-reserved-number-undecided-with-malformed-baseline",
+                  _i3_rmf is not None and _i3_rmf.checks.get("C-NO-DELETION") == "CANNOT-EVALUATE"
+                  and any("1 reserved imported:BI number(s)" in m and "the first imported:BI-2" in m
+                          for m in _i3_msgs(_i3_rmf, "C-NO-DELETION"))
+                  and not any("allocated imported:BI-<n>" in m for m in _i3_msgs(_i3_rmf, "C-NO-DELETION")))
             _i3_rwm = _i3_machine(imp={"imported:WL": 3}, leaves={
                 "worklog.imported.toml": {"schema": 1, "entry": [imp_wl(1), imp_wl(3)]}})
             check("imported-reserved-wl-gap-exempt",
@@ -6513,6 +6535,15 @@ def self_test():
                   and any("1 reserved imported:WL number(s)" in m and "the first imported:WL-2" in m
                           for m in _i3_msgs(_i3_rwn, "C-CONTIGUITY"))
                   and not any("imported:WL-2 is missing" in m for m in _i3_msgs(_i3_rwn, "C-CONTIGUITY")))
+            # The imported:WL twin of the malformed-baseline vector, on C-CONTIGUITY.
+            _i3_rwf = _i3_rrun(copy.deepcopy(_i3_rwm), (2,), key="imported:WL",
+                               obs=_i3_obs({"BI-9": _record_digest(imp_wl(1)),
+                                            "imported:WL-2": _record_digest(imp_wl(2))}))
+            check("imported-reserved-wl-undecided-with-malformed-baseline",
+                  _i3_rwf is not None and _i3_rwf.checks.get("C-CONTIGUITY") == "CANNOT-EVALUATE"
+                  and any("1 reserved imported:WL number(s)" in m and "the first imported:WL-2" in m
+                          for m in _i3_msgs(_i3_rwf, "C-CONTIGUITY"))
+                  and not any("imported:WL-2 is missing" in m for m in _i3_msgs(_i3_rwf, "C-CONTIGUITY")))
             # Append-only history over the imported leaves (spec 8.3): an unchanged prior imported record
             # passes; an edited or vanished one is a finding; a prior with no imported baseline is a named
             # CANNOT-EVALUATE; an imported counter regression is a C-HISTORY-COUNTERS finding.
@@ -6549,6 +6580,25 @@ def self_test():
             check("imported-prior-malformed-member-when-active",
                   _i3_hmf is not None and _i3_hmf.checks.get("C-HISTORY-APPEND-ONLY") == "CANNOT-EVALUATE"
                   and any("malformed" in m for m in _i3_msgs(_i3_hmf, "C-HISTORY-APPEND-ONLY")))
+            # A prior imported key whose namespace the imported series refuses (imported:LF-1: LF is
+            # outside IMPORTED_NAMESPACES, spec 8.2) is the SAME malformed-prior cant, never an
+            # absent-record finding (red when the namespace arm is dropped from the prior
+            # normalization: the key then normalizes and reads as a deleted record).
+            _i3_hlf = _i3_run(_i3_machine(), obs=_i3_obs({"imported:LF-1": _i3_dig}))
+            check("imported-prior-refused-namespace-member-when-active",
+                  _i3_hlf is not None and _i3_hlf.checks.get("C-HISTORY-APPEND-ONLY") == "CANNOT-EVALUATE"
+                  and any("malformed" in m for m in _i3_msgs(_i3_hlf, "C-HISTORY-APPEND-ONLY"))
+                  and not any("absent from the imported leaves" in m
+                              for m in _i3_msgs(_i3_hlf, "C-HISTORY-APPEND-ONLY")))
+            # A prior imported digest that is not a string is the SAME malformed-prior cant, never a changed
+            # record finding (red when the digest-type arm is dropped from the prior normalization: the
+            # integer then normalizes and differs from the present record's digest).
+            _i3_hdt = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_one), obs=_i3_obs({"imported:BI-1": 5}))
+            check("imported-prior-non-string-digest-member-when-active",
+                  _i3_hdt is not None and _i3_hdt.checks.get("C-HISTORY-APPEND-ONLY") == "CANNOT-EVALUATE"
+                  and any("malformed" in m for m in _i3_msgs(_i3_hdt, "C-HISTORY-APPEND-ONLY"))
+                  and not any("changed since the prior committed snapshot" in m
+                              for m in _i3_msgs(_i3_hdt, "C-HISTORY-APPEND-ONLY")))
             # An unreadable imported leaf, or one with no [[record]] array, is a named CANNOT-EVALUATE and is
             # never read as an empty leaf: neither its allocated ids nor a prior imported record are reported
             # deleted (spec 11: an unreadable input fails closed; red when an unread leaf joins the
@@ -6600,8 +6650,9 @@ def self_test():
             # The per-series grading over EVERY enabled namespace, never only the ones the vectors above
             # use: each enabled BASELINE namespace and a module-tier one (governance's MA, enabled inside
             # the fixture) takes the same five vectors end to end, per namespace and per check verdict.
-            # The positive leaf (rows within the high-water) passes every per-series check beside the
-            # pending reconciliation cants; an id above its own imported high-water is the exact
+            # The positive leaf (rows within the high-water) passes every per-series check, tolerates
+            # only C-IMPORTED-SCHEMA row findings on its own leaf, and carries no cant beside the
+            # pending reconciliation ones; an id above its own imported high-water is the exact
             # C-ID-SPACE finding; a duplicated id is the C-ID-SPACE duplicate finding; an allocated id
             # absent from the leaf is the C-NO-DELETION overhang finding with its exact count; and a
             # committed row that changed or vanished since the prior snapshot is each a
@@ -6616,9 +6667,17 @@ def self_test():
                                  "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-CONTAINMENT",
                                  "C-IMPORTED-IDS", "C-IMPORTED-PROVENANCE")
 
-            def _i3_series_pass(r):
-                return (r is not None and _i3_pending(r)
-                        and all(r.checks.get(c) == "PASS" for c in _i3_series_checks))
+            def _i3_series_pass(r, leaf):
+                # Beside the per-series checks passing, the ONLY tolerated findings are
+                # C-IMPORTED-SCHEMA row findings on the vector's OWN leaf (the generic rows do not
+                # carry every type's full field roster, and a module-tier row is refused by that
+                # check by design), and the pending imported checks' reconciliation cants are the
+                # only cants: a false finding from any OTHER check on a populated imported leaf,
+                # or against any other path, reds the control.
+                return (r is not None and pending_only(r)
+                        and _i3_bad(r) <= {"C-IMPORTED-SCHEMA"} | set(_imp_pending)
+                        and all(r.checks.get(c) == "PASS" for c in _i3_series_checks)
+                        and all(f.startswith(".working/toml/" + leaf + "#") for f in r.findings))
 
             def _i3_srow(ns, n, mark="t"):
                 if ns == "WL":
@@ -6645,8 +6704,11 @@ def self_test():
             _i3_every_ns = _i3_ns + ["MA"]
             _i3_pos, _i3_ovr, _i3_dup2, _i3_del2, _i3_his = [], [], [], [], []
             for _i3_x in _i3_every_ns:
+                _i3_tname = _i3_type_of[_i3_x]
+                _i3_leaf = (_opf_store.IMPORTED_WORKLOG_NAME if _i3_tname in _LEDGER_TYPES
+                            else _i3_tname + _opf_store.IMPORTED_INDEX_SUFFIX)
                 _i3_xr = _i3_run(_i3_ns_machine(_i3_x, 2, [_i3_srow(_i3_x, 1), _i3_srow(_i3_x, 2)]))
-                _i3_pos.append(_i3_series_pass(_i3_xr))
+                _i3_pos.append(_i3_series_pass(_i3_xr, _i3_leaf))
                 _i3_xr = _i3_run(_i3_ns_machine(_i3_x, 1, [_i3_srow(_i3_x, 1), _i3_srow(_i3_x, 2)]))
                 _i3_ovr.append(_i3_xr is not None and _i3_xr.checks.get("C-ID-SPACE") == "FINDING"
                                and _i3_msgs(_i3_xr, "C-ID-SPACE") == [
@@ -6880,9 +6942,87 @@ def self_test():
             check("imported-segregation-unread-clean-records-cannot-evaluate",
                   _i3_sgur is not None and _i3_sgur.checks.get("C-IMPORTED-SEGREGATION") == "CANNOT-EVALUATE"
                   and any("C-RECORDS did not evaluate" in m for m in _i3_msgs(_i3_sgur, "C-IMPORTED-SEGREGATION")))
+            # Homes 2 supported WITHOUT imported-series support (SUPPORTED_SPEC_VERSION back at its shipped
+            # value). The 2.0.0 / homes = 2 store grades generation 2, but the flag is False, so an imported
+            # counter row stays the former C-COUNTERS finding and the leaves are never graded (red when the
+            # grading reads the homes-2 generation alone).
+            _opf_store.SUPPORTED_SPEC_VERSION = _i3_prev_ssv
+            _i3_h2 = run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_bi2))
+            check("imported-grading-off-at-homes2-without-imported-support",
+                  _i3_rows_refused_inactive(_i3_h2) and _i3_h2.checks.get("C-EVIDENCE-ENUM") == "PASS"
+                  and _i3_h2.checks.get("C-ID-SPACE") == "PASS" and _i3_h2.checks.get("C-NO-DELETION") == "PASS")
         finally:
             _opf_store.SUPPORTED_HOMES = _i3_prev_homes
             _opf_store.SUPPORTED_SPEC_VERSION = _i3_prev_ssv
+        # imported_series_active is bound once in this module, by its module-level def: a parallel change
+        # that carries the same definition must leave ONE copy when both merge, and a textual merge can keep
+        # two without a conflict. The census counts these binding forms, anywhere in the source: a def, a
+        # class, an assignment or other name store (comprehension and walrus targets included), an import
+        # binding (what the statement BINDS: an unaliased `import a.b` binds its first dotted component,
+        # never the full dotted alias name), an except name, a function parameter of any kind, and a
+        # structural-pattern capture (a case name, a star capture, or a mapping rest), so a second binding
+        # by any of them is caught as well as a second def (red when the module binds it twice).
+        import ast
+        import inspect
+
+        def _i3_census(tree, name):
+            binds = []
+            for n in ast.walk(tree):
+                if isinstance(n, (ast.Import, ast.ImportFrom)):
+                    dotted = isinstance(n, ast.Import)
+                    binds.extend(a for a in n.names
+                                 if (a.asname or (a.name.partition(".")[0] if dotted else a.name)) == name)
+                elif ((isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                       and n.name == name)
+                      or (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                          and n.id == name)
+                      or (isinstance(n, ast.ExceptHandler) and n.name == name)
+                      or (isinstance(n, ast.arg) and n.arg == name)
+                      or (isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name == name)
+                      or (isinstance(n, ast.MatchMapping) and n.rest == name)):
+                    binds.append(n)
+            return binds
+
+        _i3_tree = ast.parse(inspect.getsource(sys.modules[__name__]))
+        _i3_binds = _i3_census(_i3_tree, "imported_series_active")
+        check("imported-series-active-defined-once",
+              len(_i3_binds) == 1 and isinstance(_i3_binds[0], ast.FunctionDef)
+              and _i3_binds[0] in _i3_tree.body)
+        # The census discriminates each newly counted form on a fixture that binds the name ONLY that way:
+        # a function parameter, a case capture, a star capture, and a mapping rest each count exactly one
+        # (red when the parameter or pattern-capture arm is dropped and such a binding goes uncounted).
+        check("imported-series-active-census-counts-parameters-and-captures",
+              [len(_i3_census(ast.parse(_i3_src), "imported_series_active")) for _i3_src in (
+                  "def f(imported_series_active):\n    pass\n",
+                  "match v:\n    case imported_series_active:\n        pass\n",
+                  "match v:\n    case [*imported_series_active]:\n        pass\n",
+                  "match v:\n    case {**imported_series_active}:\n        pass\n")] == [1, 1, 1, 1])
+        # The census counts what an import statement BINDS: an unaliased dotted `import a.b` binds its first
+        # component `a` (its ast.alias carries the full dotted name), an alias binds the asname alone, and a
+        # `from` import binds the imported name or its asname, never the module (red when an unaliased
+        # dotted import of the name goes uncounted, or when a dotted name is matched whole).
+        check("imported-series-active-census-counts-import-bindings",
+              [len(_i3_census(ast.parse(_i3_src), "imported_series_active")) for _i3_src in (
+                  "import imported_series_active\n",
+                  "import imported_series_active.child\n",
+                  "import imported_series_active.child as other\n",
+                  "import other.imported_series_active\n",
+                  "import pkg as imported_series_active\n",
+                  "from pkg import imported_series_active\n",
+                  "from pkg import other as imported_series_active\n",
+                  "from imported_series_active import other\n")] == [1, 1, 0, 0, 1, 1, 1, 0])
+        # Inactive prior handling is unchanged at the shipped constants: an imported counter key keeps
+        # the malformed-prior verdict, and an imported member is ignored.
+        _i3_pk = clean_prior()
+        _i3_pk["prior"]["counters_high"]["imported:BI"] = 0
+        _i3_pkr = run(clean_machine(), obs=_i3_pk)
+        _i3_pm = clean_prior()
+        _i3_pm["prior"]["imported"] = "not a table"
+        _i3_pmr = run(clean_machine(), obs=_i3_pm)
+        check("imported-prior-inert-when-inactive",
+              _i3_pkr is not None and _i3_pkr.checks.get("C-HISTORY-COUNTERS") == "CANNOT-EVALUATE"
+              and any("malformed" in m for m in _i3_msgs(_i3_pkr, "C-HISTORY-COUNTERS"))
+              and _i3_pmr is not None and _i3_pmr.status == VALID)
         # F2 (per-record): worklog/<WL-n>.toml is never a per-record body -> INVALID; a garbage body control
         # is still caught.
         wlr = copy.deepcopy(pr_machine)
