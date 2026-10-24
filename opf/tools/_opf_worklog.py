@@ -210,12 +210,16 @@ def _read_document(root_fd, relpath):
 
 
 def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read_legacy=None,
-                    on_legacy_conflict=None, supported_profiles=None, manifest_model=None):
+                    on_legacy_conflict=None, supported_profiles=None, manifest_model=None,
+                    on_read=None):
     """Load only the manifest-selected source beneath an already-resolved descriptor.
 
     with_raw preserves legacy bytes; generation 2 uses a length-framed stream in
     numeric (number, suffix) order. read_legacy preserves the view reader's policy.
-    required=False allows only an absent generation-1 ledger.
+    required=False allows only an absent generation-1 ledger. on_read, when given,
+    is called once per source FILE read as on_read(relpath, raw_bytes) (the
+    generation-1 ledger, or each generation-2 entry file), so a caller that also
+    proves canonical bytes can reuse this read instead of reading the file again.
 
     Standalone readers refuse the opposite shape. Doctor alone supplies
     on_legacy_conflict: it already grades the generation-1 directory as INVALID
@@ -248,6 +252,8 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
             if required:
                 raise WorklogError("{} is absent (the active worklog ledger is required)".format(rel))
             return None
+        if on_read is not None:
+            on_read(rel, got[0])
         return got if with_raw else got[1]
     try:
         dfd = _journal._open_dir_contained(root_fd, rel)
@@ -263,6 +269,8 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
                 if got is None:
                     raise WorklogError("{}/{} vanished during enumeration".format(rel, name))
                 raw, entry = got
+                if on_read is not None:
+                    on_read(rel + "/" + name, raw)
                 if entry.get("id") != name[:-len(".toml")]:
                     raise WorklogError("{}/{}: filename and id differ".format(rel, name))
                 # A per-record body is flat, never a legacy envelope.
@@ -283,10 +291,15 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
         raise WorklogError("cannot load worklog ({})".format(exc))
 
 
-def load_archive_worklog_at(root_fd, relpath):
-    """An explicitly named archive bucket retains the legacy envelope (M7)."""
+def load_archive_worklog_at(root_fd, relpath, *, on_read=None):
+    """An explicitly named archive bucket retains the legacy envelope (M7). on_read, when given, is
+    called as on_read(relpath, raw_bytes) on presence, so the caller can reuse this read."""
     got = _read_document(root_fd, relpath)
-    return None if got is None else got[1]
+    if got is None:
+        return None
+    if on_read is not None:
+        on_read(relpath, got[0])
+    return got[1]
 
 
 def load_worklog(store):
