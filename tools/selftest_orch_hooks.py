@@ -2720,6 +2720,187 @@ def _rwh_cases(tmp):
     # check goes red if that residual is ever closed or widened silently
     check("rwh/relative-write-operand-residual-allows",
           kind(main, "git -C " + str(free) + " bundle create ../held/zwb HEAD"), "allow")
+    # every hold-set candidate is resolved PHYSICALLY before the nearest-existing-ancestor walk,
+    # so a literal absolute path that walks '..' out of a directory the same command creates
+    # still consults the held repository (a textual walk strips the missing component and the
+    # '..' and consults the unrelated parent, hiding the hold: red when the resolution is
+    # reverted). The -C form binds inside the held worktree (the direct deny), the cd form is
+    # withheld, and a write operand through the missing directory is refused by the held-path
+    # gate; the same shapes through the unheld free repository, and the hold-reader revert leg,
+    # stay allowed.
+    dd = ["mkdir " + str(base) + "/zdnew && git -C " + str(base) + "/zdnew/../held reset --hard "
+          + seed,
+          "mkdir " + str(base) + "/zdnew2 && cd " + str(base) + "/zdnew2/../held && git reset "
+          "--hard " + seed,
+          "git -C " + str(free) + " bundle create " + str(base) + "/zdnew3/../held/zdb HEAD"]
+    dd_res = [run(base, c) for c in dd]
+    check("rwh/dotdot-candidate-normalised-denies-red-on-revert",
+          [_rdp_kind(r) for r in dd_res] +
+          ["review-in-flight-pins-its-artefact" in _rwh_reason(dd_res[0]),
+           kind(base, "mkdir " + str(free) + "/zdnew && git -C " + str(free) +
+                "/zdnew/../sub reset --hard " + seed),
+           _rwh_without_hold(lambda: kind(base, dd[0]))],
+          ["deny", "unverifiable", "deny", True, "allow", "allow"])
+    # the TARGET of a link the command creates joins the hold set even where it is RELATIVE
+    # (resolved against the directory the segment runs from), so create-link-then-mutate is
+    # withheld for a relative ln target as for an absolute one; an ln operand no literal text
+    # resolves leaves the created link's destination unknown and is withheld while a hold is
+    # live rather than guessed. The free-target link and the revert legs stay allowed.
+    lr = "ln -s held " + str(base) + "/zlrel && git -C " + str(base) + "/zlrel reset --hard " + seed
+    lo = 'ln -s "$D" ' + str(base) + "/zlopq && git -C " + str(free) + " commit --allow-empty -m x"
+    lo_res = run(main, lo)
+    check("rwh/created-link-relative-target-denies-red-on-revert",
+          [kind(base, lr),
+           kind(base, "ln -s free " + str(base) + "/zlfre && git -C " + str(base) +
+                "/zlfre reset --hard " + seed),
+           _rdp_kind(lo_res), "creates a link" in _rwh_reason(lo_res),
+           _rwh_without_hold(lambda: kind(base, lr)),
+           _rwh_without_hold(lambda: kind(main, lo))],
+          ["unverifiable", "allow", "unverifiable", True, "allow", "allow"])
+    # a PROCESS-RELATIVE path (/proc/self/..., /proc/<pid>/..., /dev/fd/...) in any structural
+    # position (an operand, option value or directory step) cannot be resolved by the hook (its
+    # meaning depends on the process that opens it), so the command is withheld outright, with
+    # the hold reader reverted too (the holds where it lands are exactly what cannot be read);
+    # the read-only grammar still passes a process-relative -C, and a sighting only the raw-text
+    # scan made (inside a shell body) withholds while a hold is live and is allowed with the
+    # hold reader reverted (red on revert for both screens).
+    pr = ["git -C " + str(free) + " -C /proc/self/cwd/../held reset --hard " + seed,
+          "git -C " + str(free) + " bundle create /proc/self/cwd/../held/zpw HEAD",
+          "git -C " + str(free) + " commit --allow-empty -F /dev/fd/3"]
+    pb = 'bash -c "git -C ' + str(free) + ' bundle create /proc/self/cwd/../held/zpb HEAD"'
+    pr_res = run(base, pr[0])
+    check("rwh/process-relative-path-fails-closed-red-on-revert",
+          [_rdp_kind(pr_res)] + [kind(base, c) for c in pr[1:]] +
+          ["process-relative" in _rwh_reason(pr_res),
+           _rwh_without_hold(lambda: kind(base, pr[0])),
+           kind(base, "git -C /proc/self/cwd status"),
+           kind(main, pb),
+           _rwh_without_hold(lambda: kind(main, pb))],
+          ["unverifiable"] * 3 + [True, "unverifiable", "allow", "unverifiable", "allow"])
+    # a literal ABSOLUTE held path anywhere in the raw text joins the hold set, a quoted shell
+    # body (bash -c, eval) and a heredoc body included, so from a session outside every held
+    # repository the body-wrapped write into the held worktree is withheld (the body is not one
+    # plain git segment); the same body writing into the unheld free tree, and the revert leg,
+    # stay allowed (red when the raw-text widening is reverted: the hold goes unseen and every
+    # one of these is allowed).
+    sb = ['bash -c "git -C ' + str(free) + ' bundle create ' + str(held) + '/zsb HEAD"',
+          "eval 'git -C " + str(free) + " bundle create " + str(held) + "/zse HEAD'",
+          "sh <<'EOF'\ngit -C " + str(free) + " bundle create " + str(held) + "/zsh HEAD\nEOF"]
+    check("rwh/shell-body-held-path-denies-red-on-revert",
+          [kind(base, c) for c in sb] +
+          [kind(base, 'bash -c "git -C ' + str(free) + ' bundle create ' + str(free) +
+                '/zsb HEAD"'),
+           _rwh_without_hold(lambda: kind(base, sb[0]))],
+          ["unverifiable"] * 3 + ["allow", "allow"])
+    # an ATTACHED short-option value (-o/abs/path) is a hold-set candidate of its own: from a
+    # session outside every held repository it is the only spelling that makes this hold
+    # visible (the raw-text scan reads no path glued to a word), so the write gate's refusal of
+    # this form goes red when the attached-value candidate is reverted; the same value into the
+    # unheld free tree, and the hold-reader revert leg, stay allowed.
+    so = "git -C " + str(free) + " format-patch -o" + str(held) + "/zso -1"
+    so_res = run(base, so)
+    check("rwh/attached-short-option-candidate-denies-red-on-revert",
+          [_rdp_kind(so_res), "writes a file or tree" in _rwh_reason(so_res),
+           kind(base, "git -C " + str(free) + " format-patch -o" + str(free) + "/zso -1"),
+           _rwh_without_hold(lambda: kind(base, so))],
+          ["deny", True, "allow", "allow"])
+    # the held-path gate reads the same attached short-option value: a verb OUTSIDE the
+    # enumerated write tables carrying -F<held path> is refused by the gate alone (red when the
+    # gate's attached-value read is reverted: the form then reaches the unrelated-target pass
+    # and is allowed); the same spelling naming the free tree, and the revert leg, stay allowed.
+    gv = "git -C " + str(free) + " commit -F" + str(held) + "/f"
+    gv_res = run(base, gv)
+    check("rwh/held-path-gate-short-value-denies-red-on-revert",
+          [_rdp_kind(gv_res), "resolves to or inside" in _rwh_reason(gv_res),
+           kind(base, "git -C " + str(free) + " commit -F" + str(free) + "/g"),
+           _rwh_without_hold(lambda: kind(base, gv))],
+          ["deny", True, "allow", "allow"])
+    # a configured core.worktree that names a MISSING path inside the held worktree is consulted
+    # at its nearest existing ancestor like every other candidate, so the expansion still shows
+    # the hold (red when the expansion's ancestor consultation is reverted: the missing path
+    # roots no repository and the command is allowed); unsetting it restores the allow, and the
+    # hold-reader revert leg shows the withhold comes from the live hold alone.
+    _rdp_git(free, "config", "core.worktree", str(held) + "/zcw")
+    cwc = "git -C " + str(free) + " add -A"
+    cwc_got = [kind(base, cwc), _rwh_without_hold(lambda: kind(base, cwc))]
+    _rdp_git(free, "config", "--unset", "core.worktree")
+    cwc_got.append(kind(base, cwc))
+    check("rwh/config-worktree-candidate-ancestor-denies-red-on-revert",
+          cwc_got, ["unverifiable", "allow", "allow"])
+    # a candidate whose existence cannot be read at all (a self-looping symlink) is probed
+    # itself and the probe failure fails closed, with the hold reader reverted too (red when the
+    # unreadable-existence branch is reverted to walk up: the walk lands on the readable parent,
+    # the loop roots no repository, and the command is allowed); the missing-file sibling that
+    # CAN be walked stays the allow control.
+    (base / "zloop").symlink_to(base / "zloop")
+    ul = "git -C " + str(free) + " commit --allow-empty -F " + str(base) + "/zloop"
+    ul_res = run(base, ul)
+    check("rwh/unresolvable-candidate-probe-fails-closed-red-on-revert",
+          [_rdp_kind(ul_res), "cannot be probed" in _rwh_reason(ul_res),
+           _rwh_without_hold(lambda: kind(base, ul)),
+           kind(base, "git -C " + str(free) + " commit --allow-empty -F " + str(base) +
+                "/zlfile")],
+          ["unverifiable", True, "unverifiable", "allow"])
+    # a core.worktree LOOKUP that cannot answer (git fails with neither the set nor the unset
+    # reply) may hide a configured worktree and its repository's holds, so it is the same
+    # cannot-evaluate as a failed identity probe, never a clean expansion (red when the failed
+    # lookup is read as unset again: discovery finishes clean and the commit is allowed); the
+    # unstubbed control still passes.
+    def _cw_fail_stub(repo, *args, **kw):
+        if args and args[0] == "config" and "core.worktree" in args and str(repo) == str(free):
+            return _RwhReply(3, err=b"fatal: injected config failure\n")
+        return saved_idp(repo, *args, **kw)
+    aiqt_hooks._review_git = _cw_fail_stub
+    try:
+        cwf_res = run(base, "git -C " + str(free) + " commit --allow-empty -m x")
+    finally:
+        aiqt_hooks._review_git = saved_idp
+    check("rwh/config-worktree-lookup-unknown-fails-closed-red-on-revert",
+          [_rdp_kind(cwf_res), "cannot be probed" in _rwh_reason(cwf_res),
+           kind(base, "git -C " + str(free) + " commit --allow-empty -m x")],
+          ["unverifiable", True, "allow"])
+    # an exit-0 identity reply is accepted ONLY as exactly the two newline-terminated path
+    # lines: a reply carrying an extra line, or missing its final newline, is the probe error,
+    # never a usable identity (red when the exact-shape test is loosened to 'at least three
+    # split parts': the junk reply builds an identity whose marker directory never exists,
+    # every hold reads as absent, and the held reset is allowed).
+    for stub_out in (b"/nonexistent/gitdir\n/nonexistent/common\nzz\n",
+                     b"/nonexistent/gitdir\n/nonexistent/common"):
+        aiqt_hooks._review_git = _reply_stub(0, out=stub_out)
+        try:
+            xl_res = run(base, rh)
+            xl_got = [_rdp_kind(xl_res), "cannot be probed" in _rwh_reason(xl_res)]
+        finally:
+            aiqt_hooks._review_git = saved_idp
+        if stub_out.endswith(b"zz\n"):
+            xl_all = xl_got
+        else:
+            xl_all += xl_got
+    check("rwh/identity-probe-extra-line-reply-fails-closed-red-on-revert",
+          xl_all + [kind(base, rh)], ["unverifiable", True] * 2 + ["deny"])
+    # a marker-directory listing that fails with "not found" reads as ABSENT only where the
+    # hook-owned chain that exists is a real directory whose child is missing: a DANGLING
+    # review-holds symlink, or a dangling aiqt component, still EXISTS there and is malformed
+    # state, never absence (red when the absence probe is reverted: the dangling link reads as
+    # no markers and the commit is allowed). Genuine absence after the link is removed, and a
+    # read-only form under the bad state, stay allowed.
+    dang = base / "dang"
+    dang.mkdir()
+    _rdp_git(base, "init", "-q", "-b", "main", str(dang))
+    (dang / ".git" / "aiqt").mkdir()
+    (dang / ".git" / "aiqt" / "review-holds").symlink_to(dang / ".git" / "aiqt" / "zz-nowhere")
+    dcmd = "git -C " + str(dang) + " commit --allow-empty -m x"
+    d1 = run(base, dcmd)
+    d1_got = [_rdp_kind(d1), "does not lead to a directory" in _rwh_reason(d1),
+              kind(base, "git -C " + str(dang) + " status")]
+    (dang / ".git" / "aiqt" / "review-holds").unlink()
+    d1_got.append(kind(base, dcmd))
+    (dang / ".git" / "aiqt").rmdir()
+    (dang / ".git" / "aiqt").symlink_to(dang / ".git" / "zz-nowhere")
+    d1_got.append(kind(base, dcmd))
+    (dang / ".git" / "aiqt").unlink()
+    check("rwh/dangling-marker-symlink-fails-closed-red-on-revert",
+          d1_got, ["deny", True, "allow", "allow", "deny"])
     # every allowlisted verb carries a closed read-only option set: a verb present in one set but
     # not the other would either fail closed forever or skip the option check
     check("rwh/read-only-option-table-covers-allowlist",

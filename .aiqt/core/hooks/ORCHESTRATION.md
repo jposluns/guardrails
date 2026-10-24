@@ -1059,18 +1059,31 @@ command outside the read-only grammar, and an absent command, is withheld as `UN
 (fail closed), in the standalone preflight as in the composed hook. A consulted directory whose
 git identity probe cannot answer (git could not be run, timed out, ran past the decision deadline,
 exited nonzero or on a signal with anything but git's specific not-a-git-repository answer, a
-dubious-ownership fatal included, or exited 0 with a reply that is not the expected two path
-lines, empty, one line or an echoed option) fails closed the same way: the probe failure is never
+dubious-ownership fatal included, or exited 0 with a reply that is not EXACTLY the expected two
+newline-terminated path
+lines, empty, one line, carrying extra lines, missing its final newline or an echoed option, or
+answered a `core.worktree` lookup with neither the set nor the unset reply) fails closed the same
+way: the probe failure is never
 read as "not a
 repository", which would hide a live hold there, while git's specific answer that a directory is
 in no repository, matched at the start of one of the probe's own C-locale stderr lines (never as
 a substring a path in the message could echo),
-stays the inert allow. A hold-set candidate path that names no existing directory is consulted
-at its NEAREST EXISTING ancestor, so a directory the command itself creates first, and a write
+stays the inert allow. A hold-set candidate path is resolved PHYSICALLY first (`os.path.realpath`,
+so a `..` component and every symlink are applied the way the kernel would apply them, never
+stripped textually) and one that names no existing directory is then consulted
+at its NEAREST EXISTING ancestor, so a directory the command itself creates first, a `..`
+spelling through it, and a write
 operand's file path, still read the markers of the repository each lands in; a candidate whose
-existence cannot be read at all is probed itself and the probe failure fails closed. A git too
+existence cannot be read at all is probed itself and the probe failure fails closed, and a
+PROCESS-RELATIVE candidate in any structural position (an operand, an option value, a `-C`, `cd`
+or `pushd` target, a `--git-dir` or `--work-tree` value, a `GIT_` assignment, an `ln` operand:
+`/proc/self/...`, `/proc/<pid>/...`, `/dev/fd/...`) cannot be resolved by the hook at all, since
+its meaning depends on the process that opens it, so it counts as held and the command is
+withheld outright (the read-only grammar still passes such a read). A git too
 old to answer the probe's options echoes them back
-on exit 0, so it fails closed the same way (it was previously read as inert). There is no
+on exit 0, so it fails closed the same way (it was previously read as inert). A marker-directory
+path that exists but does not lead to a directory (a dangling `review-holds` or `aiqt` symlink)
+is malformed marker state, never absence. There is no
 host-wide view of
 holds: the hook reads only the markers of the repositories a command names or sits in.
 
@@ -1109,13 +1122,21 @@ command text, so shell grammar is never modelled construct by construct. Every c
 against its HOLD SET: the repositories of the session working directory, of every literal path
 the raw text names after `-C`, `--git-dir`, `--work-tree` (the `=` and the separated form), `cd`,
 `pushd` or a `GIT_` assignment, with one level of surrounding quotes stripped (quoted `sh -c`
-bodies, heredoc bodies and option values included), and of every other literal ABSOLUTE path any
+bodies, heredoc bodies and option values included), of every other literal ABSOLUTE path any
 segment's tokens carry (a bare operand, the payload after the first `=` of any token, or an
-attached short-option value such as `-o/abs/path`), a candidate that names no existing directory
-consulted at its nearest existing ancestor, each resolved physically and each expanded
+attached short-option value such as `-o/abs/path`), of every operand of an `ln` segment (the
+target and the name of a link the command creates, a relative one resolved against the directory
+the segment runs from; one no literal text resolves leaves the created link's destination unknown
+and is withheld while a hold is live), and of every literal ABSOLUTE path ANYWHERE in the raw
+text (so a held path inside a quoted `bash -c`/`sh -c`/`eval` body or a heredoc body still
+surfaces its hold; a path glued to a word, an attached short-option value in raw text included,
+is left to the token scan), every candidate resolved PHYSICALLY first and one that names no
+existing directory then
+consulted at its nearest existing ancestor, and each expanded
 through its configured `core.worktree` (a repository-file `core.worktree` adds the configured
 worktree's repository to the set, so the expansion also reaches a mutation hidden behind a wrapper
-or override). The operand widening is additive only: a write operand is not a directory move and
+or override; a lookup that cannot answer, and a configured worktree that is process-relative,
+fail closed). The operand widening is additive only: a write operand is not a directory move and
 never becomes a resolution base, so an over-read can only add repositories whose holds are
 consulted. While ANY repository in that set has a live hold, ANY command whose raw text carries
 a git word (the word `git`, the git of a `git-<name>` executable, the git ending an interpreter
@@ -1238,7 +1259,11 @@ carried in the command's INPUT rather than in an operand, `apply --unsafe-paths`
 content can name paths outside the target tree, which git itself refuses without the option) and
 `fast-import --allow-unsafe-features` (the stream's own `export-marks`/`export-pack-edges`
 features name any path, which git refuses without it), since those paths travel in data no argv
-scan reads. A write operand is a path, not a directory move, so where it lands is not resolved:
+scan reads: a content-carried write path the hook cannot read as data counts as unknown and is
+refused while any hold the rule can see is live, and from a session outside every held repository
+where the command's text names NO held path at all, the hold stays unseen and the admission
+option is not refused there, a disclosed residual below. A write operand is a path, not a
+directory move, so where it lands is not resolved:
 from a command whose resolved target is an
 unrelated unheld repository it can still write into the held worktree. HELD-PATH OPERANDS: while
 ANY hold the rule can see is live, a git segment carrying a literal ABSOLUTE option value or
@@ -1249,14 +1274,20 @@ spelling would mean re-implementing each verb's grammar, so every absolute held-
 refused, a stated over-refusal for the spellings that only read (a command in the closed
 read-only grammar passed before this gate and is unaffected); a `-C` operand into the held
 worktree is the direct held-worktree mutation and carries the direct hold reason rather than
-this gate's over-refusal text. Every such literal absolute path also JOINS THE HOLD SET (a path
-that does not exist yet is consulted at its nearest existing ancestor), so the hold it names is
+this gate's over-refusal text. Every such literal absolute path also JOINS THE HOLD SET (resolved
+physically first, a path
+that does not exist yet consulted at its nearest existing ancestor), as does every literal
+absolute path anywhere in the raw text (a quoted shell body or heredoc body included), so the
+hold such a path names is
 seen, and the gates above fire, from a session outside every held repository too. The EXACT
 residual of the
 file-writing class is therefore: a file-writing option outside the enumerated tables, or a
 path-writing positional operand, whose operand is RELATIVE (it resolves against a directory this
 rule cannot fix) or is built by an expansion (`$`, a backquote, a glob or brace character, a
-leading `~`), plus a shell redirection; each of those spellings can still write into a held
+leading `~`); a shell redirection; and a write path carried ONLY in patch or stream content
+(`apply --unsafe-paths`, a `fast-import` stream) from a session outside every held repository
+whose command text names no held path, since the hook does not read that content; each of those
+spellings can still write into a held
 worktree from an allowed command, and they stay in the file-edit residual in the limits below.
 STATED OVER-REFUSAL:
 while some hold is live, an unrelated `git -C <unheld repository> rebase -x 'make' HEAD` is
@@ -1309,18 +1340,28 @@ from literal text, so an operand only an expansion resolves (`git -C "$DIR"`, a 
 glob) names no repository; from a session outside every held repository such a command stays
 allowed even where the expansion would land in a held worktree, and a git reached through an
 opaque program name (a wrapper script, an alias) carries no git word at all. The raw-text scan
-reads only the `-C`, `--git-dir`/`--work-tree`, `cd`/`pushd` (an option word such as `-P`, `-L`
-or `--` skipped before the operand) and `GIT_`-assignment spellings, and the token scan adds a
-path only where it is a whole literal absolute token, `=`-payload or attached short-option
-value: a
-directory named another way (a quote-spliced operand such as `-C
-"<prefix>"<rest>`, a `cd` stuck to a short option's value such as `rebase '-xcd <held> && ...'`,
-a `cd` inside a git `!` alias value, or a held path embedded inside a larger quoted option value
-whose `=`-payload text is not itself that path) joins no hold set, so from a session outside
+reads the `-C`, `--git-dir`/`--work-tree`, `cd`/`pushd` (an option word such as `-P`, `-L`
+or `--` skipped before the operand) and `GIT_`-assignment spellings, and EVERY literal absolute
+path anywhere in the raw text whose preceding character does not belong to a word; the token
+scan adds a
+path where it is a whole literal absolute token, `=`-payload or attached short-option
+value, and the `ln` scan adds a link's operands: a
+directory still named another way (a quote-spliced operand such as `-C
+"<prefix>"<rest>`, whose raw-text match is only the fragment inside the quotes, a RELATIVE path
+inside a quoted body that no `-C`/`cd` spelling introduces, or an attached short-option value
+such as `-o<held>/f` that appears only inside a quoted body, where the raw-text scan reads no
+path glued to a word) joins no hold set or joins it at the wrong directory, so from a session
+outside
 every held
-repository such a command stays allowed even where it reaches a held worktree; from a session
-inside one, or with any other hold the rule can see, the program gate refuses the program-running
-form that carries such a value. A program-running spelling outside the gate's lists (an alias or
+repository such a command stays allowed even where it reaches a held worktree, and so does a
+PROCESS-RELATIVE path that appears only inside such a body from a session outside every held
+repository (seen only by the raw-text scan, it withholds while a hold is live rather than
+outright); from a session
+inside one, or with any other hold the rule can see, the program gate, the one-plain-git rule or
+the process-relative withhold refuses the
+form that carries such a value. A symlink that already exists on disk and points through a
+process-relative magic link is resolved by the hook's own process when a candidate traverses it,
+which can differ from git's resolution, the same class of residual. A program-running spelling outside the gate's lists (an alias or
 a `git-<name>` program on PATH, a hook or a program the configuration already names) is the same
 residual: the gate is bounded by its enumeration, not a certified absence of programs. An
 unreadable or
@@ -1364,15 +1405,21 @@ Limits:
   view, the same file-edit residual. The enumerated file-writing path OPTIONS above are refused
   while a hold is live whatever their operand, any git segment whose literal ABSOLUTE option
   value or operand resolves into a held worktree is refused too (the held-path gate), and every
-  such literal absolute path also joins the hold set (a missing path at its nearest existing
-  ancestor), so a
+  such literal absolute path joins the hold set (resolved physically, a missing path at its
+  nearest existing
+  ancestor), from a quoted shell body or heredoc body too, so a
   file-writing option outside the tables and a path-writing POSITIONAL operand (`worktree add`,
   the `clone` and `init` directory operands, `bundle create`, `pack-objects`' base name,
   `merge-file`, `mailinfo`) are caught exactly where the operand is a literal absolute path into
   the held worktree, from a session outside every held repository included; the same spellings
   with a RELATIVE or expansion-built operand cannot be told
   from a ref or pathspec
-  without re-implementing each verb's grammar, so those forms stay in this file-edit residual.
+  without re-implementing each verb's grammar, so those forms stay in this file-edit residual,
+  and so does a write path carried only in patch or stream content from a session outside every
+  held repository whose command text names no held path (`apply --unsafe-paths` with a patch
+  whose content walks into the held worktree, a `fast-import` stream's own marks features): the
+  hook does not read that content, and with no hold visible the admission options above are not
+  refused.
 - Marker accuracy is the adopter's: a missing marker, an early removal, a wrong `workdir`, or a
   review that outlasts `expires_utc` are adopter errors the hook cannot judge.
 - A race between the check and the command running remains.
@@ -1411,7 +1458,14 @@ Limits:
   repository-level write such as
   `tag` targeted into
   the held worktree, a path that literally contains `$`, a backquote, a glob or brace character or
-  a leading `~`, a `cd` in a pipeline or subshell read as making the working directory unknown, a
+  a leading `~`, a PROCESS-RELATIVE path in any structural position, whatever the marker state
+  (and one seen only in the raw text while any reachable hold is live), an `ln` operand no
+  literal text resolves while any reachable hold is live, a `core.worktree` lookup that cannot
+  answer, in any consulted repository and whatever the marker state (the configured worktree's
+  holds are exactly what cannot be read), a held or unrelated absolute path mentioned only as
+  data in a body or message making its repository's holds visible (one more consulted
+  repository, never a loosening), a `cd` in a pipeline or subshell read as making the working
+  directory unknown, a
   `cd` destination that cannot be entered read as the directory it started from, and a worktree
   name or override the hook cannot resolve while a hold is live) are taken instead of
   under-blocking. A held worktree nested under a worktree of a DIFFERENT repository is protected
@@ -1419,7 +1473,9 @@ Limits:
   operand): a mutation bound to the enclosing foreign repository alone reads no marker of the
   nested one, a disclosed residual of per-repository marker discovery. The `review-holds`
   directory itself is resolved through the filesystem, so a
-  symlinked directory is followed; only its entries are opened without following links.
+  symlinked directory that leads to a real directory is followed; a dangling `review-holds` or
+  `aiqt` symlink reads as malformed marker state (fail closed), never as absence, and only the
+  directory's entries are opened without following links.
 
 ## Platforms without hooks
 
