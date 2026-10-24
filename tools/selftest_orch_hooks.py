@@ -9247,6 +9247,466 @@ def _main_isolated(report_path=None):
         check("ask/idempotent-append", len(keyed), 1)
         check("ask/redacted", any("SECRETPHRASE" in r for r in rows), False)
 
+        # ---------- the attended-ask backlog judgement (ctx kind "ask") ----------
+        # An attended-family mode with queued actionable work: the question is judged against the same
+        # fresh enumeration as the yield guard. Each deny case below ALLOWED on the code before this
+        # judgement existed (the attended branch returned unconditionally), so each fails without it.
+        def ask_att(tool_use_id, questions=1):
+            return aiqt_hooks.orch_ask_guard(h.payload(
+                "PreToolUse", "AskUserQuestion",
+                {"questions": [{"question": "pick"} for _ in range(questions)]},
+                extra={"tool_use_id": tool_use_id}))
+
+        def ask_reason(result):
+            _c, obj, _e = result
+            if isinstance(obj, dict) and isinstance(obj.get("hookSpecificOutput"), dict):
+                return obj["hookSpecificOutput"].get("permissionDecisionReason", "")
+            return ""
+
+        # two open items with no blocker and a four-question ask: denied, naming both items and the
+        # two exits (dispatch, or record each as blocked by this decision, then re-issue)
+        h.mode.write_text("Operating-mode: attended-autonomous\n", encoding="utf-8")
+        h.set_items([item("A-1"), item("A-2")])
+        h.set_turn_state({})
+        att_res = ask_att("tu-a1", questions=4)
+        check("ask/attended-actionable-denies", _verdict(att_res), "deny")
+        check("ask/attended-actionable-names-items",
+              "A-1" in ask_reason(att_res) and "A-2" in ask_reason(att_res), True)
+        check("ask/attended-actionable-names-exits",
+              "DISPATCH" in ask_reason(att_res) and "pending-decisions" in ask_reason(att_res)
+              and "re-issue the question" in ask_reason(att_res), True)
+        check("ask/attended-deny-counts", h.turn_state().get("ask_denials"), 1)
+        # the compound attended spelling, one actionable item, the rest blocked by a RECORDED human
+        # decision: denied, naming only the actionable item
+        h.mode.write_text("Operating-mode: attended (iPad); continuous mode\n", encoding="utf-8")
+        h.pending.write_text("D-9: deferred to the maintainer\n", encoding="utf-8")
+        h.set_items([item("A-3"),
+                     item("B-1", blocker={"kind": "human-decision", "ref": "D-9"}),
+                     item("B-2", blocker={"kind": "human-decision", "ref": "D-9"})])
+        h.set_turn_state({})
+        att_res = ask_att("tu-a2")
+        check("ask/attended-compound-one-actionable-denies", _verdict(att_res), "deny")
+        check("ask/attended-compound-names-the-item",
+              "A-3" in ask_reason(att_res) and "B-1" not in ask_reason(att_res), True)
+        # an enumerator error is cannot-evaluate: denied; the cap on an unchanged basis (just under,
+        # exactly at, and past it) then releases the question with findings
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-enum-error-denies", _verdict(ask_att("tu-a3")), "deny")
+        h.set_turn_state({"ask_denials": 2, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-enum-error-under-cap-denies", _verdict(ask_att("tu-a3b")), "deny")
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-enum-error-cap-allows-findings", _verdict(ask_att("tu-a3c")), "warn")
+        h.set_turn_state({"ask_denials": 4, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-enum-error-past-cap-allows-findings", _verdict(ask_att("tu-a3d")), "warn")
+        # a schedule count never relieves a question (the ask cap is its own counter)
+        h.set_turn_state({"schedule_denials": 3, "schedule_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-schedule-count-never-relieves", _verdict(ask_att("tu-a3e")), "deny")
+        h.enum_exit.write_text("0", encoding="utf-8")
+        # the JSON attended marker arms the same judgement
+        h.mode.write_text('{"mode": "attended"}\n', encoding="utf-8")
+        h.set_items([item("A-4")])
+        h.set_turn_state({})
+        check("ask/json-attended-actionable-denies", _verdict(ask_att("tu-a4")), "deny")
+        # controls the judgement must leave alone: a backlog with nothing actionable allows the question
+        h.mode.write_text("Operating-mode: attended-autonomous\n", encoding="utf-8")
+        h.set_items([item("B-3", blocker={"kind": "human-decision", "ref": "D-9"})])
+        h.set_turn_state({})
+        check("ask/attended-all-blocked-recorded-allows", _verdict(ask_att("tu-a5")), "allow")
+        (hsd / "dispatch-ledger.jsonl").write_text(
+            json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-9",
+                        "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
+        h.set_items([item("W-9", blocker={"kind": "tracked-task", "ref": "T-9"})])
+        h.set_turn_state({})
+        check("ask/attended-dispatched-waiting-allows", _verdict(ask_att("tu-a6")), "allow")
+        h.set_items([item("P-1", state="proposed")])
+        h.set_turn_state({})
+        check("ask/attended-proposed-only-allows", _verdict(ask_att("tu-a7")), "allow")
+        # the no-marker fail-open is unchanged even with actionable work queued
+        h.mode.write_text("shared notes with no mode declaration\n", encoding="utf-8")
+        h.set_items([item("A-5")])
+        h.set_turn_state({})
+        check("ask/prose-mode-actionable-allows", _verdict(ask_att("tu-a8")), "allow")
+        # the unattended deny is unchanged whatever the backlog: same verdict, same reason shape
+        h.mode.write_text("Operating-mode: unattended\n", encoding="utf-8")
+        h.set_turn_state({})
+        att_res = ask_att("tu-a9")
+        check("ask/unattended-actionable-denies", _verdict(att_res), "deny")
+        check("ask/unattended-actionable-reason-unchanged",
+              ask_reason(att_res).startswith(
+                  "AskUserQuestion BLOCKED: the session operating-mode is unattended"), True)
+        # the operator escape sentinel releases the attended deny (the stop/yield acceptance seam)
+        h.mode.write_text("Operating-mode: attended-autonomous\n", encoding="utf-8")
+        h.set_items([item("A-6")])
+        _orig_ask_escape_stat = aiqt_hooks._orch_escape_stat
+        try:
+            aiqt_hooks._orch_escape_stat = lambda path: _St(_stat.S_IFREG | 0o600, os.geteuid() + 1)
+            h.set_turn_state({})
+            check("ask/attended-escape-sentinel-allows", _verdict(ask_att("tu-a10")), "allow")
+        finally:
+            aiqt_hooks._orch_escape_stat = _orig_ask_escape_stat
+        # a registry with no enumerator keeps the attended judgement out of scope; an absent registry
+        # keeps the whole hook inert
+        _hregp = h.root / ".aiqt" / "orchestration.local.json"
+        _hreg = json.loads(_hregp.read_text(encoding="utf-8"))
+        _henum = _hreg.pop("enumerator")
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_items([item("A-7")])
+        h.set_turn_state({})
+        check("ask/attended-no-enumerator-allows", _verdict(ask_att("tu-a11")), "allow")
+        _hregp.unlink()
+        check("ask/attended-no-registry-allows", _verdict(ask_att("tu-a12")), "allow")
+        _hreg["enumerator"] = _henum
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        # the actionable deny is never cap-relieved: the fourth unchanged question is denied exactly
+        # as the first (its two exits, dispatch or record-then-re-issue, are always available), and
+        # every one of the four denials is counted
+        h.set_items([item("A-8")])
+        h.set_turn_state({})
+        check("ask/attended-actionable-fourth-call-still-denies",
+              [_verdict(ask_att("tu-b{}".format(i))) for i in range(4)], ["deny"] * 4)
+        check("ask/attended-actionable-four-denials-counted", h.turn_state().get("ask_denials"), 4)
+        # the cannot-evaluate cap is intact: four sequential questions against an enumerator error are
+        # denied three times, then the fourth is relieved with findings on the unchanged basis
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-enum-error-fourth-call-relieves",
+              [_verdict(ask_att("tu-c{}".format(i))) for i in range(4)],
+              ["deny", "deny", "deny", "warn"])
+
+        # a cap-relieved question past open work writes its forced_unresolved record
+        def forced_ask_rows():
+            fx = hsd / "forced-exit.jsonl"
+            if not fx.exists():
+                return 0
+            return sum(1 for row in fx.read_text(encoding="utf-8").splitlines()
+                       if json.loads(row).get("event") == "ask-guard")
+
+        _hforced = forced_ask_rows()
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/attended-cap-allow-records-forced-exit",
+              (_verdict(ask_att("tu-c4")), forced_ask_rows() - _hforced), ("warn", 1))
+        h.enum_exit.write_text("0", encoding="utf-8")
+        # an open item whose proof source is unreadable (the declared pending-decisions record is gone)
+        # is an item-level cannot-evaluate: denied, naming the item and the re-issue exit; at the cap
+        # on the unchanged basis the question is relieved with findings
+        h.pending.unlink()
+        h.set_items([item("H-1", blocker={"kind": "human-decision", "ref": "D-9"})])
+        h.set_turn_state({})
+        att_res = ask_att("tu-d1")
+        check("ask/attended-item-cannot-evaluate-denies", _verdict(att_res), "deny")
+        check("ask/attended-item-cannot-evaluate-reissue-exit",
+              "unreadable (cannot-evaluate)" in ask_reason(att_res) and "H-1" in ask_reason(att_res)
+              and "re-issue the question" in ask_reason(att_res), True)
+        # the cap is DRIVEN by four sequential questions (each denial recorded and counted), not by
+        # a preset counter, so a counting defect on this path cannot hide behind a planted count
+        h.set_turn_state({})
+        check("ask/attended-item-cannot-evaluate-cap-allows-findings",
+              [_verdict(ask_att("tu-d2-{}".format(i))) for i in range(4)],
+              ["deny", "deny", "deny", "warn"])
+        h.pending.write_text("D-9: deferred to the maintainer\n", encoding="utf-8")
+        # a deny whose counter cannot be saved STANDS (never fails open) and says so
+        h.set_items([item("A-9")])
+        h.set_turn_state({})
+        _hsave = aiqt_hooks._orch_save_turn_state
+        try:
+            aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
+            att_res = ask_att("tu-e1")
+        finally:
+            aiqt_hooks._orch_save_turn_state = _hsave
+        check("ask/attended-counter-unsaved-deny-stands", _verdict(att_res), "deny")
+        check("ask/attended-counter-unsaved-says-so",
+              "could not be written to turn-state.json" in ask_reason(att_res), True)
+        # the deny names at most ten actionable items, then the remaining count
+        h.set_items([item("N{:02d}".format(i)) for i in range(1, 12)])
+        h.set_turn_state({})
+        att_res = ask_att("tu-f1")
+        check("ask/attended-names-ten-items-and-more",
+              ("N10" in ask_reason(att_res), "N11" in ask_reason(att_res),
+               "; and 1 more" in ask_reason(att_res)), (True, False, True))
+        # genuine human input resets the ask pair exactly as it resets the schedule pair
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "X", "schedule_denials": 2,
+                          "stop_denials": 1})
+        aiqt_hooks.orch_prompt_stamp(h.payload("UserPromptSubmit",
+                                               extra={"prompt": "take the blue theme"}))
+        _hts = h.turn_state()
+        check("ask/human-input-resets-ask-counters",
+              (_hts.get("ask_denials"), "ask_basis" in _hts), (0, False))
+        # a TIMER-ORIGINATED prompt (a registered wake digest) never resets the ask pair: only
+        # genuine human input clears the count and the basis
+        _hwake = "wake: recheck T-9"
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "X",
+                          "wake_digests": [hashlib.sha256(_hwake.encode("utf-8")).hexdigest()]})
+        aiqt_hooks.orch_prompt_stamp(h.payload("UserPromptSubmit", extra={"prompt": _hwake}))
+        _hts = h.turn_state()
+        # the consumed digest proves the timer-originated branch RAN: an early allow (out of scope,
+        # or a registry that does not read ok) would also leave the planted counters untouched, but
+        # it would leave the planted digest unconsumed
+        check("ask/timer-wake-keeps-ask-counters",
+              (_hts.get("ask_denials"), _hts.get("ask_basis"), _hts.get("wake_digests")),
+              (3, "X", []))
+        # ask denials never relieve a scheduling call (the counter isolation's other direction)
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        check("ask/ask-count-never-relieves-schedule",
+              _verdict(aiqt_hooks.orch_yield_tool(h.payload(
+                  "PreToolUse", "ScheduleWakeup", {"prompt": "recheck later"},
+                  extra={"tool_use_id": "tu-g1"}))), "deny")
+        h.enum_exit.write_text("0", encoding="utf-8")
+        # a DECLARED enumerator that is not an object is a configuration error: denied as
+        # cannot-evaluate, naming the shape, with a guard-events row (never a silent allow)
+        _hreg = json.loads(_hregp.read_text(encoding="utf-8"))
+        _hreg["enumerator"] = ["not", "an", "object"]
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_items([item("A-10")])
+        h.set_turn_state({})
+        _hev = hsd / "guard-events.jsonl"
+        _hev_count = len(_hev.read_text(encoding="utf-8").splitlines()) if _hev.exists() else 0
+        att_res = ask_att("tu-h1")
+        check("ask/attended-malformed-enumerator-denies",
+              (_verdict(att_res), "not enumerable" in ask_reason(att_res)
+               and "not an object" in ask_reason(att_res)), ("deny", True))
+        _hev_rows = _hev.read_text(encoding="utf-8").splitlines() if _hev.exists() else []
+        check("ask/attended-malformed-enumerator-logs-event",
+              any(json.loads(row).get("kind") == "ask-guard"
+                  and json.loads(row).get("decision") == "deny"
+                  and "not an object (a configuration error)" in json.loads(row).get("detail", "")
+                  for row in _hev_rows[_hev_count:]), True)
+        # the configuration-error deny carries the same cap as every other cannot-evaluate deny
+        # (nothing is enumerable here, so nothing is actionable): four sequential questions are
+        # denied three times, then the fourth is relieved with findings on the unchanged basis
+        h.set_turn_state({})
+        check("ask/attended-malformed-enumerator-fourth-call-relieves",
+              [_verdict(ask_att("tu-h2-{}".format(i))) for i in range(4)],
+              ["deny", "deny", "deny", "warn"])
+        _hreg["enumerator"] = _henum
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        # a session outside the live scope (a holder-scoped lease that does not name it) never
+        # inherits the global backlog: the judgement allows there, exactly as the yield guard does
+        _hreg["lease"]["holder_is_session_id"] = True
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_items([item("A-11")])
+        h.set_turn_state({})
+        check("ask/attended-nonholder-session-allows", _verdict(ask_att("tu-i1")), "allow")
+        # the holder the lease NAMES is still judged: a scope gate that under-fires (one that loses
+        # the caller's session id) would allow here too, so this positive shape pins the deny
+        h.lease.write_text("holder: s1\n", encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-holder-session-denies", _verdict(ask_att("tu-i2")), "deny")
+        # the session-id and holder-token checks run only for a NON-EMPTY lease classified fresh or
+        # cannot-evaluate under a declared max_age_hours, or, with no horizon declared, for every
+        # non-empty lease whatever its mtime; every other lease shape (empty, path-less, stale past a
+        # declared horizon, future-dated past the tolerated skew under a declared usable horizon)
+        # skips the holder check and falls through to the live-mode scope source, which keeps EVERY
+        # session in scope, an id-less caller included (erring toward denying).
+        # First the off side: an id-less caller under a fresh holder-scoped lease is a non-holder
+        def ask_att_idless(tool_use_id):
+            _hp = h.payload("PreToolUse", "AskUserQuestion",
+                            {"questions": [{"question": "pick"}]},
+                            extra={"tool_use_id": tool_use_id})
+            del _hp["session_id"]
+            return aiqt_hooks.orch_ask_guard(_hp)
+        h.set_turn_state({})
+        check("ask/attended-fresh-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i3")), "allow")
+        # an EMPTY lease names no session, yet the judgement stays ON: the empty lease never reaches
+        # the holder check, and the live mode record keeps every session in scope, with and without
+        # a session id on the call
+        h.lease.write_text("", encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-empty-lease-keeps-judgement-on", _verdict(ask_att("tu-i4")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-empty-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i5")), "deny")
+        # the stale boundary from both sides: just INSIDE max_age_hours the lease is fresh, so the
+        # holder check runs and the unnamed session is out of scope (allow); just PAST it the lease
+        # is stale, the holder check is skipped, and the live mode record keeps the judgement on
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        _hnow = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        os.utime(h.lease, (_hnow - 24 * 3600 + 600, _hnow - 24 * 3600 + 600))
+        h.set_turn_state({})
+        check("ask/attended-just-inside-stale-lease-nonholder-allows",
+              _verdict(ask_att("tu-i6")), "allow")
+        os.utime(h.lease, (_hnow - 24 * 3600 - 600, _hnow - 24 * 3600 - 600))
+        h.set_turn_state({})
+        check("ask/attended-stale-lease-keeps-judgement-on", _verdict(ask_att("tu-i7")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-stale-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i7a")), "deny")
+        # a stale lease that can be stat'ed but not read is never opened (the age gate skips the
+        # holder check before any read), so the live mode record keeps the judgement on even though
+        # the lease names the caller: only a non-empty fresh or cannot-evaluate lease that cannot be
+        # read is off. A privileged run reads a mode-0 file anyway, so there the seam supplies the
+        # kernel's EACCES for an open of the lease.
+        h.lease.write_text("holder: s1\n", encoding="utf-8")
+        os.utime(h.lease, (_hnow - 24 * 3600 - 600, _hnow - 24 * 3600 - 600))
+        _hlease_path = str(h.lease)
+
+        def _hopen_unreadable(file, *args, **kwargs):
+            if file == _hlease_path:
+                raise PermissionError(13, "Permission denied", _hlease_path)
+            return open(file, *args, **kwargs)
+        os.chmod(h.lease, 0)
+        try:
+            if os.geteuid() == 0:
+                aiqt_hooks.open = _hopen_unreadable
+            h.set_turn_state({})
+            check("ask/attended-unreadable-stale-lease-keeps-judgement-on",
+                  _verdict(ask_att("tu-i7b")), "deny")
+        finally:
+            aiqt_hooks.__dict__.pop("open", None)
+            os.chmod(h.lease, 0o644)
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        # the future boundary from both sides: a lease mtime within the tolerated clock skew still
+        # reads fresh (the holder check runs, allow for the unnamed session); one past the skew is
+        # the future-dated shape that skips the holder check (judgement on)
+        os.utime(h.lease, (_hnow + 60, _hnow + 60))
+        h.set_turn_state({})
+        check("ask/attended-future-lease-within-skew-nonholder-allows",
+              _verdict(ask_att("tu-i8")), "allow")
+        os.utime(h.lease, (_hnow + 900, _hnow + 900))
+        h.set_turn_state({})
+        check("ask/attended-future-lease-keeps-judgement-on", _verdict(ask_att("tu-i9")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-future-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i9a")), "deny")
+        # the future-dated skip needs a declared usable horizon: with max_age_hours omitted or null
+        # the age classifier is never consulted, so the same future-dated lease runs the holder check
+        # and an unnamed or id-less caller is out of scope (allow), while the session the lease names
+        # stays judged (deny, so these allows come from the holder check, not an earlier allow); an
+        # unusable horizon reads cannot-evaluate whatever the mtime, so the holder check runs there too
+        _hreg["lease"].pop("max_age_hours")
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-no-horizon-future-lease-nonholder-allows",
+              _verdict(ask_att("tu-i9b")), "allow")
+        h.set_turn_state({})
+        check("ask/attended-no-horizon-future-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i9c")), "allow")
+        h.lease.write_text("holder: s1\n", encoding="utf-8")
+        os.utime(h.lease, (_hnow + 900, _hnow + 900))
+        h.set_turn_state({})
+        check("ask/attended-no-horizon-future-lease-holder-denies",
+              _verdict(ask_att("tu-i9d")), "deny")
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        os.utime(h.lease, (_hnow + 900, _hnow + 900))
+        _hreg["lease"]["max_age_hours"] = None
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-null-horizon-future-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i9e")), "allow")
+        _hreg["lease"]["max_age_hours"] = 0
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-unusable-horizon-future-lease-idless-caller-allows",
+              _verdict(ask_att_idless("tu-i9f")), "allow")
+        _hreg["lease"]["max_age_hours"] = 24
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        # a holder-scoped lease that declares NO path never reaches the holder check either: the
+        # live mode record keeps the judgement on
+        _hlease_decl = _hreg["lease"]
+        _hreg["lease"] = {"max_age_hours": 24, "holder_is_session_id": True}
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-pathless-lease-keeps-judgement-on", _verdict(ask_att("tu-i10")), "deny")
+        h.set_turn_state({})
+        check("ask/attended-pathless-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i10a")), "deny")
+        # an empty or a non-string path declares no path either
+        _hreg["lease"]["path"] = ""
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-empty-path-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i10b")), "deny")
+        _hreg["lease"]["path"] = 7
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.set_turn_state({})
+        check("ask/attended-non-string-path-lease-idless-caller-denies",
+              _verdict(ask_att_idless("tu-i10c")), "deny")
+        _hreg["lease"] = _hlease_decl
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        h.lease.write_text("holder: selftest\n", encoding="utf-8")
+        _hreg["lease"].pop("holder_is_session_id")
+        _hregp.write_text(json.dumps(_hreg), encoding="utf-8")
+        # a MIXED backlog (an actionable item beside an item-level cannot-evaluate) keeps the
+        # actionable deny: the fourth unchanged question is denied exactly as the first (the
+        # cannot-evaluate cap grants no relief while anything is actionable), and the deny names
+        # the actionable item, the held item, and the held item's state in ONE reason
+        h.pending.unlink()
+        h.set_items([item("A-12"), item("H-2", blocker={"kind": "human-decision", "ref": "D-9"})])
+        h.set_turn_state({})
+        _hmix = [ask_att("tu-j{}".format(i)) for i in range(4)]
+        check("ask/attended-mixed-cannot-evaluate-actionable-still-denies",
+              [_verdict(r) for r in _hmix], ["deny"] * 4)
+        check("ask/attended-mixed-deny-names-both-sets",
+              ("A-12" in ask_reason(_hmix[3]), "H-2" in ask_reason(_hmix[3]),
+               "cannot-evaluate" in ask_reason(_hmix[3])), (True, True, True))
+        h.pending.write_text("D-9: deferred to the maintainer\n", encoding="utf-8")
+        # the same mixed shape a session could manufacture itself: ONE schema-invalid line appended
+        # to the dispatch ledger holds a tracked item as cannot-evaluate beside an actionable item;
+        # still denied on every unchanged call, never relieved, and the fourth deny names both sets
+        (hsd / "dispatch-ledger.jsonl").write_text('{"event": "launch"}\n', encoding="utf-8")
+        h.set_items([item("A-13"), item("T-2", blocker={"kind": "tracked-task", "ref": "T-9"})])
+        h.set_turn_state({})
+        _hled = [ask_att("tu-k{}".format(i)) for i in range(4)]
+        check("ask/attended-mixed-invalid-ledger-line-still-denies",
+              [_verdict(r) for r in _hled], ["deny"] * 4)
+        check("ask/attended-mixed-invalid-ledger-deny-names-both-sets",
+              ("A-13" in ask_reason(_hled[3]), "T-2" in ask_reason(_hled[3]),
+               "cannot-evaluate" in ask_reason(_hled[3])), (True, True, True))
+        # the relief boundary is the CLASSIFIED actionable set: the same invalid ledger line over an
+        # ALL-tracked backlog holds every item (nothing stays classified actionable), so the fourth
+        # unchanged question is relieved at the cap; the mixed shape above, which keeps one
+        # classified-actionable item, is the control that still denies
+        h.set_items([item("T-3", blocker={"kind": "tracked-task", "ref": "T-9"}),
+                     item("T-4", blocker={"kind": "tracked-task", "ref": "T-8"})])
+        h.set_turn_state({})
+        _hall = [ask_att("tu-l{}".format(i)) for i in range(4)]
+        check("ask/attended-all-held-invalid-ledger-line-cap-relieves",
+              [_verdict(r) for r in _hall], ["deny", "deny", "deny", "warn"])
+        # the verdict sequence alone cannot tell the item-level hold from a whole-enumeration
+        # failure, so the first deny must also NAME the held items as cannot-evaluate (pinning
+        # that the ledger line held them rather than the enumeration failing)
+        check("ask/attended-all-held-first-deny-names-held-items",
+              ("T-3" in ask_reason(_hall[0]), "T-4" in ask_reason(_hall[0]),
+               "cannot-evaluate" in ask_reason(_hall[0])), (True, True, True))
+        (hsd / "dispatch-ledger.jsonl").write_text(
+            json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-9",
+                        "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
+        # an enumeration failure HIDES items rather than holding them: a duplicate item id fails the
+        # whole enumeration, so an item that would be actionable without the duplicate is absent from
+        # the classified sets and the fourth unchanged question is relieved at the cap; the
+        # four-denial actionable run above is the control that a valid enumeration retaining a
+        # classified actionable item is never cap-relieved
+        h.set_items([item("A-14"), item("A-14")])
+        h.set_turn_state({})
+        _hdup = [ask_att("tu-m{}".format(i)) for i in range(4)]
+        check("ask/attended-duplicate-id-cap-relieves",
+              [_verdict(r) for r in _hdup], ["deny", "deny", "deny", "warn"])
+        # the relief must come from THIS enumeration failure, not some other persistent fault, so
+        # the first deny must carry the duplicate-id diagnostic
+        check("ask/attended-duplicate-id-first-deny-names-duplicate",
+              "duplicate item id 'A-14'" in ask_reason(_hdup[0]), True)
+        # cap relief is best effort about its OWN records: when neither the forced_unresolved row
+        # nor the guard-events row can be written, the failure is REPORTED in the released message
+        # and the relief still proceeds (the allow-with-note is retained; the recorder never
+        # restores the deny)
+        h.enum_exit.write_text("3", encoding="utf-8")
+        h.set_turn_state({"ask_denials": 3, "ask_basis": "ENUMERATOR_ERROR"})
+        _happend = aiqt_hooks._orch_append_jsonl
+        try:
+            aiqt_hooks._orch_append_jsonl = lambda path, obj: False
+            att_res = ask_att("tu-n1")
+        finally:
+            aiqt_hooks._orch_append_jsonl = _happend
+        check("ask/attended-cap-relief-record-failure-still-allows", _verdict(att_res), "warn")
+        _hnote = att_res[1].get("systemMessage", "") if isinstance(att_res[1], dict) else ""
+        check("ask/attended-cap-relief-record-failure-says-so",
+              ("could not be fully persisted (guard-events FAILED, forced-exit.jsonl FAILED)"
+               in _hnote, "proceeds with findings" in _hnote), (True, True))
+        h.enum_exit.write_text("0", encoding="utf-8")
+
         # ---------- component 3: the truncation guard ----------
         t = Fixture(tmp, "trunc")
         bg = lambda cmd, rib=True: aiqt_hooks.orch_truncation_guard(
@@ -10934,6 +11394,15 @@ def _main_isolated(report_path=None):
               aiqt_hooks._orch_validate("turn_state", {"stop_denials": "x"})[1]["stop_denials"], None)
         check("vB/turn-unreadable-none",
               aiqt_hooks._orch_validate("turn_state", None)[1]["stop_denials"], None)
+        # the ask cap counter validates exactly as the schedule counter (absent fresh, malformed None)
+        check("vB/turn-ask-absent-fresh",
+              aiqt_hooks._orch_validate("turn_state", {})[1]["ask_denials"], 0)
+        check("vB/turn-ask-valid",
+              aiqt_hooks._orch_validate("turn_state", {"ask_denials": 2})[1]["ask_denials"], 2)
+        check("vB/turn-ask-malformed-none",
+              aiqt_hooks._orch_validate("turn_state", {"ask_denials": 1.0})[1]["ask_denials"], None)
+        check("vB/turn-ask-unreadable-none",
+              aiqt_hooks._orch_validate("turn_state", None)[1]["ask_denials"], None)
         check("vB/unknown-boundary-cannot-evaluate",
               aiqt_hooks._orch_validate("nope", {})[0], "cannot-evaluate")
         # D13: the registry version must be an exact int 1 (True and 1.0 do not pass)
@@ -11805,6 +12274,22 @@ def _main_isolated(report_path=None):
                 for n in (limit - 1, limit, limit + 1, aiqt_hooks._ORCH_COUNTER_MAX)]
                for _kind, key, limit, ctx in _core_branches],
               [["DENY"] + ["ALLOW_WITH_FINDINGS"] * 3] * len(_core_branches))
+        # the ask kind's cannot-evaluate cap relief needs an EMPTY actionable set: with an actionable
+        # item present past the cap, both cannot-evaluate shapes keep the DENY, the item-level shape
+        # naming the actionable item and the held item in one reason; with the actionable set empty
+        # the relief stands (the control that the narrowing does not over-tighten)
+        _core_ask_mixed = dict(base, kind="ask", basis_unchanged=True, schedule_denials=3,
+                               actionable=[("A", "t", "no blocker")],
+                               cannot_evaluate=[("CE", "cannot-evaluate", "held")])
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_core_ask_mixed))
+        check("core/ask-mixed-cap-still-denies",
+              (v, "A (t: no blocker)" in _r, "CE" in _r, "cannot-evaluate" in _r),
+              ("DENY", True, True, True))
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_core_ask_mixed, cannot_evaluate=[],
+                                                 enum_status="ENUMERATOR_ERROR"))
+        check("core/ask-enum-error-with-actionable-cap-still-denies", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(dict(_core_ask_mixed, actionable=[]))
+        check("core/ask-cannot-evaluate-only-cap-relieves", v, "ALLOW_WITH_FINDINGS")
 
         # Load-shed characterization pins (the load-shed mechanism itself was declined): decide_yield
         # sets no live-worker count floor, and a shed recorded as a fresh external blocker on queued

@@ -26,7 +26,10 @@ load); the commonmark selftests exercise the vendored parser and its manifest.
 
 Exit convention (matches the repo's gates):
   0  the isolated opf/ subtree verifies (closure holds)
-  1  a real finding: a subset gate failed in isolation (closure is broken), or REGISTRATION DRIFT, one of
+  1  a real finding: a subset gate failed in isolation (closure is broken; a leg's own exit 2 counts as a
+     finding UNLESS its final output lines carry the positive marker CANNOT EVALUATE: exit 2 also
+     carries real failures, a helper that cannot be imported or a self-check that exits 2, so an
+     unmarked exit 2 is never read as closure-not-evaluated, fail-closed), or REGISTRATION DRIFT, one of
      the closure-roster registration checks failing on its own assertion (each named; the checks run
      first, before opf/ is copied, any bound is derived or any leg runs). The whole-roster check holds
      every row: the leg names must be exactly those of the ceiling table, each once, and the ceiling
@@ -60,7 +63,8 @@ Exit convention (matches the repo's gates):
      a launched leg is raised only after that leg is killed, reaped and its pipe closed, any cleanup
      step that did not complete named beside it), a leg killed at its wall-clock bound (named as the
      bound tripping, never as a failure the leg reported; see _LEG_CEILING_S for how each bound is
-     derived), or a leg ended by a signal this gate did not send
+     derived), a leg that ITSELF exited 2 AND printed CANNOT EVALUATE in its final lines (the leg
+     said its own checks did not run), or a leg ended by a signal this gate did not send
      (named by its signal; a negative status cannot tell an outside signal, from another process, the
      OOM killer or an interpreter crash, from one the leg or its own process group sent itself, so it
      is never read as a failure the leg reported), with any cleanup after a kill that did not complete
@@ -75,13 +79,15 @@ lanes give the same command plus the launch margin (_LEG_BOUND_FLOOR_S), so the 
 such a leg before the lane would; reaching one is attributed to the deadline (LEG BOUND EXCEEDED,
 exit 2), never as a failure the leg reported and never as a pass. opf-tooling-selftest's is shown
 below its budget READ FROM SOURCE, the one opf.py grants its own blocked-isolation leg, because a
-bound above that budget would not fit the CI job; on this tree it is 3660 s, its config-lane floor, above the
-3615 s its copied sources' declared waits give (a term re-derived on every run, so it moves with
-them; it rose from 1458 s, 3 x the leg's 486 s ceiling, when opf.py's declared waits grew), and still
-below that blocked-isolation budget. A run under load heavier than the recorded ceilings' can trip a
+bound above that budget would not fit the CI job; on this tree it is 4821 s, its copied sources'
+declared waits plus the launch margin (a term re-derived on every run, so it moves with them), above
+the 3660 s its config-lane deadline plus that margin gives (it rose from 1458 s, 3 x the leg's 486 s
+ceiling, to that 3660 s floor, and then past it, as opf.py's declared waits grew), and still below
+that blocked-isolation budget. A run under load heavier than the recorded ceilings' can trip a
 healthy leg's bound and exit 2 (see _LOAD_HEADROOM).
 --self-test follows the same convention: 1 only for a definite failure (the real opf/ does not verify,
-registration drift, the flipped copy is NOT caught, or a self-test check fails, which it reports by
+registration drift, the flipped copy is NOT caught or its caught failure is NOT reported as closure
+broken, or a self-test check fails, which it reports by
 raising _CheckFailure), and 2 when a leg or the flip could not be evaluated (a bound kill, a signal, a
 harness failure or fault, a temporary directory that cannot be created, a bound that cannot be derived,
 a check that cannot evaluate what it checks (_CannotEvaluate: the CI job limit, or the config lanes'
@@ -231,7 +237,7 @@ _SUBSET = [
 #   * adopt-apply's self-test took 812.8 s inside a loaded opf.py --self-test run (opf.py runs the
 #     same _opf_adopt_apply.self_test in-process), about 99 times this table's 8.2 s. Were the
 #     standalone opf-adopt-apply-selftest leg that slow, slowdown under load would be far from uniform;
-#     on this tree its bound is 2880 s (its declared waits, 2820 s, plus the 60 s launch margin), so a
+#     on this tree its bound is 4086 s (its declared waits, 4026 s, plus the 60 s launch margin), so a
 #     run at that reported figure would finish inside its bound, and one slower still would trip it:
 #     exit 2, a loud refusal to evaluate, never a false pass.
 # MEASURED against the second figure on 2026-10-15, at this table's opf/ tree, plain, on a shared
@@ -241,9 +247,9 @@ _SUBSET = [
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
 # The multiplier is capped by the job fit (_job_worst_case_s against each CI job's 21600 s default
-# limit): on this tree the whole roster's worst case is 83670 s at 3 (no one job fits it: the premise
-# of the split), the per-job worst cases are 20280 s (A), 17800 s (B), 15810 s (C), 17390 s (D) and
-# 16190 s (E) at 3, and the same at 4 but for C, 18210 s (at 3 and at 4 the config-lane floors,
+# limit): on this tree the whole roster's worst case is 89565 s at 3 (no one job fits it: the premise
+# of the split), the per-job worst cases are 20523 s (A), 20340 s (B), 15810 s (C), 17390 s (D) and
+# 19302 s (E) at 3, and the same at 4 but for C, 18210 s (at 3 and at 4 the config-lane floors,
 # _LEG_BOUND_FLOOR_S, hold every floored leg's bound above its headroom term, opf-homes-selftest's
 # 1260 s above its 273 s and 364 s included; only opf-adopt-state-selftest and
 # opf-adopt-complete-selftest, both in C, are bounded by the headroom term), and the largest
@@ -273,12 +279,12 @@ _SUBSET = [
 # regression runner's budgets), opf.py --self-test grants its blocked-isolation leg ALONE
 # 31 * _deadline_case_budget(180) = 31 * (180 + 5 + 1) = 5766 s (31 isolation cases, each its 180 s
 # timeout, the 5 s fixture cleanup grace and the 1 s receipt allowance), so the whole self-test grants
-# itself more; this leg's bound (3660 s on this tree: its config-lane floor, the 3600 s the lanes
-# give opf/tools/opf.py --self-test plus the 60 s launch margin, above its declared waits, 3554.012 s
-# rounded up to 3555 s, plus that margin, 3615 s; it rose with those waits from the former 1458 s,
-# 3 x its 486 s ceiling) sits far below that. A
-# bound above it, 5766 + 60 = 5826 s, counts in both sweeps and in the negative leg: 3 x (5826 - 3660)
-# = 6498 s more, a job A worst case of 26778 s, over the 21600 s limit. So this bound takes the
+# itself more; this leg's bound (4821 s on this tree: its declared waits, 4760.012 s rounded up to
+# 4761 s, plus the 60 s launch margin, above the 3660 s its config-lane deadline gives, the 3600 s the
+# lanes give opf/tools/opf.py --self-test plus that margin; it rose with those waits from the former
+# 1458 s, 3 x its 486 s ceiling, to that 3660 s floor and then past it) sits below that. A
+# bound above it, 5766 + 60 = 5826 s, counts in both sweeps and in the negative leg: 3 x (5826 - 4821)
+# = 3015 s more, a job A worst case of 23538 s, over the 21600 s limit. So this bound takes the
 # kill-timeout rule's exception (AGENTS.md), as every other leg bound here does: a deliberately
 # shorter deadline, above the leg's recorded run and cutting a longer run short on purpose, with
 # reaching it attributed to the deadline (LEG BOUND EXCEEDED, exit 2; the self-test's negative leg,
@@ -335,9 +341,9 @@ _DRAIN_MARGIN_S = 10
 # exactly the floor. The former 120 s floor put the three-job split's job B over its 21600 s limit
 # (21986 s at a headroom of 3, before the config-lane floors); on this tree it would raise only
 # opf-prompt-pack's bound, the config-lane floors holding every lane-member leg above it, and move
-# only job B's worst case, from 17800 s to 17910 s. The reported 1348.7 s opf.py figure above is
-# covered at any multiplier on this tree: that leg's bound is set by its config-lane floor (3660 s),
-# not by the headroom term.
+# only job B's worst case, from 20340 s to 20450 s. The reported 1348.7 s opf.py figure above is
+# covered at any multiplier on this tree: that leg's bound is set by its declared waits (4821 s), not
+# by the headroom term.
 _MIN_LEG_BOUND_S = 60
 # Per-leg FLOORS, each the CONFIG-LANE DEADLINE of the leg's command plus _LAUNCH_MARGIN_S: a minimum
 # bound for a leg whose command the config-injection lanes (tools/selftest_git_fixture_env.py) also
@@ -352,11 +358,12 @@ _MIN_LEG_BOUND_S = 60
 # closure never kills a leg before the lane running that same command would. In the lanes each leg runs
 # the same command as a grandchild of a closure self-test member, one of the four members each lane's
 # pool runs at once, under the same load. The rows are the lane deadlines on this tree: 1260 s (1200 +
-# 60) for every leg the lanes bound at the default, 1860 s (1800 + 60) for opf-init-selftest and
-# opf-adopt-observe-selftest, whose commands carry 1800 s entries there, and 3660 s (3600 + 60) for
-# opf-tooling-selftest, whose command carries a 3600 s entry. Three lane-member legs carry no row
-# because their other terms already reach their lane deadline plus the margin
-# (opf-adopt-apply-selftest, opf-adopt-state-selftest and opf-adopt-complete-selftest), and two legs
+# 60) for every leg the lanes bound at the default, and 1860 s (1800 + 60) for opf-init-selftest and
+# opf-adopt-observe-selftest, whose commands carry 1800 s entries there. Four lane-member legs carry no
+# row because their other terms already reach their lane deadline plus the margin
+# (opf-tooling-selftest, whose command carries a 3600 s entry, so 3660 s, below the 4821 s its
+# declared waits give on this tree; opf-adopt-apply-selftest, opf-adopt-state-selftest and
+# opf-adopt-complete-selftest), and two legs
 # are no lane member at all (opf-homes-contract and opf-prompt-pack, whose commands carry no
 # self-test flag, so the lane runner's roster does not select them).
 # closure/leg-bound-reaches-the-lane-deadline reads the lane runner's own roster
@@ -401,14 +408,13 @@ _MIN_LEG_BOUND_S = 60
 # from about 3773 to about 10038 checks) is NOT shown absorbed by this sizing: its lane time must be
 # re-measured and the lanes' deadline for the command re-sized, and once that deadline rises above
 # 1200 s, closure/leg-bound-reaches-the-lane-deadline refuses this floor until it is raised to match.
-# FIT: each of the 23 rows below raises its leg's bound, and the jobs those bounds fit are set out on
+# FIT: each of the 22 rows below raises its leg's bound, and the jobs those bounds fit are set out on
 # _CI_JOB_LEGS.
 # A row naming no subset leg, or a value that is not a positive int (a bool included), is refused
 # fail-closed (_leg_bounds): a stale row left behind by a leg rename would otherwise silently stop
 # raising the bound it records.
 _LEG_BOUND_FLOOR_S = {
     "opf-homes-selftest": 1260,
-    "opf-tooling-selftest": 3660,
     "opf-drift-selftest": 1260,
     "opf-doctor-selftest": 1260,
     "opf-init-selftest": 1860,
@@ -442,17 +448,32 @@ _LANE_RUNNER = Path("tools") / "selftest_git_fixture_env.py"
 _COPY_PATTERNS = ("__pycache__", "*.pyc")
 _COPY_IGNORE = shutil.ignore_patterns(*_COPY_PATTERNS)
 
+# The positive cannot-evaluate marker. A subset leg that exits 2 is read as "could not evaluate its own
+# checks" ONLY when its captured final lines carry this marker (the convention the adopt-apply self-test
+# prints on an expired inner bound). Exit 2 WITHOUT it is a finding, because exit 2 also carries real
+# failures: opf.py maps a helper import failure (exactly what a surviving upward edge produces) to exit 2
+# with a lowercase "(cannot evaluate)", and the commonmark conformance selftest exits 2 on its own
+# self-check failures. Each of those is closure broken, never closure-not-evaluated, so only the
+# uppercase marker counts, and only in the output of a leg that launched: a row the runner never
+# launched (launched False) is the harness's own failure, never the leg's declaration, whatever text it
+# carries (_report). A roster script missing from opf/tools/ is registration drift, a finding (1),
+# named before the copy is made (_check_roster_registration).
+_CANNOT_EVALUATE_MARKER = "CANNOT EVALUATE"
+
 _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 # The closure work is PARTITIONED between five CI jobs, because the whole roster's worst case
 # (_job_worst_case_s over every leg) does not fit one job's time limit with the bound rule above
 # unchanged, and, once every lane-member leg reaches its config-lane deadline plus the launch margin
 # (see _LEG_BOUND_FLOOR_S), it does not fit four. ARITHMETIC on this tree: the legs' two sweeps,
-# their cleanup deadlines and the flip come to 82720 s, and each job adds the 350 s vector allowance
+# their cleanup deadlines and the flip come to 88615 s, and each job adds the 350 s vector allowance
 # and the 600 s setup to them, so four jobs hold at most 4 x (21600 - 950) = 82600 s of that work,
-# 120 s short; five is the fewest that fit. The worst cases, at a headroom of 3, are 20280 s (A,
-# the flip's job), 17800 s (B), 15810 s (C), 17390 s (D) and 16190 s (E), each within its 21600 s
-# limit; A keeps the legs it held in the three-job split (only opf-tooling-selftest's and
-# opf-doctor-selftest's bounds rose, to their floors), and opf-prompt-pack stays in B, where the
+# 6015 s short; five is the fewest that fit. The worst cases, at a headroom of 3, are 20523 s (A,
+# the flip's job), 20340 s (B), 15810 s (C), 17390 s (D) and 19302 s (E), each within its 21600 s
+# limit. When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew (each leg's
+# bound by 1206 s), A, which had held opf-adopt-apply-selftest since the three-job split, no longer
+# fit (26175 s), so that leg moved to E, and E's commonmark-headings-selftest and
+# opf-init-builders-selftest moved to A and B to make room; C, the only job whose worst case a
+# headroom multiplier from 3 up to 5.412 moves (see _LEG_CEILING_S), is unchanged. opf-prompt-pack stays in B, where the
 # --ci-job sweep vector removes it. Each job runs the --self-test step and then
 # the live gate step over its own legs alone (--ci-job); the self-test's negative leg (the flip,
 # which runs opf.py --self-test under the opf-tooling-selftest bound) runs only in the job that
@@ -468,7 +489,7 @@ _CI_JOB_LEGS = {
     "opf-closure-a": frozenset({
         "opf-tooling-selftest",
         "opf-doctor-selftest",
-        "opf-adopt-apply-selftest",
+        "commonmark-headings-selftest",
     }),
     "opf-closure-b": frozenset({
         "opf-homes-contract",
@@ -479,6 +500,7 @@ _CI_JOB_LEGS = {
         "opf-upgrade-selftest",
         "opf-prompt-pack-selftest",
         "opf-prompt-pack",
+        "opf-init-builders-selftest",
     }),
     "opf-closure-c": frozenset({
         "opf-homes-selftest",
@@ -496,11 +518,10 @@ _CI_JOB_LEGS = {
         "opf-init-substrate-selftest",
     }),
     "opf-closure-e": frozenset({
-        "opf-init-builders-selftest",
+        "opf-adopt-apply-selftest",
         "opf-init-operation-selftest",
         "opf-init-p0-selftest",
         "opf-init-observe-selftest",
-        "commonmark-headings-selftest",
         "commonmark-conformance",
     }),
 }
@@ -1543,9 +1564,21 @@ def _run_subset(opf_root, run_dir, bounds, legs=None):
     return results
 
 
+def _said_cannot_evaluate(row):
+    """Whether this result row is a leg's own positive cannot-evaluate declaration: the leg launched,
+    exited 2 AND printed the marker in its captured final lines. Anything else a launched leg exits 2
+    with is a finding (_report); a row the runner never launched is never the leg's declaration."""
+    return bool(row[4]) and row[1] == 2 and _CANNOT_EVALUATE_MARKER in (row[2] or "")
+
+
 def _report(results):
     """Print one line per leg and the verdict, and return the exit code. A leg that ITSELF exited
-    non-zero (a positive status) is a finding (1). A leg killed at its bound is reported as the bound
+    non-zero (a positive status) is a finding (1) unless it exited 2 AND printed CANNOT EVALUATE in its
+    final lines (the subset members' positive declaration of a harness error or an expired inner
+    bound): exit 2 alone also carries real failures (a helper import failure, a self-check that exits
+    2), so an unmarked exit 2 is reported as closure broken, fail-closed. A leg that declared
+    cannot-evaluate is reported as LEG CANNOT EVALUATE, and with no finding beside it the gate cannot
+    evaluate closure (2), never clean. A leg killed at its bound is reported as the bound
     tripping, a leg ended by a signal this gate did not send (a negative status) by that signal's name,
     and a leg that never launched (launched False: a missing script or an interpreter that could not
     start) as a harness failure, never as a failure the leg reported; in each case, with no finding
@@ -1562,12 +1595,15 @@ def _report(results):
         print("STANDALONE CLOSURE: NOT EVALUATED (the sweep ran no leg; an empty sweep proves nothing "
               "and never reads as clean)", file=sys.stderr)
         return 2
-    failed = [row for row in results if row[4] and row[1] is not None and row[1] > 0]
+    failed = [row for row in results
+              if row[4] and row[1] is not None and row[1] > 0 and not _said_cannot_evaluate(row)]
+    cannot = [row for row in results if _said_cannot_evaluate(row)]
     signalled = [row for row in results if row[4] and row[1] is not None and row[1] < 0]
     unlaunched = [row for row in results if not row[4]]
     timed_out = [row for row in results if row[1] is None]
     uncleaned = [row for row in results if row[6]]
-    for name, rc, _tail_text, elapsed, launched, bound, _cleanup in results:
+    for row in results:
+        name, rc, _tail_text, elapsed, launched, bound, _cleanup = row
         if not launched:
             status = "NOT LAUNCHED (harness failure; the leg reported nothing)"
         elif rc == 0:
@@ -1578,14 +1614,23 @@ def _report(results):
             status = ("ENDED BY {} after {:.1f}s (not this gate's kill; the leg reported no exit "
                       "status, and a negative status cannot tell an outside signal from one the leg or "
                       "its own process group sent itself)".format(_signal_name(rc), elapsed))
+        elif _said_cannot_evaluate(row):
+            status = "CANNOT EVALUATE rc=2 ({:.1f}s)".format(elapsed)
         else:
             status = "FAILED rc={} ({:.1f}s)".format(rc, elapsed)
         print("  {:38s} {}".format(name, status))
     if failed:
-        print("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself):",
+        print("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself; an exit 2 "
+              "without the {} marker counts as a failure, fail-closed):".format(_CANNOT_EVALUATE_MARKER),
               file=sys.stderr)
         for name, rc, tail, _elapsed, _launched, _bound, _cleanup in failed:
             print("  {} (rc={}): {}".format(name, rc, tail.replace("\n", " | ")), file=sys.stderr)
+    if cannot:
+        print("STANDALONE CLOSURE: LEG CANNOT EVALUATE (each leg below exited 2 and printed the {} "
+              "marker: it said it could not evaluate its own checks, so closure was not evaluated "
+              "for it):".format(_CANNOT_EVALUATE_MARKER), file=sys.stderr)
+        for name, _rc, tail, _elapsed, _launched, _bound, _cleanup in cannot:
+            print("  {} (rc=2): {}".format(name, tail.replace("\n", " | ")), file=sys.stderr)
     if unlaunched:
         print("STANDALONE CLOSURE: NOT EVALUATED (a leg below never launched; the failure is the "
               "harness's, never the leg's, whatever text it carries):", file=sys.stderr)
@@ -1613,7 +1658,7 @@ def _report(results):
             print("  {}: {}".format(name, "; ".join(cleanup)), file=sys.stderr)
     if failed:
         return 1
-    if timed_out or signalled or unlaunched or uncleaned:
+    if cannot or timed_out or signalled or unlaunched or uncleaned:
         return 2
     print("STANDALONE CLOSURE: OK (opf/ verifies itself with no AIQT tree reachable)")
     return 0
@@ -1626,12 +1671,13 @@ def run(root, ceilings=None, legs=None):
     sweep must then have run exactly the legs it owes (legs, or every leg when None): any other swept
     set, an empty one included, is refused (2) before any row is reported, never read as clean.
     Returns 0 (closure holds), 1 (a subset gate
-    failed: closure broken; or registration drift, named, found before opf/ is copied, any bound is
-    derived or any leg runs), or 2 (harness error, no opf/tools/ directory, an opf/tools/ entry that
-    cannot be checked, a temporary directory that cannot be created, a copy holding a symlink that
-    resolves outside it, a leg with no row in the ceilings passed in, refused before any leg launches,
-    any other exception or a SystemExit before, around or after the legs, or a leg killed at its bound
-    or ended by a signal), fail-closed. ceilings defaults to
+    failed, including a leg that exited 2 without printing CANNOT EVALUATE: closure broken; or
+    registration drift, named, found before opf/ is copied, any bound is derived or any leg runs), or 2
+    (harness error, no opf/tools/ directory, an opf/tools/ entry that cannot be checked, a temporary
+    directory that cannot be created, a copy holding a symlink that resolves outside it, a leg with no
+    row in the ceilings passed in, refused before any leg launches, any other exception or a SystemExit
+    before, around or after the legs, a leg killed at its bound or ended by a signal, or a leg that
+    exited 2 and printed CANNOT EVALUATE and so said it could not evaluate its own checks), fail-closed. ceilings defaults to
     _LEG_CEILING_S (the self-test passes a table missing a row); a leg missing from _LEG_CEILING_S
     itself is registration drift (1), since the roster is held to that table and that table to
     _ROSTER_PIN (_check_roster_registration)."""
@@ -2553,7 +2599,11 @@ def _timeout_vectors_self_test(required):
     group with start_new_session, the disclosed residual on _kill_and_reap: the kill does not reach
     it, and it holds the pipe until the run RELEASES it after the assertions (or its directory is
     removed, or 120 s pass), so the drain timeout is certain, never a scheduling accident, and each
-    run then waits until it is gone."""
+    run then waits until it is gone. The report vectors also hold the exit mapping of a leg's own exit
+    2: WITH the printed CANNOT EVALUATE marker it is LEG CANNOT EVALUATE, exit 2 alone and exit 1 beside
+    a real failure, never clean; WITHOUT the marker (a bootstrap import failure's lowercase "(cannot
+    evaluate)" does not count, nor does a conformance self-check failure) it is closure broken, exit 1;
+    and the marker in the text of a row the runner never launched is never the leg's declaration."""
     leg = max(_LEG_CEILING_S, key=lambda name: (_LEG_CEILING_S[name], name))
     ceiling = _LEG_CEILING_S[leg]
     bound = required[leg][0]
@@ -2590,6 +2640,16 @@ def _timeout_vectors_self_test(required):
             raise _CheckFailure("closure/hang-not-cut-off (rc={!r}, {:.1f}s, cleanup {!r})".format(
                 rc, elapsed, cleanup))
         unreaped = "leader-unreaped: leader pid 4242 was still unreaped at the 10s cleanup deadline"
+        apply_leg = "opf-adopt-apply-selftest"
+        apply_bound = required[apply_leg][0]
+        cannot_tail = "OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE (1 bound(s) expired)"
+        # The unmarked exit-2 tails below are real shapes a launched leg's own exit 2 carries: a
+        # bootstrap import failure (its lowercase "(cannot evaluate)" must NOT count as the marker) and
+        # a conformance self-check failure. The runner's own missing-script row is launched False, a
+        # harness failure (NOT EVALUATED), and the marker in its text never counts.
+        bootstrap_tail = "opf: cannot bootstrap: check_versions (cannot evaluate)"
+        conformance_tail = "CONFORMANCE SELF-CHECK FAIL: the verdict did not reject a duplicate example id"
+        missing_tail = "missing subset script in the copy: opf/tools/check_opf_homes.py"
         for rows, want_code, want, refused in (
                 ([(leg, None, tail, elapsed, True, bound, [])], 2,
                  ("TIMED OUT (killed at its {}s bound)".format(bound), "LEG BOUND EXCEEDED",
@@ -2619,7 +2679,42 @@ def _timeout_vectors_self_test(required):
                   ("opf-homes-contract", 1, "boom", 1.0, True, 120, [])], 1,
                  ("BROKEN", "opf-homes-contract (rc=1): boom",
                   "opf-tooling-selftest: ended by SIGKILL (signal 9)"),
-                 ("CLOSURE: OK", "opf-tooling-selftest (rc=-9)"))):
+                 ("CLOSURE: OK", "opf-tooling-selftest (rc=-9)")),
+                # A leg's own exit 2 WITH the printed marker said it could not evaluate its own checks:
+                # LEG CANNOT EVALUATE, exit 2 alone and exit 1 beside a real failure, never clean.
+                ([(apply_leg, 2, cannot_tail, 354.2, True, apply_bound, [])], 2,
+                 ("CANNOT EVALUATE rc=2 (354.2s)", "LEG CANNOT EVALUATE",
+                  "{} (rc=2): {}".format(apply_leg, cannot_tail), "closure was not evaluated"),
+                 ("BROKEN", "CLOSURE: OK")),
+                ([(apply_leg, 2, cannot_tail, 354.2, True, apply_bound, []),
+                  ("opf-homes-contract", 1, "boom", 1.0, True, 120, [])], 1,
+                 ("BROKEN", "opf-homes-contract (rc=1): boom", "LEG CANNOT EVALUATE",
+                  "{} (rc=2): {}".format(apply_leg, cannot_tail)),
+                 ("CLOSURE: OK",)),
+                # A leg's own exit 2 WITHOUT the marker is closure broken (exit 1), never
+                # closure-not-evaluated.
+                ([("opf-tooling-selftest", 2, bootstrap_tail, 1.2, True, bound, [])], 1,
+                 ("FAILED rc=2 (1.2s)", "BROKEN",
+                  "opf-tooling-selftest (rc=2): {}".format(bootstrap_tail)),
+                 ("LEG CANNOT EVALUATE", "CLOSURE: OK")),
+                # Beside it, the runner's own missing-script row (launched False) stays a harness
+                # failure, never the leg's report and never read as its declaration.
+                ([("commonmark-conformance", 2, conformance_tail, 0.3, True, 120, []),
+                  ("opf-homes-selftest", 2, missing_tail, 0.0, False, 1260, [])], 1,
+                 ("BROKEN", "commonmark-conformance (rc=2): {}".format(conformance_tail),
+                  "NOT LAUNCHED", "opf-homes-selftest: {}".format(missing_tail)),
+                 ("LEG CANNOT EVALUATE", "CLOSURE: OK", "opf-homes-selftest (rc=2)")),
+                ([(apply_leg, 2, cannot_tail, 354.2, True, apply_bound, []),
+                  ("opf-tooling-selftest", 2, bootstrap_tail, 1.2, True, bound, [])], 1,
+                 ("BROKEN", "opf-tooling-selftest (rc=2): {}".format(bootstrap_tail),
+                  "LEG CANNOT EVALUATE", "{} (rc=2): {}".format(apply_leg, cannot_tail)),
+                 ("CLOSURE: OK",)),
+                # The marker in the text of a row the runner never launched is not the leg's
+                # declaration: NOT EVALUATED as a harness failure, never LEG CANNOT EVALUATE.
+                ([("opf-homes-selftest", 2, "could not launch the interpreter: /x/CANNOT EVALUATE/py",
+                   0.0, False, 1260, [])], 2,
+                 ("NOT LAUNCHED", "NOT EVALUATED", "never the leg's"),
+                 ("LEG CANNOT EVALUATE", "BROKEN", "CLOSURE: OK"))):
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
                 code = _under_test("timeout-report", _report, rows)
@@ -2634,7 +2729,11 @@ def _timeout_vectors_self_test(required):
               "BROKEN; a killed leg whose leader is unreaped -> CLEANUP INCOMPLETE naming it, exit 2; "
               "a leg ended by a signal this gate did not send -> NOT EVALUATED naming the signal and "
               "saying the status cannot tell an outside signal from the leg's own, exit 2, never "
-              "BROKEN, and exit 1 beside a real failure)")
+              "BROKEN, and exit 1 beside a real failure); a leg's own exit 2 with the printed CANNOT "
+              "EVALUATE marker -> LEG CANNOT EVALUATE (exit 2; exit 1 beside a real failure); a leg's "
+              "own exit 2 without the marker (a bootstrap import failure, a conformance self-check "
+              "failure) -> BROKEN (exit 1); the marker in a never-launched row's text -> NOT "
+              "EVALUATED, never LEG CANNOT EVALUATE")
         # A readiness file holding anything but whole pids (a partly written file included) is a
         # named self-test failure, never a traceback.
         partly = tmp / "partly-written.pid"
@@ -3119,7 +3218,8 @@ def _positive_verdict(code, results, stopped=None):
     holds (0); (1, text) when a leg failed in isolation, or, with no results, for the definite finding
     the run stopped on (registration drift), named and never read as the real opf/ failing to verify
     (1); and (2, text) for every other code, naming each leg that was not evaluated (killed at its
-    bound, ended by a signal, never launched, or its cleanup incomplete) or, with no results, why the
+    bound, ended by a signal, never launched, exited 2 printing CANNOT EVALUATE, or its cleanup
+    incomplete) or, with no results, why the
     run stopped (a refusal or a harness fault), so a bound kill reads as the bound tripping, never as
     the real opf/ failing to verify."""
     if code == 0:
@@ -3137,6 +3237,9 @@ def _positive_verdict(code, results, stopped=None):
             named.append("{} killed at its {}s bound (the bound tripped)".format(name, bound))
         elif rc < 0:
             named.append("{} ended by {}".format(name, _signal_name(rc)))
+        elif _said_cannot_evaluate((name, rc, _tail_text, _elapsed, launched, bound, cleanup)):
+            named.append("{} exited 2 and printed {} (it said it could not evaluate its own "
+                         "checks)".format(name, _CANNOT_EVALUATE_MARKER))
         if cleanup:
             named.append("{} cleanup incomplete: {}".format(name, "; ".join(cleanup)))
     reason = "; ".join(named) or "stopped before any leg result: {}".format(
@@ -3167,7 +3270,9 @@ def _closure_legs(root, required, run_closure=None, run_one=None, legs=None):
     leg alone and says so. Any exception or SystemExit running the positive leg or judging it (from
     run_closure or _positive_verdict) leaves it unevaluated (2), named by its type, and the negative leg
     still runs (where this job runs it), so a flip not caught beside it is still a failure (1). The
-    negative leg's output is compared as raw bytes (run_one with raw True).
+    negative leg's output is compared as raw bytes (run_one with raw True), and a flip caught that way
+    must also come back from _report as closure BROKEN with exit 1, or it is a failure (1): a gate that
+    reported the break as not evaluated would provide no coverage.
     A temporary directory that cannot be created, fixture drift in the flip, any exception or SystemExit
     building the flipped copy (a failed copy, or a store that cannot be read or decoded), any exception
     or SystemExit running or judging the flipped leg, and an incomplete cleanup after the flipped leg's
@@ -3217,9 +3322,24 @@ def _closure_legs(root, required, run_closure=None, run_one=None, legs=None):
             else:
                 try:
                     bound = required["opf-tooling-selftest"][0]
-                    rc, output, _elapsed, launched, cleanup = run_one(
+                    rc, output, elapsed, launched, cleanup = run_one(
                         opf_root, "opf.py", ["--self-test"], tmp, _isolated_env(), bound, raw=True)
                     found = [_negative_verdict(rc, output, bound, launched)]
+                    if found[0] is None:
+                        # The caught flip's REAL result also goes through _report: the upward edge must
+                        # be reported as closure BROKEN with exit 1, never as closure-not-evaluated
+                        # (the flip's bootstrap failure exits 2 with a lowercase "(cannot evaluate)",
+                        # which is not the marker).
+                        out = io.StringIO()
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                            code = _report([(_FLIP_LEG, rc, _tail(output), elapsed, launched, bound,
+                                             cleanup)])
+                        said = out.getvalue()
+                        if code != 1 or "STANDALONE CLOSURE: BROKEN" not in said:
+                            found = [(1, "negative: a re-introduced upward edge (import check_versions) "
+                                         "was NOT reported as closure broken (the gate would give no "
+                                         "coverage): _report returned {} on the leg's rc={!r} and said "
+                                         "{!r}".format(code, rc, said))]
                     if cleanup:
                         found.append((2, "negative: the cleanup after the flipped leg's kill did not "
                                          "complete: {}".format("; ".join(cleanup))))
@@ -3264,6 +3384,10 @@ def _verdict_routing_self_test():
                   [])], None, 2, "opf-homes-contract never launched"),
             (2, [killed[:6] + (["leader-unreaped: leader pid 4242"],)], None, 2,
              "opf-doctor-selftest cleanup incomplete: leader-unreaped"),
+            (2, [("opf-adopt-apply-selftest", 2,
+                  "OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE (1 bound(s) expired)", 354.2, True, 4086, []),
+                 clean], None, 2,
+             "opf-adopt-apply-selftest exited 2 and printed CANNOT EVALUATE"),
             (2, None, None, 2, "stopped before any leg result: its reason is printed above"),
             (2, None, fault, 2, "stopped before any leg result: " + fault),
             (1, None, drift, 1, drift),
@@ -4281,7 +4405,7 @@ def self_test_main(job=None):
     the phase and the legs stubbed, and _check_routing_self_test holds it over the real checks). The
     positive leg runs the gate over the real opf/ and requires 0: exit 1 is
     a failure (registration drift named as itself), and exit 2 (a leg killed at its bound or ended by a
-    signal, a leg never launched, or a run stopped before any leg result by a refusal or a harness
+    signal, a leg never launched, a leg that exited 2 printing CANNOT EVALUATE, or a run stopped before any leg result by a refusal or a harness
     fault) is CANNOT EVALUATE naming each such leg or the stop (_positive_verdict). The negative leg
     materializes opf/ alone, then RE-INTRODUCES the pre-move upward edge (opf/tools/_opf_store.py
     importing `_parse` from AIQT `check_versions` instead of the extracted `_semver`); with no AIQT tree
@@ -4289,8 +4413,11 @@ def self_test_main(job=None):
     produces, its raw output byte for byte (a clean pass is a failure; a leg killed at its bound, a
     signal, a harness or launch failure (rejected structurally, whatever its text), and any other
     failure or output, one naming the injected import or differing only in a line ending or trailing
-    whitespace included, leave the flip unevaluated; see _negative_verdict). A gate that passed the
-    deliberately-broken copy would provide no coverage. Exit 1 when anything definite failed, else 2
+    whitespace included, leave the flip unevaluated; see _negative_verdict), and that caught result
+    must then go through _report and come back as closure BROKEN with exit 1 (the flip exits 2 with the
+    lowercase bootstrap message, a real break, not a declared cannot-evaluate). A gate that passed the
+    deliberately-broken copy, or that reported the break as not evaluated, would provide no coverage.
+    Exit 1 when anything definite failed, else 2
     when anything could not be evaluated (_self_test_outcome); an exception or a SystemExit that
     escapes the closure legs is a harness fault, cannot evaluate (2), named by its type, never a
     traceback and never the exit a SystemExit carries."""
