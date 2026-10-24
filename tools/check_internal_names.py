@@ -55,16 +55,17 @@ under the repository root (code, Markdown, site HTML, generated outputs that are
 own source alike), decoded as UTF-8, and also runs inside the scoped scan above (so an untracked scoped
 surface is still covered). The only exemption is the internal-allow marker, which exempts the ONE line that
 carries it; this gate's own self-test vectors carry that marker on each line that holds the word, and no
-file is exempt by name. A tracked file that is not valid UTF-8 is skipped only under the rule this gate
-already applies to walked directories (a file whose suffix is present and not in TEXT_SUFFIXES, such as the
-committed .zip archives, is not text and is not read as text); any other non-UTF-8 tracked file, a tracked
-path absent from the working tree, or a tracked path that is not a readable regular file CANNOT BE
-EVALUATED and fails closed at exit 2, the way an unreadable input does. A .gitattributes `binary` attribute
-is NOT a skip: a binary-attributed file that decodes as UTF-8 is scanned. When git cannot list the tracked
-set (no git, not a repository, a failed or empty listing) the rule cannot run and the gate exits 2.
+file is exempt by name. A tracked file that is not valid UTF-8 is skipped only when it is in a binary format
+the repository tracks, listed in TRACKED_BINARY_SIGNATURES and recognised by its suffix AND its leading
+content signature (today the ZIP archive alone: the committed skill .zip archives); any other non-UTF-8
+tracked file whatever its suffix (a malformed .csv, say), a tracked path absent from the working tree, or a
+tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2, the way an
+unreadable input does. A .gitattributes `binary` attribute is NOT a skip: a binary-attributed file that
+decodes as UTF-8 is scanned. When git cannot list the tracked set (no git, not a repository, a failed or
+empty listing) the rule cannot run and the gate exits 2.
 WHAT THE ROLE RULE CANNOT SEE: an untracked or git-ignored file (outside the scoped scan), a generated
 output that is not committed and is not handed to it as a tracked file (a built release archive, a rendered
-site that is not checked in), the contents of an archive or other non-UTF-8 file skipped by suffix, a staged
+site that is not checked in), the contents of a tracked binary file it skips (a ZIP archive), a staged
 change that differs from the working-tree copy (it reads the working tree), and the word split or encoded
 (an HTML entity, a zero-width character) so the plain pattern does not match.
 
@@ -73,9 +74,11 @@ family name followed by a QA round number, and a QA round number followed by a s
 id, in each case with at most one space between the parts, both case-insensitive) run inside the role rule
 above, over the same tracked set with the same internal-allow exemption, skips and fail-closed exits, and
 inside the scoped scan. "QA" alone, "quality", a bare grade word, a family name alone and a round number
-with neither a family name before it nor a grade or finding id after it are not matched, so a review label
-written in another shape (a family name after the round number, or a tab, two spaces or punctuation between
-the parts, say) is outside this rule.
+with neither a family name before it nor a grade or finding id after it are not matched. The grade or
+finding id must end at a word boundary, so a round number before an ordinary word that starts with a grade
+("minority", "majority") or before an F, digits and then letters is not matched. A review label written in
+another shape (a family name after the round number, a tab, two spaces or punctuation between the parts, or
+a grade or finding id run straight into a letter, digit or underscore, say) is outside this rule.
 
 Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error or a tracked file the role
 rule cannot evaluate (fail-closed). `--self-test` proves the gate FAILS on a seeded internal name (a
@@ -84,7 +87,9 @@ tracked file outside SCOPE_RELPATHS, and a maintainer-decision id of each shape 
 passes clean generic content, so removing a
 layer makes a case fail. It also runs the real scan over a planted fixture repository to prove the tree-wide
 decision-id layer is wired in and fails closed on an unreadable file, an unlistable directory, a FIFO and a
-vanished file. The self-test exits 0 only when
+vanished file, and over fixture repositories to prove the role rule skips a non-UTF-8 tracked file only in a
+tracked binary format (a real ZIP archive passes; a malformed .csv, an unsigned .zip and a .csv carrying the
+ZIP signature each exit 2). The self-test exits 0 only when
 every case ran and passed; 1 when any case failed (it also prints the cases it did not run); otherwise, when
 it skipped a case, 3. It never exits 0 after a skip. Skip reasons it prints include, as examples rather than
 a complete set:
@@ -129,6 +134,11 @@ import check_leaks  # noqa: E402  reuse the leak gate's normalization + structur
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 SKIP_NAMES = {"internal-name-hashes.txt", "check_internal_names.py", "check_leaks.py", "leak-hashes.txt"}
 TEXT_SUFFIXES = check_leaks.TEXT_SUFFIXES
+# The binary formats the repository tracks, the only non-UTF-8 tracked files the role rule skips: each suffix
+# with the content signature a file under it must start with, so a suffix alone never makes a file binary.
+# Today that is the ZIP archive alone (the committed skill archives under site/downloads/, each starting with
+# a ZIP local file header). A tracked file in any other binary format cannot be evaluated until it is listed.
+TRACKED_BINARY_SIGNATURES = {".zip": b"PK\x03\x04"}
 HASHES_RELPATH = ("tools", "internal-name-hashes.txt")
 
 # The QA-suite shipped surfaces this gate is responsible for keeping genericized. Files are scanned
@@ -168,12 +178,15 @@ _ROLE_NAMES = [
 # comment or message says what the code guards and why, never which review round asked for it.
 # Case-insensitive, since such labels are written in either case. Each needs the round NUMBER, so "QA" alone
 # in prose, "quality", a bare grade word, a family name alone and a round number with neither a family before
-# it nor a grade after it never match. Like the role-name pattern, these run over every tracked file, this
+# it nor a grade after it never match. The grade or finding id must end at a word boundary, so an ordinary
+# word that starts with a grade ("minority", "majority", "mediums") or an F, digits and then letters is not
+# a label; a grade or finding id run straight into a letter, digit or underscore (MINOR1, F2a) is therefore
+# not matched either. Like the role-name pattern, these run over every tracked file, this
 # one included; the pattern sources do not match themselves because a family name here is followed by a bar
 # or a parenthesis and "QA" by a bracket.
 _REVIEW_LABELS = [
     (re.compile(r'\b(?:codex|claude|gemini)[ ]?QA[0-9]+', re.IGNORECASE), "internal review-round label"),
-    (re.compile(r'\bQA[0-9]+[ ]?(?:BLOCKER|MAJOR|MEDIUM|MINOR|F[0-9])', re.IGNORECASE),
+    (re.compile(r'\bQA[0-9]+[ ]?(?:BLOCKER|MAJOR|MEDIUM|MINOR|F[0-9]+)\b', re.IGNORECASE),
      "internal review-round label"),
 ]
 # The patterns the tracked-file rule applies to every tracked file (see scan_role_text).
@@ -381,20 +394,29 @@ def scan_role_text(text):
     return found
 
 
+def _tracked_binary(path):
+    """True when the regular file at `path` is in a binary format the repository tracks: its suffix is listed
+    in TRACKED_BINARY_SIGNATURES and its content starts with that format's signature."""
+    signature = TRACKED_BINARY_SIGNATURES.get(path.suffix)
+    if signature is None:
+        return False
+    with open(path, "rb") as handle:
+        return handle.read(len(signature)) == signature
+
+
 def scan_tracked_roles(root, relpaths):
     """Return (findings, unevaluable) for the role rule (the role name and the review-round labels) over the
     tracked `relpaths`, independent of SCOPE_RELPATHS and SKIP_NAMES. A file that is not valid UTF-8 is
-    skipped only under the walk rule this gate already applies (a present suffix outside TEXT_SUFFIXES marks
-    a non-text file); any other non-UTF-8 file, or a tracked path absent from the working tree, is
-    unevaluable. A tracked path that is present but not a readable regular file raises OSError (exit 2)
-    through _read_present_text."""
+    skipped only when it is in a binary format the repository tracks (_tracked_binary: a listed suffix and
+    that format's content signature); any other non-UTF-8 file, whatever its suffix, or a tracked path
+    absent from the working tree, is unevaluable. A tracked path that is present but not a readable regular
+    file raises OSError (exit 2) through _read_present_text."""
     findings, unevaluable = [], []
     for rel in relpaths:
         try:
             text = _read_present_text(root / rel)
         except UnicodeDecodeError:
-            suffix = Path(rel).suffix
-            if suffix and suffix not in TEXT_SUFFIXES:
+            if _tracked_binary(root / rel):
                 continue
             unevaluable.append("{}: tracked file is not valid UTF-8; the role-name and review-round label "
                                "rule cannot evaluate it".format(rel))
@@ -727,20 +749,23 @@ def _self_test(caller_env=None):
         #     are each caught by the tracked-file rule (scan_role_text) and by the scoped scan, in either
         #     case and with or without the space. Removing _REVIEW_LABELS, or either of its patterns, leaves
         #     hits unflagged; making them case-sensitive misses the lower-case hits; dropping BLOCKER from
-        #     the grade group leaves the BLOCKER hit unflagged. The controls stay unflagged, and each names
-        #     the mutation it catches: dropping the round-number requirement in pattern 1 flags a family name
-        #     before "QA" alone, dropping it in pattern 2 flags "QA" before a bare grade, dropping pattern
-        #     1's leading word boundary flags a family name glued to a longer word, dropping pattern 2's
-        #     leading word boundary flags a round glued to a longer word, dropping the grade or finding
-        #     id flags a round number alone, dropping the digit from the finding id flags a round number
-        #     before a word that starts with F, and widening either pattern's one optional space (to any run
-        #     of spaces, any whitespace, any character, or a set that adds any one ASCII punctuation
-        #     character) flags two spaces, a tab or that punctuation character between the parts, the
-        #     documented separator limit: each pattern has a control for two spaces, a tab and every
-        #     character of string.punctuation. Every vector is assembled at runtime, so no contiguous
-        #     label sits in this source (the rule scans this file). The round numbers in the hits, the
-        #     controls and the fixture below are synthetic three-digit values naming no real round, and the
-        #     subjects are neutral.
+        #     the grade group leaves the BLOCKER hit unflagged; allowing one digit only in the finding id
+        #     leaves the F12 hit unflagged. The controls stay unflagged, and each names the mutation it
+        #     catches: dropping the round-number requirement in pattern 1 flags a family name before "QA"
+        #     alone, dropping it in pattern 2 flags "QA" before a bare grade, dropping pattern 1's leading
+        #     word boundary flags a family name glued to a longer word, dropping pattern 2's leading word
+        #     boundary flags a round glued to a longer word, dropping the grade or finding id flags a round
+        #     number alone, dropping the digit from the finding id flags a round number before a word that
+        #     starts with F, dropping pattern 2's trailing word boundary flags a round number before
+        #     "minority", "majority", "mediums", "Blockers" or an F, digits and then letters, narrowing that
+        #     boundary to "no letter follows" flags the F, two digits and then letters, and widening either
+        #     pattern's one optional space (to any run of spaces, any whitespace, any character, or a set
+        #     that adds any one ASCII punctuation character) flags two spaces, a tab or that punctuation
+        #     character between the parts, the documented separator limit: each pattern has a control for
+        #     two spaces, a tab and every character of string.punctuation. Every vector is assembled at
+        #     runtime, so no contiguous label sits in this source (the rule scans this file). The round
+        #     numbers in the hits, the controls and the fixtures below are synthetic three-digit values naming
+        #     no real round, and the subjects are neutral.
         write_hashes([])
         qa = "QA"
         review_label = "internal review-round label"
@@ -751,9 +776,11 @@ def _self_test(caller_env=None):
             "codex/claude " + qa + "934",
             qa + "916 MINOR-1: an example remark",
             qa + "904 MAJOR",
+            qa + "917 MAJOR 2: a sample item",
             qa + "929 BLOCKER 1: a placeholder item",
             qa.lower() + "907 medium",
             qa + "919 F4: a sample entry",
+            qa + "918 F12 in a sample list",
             qa.lower() + "908f2",
         )
         label_controls = (
@@ -773,6 +800,11 @@ def _self_test(caller_env=None):
             "gemini:" + qa + "939 and codex: " + qa + "940, punctuation between",
             qa + "941  MINOR and " + qa + "942\tMAJOR, two spaces and a tab apart",
             qa + "943:F1 and " + qa + "944-BLOCKER, punctuation between",
+            qa + "949 minority participation",
+            qa + "950 majority vote",
+            qa.lower() + "951 mediums and " + qa + "952 Blockers",
+            qa + "953 F2fa, an F, a digit and then letters",
+            qa + "954 F12abc, an F, digits and then letters",
         )
         import string
         for mark in string.punctuation:
@@ -863,8 +895,9 @@ def _self_test(caller_env=None):
             if "notes.txt:2: " + role not in report or "notes.txt:1: " + role in report:
                 failures.append("internal-allow expected to exempt notes.txt line 1 only, got {!r}".format(report))
             # 16. DISCRIMINATING (binary and non-UTF-8 files follow the stated rule): a .gitattributes
-            #     binary file that decodes as UTF-8 is scanned (data.bin is caught); a non-UTF-8 file whose
-            #     suffix is outside TEXT_SUFFIXES is skipped (blob.zip neither caught nor unevaluable); and
+            #     binary file that decodes as UTF-8 is scanned (data.bin is caught); a non-UTF-8 file in a
+            #     tracked binary format is skipped (blob.zip, with the ZIP signature, is neither caught nor
+            #     unevaluable; case 28 covers the formats that are not skipped); and
             #     an untracked file is out of the role rule's reach (untracked.md, a disclosed limit).
             if "data.bin:1: " + role not in report:
                 failures.append("a binary-attributed UTF-8 tracked file expected to be scanned, got {!r}".format(
@@ -923,6 +956,53 @@ def _self_test(caller_env=None):
         rc, report = gate(norepo)
         if rc != 2:
             failures.append("a root that is not a git repository expected exit 2, got rc={} {!r}".format(rc, report))
+
+        # 28. DISCRIMINATING (a non-UTF-8 tracked file is skipped only in a tracked binary format, recognised by
+        #     suffix AND content signature): a real ZIP archive with non-UTF-8 bytes, tracked beside a clean
+        #     file, passes (exit 0). Each of the following, tracked in turn, cannot be evaluated (exit 2): a
+        #     malformed .csv holding a review-round label, a .zip without the ZIP signature, and a .csv that
+        #     starts with the ZIP signature. Skipping by a suffix outside TEXT_SUFFIXES lets the .csv read
+        #     clean; skipping by suffix alone lets the unsigned .zip read clean; skipping by signature alone
+        #     lets the signed .csv read clean; never skipping fails the archive; each fails this case.
+        import zipfile
+        binrepo = tmp / "binary-repo"
+        binrepo.mkdir()
+        (binrepo / "clean.md").write_text("A clean note.\n", encoding="utf-8")
+        with zipfile.ZipFile(binrepo / "archive.zip", "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr("member.bin", b"\xff\xfe stored bytes \xff\n")
+        archive_bytes = (binrepo / "archive.zip").read_bytes()
+        try:
+            archive_bytes.decode("utf-8")
+            failures.append("the case 28 archive decodes as UTF-8, so the binary-skip vector would be vacuous")
+        except UnicodeDecodeError:
+            pass
+        init = subprocess.run(["git", "-C", str(binrepo), "init", "-q"], capture_output=True, text=True,
+                              env=_git_fixture_env.git_fixture_env(), timeout=60)
+        add = subprocess.run(["git", "-C", str(binrepo), "add", "--", "clean.md", "archive.zip"],
+                             capture_output=True, text=True, env=_git_fixture_env.git_fixture_env(), timeout=60)
+        if init.returncode != 0 or add.returncode != 0:
+            failures.append("the case 28 fixture could not be built: init rc={} add rc={} {!r}".format(
+                init.returncode, add.returncode, init.stderr + add.stderr))
+        else:
+            rc, report = gate(binrepo)
+            if rc != 0 or "archive.zip" in report:
+                failures.append("a tracked ZIP archive expected to pass (exit 0), got rc={} {!r}".format(rc, report))
+            for name, content in (
+                    ("review.csv", ("codex " + qa + "932\n").encode("utf-8") + b"\xff"),
+                    ("unsigned.zip", b"\xff\xfe not an archive \xff\n"),
+                    ("signed.csv", b"PK\x03\x04\xff\xfe not an archive \xff\n")):
+                (binrepo / name).write_bytes(content)
+                add = subprocess.run(["git", "-C", str(binrepo), "add", "--", name], capture_output=True,
+                                     text=True, env=_git_fixture_env.git_fixture_env(), timeout=60)
+                rc, report = gate(binrepo)
+                if add.returncode != 0 or rc != 2 or name + ": tracked file is not valid UTF-8" not in report:
+                    failures.append("a tracked non-UTF-8 {} expected cannot-evaluate (exit 2), got rc={} {!r}".format(
+                        name, rc, report))
+                remove = subprocess.run(["git", "-C", str(binrepo), "rm", "-q", "-f", "--", name],
+                                        capture_output=True, text=True, env=_git_fixture_env.git_fixture_env(),
+                                        timeout=60)
+                if remove.returncode != 0:
+                    failures.append("the case 28 file {} could not be removed: {!r}".format(name, remove.stderr))
 
         # 18. DISCRIMINATING (finding-3: an unknown option is a LOUD exit 2, never a silent default path): a
         #     subprocess given a misspelled --self-testx or a stray --bogus exits 2, never 0 by silently

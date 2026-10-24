@@ -11846,8 +11846,10 @@ def _watchdog_completion_case(mode, tree=None):
                              "vector:nested-generator"),
             "interrupted", "vector:nested-generator")
 
-        # Definition-time defaults (a regression the nested-body
-        # exemption introduced): a nested def's or lambda's
+        # Definition-time defaults (a regression the exemption of a
+        # whole nested def or lambda at f4200b43 introduced, which
+        # b84a21fa narrowed to the nested body): a nested def's or
+        # lambda's
         # parameter DEFAULT is
         # definition-time work -- it evaluates in the ENCLOSING
         # function, and a yield spelled there generator-converts
@@ -11909,7 +11911,7 @@ def _watchdog_completion_case(mode, tree=None):
         # definition-time default binds in the ENCLOSING scope, so
         # the nested-body walrus exemption must not cover it either
         # (already rejected at f4200b43; this pins the seam between
-        # the two exemptions added alongside that rejection).
+        # the two exemptions added at b84a21fa).
         function, capturing = leg11_vector("""
             def mutant(self):
                 try:
