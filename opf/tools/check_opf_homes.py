@@ -2295,9 +2295,13 @@ def boundary_self_test():
         stage = ".working/staging/import/" + run + "/plan.toml"
         add(stage)
         add(".working/journals/import/journal/inflight/frames.log", b"torn")
-        # A legacy store keeps its legacy grading: each homes-2 name is one unregistered path.
+        # A legacy store keeps its legacy grading for the staging name: one unregistered path. The
+        # reserved journals child is excluded in EVERY generation (spec 4.2: containment and doctor
+        # exclude journals; spec 14.2's reservation carries no homes qualifier): the adoption journal
+        # lives there, under the engine's held lock, before any adoption evidence exists, so a rogue
+        # file there is outside containment's coverage.
         check("legacy-staging-graded", lambda: graded(containment(), ".working/staging"))
-        check("legacy-journals-graded", lambda: graded(containment(), ".working/journals"))
+        check("legacy-journals-excluded", lambda: not graded(containment(), ".working/journals"))
         check("legacy-staging-not-partial", lambda: not containment(True).triage
               and any("no active" in message for message in containment(True).findings))
         with active():
@@ -2618,8 +2622,10 @@ def boundary_self_test():
           and not any(r in legacy_report.residuals for r in doctor._HOMES2_RESIDUALS))
     check("doctor-legacy-evidence-inert", lambda: not any(
         path.startswith(".working/imported/") for path in legacy_listed))
+    # The journals child is outside containment in every generation (spec 4.2; the adoption journal's
+    # own homes-2 home lives there), while the other homes-2 names keep their legacy grading.
     check("doctor-legacy-contains-homes", lambda: contained(legacy_report, ".working/imported")
-          and contained(legacy_report, ".working/journals"))
+          and not contained(legacy_report, ".working/journals"))
     with active():
         report, homes2_listed = dispatch(full_manifest2)
     check("doctor-homes2-roster", lambda: tuple(report.checks) == doctor.required_checks(2)
