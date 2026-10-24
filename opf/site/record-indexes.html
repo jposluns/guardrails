@@ -118,7 +118,7 @@
         <dt>Lifecycle</dt>
         <dd>
           <p><code>open</code> &#8594; <code>active</code> &#8594; <code>done</code> | <code>dropped</code></p>
-          <p>Open may go straight to dropped. No resurrection: a record in an unqualified terminal state never re-enters a working state, so a revived concern is a new record linking the old one. A ratified <code>done</code> creates a one-to-one completion receipt in the <a href="./record-indexes#done">done index</a>, and an item is actionable while open or active with no unqualified active block scoping it.</p>
+          <p>Open may go straight to dropped. No resurrection: a record in an unqualified terminal state never re-enters a working state, so a revived concern is a new record linking the old one. A ratified <code>done</code> creates a one-to-one completion receipt in the <a href="./record-indexes#done">done index</a>, and an item is actionable while open or active, not importer-authored, and with no unqualified active block from a non-importer actor scoping it. An importer-authored item is imported history: it is never actionable, whatever its recorded state.</p>
         </dd>
       </div>
       <div>
@@ -667,7 +667,7 @@
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">"Blocked" is one of the easiest states to abuse: it can park inconvenient work indefinitely.</blockquote>
-    <p>The standard makes a block a scoped, auditable record rather than a mood, and gates its creation: a block created by an assistant or automation is <code>active/proposed</code>, a proposal that hides nothing and justifies no stop until a maintainer ratifies it. The gate applies to assistant and automation actors; an unqualified active block from another actor also counts toward blocked-ness.</p>
+    <p>The standard makes a block a scoped, auditable record rather than a mood, and gates its creation: a block created by an assistant or automation is <code>active/proposed</code>, a proposal that hides nothing and justifies no stop until a maintainer ratifies it. The gate applies to assistant and automation actors; an unqualified active block from a maintainer also counts toward blocked-ness. An importer-authored block is imported history and hides nothing, whatever its recorded state.</p>
 
     <dl class="refstrip">
       <div>
@@ -684,7 +684,7 @@
         <dt>Lifecycle</dt>
         <dd>
           <p><code>active</code> (gated) &#8594; <code>released</code> | <code>expired</code></p>
-          <p>An unqualified active block hides the records it scopes from actionable views; a proposed or terminal block hides nothing. The block-actionability join is one of exactly two named joins in the closed transform vocabulary. Active blocks never rotate to the archive.</p>
+          <p>An unqualified active block from a non-importer actor hides the records it scopes from actionable views; a proposed or terminal block, and any importer-authored block, hides nothing. The block-actionability join is one of exactly two named joins in the closed transform vocabulary. Active blocks never rotate to the archive.</p>
         </dd>
       </div>
       <div>

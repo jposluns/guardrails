@@ -20,7 +20,9 @@ What it renders (spec 10.1, driven by the manifest [views.*] map):
   - the 1:1 <TYPE>-INDEX.md mirrors, one per enabled baseline type where declared;
   - the root VERSION deliverable, the latest release's version as exact bytes (spec 5.8/6.1).
 
-The transform vocabulary is CLOSED and versioned (spec 10.2): filter on declared field predicates; sort
+The transform vocabulary is CLOSED and versioned (spec 10.2): filter on declared field predicates (among
+them the provenance pair `importer_authored`/`not_importer_authored` on actor.kind, through which every
+split of importer-authored history from current-state records runs, spec 8.6); sort
 on declared keys with the record ID as the final tie-breaker; group by a declared field; project declared
 columns; plus EXACTLY TWO named joins, the block-actionability join (a clean, unqualified active block
 authored by a non-importer actor HIDES the records it scopes; importer-authored records enter the join on
@@ -117,7 +119,7 @@ EXIT_CANNOT_EVALUATE = 2
 # header included). A store holding none of the characters such a change touches renders byte-identical
 # views; the self-test pins this for the U+0085, U+2028 and U+2029 collapse.
 GENERATOR_NAME = "opf-views"
-GENERATOR_VERSION = "2"
+GENERATOR_VERSION = "3"
 SCHEMA_VERSION = _opf_schema.SUPPORTED_SCHEMA
 REGEN_COMMAND = "opf render --write"
 
@@ -437,7 +439,7 @@ def _sorted_ids(ids):
 # projection column a renderer may name is registered here; a name outside a registry is a ViewsError
 # (a cannot-evaluate), never a silent empty group, empty projection, or "" sort key. TRANSFORM_VOCAB
 # bumps when the set changes (a new composition shape is a spec version bump, not ad hoc logic).
-TRANSFORM_VOCAB_VERSION = "3"
+TRANSFORM_VOCAB_VERSION = "4"
 
 # group fields resolve through an accessor so a DECLARED derived field (lifecycle state) is part of the
 # closed vocabulary rather than an ad hoc bypass; a raw field reads r.get(field).
@@ -469,19 +471,32 @@ _FILTER_PREDICATES = {
     # CALL time (like is_actionable/_state above), so these entries can be registered before it is needed.
     "is_proposed": lambda: (lambda r: _is_proposed(r)),
     "not_proposed": lambda: (lambda r: not _is_proposed(r)),
+    # The imported-history firewall keys on PROVENANCE, the declared actor.kind field (spec 8.5/8.6):
+    # these split a set into importer-authored history and the records that may enter a current-state
+    # join. Every such split (the actionability join's block side, is_actionable's item side, and the
+    # BACKLOG, PIPELINE and HANDOFF renderers) goes through this pair, never a direct _importer_authored
+    # call, so the firewall has one registered definition.
+    "importer_authored": lambda: (lambda r: _importer_authored(r)),
+    "not_importer_authored": lambda: (lambda r: not _importer_authored(r)),
 }
 FILTER_PREDICATES = frozenset(_FILTER_PREDICATES)
+
+
+def _predicate(name, **kwargs):
+    """The single-record test of a DECLARED, named predicate from the closed vocabulary (spec 10.2), for
+    a per-record annotation that cannot be a set filter. An unknown predicate name is a ViewsError."""
+    factory = _FILTER_PREDICATES.get(name)
+    if factory is None:
+        raise ViewsError("unknown filter predicate {!r} (spec 10.2 closed transform vocabulary "
+                         "v{})".format(name, TRANSFORM_VOCAB_VERSION))
+    return factory(**kwargs)
 
 
 def t_filter(records, name, **kwargs):
     """Filter on a DECLARED, named predicate from the closed vocabulary (spec 10.2). `name` selects a
     registered predicate factory; `kwargs` binds its context. An unknown predicate name is a
     ViewsError, never a silent pass-through of an arbitrary callable."""
-    factory = _FILTER_PREDICATES.get(name)
-    if factory is None:
-        raise ViewsError("unknown filter predicate {!r} (spec 10.2 closed transform vocabulary "
-                         "v{})".format(name, TRANSFORM_VOCAB_VERSION))
-    predicate = factory(**kwargs)
+    predicate = _predicate(name, **kwargs)
     return [r for r in records if predicate(r)]
 
 
@@ -536,9 +551,7 @@ def join_actionability(items, blocks):
     importer-authored ITEMS are excluded on the item side by is_actionable and by the renderers, which
     surface them only as history."""
     blocked_by = {}
-    for b in blocks:
-        if _importer_authored(b):
-            continue
+    for b in t_filter(blocks, "not_importer_authored"):
         if _state(b) == "active" and not _is_proposed(b):
             bid = b.get("id")
             if not isinstance(bid, str):
@@ -556,7 +569,7 @@ def is_actionable(item, hidden):
     `active` and no clean unqualified active block scopes it (spec 8.5). `hidden` is the scoped-ID set
     from join_actionability. An importer-authored item is history, never actionable work, whatever its
     recorded state (spec 8.5/8.6), so it is never actionable here."""
-    return (not _importer_authored(item)
+    return (_predicate("not_importer_authored")(item)
             and _state(item) in ("open", "active")
             and item.get("id") not in hidden)
 
@@ -863,8 +876,8 @@ def _toml_comment_safe(value):
 
 def render_todo(src):
     """TODO: the actionable open and active backlog items (block-actionability join, then a state filter,
-    then an ID-tie-broken sort). An item an unqualified active block scopes is hidden. An importer-authored
-    item is never actionable (spec 8.5/8.6), so it never appears here; BACKLOG and PIPELINE surface it as
+    then an ID-tie-broken sort). An item a clean, unqualified active block authored by a non-importer actor
+    scopes is hidden; an importer-authored block hides nothing. An importer-authored item is never actionable (spec 8.5/8.6), so it never appears here; BACKLOG and PIPELINE surface it as
     history."""
     items, blocks = src["backlog_item"], src["block"]
     _blocked_by, hidden = join_actionability(items, blocks)
@@ -879,12 +892,14 @@ def render_backlog(src):
     """BACKLOG: every backlog item in ID order, each annotated by the block-actionability join as
     actionable or blocked by the naming block(s). An importer-authored item is annotated as
     `history (importer-authored)` (spec 8.5/8.6: history, never actionable work, whatever its recorded
-    state, and never `blocked by` since it enters neither side of the join)."""
+    state, and never `blocked by` since it enters neither side of the join). The history test is the
+    registered `importer_authored` predicate."""
     items, blocks = src["backlog_item"], src["block"]
     blocked_by, hidden = join_actionability(items, blocks)
+    history = _predicate("importer_authored")
     lines = []
     for r in t_sort(items):
-        note = "history (importer-authored)" if _importer_authored(r) else (
+        note = "history (importer-authored)" if history(r) else (
             "actionable" if is_actionable(r, hidden) else (
                 "blocked by {}".format(", ".join(_md_text(b) for b in blocked_by[r.get("id")])) if r.get("id") in hidden
                 else "not actionable ({})".format(_md_text(_state(r)))))
@@ -901,11 +916,11 @@ def render_pipeline(src):
     state. An importer-authored item is history outside every current-state join (spec 8.5/8.6): whatever
     its recorded status, it is surfaced only under a trailing `Imported history` section with that FULL
     status (as HANDOFF does), never inside a lifecycle group and never with a blocked marker. The
-    settled/proposed split and the state grouping both run through the closed transform
+    importer split, the settled/proposed split and the state grouping all run through the closed transform
     vocabulary (registered predicates and a registered derived group field), not ad hoc generator logic."""
     items, blocks = src["backlog_item"], src["block"]
-    imported = [r for r in items if _importer_authored(r)]
-    items = [r for r in items if not _importer_authored(r)]
+    imported = t_filter(items, "importer_authored")
+    items = t_filter(items, "not_importer_authored")
     blocked_by, hidden = join_actionability(items, blocks)
 
     def _marker(r):
@@ -1159,8 +1174,8 @@ def render_handoff(src):
     handoff is history outside every current-state join (spec 8.6): whatever its recorded status, it is
     surfaced only under `Imported history` with that FULL status, never as the current handoff. Every
     valid handoff status thus lands in exactly one place."""
-    imported = [r for r in src["handoff"] if _importer_authored(r)]
-    handoffs = [r for r in src["handoff"] if not _importer_authored(r)]
+    imported = t_filter(src["handoff"], "importer_authored")
+    handoffs = t_filter(src["handoff"], "not_importer_authored")
     out = ["## Current"]
     cur = t_sort(t_filter(handoffs, "state_in", states=("current",)))
     out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in cur] or [_EMPTY])
@@ -2494,6 +2509,39 @@ def self_test():
         check("actionability-importer-item-never-actionable",
               is_actionable(dict(id="BI-1", status="open", actor={"kind": "importer"}), set()) is False
               and is_actionable(dict(id="BI-1", status="open", actor={"kind": "maintainer"}), set()) is True)
+        # The importer split is registered vocabulary (spec 10.2): the join's block side, is_actionable's
+        # item side, and the BACKLOG, PIPELINE and HANDOFF splits all run through the
+        # `importer_authored`/`not_importer_authored` pair. Re-registering the pair to key on `assistant`
+        # must move every split with it, pinned as literal bodies; a split that tests _importer_authored
+        # directly keeps keying on `importer` and changes its view. The real pair is restored afterwards.
+        check("vocab-importer-predicates-registered",
+              {"importer_authored", "not_importer_authored"} <= FILTER_PREDICATES)
+        _sw_real = {k: _FILTER_PREDICATES[k] for k in ("importer_authored", "not_importer_authored")}
+        _FILTER_PREDICATES["importer_authored"] = lambda: (lambda r: r.get("actor", {}).get("kind") == "assistant")
+        _FILTER_PREDICATES["not_importer_authored"] = lambda: (lambda r: r.get("actor", {}).get("kind") != "assistant")
+        try:
+            _sw_src = dict(
+                backlog_item=[dict(id="BI-1", status="open", title="m", actor={"kind": "maintainer"}),
+                              dict(id="BI-2", status="open", title="i", actor={"kind": "importer"}),
+                              dict(id="BI-3", status="open", title="a", actor={"kind": "assistant"})],
+                block=[dict(id="BL-1", status="active", scopes=["BI-1"], actor={"kind": "importer"}),
+                       dict(id="BL-2", status="active", scopes=["BI-2"], actor={"kind": "assistant"})],
+                handoff=[dict(id="HO-1", status="current", title="i", actor={"kind": "importer"}),
+                         dict(id="HO-2", status="current", title="a", actor={"kind": "assistant"})])
+            _sw_views = (render_todo(_sw_src), render_backlog(_sw_src), render_pipeline(_sw_src),
+                         render_handoff(_sw_src))
+        finally:
+            _FILTER_PREDICATES.update(_sw_real)
+        check("vocab-importer-split-registered-todo", _sw_views[0] == "# TODO\n\n- BI-2 (open) i\n")
+        check("vocab-importer-split-registered-backlog", _sw_views[1] == (
+            "# BACKLOG\n\n- BI-1 (open) m -- blocked by BL-1\n- BI-2 (open) i -- actionable\n"
+            "- BI-3 (open) a -- history (importer-authored)\n"))
+        check("vocab-importer-split-registered-pipeline", _sw_views[2] == (
+            "# PIPELINE\n\n## open\n- BI-1 m [blocked by BL-1]\n- BI-2 i\n\n"
+            "## Imported history\n- BI-3 (open) a\n"))
+        check("vocab-importer-split-registered-handoff", _sw_views[3] == (
+            "# HANDOFF\n\n## Current\n- HO-1 i\n\n## Superseded\n_No records._\n\n"
+            "## Imported history\n- HO-2 (current) a\n"))
         # QA-2 (sibling of the closed id-less-block finding): every composed record renderer indexes the
         # record id; an id-less record from a trusted caller must render gracefully (via .get("id"), the
         # posture render_worklog/render_mirror/_id_key already take), never raise an unmapped KeyError --
@@ -3413,7 +3461,7 @@ def self_test():
         check("projection-header-is-toml-comment", dtoml_text.startswith("# GENERATED by opf render"))
         check("projection-header-no-html-comment", "<!--" not in dtoml_text)
         check("projection-header-has-digest", "# source-set-digest: sha256:" in dtoml_text)
-        check("projection-header-has-generator", "generator: opf-views/2" in dtoml_text)
+        check("projection-header-has-generator", "generator: opf-views/3" in dtoml_text)
         # R7: the TOML `#` header must carry the regenerate command INTACT and runnable. The HTML-comment
         # dash-run scrubber would corrupt `--write` into `- -write`; the TOML-specific scrubber leaves it
         # (a `--` is inert in a `#` comment). Fails without _toml_comment_safe.
