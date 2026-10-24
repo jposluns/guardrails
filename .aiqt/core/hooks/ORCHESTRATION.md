@@ -1058,9 +1058,15 @@ session's repository, so every git
 command outside the read-only grammar, and an absent command, is withheld as `UNVERIFIABLE`
 (fail closed), in the standalone preflight as in the composed hook. A consulted directory whose
 git identity probe cannot answer (git could not be run, timed out, ran past the decision deadline,
-or answered unreadably) fails closed the same way: the probe failure is never read as "not a
-repository", which would hide a live hold there, while git answering that a directory is in no
-repository stays the inert allow. There is no host-wide view of
+exited nonzero or on a signal with anything but git's specific not-a-git-repository answer, a
+dubious-ownership fatal included, or exited 0 with a reply that is not the expected two path
+lines, empty, one line or an echoed option) fails closed the same way: the probe failure is never
+read as "not a
+repository", which would hide a live hold there, while a consulted path that names no directory,
+or git's specific answer that a directory is in no
+repository, stays the inert allow. A git too old to answer the probe's options echoes them back
+on exit 0, so it fails closed the same way (it was previously read as inert). There is no
+host-wide view of
 holds: the hook reads only the markers of the repositories a command names or sits in.
 
 One marker file per live review lives in `GIT_COMMON_DIR/aiqt/review-holds/<dispatch-id>.json`,
@@ -1210,13 +1216,29 @@ write can install a `!` alias or a `core.*` program setting that a later git run
 and `help` with `--web`, `--info` or `--man` (`-w`, `-i`, `-m`, a viewer). FILE-WRITING PATH
 OPTIONS: while ANY hold the rule can see is live, a git segment carrying an option that writes a
 file or tree at an arbitrary path operand is DENIED the same way, whatever the operand names:
-`checkout-index --prefix` (it re-roots the whole checkout under any prefix), the diff family's
-`--output` (`diff`, `log`, `show`, `whatchanged`, `stash` and the
-`diff-files`/`diff-index`/`diff-tree` plumbing), `archive -o`/`--output`, `format-patch
--o`/`--output-directory`, `index-pack -o`, `fast-import --export-marks` and
-`--export-pack-edges`, and `mailsplit -o`. The operand is a path, not a directory move, so it
+`checkout-index --prefix` (it re-roots the whole checkout under any prefix), the `--output` of
+the diff and log families (`diff`, `log`, `show`, `whatchanged`, `stash`, the
+`diff-files`/`diff-index`/`diff-tree` plumbing, `range-diff`, `rev-list`, `shortlog` and
+`reflog`), `archive -o`/`--output`, `format-patch
+-o`/`--output-directory`, `bugreport` and `diagnose` `-o`/`--output-directory`, `index-pack -o`,
+`fast-import --export-marks` and
+`--export-pack-edges`, `fast-export --export-marks`, `init` and `clone --separate-git-dir`,
+`credential-store --file`, and `mailsplit -o`. The operand is a path, not a directory move, so it
 joins no hold set and where it lands is not resolved: from a command whose resolved target is an
-unrelated unheld repository it can still write into the held worktree. STATED OVER-REFUSAL:
+unrelated unheld repository it can still write into the held worktree. HELD-PATH OPERANDS: while
+ANY hold the rule can see is live, a git segment carrying a literal ABSOLUTE option value or
+operand that resolves physically to a held worktree or strictly inside one is DENIED too,
+WHATEVER the word means to its verb: a file-writing option outside the enumerated tables, or a
+path-writing positional operand, can land a write at that path, and telling it from a read
+spelling would mean re-implementing each verb's grammar, so every absolute held-path word is
+refused, a stated over-refusal for the spellings that only read (a command in the closed
+read-only grammar passed before this gate and is unaffected). The EXACT residual of the
+file-writing class is therefore: a file-writing option outside the enumerated tables, or a
+path-writing positional operand, whose operand is RELATIVE (it resolves against a directory this
+rule cannot fix) or is built by an expansion (`$`, a backquote, a glob or brace character, a
+leading `~`), plus a shell redirection; each of those spellings can still write into a held
+worktree from an allowed command, and they stay in the file-edit residual in the limits below.
+STATED OVER-REFUSAL:
 while some hold is live, an unrelated `git -C <unheld repository> rebase -x 'make' HEAD` is
 refused, as are a harmless leading assignment (`LC_ALL=C git -C <unheld repository> commit`), a
 `git config user.name` write in an unrelated repository, and a `git -C <unheld repository> diff
@@ -1313,9 +1335,13 @@ Limits:
   redirection (`>`, `>>`) is stripped from the one plain git segment before the grammar reads it, so
   a read verb redirected into a file inside the held worktree writes that file outside the grammar's
   view, the same file-edit residual. The enumerated file-writing path OPTIONS above are refused
-  while a hold is live, but a git verb that writes at a POSITIONAL path operand (`worktree add`,
+  while a hold is live whatever their operand, and any git segment whose literal ABSOLUTE option
+  value or operand resolves into a held worktree is refused too (the held-path gate), so a
+  file-writing option outside the tables and a path-writing POSITIONAL operand (`worktree add`,
   the `clone` and `init` directory operands, `bundle create`, `pack-objects`' base name,
-  `merge-file`, `mailinfo`) is not: a positional operand cannot be told from a ref or pathspec
+  `merge-file`, `mailinfo`) are caught exactly where the operand is a literal absolute path into
+  the held worktree; the same spellings with a RELATIVE or expansion-built operand cannot be told
+  from a ref or pathspec
   without re-implementing each verb's grammar, so those forms stay in this file-edit residual.
 - Marker accuracy is the adopter's: a missing marker, an early removal, a wrong `workdir`, or a
   review that outlasts `expires_utc` are adopter errors the hook cannot judge.
@@ -1336,11 +1362,15 @@ Limits:
   unrelated its certain target (an unrelated `rebase -x`, a harmless leading assignment such as
   `LC_ALL=C` and a `git config` write in an unrelated repository included), every file-writing
   path option of the enumeration above while any hold the rule can see is live, however unrelated
-  its certain target and wherever its operand lands, every git command
+  its certain target and wherever its operand lands, every git segment carrying a literal
+  absolute path that resolves into a held worktree, whatever the word means to its verb (a read
+  spelling outside the read-only grammar included), every git command
   outside the read-only grammar, and an absent command, when the payload's `cwd` is missing,
   relative, carries a NUL byte or names no directory that exists, even where no marker directory
   exists, the same commands when any consulted directory's git identity probe cannot answer
-  (git could not be run, timed out, ran past the decision deadline, or answered unreadably: the
+  (git could not be run, timed out, ran past the decision deadline, exited nonzero or on a
+  signal with anything but git's specific not-a-git-repository answer, or replied unreadably on
+  exit 0, a git too old to know the probe's options included: the
   holds there are exactly what cannot be read, so this fires even where no live hold is known),
   a RELATIVE `-C`,
   `--git-dir`, `--work-tree`, `cd` or
