@@ -3788,9 +3788,12 @@ def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
             if not recover:
                 stale = ", ".join(n for n, s in ((ACTIVE_NAME, stale_active),
                                                  (_opf_check.LEASE_NAME, stale_lease)) if s)
+                # This refusal reaches the `opf init` command line, so it names the CLI flag
+                # --recover first; recover=True is the same switch at this API.
                 raise OpLockError(
                     "stale operation record(s) under a free anchor ({}); refusing without EXPLICIT "
-                    "recovery (recover=True), which itself proceeds only when the recorded holder "
+                    "recovery (--recover on the opf command line; recover=True from the API), "
+                    "which itself proceeds only when the recorded holder "
                     "is confirmed dead".format(stale))
             rec_active_ident, rec_active_bytes, rec_lease_ident, rec_lease_bytes = \
                 _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease,
