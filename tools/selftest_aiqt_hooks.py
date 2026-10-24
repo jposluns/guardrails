@@ -1513,6 +1513,24 @@ def _test_note_literal_sites(failures, tmp):
     rd = orch.RdpFixture(base, "review-dispatch")
     note("(nl-review-dispatch) a review dispatch brief that declares a working-tree target allows with a note",
          rd.dispatch(rd.brief(["Review-target: working-tree"])), "declares target working-tree")
+    rw = base / "review-hold"
+    rw.mkdir()
+    orch._rdp_git(base, "init", "-q", "-b", "main", str(rw))
+    (rw / "seed.txt").write_text("s\n", encoding="utf-8")
+    orch._rdp_git(rw, "add", "seed.txt")
+    orch._rdp_git(rw, "commit", "-q", "-m", "seed")
+    rw_holds = rw / ".git" / "aiqt" / "review-holds"
+    rw_holds.mkdir(parents=True)
+    (rw_holds / "expired.json").write_text(json.dumps(dict(
+        version=1, workdir=str(rw), head=orch._rdp_git(rw, "rev-parse", "HEAD"),
+        dispatch_id="nl-hold", created_utc=orch._rwh_iso(-2), expires_utc=orch._rwh_iso(-1))),
+        encoding="utf-8")
+    note("(nl-review-hold-expired) an expired review-hold marker is ignored with a note on the next "
+         "Bash call, so a crashed dispatcher cannot pin a worktree forever",
+         aiqt_hooks.review_workdir_hold(dict(
+             hook_event_name="PreToolUse", cwd=str(rw), session_id="s1", tool_name="Bash",
+             tool_input=dict(command="ls"))),
+         "expired review-hold marker")
 
 
 def _shape_mutant(source, func_name, lines):
@@ -3333,6 +3351,7 @@ _DEADLINE_CASES = {
     "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
                        "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
+    "review_workdir_hold": ("git_segments_reset", "cd_git_fetch_unbal", "nest_cmdsubst"),
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
     "write_scope_guard": ("write_content", "write_deep_path"),
 }
