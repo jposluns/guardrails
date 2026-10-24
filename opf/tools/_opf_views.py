@@ -22,8 +22,10 @@ What it renders (spec 10.1, driven by the manifest [views.*] map):
 
 The transform vocabulary is CLOSED and versioned (spec 10.2): filter on declared field predicates; sort
 on declared keys with the record ID as the final tie-breaker; group by a declared field; project declared
-columns; plus EXACTLY TWO named joins, the block-actionability join (an unqualified active block HIDES the
-records it scopes, spec 8.5) and the decision-resolution supersession-chain join (the current effective
+columns; plus EXACTLY TWO named joins, the block-actionability join (a clean, unqualified active block
+authored by a non-importer actor HIDES the records it scopes; importer-authored records enter the join on
+neither side and a scheduling view surfaces an importer-authored item only as history, spec 8.5/8.6) and
+the decision-resolution supersession-chain join (the current effective
 resolution is the head of each supersedes chain, spec 8.5). Nothing beyond this vocabulary enters a
 generator; a new composition shape is a specification version bump, not ad hoc logic here.
 
@@ -392,6 +394,17 @@ def _is_proposed(record):
     return str(record.get("status", "")).endswith("/proposed")
 
 
+def _importer_authored(record):
+    """True when a record's actor kind is `importer` (spec 8.6): such a record is imported history,
+    keyed on PROVENANCE (actor.kind), not on series or import activation. An importer-authored record
+    enters no current-state join: it neither grants a stop nor counts as actionable work, and a view
+    surfaces it only as history (spec 8.5/8.6). A missing or malformed actor is NOT importer-authored
+    (records are validated before they reach a renderer; this is the permissive side, so a clean record
+    with an odd envelope is never silently demoted to history)."""
+    actor = record.get("actor")
+    return isinstance(actor, dict) and actor.get("kind") == "importer"
+
+
 def _id_key(record):
     """A numeric sort key for a record ID (namespace, number), so IDs order by number not lexically
     (BI-2 before BI-10). A malformed ID sorts last under a sentinel, but records are validated before
@@ -512,14 +525,20 @@ def t_project(record, columns):
 
 
 def join_actionability(items, blocks):
-    """The block-actionability join (spec 8.5): an UNQUALIFIED `active` block HIDES every record it scopes.
+    """The block-actionability join (spec 8.5): a clean, UNQUALIFIED `active` block authored by a
+    non-importer actor HIDES every record it scopes.
     Returns (blocked_by, hidden): blocked_by maps a scoped record ID to the block IDs that scope it, DEDUPED
     and ordered by the numeric record-id key (BL-2 before BL-10, MAJOR-1), and hidden is the set of all
     scoped IDs. A block that is `active/proposed` (a proposal, not a grant) or in a terminal state
     (`released`, `expired`) never hides anything, so only a ratified active block counts, exactly as the
-    actionability rule requires."""
+    actionability rule requires. An importer-authored block enters neither side of this join (spec 8.5/8.6:
+    imported history MUST NOT grant a current stop), so it hides nothing whatever its recorded state;
+    importer-authored ITEMS are excluded on the item side by is_actionable and by the renderers, which
+    surface them only as history."""
     blocked_by = {}
     for b in blocks:
+        if _importer_authored(b):
+            continue
         if _state(b) == "active" and not _is_proposed(b):
             bid = b.get("id")
             if not isinstance(bid, str):
@@ -533,9 +552,13 @@ def join_actionability(items, blocks):
 
 
 def is_actionable(item, hidden):
-    """A backlog item is actionable when its state is `open` or `active` and no unqualified active block
-    scopes it (spec 8.5). `hidden` is the scoped-ID set from join_actionability."""
-    return _state(item) in ("open", "active") and item.get("id") not in hidden
+    """A clean backlog item authored by a non-importer actor is actionable when its state is `open` or
+    `active` and no clean unqualified active block scopes it (spec 8.5). `hidden` is the scoped-ID set
+    from join_actionability. An importer-authored item is history, never actionable work, whatever its
+    recorded state (spec 8.5/8.6), so it is never actionable here."""
+    return (not _importer_authored(item)
+            and _state(item) in ("open", "active")
+            and item.get("id") not in hidden)
 
 
 def _detect_resolution_cycle(supersedes_map):
@@ -840,7 +863,9 @@ def _toml_comment_safe(value):
 
 def render_todo(src):
     """TODO: the actionable open and active backlog items (block-actionability join, then a state filter,
-    then an ID-tie-broken sort). An item an unqualified active block scopes is hidden."""
+    then an ID-tie-broken sort). An item an unqualified active block scopes is hidden. An importer-authored
+    item is never actionable (spec 8.5/8.6), so it never appears here; BACKLOG and PIPELINE surface it as
+    history."""
     items, blocks = src["backlog_item"], src["block"]
     _blocked_by, hidden = join_actionability(items, blocks)
     actionable = t_filter(items, "is_actionable", hidden=hidden)
@@ -852,14 +877,17 @@ def render_todo(src):
 
 def render_backlog(src):
     """BACKLOG: every backlog item in ID order, each annotated by the block-actionability join as
-    actionable or blocked by the naming block(s)."""
+    actionable or blocked by the naming block(s). An importer-authored item is annotated as
+    `history (importer-authored)` (spec 8.5/8.6: history, never actionable work, whatever its recorded
+    state, and never `blocked by` since it enters neither side of the join)."""
     items, blocks = src["backlog_item"], src["block"]
     blocked_by, hidden = join_actionability(items, blocks)
     lines = []
     for r in t_sort(items):
-        note = "actionable" if is_actionable(r, hidden) else (
-            "blocked by {}".format(", ".join(_md_text(b) for b in blocked_by[r.get("id")])) if r.get("id") in hidden
-            else "not actionable ({})".format(_md_text(_state(r))))
+        note = "history (importer-authored)" if _importer_authored(r) else (
+            "actionable" if is_actionable(r, hidden) else (
+                "blocked by {}".format(", ".join(_md_text(b) for b in blocked_by[r.get("id")])) if r.get("id") in hidden
+                else "not actionable ({})".format(_md_text(_state(r)))))
         lines.append("- {} ({}) {} -- {}".format(
             _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", "")), note))
     return _lines("BACKLOG", lines)
@@ -870,9 +898,14 @@ def render_pipeline(src):
     10.2/8.4) in lifecycle order, with a blocked marker from the block-actionability join. A `/proposed`
     item is NONTERMINAL (spec 8.4): it is held OUT of its effective-state group and surfaced in a trailing
     `awaiting ratification` section showing its FULL status, never mis-grouped under its proposed target
-    state. The settled/proposed split and the state grouping both run through the closed transform
+    state. An importer-authored item is history outside every current-state join (spec 8.5/8.6): whatever
+    its recorded status, it is surfaced only under a trailing `Imported history` section with that FULL
+    status (as HANDOFF does), never inside a lifecycle group and never with a blocked marker. The
+    settled/proposed split and the state grouping both run through the closed transform
     vocabulary (registered predicates and a registered derived group field), not ad hoc generator logic."""
     items, blocks = src["backlog_item"], src["block"]
+    imported = [r for r in items if _importer_authored(r)]
+    items = [r for r in items if not _importer_authored(r)]
     blocked_by, hidden = join_actionability(items, blocks)
 
     def _marker(r):
@@ -892,6 +925,12 @@ def render_pipeline(src):
         for r in proposed:
             out.append("- {} ({}) {}{}".format(
                 _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", "")), _marker(r)))
+        out.append("")
+    if imported:
+        out.append("## Imported history")
+        for r in t_sort(imported):
+            out.append("- {} ({}) {}".format(
+                _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", ""))))
         out.append("")
     body = "\n".join(out).rstrip("\n") if out else _EMPTY
     return "# {}\n\n{}\n".format("PIPELINE", body)
@@ -1120,12 +1159,8 @@ def render_handoff(src):
     handoff is history outside every current-state join (spec 8.6): whatever its recorded status, it is
     surfaced only under `Imported history` with that FULL status, never as the current handoff. Every
     valid handoff status thus lands in exactly one place."""
-    def _imported(r):
-        actor = r.get("actor")
-        return isinstance(actor, dict) and actor.get("kind") == "importer"
-
-    imported = [r for r in src["handoff"] if _imported(r)]
-    handoffs = [r for r in src["handoff"] if not _imported(r)]
+    imported = [r for r in src["handoff"] if _importer_authored(r)]
+    handoffs = [r for r in src["handoff"] if not _importer_authored(r)]
     out = ["## Current"]
     cur = t_sort(t_filter(handoffs, "state_in", states=("current",)))
     out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in cur] or [_EMPTY])
@@ -2122,8 +2157,10 @@ def self_test():
     by grepping output. Exercises: INDEPENDENT expected-bytes goldens per view (a hand-authored expected
     body pinned for EVERY view, so corrupting any renderer fails the test); drift detection; each transform
     (predicate filter, sort with ID tie-break, group, project); the block-actionability join (an unqualified
-    active block hides an item, an active/proposed block does not) WITH deduped numeric-order block
-    annotations (MAJOR-1); the decision supersession-chain join, with a fork and a cycle refused fail-closed;
+    active block hides an item, an active/proposed block does not, and an importer-authored block or item
+    enters the join on neither side, spec 8.5/8.6) WITH deduped numeric-order block
+    annotations (MAJOR-1); importer-authored backlog history surfaced only as history in TODO/BACKLOG/
+    PIPELINE (literal view bytes); the decision supersession-chain join, with a fork and a cycle refused fail-closed;
     GFM extended-autolink neutralization in _md_text (bare http/https/www/email rendered inert, B1); the
     generated header's HTML-comment sink refusing an interpolated `-->`/`--!>` early close (B2); every
     NONTERMINAL `/proposed` record and the valid `withdrawn` terminal surfaced correctly in
@@ -2440,6 +2477,23 @@ def self_test():
                                        block=[dict(status="active", scopes=["BI-1"])]))
         check("idless-block-no-dangling-annotation",
               "blocked by \n" not in _f5_body and _f5_body.rstrip().endswith("actionable"))
+        # Spec 8.5/8.6 (imported-history firewall, provenance-keyed on actor.kind): an importer-authored
+        # ACTIVE block grants no current stop, so it enters the actionability join on neither side and
+        # hides nothing; the maintainer twin still stops. Red when the join's importer filter is removed
+        # (the first) or inverted/over-broad (the second).
+        _fw_bb, _fw_hid = join_actionability(
+            [dict(id="BI-1", status="open")],
+            [dict(id="BL-1", status="active", scopes=["BI-1"], actor={"kind": "importer"})])
+        check("actionability-importer-block-grants-no-stop", (_fw_bb, _fw_hid) == ({}, set()))
+        _fw_bb2, _fw_hid2 = join_actionability(
+            [dict(id="BI-1", status="open")],
+            [dict(id="BL-1", status="active", scopes=["BI-1"], actor={"kind": "maintainer"})])
+        check("actionability-clean-block-still-stops", _fw_hid2 == {"BI-1"})
+        # An importer-authored backlog item is history, never actionable work, whatever its recorded
+        # state; the maintainer twin stays actionable. Red when the item-side importer filter is removed.
+        check("actionability-importer-item-never-actionable",
+              is_actionable(dict(id="BI-1", status="open", actor={"kind": "importer"}), set()) is False
+              and is_actionable(dict(id="BI-1", status="open", actor={"kind": "maintainer"}), set()) is True)
         # QA-2 (sibling of the closed id-less-block finding): every composed record renderer indexes the
         # record id; an id-less record from a trusted caller must render gracefully (via .get("id"), the
         # posture render_worklog/render_mirror/_id_key already take), never raise an unmapped KeyError --
@@ -4000,7 +4054,16 @@ def self_test():
         write_toml(proproot, "backlog_item.index.toml", "\n".join([
             "schema = 1",
             _rec("BI-1", "backlog_item", "open", "still open"),
+            _rec("BI-5", "backlog_item", "open", "imported history", actor="importer"),
+            _rec("BI-6", "backlog_item", "open", "six open"),
             _rec("BI-7", "backlog_item", "done/proposed", "proposed done", actor="assistant"),
+        ]) + "\n")
+        # Spec 8.5/8.6: BL-2 is an importer-authored ACTIVE block scoping the clean open BI-6. It grants
+        # no current stop, so BI-6 stays actionable and unblocked in every scheduling view, while the
+        # importer-authored open BI-5 surfaces only as history, never as actionable work.
+        write_toml(proproot, "block.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BL-2", "block", "active", "imported stop", actor="importer", scopes=["BI-6"]),
         ]) + "\n")
         write_toml(proproot, "pending_decision.index.toml", "\n".join([
             "schema = 1",
@@ -4053,6 +4116,26 @@ def self_test():
         _himp = pho.index("## Imported history") if "## Imported history" in pho else len(pho)
         check("handoff-imported-not-current", "HO-3" not in pho[:_sup] and "HO-3" in pho[_himp:])
         check("handoff-imported-shows-full-status", "- HO-3 (current) migrated history" in pho[_himp:])
+        # Spec 8.5/8.6 (imported-history firewall) over the SCHEDULING views, pinned as LITERAL view
+        # bytes (hand-authored, not renderer-echoed): the importer-authored open BI-5 never reaches TODO
+        # and surfaces in BACKLOG as `history (importer-authored)` and in PIPELINE only under a trailing
+        # `Imported history` section with its FULL status; the importer-authored active BL-2 grants no
+        # stop, so the clean open BI-6 it scopes stays actionable with no `blocked by` annotation or
+        # marker anywhere. Red when any of the item filter, the block filter, or either renderer edit is
+        # reverted (a doctor-level drift vector cannot discriminate this: C-VIEW-DRIFT compares against
+        # the same planner, so reverting the planner reverts the expectation with it).
+        check("views-importer-history-surfaces",
+              body_of(pview("TODO.md")) == ("\n# TODO\n\n- BI-1 (open) still open\n"
+                                            "- BI-6 (open) six open\n")
+              and body_of(pview("BACKLOG.md")) == (
+                  "\n# BACKLOG\n\n- BI-1 (open) still open -- actionable\n"
+                  "- BI-5 (open) imported history -- history (importer-authored)\n"
+                  "- BI-6 (open) six open -- actionable\n"
+                  "- BI-7 (done/proposed) proposed done -- not actionable (done)\n")
+              and body_of(pview("PIPELINE.md")) == (
+                  "\n# PIPELINE\n\n## open\n- BI-1 still open\n- BI-6 six open\n\n"
+                  "## awaiting ratification\n- BI-7 (done/proposed) proposed done\n\n"
+                  "## Imported history\n- BI-5 (open) imported history\n"))
 
         # --- the composed U6 write gate (VC-4): render --write gates on validate_store == VALID ----------
         # A bare `render` (neither --check nor --write) is a usage error; --write on a NOT-ADOPTED root is
