@@ -469,13 +469,15 @@ _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 # and the 600 s setup to them, so four jobs hold at most 4 x (21600 - 950) = 82600 s of that work,
 # 6015 s short; five is the fewest that fit. The worst cases, at a headroom of 3, are 20523 s (A,
 # the flip's job), 20340 s (B), 15810 s (C), 17390 s (D) and 19302 s (E), each within its 21600 s
-# limit. When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew (each leg's
-# bound by 1206 s), A, which had held opf-adopt-apply-selftest since the three-job split, no longer
-# fit (26175 s), so that leg moved to E, and E's commonmark-headings-selftest and
-# opf-init-builders-selftest moved to A and B to make room; C, the only job whose worst case a
-# headroom multiplier from 3 up to 5.412 moves (see _LEG_CEILING_S), is unchanged. opf-prompt-pack stays in B, where the
-# --ci-job sweep vector removes it. Each job runs the --self-test step and then
-# the live gate step over its own legs alone (--ci-job); the self-test's negative leg (the flip,
+# limit. When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
+# (the two legs' declared-wait sums from 3554.012 s to 4760.012 s and from 2820 s to 4026 s), the
+# opf-adopt-apply-selftest bound rose by 1206 s (2880 s to 4086 s) and the opf-tooling-selftest bound
+# by 1161 s (from 3660 s, set by its former floor row, to 4821 s), A, which had held
+# opf-adopt-apply-selftest since the three-job split, no longer fit (26175 s), so that leg moved to
+# E, and E's commonmark-headings-selftest and opf-init-builders-selftest moved to A and B to make
+# room; C, the only job whose worst case a headroom multiplier from 3 up to 5.412 moves (see
+# _LEG_CEILING_S), is unchanged. opf-prompt-pack stays in B, where the --ci-job sweep vector removes
+# it. Each job runs the --self-test step and then the live gate step over its own legs alone (--ci-job); the self-test's negative leg (the flip,
 # which runs opf.py --self-test under the opf-tooling-selftest bound) runs only in the job that
 # holds that leg. Every subset leg must be in exactly ONE job: a leg in no job would run in no CI job
 # at all, and a leg in more than one would make the jobs' worst cases overlap, so _partition_fault
@@ -3366,8 +3368,9 @@ def _verdict_routing_self_test():
     mkdtemp) and an incomplete cleanup after the flipped leg's kill, each named, never
     the exit a SystemExit carries; a SystemExit or another exception running the positive leg, and a
     SystemExit judging it (_positive_verdict), leave the positive leg unevaluated (2), named, with the
-    flip still run; and a definite failure outranks a leg that could not be evaluated, a flip not
-    caught beside such a positive fault included.
+    flip still run; a flip caught as the exact bytes that _report gives exit 2 (even saying BROKEN),
+    or exit 1 without the BROKEN verdict, is a failure (1); and a definite failure outranks a leg that
+    could not be evaluated, a flip not caught beside such a positive fault included.
     The wiring is held through _closure_legs, the legs self_test_main runs, with both runners stubbed
     over a throwaway tree that holds only the import the flip rewrites: the copy and the flip are real
     (but in the one case that replaces the copy with a SystemExit), and nothing is launched."""
@@ -3579,6 +3582,37 @@ def _verdict_routing_self_test():
                 or positive_fault + "SystemExit: 0" not in said):
             raise _CheckFailure("closure/self-test-routing: positive-verdict-system-exit (exit {}, want "
                                 "2; flips {!r}): {!r}".format(code, flips, said))
+        # A flip caught as the exact bytes is also judged by _report (the module name _closure_legs
+        # looks up rebound): a report of exit 2 (even one that says BROKEN) or of exit 1 without the
+        # BROKEN verdict is a failure (1), and _report must be given the flipped leg's own row.
+        for label, report_code, report_said in (
+                ("flip-reported-as-exit-2", 2, "STANDALONE CLOSURE: BROKEN (injected)"),
+                ("flip-reported-without-broken", 1,
+                 "STANDALONE CLOSURE: LEG CANNOT EVALUATE (injected)")):
+            del flips[:]
+            reported = []
+
+            def report(results, report_code=report_code, report_said=report_said):
+                reported.append([tuple(row[:6]) for row in results])
+                print(report_said)
+                return report_code
+
+            out = io.StringIO()
+            with _swapped(_report=report):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                    code = _under_test("self-test-routing: " + label, _closure_legs, root,
+                                       {"opf-tooling-selftest": (1458, 486, 0)},
+                                       run_closure=lambda _root: (0, [clean], None),
+                                       run_one=flip_runner(caught))
+            said = out.getvalue()
+            if (code != 1 or flips != flipped
+                    or reported != [[(_FLIP_LEG, _FLIP_EXIT, _tail(_FLIP_BYTES), 0.1, True, 1458)]]
+                    or "SELF-TEST FAIL: negative: a re-introduced upward edge (import check_versions) "
+                       "was NOT reported as closure broken" not in said
+                    or "_report returned {} on the leg's rc={!r}".format(report_code, _FLIP_EXIT)
+                    not in said):
+                raise _CheckFailure("closure/self-test-routing: {} (exit {}, want 1; flips {!r}; "
+                                    "reported {!r}): {!r}".format(label, code, flips, reported, said))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("RED run() exit 2 (a leg killed at its bound, a signal, a leg never launched, an incomplete "
@@ -3594,7 +3628,8 @@ def _verdict_routing_self_test():
           "cleanup as a note, kept in the text) and a SystemExit building the "
           "flipped copy -> named, exit 2; a SystemExit or another exception running the positive leg, "
           "and a SystemExit judging it -> the positive leg CANNOT EVALUATE, named, exit 2, the flip "
-          "still run, and exit 1 beside a flip not caught")
+          "still run, and exit 1 beside a flip not caught; a caught flip that _report gives exit 2 "
+          "(even saying BROKEN) or exit 1 without the BROKEN verdict -> exit 1")
 
 
 def _self_test_phase(phase):

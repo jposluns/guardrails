@@ -1030,10 +1030,14 @@ def _config_poison_fixture(base):
 # 27 had no recorded time (the 12 account members the account does not name, and the 15 later
 # members SIZING_LATER_MEASURED does not cover), and the closure gate's two self-test halves had
 # pre-split standalone times only; 106 malformed-lane members were not measured in that lane.
-# The three --ci-job members registered on 2026-10-23 each carry a SIZING_LATER_MEASURED entry,
-# so on a tree carrying all three the 27 is unchanged, 32 members have no time in the account
-# (those 27 and the five --ci-job members), and 109 malformed-lane members are not measured in
-# that lane (config/member-roster-figures prints the live figures).
+# The three --ci-job members registered on 2026-10-23 each carry a SIZING_LATER_MEASURED entry.
+# On the tree of 2026-10-24 (counted by _roster_figures; dated, not pinned), which carries all
+# five --ci-job members and two later members more (tools/check_rule_placement.py and the
+# rule-placement-selftest suite run), the roster had 123 members, 121 of them in the malformed
+# lane; 29 had no recorded time (the 12 account members the account does not name, and the 17
+# later members SIZING_LATER_MEASURED does not cover), 34 had no time in the account (those 29 and
+# the five --ci-job members), and 111 malformed-lane members were not measured in that lane
+# (config/member-roster-figures prints the live figures).
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
 # proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
