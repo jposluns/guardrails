@@ -57,13 +57,18 @@ the doctor and the resume audit report and arm from it):
   scan that ends inside an open quote reads as unreadable and draws the note too, never a silent
   allow, and so does a backslash-newline line continuation anywhere outside a single-quoted span,
   wherever the scan meets it (bash removes the pair before it tokenizes, so any token can be split
-  across one, a `<(` or `>(` process-substitution opener included; a pair inside single quotes is
-  literal data to bash and stays silent); it
+  across one, a `<(` or `>(` process-substitution opener included; a pair inside single quotes, a
+  single-quoted span inside a double-quoted substitution included, is literal data to bash and stays
+  silent; the rule holds as far as the scan reads quotes, so where its quote reading diverges from
+  bash's, as in the disclosed ANSI-C false allow, a continuation can sit in text the scan reads as
+  quoted and is missed with the rest of that divergence); it
   skips here-document bodies opened at the outer quoting level, while no parenthesis, `${...}` or
   backquote substitution is open, and arithmetic, which the in-scope
-  deny still reads as code (a here-document inside a double-quoted command substitution, the
-  commit-message form, is still read as double-quoted text, so a body `&` there can draw an extra
-  note), and passes over a redirect
+  deny still reads as code (a `<<` met inside a double-quoted command or backquote substitution, the
+  commit-message form, draws the note at the operator itself, whatever the body holds: bash reads
+  such a body under its own here-document rules, while reading it as double-quoted text let a stray
+  body quote shift the scan's quote state onto a later real `&`, a silent miss confirmed against
+  bash), and passes over a redirect
   operator and its target without losing the command position (a here-string `<<<`, the noclobber
   `>|`, a named descriptor such as `{fd}>`, a redirect between `setsid` and its wait option, and a
   `${...}` parameter expansion that is the whole redirect target, read as one word when it is
@@ -96,7 +101,13 @@ the doctor and the resume audit report and arm from it):
   up to its closing line (bash joins it before matching that line), a `${...}` target left
   unclosed, not opened by a name (a bash 5.3 `${ cmd; }` or `${| cmd; }` command substitution
   included) or holding any quote, backslash, `$`, backquote, `<` or `>`, and any further `${` in a
-  redirect target. Command position includes the word after a case pattern's `)`, parenthesised
+  redirect target. A scan that ends with an opened construct still open draws the note too: an
+  unterminated here-document body, a here-document opener with no body line, an unclosed
+  parenthesis, `${...}` or backquote substitution, or a trailing backslash that escapes nothing
+  (bash would still be reading input there, or rejects the command, so nothing the open construct
+  holds was checked; a substitution whose `(` a bare case pattern's `)` already popped is not seen
+  by that end check, a disclosed miss when nothing after it opens a here-document or detaches).
+  Command position includes the word after a case pattern's `)`, parenthesised
   (`(pat)`) or bare, and a function body the command itself defines (`f() { ...; }` or
   `function f { ...; }`); a detacher renamed by an alias or by a function defined outside the
   command is still not seen, and neither is one after an unquoted expansion as the command word
@@ -109,10 +120,12 @@ the doctor and the resume audit report and arm from it):
   the command: a hook payload on stdin that is not a readable JSON object, and a handler crash,
   each exit 2; a `tool_name` or a Bash `cwd` that fails the pre-scope checks above is denied; and
   the dispatcher's 8-second deadline, disclosed in the manifest residue, exits 2. A malformed
-  `tool_input` (missing, null or not an object, or a `command` that is missing or not a string) is
-  allowed silently there, and so is any call whose `run_in_background` is present and anything but
-  an exact boolean false (a real background dispatch and a malformed flag such as the string
-  `"true"` alike): outside registry scope no note scan runs on those shapes.
+  `tool_input` (missing, null or not an object, a `command` that is missing or not a string, or a
+  `run_in_background` that is present and not a real boolean, such as the string `"true"`) is
+  allowed WITH A NOTE naming the field the guard could not read, never silently and never a deny:
+  no note scan runs on those shapes, so a detach they carry is still not named, but ignorance is
+  no longer read as clean. A readable background dispatch (`run_in_background` exactly the boolean
+  `true`) stays the silent allow outside registry scope.
   A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
   `.aiqt` directory the guard's process lacks search (execute) permission on, such as mode `0600`
   or `0000` for a process those modes bind; a `.aiqt` of mode `0100` evaluates normally for its owner

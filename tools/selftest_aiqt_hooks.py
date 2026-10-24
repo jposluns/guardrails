@@ -3366,19 +3366,24 @@ _DEADLINE_DENY_CASES = frozenset((
     ("gate_weakening", "noverify_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
-# The (handler, shape) cases whose detach must still be noted outside registry scope, each within its bound.
+# The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
+# a detach or detacher (fg_detach_after, fg_setsid_options), or a construct left open at the end of the
+# scan (the repeated unclosed `$((` openers and the unterminated heredoc body), which the scan reports as
+# unreadable instead of a silent allow.
 _DEADLINE_NOTE_CASES = frozenset((
-    ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options")))
+    ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
+    ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open")))
 # The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
-# bound: the arithmetic opener carries no `&` or detacher; the plain-delimiter heredoc bodies (their `&`
-# and apostrophe are skipped data; a quoted delimiter would note, and its early note would also cut the
-# timing short), the unterminated heredoc body, the balanced subshells and the nested glued command
+# bound: the plain-delimiter heredoc bodies (their `&`
+# and apostrophe are skipped data and every body is closed; a quoted delimiter would note, and its early
+# note would also cut the
+# timing short), the balanced subshells and the nested glued command
 # substitutions are all skipped, provably closed or carry no outer
 # detach, so none draws a note. Pinning the outcome keeps these timing shapes from passing a scanner that
 # mistook one for a detach.
 _DEADLINE_ALLOW_CASES = frozenset((
-    ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredocs_amp"),
-    ("orch_truncation_guard", "fg_heredoc_ops_open"), ("orch_truncation_guard", "fg_subshells"),
+    ("orch_truncation_guard", "fg_heredocs_amp"),
+    ("orch_truncation_guard", "fg_subshells"),
     ("orch_truncation_guard", "fg_nested_glued_substs")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
@@ -20109,6 +20114,23 @@ def _main_isolated(monitor):
             failures.append("(noask-trunc-out-of-scope-note) orch_truncation_guard must ALLOW WITH A NOTE a "
                             "foreground bare-& detach where no orchestration registry is found; got {}"
                             .format(_f18_oos))
+        # (noask-trunc-oos-unreadable-input) with NO orchestration registry, input the guard cannot read
+        # draws the unreadable-input note naming the field, never the silent allow it was and never ask
+        # or deny: a tool_input that is not an object, a command that is not a string, and a
+        # run_in_background that is present but not a real boolean, one probe per note site.
+        with _no_registry_above(_f18_plain):
+            _f18_oos_badinput = [
+                _decision_any(aiqt_hooks.orch_truncation_guard, {
+                    "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": _f18_ti, "cwd": str(_f18_plain)})
+                for _f18_ti in ("long_job &",
+                                {"command": 7},
+                                {"command": "long_job &", "run_in_background": "true"})]
+        if _f18_oos_badinput != ["allow-note"] * 3:
+            failures.append("(noask-trunc-oos-unreadable-input) orch_truncation_guard must ALLOW WITH A "
+                            "NOTE an out-of-scope Bash call whose input it cannot read (a non-object "
+                            "tool_input, a non-string command, a non-boolean run_in_background); got {}"
+                            .format(_f18_oos_badinput))
     except (OSError, subprocess.SubprocessError) as _f18_exc:
         failures.append("(noask-orch-fixture) could not build the finding-18 armed orch fixture: {}"
                         .format(_f18_exc))

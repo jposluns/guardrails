@@ -10160,24 +10160,72 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-func-keyword-body-setsid-notes",
                  _fg("function f { setsid -f long_job; }\nf"), "warn"),
                 ("trunc/oos-subst-then-word-argument-allows", _fg("echo $(true) nohup"), "allow"),
-                # Documented limit: a here-document inside a double-quoted command substitution (the
-                # commit-message form) is read as double-quoted text, so a body whose double quotes toggle
-                # that reading exposes a body `&` to an extra note; a body that leaves the reading
-                # balanced stays silent. A body that leaves a quote open ends the scan inside it, and
-                # that scan now notes as unreadable (bash runs the real detach past the point the scan's
-                # quote state diverged), never a silent allow.
+                # A `<<` met inside a double-quoted command or backquote substitution (the
+                # commit-message form) draws the note at the operator itself, whatever the body holds:
+                # the earlier reading of such a body as double-quoted text let a stray body quote flip
+                # the scan's quote state so that a later REAL bare `&` outside the substitution read as
+                # quoted text and was silently allowed (bash 5.3 backgrounds the job: the shifted-amp
+                # row's command sets `$!`). The balanced-body row is the disclosed over-note (nothing
+                # in it detaches, and the note still fires); the literal `<<` rows are the boundary:
+                # a `<<` inside plain double quotes with no substitution open, or inside a
+                # single-quoted span within the substitution, is data and stays silent.
                 ("trunc/oos-commit-heredoc-amp-exposed-notes",
                  _fg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\""), "warn"),
-                ("trunc/oos-commit-heredoc-amp-allows",
-                 _fg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\""), "allow"),
+                ("trunc/oos-commit-heredoc-amp-body-notes",
+                 _fg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\""), "warn"),
                 ("trunc/oos-commit-heredoc-open-quote-notes",
                  _fg("git commit -m \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"\nlong_job &"), "warn"),
+                ("trunc/oos-dq-subst-heredoc-shifted-amp-notes",
+                 _fg(": \"$(cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+                 "warn"),
+                ("trunc/oos-dq-subst-heredoc-detach-control-notes",
+                 _fg(": \"$(cat <<'EOF'\nSupport 5 screens\nEOF\n)\" & long_job"), "warn"),
+                ("trunc/oos-dq-backquote-heredoc-notes",
+                 _fg("echo \"`cat <<EOF\nhi\nEOF`\""), "warn"),
+                ("trunc/oos-dq-literal-heredoc-chars-allows", _fg("echo \"a << b\""), "allow"),
+                ("trunc/oos-dq-subst-single-quoted-lt-allows",
+                 _fg("echo \"$(echo '<<')\""), "allow"),
+                # A backslash inside a single-quoted span within a double-quoted substitution is
+                # literal data to bash (bash prints the pair as written), so a backslash-newline
+                # there stays silent; outside that span, inside the same substitution, it is a live
+                # continuation and notes.
+                ("trunc/oos-dq-subst-sq-continuation-allows",
+                 _fg("echo \"$(echo 'a \\\nb')\""), "allow"),
+                ("trunc/oos-dq-subst-continuation-notes",
+                 _fg("echo \"$(echo a \\\nb)\""), "warn"),
+                # A scan that ends with an opened construct still open notes: an unterminated
+                # here-document body consumes the rest of the command while bash is still reading
+                # here-document input (bash 5.3 reads the trailing `long_job &` as body data, so
+                # nothing after the opener was really checked), a here-document opener with no body
+                # line, an unclosed `$(`, `${` or backquote (bash rejects or waits), and a trailing
+                # backslash that escapes nothing (bash joins it with whatever input follows). Each
+                # once ended the scan with nothing outstanding checked and allowed silently.
+                ("trunc/oos-unterminated-heredoc-notes", _fg("cat <<EOF\nbody"), "warn"),
+                ("trunc/oos-unterminated-heredoc-trailing-detach-notes",
+                 _fg("cat <<EOF\nbody\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-opener-no-newline-notes", _fg("cat <<EOF"), "warn"),
+                ("trunc/oos-unclosed-cmdsubst-notes", _fg("echo $("), "warn"),
+                ("trunc/oos-unclosed-param-expansion-end-notes", _fg("echo ${x"), "warn"),
+                ("trunc/oos-unclosed-backquote-notes", _fg("echo `true"), "warn"),
+                ("trunc/oos-trailing-escape-notes", _fg("echo a\\"), "warn"),
                 ("trunc/oos-plain-allows", _fg("python3 build.py"), "allow"),
                 ("trunc/oos-unbalanced-quote-notes", _fg("echo 'oops & bg"), "warn"),
+                # A readable background dispatch (run_in_background exactly the boolean true) stays
+                # the silent allow; a flag that is present but not a real boolean cannot be read as
+                # foreground or background, so it draws the unreadable-input note instead of the
+                # silent allow it was (the boolean rows are the boundary on each side of it).
                 ("trunc/oos-background-allows",
                  {"command": "setsid long_job &", "run_in_background": True}, "allow"),
-                ("trunc/oos-flag-not-boolean-allows",
-                 {"command": "long_job &", "run_in_background": "true"}, "allow")):
+                ("trunc/oos-flag-not-boolean-notes",
+                 {"command": "long_job &", "run_in_background": "true"}, "warn"),
+                ("trunc/oos-flag-string-false-notes",
+                 {"command": "long_job &", "run_in_background": "false"}, "warn"),
+                ("trunc/oos-flag-null-notes",
+                 {"command": "long_job &", "run_in_background": None}, "warn"),
+                ("trunc/oos-flag-number-notes",
+                 {"command": "long_job &", "run_in_background": 0}, "warn"),
+                ("trunc/oos-missing-command-notes", {}, "warn"),
+                ("trunc/oos-nonstring-command-notes", {"command": 7}, "warn")):
             check(check_id, _verdict(aiqt_hooks.orch_truncation_guard(
                 ti.payload("PreToolUse", "Bash", tool_input))), want)
         _oos = aiqt_hooks.orch_truncation_guard(ti.payload(
@@ -10199,9 +10247,12 @@ def _main_isolated(report_path=None):
                "open or not provably closed" in _unr_note,
                "a backslash-newline line continuation outside a single-quoted "
                "span, which can split any token" in _unr_note,
+               "a here-document opened inside a double-quoted command substitution" in _unr_note,
+               "a here-document, substitution or escape left open at the end of the command"
+               in _unr_note,
                "or a scan that ends inside an open quote), so work that detaches and runs on after "
                "this call returns cannot be ruled out" in _unr_note),
-              ("warn", True, True, True))
+              ("warn", True, True, True, True, True))
         # The whole dispatcher, in a child process: a here-document delimiter the note scan cannot read
         # with certainty (here an ANSI-C escape whose `\c` form once raised out of the handler and
         # blocked) stays a NOTE with exit 0 outside registry scope: stdout is one JSON object whose keys
@@ -10309,6 +10360,54 @@ def _main_isolated(report_path=None):
               (_span("x=$( \t)", 4, 6), _span("x=$()", 4, 4),
                _span("x=$(\n)", 4, 5), _span("x=$(a)", 4, 5)),
               (True, True, False, False))
+        # The semantics rows above pass with the scan's call site reverted to the old slice (the
+        # helper still exists and answers the same), and with the helper's body reverted to a slice
+        # copy (the slice has the same semantics), so neither revert was red anywhere. This row pins
+        # both, deterministically, with no timing: the scan of a nested glued shape must CALL the
+        # walk once per glued close (a call site reverted to the slice makes zero calls), and the
+        # positions the walk reads over the whole scan, counted through an instrumented command
+        # string (a slice read counts every position it copies), must stay within the command's
+        # length (a walk body reverted to a slice copy reads the whole enclosed span at every close,
+        # quadratic in the nesting depth: about 100,000 positions here against 200 for the walk).
+        _walk_depth = 200
+        _walk_cmd = "x=$(" * _walk_depth + "true" + ")" * _walk_depth
+        _walk_calls = [0]
+        _walk_reads = [0]
+
+        class _ReadCountingStr(str):
+            def __getitem__(self, key):
+                if isinstance(key, slice):
+                    _s, _e, _st = key.indices(len(self))
+                    _walk_reads[0] += len(range(_s, _e, _st))
+                else:
+                    _walk_reads[0] += 1
+                return str.__getitem__(self, key)
+
+        _walk_orig = aiqt_hooks._orch_span_blank
+
+        def _walk_counting(command, start, end):
+            _walk_calls[0] += 1
+            return _walk_orig(_ReadCountingStr(command), start, end)
+
+        try:
+            aiqt_hooks._orch_span_blank = _walk_counting
+            _walk_kind = aiqt_hooks._orch_note_scan(_walk_cmd, False)
+        finally:
+            aiqt_hooks._orch_span_blank = _walk_orig
+        check("trunc/scan-glued-close-walk-called-linear",
+              (_walk_kind, _walk_calls[0], _walk_reads[0] <= len(_walk_cmd)),
+              (None, _walk_depth, True))
+        # Scanner-level kinds for the dq-substitution here-document rule and the open-construct end
+        # rule: each reports the unreadable kind itself (the shifted-amp shape was a silent None at
+        # the head this fix amends, while bash backgrounds the job; the unterminated body consumed
+        # the detach as data and returned None too).
+        check("trunc/scan-dq-subst-heredoc-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  ": \"$(cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+              "unreadable")
+        check("trunc/scan-unterminated-heredoc-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("cat <<EOF\nbody\nlong_job &"),
+              "unreadable")
         # The note scan reads a `#` by the in-scope scan's comment rule: a `#` whose reading depends on
         # context (at a word start inside an open ${...} or backquote substitution, right after a `)`, or
         # after a blank inside a double-quoted "$(...)") notes as unreadable, where the deny scan denies it.
@@ -10326,10 +10425,39 @@ def _main_isolated(report_path=None):
                 aiqt_hooks._orch_foreground_note_kind(command)), ("warn", "unreadable"))
         check("trunc/oos-subst-spaced-hash-comment-allows", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash", _fg("x=$(true) # & job")))), "allow")
+        # Input this guard cannot read outside registry scope draws the note naming the unreadable
+        # field, never the silent allow it was (a detach such an input carries is never scanned, so
+        # the silent allow read ignorance as clean), and never a deny. The rows cover each unreadable
+        # field (a tool_input that is missing, null or not an object; the command and flag rows are
+        # in the table above), and the note's text is pinned to name the field and the repair.
         _oos_bad = ti.payload("PreToolUse", "Bash")
         _oos_bad["tool_input"] = "long_job &"
-        check("trunc/oos-malformed-input-allows", _verdict(aiqt_hooks.orch_truncation_guard(_oos_bad)),
-              "allow")
+        check("trunc/oos-malformed-input-notes", _verdict(aiqt_hooks.orch_truncation_guard(_oos_bad)),
+              "warn")
+        _oos_missing = ti.payload("PreToolUse", "Bash")
+        del _oos_missing["tool_input"]
+        check("trunc/oos-missing-tool-input-notes",
+              _verdict(aiqt_hooks.orch_truncation_guard(_oos_missing)), "warn")
+        _oos_null = ti.payload("PreToolUse", "Bash")
+        _oos_null["tool_input"] = None
+        check("trunc/oos-null-tool-input-notes",
+              _verdict(aiqt_hooks.orch_truncation_guard(_oos_null)), "warn")
+        _oos_array = ti.payload("PreToolUse", "Bash")
+        _oos_array["tool_input"] = ["long_job &"]
+        check("trunc/oos-array-tool-input-notes",
+              _verdict(aiqt_hooks.orch_truncation_guard(_oos_array)), "warn")
+        _bad_note = (aiqt_hooks.orch_truncation_guard(_oos_bad)[1] or {}).get("systemMessage", "")
+        _flag_note = (aiqt_hooks.orch_truncation_guard(ti.payload(
+            "PreToolUse", "Bash",
+            {"command": "long_job &", "run_in_background": "true"}))[1] or {}).get("systemMessage", "")
+        check("trunc/oos-unreadable-input-note-text",
+              ("input could not be read" in _bad_note,
+               "its tool_input is a string, not a JSON object" in _bad_note,
+               "this is a note, not a deny" in _bad_note,
+               "a tool_input object carrying a string command and a boolean run_in_background"
+               in _bad_note,
+               "its run_in_background is a string, not a boolean" in _flag_note),
+              (True, True, True, True, True))
         # REGISTRY-REQUIRED MODE (opt-in, AIQT_ORCH_REQUIRE_REGISTRY): an ABSENT registry DENIES instead
         # of the default no-registry outcome (no deny, a readable foreground detach draws only the note),
         # with a reason naming the mode and its repair; an explicit off value keeps that default outcome,
@@ -10416,12 +10544,12 @@ def _main_isolated(report_path=None):
         check("trunc/rib-omitted-foreground-detach-denies", raw({"tool_input": {"command": "sleep 5 &"}}),
               "deny")
         # Registry scope, the disclosed residual: BY DEFAULT (this run pops AIQT_ORCH_REQUIRE_REGISTRY) with NO
-        # registry file the guard denies nothing (malformed input included; a readable foreground detach
-        # draws only the note), while a PRESENT but unreadable or invalid registry keeps it active
-        # (fail-closed).
-        check("trunc/malformed-no-registry-allows", _verdict(aiqt_hooks.orch_truncation_guard(
+        # registry file the guard denies nothing (a readable foreground detach draws only the note,
+        # and input it cannot read draws the unreadable-input note, never a deny), while a PRESENT
+        # but unreadable or invalid registry keeps it active (fail-closed).
+        check("trunc/malformed-no-registry-notes", _verdict(aiqt_hooks.orch_truncation_guard(
             {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
-             "tool_input": None})), "allow")
+             "tool_input": None})), "warn")
         # The doctor's default-mode scope report for a no-registry root is pinned the same way: it
         # says the guard denies nothing there, and reports no deny.
         _scope_lines, _scope_denies = aiqt_hooks._orch_guard_scope_report(str(ti.root))

@@ -352,7 +352,7 @@ NOTE_CONSTRUCTORS = (
     "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
     "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
-    "_orch_ask_attended", "_orch_stop_family")
+    "_orch_ask_attended", "_orch_oos_unreadable_input_note", "_orch_stop_family")
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
@@ -15431,6 +15431,29 @@ def _orch_span_blank(command, start, end):
     return j >= end
 
 
+def _orch_heredoc_bodies_end(command, i, n, heredocs):
+    """The index just past the bodies of the here-documents (delimiter, strip_tabs) opened on one line,
+    read for the out-of-scope note scanner from index i (just past that line's newline) in the order
+    their `<<` operators appeared, each body ending at a line that is EXACTLY its delimiter (leading
+    tabs stripped for the <<- form), and whether EVERY body's closing delimiter line was found. A body
+    whose delimiter line never comes consumes the rest of the command and reads as NOT closed: bash
+    would still be reading here-document input there, so nothing past that opener was really checked and
+    the caller notes instead of reading the consumed text as data."""
+    closed = True
+    for delim, strip_tabs in heredocs:
+        matched = False
+        while i < n:
+            nl = command.find("\n", i)
+            line = command[i:(nl if nl != -1 else n)]
+            cand = line.lstrip("\t") if strip_tabs else line
+            i = n if nl == -1 else nl + 1
+            if cand == delim:
+                matched = True
+                break
+        closed = closed and matched
+    return i, closed
+
+
 def _orch_note_scan(command, bash_word_starts):
     """The scan behind the note outside registry scope. It reads quotes and escapes as _orch_foreground_scan
     does, and reads each unquoted `#` by the comment rule that scan applies (_hash_comment_reading, over a
@@ -15442,16 +15465,20 @@ def _orch_note_scan(command, bash_word_starts):
     text after it is code. Inside a double-quoted string it keeps that scan's stack of the `$(...)` and
     backquote substitutions opened there, and a `#` that is not right after a word character while one is
     open (outside a single-quoted span in it) returns "unreadable" as well, since bash reads it as a
-    comment that can hide the string's closing quote. It adds five things that scan does not model. A
+    comment that can hide the string's closing quote. It adds several things that scan does not model. A
     backslash-newline line continuation anywhere outside a single-quoted span returns "unreadable" the
     moment the scan meets it: bash removes the pair before it tokenizes, so ANY token can be split
     across one (a `<` or `>` split from its `(` still opens a process substitution to bash, which this
     raw scan would not count on the substitution count below, a split detacher or `case` keyword is
     still that word to bash, and a split delimiter word is not this scan's delimiter), so the class is
-    closed as a whole rather than shape by shape; each span this scan skips as data is checked for one
+    closed as a whole rather than shape by shape, as far as this scan's quote reading matches bash's
+    (where that reading diverges, as after the ANSI-C $'...' spelling the known misses below name, a
+    continuation can sit in text the scan reads as quoted and stay silent with the rest of that
+    divergence); each span this scan skips as data is checked for one
     too (a certain comment's line ending in a backslash, a skipped arithmetic span, and a here-document
     body, below), and only a pair inside a single-quoted span, which is literal data to bash, stays
-    silent. A
+    silent, a single-quoted span inside a double-quoted substitution included (a backslash there is
+    literal data too, never an escape). A
     here-document whose delimiter spec is provably simple (a whole word of
     letters, digits and `_ . + -` that bash ends where this scan does, _orch_plain_heredoc_delim), opened
     while NO parenthesis, `${...}` or backquote substitution is open on the nesting stack AND no
@@ -15476,11 +15503,15 @@ def _orch_note_scan(command, bash_word_starts):
     expansion's real `}` is read in command position, which can only over-note) and met before any
     `case` keyword was read in command position, since a later `)` cannot be told from a bare
     pattern's, so after a `case` a closed substitution stays counted open
-    and a later here-document in the same command draws the note, an over-note; a here-document opened
-    inside a double-quoted command substitution (the commit-message form) is NOT recognized and is read as
-    double-quoted text, whose own double quotes toggle that reading, so a body `&` there can draw an extra
-    note, and so does a body `#` that is not right after a word character (Fixes #12), read as a `#`
-    inside the double-quoted substitution. An arithmetic expansion $(( ... )) or
+    and a later here-document in the same command draws the note, an over-note; and a `<<` met inside a
+    double-quoted command or backquote substitution (the commit-message form) returns "unreadable" at
+    the operator itself: bash reads such a body under its own here-document rules, while this scan read
+    it as double-quoted text whose quote state each body quote toggles, so a stray quote in the body
+    once shifted that state onto a later real bare `&` outside the substitution, which read as quoted
+    text and was silently allowed; the note replaces that reading (a `<<<` here-string there, and a
+    body of pure data, draw the same note, an over-note, never a miss), and a `#` in such a
+    substitution that is not right after a word character (Fixes #12) still notes as the double-quoted
+    comment rule above. An arithmetic expansion $(( ... )) or
     arithmetic command (( ... )) is skipped, so a bitwise `&` in it does not note; it counts as arithmetic
     only when its two opening parentheses close as `))`, which is how bash tells it from a nested subshell.
     A redirect operator and its target operand are passed over without disturbing the pending command
@@ -15521,18 +15552,27 @@ def _orch_note_scan(command, bash_word_starts):
     expansion drops the pending command position; a bash 5.3 `${ cmd; }` or `${| cmd; }` command
     substitution outside a redirect target (`echo ${ setsid -f job; }`) is read char by char, so an `&`
     in it notes but a detacher word in it is not read in command position, and one in an unquoted
-    here-document body is skipped with the body; and a setsid whose wait option sits behind a redirect
-    target that is not a plain word (an expansion or a quoted word) reads the redirect as the end of the
-    options, so setsid is noted.
+    here-document body is skipped with the body. A setsid whose wait option sits behind a redirect
+    target that is not a plain word (an expansion or a quoted word) reads the redirect as the end of
+    the options, so that setsid is still noted: an over-note of a setsid that in fact waits, never a
+    miss.
 
     Returns "detach" when it meets a bare `&` control operator, "unreadable" the moment it meets a
     backslash-newline line continuation outside a single-quoted span, a span it
-    would skip but cannot read with certainty (the here-document and `${...}` redirect-target cases above)
+    would skip but cannot read with certainty (the here-document and `${...}` redirect-target cases above,
+    a `<<` inside a double-quoted substitution included)
     or a `#` whose comment reading depends on context (everything past that point is unknown, so the note
     is emitted unconditionally), else the first such
     command word it met (setsid, nohup or disown), else None. A scan that ends inside an open quote
     returns "unreadable": bash reads the remainder differently from this scan, so a detach past the point
-    the quote opened cannot be ruled out, and the note is emitted, never a silent allow. The in-scope deny
+    the quote opened cannot be ruled out, and the note is emitted, never a silent allow; and so does one
+    that ends with any opened construct still open (a here-document opener whose body never started or
+    whose closing delimiter line never came, an unclosed parenthesis, `${...}` or backquote
+    substitution, or a trailing backslash that escapes nothing): bash would still be reading input
+    there, so what the open construct holds was never really checked (a substitution whose `(` a bare
+    case pattern's `)` already popped is not seen by this end check; its here-documents are still noted
+    through the substitution count, and with no here-document and no detach after it the scan stays
+    silent, a disclosed miss). The in-scope deny
     does not use this scan; it keeps _orch_foreground_detach_kind."""
     in_single = in_double = escaped = False
     prev_dup = False
@@ -15588,7 +15628,10 @@ def _orch_note_scan(command, bash_word_starts):
         if in_double:
             if target_word and ch == "$" and command.startswith("{", i + 1):
                 return "unreadable"  # a `${` in a redirect target, double-quoted or not, is never skipped
-            if ch == "\\":
+            if ch == "\\" and not dq_single:
+                # Inside a single-quoted span within a substitution a backslash is literal data to bash
+                # (so a backslash-newline there is no line continuation and stays silent); it is left to
+                # the dq_single branch below rather than read as an escape.
                 escaped = True
             elif ch == '"':
                 in_double, dq_single = False, False
@@ -15598,6 +15641,16 @@ def _orch_note_scan(command, bash_word_starts):
             elif dq_nest and ch == "#" and dq_prev != "word":
                 # A comment to bash inside the substitution, running to the end of the line and past any
                 # quote on it, which this scan would read as the string's closing quote: it notes.
+                return "unreadable"
+            elif dq_nest and ch == "<" and command.startswith("<<", i):
+                # A here-document opened inside a double-quoted command or backquote substitution (the
+                # commit-message form): bash reads its body under bash's own here-document rules, while
+                # this scan reads the span as double-quoted text whose quote state each body quote
+                # toggles, so a stray quote in such a body once shifted that state onto a later REAL
+                # bare `&` outside the substitution, which read as quoted text and was silently
+                # allowed. Where that body ends cannot be read with certainty, so the scan notes at
+                # the `<<` itself (a `<<<` here-string here draws the same note: an over-note, never
+                # a miss).
                 return "unreadable"
             elif dq_nest and ch == "'":
                 dq_single = True
@@ -15651,8 +15704,9 @@ def _orch_note_scan(command, bash_word_starts):
                 if command[nl - 1] == "\\":
                     # The comment's line ends in a backslash-newline. bash ends the comment at the
                     # newline regardless, but every backslash-newline outside a single-quoted span
-                    # notes (the uniform continuation rule above), and a comment is the one span this
-                    # scan skips whose text could otherwise hold one silently (nl > i always: the `#`
+                    # notes (the uniform continuation rule above), so each span this scan skips as
+                    # data is checked for one: this comment's line here, a skipped arithmetic span
+                    # and a skipped here-document body at their own skips (nl > i always: the `#`
                     # at i is not a newline, so nl - 1 is at least i and inside the comment).
                     return "unreadable"
                 i = nl
@@ -15661,9 +15715,12 @@ def _orch_note_scan(command, bash_word_starts):
             # The bodies of the here-documents opened on this line follow its newline: skip them as data.
             # bash joins a backslash-newline in an unquoted body before it compares a line with the
             # delimiter, which this raw line match does not, so one anywhere up to the closing line (or
-            # to the end, for a body left open) draws the note instead.
-            end = _skip_heredoc_bodies(command, i + 1, n, heredocs)
-            if command.find("\\\n", i + 1, end) != -1:
+            # to the end, for a body left open) draws the note instead; and a body whose closing
+            # delimiter line never comes consumes the rest of the command while bash would still be
+            # reading here-document input, so nothing past its opener was really checked and it notes
+            # too (the open-construct rule at the end of this scan), never a silent skip.
+            end, bodies_closed = _orch_heredoc_bodies_end(command, i + 1, n, heredocs)
+            if not bodies_closed or command.find("\\\n", i + 1, end) != -1:
                 return "unreadable"
             i = end
             heredocs = []
@@ -15854,13 +15911,25 @@ def _orch_note_scan(command, bash_word_starts):
         # past the point the quote opened cannot be ruled out. The note is emitted, never a silent
         # allow.
         return "unreadable"
+    if escaped or heredocs or nest or groups:
+        # The scan ends with an opened construct still open: a trailing backslash that escapes
+        # nothing, a here-document opener whose body never started (no newline follows it on the
+        # command), or an unclosed parenthesis, `${...}` or backquote substitution. bash would still
+        # be reading input there, or rejects the command, so what the opened construct holds was
+        # never really checked and a detach in it cannot be ruled out: the note is emitted, never a
+        # silent allow. A substitution whose `(` a bare case pattern's `)` already popped is not
+        # seen here (its here-documents are still noted through the substitution count above, and
+        # with no here-document and no detach after it the scan stays silent, a disclosed miss).
+        return "unreadable"
     return found
 
 
 def _orch_foreground_note_kind(command):
     """What the note outside registry scope names for a foreground command: "detach" when either `#`
     comment rule (_orch_note_scan) meets a bare `&`, else the first kind either rule met ("unreadable"
-    for a skipped span it could not read with certainty or a `#` whose comment reading depends on context,
+    for a skipped span it could not read with certainty, a backslash-newline line continuation outside
+    a single-quoted span, a `#` whose comment reading depends on context, a scan that ends inside an
+    open quote or with an opened construct still open, or a `<<` inside a double-quoted substitution,
     or a setsid, nohup or disown command word), else None. Any non-None kind draws the note; none of them
     ever blocks."""
     kinds = (_orch_note_scan(command, False), _orch_note_scan(command, True))
@@ -15869,7 +15938,7 @@ def _orch_foreground_note_kind(command):
     return kinds[0] or kinds[1]
 
 
-# ROUND-2 FINDING 9: sinks that TRUNCATE their input, so a producer piped into one loses both its full
+# Sinks that TRUNCATE their input, so a producer piped into one loses both its full
 # output and (absent `pipefail`) its exit status. A subset of _CONSOLE_SINKS: cat/tee pass output through
 # (tee can even durably capture to a real file), so only head/tail are truncating.
 _ORCH_TRUNCATING_SINKS = frozenset(("head", "tail"))
@@ -16376,6 +16445,21 @@ def _orch_registry_required():
     return not (value.isascii() and value.lower() in _ORCH_REQUIRE_REGISTRY_OFF_VALUES)
 
 
+def _orch_oos_unreadable_input_note(detail):
+    """The out-of-scope note for a Bash call whose tool input this guard cannot read (a tool_input that
+    is missing, null or not a JSON object, a command that is missing or not a string, or a
+    run_in_background that is present but not a real boolean): allowed WITH A NOTE naming the field it
+    could not read, never the silent allow such a call once was here (a detach such an input carries is
+    never scanned, so silence would read ignorance as clean) and never a deny (outside registry scope
+    this guard denies nothing)."""
+    return _allow_note(
+        "AIQT guardrail (note, rule trkasy): this Bash call's input could not be read: {}. Whether the "
+        "call detaches work that runs on after it returns cannot be ruled out from input this guard "
+        "cannot read. No orchestration registry scopes this session, so this is a note, not a deny. "
+        "Re-issue the call with a tool_input object carrying a string command and a boolean "
+        "run_in_background to make it readable.".format(detail))
+
+
 def orch_truncation_guard(data):
     """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: it
     performs NO shell parsing, so no lexical or quoting edge can fabricate a capture. A background dispatch
@@ -16415,12 +16499,20 @@ def orch_truncation_guard(data):
     also skips outer-level here-document bodies, arithmetic and redirect operands), and one whose scan met
     a span it would skip but cannot read with certainty (a here-document delimiter that is not a whole
     word of letters, digits and `_ . + -`, a here-document opened while a parenthesis, `${...}` or
-    backquote substitution is open or not provably closed, a body holding a backslash-newline up to its
+    backquote substitution is open or not provably closed, a here-document opened inside a double-quoted
+    command substitution, a body holding a backslash-newline up to its
     closing line, a `${...}` redirect target left unclosed, not opened by a name or holding anything
-    beyond literal characters, or a further `${` in a redirect target), or whose scan ends inside an
-    open quote, is allowed WITH
+    beyond literal characters, or a further `${` in a redirect target), or a backslash-newline line
+    continuation anywhere outside a single-quoted span, or whose scan ends inside an
+    open quote or with an opened construct still open at the end of the command (an unterminated
+    here-document, an unclosed substitution or expansion, or a trailing escape), is allowed WITH
     A NOTE naming the tracked background
-    mechanism; every other call there is the silent allow, malformed input included. REGISTRY-REQUIRED MODE (opt-in, default
+    mechanism; a call there whose input cannot be read (a tool_input that is missing, null or not an
+    object, a command that is missing or not a string, or a run_in_background that is present but not a
+    real boolean) is allowed WITH A NOTE naming the field this guard could not read
+    (_orch_oos_unreadable_input_note), never silently and never a deny; a readable background dispatch
+    (run_in_background exactly true) and a readable foreground command whose scan finds nothing are the
+    silent allow. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
     off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
     stripped, so a padded off word reads as ON), an ABSENT registry DENIES instead of
@@ -16516,26 +16608,48 @@ def orch_truncation_guard(data):
         # Not an orchestrated session: no registry on the chain or at a git toplevel. A readable foreground
         # command that detaches work (a bare `&`, or a setsid, nohup or disown command), or one whose scan
         # met a skipped span or a `#` it cannot read with certainty (so a detach cannot be ruled out), is
-        # allowed WITH A NOTE naming the tracked background mechanism; every other call, malformed input
-        # included, is the silent allow it always was here (no new fail-closed case outside registry scope).
+        # allowed WITH A NOTE naming the tracked background mechanism; a call whose input this guard
+        # cannot read (a tool_input that is missing, null or not an object, a command that is missing or
+        # not a string, or a run_in_background that is present but not a real boolean) is allowed with a
+        # note naming the field it could not read, never silently (a detach such an input carries is
+        # never scanned, so silence would read ignorance as clean) and never a deny (no fail-closed case
+        # outside registry scope); a readable background dispatch (run_in_background exactly true) and a
+        # readable foreground command whose scan finds nothing keep the silent allow.
         out_input = data.get("tool_input")
-        out_command = out_input.get("command") if isinstance(out_input, dict) else None
-        if (not isinstance(out_command, str)
-                or out_input.get("run_in_background", False) is not False):
+        if not isinstance(out_input, dict):
+            kind = "missing" if "tool_input" not in data else _orch_json_kind(out_input)
+            return _orch_oos_unreadable_input_note(
+                "its tool_input is {}, not a JSON object, so neither its command nor its "
+                "run_in_background flag can be read".format(kind))
+        out_command = out_input.get("command")
+        if not isinstance(out_command, str):
+            kind = "missing" if "command" not in out_input else _orch_json_kind(out_command)
+            return _orch_oos_unreadable_input_note(
+                "its command is {}, not a string, so it cannot be scanned".format(kind))
+        out_rib = out_input.get("run_in_background", False)
+        if out_rib is True:
+            # A readable background dispatch: not a foreground call, so the foreground detach note does
+            # not apply, and outside registry scope the background capture rules do not run (disclosed).
             return _allow()
+        if out_rib is not False:
+            return _orch_oos_unreadable_input_note(
+                "its run_in_background is {}, not a boolean, so whether this is a foreground call "
+                "cannot be read".format(_orch_json_kind(out_rib)))
         note_kind = _orch_foreground_note_kind(out_command)
         if note_kind is None:
             return _allow()
         if note_kind == "detach":
             what = "detaches a child with a bare '&', so the work runs on after this call returns"
         elif note_kind == "unreadable":
-            what = ("holds a here-document, a redirect target, a quote, a line continuation or a '#' "
-                    "this guard cannot read "
+            what = ("holds a here-document, a redirect target, a quote, a line continuation, an open "
+                    "construct or a '#' this guard cannot read "
                     "with certainty (a here-document delimiter that is not one plain unquoted word, a "
                     "here-document opened while a parenthesis, '${...}' or backquote substitution is open "
-                    "or not provably closed, a parameter expansion left unclosed or holding quoting or "
+                    "or not provably closed, a here-document opened inside a double-quoted command "
+                    "substitution, a parameter expansion left unclosed or holding quoting or "
                     "substitution syntax, a backslash-newline line continuation outside a single-quoted "
                     "span, which can split any token, a '#' whose comment reading depends on context, "
+                    "a here-document, substitution or escape left open at the end of the command, "
                     "or a scan that "
                     "ends inside an open quote), so work that detaches and runs on after this call returns "
                     "cannot be ruled out")
