@@ -9363,9 +9363,9 @@ def _main_isolated(report_path=None):
         # With no orchestration registry the guard denies nothing, but a readable foreground command that
         # detaches work is allowed WITH A NOTE (the reducer's "warn") naming the tracked background
         # mechanism; every other call stays the silent allow.
-        ti = Fixture(tmp, "trunc-inert")
+        ti = Fixture(tmp, "trunc-no-registry")
         (ti.root / ".aiqt" / "orchestration.local.json").unlink()
-        check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
+        check("trunc/fg-detach-no-registry-notes", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "warn")
         # The same no-registry fixture: (check id, tool_input, reduced verdict). A foreground command that
@@ -9596,17 +9596,53 @@ def _main_isolated(report_path=None):
                  _fg("cat <<$'E\\x00F'\nx\nE\nlong_job &"), "warn"),
                 ("trunc/oos-ansi-c-high-byte-delim-notes",
                  _fg("cat <<$'E\\xe9F'\nx\nlong_job &"), "warn"),
+                # bash 5.3 ends a here-document body inside a command or process substitution or
+                # backquotes at a line that merely STARTS with the delimiter when a `)` or a backquote
+                # follows it on that line (bash runs the rest of that line as commands, so the
+                # exact-delimiter-line skip would read real commands as data), so a here-document
+                # opened while a parenthesis, `${...}` or backquote substitution is open notes as
+                # unreadable instead of a guessed skip. The close-on-its-own-line row is the control
+                # for the well-formed shape, which draws the same note (a disclosed over-note).
+                ("trunc/oos-heredoc-in-cmdsubst-eof-paren-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-in-cmdsubst-eof-spaced-paren-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF )\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-in-backquote-notes",
+                 _fg("msg=`cat <<EOF\nhello\nEOF`\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-in-procsub-notes",
+                 _fg("cat <(cat <<EOF\nhello\nEOF)\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-in-cmdsubst-nohup-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF)\nnohup long_job"), "warn"),
+                ("trunc/oos-heredoc-in-cmdsubst-close-own-line-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF\n)\nlong_job &"), "warn"),
+                # A case pattern's `)` restores command position whether the pattern is parenthesised
+                # or bare (bash runs the word after `(x)`), and a function body the command itself
+                # defines is scanned as code (the empty `()` parens and the `function` keyword with
+                # its name each keep command position for the body); a word after a non-empty
+                # substitution's `)` is still an argument (the control row).
+                ("trunc/oos-case-paren-pattern-setsid-notes",
+                 _fg("case x in (x) setsid -f long_job;; esac"), "warn"),
+                ("trunc/oos-case-bare-pattern-setsid-notes",
+                 _fg("case x in x) setsid -f long_job;; esac"), "warn"),
+                ("trunc/oos-func-body-setsid-notes",
+                 _fg("f() { setsid -f long_job; }\nf"), "warn"),
+                ("trunc/oos-func-keyword-body-setsid-notes",
+                 _fg("function f { setsid -f long_job; }\nf"), "warn"),
+                ("trunc/oos-subst-then-word-argument-allows", _fg("echo $(true) nohup"), "allow"),
                 # Documented limit: a here-document inside a double-quoted command substitution (the
                 # commit-message form) is read as double-quoted text, so a body whose double quotes toggle
                 # that reading exposes a body `&` to an extra note; a body that leaves the reading
-                # balanced stays silent. The same misreading can also hide a detach: a body that leaves a
-                # quote open ends the scan inside it, and that case stays silent (the residue discloses both).
+                # balanced stays silent. A body that leaves a quote open ends the scan inside it, and
+                # that scan now notes as unreadable (bash runs the real detach past the point the scan's
+                # quote state diverged), never a silent allow.
                 ("trunc/oos-commit-heredoc-amp-exposed-notes",
                  _fg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\""), "warn"),
                 ("trunc/oos-commit-heredoc-amp-allows",
                  _fg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\""), "allow"),
+                ("trunc/oos-commit-heredoc-open-quote-notes",
+                 _fg("git commit -m \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"\nlong_job &"), "warn"),
                 ("trunc/oos-plain-allows", _fg("python3 build.py"), "allow"),
-                ("trunc/oos-unbalanced-allows", _fg("echo 'oops & bg"), "allow"),
+                ("trunc/oos-unbalanced-quote-notes", _fg("echo 'oops & bg"), "warn"),
                 ("trunc/oos-background-allows",
                  {"command": "setsid long_job &", "run_in_background": True}, "allow"),
                 ("trunc/oos-flag-not-boolean-allows",
@@ -9661,6 +9697,15 @@ def _main_isolated(report_path=None):
         check("trunc/scan-heredoc-quoted-delim-unreadable",
               aiqt_hooks._orch_foreground_note_kind("cat > /tmp/f <<'EOF'\nFix A & B\nEOF"),
               "unreadable")
+        # Scanner-level: a here-document opened inside a command substitution reports the unreadable
+        # kind itself (never "detach" from a guessed body end), and a scan that ends inside an open
+        # quote reports unreadable rather than returning None (the silent allow it once was).
+        check("trunc/scan-heredoc-in-cmdsubst-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("msg=$(cat <<EOF\nhello\nEOF)\nlong_job &"),
+              "unreadable")
+        check("trunc/scan-open-quote-end-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("echo 'oops & bg"),
+              "unreadable")
         # The note scan reads a `#` by the in-scope scan's comment rule: a `#` whose reading depends on
         # context (at a word start inside an open ${...} or backquote substitution, right after a `)`, or
         # after a blank inside a double-quoted "$(...)") notes as unreadable, where the deny scan denies it.
@@ -9702,7 +9747,7 @@ def _main_isolated(report_path=None):
                   _verdict(bg("long_job &", rib=False)), "deny")
             os.environ[_rr] = "off"
             # an explicit off value keeps the default no-registry outcome: no deny, the detach note only
-            check("trunc/registry-required-off-value-inert", _verdict(aiqt_hooks.orch_truncation_guard(
+            check("trunc/registry-required-off-value-notes", _verdict(aiqt_hooks.orch_truncation_guard(
                 ti.payload("PreToolUse", "Bash",
                            {"command": "long_job &", "run_in_background": False}))), "warn")
             # The off values are matched EXACTLY, nothing stripped (ASCII case-insensitive): a comparison that
@@ -9762,7 +9807,7 @@ def _main_isolated(report_path=None):
         # registry file the guard denies nothing (malformed input included; a readable foreground detach
         # draws only the note), while a PRESENT but unreadable or invalid registry keeps it active
         # (fail-closed).
-        check("trunc/malformed-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
+        check("trunc/malformed-no-registry-allows", _verdict(aiqt_hooks.orch_truncation_guard(
             {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
              "tool_input": None})), "allow")
         tb = Fixture(tmp, "trunc-badreg")
@@ -10683,7 +10728,7 @@ def _main_isolated(report_path=None):
               ((True, "warn", True, True, True), (True, "warn", True, True, True)))
         # ROUND 8, A MISSING GIT TOPLEVEL READS AS ABSENT (decided, not a fault): git names a toplevel that
         # does not exist (core.worktree naming a removed directory). It holds no registry, so the union leg
-        # returns False and the scope is ('none', None): inert by default, and DENIED in registry-required
+        # returns False and the scope is ('none', None): denies nothing by default, and DENIED in registry-required
         # mode with the absent-registry reason (fail-closed there), never the unopenable-toplevel reason.
         _mt_top = aiqt_hooks._recovery_toplevel
         _mt_old = os.environ.get(_doc_env)

@@ -12756,9 +12756,9 @@ def gensrc_guard(data):
 # not the session repo root alone but the UNION of the cwd's physical ancestor chain and any git-resolved
 # toplevel (_orch_registry_walk, _orch_git_toplevel_has_registry), and its pre-scope denies (a malformed
 # tool_name, a Bash call's malformed cwd, an unwalkable cwd) apply before that scope in every session,
-# registry or not; a malformed tool_input is checked only after the scope (inert with no registry). Second, in the opt-in
+# registry or not; a malformed tool_input is checked only after the scope (with no registry that guard denies nothing, so such a call is allowed). Second, in the opt-in
 # registry-required mode (AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value,
-# _orch_registry_required) that guard is NOT inert with no registry: a Bash call that passes its pre-scope
+# _orch_registry_required) that guard does NOT keep the denies-nothing no-registry posture: a Bash call that passes its pre-scope
 # checks with no registry on that chain or at a git-resolved toplevel is DENIED, and so is one whose nearest
 # registry entry the discovery probe cannot confirm (_ORCH_REG_CANNOT_EVALUATE: a discovery fault is not a
 # registry). No other suite component reads that variable, so strict mode changes no other component's
@@ -12884,7 +12884,7 @@ def _orch_dirfd_has_registry(dirfd):
     registry) when the first registry name present inside a real `.aiqt` directory (the local name first,
     the whole-file precedence _orch_registry applies) is a regular file under a no-follow stat (presence,
     not validity, decides scope: a present-but-unreadable or malformed regular registry has always kept the
-    guard ACTIVE, never inert). EVERY other outcome returns _ORCH_REG_CANNOT_EVALUATE: a `.aiqt` entry these
+    guard ACTIVE, never in the denies-nothing no-registry posture). EVERY other outcome returns _ORCH_REG_CANNOT_EVALUATE: a `.aiqt` entry these
     lookups cannot cleanly rule out (a symlink the O_NOFOLLOW open refuses, a regular file, or any other
     fault), or a first present registry name that is not a regular file (a directory, a symlink, a FIFO, a
     socket, a device) or whose no-follow stat faults. For a real `.aiqt` directory the deciding permission
@@ -13129,7 +13129,7 @@ def _orch_git_toplevel_has_registry(cwd):
     does not exist holds no registry, exactly as the walk reads a missing `.aiqt` entry as a clean
     not-present, so there is no fault to report. It still fails closed where that matters: with nothing
     on the walk the scope is then ('none', None), which registry-required mode DENIES as an absent
-    registry, and the default mode is inert there exactly as for any other absent registry."""
+    registry, and the default mode denies nothing there exactly as for any other absent registry."""
     top = _recovery_toplevel(cwd)
     if top is None:
         return False
@@ -15067,7 +15067,7 @@ _ORCH_DETACH_WORD_EFFECTS = {
 # compound command, and command-modifier wrappers. An option, a number or an assignment after one of these
 # keeps command position as well (_orch_note_scan), so `timeout 5 nohup job` reads nohup as the command.
 _ORCH_NOTE_COMMAND_PREFIXES = frozenset((
-    "!", "{", "if", "then", "else", "elif", "while", "until", "do", "time",
+    "!", "{", "if", "then", "else", "elif", "while", "until", "do", "time", "function",
     "builtin", "command", "doas", "env", "exec", "ionice", "nice", "nohup", "setsid", "stdbuf", "sudo",
     "timeout"))
 # One run of plain word characters: no blank, quote, escape, expansion or shell metacharacter.
@@ -15232,13 +15232,18 @@ def _orch_note_scan(command, bash_word_starts):
     open (outside a single-quoted span in it) returns "unreadable" as well, since bash reads it as a
     comment that can hide the string's closing quote. It adds four things that scan does not model. A
     here-document whose delimiter spec is provably simple (a whole word of
-    letters, digits and `_ . + -` that bash ends where this scan does, _orch_plain_heredoc_delim) has its
+    letters, digits and `_ . + -` that bash ends where this scan does, _orch_plain_heredoc_delim), opened
+    while NO parenthesis, `${...}` or backquote substitution is open on the nesting stack, has its
     body skipped as data at the exact delimiter line, so an `&` or an apostrophe in the body neither notes
     nor shifts the quote state; EVERY other delimiter spelling (a quoted or ANSI-C fragment, a backslash
     escape or line continuation in the word, a `$`, backquote or brace in it, a `(`, `<(` or `>(` glued
     to it, a quote left open, or no delimiter word at all) returns "unreadable", and so does a body in
     which a backslash-newline appears anywhere up to its closing delimiter line (bash joins it before
-    matching that line; this raw match does not), so the note is emitted rather than guessing where the
+    matching that line; this raw match does not), and so does one that opens while anything is open on
+    that stack (bash 5.3 ends a body inside a command or process substitution or backquotes at a line
+    that merely STARTS with the delimiter when a `)` or a backquote follows it on that line, as in
+    x=$(cat <<EOF ... EOF), and reads the rest of that line as commands, so the exact-line skip would
+    misread where such a body ends), so the note is emitted rather than guessing where the
     body ends or reading the remainder as code; a here-document opened
     inside a double-quoted command substitution (the commit-message form) is NOT recognized and is read as
     double-quoted text, whose own double quotes toggle that reading, so a body `&` there can draw an extra
@@ -15261,8 +15266,12 @@ def _orch_note_scan(command, bash_word_starts):
     holds for a here-string `<<<`, whose word is a redirect target and never a here-document delimiter, for
     the noclobber redirect `>|`, read as one operator and not as a redirect then a pipe, and for a named
     descriptor written directly before its operator ({fd}> file). A setsid, nohup or disown in command
-    position (at the start of a command, after an operator or a reserved word such as then or do, or after
-    a wrapper such as env, nice, sudo or timeout and its options, numbers, assignments and redirects) is
+    position (at the start of a command, after an operator or a reserved word such as then or do, after
+    a wrapper such as env, nice, sudo or timeout and its options, numbers, assignments and redirects,
+    after a case pattern's `)`, parenthesised or bare (a word directly after a subshell's `)` is a syntax
+    error to bash, so reading it in command position too can only over-note), or inside a function body
+    the command itself defines, `f() { ...; }` or `function f { ...; }`, whose empty `()` or `function`
+    keyword and name keep command position for the body) is
     reported, setsid only without -w or --wait (or a unique prefix of --wait, of which --w is the shortest).
 
     Known misses, each also disclosed in the manifest residue: a detacher after a backtick or after a
@@ -15280,9 +15289,10 @@ def _orch_note_scan(command, bash_word_starts):
     would skip but cannot read with certainty (the here-document and `${...}` redirect-target cases above)
     or a `#` whose comment reading depends on context (everything past that point is unknown, so the note
     is emitted unconditionally), else the first such
-    command word it met (setsid, nohup or disown), else None. A scan that ends inside an open quote returns
-    the same, never a separate kind: outside registry scope that case stays silent. The in-scope deny does
-    not use this scan; it keeps _orch_foreground_detach_kind."""
+    command word it met (setsid, nohup or disown), else None. A scan that ends inside an open quote
+    returns "unreadable": bash reads the remainder differently from this scan, so a detach past the point
+    the quote opened cannot be ruled out, and the note is emitted, never a silent allow. The in-scope deny
+    does not use this scan; it keeps _orch_foreground_detach_kind."""
     in_single = in_double = escaped = False
     prev_dup = False
     redirect_target = False  # between a redirect operator and the start of its target operand
@@ -15294,7 +15304,8 @@ def _orch_note_scan(command, bash_word_starts):
     dq_prev = "word"  # the comment rule's class of the previous character inside those substitutions
     dq_single = False  # inside a single-quoted span within such a substitution
     command_position = next_command = True  # next_command: the position the next word takes after a blank
-    groups = []  # next_command saved at each unquoted `(`, restored at its `)`
+    after_function = False  # the previous command-position word was the `function` keyword
+    groups = []  # (glued, next_command, index) saved at each unquoted `(`, restored at its `)`
     heredocs = []  # (delimiter, strip_tabs) opened on the current line; their bodies follow its newline
     closes = _orch_arith_closes(command) if "((" in command else None
     found = None
@@ -15448,6 +15459,14 @@ def _orch_note_scan(command, bash_word_starts):
                 continue
         if (ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i)
                 and not (prev_dup and command[i - 1] == "<")):  # the `<<` that ends a `<<<` opens nothing
+            if nest:
+                # A here-document opened while a parenthesis, `${...}` or backquote substitution is
+                # open: bash 5.3 ends such a body inside a command or process substitution or
+                # backquotes at a line that merely STARTS with the delimiter when a `)` or a backquote
+                # follows it on that line (x=$(cat <<EOF ... EOF) runs the rest of that line as
+                # commands), so the exact-delimiter-line skip below would misread where the body ends
+                # and read real commands as data. Where the body ends is unknown, so the scan notes.
+                return "unreadable"
             parsed = _orch_plain_heredoc_delim(command, i + 2, n)
             if parsed is None:
                 # A here-document delimiter that is not provably simple (a character outside the plain
@@ -15473,7 +15492,12 @@ def _orch_note_scan(command, bash_word_starts):
                     _ENV_ASSIGN_RE.match(word) or word.startswith("-")
                     or (at_break and (base in _ORCH_NOTE_COMMAND_PREFIXES
                                       or _ORCH_NOTE_NUMBER_RE.fullmatch(word)))
-                    or (end < n and command[end] in "<>" and _ORCH_NOTE_NAMED_FD_RE.fullmatch(word)))
+                    or (end < n and command[end] in "<>" and _ORCH_NOTE_NAMED_FD_RE.fullmatch(word))
+                    # The word after a `function` keyword is the function's NAME, and the token after
+                    # the name opens its body (`function f { ...; }`): the body is bash code, so the
+                    # name keeps command position for it.
+                    or after_function)
+                after_function = at_break and base == "function"
                 command_position = False
                 for c in word:
                     _nest_track(nest, c, False)  # of the stack's characters a word holds only `}`
@@ -15483,12 +15507,26 @@ def _orch_note_scan(command, bash_word_starts):
         if ch in ";|" and not redirect_target:
             command_position = next_command = True
         elif ch == "(":
-            groups.append(next_command)
+            # A `(` glued to the character before it opens a substitution or an extglob (`$(`, `<(`,
+            # `>(`, `a+(`); any other `(` opens a subshell or a parenthesised case pattern. The
+            # distinction decides what its `)` restores below, so it is saved with the `(`.
+            glued = i > 0 and command[i - 1] not in " \t\n;&|("
+            groups.append((glued, next_command, i))
             command_position = next_command = True
         elif ch == ")":
             if groups:
-                next_command = groups.pop()
-                command_position = False
+                glued, saved, opened = groups.pop()
+                if not glued or not command[opened + 1:i].strip(" \t"):
+                    # A word directly after a `)` is bash code only where the `)` closes a case
+                    # pattern (after a subshell's `)` it is a syntax error), and after glued EMPTY
+                    # parens, which close a function definition (`f()`) whose body follows (an empty
+                    # `$()` leaves only an over-note). So such a `)` restores command position:
+                    # `case x in (x) setsid job;; esac` and a function body are read as code, and a
+                    # wrong restore can only over-note, never miss.
+                    command_position = next_command = True
+                else:
+                    next_command = saved
+                    command_position = False
             else:
                 command_position = next_command = True  # a case pattern's `)`: a command follows
         elif ch in "<>|":
@@ -15509,6 +15547,12 @@ def _orch_note_scan(command, bash_word_starts):
         prev_dup = ch in (">", "<", "|")
         after_dollar = ch == "$"
         i += 1
+    if in_single or in_double:
+        # The scan ends inside an open quote: bash reads the remainder differently from this scan
+        # (an unbalanced quote, or a quote state shifted by text the scan cannot model), so a detach
+        # past the point the quote opened cannot be ruled out. The note is emitted, never a silent
+        # allow.
+        return "unreadable"
     return found
 
 
@@ -16008,7 +16052,8 @@ def _orch_registry_required():
     case-insensitive in ASCII letters only; unset is off). The value is compared EXACTLY as set, with
     nothing stripped, so an off word with any added character (a space, tab, newline, or no-break space
     around it) is not an off value and reads as ON. Under it, an ABSENT orchestration registry DENIES every
-    Bash call that passes the pre-scope checks instead of leaving orch_truncation_guard inert, and ABSENT
+    Bash call that passes the pre-scope checks instead of the default outcome, in which
+    orch_truncation_guard denies nothing, and ABSENT
     includes a registry reachable only through a git-resolved toplevel (core.worktree) when git fails, so
     there a git failure alone denies; a registry entry the discovery probe cannot confirm
     (_ORCH_REG_CANNOT_EVALUATE: a `.aiqt` that is a regular file, a symlink, or a directory this process
@@ -16076,7 +16121,8 @@ def orch_truncation_guard(data):
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
     off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
     stripped, so a padded off word reads as ON), an ABSENT registry DENIES instead of
-    leaving the guard inert (_orch_registry_required), and so does a registry discovery that cannot be
+    the default outcome, in which the guard denies nothing (_orch_registry_required), and so does a
+    registry discovery that cannot be
     evaluated (round 5): the nearest non-absent chain entry, or with none on the chain the git-resolved
     toplevel's entry, that the probe returns as _ORCH_REG_CANNOT_EVALUATE (a `.aiqt` that is a regular
     file, a symlink, or a directory without search (execute) permission, such as mode 0o600 or 0o000 for a
@@ -16086,8 +16132,8 @@ def orch_truncation_guard(data):
     whose no-follow stat faults) DENIES in that mode, never read as a registry, and so does a git
     toplevel that exists but cannot be opened as a directory (_ORCH_REG_TOPLEVEL_UNOPENABLE, round 6,
     with its own reason naming the toplevel), while by default each keeps the guard ACTIVE exactly as a
-    present registry does (a git toplevel that does not exist is absent: inert by default, denied as an
-    absent registry in that mode). PRE-SCOPE DENIES, checked BEFORE the
+    present registry does (a git toplevel that does not exist is absent: by default the guard then denies
+    nothing, and that mode denies it as an absent registry). PRE-SCOPE DENIES, checked BEFORE the
     registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
     not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
     not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
@@ -16151,15 +16197,17 @@ def orch_truncation_guard(data):
         # reachable only through the git toplevel is denied below, and git success removes that deny.
         if _orch_registry_required():
             # REGISTRY-REQUIRED MODE (opt-in): the adopter set AIQT_ORCH_REQUIRE_REGISTRY, so an
-            # absent registry fails closed instead of leaving the guard inert. Default unchanged.
+            # absent registry fails closed instead of the default, in which the guard denies
+            # nothing. Default unchanged.
             return _deny(
                 "AIQT rule trkasy (track-launched-work) (registry-required mode): "
                 "AIQT_ORCH_REQUIRE_REGISTRY is set, so an absent orchestration registry fails closed "
-                "instead of leaving this guard inert, and no .aiqt/orchestration.local.json or "
+                "instead of the default, in which this guard denies nothing, and no "
+                ".aiqt/orchestration.local.json or "
                 ".aiqt/orchestration.json was found on this cwd's ancestor chain or at a git-resolved "
                 "toplevel. Commit the orchestration registry at the repository root, run from a "
                 "directory under the orchestrated tree, or unset AIQT_ORCH_REQUIRE_REGISTRY to "
-                "restore the default scoping (inert allow with no registry).",
+                "restore the default scoping (with no registry this guard denies nothing and allows).",
                 "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
                 "registry found (rule trkasy, fail-closed).")
         # Not an orchestrated session: no registry on the chain or at a git toplevel. A readable foreground
@@ -19586,7 +19634,8 @@ def _orch_guard_scope_report(root):
                  "a Bash call from the repository root is DENIED: %s"
                  % (env, _ORCH_STRICT_SCOPE_FINDINGS[scope])], True)
     if scope == "none":
-        return (["truncation guard: inert for a Bash call from the repository root (no registry on its "
+        return (["truncation guard: denies nothing for a Bash call from the repository root (no registry "
+                 "on its "
                  "ancestor chain or at its git toplevel; with registry-required mode enabled, %s set to a "
                  "value other than an off value, such as 1, it denies instead)" % env], False)
     if scope in _ORCH_STRICT_SCOPE_FINDINGS:

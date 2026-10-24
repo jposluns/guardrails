@@ -53,8 +53,11 @@ the doctor and the resume audit report and arm from it):
   note naming the tracked background mechanism (`run_in_background`, or a foreground wait); its scan
   reads a `#` by the in-scope deny's comment rule, so a `#` whose reading depends on context (right
   after a `)`, as in `x=$(true)#`, or at a word start inside an open `${...}` or backquote
-  substitution, as in `echo ${x:- #} & job`) draws the note rather than being read as a comment; it
-  skips here-document bodies opened at the outer quoting level and arithmetic, which the in-scope
+  substitution, as in `echo ${x:- #} & job`) draws the note rather than being read as a comment; a
+  scan that ends inside an open quote reads as unreadable and draws the note too, never a silent
+  allow; it
+  skips here-document bodies opened at the outer quoting level, while no parenthesis, `${...}` or
+  backquote substitution is open, and arithmetic, which the in-scope
   deny still reads as code (a here-document inside a double-quoted command substitution, the
   commit-message form, is still read as double-quoted text, so a body `&` there can draw an extra
   note), and passes over a redirect
@@ -65,18 +68,27 @@ the doctor and the resume audit report and arm from it):
   default does not nest, as in bash), all
   included; a number or `{fd}` before `&>` is a word to bash, never an fd prefix, and is read as
   one). The scan skips a here-document body or a `${...}` redirect target silently ONLY when the
-  span passes an allow-list: a delimiter whose whole word is letters, digits and `_ . + -`, ended
+  span passes an allow-list: a here-document opened while no parenthesis, `${...}` or backquote
+  substitution is open, under a delimiter whose whole word is letters, digits and `_ . + -`, ended
   where bash ends it (a blank, a newline, the end of the command, or one of `; & | )`, or a `<` or
   `>` that opens no process substitution), over a body with no backslash-newline up to its closing
   line, and a target that opens with a name and holds nothing beyond literal characters. Every
   other such span draws the same note instead of a silent skip, and never a block: any other
   delimiter (a quoted, ANSI-C or escaped spelling, one continued with a backslash-newline, one
   holding a `$`, backquote or brace, such as `<<$(true)` or `<<${x:-a b}`, one with a `(`, `<(` or
-  `>(` glued to it, a quote left open, or no delimiter word at all), a body with a backslash-newline
+  `>(` glued to it, a quote left open, or no delimiter word at all), a here-document opened while a
+  parenthesis, `${...}` or backquote substitution is open (bash 5.3 ends such a body inside a
+  command or process substitution or backquotes at a line that merely starts with the delimiter
+  when a `)` or a backquote follows it on that line, as in `x=$(cat <<EOF ... EOF)`, and reads the
+  rest of that line as commands, so where such a body ends is unknown), a body with a
+  backslash-newline
   up to its closing line (bash joins it before matching that line), a `${...}` target left
   unclosed, not opened by a name (a bash 5.3 `${ cmd; }` or `${| cmd; }` command substitution
   included) or holding any quote, backslash, `$`, backquote, `<` or `>`, and any further `${` in a
-  redirect target. The excluded characters are the ones known to let bash read further or run a
+  redirect target. Command position includes the word after a case pattern's `)`, parenthesised
+  (`(pat)`) or bare, and a function body the command itself defines (`f() { ...; }` or
+  `function f { ...; }`); a detacher renamed by an alias or by a function defined outside the
+  command is still not seen. The excluded characters are the ones known to let bash read further or run a
   command there; nothing shows the list is complete, which is why the rules allow rather than deny.
   Outside registry scope this scan only ever notes; where it is unsure it over-notes rather than
   misses, apart from the known misses the manifest residue lists. No command content makes the scan
