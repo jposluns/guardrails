@@ -2366,6 +2366,66 @@ def _rwh_cases(tmp):
         aiqt_hooks._review_git = saved_idp
     check("rwh/identity-probe-reply-shapes-fail-closed",
           shape_got, ["unverifiable", True, "unverifiable"] * 4 + ["allow"])
+    # the echoed-option exit-0 reply (a git too old to know the probe's options prints them back)
+    # is pinned on its own: it must read as the probe error, never as a usable identity. With the
+    # dash-leading test reverted, the echo builds a bogus identity whose marker directory never
+    # exists, so every hold reads as absent and the held reset is allowed: this goes red then.
+    aiqt_hooks._review_git = _reply_stub(0, out=b"--absolute-git-dir\n--git-common-dir\n")
+    try:
+        echo_res = run(base, rh)
+        echo_got = [_rdp_kind(echo_res), "cannot be probed" in _rwh_reason(echo_res),
+                    kind(base, "git -C " + str(free) + " commit --allow-empty -m x")]
+    finally:
+        aiqt_hooks._review_git = saved_idp
+    check("rwh/identity-probe-echoed-option-fails-closed",
+          echo_got, ["unverifiable", True, "unverifiable"])
+    # the not-a-repository answer is matched at the start of one of stderr's own lines, never as a
+    # substring: a 128 fatal that merely ECHOES a path holding those words (dubious ownership in a
+    # directory so named) stays the probe error. With a substring match reverted in, that reply
+    # reads as "not a repository", every hold is hidden and the held reset is allowed (red); the
+    # control shows the answer on its own line is still the inert allow.
+    aiqt_hooks._review_git = _reply_stub(
+        128, err=b"fatal: detected dubious ownership in repository at "
+                 b"'/srv/not a git repository/x'\n")
+    try:
+        line_res = run(base, rh)
+        line_got = [_rdp_kind(line_res), "cannot be probed" in _rwh_reason(line_res)]
+    finally:
+        aiqt_hooks._review_git = saved_idp
+    aiqt_hooks._review_git = _reply_stub(
+        128, err=b"warning: something else\nfatal: not a git repository (or any of the parent "
+                 b"directories): .git\n")
+    try:
+        line_got.append(kind(base, "git -C " + str(free) + " commit --allow-empty -m x"))
+    finally:
+        aiqt_hooks._review_git = saved_idp
+    check("rwh/identity-probe-not-a-repo-line-anchored",
+          line_got, ["unverifiable", True, "allow"])
+    # the identity probe pins LC_ALL=C into its child environment, so the not-a-repository answer
+    # is matched against untranslated text whatever locale the session inherits; with the pin
+    # reverted, the recorded environment carries the inherited locale instead (red on revert)
+    probe_envs = []
+
+    def _env_recorder(argv, **kw):
+        probe_envs.append(kw.get("env"))
+        return _RwhReply(
+            128, err=b"fatal: not a git repository (or any of the parent directories): .git\n")
+    saved_run_lc = aiqt_hooks.subprocess.run
+    saved_lc_all = os.environ.get("LC_ALL")
+    aiqt_hooks.subprocess.run = _env_recorder
+    os.environ["LC_ALL"] = "de_DE.UTF-8"
+    try:
+        aiqt_hooks._review_git(str(free), "rev-parse", "--absolute-git-dir", "--git-common-dir")
+    finally:
+        aiqt_hooks.subprocess.run = saved_run_lc
+        if saved_lc_all is None:
+            os.environ.pop("LC_ALL", None)
+        else:
+            os.environ["LC_ALL"] = saved_lc_all
+    check("rwh/identity-probe-locale-pin-red-on-revert",
+          [len(probe_envs), probe_envs and probe_envs[0] is not None and
+           probe_envs[0].get("LC_ALL")],
+          [1, "C"])
     # end to end through main() with a stub git on PATH that is KILLED for the identity-probe
     # argv and runs the real git for every other call: the standalone preflight withholds an
     # unrelated-target commit, naming the unanswerable probe, and allows the same payload again
@@ -2551,7 +2611,7 @@ def _rwh_cases(tmp):
     # passes while the hold is still live, and the revert leg shows each deny comes from the
     # live hold alone.
     hp = ["fast-export --anonymize-map-file=" + str(held) + "/f HEAD",
-          "apply --unsafe-paths --directory=" + str(held) + " x.patch",
+          "apply --directory=" + str(held) + " x.patch",
           "add " + str(held) + "/f",
           "add " + str(held),
           "add " + str(base / "alias") + "/f"]
@@ -2574,6 +2634,92 @@ def _rwh_cases(tmp):
     finally:
         aiqt_hooks._rwh_held_path_gate = saved_hpgate
     check("rwh/held-path-operand-gate-discriminates", nohp_got, ["allow"] * 3)
+    # a path INSIDE the held worktree that does not exist yet is still a hold-set candidate,
+    # consulted at its nearest existing ancestor: a command that creates the directory first and
+    # then mutates through it (-C, or cd) reads the held repository's markers and is refused. The
+    # session sits outside every repository, so the hold is visible only through that candidate;
+    # the same creation inside the unheld free repository stays allowed, and the revert leg shows
+    # each refusal comes from the live hold alone (with the ancestor consultation reverted, the
+    # missing path reads as "no repository" and every one of these is allowed: red on revert).
+    cp = ["mkdir " + str(held) + "/zznew && git -C " + str(held) + "/zznew reset --hard " + seed,
+          "mkdir " + str(held) + "/zxnew; git -C " + str(held) + "/zxnew checkout -q " + seed,
+          "mkdir -p " + str(held) + "/zynew && cd " + str(held) + "/zynew && git reset --hard " +
+          seed]
+    cp_res = [run(base, c) for c in cp]
+    check("rwh/created-path-into-held-denies-red-on-revert",
+          [_rdp_kind(r) for r in cp_res] +
+          ["review-in-flight-pins-its-artefact" in _rwh_reason(cp_res[0]),
+           kind(base, "mkdir " + str(free) + "/zznew && git -C " + str(free) +
+                "/zznew reset --hard " + seed),
+           _rwh_without_hold(lambda: kind(base, cp[0]))],
+          ["deny", "deny", "unverifiable", True, "allow", "allow"])
+    # a literal absolute path in ANY segment joins the hold set, so a command that first creates a
+    # link to the held worktree and then mutates through it is withheld: the held path appears as
+    # the ln operand, and the link itself does not exist at decision time. The same link to the
+    # unheld free repository stays allowed, and the revert legs show the refusal comes from the
+    # live hold through that operand alone (with the operand candidates reverted, nothing names
+    # the held repository and the command is allowed: red on revert).
+    ln_cmd = "ln -s " + str(held) + " " + str(base) + "/zlinknew && git -C " + str(base) + \
+        "/zlinknew reset --hard " + seed
+    check("rwh/created-link-into-held-denies-red-on-revert",
+          [kind(base, ln_cmd),
+           kind(base, "ln -s " + str(free) + " " + str(base) + "/zlinkfree && git -C " +
+                str(base) + "/zlinkfree reset --hard " + seed),
+           _rwh_without_hold(lambda: kind(base, ln_cmd))],
+          ["unverifiable", "allow", "allow"])
+    # from a session OUTSIDE every held repository, an absolute write operand or option value into
+    # the held worktree makes that hold visible (the operand is a hold-set candidate, its missing
+    # file consulted at the held ancestor), so the write gate or the held-path gate refuses it;
+    # before this, such a session saw no hold and every one of these forms was allowed (red on
+    # revert). The same forms writing into the unheld free tree, and the hold-reader revert leg,
+    # stay allowed.
+    vo2 = ["bundle create " + str(held) + "/zvb HEAD",
+           "diff --output=" + str(held) + "/zvd HEAD",
+           "worktree add " + str(held) + "/zwt",
+           "fast-export --export-marks=" + str(held) + "/zvm HEAD",
+           "rev-list --output=" + str(held) + "/zvf HEAD",
+           "read-tree --index-output=" + str(held) + "/zvi HEAD"]
+    vo2_res = [run(base, "git -C " + str(free) + " " + c) for c in vo2]
+    check("rwh/outside-session-held-write-operand-denies-red-on-revert",
+          [_rdp_kind(r) for r in vo2_res] +
+          ["resolves to or inside" in _rwh_reason(vo2_res[0]),
+           "writes a file or tree" in _rwh_reason(vo2_res[1]),
+           kind(base, "git -C " + str(free) + " bundle create " + str(free) + "/zvb HEAD"),
+           kind(base, "git -C " + str(free) + " diff --output=" + str(free) + "/zvd HEAD"),
+           _rwh_without_hold(lambda: kind(base, "git -C " + str(free) + " " + vo2[0]))],
+          ["deny"] * 6 + [True, True, "allow", "allow", "allow"])
+    # the two options that admit write paths from the command's INPUT are refused while a hold is
+    # visible: apply --unsafe-paths lets the patch content name paths outside the target tree, and
+    # fast-import --allow-unsafe-features admits a stream's own marks-export features, so the
+    # write path travels in data no argv scan reads. Each leg goes red when its table entry is
+    # removed (the form then reaches the unrelated-target pass and is allowed); the same verbs
+    # without the option, and the revert leg, stay allowed.
+    cc2 = ["fast-import --allow-unsafe-features --quiet",
+           "apply --unsafe-paths " + str(base) + "/zp.patch"]
+    cc2_res = [run(main, "git -C " + str(free) + " " + c) for c in cc2]
+    check("rwh/content-carried-write-options-deny-red-on-revert",
+          [_rdp_kind(r) for r in cc2_res] +
+          ["writes a file or tree" in _rwh_reason(r) for r in cc2_res] +
+          [kind(main, "git -C " + str(free) + " fast-import --quiet"),
+           kind(main, "git -C " + str(free) + " apply " + str(base) + "/zp.patch"),
+           _rwh_without_hold(lambda: kind(main, "git -C " + str(free) + " " + cc2[0]))],
+          ["deny", "deny", True, True, "allow", "allow", "allow"])
+    # the direct held-worktree mutation (-C into the held tree) carries the direct hold reason,
+    # never the held-path gate's write-path over-refusal text, while a held path in any other
+    # position keeps that gate's own reason: the two reasons are pinned apart (red when the
+    # direct classification is reverted)
+    dt_res = run(base, "git -C " + str(held) + " reset --hard " + seed)
+    in_res = run(main, "git -C " + str(free) + " add " + str(held) + "/f")
+    check("rwh/held-direct-target-deny-reason-red-on-revert",
+          [_rdp_kind(dt_res), "review-in-flight-pins-its-artefact" in _rwh_reason(dt_res),
+           _rdp_kind(in_res), "resolves to or inside" in _rwh_reason(in_res)],
+          ["deny", True, "deny", True])
+    # pins the DISCLOSED residual of the file-writing class: a RELATIVE positional write operand
+    # resolves against a directory this rule cannot fix and cannot be told from a ref or pathspec,
+    # so it stays allowed (the docs and the manifest residue state exactly this remainder); this
+    # check goes red if that residual is ever closed or widened silently
+    check("rwh/relative-write-operand-residual-allows",
+          kind(main, "git -C " + str(free) + " bundle create ../held/zwb HEAD"), "allow")
     # every allowlisted verb carries a closed read-only option set: a verb present in one set but
     # not the other would either fail closed forever or skip the option check
     check("rwh/read-only-option-table-covers-allowlist",
