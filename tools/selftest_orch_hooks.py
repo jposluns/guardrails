@@ -11357,11 +11357,18 @@ def _main_isolated(report_path=None):
               "allow")
         check("wl/handler-allow-nested",
               _verdict(wl("while outer; do while inner; do gh api x; sleep 1; done; done &")), "allow")
-        # fail-open: non-Bash tool, non-str command, absent registry -> silent allow even on a match command.
+        # fail-open: non-Bash tool and absent registry -> silent allow even on a match command; an EMPTY
+        # command is readable (it runs nothing) and also allows. In registry scope a MISSING or NON-STRING
+        # command is a cannot-evaluate input and DENIES (check-fails-closed-on-unreadable), never a clean
+        # pass.
         check("wl/failopen-nonbash", _verdict(aiqt_hooks.orch_untracked_wait_loop(
             w.payload("PreToolUse", "Write", {"command": BASE}))), "allow")
-        check("wl/failopen-nonstr", _verdict(aiqt_hooks.orch_untracked_wait_loop(
-            w.payload("PreToolUse", "Bash", {"command": 42}))), "allow")
+        check("wl/failclosed-nonstr", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Bash", {"command": 42}))), "deny")
+        check("wl/failclosed-missing-command", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Bash", {}))), "deny")
+        check("wl/failopen-empty", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Bash", {"command": ""}))), "allow")
         wi = Fixture(tmp, "waitloop-inert")
         (wi.root / ".aiqt" / "orchestration.local.json").unlink()
         check("wl/failopen-no-registry", _verdict(aiqt_hooks.orch_untracked_wait_loop(

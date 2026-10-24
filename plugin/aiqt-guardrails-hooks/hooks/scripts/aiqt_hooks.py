@@ -80,9 +80,12 @@ command-injection hazard the shell runs before git sees the argument, so it DENI
 re-issue (single quotes, escape the marker, or git commit -F <file>); the unparseable-fallback and unreadable
 -command cases deny fail-safe on the same terms. Only a mis-wired event hard-blocks (no structured decision).
 
-git_explicit_binding (expbnd): an ambient git target or a whole-tree breadth+publish is a binding CONVENTION
-where the orchestrator normally binds its own target, not a hazard, so every former ask (including the
-unreadable-command case) ALLOWS with a note.
+git_explicit_binding (expbnd): an ambient git target or a relocated whole-tree breadth stage is a binding
+CONVENTION where the orchestrator normally binds its own target, not a hazard, so every former ask
+(including the unreadable-command case) ALLOWS with a note - EXCEPT the whole-tree stage-then-push pair: a
+breadth stage ('git add -A/./:/', 'git commit -a/--all') followed by a 'git push' later in the same command
+publishes whatever the tree holds, so it is DENIED, on the parsed path and on every fallback alike (the
+fallback tests that pair before its directory-change note, so the note cannot mask the denial).
 
 git_discard (prsunc) is a DELIBERATE, ULTRA-CONSERVATIVE "recover then allow" guard (EN-6). NO-ASK
 TRANSLATION: this control was originally an "ask unless PRISTINE and provably clean" three-outcome
@@ -94,9 +97,9 @@ inline alias, an unrecognized flagged subcommand, an unresolvable worktree). The
 whole-tree clobber on a dirty tree is unchanged (it too carries a recovery snapshot when one could be made).
 So wherever the detailed prose below says a form "ASKS", read it as "snapshot-then-allows when recoverable,
 else denies-and-educates". UNLIKE the fail-closed controls above, it fails OPEN
-(ALLOW) at the TRUE BOUNDARY - a non-Bash or absent tool, a malformed or missing tool_input.command it
-cannot read as a discard, a non-git command, or no recognized lossy verb - because none of those is a
-discard it can reason about, and it never silently allows a recognized WORKING-TREE-CONTENT discard (a
+(ALLOW) at the TRUE BOUNDARY - a non-Bash or absent tool, a non-git command, or no recognized lossy
+verb - because none of those is a discard it can reason about, and it never silently allows a
+recognized WORKING-TREE-CONTENT discard (a
 recognized verb in a genuinely non-destructive FORM - checkout -b, reset --soft, clean -n - preserves the
 index and worktree content, though reset --soft still MOVES HEAD, a reflog-recoverable ref move, so it
 discards no working-tree content and may ALLOW even on a dirty tree, as detailed below). That no-silent-allow
@@ -109,7 +112,9 @@ takes the recover-then-allow/deny resolution above (never a silent pass). WITHIN
 verb: checkout/switch/restore/reset/clean/stash/
 rm/branch) that resolution applies unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND
 the tree is provably clean (or the form is genuinely non-destructive), in
-which case it ALLOWS. PRISTINE
+which case it ALLOWS. A Bash payload whose tool_input.command is MISSING or NOT A STRING is not that
+boundary but a cannot-evaluate input (a discard could hide in what was not read), so it DENIES under the
+shared fail-closed contract (check-fails-closed-on-unreadable), like the fail-closed controls above. PRISTINE
 SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
 assignments the command is exactly 'git <args>' as ONE simple command, and the RAW string carries NO shell
 metacharacter anywhere EVEN INSIDE QUOTES (none of ; | & < > ( ) { } $ backtick backslash ! newline, which
@@ -5100,15 +5105,17 @@ def _expbnd_breadth_publish_deny(verb):
 
 
 def _expbnd_fallback_kind(command):
-    """The decision _expbnd_fallback gives command, by its raw probes: "target" (a cd and a mutation or a
-    pruning fetch) notes, "publish" (a breadth stage and a push, with no such cd pair) denies, and None allows.
+    """The decision _expbnd_fallback gives command, by its raw probes: "publish" (a breadth stage and a
+    push) denies, "target" (a cd and a mutation or a pruning fetch, with no such breadth-push pair) notes,
+    and None allows. The publish pair is tested FIRST, mirroring the parsed pre-scan's precedence: a cd in
+    the same text earns only the relocate note, which must not stand in for the breadth-and-publish denial.
     git_explicit_binding reads it for its floor (MAIN'S DECISION AS A FLOOR, above _MainHashReading)."""
-    if (_RAW_EXPBND_CD_RE.search(command) and
-            (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
-        return "target"
     if ((_RAW_EXPBND_ADD_BREADTH_RE.search(command) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(command))
             and _RAW_EXPBND_PUSH_RE.search(command)):
         return "publish"
+    if (_RAW_EXPBND_CD_RE.search(command) and
+            (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
+        return "target"
     return None
 
 
@@ -5131,8 +5138,12 @@ def git_explicit_binding(data):
     ('git add -A/./:/', 'git commit -a/--all') FOLLOWED BY a PUBLISH ('git push') in the SAME command
     DENIES-and-educates - the breadth selector sweeps in unrelated modified/untracked content and the push
     then publishes it irreversibly, so it is not waved through. A plain 'git commit -m' and a scoped
-    'git add <path>' are not breadth and are unaffected. It never asks. Behind a '#' whose comment reading
-    the shared lexer cannot judge under both readings, the raw fallback reads _hash_doubt_scan, and a command
+    'git add <path>' are not breadth and are unaffected. It never asks. A '#' whose comment reading the
+    shared lexer CAN judge under both readings is judged one reading at a time, because both scans here are
+    order-sensitive: the strictest decision across the readings stands (a deny on any reading, then the
+    first reading's note), and the breadth-then-push or cd-then-mutation order is never read across a
+    reading boundary, so a sequence no single reading holds cannot deny or note. Behind a '#' it cannot
+    judge under both readings, the raw fallback reads _hash_doubt_scan, and a command
     whose quoting that scan does not decode (_hash_doubt_opaque) DENIES, since the breadth-and-publish pair
     cannot be ruled out there. Where a lex read a quoted here-document's body that main's lexer reads
     otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), main's segments are judged beside the
@@ -5157,8 +5168,13 @@ def git_explicit_binding(data):
     reads = _SubstHeredocs.reads
     try:
         # Both scans below read only each segment's words, and a segment with no word names no command
-        # (its _command_word is ''), so no such segment is built (_lex_command's skip_empty).
-        segments = _segments(command, skip_empty=True)
+        # (its _command_word is ''), so no such segment is built (_lex_command's skip_empty). The readings
+        # of an uncertain '#' (the shared lexer's comment rule) are kept apart: both scans carry order
+        # state (a breadth stage before a push, a directory change before a mutation) that is real only
+        # within one reading, so each reading is judged on its own and the strictest decision across the
+        # readings stands (a deny on any reading wins, then the first reading's note); state carried over
+        # a reading boundary would invent a sequence no single reading holds.
+        readings = _lex_readings(command, skip_empty=True)
     except _UncertainHashError:
         # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
         # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
@@ -5172,22 +5188,24 @@ def git_explicit_binding(data):
         return _expbnd_fallback(command)
 
     # ROUND-2 FINDING 11 PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
-    # FOLLOWED BY a PUBLISH ('git push') ANYWHERE later in the command DENIES-and-educates, regardless of any
-    # cd/pushd between them. This runs BEFORE the dir-change/target logic below so a preceding cd (which would
-    # otherwise short-circuit to the relocate allow-note) cannot mask the breadth+publish hazard. A push
-    # BEFORE the breadth stage publishes only the pre-breadth state and does not fire.
-    breadth_before_push = None
-    for tokens, _sep in segments:
-        eff = _expbnd_effective_tokens(tokens)
-        if _command_word(eff) != "git":
-            continue
-        s, a = _git_sub_and_args(eff)
-        if s is None:
-            continue
-        if s == "push" and breadth_before_push is not None:
-            return _expbnd_breadth_publish_deny(breadth_before_push)
-        if _git_is_breadth(s, a):
-            breadth_before_push = s
+    # FOLLOWED BY a PUBLISH ('git push') ANYWHERE later in the same reading DENIES-and-educates, regardless
+    # of any cd/pushd between them. This runs BEFORE the dir-change/target logic below so a preceding cd
+    # (which would otherwise short-circuit to the relocate allow-note) cannot mask the breadth+publish
+    # hazard. A push BEFORE the breadth stage publishes only the pre-breadth state and does not fire; the
+    # before/after order is read within ONE reading at a time, never across the reading boundary.
+    for segments in readings:
+        breadth_before_push = None
+        for seg in segments:
+            eff = _expbnd_effective_tokens(seg.argv)
+            if _command_word(eff) != "git":
+                continue
+            s, a = _git_sub_and_args(eff)
+            if s is None:
+                continue
+            if s == "push" and breadth_before_push is not None:
+                return _expbnd_breadth_publish_deny(breadth_before_push)
+            if _git_is_breadth(s, a):
+                breadth_before_push = s
     floor = _SubstHeredocs.reads != reads  # main's reading of a body the lex read fails: its decision is a floor
     if floor and _expbnd_fallback_kind(command) == "publish":
         return _expbnd_fallback(command)  # the deny main's failed lex takes
@@ -5200,24 +5218,26 @@ def git_explicit_binding(data):
     # only through a "||" (git runs only on the prior command's failure, so the cwd is unchanged) or a "|"
     # (a subshell cd) is conservatively treated as preceding: a safe over-ASK, not a silent allow. The
     # breadth+publish deny is handled by the pre-scan above; a breadth op after a cd with NO publish is only
-    # the relocate convention nudge.
-    saw_dir_change = False
-    for tokens, _sep in segments:
-        eff = _expbnd_effective_tokens(tokens)
-        word = _command_word(eff)
-        if word in _CD_BUILTINS or word == "popd":
-            saw_dir_change = True
-            continue
-        if word != "git":
-            continue
-        sub, args = _git_sub_and_args(eff)
-        if sub is None:
-            continue
-        if (_git_is_mutating(sub, args) and not _git_target_is_explicit(eff)
-                and saw_dir_change):
-            return _expbnd_target_ask(sub)
-        if _git_is_breadth(sub, args) and saw_dir_change:
-            return _expbnd_breadth_ask(sub)
+    # the relocate convention nudge. The precedes relation is read within one reading at a time, as above:
+    # a cd that only one reading holds cannot confuse a git segment another reading holds.
+    for segments in readings:
+        saw_dir_change = False
+        for seg in segments:
+            eff = _expbnd_effective_tokens(seg.argv)
+            word = _command_word(eff)
+            if word in _CD_BUILTINS or word == "popd":
+                saw_dir_change = True
+                continue
+            if word != "git":
+                continue
+            sub, args = _git_sub_and_args(eff)
+            if sub is None:
+                continue
+            if (_git_is_mutating(sub, args) and not _git_target_is_explicit(eff)
+                    and saw_dir_change):
+                return _expbnd_target_ask(sub)
+            if _git_is_breadth(sub, args) and saw_dir_change:
+                return _expbnd_breadth_ask(sub)
     if floor:
         return _expbnd_fallback(command)  # its note, or the allow, in place of this allow
     return _allow()
@@ -7978,8 +7998,10 @@ def git_discard(data):
     exactly what FOO=<the same value> gets); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
     reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
-    reserved for the TRUE boundary (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
-    or no recognized lossy verb). A wrapper is in scope while the raw scan, the continuation-joined text or
+    reserved for the TRUE boundary (a non-Bash or absent tool, a non-git command, or no recognized lossy
+    verb); a tool_input whose command is MISSING or NOT A STRING is a cannot-evaluate input, not that
+    boundary, and DENIES under the shared fail-closed contract (check-fails-closed-on-unreadable), since a
+    discard could hide in what was not read. A wrapper is in scope while the raw scan, the continuation-joined text or
     the DE-QUOTED copy (_dequoted_text: continuations joined, a '$' before a quote, quote characters and
     backslashes removed) sees a contiguous git verb keyword. The de-quoted copy is read on a
     certain lex too, so a wrapper that ALSO fragments the COMMAND WORD 'git' itself or the verb with quotes or
@@ -8047,7 +8069,14 @@ def git_discard(data):
     tool_input = data.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
-        return _allow()  # boundary: unreadable/malformed command container
+        # A missing, non-object or non-string command container is a cannot-evaluate input, not the true
+        # boundary: a discard could hide in what was not read, so it denies under the shared fail-closed
+        # contract (check-fails-closed-on-unreadable) rather than passing clean.
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): the Bash payload carried no readable command "
+            "string, so the discard check could not run; failing closed. Re-issue the call with a string "
+            "command.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule prsunc, fail-closed).")
     try:
         # Segments with no word and no redirect are skipped unbuilt: the lossy scan below passes over a
         # segment with no command word, and _pristine_single_bare_git returns before reading the segments
@@ -11634,7 +11663,9 @@ def _gate_weakening_fallback(command):
     or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
     design, the documented posture of the sibling fallbacks (_diff_source_fallback,
     _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable. Which decision the
-    text earns is _gate_weakening_fallback_kind's."""
+    text earns is _gate_weakening_fallback_kind's. gate_weakening's ordinary-parse-failure caller passes
+    _hash_doubt_scan(command) (the text as written and with its quoting removed), so a simply
+    quote-fragmented spelling is probed decoded too; the floor callers pass the raw text."""
     kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
@@ -11747,9 +11778,17 @@ def gate_weakening(data):
     holding a checker-shaped word (_gate_doubt_checker, the parsed recognizer's own name splitter and
     lexicon, called rather than re-spelled) and a pipe, process substitution or here-string
     ALLOWS-WITH-NOTE, never a silent allow quieter than the note tier a readable spelling of the same
-    shape earns. These stricter doubt tests run ONLY on this path: the plain parse-error fallback and the
-    failed-main-reading floor keep the conservative raw probes, so a command outside the doubt path keeps
-    the decision it had.
+    shape earns. An ORDINARY parse failure (an unbalanced quote, a here-string, a process substitution)
+    takes the same conservative stance on quoting: a command whose text holds quoting the fallback's
+    removal does not decode (_hash_doubt_opaque) DENIES, since a fragmented bypass verb (git co'mmit'
+    --no-verify) cannot be ruled out there, and otherwise the raw fallback probes read _hash_doubt_scan
+    (the text as written and with its backslash-newlines, quote characters and backslashes removed), so a
+    simply fragmented verb keeps the deny its plain spelling earns while an ordinary here-string command
+    with no bypass spelling still allows. The checker-word doubt tests beyond that run ONLY on the
+    uncertain-'#' path, and the failed-main-reading floor keeps the conservative raw probes alone (the
+    quoted here-document body that makes a command a floor case holds quote characters next to letters by
+    construction, so the undecoded-quoting deny there would refuse every such command; a disclosed
+    narrowing of the floor, not of the parse-failure fallback).
     Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A
     FLOOR, above _MainHashReading), main's reading is one more reading here where it lexes. Where it fails, the
     decision of the path main's failed lex takes is a floor: the sink that main's partial lex proves past the
@@ -11791,7 +11830,26 @@ def gate_weakening(data):
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
         if not isinstance(exc, _UncertainHashError):
-            return _gate_weakening_fallback(command)
+            # An ordinary parse failure (an unbalanced quote, a here-string, a process substitution) is
+            # conservative about undecoded quoting exactly as the uncertain-'#' path below is: quoting the
+            # fallback's removal does not undo the way bash does can fragment a bypass verb past the raw
+            # probes (git co'mmit' --no-verify), so such a command denies unread, and otherwise the probes
+            # also read the text with its backslash-newlines, quote characters and backslashes removed
+            # (_hash_doubt_scan), so a simply fragmented verb keeps the deny its plain spelling earns while
+            # an ordinary here-string command with no bypass spelling still allows.
+            if _hash_doubt_opaque(command):
+                return _deny(
+                    "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell "
+                    "lexer (an unbalanced quote or an unsupported construct such as a here-string) and its "
+                    "text holds quoting this guard's fallback does not decode (an ANSI-C $'...' or locale "
+                    "$\"...\" quote, or a quote character or backslash next to a letter), so a "
+                    "verification-hook bypass (a --no-verify spelling, or -n on commit or am) spelled "
+                    "through that quoting cannot be ruled out; it is denied rather than allowed unread "
+                    "(check-fails-closed-on-unreadable). Re-issue it as a parseable command with plain "
+                    "spellings. " + _GATE_ALTS,
+                    "AIQT guardrail: denied an unparseable command in quoting its fallback does not decode "
+                    "(rule gatdis, fail-closed).")
+            return _gate_weakening_fallback(_hash_doubt_scan(command))
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -16304,7 +16362,9 @@ def orch_untracked_wait_loop(data):
     a registry ABOVE a nested repository whose toplevel has none, the guard stays active (a plain call
     allows, a bare-& detach denies) while this component stays inert. NOT lease-gated: a
     bounded worker building a fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash
-    or absent tool, no git toplevel, an absent registry, or a non-string/empty command; a NUL, heredoc,
+    or absent tool, no git toplevel, an absent registry, or an empty command (it runs nothing); in registry
+    scope a MISSING, NON-OBJECT or NON-STRING command is a cannot-evaluate input and DENIES
+    (check-fails-closed-on-unreadable), never a clean pass. A NUL, heredoc,
     unbalanced quote, or subshell-grouped detach classifies 'indeterminate' and emits nothing, deferring to
     the truncation guard's generic bare-`&` DENY-and-educate (or its open-quote deny) on the same event.
     Only a positive 'match' DENIES here. This is a specific companion to that generic deny, defence in
@@ -16320,8 +16380,17 @@ def orch_untracked_wait_loop(data):
         return _allow()                     # no registry at the git toplevel: inert (the truncation guard's walk may still find one above)
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     command = tool_input.get("command")
-    if not isinstance(command, str) or not command:
-        return _allow()                     # unreadable/empty command: out of scope, fail-open
+    if not isinstance(command, str):
+        # In registry scope a missing, non-object or non-string command is a cannot-evaluate input: the
+        # loop scan cannot run over what was not read, so it denies (check-fails-closed-on-unreadable)
+        # rather than passing clean.
+        return _deny(
+            "AIQT rule trkasy (untracked wait loop): the Bash payload carried no readable command string, "
+            "so this guard could not scan it for an untracked background wait loop; failing closed. "
+            "Re-issue the call with a string command.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule trkasy, fail-closed).")
+    if not command:
+        return _allow()                     # an empty command runs nothing: no loop to scan, out of scope
     if _orch_bg_poll_loop(command) == "match":
         return _deny(
             "AIQT rule trkasy (untracked wait loop): this command backgrounds a polling loop with a bare "

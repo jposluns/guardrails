@@ -6926,16 +6926,33 @@ def _main_isolated(monitor):
                cwd=rh)
 
         # === malformed / robustness (F-66.7) ================================================
-        # A malformed tool_input (a string, not a dict) -> boundary ALLOW (fail open), not a crash. This is
-        # the DELIBERATE true-boundary fail-open the module and git_discard docstrings state (F-86): a
-        # malformed/missing command is input git_discard cannot read as a discard, so it fails OPEN here
-        # rather than fail-CLOSED like the other PreToolUse controls; it never silently allows a RECOGNIZED
-        # discard, only input it cannot recognize as one.
+        # A malformed tool_input (a string, not a dict) is a Bash call whose command cannot be read: a
+        # cannot-evaluate input, NOT the true fail-open boundary (which is a non-Bash tool, a non-git
+        # command, or no recognized lossy verb). A discard could hide in what was not read, so it DENIES
+        # under the shared fail-closed contract rather than passing clean, and never crashes.
         malformed = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": "malformed"}
         code, stdout_obj, _stderr = handler(malformed)
-        if not (code == 0 and stdout_obj is None):
-            failures.append("(robust-a) malformed tool_input: expected allow, got code={!r}, stdout={!r}"
-                            .format(code, stdout_obj))
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(robust-a) malformed tool_input: expected the fail-closed deny, got code={!r}, "
+                            "stdout={!r}".format(code, stdout_obj))
+        # The same contract for an EMPTY tool_input object (no command member at all): deny, fail closed.
+        missing_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}
+        code, stdout_obj, _stderr = handler(missing_cmd)
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(robust-a2) missing tool_input.command: expected the fail-closed deny, got "
+                            "code={!r}, stdout={!r}".format(code, stdout_obj))
+        # And for a present but non-string command; a present EMPTY STRING is readable (it runs nothing)
+        # and stays at the true boundary (allow), the just-inside case of the same boundary.
+        nonstr_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": 42}}
+        code, stdout_obj, _stderr = handler(nonstr_cmd)
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(robust-a3) non-string tool_input.command: expected the fail-closed deny, got "
+                            "code={!r}, stdout={!r}".format(code, stdout_obj))
+        empty_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": ""}}
+        code, stdout_obj, _stderr = handler(empty_cmd)
+        if _reduce_result(code, stdout_obj) != "allow":
+            failures.append("(robust-a4) empty-string command is readable and out of scope: expected allow, "
+                            "got code={!r}, stdout={!r}".format(code, stdout_obj))
         # No cwd and a dir-simple lossy verb: the worktree cannot be resolved -> ASK, never silent-allow.
         expect("(robust-b) no-cwd reset --hard denies", "git reset --hard", "deny")
 
@@ -12184,10 +12201,15 @@ def _main_isolated(monitor):
                        ("cd-checkout-b", "\ncd foo; git checkout -b feat; true"),
                        ("cd-commit", "\ncd foo; git commit -m y; true"),
                        ("cd-add-push", "\ncd foo; git add -A; git push; true"))
+        # AMENDED RECORDS (two letters): on the cd-add-push rows the recorded module gave
+        # git_explicit_binding the relocate note through its failed-lex fallback, where the visible
+        # breadth+push pairing must deny; the fallback now tests the publish deny before the
+        # directory-change note (the parsed pre-scan's precedence), so those two rows record D at the
+        # git_explicit_binding position in place of the recorded N. Every other letter is the record.
         _hdx_main = {"E": ("AAAADAAAAA", "AAAADAAAAA", "AAAAADDAAA", "AAAAADDAAA", "AAAAADAAAA", "AANANDDAAA",
-                           "AANANAAADD", "AANANAAAAA"),
+                           "AANANAAADD", "AADANAAAAA"),
                      "F": ("AAAADAAADD", "AANADAAADD", "AAAAADDADD", "AAAAADDADD", "AAAAADAADD", "AANANDDADD",
-                           "AANANAAADD", "AANANAAADD")}
+                           "AANANAAADD", "AADANAAADD")}
         _hd_main_rows = [("early-close-switch", "git commit -m \"$(cat <<'EOF'\n)\"; git switch -c test origin/other; "
                           "echo \"\nEOF\n)\"", "AAAAADDADD")]
         for _hdxf, _hdxform in (("E", _hdx_e), ("F", _hdx_f)):
@@ -13780,9 +13802,31 @@ def _main_isolated(monitor):
                 'git commit --no-verify -m "unbalanced', "deny")
         gexpect("(gw-ad) unparseable commit -n denies (the raw scan cannot bind the cluster)",
                 'git commit -n -m "unbalanced', "deny")
+        # The unparseable fallback decodes simple quoting (it reads the text with its quote characters and
+        # backslashes removed as well), and quoting that removal does not undo (a quote character or
+        # backslash NEXT TO A LETTER, or an ANSI-C/locale quote) is a fail-closed deny, the same stance the
+        # uncertain-'#' doubt path takes. These two keep the relaxed-fallback outcomes pinned on spellings
+        # whose quote touches no letter, so the removal decodes them.
         gexpect("(gw-ae) unparseable checker + swallow allows-with-note (finding 14; fallback relaxed)",
-                'pytest || true "unbalanced', "allow-note")
-        gexpect("(gw-af) unparseable non-gate command allows", 'ls -la "unbalanced', "allow")
+                'pytest || true " unbalanced', "allow-note")
+        gexpect("(gw-af) unparseable non-gate command allows", 'ls -la " unbalanced', "allow")
+        # Quote-fragmented bypass spellings behind an ordinary parse failure (a here-string): the fallback
+        # reads the de-quoted text too, so the fragmented verb keeps the deny its plain spelling earns, and
+        # quoting the removal does not decode denies unread rather than clearing a recognizable bypass.
+        gexpect("(gw-pf1) here-string + quote-fragmented commit verb with --no-verify denies (the "
+                "fallback reads the de-quoted text)",
+                "git co'mmit' --no-verify -m x <<<x", "deny")
+        gexpect("(gw-pf2) here-string + ANSI-C-fragmented commit verb with --no-verify denies (undecoded "
+                "quoting fails closed)",
+                "git co$'mmit' --no-verify -m x <<<x", "deny")
+        gexpect("(gw-pf3) DISCLOSED over-deny: an unparseable command whose quote touches a letter denies "
+                "fail-closed even with no gate word (the undecoded-quoting stance)",
+                'ls -la "unbalanced', "deny")
+        # Ordinary here-string commands with no bypass spelling still pass (the conservative stance does
+        # not blanket-deny parse failures).
+        gexpect("(gw-pf4) here-string commit with no bypass flag still allows", "git commit -m x <<<x",
+                "allow")
+        gexpect("(gw-pf5) here-string non-git command still allows", "wc -l <<<x", "allow")
         # DENY outranks the parse error only over complete segments: the segment the lexer was still inside
         # is dropped, and a segment the scan had already closed (by ';', '&&' or a newline) before the
         # unparseable construct begins is judged, so the closed verification-into-sink pipeline denies as it
@@ -14170,15 +14214,17 @@ def _main_isolated(monitor):
                 "(true #'\n)\ntools/testı.py | cut -c1", "allow-note")
         gexpect("(gw-dbt-note-latest) control: 'latest' carries no checker part, allows",
                 "(true #'\n)\ntools/latest.py | cut -c1", "allow")
-        # The doubt tests run ONLY behind a '#' the lexer cannot judge under both readings: the plain
-        # parse-error fallback and the failed-main-reading floor keep the conservative raw probes, so
-        # these commands keep the allow the probes have always given them (each was denied while widened
-        # spelling probes ran on every fallback path, though no path here can read a bypass in them).
+        # The checker-word doubt tests run ONLY behind a '#' the lexer cannot judge under both readings; the
+        # plain parse-error fallback keeps the conservative raw probes over the decoded scan (and fails
+        # closed only on quoting that scan does not decode), and the failed-main-reading floor keeps the
+        # raw probes alone, so these commands keep the allow the probes have always given them (each was
+        # denied while widened spelling probes ran on every fallback path, though no path here can read a
+        # bypass in them). The procsub row's quotes touch no letter, so the scan decodes them.
         gexpect("(gw-fb-herestring) outside the doubt path, a here-string parse error with a '-name' "
                 "operand in another segment still allows",
                 "git commit -m x && find . -name z <<<y", "allow")
         gexpect("(gw-fb-procsub) a process-substitution parse error passing '-Dname' through still allows",
-                "git commit -F <(echo \"pass -Dname through\")", "allow")
+                "git commit -F <(echo \" pass -Dname through \")", "allow")
         gexpect("(gw-fb-heredocfloor) on the failed-main-reading floor, a heredoc commit message carrying "
                 "'-Dname' still allows",
                 "git commit -m \"$(cat <<'EOF'\nPass -Dname through; don't drop it\nEOF\n)\"", "allow")
@@ -14332,8 +14378,9 @@ def _main_isolated(monitor):
             # step 7, the parse-error path
             ("(gw-ct-e1) a recovered prefix proves the sink before an unquoted heredoc, denies",
              "pytest | tail; cat <<EOF\nx\nEOF", "deny"),
-            ("(gw-ct-e2) an in-progress (unclosed) sink segment is not proof: the raw note stays",
-             'pytest | tail "unbalanced', "allow-note"),
+            ("(gw-ct-e2) an in-progress (unclosed) sink segment is not proof: the raw note stays (the "
+             "quote touches no letter, so the fallback decodes it)",
+             'pytest | tail " unbalanced', "allow-note"),
             # the incident shape and its absolute-redirect form
             ("(gw-ct-i1) the incident command notes",
              "python3 -I -B tools/check_release_cut.py --self-test --red-on-revert | tail -20", "allow-note"),
@@ -18880,6 +18927,20 @@ def _main_isolated(monitor):
         ebexpect("(eb-e10d) breadth add with NO publish allows (relocate/convention, not breadth+publish)",
                  "git add -A && git commit -m x", "allow")
         ebexpect("(eb-e10e) a push BEFORE the breadth stage does not fire (publishes pre-breadth state)",
+                 "git push && git add -A", "allow")
+        # The fallback's deny precedence: behind a '#' the lexer cannot judge under both readings (the
+        # backquote prefix), a visible cd+mutate pairing must not note its way past the visible
+        # breadth+push pairing - the raw fallback tests the publish deny first, like the parsed pre-scan.
+        ebexpect("(eb-e10f) fallback: cd+mutate beside breadth+push still DENIES (the cd note cannot mask "
+                 "the publish deny)",
+                 "x=`true #`\ncd /abs/repo && git add --all && git commit -m x && git push", "deny")
+        # Order state is judged one reading of an uncertain '#' at a time: flattening the readings would
+        # read the first reading's trailing breadth into the second reading's push and invent a
+        # stage-then-publish sequence no single reading holds, so the prefixed spelling of eb-e10e must
+        # keep its control's allow.
+        ebexpect("(eb-e10g) per-reading order: push before breadth behind an uncertain '#' prefix allows",
+                 "x=$(true)#\ngit push && git add -A", "allow")
+        ebexpect("(eb-e10h) control for eb-e10g: the unprefixed push-before-breadth command allows",
                  "git push && git add -A", "allow")
         ebexpect("(eb-e11) cd feeding read-only git allows", "cd /abs && git status", "allow")
         ebexpect("(eb-e12) cd feeding non-git allows", "cd /abs && ls -la", "allow")
