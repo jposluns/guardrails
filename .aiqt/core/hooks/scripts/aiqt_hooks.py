@@ -4749,7 +4749,8 @@ _GIT_MUTATING_VERBS = frozenset((
     "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
     "switch", "tag", "update-index", "update-ref", "worktree"))
 _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
-# branch/tag classification (GD-158 rounds 1-6, synthesis; flag behaviour pinned to git 2.53; the long
+# branch/tag classification (GD-158 rounds 1-6, synthesis; flag behaviour pinned to git 2.53, plus the
+# git 2.56 branch options marked in the table; the long
 # universe is a conservative SUPERSET of git 2.53's branch/tag option table, validated against git 2.53
 # by the eb-e57..e147 differential self-test and an out-of-suite real-git differential; a future git
 # option-table change, such as a new write option absent from the table, is a DISCLOSED drift residual
@@ -4783,10 +4784,14 @@ _GIT_REF_SPECS = {
             "--recurse-submodules": "W", "--no-recurse-submodules": "W",
             "--no-list": "W", "--no-show-current": "W",
             "--no-points-at": "W", "--no-with": "W", "--no-without": "W",
+            # git 2.56: --delete-merged deletes merged local branches; --dry-run and --no-dry-run decide
+            # whether it does, so they are W too (a dry run beside the deletion is judged like the deletion).
+            "--delete-merged": "W", "--dry-run": "W", "--no-dry-run": "W",
             # L / F: list trigger and filters (set list mode; F takes a value, optional only when last).
             "--list": "L",
             "--contains": "F", "--no-contains": "F", "--merged": "F", "--no-merged": "F",
             "--points-at": "F", "--with": "F", "--without": "F",
+            "--forked": "F",  # git 2.56: lists branches whose upstream matches; implies --list
             # D: required value, NO list mode (a following name creates).
             "--format": "D", "--sort": "D",
             # O: optional '='-attached value only (never consumes a following token).

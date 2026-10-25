@@ -19111,11 +19111,46 @@ def _main_isolated(monitor):
             ("eb-e145", "tag", ["--", "-v"], _M),                      # -v after '--' is an operand -> create
             ("eb-e146", "tag", ["--frob"], _M),
             ("eb-e147", "tag", ["-Z"], _M),
+            # -- branch: git 2.56 options. --delete-merged deletes; --dry-run and --no-dry-run decide
+            # whether it does and are W, so a dry run beside the deletion is judged like the deletion --
+            ("eb-e148", "branch", ["--delete-merged", "main"], _M),
+            ("eb-e149", "branch", ["--delete-merged=main"], _M),
+            ("eb-e150", "branch", ["--delete-m", "main"], _M),          # git 2.56 resolves this prefix
+            ("eb-e151", "branch", ["--dry-run", "--delete-merged", "main"], _M),
+            ("eb-e152", "branch", ["--delete-merged", "main", "--dry-run"], _M),
+            ("eb-e153", "branch", ["--dry-run"], _M),                   # git refuses it alone (over-ASK)
+            ("eb-e154", "branch", ["--no-dry-run"], _M),                # git lists (over-ASK)
+            ("eb-e155", "branch", ["--no-dry-run", "NAME"], _M),        # git creates NAME
+            # -- branch: git 2.56 --forked is a filter that implies --list (a name is a pattern) --
+            ("eb-e156", "branch", ["--forked", "main"], _R),
+            ("eb-e157", "branch", ["--forked=main"], _R),
+            ("eb-e158", "branch", ["--fork", "main"], _R),              # git 2.56 resolves this prefix
+            ("eb-e159", "branch", ["--forked", "main", "NAME"], _R),    # git creates nothing
+            ("eb-e160", "branch", ["--forked", "main", "-d", "NAME"], _M),  # list mode never masks a write
         ):
             _rc_got = aiqt_hooks._git_is_mutating(_rc_sub, _rc_args)
             if _rc_got is not _rc_want:
                 failures.append("({}) _git_is_mutating({!r}, {!r}): expected {}, got {}"
                                 .format(_rc_label, _rc_sub, _rc_args, _rc_want, _rc_got))
+        # A W entry and the unknown-option default give the same MUTATING verdict, so the git 2.56
+        # spellings are also pinned by role: each resolves to its own entry, and a prefix git 2.56
+        # rejects as ambiguous (--d, --del, --fo) resolves to None.
+        _rr_long = aiqt_hooks._GIT_REF_SPECS["branch"]["long"]
+        for _rr_label, _rr_name, _rr_want in (
+                ("eb-e161", "--delete-merged", "W"), ("eb-e162", "--delete-m", "W"),
+                ("eb-e163", "--dry-run", "W"), ("eb-e164", "--dr", "W"), ("eb-e165", "--no-dry-run", "W"),
+                ("eb-e166", "--forked", "F"), ("eb-e167", "--fork", "F"),
+                ("eb-e168", "--del", None), ("eb-e169", "--d", None), ("eb-e170", "--fo", None)):
+            _rr_got = aiqt_hooks._resolve_long_role(_rr_name, _rr_long)
+            if _rr_got != _rr_want:
+                failures.append("({}) branch {} resolves to role {!r}, expected {!r}"
+                                .format(_rr_label, _rr_name, _rr_got, _rr_want))
+        ebexpect("(eb-e171) branch --delete-merged under cd allows with a note (a deletion)",
+                 "cd /x && git branch --delete-merged main", "allow-note")
+        ebexpect("(eb-e172) branch --forked listing under cd is read-only",
+                 "cd /x && git branch --forked main", "allow")
+        ebexpect("(eb-e173) a dry run beside --delete-merged is judged like the deletion under cd",
+                 "cd /x && git branch --dry-run --delete-merged main", "allow-note")
         for _eb_sub, _eb_args, _eb_want in (
                 ("commit", ["-am", "x"], True),
                 ("add", ["-A"], True),

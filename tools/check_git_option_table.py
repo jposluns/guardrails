@@ -6,7 +6,8 @@ Run with: python3 -I -B tools/check_git_option_table.py [--root DIR]
 The self-test uses in-memory fixtures only; it invokes no git or filesystem writes.
 Exit: 0 clean within scope; 1 drift finding; 2 cannot-evaluate.
 
-Primary input is git <sub> -h, stdout plus stderr, status 129. Completion
+Primary input is git <sub> -h, stdout plus stderr, status 129 (git 2.55 and
+earlier) or 0 (git 2.56 and later), with the usage text either way. Completion
 adds required value-form checks in a fresh isolated repository. Unavailable,
 empty or malformed completion is cannot-evaluate. No hook code is imported.
 
@@ -53,6 +54,7 @@ TIMEOUT = 30
 SUBCOMMANDS = ("branch", "tag")
 SOURCE_REL = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
 MIN_OPTIONS = 5
+HELP_STATUSES = (129, 0)
 LONG_NAME = re.compile(r"--[a-z][a-z0-9-]*\Z")
 SHORT_NAME = re.compile(r"-[A-Za-z0-9]\Z")
 HELP_OPTION = re.compile(
@@ -105,6 +107,9 @@ ROLE_VERDICTS = {
 # P: git v2.53.0 parse-options.c negation and parse-options.h option macros:
 # https://raw.githubusercontent.com/git/git/v2.53.0/parse-options.c
 # https://raw.githubusercontent.com/git/git/v2.53.0/parse-options.h
+# G: installed git 2.56.0 git-branch(1) OPTIONS and git branch -h, with the behaviour
+# observed in a scratch repository: --delete-merged deletes, --forked implies --list,
+# and --dry-run is refused without --delete-merged. Not reviewed against pinned source.
 ROLE_CATALOG = {
     ("branch", "--verbose"): "R",  # B: verbosity.
     ("branch", "--no-verbose"): "R",  # B/P: reset verbosity.
@@ -171,6 +176,10 @@ ROLE_CATALOG = {
     ("branch", "--no-recurse-submodules"): "W",  # B/P: creation control.
     ("branch", "--format"): "D",  # B: formatting.
     ("branch", "--no-format"): "R",  # B/P: formatting.
+    ("branch", "--delete-merged"): "W",  # G: deletes merged local branches.
+    ("branch", "--dry-run"): "W",  # G: deletion control, judged like the deletion.
+    ("branch", "--no-dry-run"): "W",  # G: deletion control.
+    ("branch", "--forked"): "F",  # G: upstream filter.
     ("tag", "--list"): "L",  # T: list mode.
     ("tag", "-l"): "L",  # T: list mode.
     ("tag", "-n"): "N",  # T: list message lines, optional attached decimal.
@@ -313,8 +322,11 @@ def parse_hook(source):
 
 def parse_help(sub, status, stdout, stderr):
     text = stdout + "\n" + stderr
-    if status != 129 or not re.search(r"^usage: git " + sub + r"\b", text, re.M):
-        raise CannotEvaluate("{}: PRIMARY expected usage and exit 129, got {}".format(sub, status))
+    # git 2.55 and earlier print the -h usage text and exit 129; git 2.56 and
+    # later print the same text and exit 0. Either status needs the usage text.
+    if status not in HELP_STATUSES or not re.search(r"^usage: git " + sub + r"\b", text, re.M):
+        raise CannotEvaluate("{}: PRIMARY expected usage and exit 129 or 0, got {}".format(
+            sub, status))
     options = set()
 
     def collect(declaration, strict=False):
@@ -551,11 +563,22 @@ def self_test():
     case("f floor", 2, lambda: help_code(129, "usage: git branch\n    --list    list\n"))
     case("f repair stdout", 0, lambda: help_code(129, good_help))
     case("f repair stderr", 0, lambda: help_code(129, "", good_help))
-    case("f wrong status", 2, lambda: help_code(0, good_help))
+    # git 2.56 and later exit 0 after -h; the usage text is still required.
+    no_usage = good_help.replace("usage: git branch [<options>]\n\n", "", 1)
+    case("f status 0 stdout", 0, lambda: help_code(0, good_help))
+    case("f status 0 stderr", 0, lambda: help_code(0, "", good_help))
+    case("f status 0 no usage", 2, lambda: help_code(0, no_usage))
+    case("f status 0 other usage", 2, lambda: help_code(
+        0, good_help.replace("git branch", "git tag")))
+    case("f status 129 no usage", 2, lambda: help_code(129, no_usage))
+    for status in (-1, 1, 128, 130):
+        case("f wrong status {}".format(status), 2, lambda: help_code(status, good_help))
     case("f malformed spelling", 2, lambda: help_code(129, good_help + "    --BAD    bad\n"))
     parsed = parse_help("branch", 129, good_help, "")
     if parsed != {"-l", "--list", "--force", "--no-force", "--format", "--quiet", "--verbose"}:
         failures.append("f: wrong exact spelling expansion")
+    case("f status 0 same spellings", 0, lambda: int(
+        parse_help("branch", 0, good_help, "") != parsed))
     # g: Remove a duplicate or replace malformed syntax with this valid literal.
     spec = (
         "{'long': {'--list': 'L'}, 'short_write': frozenset(), "
@@ -611,8 +634,8 @@ def self_test():
         "--delete": "W", "--no-delete": "W",
     }
 
-    def short_help_code(text, roles, stderr=False):
-        parsed = parse_help("branch", 129, "" if stderr else text, text if stderr else "")
+    def short_help_code(text, roles, stderr=False, status=129):
+        parsed = parse_help("branch", status, "" if stderr else text, text if stderr else "")
         return verdict(compare("branch", parsed, roles, ROLE_CATALOG))
 
     reordered = good_help + "    --[no-]delete,  -d    delete\n"
@@ -621,6 +644,9 @@ def self_test():
         reordered, dict(baseline, **{"-d": "W"}), stderr=True))
     case("r2 reordered short mis-role", 1, lambda: short_help_code(
         reordered, dict(baseline, **{"-d": "R"})))
+    case("r2 status 0 missing short", 1, lambda: short_help_code(reordered, baseline, status=0))
+    case("r2 status 0 short repair", 0, lambda: short_help_code(
+        reordered, dict(baseline, **{"-d": "W"}), status=0))
     aliases = good_help + "    -d,  -D, --[no-]delete    delete\n"
     case("r2 multiple short aliases", 1, lambda: short_help_code(
         aliases, dict(baseline, **{"-d": "W"})))
@@ -684,6 +710,19 @@ def self_test():
                      sub, {option}, {option: role}, ROLE_CATALOG)))
     # The long-role comparison still permits equal verdict profiles.
     check("r3 long equal profiles", 0, {"--list"}, {"--list": "V"}, ROLE_CATALOG)
+    # git 2.56 branch spellings: the deletion and its dry-run controls are W and the
+    # upstream filter is F; a read-side role for any of them is a finding.
+    git256 = {"--delete-merged": "W", "--dry-run": "W", "--no-dry-run": "W", "--forked": "F"}
+    check("git 2.56 roles", 0, set(git256), git256, ROLE_CATALOG, {"--delete-merged", "--forked"})
+    check("git 2.56 delete-merged as filter", 1, {"--delete-merged"},
+          {"--delete-merged": "F"}, ROLE_CATALOG)
+    check("git 2.56 delete-merged as read", 1, {"--delete-merged"},
+          {"--delete-merged": "R"}, ROLE_CATALOG)
+    check("git 2.56 dry-run as read", 1, {"--dry-run"}, {"--dry-run": "R"}, ROLE_CATALOG)
+    check("git 2.56 no-dry-run as list", 1, {"--no-dry-run"}, {"--no-dry-run": "L"}, ROLE_CATALOG)
+    check("git 2.56 forked as display", 1, {"--forked"}, {"--forked": "D"}, ROLE_CATALOG)
+    check("git 2.56 forked value form", 1, {"--forked"}, {"--forked": "R"}, ROLE_CATALOG,
+          {"--forked"})
 
     if failures:
         print("SELF-TEST FAIL:\n  " + "\n  ".join(failures))
