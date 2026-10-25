@@ -1446,6 +1446,8 @@ expected-check-ids = [
   "rwh/created-link-relative-and-hard-targets-at-working-dir-deny-red-on-revert",
   "rwh/ln-unmodelled-option-withheld-while-hold-live-red-on-revert",
   "rwh/ln-unmodelled-option-no-live-hold-inert-red-on-revert",
+  "rwh/ln-unmodelled-option-target-bases-each-red-on-revert",
+  "rwh/ln-unmodelled-option-three-operand-link-directory-red-on-revert",
   "rwh/leading-slash-run-collapsed-fails-closed-red-on-revert",
   "rwh/quoted-span-space-path-denies-red-on-revert",
   "rwh/config-worktree-reply-byte-exact-and-unambiguous-red-on-revert",

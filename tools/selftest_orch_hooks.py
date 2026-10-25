@@ -2958,8 +2958,9 @@ def _rwh_cases(tmp):
     # an ln option word outside the modelled set (a short-option cluster other than -sr, such as
     # -sf or -sfn; -t or --target-directory; -T; any other option, such as -n) leaves where the
     # link lands or points unmodelled, so while a hold is live the command is withheld, naming
-    # the option; its operands still join the hold set under every reading the modelled forms
-    # make at once, so a RELATIVE operand naming the held worktree surfaces the hold from a
+    # the option; its operands still join the hold set under the readings the modelled forms
+    # make, taken at once (a -t or --target-directory value is never a target base), so a
+    # RELATIVE operand naming the held worktree at the session directory surfaces the hold from a
     # session outside every held repository, a hook created in the held repository's own .git is
     # withheld from its main worktree, and a step through a link toward the held worktree's
     # PARENT is followed, a -sfn link named over an existing link to a directory included (red
@@ -3005,6 +3006,46 @@ def _rwh_cases(tmp):
           [_rwh_without_hold(lambda c=c: kind(base, c)) for c in uh] +
           [_rwh_without_hold(lambda c=c: kind(out, c)) for c in up],
           ["allow"] * 17)
+    # under an unmodelled option each operand before the last is read as a target at the
+    # directory the segment runs from, at the last operand and at the last operand's parent,
+    # all at once, so each reading on its own surfaces a hold no other reading reaches from a
+    # session outside every held repository: a target naming the held worktree only from the
+    # link name's parent (red when that reading is dropped, or when only the segment-directory
+    # reading is kept), only from inside the last operand (red when the last-operand reading
+    # is dropped), and only from the segment directory, stepped through by the recorded link
+    # (red when that reading is dropped); each such revert leaves the hold unseen and the reset
+    # allowed. The same shape toward the unheld free tree, and the hold-reader revert legs,
+    # stay allowed.
+    tb = ["ln -sf ../held " + str(out) + "/zt1 && git -C " + str(out) + "/zt1 reset --hard " +
+          seed,
+          "ln -sf ../held " + str(out) + " && git -C " + str(out) + "/held reset --hard " + seed,
+          "ln -srf . " + str(out) + "/zt2 && git -C " + str(out) + "/zt2/held reset --hard " +
+          seed]
+    tb_res = run(base, tb[0])
+    check("rwh/ln-unmodelled-option-target-bases-each-red-on-revert",
+          [_rdp_kind(tb_res), "'-sf'" in _rwh_reason(tb_res)] + [kind(base, c) for c in tb[1:]] +
+          [kind(base, "ln -sf ../free " + str(out) + "/zt3 && git -C " + str(out) +
+                "/zt3 commit --allow-empty -m x")] +
+          [_rwh_without_hold(lambda c=c: kind(base, c)) for c in tb],
+          ["unverifiable", True, "unverifiable", "unverifiable"] + ["allow"] * 4)
+    # the same readings are taken for every operand count: with three operands or more the
+    # last is the directory the links are created in, and a relative target read against it
+    # surfaces the hold, for -sf, -sv and -s -f alike (red when the readings are taken for two
+    # operands only again: each target is then read at the segment directory alone, names no
+    # repository, and the reset is allowed). The modelled -s spelling of the same command is
+    # still withheld by its own branch, and the free-tree shape and the hold-reader revert leg
+    # stay allowed.
+    t3 = [o + " ../held " + n + " " + str(out) + " && git -C " + str(out) + "/held reset --hard " +
+          seed for o, n in (("ln -sf", "zt4"), ("ln -sv", "../zt5"), ("ln -s -f", "../zt5"))]
+    t3_res = run(base, t3[0])
+    check("rwh/ln-unmodelled-option-three-operand-link-directory-red-on-revert",
+          [_rdp_kind(t3_res), "'-sf'" in _rwh_reason(t3_res)] + [kind(base, c) for c in t3[1:]] +
+          [kind(base, "ln -s ../held zt4 " + str(out) + " && git -C " + str(out) +
+                "/held reset --hard " + seed),
+           kind(base, "ln -sf ../free zt6 " + str(out) + " && git -C " + str(out) +
+                "/free commit --allow-empty -m x"),
+           _rwh_without_hold(lambda: kind(base, t3[0]))],
+          ["unverifiable", True] + ["unverifiable"] * 3 + ["allow"] * 2)
     # a run of leading slashes collapses to one before every screen: the kernel reads '//x' as
     # '/x', so '//proc' and '///proc' spellings are process-relative (withheld outright), a '..'
     # spelling that a textual collapse would erase stays process-relative (the components are

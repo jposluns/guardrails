@@ -20667,9 +20667,12 @@ def _rwh_hold_dirs(command, segments, cwd):
     against the directory the segment runs from; a relative TARGET of a plain symbolic link
     (-s without -r) resolved against the LINK'S OWN directory, where the kernel resolves it, and
     that of a hard link or a -r/--relative link against the directory the segment runs from,
-    where ln opens it; under an option word _RWH_LN_OPTS does not classify, every one of those
-    readings taken at once, the link recorded even over an existing directory, and the command
-    withheld while a hold is live; and the
+    where ln opens it; under an option word _RWH_LN_OPTS does not classify, those readings taken
+    at once for every operand count (each operand before the last read as a target at the
+    directory the segment runs from, at the last operand and at its parent; a -t or
+    --target-directory value, never paired with its option, is never a target base), the link
+    recorded even over an existing directory, and the command withheld while a hold is live; and
+    the
     plain two-operand link recorded so a later candidate stepping through it is also consulted
     where the link will point), every literal
     ABSOLUTE path anywhere in the raw text (_RWH_RAW_ABS_PATH_RE, so a held path inside a quoted
@@ -20834,8 +20837,9 @@ def _rwh_hold_dirs(command, segments, cwd):
             # _RWH_LN_OPTS are modelled: any other (a short-option cluster other than -sr and
             # -rs, -t or --target-directory, -T, an option word the table does not name) leaves
             # where the link lands or points unmodelled, so the caller withholds the command
-            # while a hold is live; its operands still join the hold set under every modelled
-            # reading at once, and with every hold the set shows clear the decision is
+            # while a hold is live; its operands still join the hold set under the modelled
+            # readings at once (a -t or --target-directory value excepted, never a target
+            # base), and with every hold the set shows clear the decision is
             # unchanged. An operand that cannot be resolved (relative with the needed base
             # unknown, or expansion-built) leaves the created link's destination unknown, which
             # the caller withholds while a hold is live. The plain two-operand link is also
@@ -20851,23 +20855,27 @@ def _rwh_hold_dirs(command, segments, cwd):
                         break
                     letters += _RWH_LN_OPTS[opt]
             if unmodelled is not None:
-                # where the link lands or points is not modelled, so every reading the modelled
-                # forms make is taken at once, additive only: each operand at the directory the
-                # segment runs from, the target also at the link's directory (the link name
-                # itself and its parent), and the two-operand link recorded for the rewrite even
-                # when its name resolves to an existing directory (ln's -n and -T read a link
-                # name that points to a directory as the name itself, not as a directory to
-                # enter), so a hold any of those readings reaches is seen and withholds while it
-                # is live
+                # where the link lands or points is not modelled, so the readings the modelled
+                # forms make are taken at once, additive only, whatever the operand count: each
+                # operand at the directory the segment runs from, and each operand before the
+                # last (a target) also at the last operand (the links' directory when it is or
+                # may be a directory) and at its parent; the two-operand link is recorded for
+                # the rewrite even when its name resolves to an existing directory (ln's -n and
+                # -T read a link name that points to a directory as the name itself, not as a
+                # directory to enter), so a hold any of those readings reaches is seen and
+                # withholds while it is live. A -t or --target-directory value, the links'
+                # directory in that form, is not paired with its option, so it is never a
+                # target base: a disclosed residual
                 for operand in operands:
                     add(operand, c_chain)
-                if len(operands) == 2:
-                    dest_abs = add(operands[1], c_chain)
+                if len(operands) > 1:
+                    dest_abs = add(operands[-1], c_chain)
                     if dest_abs is not None:
-                        for target_base in (c_chain, dest_abs, os.path.dirname(dest_abs)):
-                            target = add(operands[0], target_base)
-                            if target is not None:
-                                links.append((dest_abs, target))
+                        for operand in operands[:-1]:
+                            for target_base in (c_chain, dest_abs, os.path.dirname(dest_abs)):
+                                target = add(operand, target_base)
+                                if target is not None and len(operands) == 2:
+                                    links.append((dest_abs, target))
                 if link_held is None:
                     link_held = unmodelled
             else:
@@ -21582,7 +21590,10 @@ def review_workdir_hold(data):
     step whose path the command already named earlier; a step
     through a created link whose rewritten path is process-relative, which is dropped from the
     hold set rather than refused (a link to / followed by a -C through <link>/proc/self/cwd); a
-    held path
+    relative target of a plain symbolic link (no -r) made with ln -t or --target-directory,
+    which the kernel resolves against the option's directory, a base the hold set never reads
+    because the option is not paired with its value (the unmodelled-option withhold fires only
+    when some other reading shows a live hold); a held path
     carried only in CONTENT (a patch, stream, file or stdin the command reads), which no argv or
     raw-text scan sees, so the input-path admissions are refused only while some hold is visible;
     an UNQUOTED path containing spaces in raw text (only a quoted span is read whole); a relative

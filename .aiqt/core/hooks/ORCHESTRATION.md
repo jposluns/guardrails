@@ -1087,12 +1087,17 @@ the command is withheld outright (the read-only grammar still passes such a read
 segment carrying any option word other than `-s`, `-r`, `-sr`, `-rs`, `--symbolic` or
 `--relative` (another cluster such as `-sf`, `-t`/`--target-directory`, `-T`, `-n` or an
 unknown option) leaves where that link lands or points unmodelled, so while a hold is live a
-git command in the same Bash call is withheld. Its operands are still consulted under every
-reading the modelled forms make at once (the target at the directory the segment runs from and
-at the link's directory, and the link recorded for the rewrite even over an existing directory,
-since `-n` and `-T` read a link name that points to a directory as the name itself, not as a
-directory to enter), so a hold any of those readings reaches is seen; with no live hold in any consulted repository the decision is the inert allow, unchanged
-for adopters who write no markers. Create the link in a separate command first. A git too
+git command in the same Bash call is withheld. Its operands are still consulted under the
+readings the modelled forms make, all at once and for every operand count: every operand at
+the directory the segment runs from, every operand before the last (a target) also at the last
+operand and at the last operand's parent, and a two-operand link recorded for the rewrite even
+over an existing directory, since `-n` and `-T` read a link name that points to a directory as
+the name itself, not as a directory to enter. A hold any of those readings reaches is seen.
+The exception is `-t`/`--target-directory`: there the link's directory is the option's value,
+which this scan does not pair with the option and never reads as a target base, so a relative
+target that reaches a held worktree only from that directory is not seen (an allow residual,
+listed below). With no live hold in any consulted repository the decision is the inert allow,
+unchanged for adopters who write no markers. Create the link in a separate command first. A git too
 old to answer the probe's options echoes them back
 on exit 0, so it fails closed the same way (it was previously read as inert). A marker-directory
 path that exists but does not lead to a directory (a dangling `review-holds` or `aiqt` symlink)
@@ -1392,7 +1397,11 @@ in it); a step through a link created INSIDE a directory that already exists (a 
 recorded under its own name only); a step whose path the command already
 named earlier; and a step
 whose rewritten path is process-relative, which is dropped from the hold set rather than
-refused (a link to `/` and then `-C <link>/proc/self/cwd/...`). From a session outside every
+refused (a link to `/` and then `-C <link>/proc/self/cwd/...`). A relative target of a plain
+symbolic link (no `-r`) made with `ln -t` or `--target-directory` is resolved by the kernel
+against the option's directory, which the hold set never reads as a target base (the option
+is not paired with its value), so a step through such a link (`ln -s -t <dir> ../held &&
+git -C <dir>/held reset`) reaches the held worktree with its hold unread. From a session outside every
 held repository such a command stays allowed even where it reaches a held worktree. A program-running spelling outside the gate's lists (an alias or
 a `git-<name>` program on PATH, a hook or a program the configuration already names) is the same
 residual: the gate is bounded by its enumeration, not a certified absence of programs. An
