@@ -196,6 +196,12 @@ run_gate "worker-pack-drift" python3 -I -B tools/gen_worker_pack.py --check
 run_gate "hooks-selftest" python3 -I -B tools/gen_hooks.py --self-test
 run_gate "secret-patterns-drift" python3 -I -B tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
+# CI builds bash 5.3 at patch level 9 before the hooks behaviour self-test (tools/ci_build_bash.py --build, a
+# CI-only step: it installs into RUNNER_TEMP and writes GITHUB_PATH, which only a CI runner provides; the script
+# builds only on that explicit --build, and run with no argument it runs its offline self-test). This runner
+# builds nothing: the self-test uses the host's bash, and it fails, never skips, when that bash is older than
+# 5.3. Only the build script's offline self-test runs here.
+run_gate "ci-build-bash-selftest" python3 -I -B tools/ci_build_bash.py --self-test
 run_gate "hooks-behaviour-selftest" python3 -I -B tools/selftest_aiqt_hooks.py
 run_gate "char-policy-selftest" python3 -I -B tools/gen_char_policy.py --self-test
 run_gate "char-policy-drift" python3 -I -B tools/gen_char_policy.py --check
@@ -210,6 +216,7 @@ run_gate "git-fixture-env-config-malformed" python3 -I -B tools/check_selftest_e
 run_gate "git-fixture-env-config-system" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
 run_gate "instruction-budget-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
 run_gate "brief-capability-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
+run_gate "ci-build-bash-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-build-bash-selftest
 run_gate "hook-latency-selftest" python3 -I -B tools/check_selftest_execution.py --suite hook-latency-selftest
 run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
 run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py

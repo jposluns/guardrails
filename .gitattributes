@@ -719,6 +719,7 @@ tools/check_standards_urls_live.py text eol=lf
 tools/check_version_monotonicity.py text eol=lf
 tools/check_versions.py text eol=lf
 tools/ci-status.sh text eol=lf
+tools/ci_build_bash.py text eol=lf
 tools/conformance.py text eol=lf
 tools/doctor.py text eol=lf
 tools/gen_adapters.py text eol=lf

@@ -2614,6 +2614,45 @@ expected-check-ids = [
 ]
 
 [[suite]]
+id = "ci-build-bash-selftest"
+runner = "tools/ci_build_bash.py"
+expected-check-ids = [
+  # ---------- the pin table ----------
+  "pins/table-shape",
+  # ---------- a fetched file against its pin ----------
+  "verify/match-passes",
+  "verify/sha256-mismatch-refuses",
+  "verify/size-mismatch-refuses",
+  "verify/missing-file-refuses",
+  "fetch/non-https-refuses",
+  # ---------- the built bash's BASH_VERSINFO ----------
+  "version/match-passes",
+  "version/patch-below-refuses",
+  "version/patch-above-refuses",
+  "version/minor-refuses",
+  "version/nonzero-exit-refuses",
+  "version/no-binary-refuses",
+  # ---------- the whole pipeline over fixture files ----------
+  "provision/success-installs-and-appends",
+  "provision/mismatch-installs-nothing",
+  "provision/download-error-installs-nothing",
+  "provision/patch-order-installs-nothing",
+  "provision/built-version-installs-nothing",
+  "provision/installed-version-removes-install",
+  "provision/existing-install-refuses",
+  # ---------- the CI entry ----------
+  "env/missing-runner-temp-exits-2",
+  "env/relative-github-path-exits-2",
+  "env/os-error-exits-2",
+  # ---------- the entry: a bare run is the self-test; only --build builds ----------
+  "main/bare-runs-self-test",
+  "main/self-test-forms-run-self-test",
+  "main/build-without-env-exits-2",
+  "main/unknown-argument-exits-2",
+  "network/never-reached",
+]
+
+[[suite]]
 id = "hook-latency-selftest"
 runner = "tools/measure_hook_latency.py"
 expected-check-ids = [

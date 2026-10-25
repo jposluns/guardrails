@@ -16,6 +16,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   branch_root         PreToolUse  brnrot  deny branch creation from an orphaned or unprovable start point
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass and a verification run piped into a truncating sink; allow+note another swallowed or truncated checker
   commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
+  heredoc_terminator  PreToolUse  sectvl  deny a Bash heredoc whose opener has no exactly matching terminator line
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
 
@@ -79,6 +80,11 @@ commit_msg_subst (sectvl): a backtick or $( command substitution in a git commit
 command-injection hazard the shell runs before git sees the argument, so it DENIES and names the safe
 re-issue (single quotes, escape the marker, or git commit -F <file>); the unparseable-fallback and unreadable
 -command cases deny fail-safe on the same terms. Only a mis-wired event hard-blocks (no structured decision).
+
+heredoc_terminator (sectvl): a heredoc opener with no line exactly equal to its delimiter before the end of the
+command makes bash read the rest of the command as heredoc text, so it DENIES, naming the opener and any
+near-miss line; a << whose delimiter word cannot be read and an unreadable command deny fail-safe on the same
+terms. Only a mis-wired event hard-blocks.
 
 git_explicit_binding (expbnd): an ambient git target or a whole-tree breadth+publish is a binding CONVENTION
 where the orchestrator normally binds its own target, not a hazard, so every former ask (including the
@@ -12087,6 +12093,518 @@ def commit_msg_subst(data):
     return _allow()
 
 
+# --- sectvl: a heredoc opener with no exactly matching terminator line ------------------------------
+# A heredoc ends at the first body line that is EXACTLY its delimiter. A mistyped terminator (EFO, a trailing
+# space or carriage return after EOF, a <<- terminator indented with spaces, an EOF sharing its line with the
+# ) of a command substitution) ends nothing: bash reads every remaining line of the command as heredoc text,
+# so a program fed by the heredoc (python3 - <<'PY', bash -s <<'SH') can run the rest of the command as its
+# own code while the shell runs none of it. The shared _lex_command cannot judge this (it refuses an unquoted
+# heredoc, and reads a double-quoted "$(cat <<'EOF' ...)" as one word), so this guard makes its own raw pass,
+# tracking only what decides whether a << is an opener: quoting, escapes, comments, assignment subscripts,
+# and the command, arithmetic and parameter substitutions that nest inside one another. A delimiter
+# word is read by the shared _parse_heredoc_delim, so both passes read a delimiter alike. A command that
+# holds a backslash-newline pair together with a << once every pair is removed never reaches this scan:
+# heredoc_terminator refuses it as unverifiable, because bash removes each unquoted pair before it splits
+# operators and words and this scan does not model that joining.
+_HeredocOpener = collections.namedtuple(
+    "_HeredocOpener", ("spec", "line", "delim", "strip_tabs", "quoted", "terminated", "near", "stop"))
+_HEREDOC_NEAR_MISS_MAX = 2  # the largest edit distance at which a body line is named as a near miss
+_HEREDOC_SHOWN = 80  # the longest opener, delimiter or near-miss text quoted in a deny reason
+_HEREDOC_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Words after which bash still reads the next word as a possible assignment: reserved words that begin a
+# command. A declaration builtin lets a later name=(...) argument be a compound assignment, but bash does
+# not read a name[...] argument of it as a subscript.
+_HEREDOC_COMMAND_WORDS = frozenset(("!", "{", "coproc", "do", "elif", "else", "if", "then", "time", "until",
+                                    "while"))
+_HEREDOC_DECL_WORDS = frozenset(("alias", "declare", "eval", "export", "let", "local", "readonly", "typeset"))
+
+
+def _heredoc_edit_distance(a, b, bound):
+    """The Levenshtein distance between a and b when it is at most bound, else bound + 1. Only the cells within
+    bound of the diagonal are computed, so the cost is linear in len(a)."""
+    big = bound + 1
+    if abs(len(a) - len(b)) > bound:
+        return big
+    width = 2 * bound + 1
+    # prev[k] is row i - 1 at column j = (i - 1) + k - bound; row 0 holds the distance from "" to b[:j], j
+    prev = [k - bound if 0 <= k - bound <= len(b) else big for k in range(width)]
+    for i in range(1, len(a) + 1):
+        cur = [big] * width
+        for k in range(width):
+            j = i + k - bound
+            if j < 0 or j > len(b):
+                continue
+            if j == 0:
+                cur[k] = min(i, big)
+                continue
+            best = prev[k] + (a[i - 1] != b[j - 1])  # match or substitute, from (i - 1, j - 1)
+            if k + 1 < width:
+                best = min(best, prev[k + 1] + 1)  # delete a[i - 1], from (i - 1, j)
+            if k > 0:
+                best = min(best, cur[k - 1] + 1)  # insert b[j - 1], from (i, j - 1)
+            cur[k] = min(best, big)
+        prev = cur
+    return prev[len(b) - len(a) + bound]
+
+
+def _heredoc_body(command, i, n, opener, in_subst, line_no):
+    """Read one heredoc body the way bash does, from index i (where _heredoc_openers says bash starts it: the
+    line after a newline of the opener's own command context, or after the line on which its substitution
+    closed, or where the previous body ended), which is on line line_no. Returns (next_i, terminated, near,
+    stop):
+    next_i is where scanning resumes; terminated is True when a line EXACTLY equal to the delimiter was found
+    (next_i is then just past that line); near is None or, for an unterminated body, (line, text, distance)
+    for the closest body line (the first on a tie) that is not blank and is within _HEREDOC_NEAR_MISS_MAX
+    edits of the delimiter and fewer edits than the delimiter has characters; stop is None or (line, text)
+    for the early end below.
+    A line is one physical line, except that for an UNQUOTED delimiter a line ending in an odd run of
+    backslashes is joined to the next with that backslash and the newline removed (bash's line continuation
+    in an interpolating heredoc; a quoted delimiter's body is read verbatim). For <<- the leading tabs of
+    the line are removed before it is compared. In a $(...), <(...) or >(...) substitution (in_subst), bash
+    5.3 also ends the body early, with a here-document warning, at a line that starts with the delimiter and
+    holds a ) later on, such as EOF) or EOF;true): it reads the rest of that line, from just after the
+    delimiter, as commands, so next_i is that point and the body is not terminated. With no terminator
+    next_i is n."""
+    delim = opener.delim
+    bound = min(_HEREDOC_NEAR_MISS_MAX, len(delim) - 1)
+    near = None
+    while i < n:
+        first_line = line_no
+        pieces = []  # (index in command, text) of each physical part of this line
+        while True:
+            nl = command.find("\n", i)
+            physical = command[i:n if nl < 0 else nl]
+            start = i
+            i = n if nl < 0 else nl + 1
+            line_no += 1
+            backslashes = len(physical) - len(physical.rstrip("\\"))
+            if opener.quoted or nl < 0 or backslashes % 2 == 0:
+                pieces.append((start, physical))
+                break
+            pieces.append((start, physical[:-1]))
+            if i >= n:
+                break
+        text = "".join(piece for _start, piece in pieces)
+        tabs = len(text) - len(text.lstrip("\t")) if opener.strip_tabs else 0
+        candidate = text[tabs:]
+        if candidate == delim:
+            return i, True, None, None
+        if in_subst and candidate.startswith(delim) and ")" in candidate[len(delim):]:
+            offset = tabs + len(delim)  # the line holds a ) past this offset, so one of its pieces holds it
+            for start, piece in pieces:
+                if offset < len(piece):
+                    return start + offset, False, None, (first_line, text)
+                offset -= len(piece)
+        if bound > 0 and candidate.strip():
+            distance = _heredoc_edit_distance(candidate, delim, bound)
+            if distance <= bound and (near is None or distance < near[2]):
+                near = (first_line, text, distance)
+    return n, False, near, None
+
+
+def _heredoc_skip_to(command, i, n, close):
+    """The index just past the first unescaped close character at or after i (n when there is none); a
+    backslash escapes the character after it. Skips an ANSI-C $'...' body or a backtick command substitution,
+    whose text this pass does not scan for openers."""
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+        elif c == close:
+            return i + 1
+        else:
+            i += 1
+    return n
+
+
+def _heredoc_openers(command):
+    """Every heredoc opener bash would act on in a raw Bash command, in source order, each read through to its
+    terminator by _heredoc_body. An opener is a << that is not part of a here-string <<<, and that is not
+    quoted, escaped, commented out, inside arithmetic ($((...)), $[...], ((...))) or the subscript of an
+    assignment (name[...]= where an assignment can stand, which a redirection's target never is, or [...]=
+    in a compound assignment name=(...)), inside a ${...} parameter expansion, or inside a backtick
+    substitution or ANSI-C $'...' text (both skipped unread). Quotes inside arithmetic or a subscript are
+    read as in a command, so a ] or ) inside them does not end it. A << inside a $(...) command
+    substitution or a <(...)/>(...) process substitution IS an opener, also within double quotes, in
+    arithmetic, in a subscript or in a ${...}; a <( directly inside double quotes or in arithmetic is literal
+    text, as in bash. A << whose delimiter word _parse_heredoc_delim cannot read is returned with delim None
+    and terminated False.
+    A backslash-newline pair is NOT joined here: this scan reads it as an escaped newline (no word
+    character, skipped mid-word), while bash removes each unquoted pair before it splits the text into
+    operators and words, so on pair-bearing text this scan can read any multi-character construct bash
+    joins across a pair (<<, <<<, $(, $', &>, a delimiter word, a body line and the rest) as its unjoined
+    characters and so miss or misjudge an opener in either direction. heredoc_terminator never hands this
+    scan such text: it refuses, before scanning, any command that holds a pair together with a << once
+    every pair is removed, and a pair-bearing command with no << after that removal has no opener to find
+    (removing a pair removes no < character). A direct caller that passes pair-bearing text gets the
+    unjoined reading.
+    Bodies are read in bash's order. Each command context (the command, and each $(...), <(...) or >(...)
+    in it at any depth) keeps its own pending openers, and a newline of that context reads only its own
+    pending bodies, in the order their openers appeared; the pending bodies of the contexts around it wait
+    for a newline of their own. So when a line cat <<A "$(cat <<B is followed by lines B, )" and A, the
+    body of B (the line B) is read before the body of A (the line A). A substitution that closes with
+    bodies still unread (bash warns of an unterminated here-document) has them read at once, from the line
+    after the one it closes on (or after bodies already read that way), before anything still pending
+    around it; the scan then finishes that line and, at its newline (also within a string or expansion,
+    or after a backslash), resumes after those bodies. One forward pass with a stack of open contexts, each [kind, depth]: cmd (a command; depth
+    counts plain parentheses; then its pending openers, whether a word starting now can be an assignment,
+    and whether it is the parentheses of a compound assignment), dq (a double-quoted string), param
+    (${...}), arith (depth counts parentheses; then whether a word ends with it) and bracket ($[...] or a
+    subscript; depth counts brackets; then whether a word ends with it, and whether it is a subscript)."""
+    n = len(command)
+    openers = []
+    # a cmd frame's third item lists indexes into openers whose bodies it has not read; its fourth is
+    # "command" before a command's first word, "assign" after only assignments (a word read in either can
+    # be an assignment), "decl" after a declaration builtin, else ""; its fifth marks a compound assignment
+    stack = [["cmd", 0, [], "command", False]]
+    word_start = True  # a '#' starts a comment only at the start of a word
+    seen = [0, 1]  # [index, its line]; the scan only moves forward, so line counting stays linear
+    ahead = None  # (index, line) just past the bodies read when a substitution closed with bodies unread
+    redirect = False  # the next word is a redirection's target, which leaves a command's position as it was
+    compound_at = -1  # the index of the ( that opens a compound assignment name=(...)
+
+    def line_at(index):
+        seen[1] += command.count("\n", seen[0], index)
+        seen[0] = index
+        return seen[1]
+
+    def read_bodies(pending, i, line_no, in_subst):
+        """Read each pending body in turn from index i on line line_no; returns where the next one starts."""
+        for index in pending:
+            start = i
+            i, terminated, near, stop = _heredoc_body(command, i, n, openers[index], in_subst, line_no)
+            openers[index] = openers[index]._replace(terminated=terminated, near=near, stop=stop)
+            line_no += command.count("\n", start, i)
+        del pending[:]
+        return i, line_no
+
+    i = 0
+    while i < n:
+        frame = stack[-1]
+        kind = frame[0]
+        c = command[i]
+        nx = command[i + 1] if i + 1 < n else ""
+        if ahead is not None and ahead[0] <= i:
+            ahead = None  # a quoted or skipped span crossed lines past those bodies; never scan backwards
+        if ahead is not None and (c == "\n" and kind != "cmd" or c == "\\" and nx == "\n"):
+            # the line ends inside a string or an expansion, or is continued by a backslash: bash goes on with
+            # the line after the bodies a closed substitution already read (a newline of a command is below)
+            i = ahead[0]
+            ahead = None
+            continue
+        if kind == "cmd" and word_start and c not in " \t\n;&|<>()#" and not (c == "\\" and nx == "\n"):
+            # the first character of a word. Bash reads name[...] as an assignment's subscript, in which << is a
+            # shift, only where an assignment can stand (not after a command word, not as an argument of a
+            # declaration builtin, and never as a redirection's target, as in >f[1<<EOF]), and [...] at the
+            # start of a word inside a compound assignment's parentheses
+            match = _HEREDOC_NAME_RE.match(command, i)
+            j = match.end() if match else i
+            digits = i
+            while digits < n and command[digits].isdigit():
+                digits += 1
+            if not redirect and (frame[4] and c == "[" or match and frame[3] in ("command", "assign")
+                                 and command.startswith("[", j)):
+                stack.append(["bracket", 0, False, True])
+                word_start = False
+                i = (i if c == "[" else j) + 1
+                continue
+            if digits > i and command[digits:digits + 1] in ("<", ">"):
+                pass  # the file descriptor number of a redirection
+            elif redirect:
+                redirect = False  # a redirection's target; after an assignment it ends the command position
+                if frame[3] == "assign":
+                    frame[3] = ""
+            elif match and frame[3] and (command.startswith("=", j) or command.startswith("+=", j)):
+                if frame[3] == "command":
+                    frame[3] = "assign"  # the next word can still be an assignment
+                equals = j + (command[j] == "+")
+                if command.startswith("(", equals + 1):
+                    compound_at = equals + 1
+            elif not frame[4]:
+                end = j if match else i + (c in "!{")
+                word = command[i:end] if end >= n or command[end] in " \t\n;&|<>()" else None
+                if frame[3] in ("command", "assign") and word in _HEREDOC_DECL_WORDS:
+                    frame[3] = "decl"
+                elif not (frame[3] == "command" and word in _HEREDOC_COMMAND_WORDS) and frame[3] != "decl":
+                    frame[3] = ""
+        if c == "\\":  # the next character is literal; a backslash-newline joins lines and ends no word
+            if nx != "\n":
+                word_start = False
+            i += 2
+            continue
+        if kind in ("arith", "bracket") and c not in "$`\"'":
+            # << here is a shift; a $(...), ${...} or nested arithmetic, a backtick, or a single- or
+            # double-quoted string inside it is read below as it is elsewhere, so a heredoc in a $(...) in
+            # arithmetic is checked, and a ] or ) inside quotes (p[']']=x, $(( ')' ))) does not end it
+            if kind == "bracket" and frame[3] and c in "<>" and nx == "(":
+                stack.append(["cmd", 0, [], "command", False])  # bash runs a <(...) inside a subscript
+                word_start = True
+                i += 2
+                continue
+            if c == ("(" if kind == "arith" else "["):
+                frame[1] += 1
+            elif c == (")" if kind == "arith" else "]"):
+                if frame[1]:
+                    frame[1] -= 1
+                else:
+                    stack.pop()
+                    word_start = frame[2]  # mid-word after an expansion; a new word after a ((...)) command
+                    if kind == "arith" and nx == ")":
+                        i += 1  # the second ) of a closing ))
+                    elif kind == "bracket" and frame[3] and not stack[-1][4]:
+                        # name[...]= is an assignment; name[...] with no = after it is a command word
+                        assigned = command.startswith("=", i + 1) or command.startswith("+=", i + 1)
+                        stack[-1][3] = "assign" if assigned else ""
+            i += 1
+            continue
+        if c == "$":
+            if command.startswith("$((", i):
+                stack.append(["arith", 0, False])
+                word_start = False
+                i += 3
+            elif nx == "(":
+                stack.append(["cmd", 0, [], "command", False])
+                word_start = True
+                i += 2
+            elif nx == "{":
+                stack.append(["param", 0])
+                i += 2
+            elif nx == "[":
+                stack.append(["bracket", 0, False, False])
+                word_start = False
+                i += 2
+            elif nx == "'" and kind != "dq":  # ANSI-C quoting (inside double quotes $' is literal)
+                i = _heredoc_skip_to(command, i + 2, n, "'")
+                word_start = False
+            else:  # a $"..." locale string then opens as a double-quoted one
+                word_start = False
+                i += 1
+            continue
+        if c == "`":
+            i = _heredoc_skip_to(command, i + 1, n, "`")
+            word_start = False
+            continue
+        if kind == "dq":
+            if c == '"':
+                stack.pop()
+                word_start = False
+            i += 1
+            continue
+        if c == "'":  # in a command, a ${...}, arithmetic or a subscript: literal to the next single quote
+            close = command.find("'", i + 1)
+            i = n if close < 0 else close + 1
+            word_start = False
+            continue
+        if c == '"':
+            stack.append(["dq", 0])
+            word_start = False
+            i += 1
+            continue
+        if kind == "param":
+            if c in "<>" and nx == "(":  # bash runs a <(...) inside ${...}, also within double quotes
+                stack.append(["cmd", 0, [], "command", False])
+                word_start = True
+                i += 2
+                continue
+            if c == "}":
+                stack.pop()
+                word_start = False
+            i += 1
+            continue
+        if c == "\n":  # a newline of this command context reads its own pending bodies, and no others
+            i += 1
+            word_start = True
+            redirect = False
+            if not frame[4]:
+                frame[3] = "command"
+            if ahead is not None:
+                i, line_no = ahead
+                ahead = None
+            else:
+                line_no = line_at(i)
+            if frame[2]:
+                i, _line_no = read_bodies(frame[2], i, line_no, len(stack) > 1)
+            continue
+        if c == "#" and word_start:
+            nl = command.find("\n", i)
+            i = n if nl < 0 else nl
+            continue
+        if c == "<" and nx == "<":
+            if command.startswith("<<<", i):  # a here-string: no body and no terminator line
+                word_start = True
+                redirect = True
+                i += 3
+                continue
+            parsed = _parse_heredoc_delim(command, i + 2, n)
+            end = i + 2 if parsed is None else parsed[3]
+            if parsed is None:
+                openers.append(_HeredocOpener(command[i:end], line_at(i), None, False, False, False, None, None))
+            else:
+                quoted, delim, strip_tabs, _end = parsed
+                openers.append(_HeredocOpener(command[i:end], line_at(i), delim, strip_tabs, quoted, False, None,
+                                              None))
+                frame[2].append(len(openers) - 1)
+            word_start = parsed is None
+            i = end
+            continue
+        if c in "<>" and nx == "(":  # a process substitution runs a command
+            if redirect:  # it is a redirection's target (cat < <(...)), read as a target word is read below
+                redirect = False
+                if frame[3] == "assign":
+                    frame[3] = ""
+            stack.append(["cmd", 0, [], "command", False])
+            word_start = True
+            i += 2
+            continue
+        if c in "<>" or c == "&" and nx == ">":  # a redirection operator (>&, >>, >|, <&, <> and &> in full)
+            redirect = True
+            if nx and nx in "&>|" or c == "<" and nx == ">":
+                i += 1
+            i += 1
+            word_start = True
+            continue
+        if c == "(":
+            if i == compound_at:  # the parentheses of a compound assignment name=(...)
+                stack.append(["cmd", 0, [], "", True])
+                word_start = True
+                i += 1
+                continue
+            if nx == "(" and word_start:  # an arithmetic command
+                stack.append(["arith", 0, True])
+                i += 2
+                continue
+            frame[1] += 1
+        elif c == ")":
+            if frame[1]:
+                frame[1] -= 1
+            elif frame[4]:  # the ) that closes a compound assignment
+                stack.pop()
+                word_start = False
+                i += 1
+                continue
+            elif len(stack) > 1:  # the ) that closes a $(...), <(...) or >(...)
+                stack.pop()
+                if frame[2]:
+                    # bodies the substitution never reached a newline for: bash warns, then reads them at once
+                    # from the line after this one (or after bodies already read so), early-end rule included
+                    if ahead is None:
+                        nl = command.find("\n", i)
+                        ahead = (n if nl < 0 else nl + 1, line_at(i) + 1)
+                    ahead = read_bodies(frame[2], ahead[0], ahead[1], True)
+                word_start = False
+                i += 1
+                continue
+        if c in ";&|()" and not frame[4]:  # a command operator: the next word starts a command
+            frame[3] = "command"
+            redirect = False
+        word_start = c in " \t;&|<>()"
+        i += 1
+    return openers
+
+
+def _heredoc_terminator_reason(bad):
+    """The deny reason: each unterminated or unreadable heredoc opener (the first three, then a count), with
+    its near-miss line where one was found."""
+    clauses = []
+    for op in bad[:3]:
+        spec = op.spec[:_HEREDOC_SHOWN]
+        if op.delim is None:
+            clauses.append("the {} on line {} is not followed by a delimiter word this check can read, so "
+                           "where its heredoc ends cannot be told".format(spec, op.line))
+            continue
+        if op.stop is not None:
+            clauses.append("the heredoc opened by {} on line {} is cut short at line {}, {!r}: that line starts "
+                           "with {!r} but is not exactly it, and because it holds a ) inside a substitution, "
+                           "bash ends the heredoc after the delimiter with a warning and reads the rest of the "
+                           "line as commands".format(spec, op.line, op.stop[0], op.stop[1][:_HEREDOC_SHOWN],
+                                                     op.delim[:_HEREDOC_SHOWN]))
+            continue
+        clause = ("the heredoc opened by {} on line {} has no line exactly equal to {!r}{} before the end of "
+                  "the command".format(spec, op.line, op.delim[:_HEREDOC_SHOWN],
+                                       " after its leading tabs" if op.strip_tabs else ""))
+        if op.near is not None:
+            near_line, near_text, distance = op.near
+            clause += "; line {}, {!r}, is {} edit{} away from it".format(
+                near_line, near_text[:_HEREDOC_SHOWN], distance, "" if distance == 1 else "s")
+        clauses.append(clause)
+    if len(bad) > 3:
+        clauses.append("{} more such opener{}".format(len(bad) - 3, "" if len(bad) == 4 else "s"))
+    return ("AIQT rule sectvl (tool-argument-validation): {}. Bash reads every line after an unterminated "
+            "heredoc's opener as heredoc text, so a program fed by it (python3 - <<'PY', bash -s) can run the "
+            "rest of the command as its own code while the shell runs none of it; the command is denied "
+            "before anything runs. Re-issue it with each heredoc closed by a line that is exactly its "
+            "delimiter: nothing before it (only tabs, and only for <<-) and nothing after it (no trailing "
+            "space or carriage return, and no ) of a $(...), which goes on the next line)."
+            .format("; and ".join(clauses)))
+
+
+def heredoc_terminator(data):
+    """sectvl (security/tool-argument-validation), PreToolUse/Bash. DENY-and-educate a Bash command in which a
+    heredoc opener (<<TOKEN, <<'TOKEN', <<"TOKEN", <<-TOKEN) has no later line exactly equal to its delimiter
+    (after the line's leading tabs for <<-) before the end of the command, naming the opener and the nearest
+    near-miss line. Hooks never ask; a command with every opener terminated allows silently. A << whose
+    delimiter word cannot be read, and a payload with no readable command string, deny fail-safe.
+    A command that holds any backslash-newline pair and still holds a << once every such pair is removed
+    (removed regardless of quoting, which removes at least every pair bash removes) is DENIED as
+    unverifiable without being scanned: bash removes each unquoted pair before it splits the text into
+    operators and words, so a pair can split or move what bash reads as the << operator, the delimiter
+    word, another operator, or a body line, and this check does not model that joining. The refusal is
+    deliberately wider than bash (it also denies a command bash runs correctly, such as a closed heredoc
+    whose body line ends in a backslash, or a pair bash keeps literal inside single quotes); the message
+    tells the caller to re-issue the command without line continuations. A pair-bearing command with no <<
+    after that removal is allowed by the fast path below, since removing a pair removes no < character, so
+    no << can form at a join. With no pair present the full scan runs unchanged."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: heredoc_terminator wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("sectvl")
+    if tool_name != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule sectvl (tool-argument-validation): the Bash payload carried no readable command "
+            "string, so the heredoc terminator check could not run; it is denied fail-safe. Re-issue a "
+            "well-formed Bash command.",
+            "AIQT guardrail: denied a Bash call with no readable command; re-issue a well-formed command "
+            "(rule sectvl, fail-safe).")
+    if "\\\n" in command:
+        # bash removes each unquoted backslash-newline pair before it splits operators and words, so a pair
+        # can split or move a << operator, a delimiter word or a body line; the scan below does not model
+        # that joining, so a command that mixes a pair with a << (judged on the text with every pair
+        # removed, which removes at least every pair bash removes) cannot be verified and is denied. With
+        # no << after that removal no opener can exist, since removing a pair removes no < character.
+        if "<<" not in command.replace("\\\n", ""):
+            return _allow()
+        return _deny(
+            "AIQT rule sectvl (tool-argument-validation): the command holds a backslash-newline pair, and "
+            "it still holds a << once every such pair is removed. The pairs are removed from the text "
+            "regardless of quoting, which removes at least every line continuation bash removes, and the "
+            "<< that remains may be a heredoc operator, a here-string or a shift; this check does not "
+            "decide which. Because a line continuation can split or move what bash reads as the << "
+            "operator, a heredoc's delimiter word, or a body line, whether every heredoc here is "
+            "terminated cannot be verified, so the command is denied fail-safe before anything runs; the "
+            "refusal is deliberately wider than bash and also denies a command bash runs correctly, such "
+            "as a pair bash keeps literal inside single quotes. Re-issue it without line continuations: "
+            "write the command so that no line ends in a backslash.",
+            "AIQT guardrail: denied a Bash command that holds a backslash-newline pair and still holds a "
+            "<< once every pair is removed from the text regardless of quoting, which this check cannot "
+            "verify (rule sectvl, fail-safe); re-issue it without line continuations.")
+    if "<<" not in command:
+        return _allow()
+    bad = [op for op in _heredoc_openers(command) if not op.terminated]
+    if not bad:
+        return _allow()
+    return _deny(
+        _heredoc_terminator_reason(bad),
+        "AIQT guardrail: denied a Bash command whose heredoc {} on line {} has no exactly matching terminator "
+        "line (rule sectvl); close it with a line that is exactly its delimiter."
+        .format(bad[0].spec[:_HEREDOC_SHOWN], bad[0].line))
+
+
 # --- secsec: an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
 # A COMPENSATING, shift-left control: it does NOT replace the CI secret-scan and gitleaks gates (they
 # remain the real backstop), it moves the same high-signal detection to the moment a secret would be
@@ -23930,6 +24448,7 @@ HANDLERS = {
     "branch_root": branch_root,
     "gate_weakening": gate_weakening,
     "commit_msg_subst": commit_msg_subst,
+    "heredoc_terminator": heredoc_terminator,
     "secrets_shift_left": secrets_shift_left,
     "gensrc_guard": gensrc_guard,
     "write_scope_guard": write_scope_guard,
@@ -23969,6 +24488,7 @@ HANDLER_EVENT = {
     "branch_root": PRETOOL,
     "gate_weakening": PRETOOL,
     "commit_msg_subst": PRETOOL,
+    "heredoc_terminator": PRETOOL,
     "secrets_shift_left": PRETOOL,
     "gensrc_guard": PRETOOL,
     "write_scope_guard": PRETOOL,
