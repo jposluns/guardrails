@@ -786,6 +786,12 @@ def _fixtures(base_dir):
         LEDGER_REL: LEDGER_HEADER + '\n[[retirement]]\ncontrol = "gate:x"\n'
         'state = { kind = "disclosed" }\nauthorization = "recorded"\n'}), _snapshot(), 2,
         ("base tools/control_retirements.toml: row 1 field state must be a string, not dict",))
+    # A base row with a non-string field, deleted at the head while its control is live there again (the
+    # deletion the append-only check allows): the type refusal is all that stands between this record and a
+    # pass, so this is the fixture a reverted type check accepts.
+    add("ledger/base-evidence-list-row-deleted", _snapshot(ledger=[dict(history, evidence=["x"])]),
+        _snapshot(gates=BASE_GATES + ("retired-gate",)), 2,
+        ("base tools/control_retirements.toml: row 1 field evidence must be a string, not list",))
     two = _without(_without(BASE_SUITES, "orch-behaviour-selftest", "trunc/head-denies", "trunc/head-refuses"),
                    "entry-guard-selftest", "live/direct-launch-passes")
     second = dict(control="check:entry-guard-selftest/live/direct-launch-passes", state="unreachable",
@@ -812,6 +818,13 @@ def _fixtures(base_dir):
         ("1 control(s) removed",))
     add("head/schema-invalid-registry", base, dict(_snapshot(), **{REGISTRY_REL: _extra_key_registry(BASE_SUITES)}),
         2, ("head tools/selftest_checks.toml: schema-invalid",))
+    # The same schema-invalid head registry with a disclosed row for every base check id: read as an empty
+    # check set, it would show every check removed and recorded, so this is the fixture a reverted schema
+    # refusal accepts.
+    every_check = ["check:{}/{}".format(sid, cid) for sid, ids in BASE_SUITES for cid in ids]
+    add("head/schema-invalid-registry-all-recorded", base, dict(_snapshot(ledger=[
+        dict(control=control, state="disclosed", authorization="recorded in the change") for control in every_check]),
+        **{REGISTRY_REL: _extra_key_registry(BASE_SUITES)}), 2, ("head tools/selftest_checks.toml: schema-invalid",))
     add("base/gate-without-id", dict(base, **{GATES_REL: '[[gate]]\nscript = "tools/x.py"\n'}), _snapshot(), 2,
         ("base .aiqt/core/gates/manifest.toml: [[gate]] #1 has no usable id",))
     # The same id-less row at both ends: without the id check both snapshots collapse to the same unusable
@@ -834,6 +847,15 @@ def _fixtures(base_dir):
     add("local/base-arg", base, _snapshot(suites=dropped), 1, (DROPPED + ": present at base", "--base HEAD"),
         base_arg="HEAD", branch="trunk")
     add("local/base-arg-option", base, _snapshot(), 2, ("is not a usable commit name",), base_arg="--all")
+
+    def dash_tag(root, run_env):
+        # A tag named with a leading '-' resolves after --end-of-options, so without the leading-dash refusal
+        # --base -probe would bind the base to that tag and pass.
+        subprocess.run(["git", "-C", str(root), "update-ref", "refs/tags/-probe", "HEAD"],
+                       check=True, capture_output=True, timeout=TIMEOUT, env=git_fixture_env())
+
+    add("local/base-arg-dash-tag", base, _snapshot(), 2, ("revision '-probe' is not a usable commit name",),
+        base_arg="-probe", prepare=dash_tag)
 
     def committed_drop(root, run_env):
         # The removal is already committed on a feature branch; only refs/heads/main still holds the base.
@@ -894,6 +916,18 @@ def _fixtures(base_dir):
         env=push, prepare=payload(None))
     add("ci/push-zero-before", base, _snapshot(), 2, ("no usable before commit",), env=push,
         prepare=payload("0" * 40))
+
+    def zero_named_ref(root, run_env):
+        # An all-zero before of the other hash width is not a full object id in this repository, so git looks
+        # it up as a ref name: with a branch of that name, a reverted zero check would bind the base to it and
+        # pass.
+        width = 64 if len(_commit(root, _git_env(), "HEAD")) == 40 else 40
+        subprocess.run(["git", "-C", str(root), "update-ref", "refs/heads/" + "0" * width, "HEAD"],
+                       check=True, capture_output=True, timeout=TIMEOUT, env=git_fixture_env())
+        payload("0" * width)(root, run_env)
+
+    add("ci/push-zero-before-named-ref", base, _snapshot(), 2, ("no usable before commit",), env=push,
+        prepare=zero_named_ref)
     add("ci/push-no-payload", base, _snapshot(), 2, ("without GITHUB_EVENT_PATH",), env=push)
     add("ci/push-base-arg-refused", base, _snapshot(), 2, ("--base is refused",), env=push, base_arg="HEAD",
         prepare=payload(None))
@@ -951,10 +985,15 @@ def _patched(owner, name, replacement):
 # crashes, or merely changes a diagnostic while the fixture stays rejected, earns no credit here.
 #
 # DIAGNOSTIC_MUTANTS (mutant id, the exact source text, its replacement, a vector, the exact exit under the
-# mutant, output fragments under the mutant): a revert that cannot make any invalid fixture accepted,
-# because it changes only a refusal message, an exception handler or a crash class, or because it
-# re-tightens the stale-row repair (refusing a valid fixture, never accepting an invalid one). Each is
-# pinned to its exact outcome under the mutant, never loosely counted as caught.
+# mutant, output fragments under the mutant): a revert that changes only a refusal message, an exception
+# handler or a crash class, or that narrows what the gate accepts (a stricter grammar or schema, or the
+# stale-row repair re-tightened), so it refuses a valid fixture but accepts no invalid one; the comment
+# above each row states which. Each is pinned to its exact outcome under the mutant, never loosely counted
+# as caught. The class boundary is checked only against the vectors: under every diagnostic mutant, no
+# vector the gate refuses may be accepted, so a revert whose accepting input is among the vectors cannot
+# sit in this class. An accepting input outside the vectors is not searched for; the reason stated on each
+# row is a review argument, not a proof, and a revert found to accept such an input moves to the
+# enforcement class with that input added as its vector.
 ENFORCEMENT_MUTANTS = (
     ("removal-leg", "        if control not in rows_by_control:\n", "        if False:\n", "drop/check-no-row"),
     ("gate-set", '    live |= control_ids(_required(read, where, GATES_REL), "gate", "gate", where + " " + GATES_REL,'
@@ -1010,40 +1049,49 @@ ENFORCEMENT_MUTANTS = (
     ("actions-event", '        if event != "push":\n', "        if False:\n", "ci/dispatch-with-payload"),
     ("pr-base-ref", '        if not BRANCH_RE.fullmatch(base_ref) or ".." in base_ref or base_ref.endswith((".lock", "/")):\n',
      "        if False:\n", "ci/pr-base-ref-revision-syntax"),
+    ("row-field-type", "            if not isinstance(row[key], str):\n", "            if False:\n",
+     "ledger/base-evidence-list-row-deleted"),
+    ("registry-schema", "    if rows is None:\n        raise CannotEvaluate(\"{}: schema-invalid",
+     "    if rows is None:\n        return set()\n        raise CannotEvaluate(\"{}: schema-invalid",
+     "head/schema-invalid-registry-all-recorded"),
+    ("option-revision", 'if not revision or revision.startswith("-"):', "if not revision:", "local/base-arg-dash-tag"),
+    ("push-before-zero", 'or not before.strip("0"):', ":", "ci/push-zero-before-named-ref"),
 )
 DIAGNOSTIC_MUTANTS = (
-    ("row-field-type", "            if not isinstance(row[key], str):\n", "            if False:\n",
-     "row/state-array", "crashed (TypeError)", ()),
+    # Narrows the gate and hook id grammar a row's control is read by: a row the narrowed grammar rejects
+    # draws the control-grammar finding, which stands in for the new-row finding it skips.
     ("row-id-grammar", "        return bool(sep) and _id_text(rest)\n", "        return bool(sep) and _head_id_ok(rest)\n",
      "base/id-outside-head-grammar", 1,
      ("row 1: control must be gate:<id>, hook:<id> or check:<suite>/<check id>",)),
+    # Narrows the check id grammar a row's control is read by, the same way.
     ("padded-id", "        return bool(sep) and _id_text(suite) and bool(slash) and _id_text(cid)\n",
      "        return bool(sep) and _id_text(suite) and bool(slash) and _id_text(cid) and cid == cid.strip()\n",
      "rename/padded-check-id", 1, ("control must be gate:<id>, hook:<id> or check:<suite>/<check id>",)),
+    # Changes an exception handler: a malformed TOML input crashes the run (exit 1 from the interpreter).
     ("toml-parse", "    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:\n"
      "        raise CannotEvaluate(\"{}: malformed ({})\".format(label, type(exc).__name__))\n",
      "    except ZeroDivisionError as exc:\n        raise CannotEvaluate(str(exc))\n", "base/unparseable-registry",
      "crashed (TOMLDecodeError)", ()),
-    ("registry-schema", "    if rows is None:\n        raise CannotEvaluate(\"{}: schema-invalid",
-     "    if rows is None:\n        return set()\n        raise CannotEvaluate(\"{}: schema-invalid",
-     "head/schema-invalid-registry", 1,
-     ("check:orch-behaviour-selftest/trunc/head-denies: present at base", "4 finding(s)")),
+    # Narrows the base registry reader to the head schema, which refuses every registry the by-id reader
+    # refuses and otherwise yields the same check keys.
     ("base-registry-by-id", "    registry = check_keys if head else base_check_keys\n", "    registry = check_keys\n",
      "base/registry-extra-key", 2, ("base tools/selftest_checks.toml: schema-invalid",)),
+    # Narrows the base gate and hook id grammar: a base id it rejects is refused, never skipped.
     ("base-id-grammar", "    id_ok = _head_id_ok if head else _id_text\n", "    id_ok = _head_id_ok\n",
      "base/id-outside-head-grammar", 2, ("base .aiqt/core/gates/manifest.toml: [[gate]] #3 has no usable id",)),
+    # Changes an exception handler: an unavailable scratch home crashes the run.
     ("scratch-home-refused", "    except OSError as exc:\n        raise CannotEvaluate(\"hermetic git environment",
      "    except ZeroDivisionError as exc:\n        raise CannotEvaluate(\"hermetic git environment",
      "env/scratch-home-unavailable", "crashed (FileNotFoundError)", ()),
+    # Changes a refusal message: a missing input read as empty TOML is still refused by its reader, since
+    # every reader requires a non-empty array of rows.
     ("input-required", "    if data is None:\n        raise CannotEvaluate(\"{} {}: missing\".format(where, rel))\n",
      "    if data is None:\n        data = b\"\"\n", "base/hooks-missing", 2,
      ("base .aiqt/core/hooks/manifest.toml: [[hook]] must be a non-empty array of tables",)),
-    ("option-revision", 'if not revision or revision.startswith("-"):', "if not revision:",
-     "local/base-arg-option", 2, ("does not resolve to a commit",)),
-    ("push-before-zero", 'or not before.strip("0"):', ":", "ci/push-zero-before", 2,
-     ("does not resolve to a commit",)),
+    # Changes a refusal message: an empty event path still fails to open, as an unreadable payload.
     ("push-payload", '    if not path:\n        raise CannotEvaluate("push event without GITHUB_EVENT_PATH")\n', "",
      "ci/push-no-payload", 2, ("push event payload unreadable",)),
+    # Re-tightens the stale-row repair: it only adds a finding (the repair is refused again), never removes one.
     ("base-row-repair",
      "        if isinstance(base_control, str) and base_control in base_live and base_control not in head_live:\n",
      "        if isinstance(base_control, str) and base_control in base_live:\n",
@@ -1226,6 +1274,7 @@ def _self_test_isolated(executed, real_git):
                 ("vector/ledger-base-row-live-kept", "ledger/base-row-live-kept"),
                 ("vector/ledger-base-control-array", "ledger/base-control-array"),
                 ("vector/ledger-base-state-table", "ledger/base-state-table"),
+                ("vector/ledger-base-evidence-list-row-deleted", "ledger/base-evidence-list-row-deleted"),
                 ("vector/boundary-exact-rows", "boundary/exact-rows"),
                 ("vector/boundary-one-short", "boundary/one-short"),
                 ("vector/boundary-extra-live-row", "boundary/extra-live-row"),
@@ -1235,6 +1284,7 @@ def _self_test_isolated(executed, real_git):
                 ("vector/base-registry-extra-key", "base/registry-extra-key"),
                 ("vector/base-id-outside-head-grammar", "base/id-outside-head-grammar"),
                 ("vector/head-schema-invalid-registry", "head/schema-invalid-registry"),
+                ("vector/head-schema-invalid-registry-all-recorded", "head/schema-invalid-registry-all-recorded"),
                 ("vector/base-gate-without-id", "base/gate-without-id"),
                 ("vector/base-gate-without-id-both-ends", "base/gate-without-id-both-ends"),
                 ("vector/base-hooks-missing", "base/hooks-missing"),
@@ -1245,6 +1295,7 @@ def _self_test_isolated(executed, real_git):
                 ("vector/head-duplicate-hook-id", "head/duplicate-hook-id"),
                 ("vector/local-base-arg", "local/base-arg"),
                 ("vector/local-base-arg-option", "local/base-arg-option"),
+                ("vector/local-base-arg-dash-tag", "local/base-arg-dash-tag"),
                 ("vector/local-committed-drop-no-row", "local/committed-drop-no-row"),
                 ("vector/env-scratch-home-unavailable", "env/scratch-home-unavailable"),
                 ("vector/ci-pr-drop-no-row", "ci/pr-drop-no-row"),
@@ -1254,6 +1305,7 @@ def _self_test_isolated(executed, real_git):
                 ("vector/ci-pr-base-ref-revision-syntax", "ci/pr-base-ref-revision-syntax"),
                 ("vector/ci-push-drop-no-row", "ci/push-drop-no-row"),
                 ("vector/ci-push-zero-before", "ci/push-zero-before"),
+                ("vector/ci-push-zero-before-named-ref", "ci/push-zero-before-named-ref"),
                 ("vector/ci-push-no-payload", "ci/push-no-payload"),
                 ("vector/ci-push-base-arg-refused", "ci/push-base-arg-refused"),
                 ("vector/ci-unsupported-event", "ci/unsupported-event"),
@@ -1275,10 +1327,11 @@ def _self_test_isolated(executed, real_git):
         # 3. honest mutants, separated by class (see the tables). An enforcement mutant is caught only when
         # its named invalid fixture becomes ACCEPTED (exit 0) under it; a crash or a changed diagnostic
         # earns no credit. A diagnostic or exception-handling mutant is pinned to its exact outcome under
-        # the mutant. The discrimination check keeps its weaker reading on purpose: every vector expecting
-        # a nonzero exit deviates from its expectation under at least one mutant of either class.
+        # the mutant, and under it no vector the gate refuses may be accepted (the class boundary, checked
+        # against every vector). The discrimination check keeps its weaker reading on purpose: every vector
+        # expecting a nonzero exit deviates from its expectation under at least one mutant of either class.
         gate_source, marker, rest = Path(__file__).read_text(encoding="utf-8").partition("\nBASE_GATES = ")
-        exposed, unaccepted, mismatched = set(), [], []
+        exposed, unaccepted, mismatched, accepting = set(), [], [], []
         mutant_dir = Path(base_dir) / "mutants"
         mutant_dir.mkdir()
 
@@ -1302,13 +1355,22 @@ def _self_test_isolated(executed, real_git):
         for number, (mutant, old, new, vector, code, texts) in enumerate(
                 DIAGNOSTIC_MUTANTS, len(ENFORCEMENT_MUTANTS) + 1):
             outcomes, problem = mutant_results(old, new, number)
-            if problem is not None or vector not in by_name:
-                mismatched.append((mutant, vector, problem or "vector not built"))
+            if problem is not None:
+                mismatched.append((mutant, vector, problem))
+                accepting.append((mutant, problem))
+                continue
+            accepted = sorted(name for name, (_ok, (got, _output)) in outcomes.items()
+                              if got == 0 and by_name[name][4] != 0)
+            if accepted:
+                accepting.append((mutant, accepted))
+            if vector not in by_name:
+                mismatched.append((mutant, vector, "vector not built"))
                 continue
             got_code, got_output = outcomes[vector][1]
             if got_code != code or not all(text in got_output for text in texts):
                 mismatched.append((mutant, vector, got_code, got_output))
         check("mutant/every-diagnostic-mutant-exact-outcome", vectors and not mismatched, mismatched)
+        check("mutant/no-diagnostic-mutant-accepts", vectors and not accepting, accepting)
         never = sorted(vector[0] for vector in vectors if vector[4] != 0 and vector[0] not in exposed)
         check("mutant/every-refusing-vector-discriminates", vectors and not never, never)
 
@@ -1431,8 +1493,8 @@ def _self_test_isolated(executed, real_git):
           "append-only; the base is read by id only; unresolvable bases, malformed inputs and an unavailable "
           "scratch home fail closed; an ownership refusal says only the checkout owner or CI can evaluate; {} "
           "enforcement mutants each caught by an accepted invalid fixture, {} diagnostic and refusal mutants "
-          "each pinned to an exact outcome, every refusing vector deviating under at least one mutant, a crash "
-          "counted as a deviation; a poisoned caller HOME, XDG "
+          "each pinned to an exact outcome and accepting no refusing vector, every refusing vector deviating "
+          "under at least one mutant, a crash counted as a deviation; a poisoned caller HOME, XDG "
           "and system git configuration, each shown to break a read that honours it, changes no result)".format(
               len(results), len(vectors), len(ENFORCEMENT_MUTANTS), len(DIAGNOSTIC_MUTANTS)))
     return 0
