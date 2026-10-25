@@ -18818,6 +18818,109 @@ def _main_isolated(monitor):
              "FOO=x cd -", "allow-note")
         bcmd("(ap-c84b) 'FOO=x cd' allows with a note (any leading assignment -> bare-cd $HOME ALLOWS WITH A NOTE, round-4 conservative cost)",
              "FOO=x cd", "allow-note")
+        # UNREAD TAIL: the text from a construct the full lex does not read (a here-string, process
+        # substitution, '{fd}' redirect, unquoted here-document, or unbalanced quote) onward is judged on the
+        # raw text for the deny tier (_abspth_unread_truncation): a truncating redirect there whose target is
+        # not shown absolute DENIES. Every deny below allowed before that scan (fails when reverted); the
+        # allows pin the tiers the scan keeps and the over-deny it discloses.
+        bcmd("(ap-c85) relative truncating redirect AFTER a here-string DENIES (unread tail)",
+             "cat <<<y > out.txt", "deny")
+        bcmd("(ap-c86) relative truncating redirect AFTER a process substitution DENIES (unread tail)",
+             "cat <(true) > out.txt", "deny")
+        bcmd("(ap-c87) a '>' in an unbalanced quote's text DENIES (unread tail, disclosed over-deny)",
+             'echo "a > out.txt', "deny")
+        bcmd("(ap-c88) a here-string with no redirect keeps its allow (unread tail holds no '>')",
+             "cat <<<y", "allow")
+        bcmd("(ap-c89) a readable relative truncating redirect still DENIES (full lex, unchanged)",
+             "echo x > out.txt", "deny")
+        bcmd("(ap-c90) an ABSOLUTE truncating redirect after a here-string allows (unread tail)",
+             "cat <<<y > {}/out.txt".format(rp), "allow")
+        bcmd("(ap-c91) a relative '>|' after a here-string DENIES (unread tail)", "cat <<<y >| out.txt", "deny")
+        bcmd("(ap-c91b) a relative '&>' after a here-string DENIES (unread tail)", "cat <<<y &> out.txt", "deny")
+        bcmd("(ap-c91c) a '>&' to a relative file after a here-string DENIES (unread tail)",
+             "cat <<<y >& out.txt", "deny")
+        bcmd("(ap-c91d) an opaque '$F' truncating target after a here-string DENIES (unread tail)",
+             "cat <<<y > $F", "deny")
+        bcmd("(ap-c91e) a relative truncating redirect in a LATER segment after a here-string DENIES "
+             "(unread tail)", "cat <<<y > {}/out.txt; echo z > out.txt".format(rp), "deny")
+        bcmd("(ap-c91f) a relative truncating redirect inside an output process substitution DENIES "
+             "(unread tail)", "cmd > >(tee > out.txt)", "deny")
+        bcmd("(ap-c91g) a relative truncating '{fd}>' redirect DENIES (unread tail)",
+             "exec {fd}> out.txt", "deny")
+        # the tiers the unread-tail scan keeps: append, descriptor duplication or close, current-user tilde,
+        # a read redirect, a cd, a process-substitution target, and an escaped '>' (not an operator to bash).
+        bcmd("(ap-c92) an append '>>' after a here-string keeps its allow (unread tail)",
+             "cat <<<y >> out.txt", "allow")
+        bcmd("(ap-c92b) an append '&>>' after a here-string keeps its allow (unread tail)",
+             "cat <<<y &>> out.txt", "allow")
+        bcmd("(ap-c92c) a '2>&1' duplication after a here-string keeps its allow (unread tail)",
+             "cat <<<y 2>&1", "allow")
+        bcmd("(ap-c92d) a '>&-' close after a here-string keeps its allow (unread tail)", "cat <<<y >&-", "allow")
+        bcmd("(ap-c92e) a current-user tilde target after a here-string allows (unread tail)",
+             "cat <<<y > ~/out.txt", "allow")
+        bcmd("(ap-c92f) a read '<' after a here-string keeps its allow (unread tail)", "cat <<<y < in.txt", "allow")
+        bcmd("(ap-c92g) a read-write '<>' after a here-string keeps its allow (unread tail)",
+             "cat <<<y <> rw.txt", "allow")
+        bcmd("(ap-c92h) a relative cd after a here-string keeps its allow (unread tail)", "cat <<<y; cd rel", "allow")
+        bcmd("(ap-c92i) a process-substitution redirect target allows (unread tail)",
+             "cmd > >(tee {}/log)".format(rp), "allow")
+        bcmd("(ap-c92j) an escaped '\\>' after a here-string is an argument, not a redirect: allows (unread tail)",
+             "cat <<<y \\> out.txt", "allow")
+        bcmd("(ap-c92k) a '{fd}>>' append keeps its allow (unread tail)", "exec {fd}>> out.txt", "allow")
+        # the scan starts where the full lex stopped: a quoted '>' the lex read BEFORE the construct is not
+        # rescanned, while a '>' in the here-string's own quoted text is (the disclosed over-deny).
+        bcmd("(ap-c93) a quoted '>' BEFORE a here-string keeps its allow (scan starts where the lex stopped)",
+             'echo "a > b"; cat <<<y', "allow")
+        bcmd("(ap-c93b) a '>' in a here-string's quoted text DENIES (unread tail, disclosed over-deny)",
+             'cat <<<"a > b"', "deny")
+        # an unquoted here-document: the plain body of the one the lex stopped at is data and is left out;
+        # its line, the text after its body, a body holding a command substitution, an unterminated body and
+        # a body after an opener line holding quoting are read.
+        bcmd("(ap-c94) a relative truncating redirect on an unquoted here-document's line DENIES (unread tail)",
+             "cat <<EOF > out.txt\nx\nEOF", "deny")
+        bcmd("(ap-c94b) a relative truncating redirect after an unquoted here-document's body DENIES "
+             "(unread tail)", "cat <<EOF\nx\nEOF\necho y > out.txt", "deny")
+        bcmd("(ap-c94c) a '>' in the plain body of an unquoted here-document allows (the body is data)",
+             "cat <<EOF > {}/out\nif a > b\nEOF".format(rp), "allow")
+        bcmd("(ap-c94d) a '>' in the plain body of a '<<-' here-document allows (tab-stripped delimiter)",
+             "cat <<-EOF > {}/out\n\ta > b\n\tEOF".format(rp), "allow")
+        bcmd("(ap-c94e) a '$(...)' in an unquoted here-document body is read and DENIES (unread tail)",
+             "cat <<EOF > {}/out\n$(echo a > b)\nEOF".format(rp), "deny")
+        bcmd("(ap-c94f) a backquote substitution in an unquoted here-document body is read and DENIES",
+             "cat <<EOF > {}/out\n`echo a > b`\nEOF".format(rp), "deny")
+        bcmd("(ap-c94g) an unterminated unquoted here-document body is read and DENIES (disclosed over-deny)",
+             "cat <<EOF > {}/out\na > b".format(rp), "deny")
+        bcmd("(ap-c94h) a body after an opener line holding a quote is read and DENIES (disclosed over-deny)",
+             'cat <<EOF "q"\na > b\nEOF', "deny")
+        bcmd("(ap-c94i) a here-document opener inside a later quoted text is not trusted, so the text after it "
+             "is read and DENIES", "cat <<<'see <<EOF here'\necho y > out.txt\ncat <<EOF\nbody\nEOF", "deny")
+        # the deny names the unread construct, the target and the remedy.
+        _ut_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                  "tool_input": {"command": "cat <<<y > out.txt"}})
+        _ut_reason = (_ut_out[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        if ("could not read" not in _ut_reason or "'out.txt'" not in _ut_reason
+                or "ABSOLUTE" not in _ut_reason):
+            failures.append("(ap-c95) the unread-tail deny must say the redirect target could not be read, "
+                            "name 'out.txt' and ask for an ABSOLUTE target; got {!r}".format(_ut_reason))
+        # the full lex reports where it stopped: the first character of the token it could not read.
+        try:
+            aiqt_hooks._lex_command("cat <<<y > out.txt", skip_empty=True)
+            failures.append("(ap-c95b) the here-string command must fail the full lex")
+        except aiqt_hooks._UncertainHashError:
+            failures.append("(ap-c95c) the here-string command must fail the full lex without an uncertain '#'")
+        except ValueError as _ut_exc:
+            if getattr(_ut_exc, "stop", None) != 4:
+                failures.append("(ap-c95d) the full lex must stop at index 4, the here-string's '<<<'; got "
+                                "{!r}".format(getattr(_ut_exc, "stop", None)))
+        # COST: an escaped '>' run inside one absolute target word is passed over, so the scan makes one word
+        # read for that run, not one per '>' (a read per '>' grows with the square of the run's length).
+        _ut_cost_cmd = "cat <<<y > /" + "\\>/" * 8000
+        _ut_t0 = time.process_time()
+        _ut_cost_got = _decision(aiqt_hooks.bash_absolute_paths, _ut_cost_cmd)
+        _ut_cpu = time.process_time() - _ut_t0
+        if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
+            failures.append("(ap-c95e) the escaped-'>' run must allow in under 1 s of CPU; got {} in {:.2f} s"
+                            .format(_ut_cost_got, _ut_cpu))
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
