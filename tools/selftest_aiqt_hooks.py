@@ -18873,15 +18873,17 @@ def _main_isolated(monitor):
              'echo "a > b"; cat <<<y', "allow")
         bcmd("(ap-c93b) a '>' in a here-string's quoted text DENIES (unread tail, disclosed over-deny)",
              'cat <<<"a > b"', "deny")
-        # an unquoted here-document: the body of the one the lex stopped at is data and is left out only when
-        # it holds no backslash, '$' or backquote (the characters bash treats specially there); its line, the
-        # text after its body, a body holding any of those three, an unterminated body and a body after an
-        # opener line holding quoting are read.
+        # an unquoted here-document: the body of the one the lex stopped at is left out only in the narrow shape
+        # _abspth_unread_truncation states (no quote, escape, expansion, brace or parenthesis before the opener
+        # or after the delimiter on its line, no line before the delimiter line starting with the delimiter
+        # text, and no backslash, '$' or backquote in the body); its line, the text after its body, a body
+        # holding any of those three, an unterminated body and a body after an opener line holding quoting are
+        # read.
         bcmd("(ap-c94) a relative truncating redirect on an unquoted here-document's line DENIES (unread tail)",
              "cat <<EOF > out.txt\nx\nEOF", "deny")
         bcmd("(ap-c94b) a relative truncating redirect after an unquoted here-document's body DENIES "
              "(unread tail)", "cat <<EOF\nx\nEOF\necho y > out.txt", "deny")
-        bcmd("(ap-c94c) a '>' in the plain body of an unquoted here-document allows (the body is data)",
+        bcmd("(ap-c94c) a '>' in the plain body of an unquoted here-document allows (the body is left out)",
              "cat <<EOF > {}/out\nif a > b\nEOF".format(rp), "allow")
         bcmd("(ap-c94d) a '>' in the plain body of a '<<-' here-document allows (tab-stripped delimiter)",
              "cat <<-EOF > {}/out\n\ta > b\n\tEOF".format(rp), "allow")
@@ -18929,7 +18931,57 @@ def _main_isolated(monitor):
         bcmd("(ap-c94v) a backslash before a letter in an unquoted body is read and DENIES (disclosed over-deny)",
              "cat <<EOF > {}/out\na\\b -> y\nEOF".format(rp), "deny")
         bcmd("(ap-c94w) a plain body holding '->' and '=>' and no backslash, '$' or backquote allows (the body "
-             "is data)", "cat <<EOF > {}/out\nx -> y\na => b\nEOF".format(rp), "allow")
+             "is left out)", "cat <<EOF > {}/out\nx -> y\na => b\nEOF".format(rp), "allow")
+        # a here-document opened inside a '$(...)' substitution can end in bash at a line such as 'EOF)' or
+        # 'EOF );' that is not exactly its delimiter, and bash then runs the next line as a command; the scan
+        # does not model where such a body ends. A body is read where the command's text before its '<<' holds
+        # a quote, escape, expansion, brace or parenthesis, or where a line before its delimiter line starts
+        # with the delimiter text, so each shape below DENIES (a disclosed over-deny where bash reads that body
+        # as data). The allows pin where each condition looks: only before the '<<', and only at the start of
+        # a body line (after its leading tabs for the <<- form alone).
+        bcmd("(ap-c96) a body inside '$(...)' that bash ends at 'EOF)' is read, so the command after it DENIES",
+             "x=$(cat <<EOF\nhi\nEOF)\necho y > out.txt\n: <<EOF\nEOF\n", "deny")
+        bcmd("(ap-c96b) an 'echo $(cat <<EOF' body that bash ends at 'EOF)' is read, so the command after it "
+             "DENIES", "echo $(cat <<EOF\nhi\nEOF)\necho y > out.txt\n: <<EOF\nEOF\n", "deny")
+        bcmd("(ap-c96c) a body inside '$(...)' ending at 'EOF)' before a later 'cat <<EOF' is read and DENIES",
+             "x=$(cat <<EOF\nhi\nEOF)\necho y > out.txt\ncat <<EOF\nEOF\n", "deny")
+        bcmd("(ap-c96d) a body inside '$(...)' ending at 'EOF)' before a bare 'EOF' line is read and DENIES",
+             "echo $(cat <<EOF\nx\nEOF)\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96e) a body inside '$(...)' ending at 'EOF )' is read and DENIES",
+             "echo $(cat <<EOF\nx\nEOF )\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96f) a body inside '$(...)' ending at 'EOF);' with a command after it on that line DENIES",
+             "echo $(cat <<EOF\nx\nEOF);echo y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96g) a '>|' after a body inside '$(...)' ending at 'EOF)' DENIES",
+             "echo $(cat <<EOF\nx\nEOF)\ntrue >| out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96h) a '&>' after a body inside '$(...)' ending at 'EOF)' DENIES",
+             "echo $(cat <<EOF\nx\nEOF)\ntrue &> out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96i) an absolute redirect on the opener line inside '$(...)' does not leave its body out: "
+             "the command after 'EOF)' DENIES", "echo $(cat <<EOF > {}/out\nx\nEOF)\necho y > out.txt\nEOF\n"
+             .format(rp), "deny")
+        bcmd("(ap-c96j) a body inside '$(...)' ending at 'EOF );' with a command after it on that line DENIES",
+             "echo $(cat <<EOF\nx\nEOF );echo y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96k) a body after a '{' before its opener is read and DENIES (disclosed over-deny)",
+             "{{ cat <<EOF > {}/out\na > b\nEOF\n}}".format(rp), "deny")
+        bcmd("(ap-c96l) a body after a quote on an earlier line is read and DENIES (disclosed over-deny)",
+             "echo 'a'\ncat <<EOF > {}/out\nx -> y\nEOF".format(rp), "deny")
+        bcmd("(ap-c96m) a body after a quote just before its '<<' is read and DENIES (disclosed over-deny)",
+             'cat ""<<EOF > {}/out\nx -> y\nEOF'.format(rp), "deny")
+        bcmd("(ap-c96n) a body after a '(' at the command's start is read and DENIES (disclosed over-deny)",
+             "(cat <<EOF > {}/out\nx -> y\nEOF\n)".format(rp), "deny")
+        bcmd("(ap-c96o) a quote, '$' or brace only after the delimiter line leaves the plain body out: allows",
+             "cat <<EOF > {}/out\nx -> y\nEOF\necho \"$HOME\" 'q' {{a,b}}".format(rp), "allow")
+        bcmd("(ap-c96p) a body line starting with the delimiter text ('EOF)') is read and DENIES (disclosed "
+             "over-deny)", "cat <<EOF > {}/out\nEOF) a > b\nEOF".format(rp), "deny")
+        bcmd("(ap-c96q) a last body line starting with the delimiter text is read and DENIES (disclosed "
+             "over-deny)", "cat <<EOF > {}/out\nx -> y\nEOFX\nEOF".format(rp), "deny")
+        bcmd("(ap-c96r) a '<<-' body line starting with the delimiter text after a tab is read and DENIES "
+             "(disclosed over-deny)", "cat <<-EOF > {}/out\n\tEOF) a > b\n\tEOF".format(rp), "deny")
+        bcmd("(ap-c96s) a '<<' body line holding a tab before the delimiter text leaves the body out: allows",
+             "cat <<EOF > {}/out\n\tEOF) a > b\nEOF".format(rp), "allow")
+        bcmd("(ap-c96t) a body line holding the delimiter text after its start leaves the body out: allows",
+             "cat <<EOF > {}/out\nx EOF) a > b\nEOF".format(rp), "allow")
+        bcmd("(ap-c96u) a line after the delimiter line starting with the delimiter text leaves the body out: "
+             "allows", "cat <<EOF > {}/out\nx -> y\nEOF\nEOFX".format(rp), "allow")
         # the deny names the unread construct, the target and the remedy.
         _ut_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": "cat <<<y > out.txt"}})
