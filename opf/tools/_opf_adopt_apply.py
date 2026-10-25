@@ -3358,8 +3358,8 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
     only through _init_store_prior_run_paths: that run's init-store transaction terminal
     ROLLED-BACK, its bundle verified, every artefact created by a COMPLETE transaction of this
     journal, and the machine home only on its committed archival -- so a fresh run continues a
-    reversed run's committed work without re-running its burnt id (claude round 4, F1;
-    spec 14.1). Only then is the emptied, pre-existing
+    reversed run's committed work without re-running its burnt id (spec
+    14.1). Only then is the emptied, pre-existing
     directory admitted as a pre-existing planned directory, its mode pre-checked HERE (before
     the run's intent opens, so a wrong-mode tree never burns the run id) at the FULL
     stat.S_IMODE the substrate compares: the machine directory against the planned mode,
@@ -3367,7 +3367,8 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
     is admitted too, against the substrate's own two
     facts -- it records `.working`'s observed mode MASKED to 0o777 and re-compares the full
     S_IMODE against that record, so a special bit (a setgid 02755) can never pass, and it
-    refuses a group- or world-writable mode outright (claude round 5, N2). The substrate
+    refuses a group- or world-writable mode outright, since a store is never published beneath
+    a home others can write. The substrate
     re-verifies and preserves what it admits.
     Every consumed
     sources-row field (path, digest, disposition, occupying, preservation) is validated
@@ -4287,8 +4288,9 @@ class RegistrationContext:
     `kept` maps each kept path to its approved source digest (the plan's keep source rows), against which
     register-unmanaged re-checks the kept file's live bytes. `manifest_digest` is the plan-bound digest of
     the store manifest the planner observed (the re-derived observation's resolution.manifest_digest, which
-    the plan's inventory_digest seals; empty when no store resolved), which a LIVE manifest a registration
-    reads must still hash to (_store_model). `rewrites` holds the one write op each
+    the plan's inventory_digest seals; empty when no store resolved), which the LIVE manifest repoint-consumer
+    reads must still hash to (_store_model; register-unmanaged's live read is bound by its row's old_digest).
+    `rewrites` holds the one write op each
     rewritten path has in this transaction, so a register-unmanaged chain extends that one write link by link
     (one op per path) and a second repointing of one consumer refuses."""
 
@@ -4378,12 +4380,12 @@ def _adopt_created(context, rel):
 
 def _store_model(context, manifest):
     """The frozen store manifest as this transaction leaves it so far (its pending chain link, a manifest
-    created earlier in this transaction, or the live bytes), parsed and VALID, else refuse: both
-    registration ops need it to tell the store's own paths from adopter content (fail-closed). The live
-    bytes must hash to the plan-bound manifest digest (context.manifest_digest), re-read here under the
-    journal lock, so a manifest edited after the plan froze (an [unmanaged] entry dropped, a view target
-    moved) never weakens the guards that read it; with no bound digest (no store observed) a live
-    manifest refuses."""
+    created earlier in this transaction, or the live bytes), parsed and VALID, else refuse: repoint-consumer,
+    its one caller, needs it to tell the store's own paths from a consumer (fail-closed); register-unmanaged
+    reads the manifest through its row's old_digest instead (_current_bytes). The live bytes must hash to
+    the plan-bound manifest digest (context.manifest_digest), re-read here under the journal lock, so a
+    manifest edited after the plan froze (an [unmanaged] entry dropped, a view target moved) never weakens
+    the guards that read it; with no bound digest (no store observed) a live manifest refuses."""
     _adopt_created(context, manifest)
     if manifest in context.rewrites:
         data = context.ops.staged.get(manifest)
@@ -4396,11 +4398,11 @@ def _store_model(context, manifest):
         bound = context.manifest_digest
         if not schema._is_digest(bound):
             raise AdoptApplyError("the live store manifest {!r} is bound by no observed manifest digest (the "
-                                  "plan observed no store), so nothing is registered or repointed against "
+                                  "plan observed no store), so no repoint-consumer row is composed against "
                                   "it (fail-closed)".format(manifest))
         if "sha256:" + _sha256(data) != bound:
             raise AdoptApplyError("the live store manifest {!r} is drifted: its bytes no longer match the "
-                                  "manifest digest the plan bound, so nothing is registered or repointed "
+                                  "manifest digest the plan bound, so no repoint-consumer row is composed "
                                   "against it; a fresh plan with its own approval is the remedy "
                                   "(spec 14.1)".format(manifest))
     # For a LIVE manifest this parse guard is redundant with the posture gate, which refuses an unparseable
@@ -9388,7 +9390,8 @@ def _self_test_checks():
                   observed="captured={!r} refusal={!r}".format(captured, err))
     # 6a''''b: the discard empties only a preimages/ holding exactly what the capture writes: an entry it
     # never writes (here a directory) stops it, every captured payload stays, and the refusal names the
-    # entries left, never "nothing written" (red against a discard that removes what it cannot attribute).
+    # entries left, never "nothing written" (red against a discard that removes a non-regular entry; a
+    # regular file under a name the capture never writes is 6a''''c's).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)
         real_capture = _journal.capture_preimages
@@ -9409,6 +9412,33 @@ def _self_test_checks():
               and "{}/preimages/{} (file)".format(txn_rel, captured[0] if captured else "") in (err or "")
               and "nothing written" not in (err or "") and lock_free(root),
               observed="captured={!r} left={!r} refusal={!r}".format(captured, left, err))
+    # 6a''''c: a REGULAR file in preimages/ whose name capture_preimages never writes (not the op's sequence
+    # number in decimal: a word, or a decimal with a leading zero) stops the discard too: that file, every
+    # captured payload and frames.log stay, and the refusal names the entries left, never "nothing written"
+    # (red against a discard that checks the entry type alone, which removes that file with the payloads).
+    for label, stray in (("non-numeric", "stray"), ("leading-zero", "01")):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root, files = fixture(temp)
+            real_capture = _journal.capture_preimages
+            txn_rel = JOURNAL_REL + "/" + rid
+            captured = []
+
+            def capture_plant_file_then_refuse(*args):
+                real_capture(*args)
+                captured.extend(sorted(os.listdir(root / txn_rel / "preimages")))
+                (root / txn_rel / "preimages" / stray).write_bytes(b"not a captured payload\n")
+                raise _journal.JournalError("injected refusal after capture, before INTENT")
+            with mock.patch.object(_journal, "capture_preimages", capture_plant_file_then_refuse):
+                err = refusal(run_adopt_transaction, root, rid, compose_full(files))
+            preimages = root / txn_rel / "preimages"
+            left = sorted(os.listdir(preimages)) if preimages.is_dir() else []
+            check("pre-intent-capture-unattributed-preimage-file-stops-discard-" + label,
+                  len(captured) == 2 and stray not in captured and left == sorted(captured + [stray])
+                  and (preimages / stray).is_file() and (root / txn_rel / "frames.log").is_file()
+                  and "{}/preimages/{} (file)".format(txn_rel, stray) in (err or "")
+                  and "{}/preimages/{} (file)".format(txn_rel, captured[0] if captured else "") in (err or "")
+                  and "nothing written" not in (err or "") and lock_free(root),
+                  observed="captured={!r} left={!r} refusal={!r}".format(captured, left, err))
     # 6a5: a journal listing that could not read part of the tree never authorizes "nothing written", even
     # when both listings failed alike; it says the journal could not be fully observed (red against a
     # comparison in which two equal "unlisted" markers vanish). The fault hits the listing only.
@@ -12710,6 +12740,37 @@ def _self_test_checks():
                                          plan_digest(b"m\n"))
     check("driver-registration-context-carries-manifest-digest",
           typed_reg[_execute_registration_op].manifest_digest == plan_digest(b"m\n"))
+    # and run_apply hands that digest on: over a plan the real planner froze over a tree whose store resolves
+    # (this section's fixture, so the observation binds the planted manifest's digest), the
+    # RegistrationContext run_apply builds carries it (red against a run_apply that calls _driver_contexts
+    # without it, which binds nothing). render-views and install-pack, which this driver cannot run, and the
+    # receipt stage are stand-ins as in 11b; the recording wrapper refuses once the contexts are built, in
+    # the write-free preflight, so nothing is written.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = reg_fixture(temp)
+        bound_head = _selftest_git_commit(root)
+        bound_sheet = _sheet_with(root, bound_head, [dict(path=keep, disposition="keep", actor="fixture")])
+        # the store resolves, so the plan takes no init-store row
+        bound_sheet["ops"] = [row for row in bound_sheet["ops"] if row["op"] != "init-store"]
+        bound_plan = _freeze(root, bound_sheet) or b""
+        bound_approval = attempt(capture_approval, root, bound_plan, bound_sheet, "adopter", now)[0] or b""
+        bound_before = _snapshot(root)
+        bound_built = []
+        real_driver_contexts = _driver_contexts
+
+        def recording_contexts(*args, **kwargs):
+            _table, typed = real_driver_contexts(*args, **kwargs)
+            bound_built.append(typed[_execute_registration_op].manifest_digest)
+            raise AdoptApplyError("stopped once the driver's contexts are built")
+        stand_ins = dict.fromkeys(("render-views", "install-pack"), lambda op_row, context=None: schema._ok())
+        with mock.patch.dict(globals(), _driver_contexts=recording_contexts), \
+                mock.patch.dict(OP_HANDLERS, stand_ins), \
+                mock.patch.dict(DRIVER_STAGES, {RECEIPT_STAGE: lambda context: schema._ok()}):
+            bound_err = refusal(run_apply, root, bound_plan, bound_approval, bound_sheet)
+        check("driver-apply-registration-context-carries-bound-manifest-digest",
+              bool(bound_plan) and bool(bound_approval) and bound_built == [plan_digest(files[man])]
+              and "stopped once the driver's contexts are built" in (bound_err or "")
+              and _snapshot(root) == bound_before, observed=(bound_built, bound_err))
     # the committed store pointer as an entry: a planted pointer naming the product root itself, so the store
     # still resolves in-root and only the protected-destination rule refuses the registration.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
