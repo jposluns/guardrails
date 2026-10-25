@@ -102,8 +102,8 @@ index and worktree content, though reset --soft still MOVES HEAD, a reflog-recov
 discards no working-tree content and may ALLOW even on a dirty tree, as detailed below). That no-silent-allow
 guarantee is bounded to WORKING-TREE CONTENT and is best-effort, not categorical: some ref-level moves (a
 merged-branch delete, reset --soft moving HEAD) are reflog-recoverable, and the obfuscation/config residuals
-disclosed below (a fragmented git command word or verb, a git alias, ambient config) can hide a discard the
-lexical scan never sees. An UNPARSEABLE command
+disclosed below (a fragmented git command word or verb, a git alias defined in a configuration file, ambient
+config) can hide a discard the lexical scan never sees. An UNPARSEABLE command
 (unbalanced quote) is not a free pass, it is scanned raw for a lossy verb keyword and, when one is present,
 takes the recover-then-allow/deny resolution above (never a silent pass). WITHIN scope (a recognized lossy
 verb: checkout/switch/restore/reset/clean/stash/
@@ -134,8 +134,10 @@ No recognized lossy verb that would discard WORKING-TREE CONTENT is silently ALL
 on a dirty tree), or on a provably-clean tree - worst case it ASKS, at the cost of more asks. No in-band
 override exists (the operator channel is hook configuration). This guarantee is bounded to
 working-tree content: ref-level moves (reset --soft moving HEAD, a merged-branch delete) are reflog-
-recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
-function renaming git; deliberate obfuscation of the COMMAND WORD 'git' ITSELF or of the verb that no raw,
+recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias
+defined in a configuration file, or a shell function, renaming git (a git alias the command defines for itself,
+or runs under from an export or the session environment, DENIES: _git_local_alias, _git_alias_from_env);
+deliberate obfuscation of the COMMAND WORD 'git' ITSELF or of the verb that no raw,
 continuation-joined or de-quoted reading assembles (an escape decoded inside $'...', or a word built by a
 parameter expansion or a command substitution at run time, reads as 'no recognized lossy verb' and is
 silently ALLOWED - a best-effort residual; a quote- or backslash-fragmented spelling under a wrapper, such
@@ -356,8 +358,9 @@ NOTE_CONSTRUCTORS = (
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
-    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_git_discard_fallback",
-    "_hash_doubt_opaque_deny", "_protected_line_fallback", "_raw_push_guard", "_wrtscp_deny")
+    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
+    "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny", "_protected_line_fallback",
+    "_raw_push_guard", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -4011,7 +4014,7 @@ def find_ai_authorship(command):
     return hit
 
 
-def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
+def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=False):
     """find_ai_authorship over one command line at a run-line nesting depth. The line is judged under both
     readings, the locale reading and the literal '$' reading (the locale flag of _segments True and False),
     once when they agree, which they do on a line holding no $". paths lists the readings whose own reading of
@@ -4027,7 +4030,9 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
     bounds that a reading charges are spent it builds no further run line, and each rebase reads its options
     only up to the next rebase subcommand (_cmtidn_run_lines), so the cost stays linear. judged maps each word
     already scanned for a co-author trailer, on this line or another line of the command, to its result
-    (_co_author_ai). A parse error in the command itself (depth 0) raises: at once when neither reading parses
+    (_co_author_ai). from_env is True when a git alias defined outside a git command's own segment
+    (_git_alias_from_env) applies to every git command of a line that encloses this one, which runs under its
+    environment. A parse error in the command itself (depth 0) raises: at once when neither reading parses
     it, and otherwise after the other reading has found nothing."""
     readings = []  # (the readings that read the line so, its segments)
     error = None
@@ -4057,14 +4062,17 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
         raise error
     for same, segments in readings:
         keys = [reading for reading in paths if reading in same] or [None]
+        line_env = from_env or _git_alias_from_env(tokens for tokens, _sep in segments)
         for tokens, _sep in segments:
             hit = _identity_assignment_ai(tokens)
             if hit is not None:
                 return hit
             subs = list(_cmtidn_git_commands(tokens))
             # A subcommand word after a git alias definition (_git_alias_defined_at) may name that alias, which
-            # may run a commit, so the segment is read as a commit-family one.
-            alias_at = next((j for j in range(len(tokens)) if _git_alias_defined_at(tokens, j)), len(tokens))
+            # may run a commit, so the segment is read as a commit-family one; so is every subcommand word of the
+            # line where an alias is defined outside its own segment (_git_alias_from_env).
+            alias_at = -1 if line_env else next((j for j in range(len(tokens)) if _git_alias_defined_at(tokens, j)),
+                                                len(tokens))
             if any(tokens[k] in COMMIT_VERBS or alias_at < k for k in subs):
                 hit = _commit_message_and_author_ai(tokens, judged)
                 if hit is not None:
@@ -4083,7 +4091,7 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
                         if depth >= _CMTIDN_RUN_DEPTH or all(spent):
                             break
                     hit = _cmtidn_line_ai(line, depth + 1, budgets, unread, [key for key in keys if key is not None],
-                                          judged)
+                                          judged, line_env)
                     if hit is not None:
                         return hit
     if error is not None and depth == 0:
@@ -4625,8 +4633,9 @@ def bash_absolute_paths(data):
 # layer (see the block comment above _SNAPSHOTTABLE_VERBS) is SIDE-EFFECTING - it writes an inert
 # refs/aiqt-recovery/* snapshot ref and an external ledger for a not-provably-clean discard - but writes only
 # git objects and one private ref, never the real index, worktree, HEAD, or a branch. HONEST RESIDUAL (not
-# caught by a lexical hook): a git alias or shell function that renames git, a discard performed outside the
-# Bash tool, or persistent shell/config state set in a prior turn; the recovery/snapshot layer backstops a
+# caught by a lexical hook): a git alias defined in a configuration file, or a shell function, that renames git
+# (one the command defines or runs under denies, _git_local_alias, _git_alias_from_env), a discard performed
+# outside the Bash tool, or persistent shell/config state set in a prior turn; the recovery/snapshot layer backstops a
 # discard it CAN see, but cannot snapshot content the probe itself cannot see (assume-unchanged/skip-worktree
 # marks or submodule.<name>.ignore hide work from the probe) nor ignored files (git add --all excludes them).
 # REMOVED OVERRIDE: a leading GUARDRAIL_ALLOW_DISCARD assignment once short-circuited a pristine bare git
@@ -4749,9 +4758,11 @@ def _git_sub_and_args(tokens):
 # expanded here with certainty: a --config-env value lives in the environment and an include in a file, a value
 # starting with '!' runs a shell command, an alias may name another alias, and git splits the value by its own
 # quoting rules. So a git command that defines one runs an unknown subcommand, possibly a mutating one, and each
-# reader of the subcommand treats it that way (_git_local_alias). Outside this lexical reading: an alias in a
-# configuration file git reads anyway (the repository, global or system file, or one an assignment such as
-# GIT_CONFIG_GLOBAL or HOME points git at), an assignment value built at run time, and git behind a wrapper.
+# reader of the subcommand treats it that way (_git_local_alias). A definition outside the git command's own
+# segment, an earlier export or the hook's environment, is read below (_git_alias_from_env). Outside this lexical
+# reading: an alias in a configuration file git reads anyway (the repository, global or system file, or one an
+# assignment such as GIT_CONFIG_GLOBAL or HOME points git at), the value of an assignment before the command word
+# built at run time, and git behind a wrapper.
 _GIT_ALIAS_KEY_RE = re.compile(r"(?i)(?:alias|include|includeif)\.")
 _GIT_CONFIG_ENV_ASSIGN_RE = re.compile(r"GIT_CONFIG_(?:PARAMETERS|KEY_[0-9]+)\+?=")
 
@@ -4784,6 +4795,69 @@ def _git_local_alias(tokens):
             return True
         i += 2 if "=" not in tokens[i] and tokens[i] in _GIT_ARG_OPTS else 1
     return False
+
+
+# A git alias defined outside the git command's own segment. A command defines one for the git commands it runs
+# when a segment of it sets git's configuration environment: an export, declare, typeset, local or readonly word
+# (each can export the variable, and a change to one the environment already carries reaches every later
+# command) naming GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_<n>, with a value or alone ('export
+# GIT_CONFIG_PARAMETERS' after an assignment), or a bare assignment to one (it reaches git when the variable is
+# already exported, or under set -a). On git 2.53.0 a later 'git p' ran the alias p that each of these defined
+# (a bare assignment and readonly only where the variable was already exported). The value may be built at run
+# time ('export GIT_CONFIG_PARAMETERS="$P"'), so it is not read: any such word counts, and so an export unrelated
+# to aliases counts too (a disclosed over-refusal). It counts for every git command of the command, those written
+# before it included, since a loop or a function can run those after it (in 'for i in 1 2; do git p; export
+# GIT_CONFIG_PARAMETERS=...; done' the second pass ran the alias). The hook's own environment counts as
+# well: the shell the Bash tool runs a command in inherits the session's environment, as this hook does (the
+# premise _ambient_repo_view_override reads it on), so a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> there whose
+# value names an alias, include or includeIf key defines that alias for every git command. That value is set
+# before the command runs and is visible here, so it is read as an assignment before the command word is, and an
+# environment carrying only unrelated configuration (gc.auto) is not refused. Outside this reading: a variable
+# the Bash tool's shell sets or changes in its own startup files, a variable name built at run time, and an export
+# inside an eval, sh -c or bash -c body or a sourced file.
+_GIT_CONFIG_ENV_NAME_RE = re.compile(r"GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_[0-9]+)(?:\+?=|\Z)")
+_SHELL_DECLARE_WORDS = frozenset(("export", "declare", "typeset", "local", "readonly"))
+
+
+def _git_config_env_declared(tokens):
+    """Whether a segment that is not itself a git command sets git's configuration environment for the commands
+    after it (see _GIT_CONFIG_ENV_NAME_RE): a word naming GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or
+    GIT_CONFIG_KEY_<n>, with a value or alone, in a segment holding an export, declare, typeset, local or readonly
+    word, or an assignment to one in a segment that is all assignments. Leading reserved words, '!' and time are
+    passed over first, so '{ GIT_CONFIG_PARAMETERS=...; }' and 'then GIT_CONFIG_PARAMETERS=...' count."""
+    lead = 0
+    while lead < len(tokens) and (tokens[lead] in _SHELL_RESERVED_WORDS or tokens[lead] in ("!", "time")):
+        lead += 1
+    rest = tokens[lead:]
+    start = _command_word_index(rest)
+    if start < len(rest) and (_command_word(rest) == "git" or not _SHELL_DECLARE_WORDS.intersection(rest[start:])):
+        return False
+    return any(_GIT_CONFIG_ENV_NAME_RE.match(token) for token in rest)
+
+
+def _git_alias_from_env(segments):
+    """Whether every git command of a command runs under a git alias defined outside its own segment (see
+    _GIT_CONFIG_ENV_NAME_RE): the hook's environment carries a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> whose
+    value names an alias, include or includeIf key (read as _git_alias_defined_at reads an assignment), or one of
+    segments, the token lists of the command's segments, sets git's configuration environment
+    (_git_config_env_declared)."""
+    inherited = ["{}={}".format(name, value) for name, value in os.environ.items()
+                 if name.startswith("GIT_CONFIG_")]
+    if any(_git_alias_defined_at(inherited, j) for j in range(len(inherited))):
+        return True
+    return any(_git_config_env_declared(tokens) for tokens in segments)
+
+
+def _git_alias_recovered(command):
+    """Whether a git segment that a partial lex of an unparseable command recovers runs under a git alias the
+    command defines (_git_local_alias, _git_alias_from_env). The segment the lexer was still inside is kept: the
+    words of it already read stand whatever follows, and this reading only ever denies."""
+    try:
+        recovered = [seg.argv for seg in _lex_command(command, partial=True)[0]]
+    except ValueError:
+        return False
+    from_env = _git_alias_from_env(recovered)
+    return any(_command_word(tokens) == "git" and (from_env or _git_local_alias(tokens)) for tokens in recovered)
 
 
 # The option-parsing boundary tokens: after either, every remaining token is an operand (a pathspec or
@@ -5244,7 +5318,9 @@ def git_explicit_binding(data):
     # cd/pushd between them. This runs BEFORE the dir-change/target logic below so a preceding cd (which would
     # otherwise short-circuit to the relocate allow-note) cannot mask the breadth+publish hazard. A push
     # BEFORE the breadth stage publishes only the pre-breadth state and does not fire. A git alias the command
-    # defines (_git_local_alias) may be either, so it counts as both a publish and a breadth stage.
+    # defines (_git_local_alias, or outside the git command's own segment, _git_alias_from_env) may be either, so
+    # it counts as both a publish and a breadth stage.
+    from_env = _git_alias_from_env(tokens for tokens, _sep in segments)
     breadth_before_push = None
     for tokens, _sep in segments:
         eff = _expbnd_effective_tokens(tokens)
@@ -5253,7 +5329,7 @@ def git_explicit_binding(data):
         s, a = _git_sub_and_args(eff)
         if s is None:
             continue
-        aliased = _git_local_alias(eff)
+        aliased = from_env or _git_local_alias(eff)
         if (s == "push" or aliased) and breadth_before_push is not None:
             return _expbnd_breadth_publish_deny(breadth_before_push)
         if _git_is_breadth(s, a) or aliased:
@@ -5283,7 +5359,7 @@ def git_explicit_binding(data):
         sub, args = _git_sub_and_args(eff)
         if sub is None:
             continue
-        aliased = _git_local_alias(eff)  # its subcommand is unknown, so possibly mutating
+        aliased = from_env or _git_local_alias(eff)  # its subcommand is unknown, so possibly mutating
         if ((_git_is_mutating(sub, args) or aliased) and not _git_target_is_explicit(eff)
                 and saw_dir_change):
             return _expbnd_target_ask(sub)
@@ -6228,7 +6304,11 @@ def _git_discard_fallback(command):
     (_dequoted_text: continuations joined, a '$' before a quote, quote characters and backslashes
     removed), so a fragmented 're""set' in an unparseable command is flagged and denied like its
     plain spelling. Every flagged unparseable command denies here, so a redirect a continuation or a
-    quote splits ('-\\<newline>C', '-"C"') can never reach a session-directory snapshot."""
+    quote splits ('-\\<newline>C', '-"C"') can never reach a session-directory snapshot. A git segment that a
+    partial lex recovers and that runs under a git alias the command defines (_git_alias_recovered) denies
+    first, as on a parsed command, since the alias may name no work-losing verb this scan can see."""
+    if _git_alias_recovered(command):
+        return _git_discard_alias_deny()
     if not (_raw_has_lossy_git(command) or _raw_has_lossy_git(_dequoted_text(command))):
         return _allow()  # no git + work-losing verb in the raw text or its de-quoted copy: the true boundary
     return _deny(
@@ -6241,6 +6321,23 @@ def _git_discard_fallback(command):
         "command from the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
         "AIQT guardrail: denied an unparseable command naming a git work-losing verb (rule prsunc); "
         "re-issue it as a plain, parseable git command, or commit or stash first.")
+
+
+def _git_discard_alias_deny():
+    """git_discard's deny of a git command that runs under a git alias the command defines (_git_local_alias,
+    _git_alias_from_env), on a parsed command and on an unparseable one (_git_discard_fallback) alike."""
+    return _deny(
+        "AIQT rule prsunc (preserve-uncommitted-work): this command defines a git alias for itself, or runs git "
+        "under one (a -c or --config-env alias.<name>, include.path or includeIf key, a GIT_CONFIG_PARAMETERS or "
+        "GIT_CONFIG_KEY_<n> assignment naming one, an export or declaration of GIT_CONFIG_PARAMETERS, "
+        "GIT_CONFIG_COUNT or GIT_CONFIG_KEY_<n> in the command whatever its value, or a GIT_CONFIG_PARAMETERS or "
+        "GIT_CONFIG_KEY_<n> in the session environment naming one) that may expand to a work-losing verb this "
+        "guard cannot resolve or snapshot; denied rather than run on an unknown discard. Re-issue the command the "
+        "alias expands to explicitly, without the export, so this guard can classify it (an alias from the "
+        "session environment needs a session started without that variable), or commit or stash your work "
+        "first. {}".format(_DISCARD_ALTS),
+        "AIQT guardrail: denied a git alias the command defines or runs under, which may discard work (rule "
+        "prsunc); run the aliased command explicitly, or commit or stash first.")
 
 
 def _pristine_single_bare_git(command, segments):
@@ -8192,19 +8289,13 @@ def git_discard(data):
     raw_lossy = (_raw_has_lossy_git(command)
                  or _raw_has_lossy_git(_join_continuations(command)[0])
                  or _raw_has_lossy_git(_dequoted_text(command)))
-    # A git alias the command defines (_git_local_alias) runs a subcommand this guard cannot resolve, whether or
-    # not the text names a work-losing verb (a --config-env value or an included file names none), so it cannot
-    # be classified or snapshotted and denies, on a clean tree as on a dirty one.
-    if any(_command_word(tokens) == "git" and _git_local_alias(tokens) for tokens, _sep in segments):
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): this command defines a git alias for itself (a -c or "
-            "--config-env alias.<name>, include.path or includeIf key, or a GIT_CONFIG_PARAMETERS or "
-            "GIT_CONFIG_KEY_<n> assignment naming one) that may expand to a work-losing verb this guard cannot "
-            "resolve or snapshot; denied rather than run on an unknown discard. Re-issue the command the alias "
-            "expands to explicitly, so this guard can classify it, or commit or stash your work first. {}"
-            .format(_DISCARD_ALTS),
-            "AIQT guardrail: denied a git alias the command defines, which may discard work (rule prsunc); run "
-            "the aliased command explicitly, or commit or stash first.")
+    # A git alias the command defines (_git_local_alias, or outside the git command's own segment,
+    # _git_alias_from_env) runs a subcommand this guard cannot resolve, whether or not the text names a
+    # work-losing verb (a --config-env value, an exported value or an included file names none), so it cannot be
+    # classified or snapshotted and denies, on a clean tree as on a dirty one.
+    from_env = _git_alias_from_env(tokens for tokens, _sep in segments)
+    if any(_command_word(tokens) == "git" and (from_env or _git_local_alias(tokens)) for tokens, _sep in segments):
+        return _git_discard_alias_deny()
     if not lossy and not raw_lossy:
         return _allow()  # boundary: no git + work-losing verb anywhere
 
@@ -9013,7 +9104,7 @@ def _commit_syntax_step(seg):
     return _CommitStep(kind, target, branch, seg)
 
 
-def _commit_apparent_segment(seg):
+def _commit_apparent_segment(seg, from_env=False):
     """Conservative detection for an UNCLASSIFIED segment only.
 
     Decoded words expose ordinary quote/backslash fragmentation. Raw text additionally
@@ -9021,13 +9112,15 @@ def _commit_apparent_segment(seg):
     in an already admitted literal commit/printf segment.
 
     A git alias the segment defines for itself (_git_local_alias) runs a subcommand
-    this reading cannot see, possibly a commit, so that segment is apparent too.
+    this reading cannot see, possibly a commit, so that segment is apparent too, and
+    so is every git segment when from_env says the command defines one outside a git
+    command's own segment (_git_alias_from_env).
 
     This does not discover every renamed executable, alias, function, opaque script,
     or unparseable fragmentation. Detection is not a Bash interpreter.
     """
     sub, _args = _git_sub_and_args(seg.argv)
-    if _command_word(seg.argv) == "git" and (sub == "commit" or _git_local_alias(seg.argv)):
+    if _command_word(seg.argv) == "git" and (sub == "commit" or from_env or _git_local_alias(seg.argv)):
         return True
     return bool(_RAW_COMMIT_RE.search(" ".join(seg.argv))
                 or _RAW_COMMIT_RE.search(seg.raw))
@@ -9079,7 +9172,8 @@ def _commit_command_syntax(command):
         scan = _hash_doubt_scan(command) if doubt else command
         apparent = bool(_RAW_COMMIT_RE.search(scan)) or (doubt and _hash_doubt_opaque(command))
         apparent = apparent or not _commit_quote_bytes_known(command)
-        apparent = apparent or any(_commit_apparent_segment(seg) for seg in partial)
+        from_env = _git_alias_from_env(seg.argv for seg in partial)
+        apparent = apparent or any(_commit_apparent_segment(seg, from_env) for seg in partial)
         status = "unverifiable" if apparent else "outside"
         return _CommitSyntax(status, tuple(partial), (), (), "incomplete shell parse")
     if len(records) > _COMMIT_MAX_SEGMENTS:
@@ -9091,7 +9185,8 @@ def _commit_command_syntax(command):
                              "ANSI-C or locale quoting has unknown execution-time bytes")
     commits = tuple(i for i, step in enumerate(steps)
                     if step is not None and step.kind == "commit")
-    hidden = any(_commit_apparent_segment(seg)
+    from_env = _git_alias_from_env(seg.argv for seg in records)
+    hidden = any(_commit_apparent_segment(seg, from_env)
                  for seg, step in zip(records, steps) if step is None)
     if not commits and not hidden:
         return _CommitSyntax("outside", records, steps, (), "no apparent direct commit")
@@ -10181,20 +10276,25 @@ def protected_line(data):
     if floor:
         with _SubstHeredocFloor():
             failed = _commit_command_syntax(command)
-    # A git alias the command defines (_git_local_alias) runs a subcommand neither reading below can see: it may
-    # commit on the protected line or force-push to it (git -c alias.p=push p --force origin names no push), so it
-    # denies on any branch, as a commit outside the admitted grammar does. The commit recognizer reads the same
-    # segment as an apparent commit (_commit_apparent_segment), which covers main's reading of the floor.
-    if any(_command_word(seg.argv) == "git" and _git_local_alias(seg.argv) for seg in syntax.records):
+    # A git alias the command defines (_git_local_alias, or outside the git command's own segment,
+    # _git_alias_from_env) runs a subcommand neither reading below can see: it may commit on the protected line or
+    # force-push to it (git -c alias.p=push p --force origin names no push), so it denies on any branch, as a
+    # commit outside the admitted grammar does. The commit recognizer reads the same segment as an apparent commit
+    # (_commit_apparent_segment), which covers main's reading of the floor.
+    from_env = _git_alias_from_env(seg.argv for seg in syntax.records)
+    if any(_command_word(seg.argv) == "git" and (from_env or _git_local_alias(seg.argv)) for seg in syntax.records):
         return _deny(
             "AIQT rules prtbrn (protected-branch-integrity) and artbr1 (branch-and-merge-on-green): this command "
-            "defines a git alias for itself (a -c or --config-env alias.<name>, include.path or includeIf key, "
-            "or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> assignment naming one), so the subcommand it runs "
-            "is unknown here and may be a commit on the protected line or a push that rewrites it; denied "
-            "fail-safe. Re-issue the command the alias expands to explicitly, so this guard can classify it. "
-            + _PROTECTED_ALTS,
-            "AIQT guardrail: denied a git alias the command defines, which may commit to or force-push the "
-            "protected branch (rules prtbrn, artbr1); run the aliased command explicitly.")
+            "defines a git alias for itself, or runs git under one (a -c or --config-env alias.<name>, include.path "
+            "or includeIf key, a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> assignment naming one, an export or "
+            "declaration of GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_<n> in the command whatever "
+            "its value, or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> in the session environment naming one), "
+            "so the subcommand it runs is unknown here and may be a commit on the protected line or a push that "
+            "rewrites it; denied fail-safe. Re-issue the command the alias expands to explicitly, without the "
+            "export, so this guard can classify it (an alias from the session environment needs a session started "
+            "without that variable). " + _PROTECTED_ALTS,
+            "AIQT guardrail: denied a git alias the command defines or runs under, which may commit to or "
+            "force-push the protected branch (rules prtbrn, artbr1); run the aliased command explicitly.")
     if syntax.status == "help":
         return _allow()  # only literal lone git commit --help / -h
     if syntax.status == "unverifiable":
@@ -10804,6 +10904,7 @@ def branch_root(data):
     pending_deny = None
     pending_note = None
     saw_dir_change = False
+    from_env = _git_alias_from_env(tokens for tokens, _sep in segments)
     for tokens, _sep in segments:
         word = _command_word(tokens)
         if word in _CD_BUILTINS or word == "popd":
@@ -10814,9 +10915,10 @@ def branch_root(data):
         if word != "git" or _has_info_flag(tokens):
             continue
         sub, args = _git_sub_and_args(tokens)
-        # A git alias the command defines (_git_local_alias) runs a subcommand this guard cannot read, possibly a
-        # branch creation, so it is a form this guard cannot classify.
-        start = _ASK_START if _git_local_alias(tokens) else _branch_creation_start(sub, args)
+        # A git alias the command defines (_git_local_alias, or outside the git command's own segment,
+        # _git_alias_from_env) runs a subcommand this guard cannot read, possibly a branch creation, so it is a
+        # form this guard cannot classify.
+        start = _ASK_START if from_env or _git_local_alias(tokens) else _branch_creation_start(sub, args)
         if start is None:
             continue
         if start is _ASK_START:
@@ -10824,9 +10926,10 @@ def branch_root(data):
                 pending_deny = (
                     "AIQT rule brnrot (branch-rooted-on-live-main): this command uses a branch/worktree form "
                     "this guard cannot classify with confidence (an --orphan, an abbreviated or negated "
-                    "option, an option of unknown arity, or a git alias the command defines); it may create a "
-                    "branch from an unverified or orphaned start, so its ancestry cannot be checked here and it is "
-                    "denied fail-safe. Re-issue it with an explicit start point (e.g. 'git switch -c <name> "
+                    "option, an option of unknown arity, or a git alias the command defines or runs under, an "
+                    "export of GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_<n> included); it may "
+                    "create a branch from an unverified or orphaned start, so its ancestry cannot be checked here "
+                    "and it is denied fail-safe. Re-issue it with an explicit start point (e.g. 'git switch -c <name> "
                     "origin/HEAD'); the CI branch-root gate remains the authoritative backstop.",
                     "AIQT guardrail: denied a branch-creation form whose start point is ambiguous "
                     "(rule brnrot); re-issue with an explicit start point.")
@@ -11770,6 +11873,22 @@ def _gate_weakening_fallback(command):
     return _allow()
 
 
+def _gate_alias_deny():
+    """gate_weakening's deny of a git command that runs under a git alias the command defines (_git_local_alias,
+    _git_alias_from_env), on a parsed command and on the segments an unparseable one recovers alike."""
+    return _deny(
+        "AIQT rule gatdis (gate-discipline): this git command defines a git alias for itself, or runs under one (a "
+        "-c or --config-env alias.<name>, include.path or includeIf key, a GIT_CONFIG_PARAMETERS or "
+        "GIT_CONFIG_KEY_<n> assignment naming one, an export or declaration of GIT_CONFIG_PARAMETERS, "
+        "GIT_CONFIG_COUNT or GIT_CONFIG_KEY_<n> in the command whatever its value, or a GIT_CONFIG_PARAMETERS or "
+        "GIT_CONFIG_KEY_<n> in the session environment naming one), so this guard cannot read the subcommand or "
+        "the options it runs, and a bypass of the verification hooks (--no-verify, or -n on commit or am) cannot "
+        "be ruled out. Re-issue the command the alias expands to explicitly, without the export (an alias from the "
+        "session environment needs a session started without that variable). {}".format(_GATE_ALTS),
+        "AIQT guardrail: denied a git alias the command defines or runs under, which may bypass verification hooks "
+        "(rule gatdis); run the aliased command explicitly.")
+
+
 # The kinds of _gate_weakening_fallback_kind on which _gate_weakening_fallback denies.
 _GATE_FALLBACK_DENIES = frozenset(("no-verify", "short-n"))
 
@@ -11859,8 +11978,10 @@ def gate_weakening(data):
     body (_gate_recovered_sink inside _SubstHeredocFloor) and a raw fallback deny
     (_gate_weakening_fallback_kind) deny after this guard's own denies, and the raw fallback decides in place
     of this guard's allow.
-    A git command that defines a git alias for itself (_git_local_alias) DENIES: the subcommand and options it
-    runs cannot be read, so a hook bypass cannot be ruled out.
+    A git command that defines a git alias for itself (_git_local_alias), or runs under one the command defines
+    outside its own segment or the session environment carries (_git_alias_from_env), DENIES: the subcommand and
+    options it runs cannot be read, so a hook bypass cannot be ruled out. On a parse error such a git segment the
+    partial lex recovers DENIES too (_git_alias_recovered), after the recovered sink.
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
@@ -11896,6 +12017,11 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
+        # A recovered git segment that runs under a git alias the command defines denies as on a parsed command
+        # (_git_alias_recovered): its subcommand and options cannot be read, and the raw probes below may see no
+        # bypass spelling in an alias value they cannot reach.
+        if _git_alias_recovered(command):
+            return _gate_alias_deny()
         if not isinstance(exc, _UncertainHashError):
             return _gate_weakening_fallback(command)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
@@ -11953,24 +12079,18 @@ def gate_weakening(data):
     floor = _SubstHeredocs.reads != reads  # main's reading of a body the lex read fails: its decision is a floor
     records = [seg for reading in readings for seg in reading]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
+    from_env = _git_alias_from_env(seg.argv for seg in records)
     for index, seg in enumerate(records):
         tokens = seg.argv
         if not tokens:
             continue  # no command word, so neither git nor a checker (a run of separators reads nothing here)
         sep_after = seg.sep_after
         if _command_word(tokens) == "git" and not _has_info_flag(tokens):
-            # A git alias the command defines (_git_local_alias) runs a subcommand, and options in its value,
-            # that this guard cannot read, so a hook bypass cannot be ruled out: it denies like one.
-            if _git_local_alias(tokens):
-                return _deny(
-                    "AIQT rule gatdis (gate-discipline): this git command defines a git alias for itself (a -c "
-                    "or --config-env alias.<name>, include.path or includeIf key, or a GIT_CONFIG_PARAMETERS or "
-                    "GIT_CONFIG_KEY_<n> assignment naming one), so this guard cannot read the subcommand or the "
-                    "options it runs, and a bypass of the verification hooks (--no-verify, or -n on commit or "
-                    "am) cannot be ruled out. Re-issue the command the alias expands to explicitly. {}"
-                    .format(_GATE_ALTS),
-                    "AIQT guardrail: denied a git alias the command defines, which may bypass verification hooks "
-                    "(rule gatdis); run the aliased command explicitly.")
+            # A git alias the command defines (_git_local_alias, or outside the git command's own segment,
+            # _git_alias_from_env) runs a subcommand, and options in its value, that this guard cannot read, so a
+            # hook bypass cannot be ruled out: it denies like one.
+            if from_env or _git_local_alias(tokens):
+                return _gate_alias_deny()
             sub, args = _git_sub_and_args(tokens)
             if sub in _NOVERIFY_VERBS:
                 spelling = _no_verify_spelling(sub, args)
@@ -12102,11 +12222,13 @@ def _commit_msg_command_index(tokens):
     return i
 
 
-def _commit_msg_subst_hit(seg):
+def _commit_msg_subst_hit(seg, from_env=False):
     """Return (argument, marker) for the first post-subcommand hit in a recognized git commit segment.
 
     Every token after commit is inspected without Git option binding: Bash performs substitution before Git
     parses options or an end-of-options token, so neither an option value nor `--` makes a marker safe.
+    from_env is True when the command defines a git alias outside a git command's own segment
+    (_git_alias_from_env), which every git segment may then run.
     """
     tokens = seg.argv
     command_index = _commit_msg_command_index(tokens)
@@ -12114,9 +12236,9 @@ def _commit_msg_subst_hit(seg):
             or tokens[command_index].rsplit("/", 1)[-1] != "git"):
         return None
     sub, args = _git_sub_and_args(tokens[command_index:])
-    # A git alias the command defines (_git_local_alias, or an assignment before the command word) may run
-    # git commit, so its arguments are read as a commit's.
-    aliased = (any(_git_alias_defined_at(tokens, j) for j in range(command_index))
+    # A git alias the command defines (_git_local_alias, or an assignment before the command word, or one outside
+    # the git command's own segment, from_env) may run git commit, so its arguments are read as a commit's.
+    aliased = (from_env or any(_git_alias_defined_at(tokens, j) for j in range(command_index))
                or _git_local_alias(tokens[command_index:]))
     if sub != "commit" and not (sub is not None and aliased):
         return None
@@ -12190,8 +12312,9 @@ def commit_msg_subst(data):
         return _commit_msg_subst_fallback(_hash_doubt_scan(command))
     except ValueError:
         return _commit_msg_subst_fallback(command)
+    from_env = _git_alias_from_env(seg.argv for seg in segments)
     for seg in segments:
-        hit = _commit_msg_subst_hit(seg)
+        hit = _commit_msg_subst_hit(seg, from_env)
         if hit is None:
             continue
         argument, marker = hit
