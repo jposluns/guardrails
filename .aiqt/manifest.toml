@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "7c756cef762dc74d82d6c354c8099908cb88a8ad1035d084d21c7044a2eb80d2"
+tree-sha256 = "4d23ea87aa56d843b5c389c35a0be20f25e001711b0ccb95a718730530389ab4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "f40d883c1ae826299d128c36b9c3fa672e1c14118bc67930367719d37262a548"
+sha256 = "7fcdbec5c7f7ba0690d5bc9114702a2e7a2c45f213221e57819af0507953aa7b"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3291,8 +3291,8 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_standards.py"
-bytes = 21529
-sha256 = "8bc39c8b7e8ae2001660a0c1ad70f8cb907edd7d65f3143a750a7cb49c82a1ea"
+bytes = 23230
+sha256 = "a1c868cc733f310e9cf47570152c621cbad0e70f691917e573b819cf7e82024e"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -3586,8 +3586,8 @@ sha256 = "d5e68bcbdfc7f4910676d047b73f8ede82a3602b027b23e442f58fee2bba453d"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 79827
-sha256 = "e08acffb0d26902c56cc08c153ec5a345abff455a50e0bc9e0aef9e378e4816b"
+bytes = 85608
+sha256 = "2b7c131eb19b3000e25c0b6493a530091e7dd0b528b1a7457f1d477fc0a02872"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -3626,8 +3626,8 @@ sha256 = "88575c9b533d05ffce5ca61d3efe9320bc5f993a6f40e74181b87032394820b5"
 
 [[sources]]
 path = "tools/gen_cursor.py"
-bytes = 16076
-sha256 = "c23e64eb3dc1c8e63c3c41c68f4a4aa79fe9c752894a909ec80b31e8f32386f1"
+bytes = 19644
+sha256 = "7ecef972ef90e5da7167a257c275e136d535c639e8a8cfec4b20223f317d2492"
 
 [[sources]]
 path = "tools/gen_disclosure.py"
@@ -3656,8 +3656,8 @@ sha256 = "45dc4e2a261c1d8036a23a74ba149ca92220c665d45a61dd060f464e0238f464"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 251999
-sha256 = "644c4086f45d6201e61dd99a352d99023cba838469f25d63eb8fd9e6e00ec259"
+bytes = 256110
+sha256 = "589ad1c8b17ab0e0926f8d4f37e2031ca28705011d895aa0fff063748aa9f3c8"
 
 [[sources]]
 path = "tools/gen_install.py"

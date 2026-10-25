@@ -206,8 +206,9 @@ def dir_or_absent(path, root):
     examined other than by absence (an unreadable ancestor, an ancestor that is not a directory, or a
     symbolic link loop), as dir_present does. dir_present reads every non-directory as absent; a caller that
     must not pass over an input it never read refuses the reason as cannot-evaluate instead. Only the last
-    component is judged: an ancestor symlink is followed. The caller reads the tree through path, so a link
-    retargeted between this probe and that read (by another writer at the same moment) is not detected."""
+    component is judged: an ancestor symlink is followed (dir_chain_or_absent judges every component). The
+    caller reads the tree through path, so a link retargeted between this probe and that read (by another
+    writer at the same moment) is not detected."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -224,6 +225,35 @@ def dir_or_absent(path, root):
         return (False, LINK_OUTSIDE_ROOT)
     if not stat.S_ISDIR(os.lstat(real).st_mode):
         return (False, LINK_NOT_A_DIRECTORY)
+    return (True, None)
+
+
+def dir_chain_or_absent(path, root):
+    """dir_or_absent for every directory component of path under root, from the first one below root down to
+    path itself, so a symbolic link at any depth is judged, not only the last component. A tool that writes,
+    deletes or reads a generated file probes the directory holding it this way before the first such access.
+    Each link met is followed only to a directory inside root, so the directory reached is inside root too.
+    Return (True, None) when every component is a directory, (False, None) at the first absent one (nothing
+    below it is there), and (False, reason) at the first one that is there but cannot be read as a directory;
+    the reason names that component when it is above path. A path not lexically under root, or holding a ..
+    component, is (False, reason) as well. RAISE OSError as dir_or_absent does. dir_or_absent's caveat about a
+    link retargeted between the probe and the read applies to every component."""
+    try:
+        parts = Path(path).relative_to(root).parts
+    except ValueError:
+        return (False, "is not under the repository root {}".format(root))
+    if ".." in parts:
+        return (False, "holds a .. component")
+    current = Path(root)
+    for depth, part in enumerate(parts, 1):
+        current = current / part
+        present, problem = dir_or_absent(current, root)
+        if problem is not None:
+            if depth < len(parts):
+                problem = "has a directory component {} that {}".format(current, problem)
+            return (False, problem)
+        if not present:
+            return (False, None)
     return (True, None)
 
 
