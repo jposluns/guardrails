@@ -12,8 +12,9 @@ pack's own subtree and never an adopter's own Cursor rules beside it. Format per
 https://cursor.com/docs/rules (retrieved 2026-08-17).
   gen_cursor.py           regenerate .cursor/rules/aiqt-guardrails/{aiqt,security}/
   gen_cursor.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
-  gen_cursor.py --self-test  assert an invalid-UTF-8 generated .mdc target, and a source path that is not
-                             a directory or a symlink to a directory inside the root, fail closed (exit 2)
+  gen_cursor.py --self-test  assert an invalid-UTF-8 generated .mdc target, a source path that is not a
+                             directory or a symlink to a directory inside the root, and a reserved subtree
+                             symlinked outside the root fail closed (exit 2)
 """
 import sys
 
@@ -34,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import dir_or_absent, dir_present  # noqa: E402
+from _standards import dir_or_absent  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 # The reserved output subtree (relative parts, joined under repo root). Everything under it is
@@ -104,6 +105,16 @@ def run(root, check):
     def _raise(exc):
         raise exc
     try:
+        # dir_or_absent (not is_dir or dir_present), before the first read, write or delete in the reserved
+        # subtree: one that is there but cannot be read as a directory (a regular file, or a symlink that is
+        # dangling, whose target is not a directory or resolves outside the root) is exit 2 with nothing written
+        # or deleted, never followed out of the repository, and an unreadable .cursor/ parent raises (exit 2
+        # below), never skipping the orphan scan. A symlink to a directory inside the root is read. A subtree
+        # absent here can only be created below, holding desired files alone.
+        out_present, problem = dir_or_absent(out_dir, root)
+        if problem is not None:
+            print("error: {} {} (cannot evaluate)".format(out_dir, problem))
+            return 2
         for rel, content in sorted(desired.items()):
             target = out_dir / rel
             current = target.read_text(encoding="utf-8") if target.exists() else None
@@ -113,9 +124,8 @@ def run(root, check):
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text(content, encoding="utf-8")
         # Orphan scan, scoped to the reserved subtree ONLY (it is 100% generated; siblings under
-        # .cursor/rules/ may be the adopter's own and are never walked). dir_present, not is_dir: an
-        # unreadable .cursor/ parent must fail closed, not skip the orphan scan.
-        if dir_present(out_dir):
+        # .cursor/rules/ may be the adopter's own and are never walked).
+        if out_present:
             for dirpath, _dirs, filenames in os.walk(out_dir, onerror=_raise):
                 for fn in sorted(f for f in filenames if f.endswith(".mdc")):
                     f = Path(dirpath) / fn
@@ -235,6 +245,28 @@ def self_test_main():
             if got != want or not kept.exists() or rewritten != (shape == "in-root"):
                 failures.append("a source path that is a symlink {} expected exit {} with the generated .mdc "
                                 "{}, got {}".format(shape, want, "rewritten" if want == 0 else "kept", got))
+        # The reserved subtree that is a symlink to a directory holding a planted orphan .mdc and lacking the
+        # generated one, in write mode: outside the root, it is exit 2 with the orphan kept and the .mdc not
+        # written there, never followed to prune or write out of the repository; inside the root, it is read
+        # (exit 0, the orphan pruned and the .mdc written there).
+        for where, want in (("outside", 2), ("in-root", 0)):
+            out = tmp / ("out-" + where)
+            (out / ".aiqt" / "core" / "rules").mkdir(parents=True)
+            (out / ".aiqt" / "core" / "rules" / "gen-cursor-selftest-target.md").write_text(_RULE_SRC, encoding="utf-8")
+            link = out.joinpath(*OUT_PARTS)
+            link.parent.mkdir(parents=True)
+            held = tmp / "held-outside" if where == "outside" else out / "shared" / "held"
+            (held / "aiqt").mkdir(parents=True)
+            (held / "aiqt" / "zz-planted-orphan.mdc").write_text("planted\n", encoding="utf-8")
+            link.symlink_to(held if where == "outside" else os.path.relpath(held, link.parent))
+            got = run_quiet(out, check=False)
+            kept = (held / "aiqt" / "zz-planted-orphan.mdc").exists()
+            wrote = (held / _RULE_MDC_REL).exists()
+            if (got, kept, wrote) != (want, want == 2, want == 0):
+                failures.append("a reserved subtree that is a symlink {} expected exit {} with the orphan {} there, "
+                                "got exit {}, orphan kept {}, .mdc written {}".format(
+                                    where, want, "kept and nothing written" if want == 2 else "pruned", got, kept,
+                                    wrote))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -246,7 +278,9 @@ def self_test_main():
     print("SELF-TEST PASS: an invalid-UTF-8 generated .mdc target fails closed (exit 2), not a raw "
           "UnicodeDecodeError traceback (guards the widened reconcile arm); a source path that is a "
           "regular file or a symlink that is dangling, to a regular file or to a directory outside the root "
-          "exits 2 with the generated .mdc kept, and one symlinked to a directory inside the root is read.")
+          "exits 2 with the generated .mdc kept, and one symlinked to a directory inside the root is read; a "
+          "reserved subtree symlinked outside the root exits 2 in write mode with nothing written or deleted "
+          "there, and one symlinked inside the root is read.")
     return 0
 
 

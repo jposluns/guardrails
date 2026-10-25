@@ -265,7 +265,13 @@ def load_manifests(std_dir, root=None):
     existing dir that cannot be listed, or a std_dir that is there but cannot be read as a directory
     (dir_or_absent: a regular file, or a symlink that is dangling, whose target is not a directory or
     resolves outside root), raises OSError (fail-closed), never a false-clean empty. root is the
-    repository root; by default the directory two levels up, whose .aiqt/standards std_dir is."""
+    repository root; by default the directory two levels up, whose .aiqt/standards std_dir is. That default
+    is the real root for every caller that passes <root>/.aiqt/standards. A std_dir named explicitly (the
+    --std DIR of check_standards_currency and check_standards_urls_live) has no known repository root, so
+    the default is a guess there: a DIR that is itself a symbolic link is judged against DIR's grandparent,
+    and one whose target lies outside that directory is refused (exit 2, the message naming it as outside
+    the repository) even when the target is a valid standards directory; name the target directory itself
+    to audit it. A DIR that is not a symbolic link is read as it is, wherever it lies."""
     std_dir = Path(std_dir)
     out = {}
     if not _standards_present(std_dir, std_dir.parent.parent if root is None else root):

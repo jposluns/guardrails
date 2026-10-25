@@ -85,7 +85,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
-from _standards import dir_present  # noqa: E402
+from _standards import dir_or_absent, LINK_OUTSIDE_ROOT  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402  canonical AIQT-priority rule order (as gen_mappings uses)
 import gen_enforceability  # noqa: E402  reuse build_ledger so the register can never accept a stale ledger
@@ -768,7 +768,13 @@ def build_views(root):
     ValueError/OSError/gen_site.SchemaError on any malformed, unreadable, stale, or contradictory input
     (including a bad site shell or a display-fidelity failure); the caller maps those to exit 2."""
     rules_dir = root / RULES_DIR_REL
-    if not dir_present(rules_dir):
+    # dir_or_absent (not is_dir or dir_present): a corpus that is there but cannot be read as a directory (a
+    # regular file, or a symlink that is dangling, whose target is not a directory or resolves outside the
+    # root) is never read; a symlink to a directory inside the root is read.
+    present, problem = dir_or_absent(rules_dir, root)
+    if problem is not None:
+        raise ValueError("cannot build the register: {} {} (cannot evaluate)".format(rules_dir, problem))
+    if not present:
         raise ValueError("cannot build the register: no {} to load".format(rules_dir))
     ledger = load_ledger(root)
     by_cid, controls, linkage = ledger_index(ledger)
@@ -1096,6 +1102,7 @@ def _build(base):
 
 def self_test_main():
     import io
+    import os
     import shutil
     import tempfile
     from contextlib import redirect_stdout, redirect_stderr
@@ -1543,6 +1550,29 @@ def self_test_main():
                           "<code>hook:hook-one</code></a>, class b; " + pv_link + "</td>"):
                 if token not in page:
                     failures.append("preview tree: {!r} missing from the generated page".format(token))
+
+        # A .aiqt/core/rules that is a symlink to the corpus moved elsewhere inside the root is read (exit 0,
+        # the views written); one to the corpus moved outside the root (so following it would render cleanly)
+        # fails closed (exit 2) with no view written, refused by this generator's own corpus probe (its
+        # message), never followed out of the repository.
+        for where, want in (("in-root", 0), ("outside", 2)):
+            t = _build(tmp / ("corpus-" + where))
+            corpus = t / RULES_DIR_REL
+            target = t / "shared" / "rules" if where == "in-root" else tmp / "outside-corpus"
+            target.parent.mkdir(exist_ok=True)
+            shutil.move(str(corpus), str(target))
+            corpus.symlink_to(target if where == "outside" else os.path.relpath(target, corpus.parent))
+            buf = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(buf):
+                try:
+                    got = run(t, False)
+                except (SystemExit, Exception) as exc:  # noqa: BLE001  an escape is a failure, not a crash
+                    got = "raised {}".format(type(exc).__name__)
+            named = "cannot build the register: {} {}".format(corpus, LINK_OUTSIDE_ROOT) in buf.getvalue()
+            if (got, (t / MD_REL).is_file(), named) != (want, want == 0, want == 2):
+                failures.append("a corpus that is a symlink {} expected exit {} with the views {}{}, got {}\n{}".format(
+                    where, want, "written" if want == 0 else "not written",
+                    "" if want == 0 else " and the register's own refusal", got, buf.getvalue()))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1571,7 +1601,8 @@ def self_test_main():
           "neither view calls a linked control enforcement, and the page "
           "lead scopes its linkage claim to the declared inputs; and a rule linked only to a preview-channel "
           "hook reads Preview only (not Hook-linked) while a rule linked to a plugin hook and a preview hook "
-          "reads Hook-linked with the preview mechanism marked, in both views")
+          "reads Hook-linked with the preview mechanism marked, in both views; a corpus symlinked inside the "
+          "root is read, and one symlinked outside the root fails closed (exit 2) with no view written")
     return 0
 
 

@@ -69,7 +69,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
-from _standards import dir_present  # noqa: E402
+from _standards import dir_or_absent, LINK_OUTSIDE_ROOT  # noqa: E402
 from gen_rules import load_corpus, CID_RE  # noqa: E402
 import gen_agents  # noqa: E402  the AGENTS.md ordering and body transform (sort_key, body_of, HEADER)
 import _adapter_compose as adapter_compose  # noqa: E402  the AGENTS.md layout (load_registry, compose)
@@ -168,7 +168,13 @@ def measure(root):
     the corpus loader's ValueError/OSError) on an unreadable or ambiguous input."""
     agents = read_agents(root / AGENTS_REL)
     src_dir = root.joinpath(*RULES_PARTS)
-    if not dir_present(src_dir):
+    # dir_or_absent (not is_dir or dir_present): a corpus that is there but cannot be read as a directory (a
+    # regular file, or a symlink that is dangling, whose target is not a directory or resolves outside the
+    # root) is never read; a symlink to a directory inside the root is read.
+    present, problem = dir_or_absent(src_dir, root)
+    if problem is not None:
+        raise DemoError("the rule corpus {} {} (cannot evaluate)".format("/".join(RULES_PARTS), problem))
+    if not present:
         raise DemoError("the rule corpus {} is absent".format("/".join(RULES_PARTS)))
     pairs = [(src, fm) for src, fm, _ in load_corpus(src_dir)]
     pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
@@ -264,7 +270,9 @@ def main():
 #      the gen_agents rendering each fail closed (exit 2);
 #   7. the block registry: a before-rules block shifts every span by exactly the bytes it adds, so a rule
 #      delivered in the legacy layout is pushed past the cap and no longer delivered; an after-rules block
-#      is not read as rule text (the build passes; spans move only by the AIQT-RULES BEGIN line).
+#      is not read as rule text (the build passes; spans move only by the AIQT-RULES BEGIN line);
+#   8. a rule corpus symlinked to a directory inside the root is read, while one symlinked outside the root
+#      fails closed (exit 2) with nothing written.
 
 _APEX = "---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
 _RULE = "---\ncorpus-id: {cid}\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: ACCUR\nslug: {slug}\n---\n"
@@ -576,6 +584,23 @@ def self_test_main():
                 "delivered-prefix-obligations") != ["prjint1"]:
             failures.append("after-rules block: expected spans moved by {} bytes and exit 0 delivering prjint1, "
                             "got {} / {}\n{}".format(len(rules_begin) + 1, moved, code, out))
+
+        # 8. A rule corpus that is a symlink to the corpus moved elsewhere inside the root is read (exit 0, the
+        #    demonstration written); one to the corpus moved outside the root (so following it would build
+        #    cleanly) fails closed (exit 2) with nothing written, never followed out of the repository.
+        for where, want in (("in-root", 0), ("outside", 2)):
+            lk = tmp / ("corpus-" + where)
+            _write_tree(lk, [("prjint1", True, 0), ("ruleaa", False, 10)])
+            corpus = lk.joinpath(*RULES_PARTS)
+            target = lk / "shared" / "rules" if where == "in-root" else tmp / "outside-corpus"
+            target.parent.mkdir(exist_ok=True)
+            shutil.move(str(corpus), str(target))
+            corpus.symlink_to(target if where == "outside" else os.path.relpath(target, corpus.parent))
+            code, out = capture(lk, False)
+            if (code, (lk / DEMO_REL).exists(), LINK_OUTSIDE_ROOT in out) != (want, want == 0, want == 2):
+                failures.append("a rule corpus that is a symlink {}: expected exit {} with the demonstration {}, "
+                                "got {}\n{}".format(where, want, "written" if want == 0 else "not written", code,
+                                                    out))
     finally:
         for dirpath, _dirnames, filenames in os.walk(tmp):
             for fn in filenames:
@@ -597,7 +622,8 @@ def self_test_main():
           "(exit 2); a digest mismatch is drift (exit 1) and the consumer flags it; an unreadable, absent, "
           "non-regular, non-UTF-8 or hand-edited AGENTS.md fails closed (exit 2); a before-rules block moves "
           "every span by exactly the bytes it adds and can push a rule past the cap, and an after-rules block "
-          "is never read as rule text.")
+          "is never read as rule text; a rule corpus symlinked inside the root is read, and one symlinked "
+          "outside the root fails closed (exit 2) with nothing written.")
     return 0
 
 
