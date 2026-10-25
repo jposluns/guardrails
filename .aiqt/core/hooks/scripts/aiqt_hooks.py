@@ -8520,7 +8520,8 @@ def git_discard(data):
         # or a leading GIT_DIR/GIT_WORK_TREE assignment is then resolved by git below (beside -C, a relative
         # --git-dir is taken after the whole -C chain) and snapshotted at the repository git resolves; the -C or
         # session directory read here stays a floor, snapshotted as well (when not provably clean) whenever it
-        # lies in another repository, and DENYING when that snapshot fails. A -c or other global option with no
+        # lies in another repository; a failed snapshot there DENIES unless the repository git resolved was
+        # probed and is provably clean or was snapshotted successfully. A -c or other global option with no
         # -C keeps the session-cwd snapshot; the ambient-GIT_* case (unreadable from the command) keeps its
         # disclosed best-effort session-cwd snapshot.
         # ROUND-7 (codex findings 1 and 2): resolve the REPO git's index/ref/stash op acts on via
@@ -8630,8 +8631,9 @@ def git_discard(data):
         # The base read above without asking git (the -C directory, or the session directory beside a
         # --git-dir or leading GIT_DIR=) also stays a floor under git's answer: when it lies in another
         # repository than the one git resolved, it is probed and, when not provably clean, snapshotted as well
-        # below, and a failed snapshot there DENIES, so resolving through git never allows a discard whose
-        # snapshot of that base fails. The repository git resolved is snapshotted in either case.
+        # below. A failed snapshot there is allowed past, with the failure named, only when the repository git
+        # resolved, which the command acts on, was probed and is provably clean or was snapshotted
+        # successfully; otherwise it DENIES. The repository git resolved is snapshotted in either case.
         pre_base = pre_desc = None
         if redirect_base is not None and repo_dir != "opaque":
             if _snapshot_bases_differ(repo_dir if isinstance(repo_dir, str) else cwd_base, redirect_base):
@@ -8716,40 +8718,52 @@ def git_discard(data):
                 "AIQT guardrail: denied a view-overridden git discard with no session directory to snapshot "
                 "(rule prsunc); run it from the target repo, or commit or stash first.")
         # The floor base (pre_base, set only beside a redirect git resolved to another repository) is probed
-        # and snapshotted first, exactly as the base itself was before git was asked. A failed snapshot there
-        # DENIES with that failure named, after a best-effort snapshot of the repository git resolved (folded
-        # into the reason); a successful one is named in the outcome below, after the resolved snapshot.
+        # and snapshotted first, exactly as the base itself was before git was asked, and the repository git
+        # resolved is probed and snapshotted next. A successful floor snapshot is named in the outcome below,
+        # after the resolved snapshot. A failed one is named too, and it alone does not deny when the
+        # repository git resolved (the one the command acts on) was probed and is provably clean or was
+        # snapshotted successfully; when that probe did not complete or that snapshot failed, it DENIES with
+        # both outcomes named.
         pre_snap = None
         pre_text = ""
         if pre_base is not None and _tree_is_clean(pre_base) is not True:
             pre_snap = _record_recovery(pre_base, sub)
-            if pre_snap is not None and pre_snap[0] == "fail":
-                return _deny(
-                    "AIQT rule prsunc (preserve-uncommitted-work): {} carries a redirect that git resolves to {}, "
-                    "but this guard also snapshots {}, the directory it reads that redirect from without asking "
-                    "git, and could not snapshot it ({}); a discard whose snapshot there fails is denied rather "
-                    "than run, whatever git resolves.{} Re-issue it as a plain 'git -C <repo> <verb>' command run "
-                    "from the target repository, or commit or stash your work first. {}".format(
-                        kind or "a git work-losing verb", target_base, pre_desc, pre_snap[1],
-                        _redirect_recovery_text(target_base, sub), alts),
-                    "AIQT guardrail: denied a redirected git discard because a directory it reads could not be "
-                    "snapshotted (rule prsunc); run it from the target repo, or commit or stash first.")
-            pre_text = (" {}{}, the directory this guard reads the redirect from without asking git, was "
-                        "snapshotted as well.{}".format(pre_desc[:1].upper(), pre_desc[1:],
-                                                        _recovery_outcome_text(pre_snap)))
         ao_snap = None
         ao_clean = _tree_is_clean(target_base) if (target_base is not None and destructive) else None
         if target_base is not None and destructive and ao_clean is not True:
             ao_snap = _record_recovery(target_base, sub)
-            if ao_snap is not None and ao_snap[0] == "fail":
+        if pre_snap is not None and pre_snap[0] == "fail":
+            if not (ao_clean is True or (ao_clean is False and ao_snap is not None and ao_snap[0] == "ok")):
                 return _deny(
-                    "AIQT rule prsunc (preserve-uncommitted-work): {} would discard from {}, which this "
-                    "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
-                    "than run. Re-issue it as a plain git command from the target repository, or commit or "
-                    "stash your work first. {}".format(kind or "a git work-losing verb", target_desc,
-                                                       ao_snap[1], alts),
-                    "AIQT guardrail: denied an unrecoverable worktree-redirected git discard (rule prsunc); "
-                    "run it from the target repo, or commit or stash first.")
+                    "AIQT rule prsunc (preserve-uncommitted-work): {} carries a redirect that git resolves to {}, "
+                    "but this guard also snapshots {}, the directory it reads that redirect from without asking "
+                    "git, and could not snapshot it ({}); a discard whose snapshot there fails is allowed only "
+                    "when the repository git resolved was probed and is provably clean or was snapshotted, and "
+                    "{}, so it is denied rather than run.{} Re-issue it as a plain 'git -C <repo> <verb>' command "
+                    "run from the target repository, or commit or stash your work first. {}".format(
+                        kind or "a git work-losing verb", target_base, pre_desc, pre_snap[1],
+                        "its probe did not complete" if ao_clean is None else "its snapshot failed",
+                        _recovery_outcome_text(ao_snap), alts),
+                    "AIQT guardrail: denied a redirected git discard because a directory it reads could not be "
+                    "snapshotted (rule prsunc); run it from the target repo, or commit or stash first.")
+            pre_text = (" {}{}, the directory this guard reads the redirect from without asking git, could not "
+                        "be snapshotted ({}); that failure alone does not deny the command, because the "
+                        "repository git resolved, which it acts on, {}.".format(
+                            pre_desc[:1].upper(), pre_desc[1:], pre_snap[1],
+                            "was probed and is provably clean" if ao_clean is True else "was snapshotted first"))
+        elif pre_snap is not None:
+            pre_text = (" {}{}, the directory this guard reads the redirect from without asking git, was "
+                        "snapshotted as well.{}".format(pre_desc[:1].upper(), pre_desc[1:],
+                                                        _recovery_outcome_text(pre_snap)))
+        if ao_snap is not None and ao_snap[0] == "fail":
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} would discard from {}, which this "
+                "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
+                "than run. Re-issue it as a plain git command from the target repository, or commit or "
+                "stash your work first. {}".format(kind or "a git work-losing verb", target_desc,
+                                                   ao_snap[1], alts),
+                "AIQT guardrail: denied an unrecoverable worktree-redirected git discard (rule prsunc); "
+                "run it from the target repo, or commit or stash first.")
         # A whole-tree clobber (reset --hard, an operand-free checkout -f, switch --force/--discard-changes)
         # on a target the probe confirms DIRTY denies here exactly as the bare command does below, with the
         # snapshot just taken folded into the reason. A command-local cause of this branch (any git global
@@ -8758,7 +8772,8 @@ def git_discard(data):
         # turn the bare deny into a snapshot-then-allow. An ambient GIT_* override keeps its best-effort
         # snapshot-then-allow: it is unreadable from the command, which may not act on the probed tree at
         # all. A probe that did not complete keeps the bare path's snapshot-then-allow. Either outcome names
-        # the floor base's snapshot (pre_text) ahead of `note`, which still ends the reason or note.
+        # the floor base's snapshot or its failure (pre_text) ahead of `note`, which still ends the reason or
+        # note.
         if role == "clobber" and ao_clean is False and not ambient_override:
             return _deny_with_recovery(kind, ao_snap, pre_text + note)
         return _discard_recovery_result(

@@ -8536,11 +8536,12 @@ def _main_isolated(monitor):
         # and a --work-tree outside the -C or session repository still DENY where git resolves one repository,
         # with that repository snapshotted first when it is not provably clean. The session directory such a
         # --git-dir/GIT_DIR form was read from stays a floor too: it is snapshotted as well when it is not
-        # provably clean, and a failed snapshot there DENIES (the '(gdc-floor-*)' vectors). Each fixture is a
-        # session repository 'sess' (clean unless the vector names a sess_cause: uncommitted session work, whose
-        # snapshot fails through a lowered size cap or a temp dir inside sess), a target repository 'tgt' (with
-        # a committed sub/ directory) and, where named, a third repository 'oth', all siblings, the hook running
-        # from sess. Each vector asserts the verdict,
+        # provably clean, and a failed snapshot there is allowed with that failure named only when the target
+        # git resolved was probed and is provably clean or was snapshotted, and DENIES otherwise (the
+        # '(gdc-floor-*)' vectors). Each fixture is a session repository 'sess' (clean unless the vector names a
+        # sess_cause: uncommitted session work, whose snapshot fails through a lowered size cap or a temp dir
+        # inside sess), a target repository 'tgt' (with a committed sub/ directory) and, where named, a third
+        # repository 'oth', all siblings, the hook running from sess. Each vector asserts the verdict,
         # the recovery refs written in every fixture repository and, where named, the text the reason or note
         # carries, so each is red on revert of the fix ('(gdc-*-control)' vectors excepted: they pin unchanged
         # neighbours).
@@ -8558,10 +8559,14 @@ def _main_isolated(monitor):
                     (repos[role] / "file.txt").write_text("committed line\nuncommitted work\n", encoding="utf-8")
                 if state == "staged":
                     _git(repos[role], "add", "file.txt")
+                if state == "big":
+                    # 4 KiB of uncommitted work: over the 1 KiB cap sess_cause "sizecap" sets, so the target's
+                    # own snapshot fails beside the session's.
+                    (repos[role] / "file.txt").write_text("committed line\n" + "w" * 4095 + "\n", encoding="utf-8")
             return base, repos
 
         def gdc(label, template, want, tgt_state, refs_want, needle=None, oth_state=None, ambient=None,
-                sess_cause=None):
+                sess_cause=None, tgt_probe=None):
             try:
                 base, repos = _gdc_fixture(label[1:label.index(")")], tgt_state, oth_state)
                 if sess_cause is not None:
@@ -8579,16 +8584,23 @@ def _main_isolated(monitor):
             for _k, _v in (ambient or {}).items():
                 os.environ[_k] = _v
             _orig_gdc_cap, _orig_gdc_tempdir = aiqt_hooks._RECOVERY_SIZE_CAP, tempfile.tempdir
+            _orig_gdc_clean = aiqt_hooks._tree_is_clean
             if sess_cause == "sizecap":
                 aiqt_hooks._RECOVERY_SIZE_CAP = 1024
             elif sess_cause == "tmpdir":
                 tempfile.tempdir = str(repos["sess"] / "tmpd")
+            if tgt_probe == "incomplete":
+                # The clean probe of the target alone does not complete; every other probe runs as it is.
+                _gdc_tgt_real = os.path.realpath(str(repos["tgt"]))
+                aiqt_hooks._tree_is_clean = lambda repo: (
+                    None if os.path.realpath(repo) == _gdc_tgt_real else _orig_gdc_clean(repo))
             try:
                 code, stdout_obj, _stderr = handler(data)
             finally:
                 for _k in (ambient or {}):
                     os.environ.pop(_k, None)
                 aiqt_hooks._RECOVERY_SIZE_CAP, tempfile.tempdir = _orig_gdc_cap, _orig_gdc_tempdir
+                aiqt_hooks._tree_is_clean = _orig_gdc_clean
             got = _reduce_result(code, stdout_obj)
             text = ""
             if isinstance(stdout_obj, dict):
@@ -8748,49 +8760,92 @@ def _main_isolated(monitor):
             "git -C {T} --git-dir=.git reset --hard && true", "deny", "dirty", {"tgt": 0, "sess": 0})
         # The session-directory floor: a --git-dir/GIT_DIR form beside -C was read from the session directory
         # before git resolved it, and that directory is still probed and snapshotted when it is not provably
-        # clean. When that snapshot fails (the size cap, or a temp dir inside the session repository) the
-        # discard DENIES with that failure named, in each prefix order, on a clean target and on a dirty one
-        # (whose own snapshot is still taken and named); each is allowed with a target snapshot when the floor
-        # is removed. When the session snapshot succeeds, both repositories are snapshotted and it allows.
+        # clean. When that snapshot fails (the size cap, or a temp dir inside the session repository) and the
+        # target git resolved was probed and is provably clean, or was snapshotted, the discard is allowed with
+        # that failure named, in each prefix order, on a clean target and on a dirty one (whose own snapshot is
+        # taken and named); each of those is red under a floor that denies every failed session snapshot.
+        # When the target's own snapshot also fails, or its probe does not complete, it DENIES with the session
+        # failure named; each of those is red when the floor stops requiring that target outcome. A whole-tree
+        # clobber on a dirty target still denies there, naming the session failure. When the session snapshot
+        # succeeds, both repositories are snapshotted and it allows.
         _gdc_floor = "but this guard also snapshots the session directory"
         _gdc_cap = "exceeds the 0 MiB recovery snapshot size cap"
         _gdc_tmp = "the temp snapshot dir resolved inside the repo"
-        gdc("(gdc-floor-cap-clean) -C <target> --git-dir=.git, session over the size cap, clean target: DENIES",
-            "git -C {T} --git-dir=.git reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
-            (_gdc_floor, _gdc_cap), sess_cause="sizecap")
-        gdc("(gdc-floor-cap-dirty) -C <target> --git-dir=.git, session over the size cap, dirty target: DENIES",
-            "git -C {T} --git-dir=.git checkout -- file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
-            (_gdc_floor, _gdc_cap, _gdc_saved), sess_cause="sizecap")
-        gdc("(gdc-floor-cap-rev-clean) --git-dir=.git -C <relative>, session over the size cap, clean: DENIES",
-            "git --git-dir=.git -C ../tgt restore --staged file.txt", "deny", "clean", {"tgt": 0, "sess": 0},
-            (_gdc_floor, _gdc_cap), sess_cause="sizecap")
-        gdc("(gdc-floor-cap-rev-dirty) --git-dir=.git -C <relative>, session over the size cap, dirty: DENIES",
-            "git --git-dir=.git -C ../tgt reset", "deny", "dirty", {"tgt": 1, "sess": 0},
-            (_gdc_floor, _gdc_cap, _gdc_saved), sess_cause="sizecap")
-        gdc("(gdc-floor-cap-env-clean) GIT_DIR=.git with -C <target>, session over the size cap, clean: DENIES",
-            "GIT_DIR=.git git -C {T} clean -fd", "deny", "clean", {"tgt": 0, "sess": 0},
-            (_gdc_floor, _gdc_cap), sess_cause="sizecap")
-        gdc("(gdc-floor-cap-env-dirty) GIT_DIR=.git with -C <target>, session over the size cap, dirty: DENIES",
-            "GIT_DIR=.git git -C {T} restore file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
-            (_gdc_floor, _gdc_cap, _gdc_saved), sess_cause="sizecap")
-        gdc("(gdc-floor-tmp-clean) -C <target> --git-dir=.git, temp dir inside the session, clean: DENIES",
-            "git -C {T} --git-dir=.git restore file.txt", "deny", "clean", {"tgt": 0, "sess": 0},
-            (_gdc_floor, _gdc_tmp), sess_cause="tmpdir")
-        gdc("(gdc-floor-tmp-dirty) -C <target> --git-dir=.git, temp dir inside the session, dirty: DENIES",
-            "git -C {T} --git-dir=.git checkout -- file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
-            (_gdc_floor, _gdc_tmp, _gdc_saved), sess_cause="tmpdir")
-        gdc("(gdc-floor-tmp-rev-clean) --git-dir=.git -C <relative>, temp dir inside the session, clean: DENIES",
-            "git --git-dir=.git -C ../tgt reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
-            (_gdc_floor, _gdc_tmp), sess_cause="tmpdir")
-        gdc("(gdc-floor-tmp-rev-dirty) --git-dir=.git -C <relative>, temp dir inside the session, dirty: DENIES",
-            "git --git-dir=.git -C ../tgt clean -fd", "deny", "dirty", {"tgt": 1, "sess": 0},
-            (_gdc_floor, _gdc_tmp, _gdc_saved), sess_cause="tmpdir")
-        gdc("(gdc-floor-tmp-env-clean) GIT_DIR=.git with -C <target>, temp dir inside the session, clean: DENIES",
-            "GIT_DIR=.git git -C {T} reset", "deny", "clean", {"tgt": 0, "sess": 0},
-            (_gdc_floor, _gdc_tmp), sess_cause="tmpdir")
-        gdc("(gdc-floor-tmp-env-staged) GIT_DIR=.git with -C <target>, temp dir inside the session, staged: DENIES",
-            "GIT_DIR=.git git -C {T} restore --staged file.txt", "deny", "staged", {"tgt": 1, "sess": 0},
-            (_gdc_floor, _gdc_tmp, _gdc_saved), sess_cause="tmpdir")
+        _gdc_floor_note = ("The session directory, the directory this guard reads the redirect from without asking "
+                           "git, could not be snapshotted (")
+        _gdc_floor_pass = "that failure alone does not deny the command"
+        _gdc_tgt_clean = "which it acts on, was probed and is provably clean"
+        _gdc_tgt_snap = "which it acts on, was snapshotted first"
+        # FLIPPED (was "deny"): a failed session snapshot is allowed past once the target is provably clean or
+        # snapshotted.
+        gdc("(gdc-floor-cap-clean) -C <target> --git-dir=.git, session over the size cap, clean target: allows",
+            "git -C {T} --git-dir=.git reset --hard", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_at, _gdc_floor_note, _gdc_cap, _gdc_floor_pass, _gdc_tgt_clean), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-dirty) -C <target> --git-dir=.git, session over the size cap, dirty target: allows",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-rev-clean) --git-dir=.git -C <relative>, session over the size cap, clean: allows",
+            "git --git-dir=.git -C ../tgt restore --staged file.txt", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_clean), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-rev-dirty) --git-dir=.git -C <relative>, session over the size cap, dirty: allows",
+            "git --git-dir=.git -C ../tgt reset", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-env-clean) GIT_DIR=.git with -C <target>, session over the size cap, clean: allows",
+            "GIT_DIR=.git git -C {T} clean -fd", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_clean), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-env-dirty) GIT_DIR=.git with -C <target>, session over the size cap, dirty: allows",
+            "GIT_DIR=.git git -C {T} restore file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-tmp-clean) -C <target> --git-dir=.git, temp dir inside the session, clean: allows",
+            "git -C {T} --git-dir=.git restore file.txt", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_clean), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-dirty) -C <target> --git-dir=.git, temp dir inside the session, dirty: allows",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_snap, _gdc_saved), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-rev-clean) --git-dir=.git -C <relative>, temp dir inside the session, clean: allows",
+            "git --git-dir=.git -C ../tgt reset --hard", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_clean), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-rev-dirty) --git-dir=.git -C <relative>, temp dir inside the session, dirty: allows",
+            "git --git-dir=.git -C ../tgt clean -fd", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_snap, _gdc_saved), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-env-clean) GIT_DIR=.git with -C <target>, temp dir inside the session, clean: allows",
+            "GIT_DIR=.git git -C {T} reset", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_clean), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-env-staged) GIT_DIR=.git with -C <target>, temp dir inside the session, staged: allows",
+            "GIT_DIR=.git git -C {T} restore --staged file.txt", "allow-note", "staged", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_snap, _gdc_saved), sess_cause="tmpdir")
+        # The target's own snapshot fails too (its 4 KiB change is over the same lowered cap): DENIES in each
+        # prefix order, with both failures named and no snapshot anywhere.
+        _gdc_tgt_fail = "NOTE: no pre-command recovery snapshot could be created (the working tree exceeds"
+        gdc("(gdc-floor-cap-tgtfail) -C <target> --git-dir=.git, session and target over the size cap: DENIES",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "deny", "big", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its snapshot failed", _gdc_tgt_fail), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-rev-tgtfail) --git-dir=.git -C <relative>, session and target over the cap: DENIES",
+            "git --git-dir=.git -C ../tgt restore file.txt", "deny", "big", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its snapshot failed", _gdc_tgt_fail), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-env-tgtfail) GIT_DIR=.git with -C <target>, session and target over the cap: DENIES",
+            "GIT_DIR=.git git -C {T} reset", "deny", "big", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its snapshot failed", _gdc_tgt_fail), sess_cause="sizecap")
+        # The target's clean probe does not complete (its snapshot is still taken and named): DENIES in each
+        # prefix order, though the same target snapshot would allow a discard whose session snapshot succeeded.
+        gdc("(gdc-floor-cap-noprobe) -C <target> --git-dir=.git, session over the cap, target probe unfinished: "
+            "DENIES", "git -C {T} --git-dir=.git checkout -- file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its probe did not complete", _gdc_saved), sess_cause="sizecap",
+            tgt_probe="incomplete")
+        gdc("(gdc-floor-tmp-rev-noprobe) --git-dir=.git -C <relative>, temp dir in the session, target probe "
+            "unfinished: DENIES", "git --git-dir=.git -C ../tgt restore file.txt", "deny", "dirty",
+            {"tgt": 1, "sess": 0}, (_gdc_floor, _gdc_tmp, "and its probe did not complete", _gdc_saved),
+            sess_cause="tmpdir", tgt_probe="incomplete")
+        gdc("(gdc-floor-tmp-env-noprobe) GIT_DIR=.git with -C <target>, temp dir in the session, target probe "
+            "unfinished: DENIES", "GIT_DIR=.git git -C {T} restore --staged file.txt", "deny", "staged",
+            {"tgt": 1, "sess": 0}, (_gdc_floor, _gdc_tmp, "and its probe did not complete", _gdc_saved),
+            sess_cause="tmpdir", tgt_probe="incomplete")
+        # A whole-tree clobber on a dirty target still DENIES as the bare form does, with the target snapshot
+        # and the session failure named.
+        gdc("(gdc-floor-cap-clobber) -C <target> --git-dir=.git reset --hard, session over the cap, dirty: DENIES",
+            "git -C {T} --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            ("would overwrite the working tree", _gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved),
+            sess_cause="sizecap")
         gdc("(gdc-floor-both) a dirty session whose snapshot succeeds is snapshotted beside the target; allows",
             "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 1},
             (_gdc_at, "The session directory, the directory this guard reads the redirect from without asking "
@@ -20512,7 +20567,8 @@ def _main_isolated(monitor):
           "dirty target, with its snapshot, exactly as the bare command does, and a destructive form "
           "carrying a --git-dir, --work-tree or --bare redirect is resolved by git itself, DENYING when git "
           "splits the git dir and worktree across repositories or cannot resolve them read-only, or when the "
-          "session directory a --git-dir beside -C was read from cannot be snapshotted) "
+          "session directory a --git-dir beside -C was read from cannot be snapshotted while the repository "
+          "git resolved was neither probed clean nor snapshotted; otherwise the note names that failure) "
           "and ALLOWS on a clean one (nothing to snapshot); stash/branch are not snapshottable and "
           "allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
           "deletion, DENIES fail-safe a push it cannot prove misses the protected line (a "
