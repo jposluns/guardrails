@@ -1897,6 +1897,7 @@ expected-check-ids = [
   "harness/fault-channel-flush-window-recheck-exit-2",
   "harness/fault-channel-flush-window-start-recheck-exit-2",
   "harness/fault-channel-entry-wiring-exact",
+  "harness/fault-channel-armed-exit-atexit-runs-and-is-stated",
   "harness/fault-channel-failures-all-mapped",
   "harness/fault-channel-labels-registered",
   "revert/character-set-red",

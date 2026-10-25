@@ -126,8 +126,12 @@ that kills a descendant process still in the child's session and refuses the run
 that session, by setsid say, is not found: a stated residual), and a stage marker telling a refusal of
 the loaded code from a bootstrap failure) and ends the process with os._exit,
 so an atexit callback registered by loaded code can never run after the verdict (that channel is
-unreachable, not disclosed). Every OTHER launched script's `__main__` entry remains unwrapped
-(wrapping those is planned hardening), so outside the wrapped set such an exit ends that gate with the
+unreachable, not disclosed), with one exception: a tools/check_instruction_budget self-test that armed
+its execution report ends through that report's exit_with instead, so there such a callback does run
+after the verdict, before the report's finalizer (its fault reaches stderr, and
+tools/check_selftest_execution.py refuses a nonempty error stream; a callback that ends the process
+itself leaves no report, which that gate refuses as missing). Every OTHER launched script's
+`__main__` entry remains unwrapped (wrapping those is planned hardening), so outside the wrapped set such an exit ends that gate with the
 exception's own status (exit 0 for SystemExit 0 or None), and its loaded code's background faults are not
 settled. Loaded code calling os._exit ITSELF remains a disclosed residual at every wrapped gate whose load
 stays in its own process (an in-process entry cannot catch it); only the contract gate's child-contract

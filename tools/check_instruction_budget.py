@@ -2387,7 +2387,8 @@ def self_test(report_path=None):
                 ("exit-status-boundary-negative", "harness/fault-channel-exit-status-boundary-negative-exit-2"),
                 ("flush-window", "harness/fault-channel-flush-window-recheck-exit-2"),
                 ("flush-window-start", "harness/fault-channel-flush-window-start-recheck-exit-2"),
-                ("entry-wiring", "harness/fault-channel-entry-wiring-exact")):
+                ("entry-wiring", "harness/fault-channel-entry-wiring-exact"),
+                ("armed-exit-atexit", "harness/fault-channel-armed-exit-atexit-runs-and-is-stated")):
             fault_labels.add(fault_label)
             check(fault_id, [failure for failure in fault_failures
                              if failure.startswith("fault-channel/" + fault_label + ":")], [])
@@ -2402,7 +2403,7 @@ def self_test(report_path=None):
         # _FAULT_CHANNEL_CASES cannot leave its per-label check passing vacuously as [] == [].
         check("harness/fault-channel-labels-registered",
               sorted({case_label for case_label, _body, _expected, _marked, _absent in _FAULT_CHANNEL_CASES}
-                     | {"flush-window", "flush-window-start", "entry-wiring"}),
+                     | {"flush-window", "flush-window-start", "entry-wiring", "armed-exit-atexit"}),
               sorted(fault_labels))
         code_ran = []
 
@@ -2792,7 +2793,9 @@ def main(argv):
 # count and threading's census already dropped it), a faulthandler watchdog and a thread a C extension
 # starts. The verdict then ends the process with os._exit, so an
 # atexit callback registered by loaded code can never run after it (that channel is unreachable, not
-# merely disclosed). Only a SystemExit with code None or 0 ending a worker thread is the interpreter's
+# merely disclosed), except on the armed execution-report path, which ends through exit_with instead and
+# where such a callback does run after the verdict (see _EXIT_REPORT_ARMED for what then refuses its
+# fault). Only a SystemExit with code None or 0 ending a worker thread is the interpreter's
 # normal SUCCESSFUL thread exit (default-hook parity) and is not recorded; any other code is an
 # unsuccessful exit a worker reported, so it is recorded.
 # A low-level _thread worker's SystemExit never reaches any hook (the interpreter drops it), so the
@@ -2807,7 +2810,8 @@ def main(argv):
 # marker line. After the exit flushes the settle stops the collector, blocks every signal, runs any
 # handler already tripped, and re-reads the record and every liveness term, so a fault recorded or a
 # worker a signal handler started while a flush was blocked on a full pipe still fails the verdict, and
-# no loaded code can run between that last read and the exit.
+# no loaded code can run between that last read and the exit (on the armed execution-report path an
+# atexit callback registered by loaded code still runs after it: see _EXIT_REPORT_ARMED).
 # Paths that end outside _gate_exit (a propagating KeyboardInterrupt, an escaping exception) already end
 # non-zero, and an ACCIDENTAL fault in an atexit callback cannot turn that non-zero end into exit 0, so
 # no background fault reads as a pass there. Residual: loaded code replacing these hooks, this record or
@@ -2824,7 +2828,8 @@ _FAULT_MARKER = "LOADED-CODE-FAULT"
 # process, so an armed run ends through exit_with instead of os._exit, after the same settle and fault
 # decision. On that path an atexit callback registered by loaded code does run, before the finalizer;
 # its fault reaches stderr, and tools/check_selftest_execution.py refuses a run with a nonempty error
-# stream.
+# stream; a callback that ends the process itself (os._exit, say) does so before the finalizer writes
+# the report, and that gate refuses a missing report as cannot-evaluate.
 _EXIT_REPORT_ARMED = []
 
 
@@ -3386,6 +3391,75 @@ def _entry_wiring_failures():
                         "fail-closed form")
     return failures
 
+
+# The armed execution-report path: _gate_exit ends through exit_with there, an exception, never os._exit,
+# so an atexit callback the loaded code registered runs after the verdict. The probe takes that branch
+# (the report itself stays unarmed, so exit_with is a plain sys.exit) over a fixture whose callback writes
+# a marker; exit 0 with the marker on stderr is required, a witness of the exception this file's
+# fault-channel comment states (red if that path stops running such callbacks), and the comment must
+# state it (red if the unqualified claim that such a callback never runs comes back).
+_ARMED_EXIT_PROBE = """import importlib.util, sys
+tool, fixture = sys.argv[1:3]
+sys.path.insert(0, tool.rsplit("/", 1)[0])
+spec = importlib.util.spec_from_file_location("_armed_exit_probe_target", tool)
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+gate._SETTLE_SECONDS = 2.0
+gate._EXIT_REPORT_ARMED.append(True)
+def load():
+    case = importlib.util.spec_from_file_location("_armed_exit_fixture", fixture)
+    module = importlib.util.module_from_spec(case)
+    case.loader.exec_module(module)
+    return 0
+gate._fail_closed_main(load)
+"""
+_ARMED_EXIT_FIXTURE = ("import atexit, sys\n"
+                       "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n")
+# The two statements of that exception in the fault-channel comment, matched over the comment lines
+# alone (joined, so a wrap does not matter), never over this code that names them.
+_ARMED_EXIT_STATEMENTS = (
+    "except on the armed execution-report path, which ends through exit_with instead and where such a "
+    "callback does run after the verdict",
+    "on the armed execution-report path an atexit callback registered by loaded code still runs after it",
+)
+
+
+def _armed_exit_failures():
+    """One failure string per armed-path requirement missed (see _ARMED_EXIT_PROBE)."""
+    import subprocess
+    import tempfile
+    failures = []
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="instruction-budget-armed-exit-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_ARMED_EXIT_PROBE, encoding="utf-8")
+        case = Path(tmp) / "armed_exit.py"
+        case.write_text(_ARMED_EXIT_FIXTURE, encoding="utf-8")
+        try:
+            child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                   capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.SubprocessError) as exc:
+            child = None
+            failures.append("fault-channel/armed-exit-atexit: probe did not run ({})".format(
+                type(exc).__name__))
+    if child is not None and (child.returncode != 0 or "FAULT-FIXTURE-ATEXIT-RAN" not in child.stderr):
+        failures.append("fault-channel/armed-exit-atexit: expected exit 0 with the loaded atexit callback "
+                        "run after the verdict, got exit {} with the callback {}".format(
+                            child.returncode,
+                            "run" if "FAULT-FIXTURE-ATEXIT-RAN" in child.stderr else "not run"))
+    try:
+        source = Path(__file__).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return failures + ["fault-channel/armed-exit-atexit: this file could not be read ({})".format(
+            type(exc).__name__)]
+    comments = " ".join(line.strip()[1:].strip() for line in source.splitlines()
+                        if line.strip().startswith("#"))
+    for statement in _ARMED_EXIT_STATEMENTS:
+        if statement not in comments:
+            failures.append("fault-channel/armed-exit-atexit: the fault-channel comment does not state "
+                            "that exception: {!r}".format(statement))
+    return failures
+
 def _fault_channel_vectors():
     """One failure string per fault-channel case whose child did not end as required: the expected exit
     code, the fault marker exactly when a fault must be recorded, and for the atexit case no trace of the
@@ -3419,6 +3493,7 @@ def _fault_channel_vectors():
                 failures.append("fault-channel/{}: the atexit callback ran".format(label))
     failures.extend(_flush_window_failures())
     failures.extend(_entry_wiring_failures())
+    failures.extend(_armed_exit_failures())
     return failures
 
 

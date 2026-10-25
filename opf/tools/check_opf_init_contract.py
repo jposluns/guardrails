@@ -84,7 +84,8 @@ def _drift(msg):
 # GeneratorExit, an os._exit with ANY status, any other BaseException, or a background fault) at load
 # and in the membership test, because the validator is loaded in a CHILD process under the fail-closed
 # child contract (_validator_missing), never in this gate's process. An operator's Ctrl-C reaches THIS
-# process (the signal goes to the process group) and propagates to stop the gate runner.
+# process (the signal goes to its process group) and propagates to stop the gate runner; the child runs in
+# its own session, so it never receives that signal and is left to end by itself (a stated residual).
 
 
 def _ending_kind(exc):
@@ -287,6 +288,9 @@ _REFUSED_BEFORE_LOAD = ("loading the validator to verify _RESERVED membership: t
                         "fail-closed")
 _CANT_NOT_COMPLETE = "loading the validator to verify _RESERVED membership: the child did not complete"
 _CANT_MALFORMED = "loading the validator to verify _RESERVED membership: the child result is malformed"
+_CANT_CENSUS = ("loading the validator to verify _RESERVED membership: the child's session could not be "
+                "read after it ended (the process listing, a process's status or the group probe was "
+                "refused), so no survivor can be ruled out; fail-closed")
 
 
 def _stage_began(out):
@@ -300,15 +304,21 @@ def _stage_began(out):
 
 
 def _survivors_of_session(session):
-    """Kill and reap every process left in the child's own session once the child has ended, returning
-    the number found (0 when none). The census keys on the session id the child was launched with:
-    field 6 of /proc/<pid>/stat, read past the LAST ')' so a command name cannot shift it, plus a
-    process-group existence probe (signal 0; the leader's group id equals the session id); each survivor
-    gets SIGKILL and the census is re-polled until empty or a 10-second bound. Stated residuals, not
-    closed: a descendant that called setsid left the session and is not found; where /proc is
-    unavailable only the group probe runs, so a descendant that only changed its process group is not
-    found; and a pid recycled into this session id between the child's end and the census is
-    indistinguishable from a survivor."""
+    """Kill every process left in the child's own session once the child has ended, returning the number
+    found (0 when none). The census keys on the session id the child was launched with: field 6 of
+    /proc/<pid>/stat, read past the LAST ')' so a command name cannot shift it, plus a process-group
+    existence probe (signal 0; the leader's group id equals the session id); each survivor gets SIGKILL
+    and the census is re-polled until empty or a 10-second bound (it signals and polls; the survivors
+    are not its children, so it never waits on them). Only an absence reads as absence: a /proc entry
+    whose stat is gone (ENOENT, or ESRCH from a process that ended during the read) and a group probe
+    answering ESRCH. Any other answer (the /proc listing missing or refused, a process's stat refused or
+    too short to carry the session field, the group probe refused) is _CANT_CENSUS (exit 2) after the
+    kill pass, never an empty session, so a host whose /proc hides other users' process details
+    (hidepid=1) or a confinement that refuses reading another process's stat is refused, never passed.
+    Stated residuals, not closed: a descendant that called setsid left the session and is not found, and
+    neither is one running as another user under a /proc that hides it (hidepid=2) once it has also left
+    the child's process group; and a pid recycled into this session id between the child's end and the
+    census is indistinguishable from a survivor."""
     import os
     import signal
     import time
@@ -317,27 +327,36 @@ def _survivors_of_session(session):
     deadline = time.monotonic() + 10.0
     while True:
         pids = []
+        unreadable = False
         try:
             entries = os.listdir("/proc")
         except OSError:
             entries = []
+            unreadable = True
         for entry in entries:
             if not entry.isdigit():
                 continue
             try:
                 with open("/proc/" + entry + "/stat", "rb") as handle:
                     fields = handle.read().rsplit(b")", 1)[-1].split()
-            except OSError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue
-            if len(fields) > 3 and fields[3] == token:
+            except OSError:
+                unreadable = True
+                continue
+            if len(fields) <= 3:
+                unreadable = True
+            elif fields[3] == token:
                 pids.append(int(entry))
         group_alive = False
         try:
             os.killpg(session, 0)
             group_alive = True
-        except OSError:
+        except ProcessLookupError:
             pass
-        if not pids and not group_alive:
+        except OSError:
+            unreadable = True
+        if not pids and not group_alive and not unreadable:
             return found
         found = max(found, len(pids), 1)
         for pid in pids:
@@ -350,6 +369,8 @@ def _survivors_of_session(session):
                 os.killpg(session, signal.SIGKILL)
             except OSError:
                 pass
+        if unreadable:
+            _cant(_CANT_CENSUS)
         if time.monotonic() >= deadline:
             return found
         time.sleep(0.05)
@@ -359,8 +380,9 @@ def _validator_missing(path, views):
     """Load the validator at path in a CHILD process under the fail-closed child contract and return the
     views missing from its ACTUAL _RESERVED tuple. The contract: the child removes the subinterpreter and
     watchdog capabilities, writes the stage marker, computes the result, runs the loaded code's cleanup
-    (waits until the runtime itself shows no other thread and a zero low-level live count, runs its atexit
-    callbacks, collects garbage, cancels any armed watchdog), writes the result LAST and ends by
+    (waits until the runtime itself shows no other thread and a zero low-level live count and the OS's own
+    thread list shows no other thread, runs its atexit callbacks, collects garbage, cancels any armed
+    watchdog), writes the result LAST and ends by
     os._exit(0) with both streams empty; this gate launches the child in its own session and accepts only
     that exact outcome with no process left in that session. ANY other ending of the loaded code, an
     os._exit with ANY status (in a worker or an atexit callback included), a sys.exit or SystemExit (0 or
@@ -374,18 +396,22 @@ def _validator_missing(path, views):
     those cleanup phases is a fault whether or not the worker finishes, and the thread list and live count
     are read again after them), a thread or low-level worker still live at the bound, an armed
     faulthandler watchdog, a process still alive in the child's session after it ended (killed, then
-    refused), a missing result, a non-zero exit, or a non-empty stream, is CANNOT-EVALUATE (exit 2), never
+    refused), a session the census cannot read, a missing result, a non-zero exit, or a non-empty stream,
+    is CANNOT-EVALUATE (exit 2), never
     this gate's pass: the loaded code never runs in this gate's process, so the os._exit channel of the
     in-process load is unreachable here, not disclosed. The diagnostic separates a refusal of the loaded
     code (stage marker present) from a bootstrap failure that never evaluated it and from a malformed
     result, so the self-test's refusal oracle credits only completed refusals of code the child began to
-    load. An operator's Ctrl-C is a KeyboardInterrupt in THIS process (the signal reaches the whole group)
-    and propagates to stop the runner. Residuals, stated exactly: deliberately hostile loaded code forging
-    the child contract (writing the stage and result files itself and ending cleanly) is the
+    load. An operator's Ctrl-C is a KeyboardInterrupt in THIS process (the signal reaches this process's
+    group) and propagates to stop the runner; the child, in its own session, never receives it and is left
+    to end by itself, the gate still ending non-zero. Residuals, stated exactly: deliberately hostile
+    loaded code forging the child contract (writing the stage and result files itself and ending cleanly)
+    is the
     reporting-machinery channel disclosed once in the _opf_views class disclosure (accepted there, not
-    closed), with the hostile-object residual stated there; a thread outside the Python runtime (one a C
-    extension starts) is invisible to the census and the live count; and the session-census residuals are
-    stated on _survivors_of_session."""
+    closed), with the hostile-object residual stated there; and the session-census residuals are stated
+    on _survivors_of_session. A thread outside the Python runtime (one a C extension starts) is invisible
+    to threading's census and the live count, so on Linux the OS's own thread list the child also waits on
+    carries it, and where that list cannot be read (outside Linux) the child refuses every load."""
     import json
     import os
     import signal
@@ -1106,6 +1132,92 @@ def _self_test_loaded_exit():
                 "oracle control: a result that exists but cannot be read must be this test's failure")
 
 
+def _self_test_census_errors():
+    """The session census reads only an absence as absence. Each vector drives the real
+    _survivors_of_session with one answer faked (the /proc listing, a process's stat or the group probe;
+    os.kill only records) over one listed process that is not a session member, so it differs from the
+    clean control in that one answer alone. A refused listing, a missing /proc, a refused stat, a stat too
+    short to carry the session field and a refused group probe must each end exit 2 with exactly the
+    census diagnostic, never a count of 0 (each is red when its answer is read as absence again); a
+    process that ended before or during its stat read and an absent group must still read as absence; a
+    member found beside an unreadable entry is killed before the census refuses; and a member found
+    alone is killed and counted."""
+    import contextlib
+    import io
+    import os
+    module_globals = globals()
+    census_line = "CANNOT-EVALUATE: {}\n".format(_CANT_CENSUS)
+    killed = []
+
+    def _injected(error):
+        def _raise(*args, **kwargs):
+            raise error("injected census fault")
+        return _raise
+
+    def _stat_of(session_field):
+        # The command name holds a ')' so the session field is found past the LAST one.
+        line = "4242 (a) b) S 1 4242 {} 0\n".format(session_field).encode("ascii")
+        return lambda path, mode="r": io.BytesIO(line)
+
+    def _census_with(listdir, stat, killpg):
+        saved = (os.listdir, os.killpg, os.kill)
+        captured = io.StringIO()
+        os.listdir, os.killpg, os.kill = listdir, killpg, lambda pid, sig: killed.append(pid)
+        module_globals["open"] = stat
+        try:
+            with contextlib.redirect_stderr(captured):
+                return _survivors_of_session(4242)
+        except SystemExit as exc:
+            refused = type(exc.code) is int and exc.code == 2 and captured.getvalue() == census_line
+            return "CENSUS-REFUSED" if refused else "OTHER-EXIT"
+        finally:
+            os.listdir, os.killpg, os.kill = saved
+            del module_globals["open"]
+
+    listing = lambda path: ["4242", "self"]
+    non_member = _stat_of("1")
+    no_group = _injected(ProcessLookupError)
+    _expect(_census_with(listing, non_member, no_group) == 0,
+            "census control: a readable non-member and an absent group read as an empty session")
+    _expect(_census_with(listing, _injected(PermissionError), no_group) == "CENSUS-REFUSED",
+            "census: a refused stat read is cannot-evaluate, never an absent process")
+    _expect(_census_with(listing, _injected(FileNotFoundError), no_group) == 0,
+            "census: a process that ended before its stat read reads as absence")
+    _expect(_census_with(listing, _injected(ProcessLookupError), no_group) == 0,
+            "census: a process that ended during its stat read reads as absence")
+    _expect(_census_with(listing, lambda path, mode="r": io.BytesIO(b"4242 (a) S 1\n"), no_group)
+            == "CENSUS-REFUSED",
+            "census: a stat too short to carry the session field is cannot-evaluate, never a non-member")
+    _expect(_census_with(listing, non_member, _injected(PermissionError)) == "CENSUS-REFUSED",
+            "census: a refused group probe is cannot-evaluate, never an absent group")
+    _expect(_census_with(_injected(PermissionError), non_member, no_group) == "CENSUS-REFUSED",
+            "census: a refused /proc listing is cannot-evaluate, never an empty session")
+    _expect(_census_with(_injected(FileNotFoundError), non_member, no_group) == "CENSUS-REFUSED",
+            "census: a missing /proc is cannot-evaluate, never an empty session")
+    member = _stat_of("4242")
+
+    def _member_beside_unreadable(path, mode="r"):
+        if path == "/proc/4242/stat":
+            return member(path, mode)
+        raise PermissionError("injected census fault")
+
+    del killed[:]
+    _expect(_census_with(lambda path: ["4242", "4243"], _member_beside_unreadable, no_group)
+            == "CENSUS-REFUSED" and killed == [4242],
+            "census: a member found beside an unreadable entry is killed before the census refuses")
+    reads = []
+
+    def _member_then_gone(path, mode="r"):
+        reads.append(path)
+        if len(reads) == 1:
+            return member(path, mode)
+        raise FileNotFoundError("injected census fault")
+
+    del killed[:]
+    _expect(_census_with(listing, _member_then_gone, no_group) == 1 and killed == [4242],
+            "census: a member found alone is killed and counted")
+
+
 # The loaded-exit vectors run in a child of the self-test that must end 0 with exactly this file's
 # completion line on stdout: a validator load moved back into the process running them would let a
 # loaded os._exit(0) end that child 0 before the line, which is red here, never a silent pass.
@@ -1161,6 +1273,7 @@ def _self_test():
     labels = ["F{:02d}".format(n) for n in range(1, 31)]
     _expect(labels[0] == "F01" and labels[-1] == "F30" and len(labels) == 30, "F-range")
     _expect(ACTOR_LINE.count('"') == 8, "actor line shape")
+    _self_test_census_errors()
     _self_test_loaded_exit_in_child()
     _self_test_fault_channels()
     sys.stdout.write("PASS check_opf_init_contract self-test\n")
