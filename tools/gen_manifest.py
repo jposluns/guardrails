@@ -72,7 +72,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile  # noqa: E402
 import check_versions  # noqa: E402  the ONE shared ASCII SemVer validator the release gates use
 
 # Static content-bearing inputs shared by manifest.toml/root.txt/announce-snippet.txt (VERSION ->
@@ -803,11 +803,11 @@ def run(root, check):
         except GateError as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
-    if not check:
-        (root / ".aiqt" / "release").mkdir(parents=True, exist_ok=True)
     drifted = []
     for rel in GENERATED_OUTPUTS_REL:  # attributes first: the manifest's SOURCES row covers its new bytes
-        if reconcile(root / rel, texts[rel], check):
+        # make_parents: .aiqt/release/ is created inside reconcile, after its directory probe, so a .aiqt/
+        # that resolves outside the repository is refused before anything is made there.
+        if reconcile(root / rel, texts[rel], check, root, make_parents=True):
             drifted.append(rel)
     if drifted:
         print("drift: {} out of date; run tools/gen_manifest.py".format(", ".join(drifted)),
@@ -1134,6 +1134,23 @@ def _self_test_main_isolated():
         run_quiet(good, check=False)
         if (good / MANIFEST_REL).read_text(encoding="utf-8") != manifest_text:
             failures.append("determinism: two runs are not byte-identical")
+        # .aiqt/release/ above ROOT symlinked outside the root fails closed (exit 2) in --check and write mode with
+        # root.txt there untouched; symlinked inside the root, it is read and root.txt rewritten there.
+        failures.extend(linked_dir_failures(tmp, "release", _build_fixture, run, ".aiqt/release",
+                                            ".aiqt/release/root.txt"))
+        # .aiqt/ symlinked outside the root to a copy that lacks release/: write mode exits 2 with release/ not
+        # made there (it is created only after the directory probe, inside reconcile).
+        bare = _build_fixture(tmp / "bare-aiqt")
+        if bare is not None:
+            held = tmp / "bare-aiqt-held"
+            shutil.move(str(bare / ".aiqt"), str(held))
+            shutil.rmtree(held / "release", ignore_errors=True)
+            (bare / ".aiqt").symlink_to(held)
+            got = run_quiet(bare, check=False)
+            made = (held / "release").exists()
+            if got != "raised SystemExit(2)" or made:
+                failures.append(".aiqt/ symlinked outside the root without release/ expected exit 2 with release/ "
+                                "not made there, got {} and release/ made {}".format(got, made))
 
         # (b) SOURCES carve-outs and the managed-block artifact.
         if '[[sources]]\npath = ".aiqt/manifest.toml"' in manifest_text:

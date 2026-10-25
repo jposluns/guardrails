@@ -39,7 +39,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 from check_reference_facts import expected_counts  # noqa: E402
 
@@ -192,11 +192,11 @@ def run(root, check):
               file=sys.stderr)
         return 2
     drifted = False
-    if reconcile(root / README_REL, roster_text, check):
+    if reconcile(root / README_REL, roster_text, check, root):
         print("drift: .aiqt/standards/README.md roster is out of date; run tools/gen_reference_facts.py",
               file=sys.stderr)
         drifted = True
-    if reconcile(root / LANDING_REL, landing_text, check):
+    if reconcile(root / LANDING_REL, landing_text, check, root):
         print("drift: README.md landing-count blocks are out of date; run tools/gen_reference_facts.py",
               file=sys.stderr)
         drifted = True
@@ -623,6 +623,11 @@ def self_test_main():
                                 "rendered".format(label))
             if run_quiet(disjoint, check=True) != 0:
                 failures.append("{} disjoint landing blocks expected exit 0 on --check".format(label))
+
+        # .aiqt/ above the roster README symlinked outside the root fails closed (exit 2) in --check and write
+        # mode with the README there untouched; symlinked inside the root, it is read and the README rewritten.
+        failures.extend(linked_dir_failures(tmp, "aiqt", lambda base: _write_fixture(base, two, _README), run,
+                                            ".aiqt", README_REL))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

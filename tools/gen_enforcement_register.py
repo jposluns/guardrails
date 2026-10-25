@@ -84,7 +84,7 @@ import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile  # noqa: E402
 from _standards import dir_or_absent, LINK_OUTSIDE_ROOT  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402  canonical AIQT-priority rule order (as gen_mappings uses)
@@ -864,11 +864,11 @@ def run(root, check):
     try:
         # reconcile fail-closes with SystemExit(2) on an unreadable or invalid-UTF-8 existing target or a
         # write error; map that to a returned exit 2 so the code is uniform with the input-error path above.
-        if reconcile(root / MD_REL, md_text, check):
+        if reconcile(root / MD_REL, md_text, check, root):
             print("drift: {} is out of date; run tools/gen_enforcement_register.py".format(MD_REL),
                   file=sys.stderr)
             drift = True
-        if reconcile(root / HTML_REL, html_page, check):
+        if reconcile(root / HTML_REL, html_page, check, root):
             print("drift: {} is out of date; run tools/gen_enforcement_register.py".format(HTML_REL),
                   file=sys.stderr)
             drift = True
@@ -1573,6 +1573,10 @@ def self_test_main():
                 failures.append("a corpus that is a symlink {} expected exit {} with the views {}{}, got {}\n{}".format(
                     where, want, "written" if want == 0 else "not written",
                     "" if want == 0 else " and the register's own refusal", got, buf.getvalue()))
+
+        # site/ above the HTML view symlinked outside the root fails closed (exit 2) in --check and write mode with
+        # the page there untouched; symlinked inside the root, it is read and the page rewritten there.
+        failures.extend(linked_dir_failures(tmp, "site", _build, run, "site", HTML_REL))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

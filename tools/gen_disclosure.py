@@ -485,7 +485,7 @@ def main():
         print("error: disclosure.toml: {}".format(exc), file=sys.stderr)
         return 2
     drift = False
-    if reconcile(root / "DISCLOSURE.md", md, check):
+    if reconcile(root / "DISCLOSURE.md", md, check, root):
         print("drift: DISCLOSURE.md")
         drift = True
     page = root / "site" / "disclosure.html"
@@ -497,7 +497,7 @@ def main():
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    if reconcile(page, new_html, check):
+    if reconcile(page, new_html, check, root):
         print("drift: site/disclosure.html")
         drift = True
     if check and drift:

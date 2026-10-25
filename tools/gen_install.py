@@ -41,7 +41,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, replace_block, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, replace_block, reconcile  # noqa: E402
 from gen_skill import parse_source, versioned_zip_basename, SKILL_SRC_PARTS  # noqa: E402
 
 # The generated region and its home. INSTALL_PAGE_PARTS is the relative parts of the hand-authored page the
@@ -93,7 +93,7 @@ def run_gen(root, check):
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    drift = reconcile(page, new_html, check)  # shared reconcile fail-closes (exit 2) on an OSError or an
+    drift = reconcile(page, new_html, check, root)  # shared reconcile fail-closes (exit 2) on an OSError or an
                                               # invalid-UTF-8 target
     if drift:
         print("drift: {}".format(INSTALL_PAGE_REL))
@@ -209,6 +209,10 @@ def self_test_main():
         if code != 2:
             failures.append("missing SKILL-DOWNLOAD markers expected exit 2 (fail-closed), got {}\n{}".format(
                 code, out))
+
+        # 5. site/ above the install page symlinked outside the root fails closed (exit 2) in --check and write
+        #    mode with the page there untouched; symlinked inside the root, it is read and the page rewritten.
+        failures.extend(linked_dir_failures(tmp, "site", _write_fixture, run_gen, "site", INSTALL_PAGE_REL))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -219,7 +223,8 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: a well-formed source renders the SKILL-DOWNLOAD block and re-checks drift-clean "
           "with the version-numbered href present; a drifted block is caught (exit 1); a missing install "
-          "page and missing markers each fail closed (exit 2).")
+          "page and missing markers each fail closed (exit 2); a site/ symlinked outside the root fails closed "
+          "(exit 2) with the page there untouched, and one symlinked inside the root is read and rewritten.")
     return 0
 
 

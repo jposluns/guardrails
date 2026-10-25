@@ -132,7 +132,7 @@ def run_generator(argv, *, source, targets, regen_hint, schema_excs):
         except TargetError as exc:
             print(str(exc))
             return 2
-        if reconcile(path, text, check):
+        if reconcile(path, text, check, root):
             print("drift: {}".format(target.path))
             drift = True
     if check and drift:

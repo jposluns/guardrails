@@ -164,10 +164,10 @@ def main():
         print("error: {}".format(exc), file=sys.stderr)
         return 2
     drift = False
-    if reconcile(index_md, indexdoc, check):
+    if reconcile(index_md, indexdoc, check, root):
         print("drift: {}".format(INDEX_PATH))
         drift = True
-    if reconcile(claude_md, new_claude, check):
+    if reconcile(claude_md, new_claude, check, root):
         print("drift: CLAUDE.md")
         drift = True
     if drift:

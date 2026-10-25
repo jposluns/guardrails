@@ -8,9 +8,10 @@ silently drift (including orphaned generated files with no source). Vendored `ex
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
   gen_rules.py --self-test  assert an invalid-UTF-8 generated target, a source path that is not a
-                            directory or a symlink to a directory inside the root, and a .claude/rules or
-                            family directory symlinked outside the root fail closed (exit 2), and the
-                            MAP_KEYS read refusal exits 2 with empty stdout under each stderr condition
+                            directory or a symlink to a directory inside the root, and a .claude/, a
+                            .claude/rules or a family directory symlinked outside the root fail closed
+                            (exit 2), and the MAP_KEYS read refusal exits 2 with empty stdout under each
+                            stderr condition
 """
 import sys
 
@@ -32,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import dir_or_absent, map_keys  # noqa: E402
+from _standards import dir_chain_or_absent, dir_or_absent, map_keys  # noqa: E402
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
@@ -271,15 +272,17 @@ def run(root, check):
     def _raise(exc):
         raise exc
     try:
-        # dir_or_absent (not is_dir or dir_present), before the first read, write or delete under out_dir:
-        # .claude/rules or a family directory in it that is there but cannot be read as a directory (a regular
-        # file, or a symlink that is dangling, whose target is not a directory or resolves outside the root) is
-        # exit 2 with nothing written or deleted, never followed out of the repository, and an unreadable
-        # .claude parent raises (exit 2 below), never skipping the orphan scan. A symlink to a directory inside
-        # the root is read. A family absent here can only be created below, holding desired files alone.
+        # dir_chain_or_absent (not is_dir, dir_present or dir_or_absent), before the first read, write or delete
+        # under out_dir: .claude/rules and each family directory in it (the directory holding every generated
+        # rule) are judged at every component under the root (.claude/ too), so one at any depth that is there
+        # but cannot be read as a directory (a regular file, or a symlink that is dangling, whose target is not
+        # a directory or resolves outside the root) is exit 2 with nothing written or deleted, never followed
+        # out of the repository, and an unreadable parent raises (exit 2 below), never skipping the orphan
+        # scan. A symlink to a directory inside the root is read. A family absent here can only be created
+        # below, holding desired files alone.
         probed = {}
         for path in (out_dir, out_dir / "aiqt", out_dir / "security"):
-            probed[path], problem = dir_or_absent(path, root)
+            probed[path], problem = dir_chain_or_absent(path, root)
             if problem is not None:
                 print("error: {} {} (cannot evaluate)".format(path, problem))
                 return 2
@@ -458,28 +461,30 @@ def self_test_main():
             if got != want or not kept.exists():
                 failures.append("a source path that is a symlink {} expected exit {} with the generated target "
                                 "kept, got {}".format(shape, want, got))
-        # The read tree, or a family directory in it, that is a symlink to a directory holding a planted orphan
-        # and lacking the generated rule, in write mode: outside the root, it is exit 2 with the orphan kept and
-        # the rule not written there, never followed to prune or write out of the repository; inside the root,
-        # it is read (exit 0, the orphan pruned and, but for the security family, the rule written there).
-        for linked_rel in ("rules", "rules/aiqt", "rules/security"):
+        # The .claude/ directory above the read tree, the read tree, or a family directory in it, that is a
+        # symlink to a directory holding a planted orphan and lacking the generated rule, in write mode: outside
+        # the root, it is exit 2 with the orphan kept and the rule not written there, never followed to prune or
+        # write out of the repository; inside the root, it is read (exit 0, the orphan pruned and, but for the
+        # security family, the rule written there).
+        for linked_rel, sub in ((".claude", ("rules", "aiqt")), (".claude/rules", ("aiqt",)),
+                                (".claude/rules/aiqt", ()), (".claude/rules/security", ())):
             for where, want in (("outside", 2), ("in-root", 0)):
-                out = tmp / ("out-" + linked_rel.replace("/", "-") + "-" + where)
+                out = tmp / ("out-" + linked_rel.lstrip(".").replace("/", "-") + "-" + where)
                 (out / ".aiqt" / "core" / "rules").mkdir(parents=True)
                 (out / ".aiqt" / "core" / "rules" / "gen-rules-selftest-target.md").write_text(
                     _RULE_SRC, encoding="utf-8")
-                link = out / ".claude" / linked_rel
-                link.parent.mkdir(parents=True)
+                link = out / linked_rel
+                link.parent.mkdir(parents=True, exist_ok=True)
                 held = tmp / ("held-" + out.name) if where == "outside" else out / "shared" / "held"
-                fam = held / "aiqt" if linked_rel == "rules" else held
+                fam = held.joinpath(*sub)
                 fam.mkdir(parents=True)
                 (fam / "zz-planted-orphan.md").write_text("planted\n", encoding="utf-8")
                 link.symlink_to(held if where == "outside" else os.path.relpath(held, link.parent))
                 got = run_quiet(out, check=False)
                 kept = (fam / "zz-planted-orphan.md").exists()
                 wrote = (fam / Path(_RULE_REL).name).exists()
-                if (got, kept, wrote) != (want, want == 2, want == 0 and linked_rel != "rules/security"):
-                    failures.append("a .claude/{} that is a symlink {} expected exit {} with the orphan {} there, "
+                if (got, kept, wrote) != (want, want == 2, want == 0 and linked_rel != ".claude/rules/security"):
+                    failures.append("a {} that is a symlink {} expected exit {} with the orphan {} there, "
                                     "got exit {}, orphan kept {}, rule written {}".format(
                                         linked_rel, where, want, "kept and nothing written" if want == 2
                                         else "pruned", got, kept, wrote))
@@ -496,7 +501,7 @@ def self_test_main():
           "UnicodeDecodeError traceback (guards the widened reconcile arm); a source path that is a regular "
           "file or a symlink that is dangling, to a regular file or to a directory outside the root exits 2 "
           "with the generated target kept, and one symlinked to a directory inside the root is read; a "
-          ".claude/rules or family directory symlinked outside the root exits 2 in write mode with nothing "
+          ".claude/, .claude/rules or family directory symlinked outside the root exits 2 in write mode with nothing "
           "written or deleted there, and one symlinked inside the root is read; the MAP_KEYS read refusal "
           "exits 2 with empty stdout under {} stderr conditions ({}).".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS)))

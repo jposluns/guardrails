@@ -849,7 +849,7 @@ def main(argv):
         except SchemaError as exc:
             print("error: {}".format(exc), file=sys.stderr)
             return 2
-        if reconcile(target, page, check):
+        if reconcile(target, page, check, root):
             print("drift: {}".format(target_rel))
             drift = True
     if check and drift:

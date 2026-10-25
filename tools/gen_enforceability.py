@@ -107,7 +107,7 @@ import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile  # noqa: E402
 from _standards import dir_or_absent  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_hooks import (load_manifest, ID_RE, CID_RE, KNOWN_EVENTS,  # noqa: E402  reuse the hooks loader and shapes
@@ -643,7 +643,7 @@ def run(root, check):
     except (ValueError, OSError) as exc:
         print("error: cannot build {} ({}); fail-closed".format(LEDGER_REL, exc), file=sys.stderr)
         return 2
-    drifted = reconcile(root / LEDGER_REL, text, check)  # shared reconcile fail-closes (exit 2) on an
+    drifted = reconcile(root / LEDGER_REL, text, check, root)  # shared reconcile fail-closes (exit 2) on an
                                                          # OSError or an invalid-UTF-8 target
     if drifted:
         print("drift: {} is out of date; run tools/gen_enforceability.py".format(LEDGER_REL),
@@ -1388,6 +1388,10 @@ def self_test_main():
             if got != want or (t / LEDGER_REL).is_file() != (want == 0):
                 failures.append("a corpus that is a symlink {} expected exit {} with the ledger {}, got {}".format(
                     where, want, "written" if want == 0 else "not written", got))
+
+        # .aiqt/ above the ledger symlinked outside the root fails closed (exit 2) in --check and write mode with
+        # the ledger there untouched; symlinked inside the root, it is read and the ledger rewritten there.
+        failures.extend(linked_dir_failures(tmp, "aiqt", _build, run, ".aiqt", LEDGER_REL))
     finally:
         if unread_manifest is not None:
             os.chmod(unread_manifest, 0o644)  # restore even on an unexpected early exit

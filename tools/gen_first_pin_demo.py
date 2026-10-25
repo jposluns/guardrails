@@ -235,7 +235,7 @@ def run(root, check):
     except (ValueError, OSError, UnicodeError) as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
-    if reconcile(out, text, check):  # reconcile fail-closes (exit 2) on an OSError or invalid-UTF-8 target
+    if reconcile(out, text, check, root):  # reconcile fail-closes (exit 2) on an OSError or invalid-UTF-8 target
         print("drift: {}".format(DEMO_REL))
         print("run tools/gen_first_pin_demo.py to regenerate")
         return 1

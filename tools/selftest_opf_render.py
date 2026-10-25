@@ -19,6 +19,9 @@ built to FAIL if its fix is reverted, so the selftest is the durable guard the f
      (a fail-open returning a clean 0 while reconciling nothing), and an empty target set raises rather
      than passing clean.
 
+  3. A directory above a target that is a symlink resolving outside the root is refused (exit 2) by the
+     shared reconcile before any read or write, and one resolving inside the root is followed.
+
 Every fixture is synthetic and assembled in a tempdir; opf_render.repo_root is redirected to it so no
 real file is read or written. Exit convention matches the repo's selftests: 0 pass, 1 fail, 2 error.
 """
@@ -44,6 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import opf_render  # noqa: E402
+from _gen_common import linked_dir_failures  # noqa: E402
 from opf_render import run_generator, FileTarget, BlockTarget  # noqa: E402
 
 SOURCE = "source.toml"
@@ -157,6 +161,16 @@ def _selftest(root, failures):
     else:
         failures.append("empty targets: an empty target set must raise (fail closed), not pass clean")
 
+    # (h) A directory above a target symlinked outside the root: --check and write mode exit 2 (reconcile's
+    #     directory probe) with the target there untouched; symlinked inside the root, it is read and rewritten.
+    def build(base):
+        (base / SOURCE).write_text("probe = 1\n", encoding="utf-8")
+        (base / "site").mkdir()
+
+    def run(base, check):
+        return _run(base, ["--check"] if check else [], (FileTarget("site/out.md", _fresh),))[0]
+    failures.extend(linked_dir_failures(root / "linked", "site", build, run, "site", "site/out.md"))
+
 
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-opf-render-selftest-"))
@@ -182,8 +196,9 @@ def main():
           "earlier target's drift line prints and its file is written before a later target's "
           "materialization failure aborts the run (--check and write, missing-page and markerless); a "
           "schema error on a later target aborts before an earlier target is reconciled; a one-shot "
-          "iterator target is reconciled rather than silently skipped; and an empty target set fails "
-          "closed by raising")
+          "iterator target is reconciled rather than silently skipped; an empty target set fails "
+          "closed by raising; and a directory above a target symlinked outside the root fails closed "
+          "(exit 2) with the target there untouched, while one symlinked inside the root is read")
     return 0
 
 

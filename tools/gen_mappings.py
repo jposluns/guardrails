@@ -488,13 +488,13 @@ def main():
         return 2
 
     drift = False
-    if reconcile(page, text, check):
+    if reconcile(page, text, check, root):
         print("drift: site/mappings.html")
         drift = True
-    if reconcile(root / "site" / "downloads" / "mappings.csv", render_csv(export_rows), check):
+    if reconcile(root / "site" / "downloads" / "mappings.csv", render_csv(export_rows), check, root):
         print("drift: site/downloads/mappings.csv")
         drift = True
-    if reconcile(root / "site" / "downloads" / "mappings.json", render_json(reg, export_rows), check):
+    if reconcile(root / "site" / "downloads" / "mappings.json", render_json(reg, export_rows), check, root):
         print("drift: site/downloads/mappings.json")
         drift = True
     if check and drift:

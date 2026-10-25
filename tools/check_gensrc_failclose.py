@@ -1340,6 +1340,7 @@ def _build_repo(base, gens):
     tools = base / "tools"
     tools.mkdir(parents=True)
     shutil.copy2(here / "_gen_common.py", tools / "_gen_common.py")
+    shutil.copy2(here / "_standards.py", tools / "_standards.py")  # reconcile's target-directory probe
     shutil.copy2(here / "gen_gensrc.py", tools / "gen_gensrc.py")
     (base / "src").mkdir()
     (base / "out").mkdir()
@@ -1673,6 +1674,7 @@ def _self_test_main_isolated():
             (mal / "tools").mkdir(parents=True)
             here = Path(__file__).resolve().parent
             shutil.copy2(here / "_gen_common.py", mal / "tools" / "_gen_common.py")
+            shutil.copy2(here / "_standards.py", mal / "tools" / "_standards.py")
             shutil.copy2(here / "gen_gensrc.py", mal / "tools" / "gen_gensrc.py")
             (mal / ".git").write_text("marker\n", encoding="utf-8")
             _write_gen(mal / "tools", "malformed", _MALFORMED)
