@@ -771,9 +771,10 @@ def run(root, check, targets, regen, corpus_bodies):
     root = Path(root)
     try:
         registry = load_registry(root)
-        # dir_present (not is_dir): an unreadable .aiqt/ parent fails closed as exit 2, like an absent one.
+        # dir_present (not is_dir), bound beneath root: an unreadable or symlinked .aiqt/ parent fails
+        # closed as exit 2, like an absent one.
         src_dir = root.joinpath(*RULES_PARTS)
-        if not dir_present(src_dir):
+        if not dir_present(src_dir, root=root):
             print("error: the rule corpus {}/ is absent; nothing was written or deleted (restore the corpus; "
                   "to retire an adapter, review it and delete it by hand)".format("/".join(RULES_PARTS)))
             return 2

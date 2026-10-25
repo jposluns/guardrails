@@ -444,7 +444,7 @@ def build_desired(root, src_dir):
         raise ValueError("{} exists but holds no manifest.toml".format(src_dir))
     plugin, hooks = load_manifest(manifest_path)
     rules_dir = root / ".aiqt" / "core" / "rules"
-    if not dir_present(rules_dir):
+    if not dir_present(rules_dir, root=root):
         raise ValueError("cannot validate manifest rules ids: no {} to load".format(rules_dir))
     corpus_ids = {str(fm["corpus-id"]) for _src, fm, _rel in load_corpus(rules_dir)}
     script_text = script_src.read_text(encoding="utf-8")  # FileNotFoundError -> OSError, fail-closed
@@ -469,7 +469,7 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
     try:
         # dir_present (not is_dir) inside the try: an unreadable .aiqt/ parent must fail closed as
         # exit 2, not read as an absent manifest (which would prune the whole surface as orphans).
-        if dir_present(src_dir):
+        if dir_present(src_dir, root=root):
             desired = build_desired(root, src_dir)
             if project_ids and authoring_tree(root):
                 _plugin, hooks = load_manifest(src_dir / "manifest.toml")
@@ -497,7 +497,7 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
         # Orphan scan, scoped to the RESERVED plugin hooks/ subtree (100% generated) plus the one
         # managed .claude-plugin/plugin.json; nothing else is ever walked, written, or deleted.
         hooks_dir = root.joinpath(*HOOKS_SUBTREE_PARTS)
-        if dir_present(hooks_dir):
+        if dir_present(hooks_dir, root=root):
             for dirpath, _dirs, filenames in os.walk(hooks_dir, onerror=_raise):
                 for fn in sorted(filenames):
                     f = Path(dirpath) / fn

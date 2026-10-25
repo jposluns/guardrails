@@ -175,7 +175,7 @@ _lstat = os.lstat
 _DIR_FD_OK = os.open in os.supports_dir_fd and os.lstat in os.supports_dir_fd
 
 
-def dir_present(path, root=None):
+def dir_present(path, *, root):
     """Fail-closed three-way directory probe. Return True only when every inspected component is a
     real directory by lstat (never following a link). Return False only on GENUINE absence: no
     directory entry at an inspected component (FileNotFoundError; a dangling symlink is a present
@@ -190,23 +190,27 @@ def dir_present(path, root=None):
     resolved (the same rule check_site_versions.py and gen_secret_patterns.py apply, and gen_manifest
     rejects any tracked symlink repo-wide).
 
-    Which components are inspected is the caller's contract. With `root` (a directory the caller
-    already trusts, e.g. a resolved repository root that `path` must lie beneath), EVERY component of
-    path below root is inspected, each bound beneath the previous component's directory descriptor
-    (lstat with dir_fd, then os.open with O_DIRECTORY|O_NOFOLLOW), so a wrong-type entry or a
-    symlink, live or dangling, at ANY ancestor (a symlinked .claude or .aiqt included, even one
-    swapped in mid-probe) is refused, never followed and never read as absent, while a genuinely
-    absent ancestor still reads as absence. With root=None only the final component is inspected,
-    bound beneath its parent: the rest of the parent chain is the caller's trusted ground (e.g. a
-    directory it just created). Pairs with ensure_listable: dir_present catches an unreachable or
-    wrong-type entry, ensure_listable catches a reachable-but-unlistable directory."""
+    root is required and keyword-only: the directory the caller already trusts (its resolved
+    repository or --root directory, or a directory it just created), which path must lie beneath.
+    root itself is opened as the caller named it; EVERY component of path below root is inspected,
+    each bound beneath the previous component's directory descriptor (lstat with dir_fd, then
+    os.open with O_DIRECTORY|O_NOFOLLOW), so a wrong-type entry or a symlink, live or dangling, at
+    ANY ancestor (a symlinked .claude or .aiqt included, even one swapped in between its lstat and
+    its open) is refused, never followed and never read as absent, while a genuinely absent
+    ancestor still reads as absence. There is no form without a root: a probe that judged only the
+    final component would trust, and so follow, every ancestor, and read a dangling one as absence.
+    A path that is not beneath root (or that climbs with '..') raises OSError (EINVAL), so the
+    callers' handlers refuse it too. The probe judges the tree only while it runs: a later read of
+    the same path by name is not bound to it. Pairs with ensure_listable: dir_present catches an
+    unreachable or wrong-type entry, ensure_listable catches a reachable-but-unlistable directory."""
     path = Path(path)
-    if root is None:
-        base = path.parent
-        parts = (path.name,) if path.name else ()
-    else:
-        base = Path(root)
+    base = Path(root)
+    try:
         parts = path.relative_to(base).parts
+    except ValueError:
+        parts = None
+    if parts is None or ".." in parts:
+        raise OSError(errno.EINVAL, "not a path beneath the probe root {}".format(base), str(path))
     if not _DIR_FD_OK:
         raise OSError(
             errno.ENOSYS, "directory probing bound beneath a descriptor (os.open and os.lstat "
@@ -260,13 +264,15 @@ def _check_stem(path):
             "{}: manifest stem may not end in -tight/-broad (reserved fit suffix)".format(path.name))
 
 
-def load_manifests(std_dir):
+def load_manifests(std_dir, *, root):
     """Return {map_key: Manifest} for every *.toml under std_dir, fully validated. Raise ManifestError
     on any malformed manifest or duplicate map-key. An absent/empty dir returns {} (transition-safe); an
-    existing dir that cannot be listed raises OSError (fail-closed), never a false-clean empty."""
+    existing dir that cannot be listed raises OSError (fail-closed), never a false-clean empty. std_dir
+    is probed beneath root (required, as for dir_present), so a symlinked or dangling .aiqt (or
+    standards) raises rather than being followed or reading as an absent, empty manifest set."""
     std_dir = Path(std_dir)
     out = {}
-    if not dir_present(std_dir):
+    if not dir_present(std_dir, root=root):
         return out
     ensure_listable(std_dir)
     for path in sorted(std_dir.glob("*.toml")):

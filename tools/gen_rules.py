@@ -248,7 +248,7 @@ def run(root, check):
     try:
         # dir_present (not is_dir) inside the try: an unreadable .aiqt/ parent must fail closed as exit 2,
         # not read as an absent corpus (which would delete every generated file as an orphan below).
-        if dir_present(src_dir):
+        if dir_present(src_dir, root=root):
             for src, _fm, rel in load_corpus(src_dir):
                 desired[rel] = src.read_text(encoding="utf-8")
     except (ValueError, OSError) as exc:
@@ -273,7 +273,7 @@ def run(root, check):
                     target.write_text(content, encoding="utf-8")
         for family in ("aiqt", "security"):
             fam_dir = out_dir / family
-            if dir_present(fam_dir):  # not is_dir: an unreadable .claude parent must fail closed, not skip the orphan scan
+            if dir_present(fam_dir, root=root):  # not is_dir: an unreadable .claude parent must fail closed, not skip the orphan scan
                 for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_raise):
                     for fn in sorted(f for f in filenames if f.endswith(".md")):
                         f = Path(dirpath) / fn

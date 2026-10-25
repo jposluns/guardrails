@@ -74,9 +74,11 @@ def _reachable(url, timeout):
     return (False, "HEAD refused and GET did not resolve")
 
 
-def run(std_dir, timeout):
+def run(std_dir, timeout, *, root):
+    # std_dir is probed beneath root (the repository root for the default dir; a --std directory is its
+    # own root), so a symlinked or dangling .aiqt or standards fails closed (exit 2).
     try:
-        manifests = load_manifests(std_dir)
+        manifests = load_manifests(std_dir, root=root)
     except (ManifestError, OSError) as exc:
         print("MALFORMED: {}".format(exc), file=sys.stderr)
         return 2
@@ -133,8 +135,9 @@ def main():
     if parsed is None:
         return 2
     std, timeout = parsed
-    std_dir = std if std is not None else (repo_root() / ".aiqt" / "standards")
-    return run(std_dir, timeout)
+    root = std if std is not None else repo_root()
+    std_dir = std if std is not None else (root / ".aiqt" / "standards")
+    return run(std_dir, timeout, root=root)
 
 
 if __name__ == "__main__":

@@ -379,7 +379,7 @@ def expand_corpus(root, globs):
         deep = len(static) < len(parts) - 1      # a wildcard in a directory component
         matched = 0
         try:
-            if dir_present(base):
+            if dir_present(base, root=root):
                 # Path.glob silently yields nothing for a directory it cannot list; force the read error.
                 ensure_listable(base)
                 if deep:
@@ -477,7 +477,7 @@ def run(root, config=None):
     root = Path(root)
     try:
         try:
-            manifests = load_manifests(root / STANDARDS_REL)
+            manifests = load_manifests(root / STANDARDS_REL, root=root)
         except (ManifestError, OSError) as exc:
             raise CannotEvaluate("standards manifests: {}".format(exc))
         registered = manifest_identities(manifests)

@@ -184,7 +184,7 @@ def build_landing(root, manifests):
 
 def run(root, check):
     try:
-        manifests = load_manifests(root / ".aiqt" / "standards")
+        manifests = load_manifests(root / ".aiqt" / "standards", root=root)
         roster_text = build(root, manifests)
         landing_text = build_landing(root, manifests)
     except (ManifestError, OSError, ValueError, KeyError) as exc:

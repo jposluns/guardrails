@@ -2206,9 +2206,18 @@ expected-check-ids = [
   "probe/ancestor-dangling-refused",
   "probe/ancestor-absent-reads-false",
   "probe/nested-directory-reads-true",
+  "probe/ancestor-swapped-before-open-refused",
+  "probe/outside-root-raises",
+  "probe/parent-climb-raises",
+  "probe/descriptors-closed-once",
+  # ---------- the manifest loader, probed beneath its root ----------
+  "loader/aiqt-ancestor-dangling-refused",
+  "loader/aiqt-ancestor-symlink-refused",
+  "loader/absent-standards-reads-empty",
   # ---------- the placement gate over synthetic --root trees ----------
   "gate/absent-tree-passes",
   "gate/empty-directory-reads-tree",
+  "gate/populated-tree-violation-fails",
   "gate/regular-file-exits-2",
   "gate/dangling-symlink-exits-2",
   "gate/symlink-to-directory-exits-2",
@@ -2223,6 +2232,9 @@ expected-check-ids = [
   "mutant/wrong-type-reads-absent-caught",
   "mutant/eacces-reads-absent-caught",
   "mutant/ancestor-walk-skipped-caught",
+  "mutant/nofollow-dropped-caught",
+  "mutant/descriptor-close-skipped-caught",
+  "mutant/loader-unrooted-caught",
 ]
 
 [[suite]]
