@@ -2228,6 +2228,20 @@ def _make_badname_fixture(badname, failures):
         return False
 
 
+def _make_linesep_fixture(path, failures):
+    """Create the untracked U+2028-named fixture file of the blank-probe-linesep case and return True. A
+    filesystem that refuses the name cannot evaluate that case: record the NAMED failure and return False, so
+    the precedence assertion is never silently omitted from a passing run."""
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("junk\n")
+        return True
+    except OSError as exc:
+        failures.append("(blank-probe-linesep-cannot-evaluate) the U+2028 fixture filename could not be "
+                        "created ({}), so the blank-fragment precedence case was not evaluated".format(exc))
+        return False
+
+
 def _make_stash_fixture(repo, failures):
     """Create the one stash entry the cf4 stash-recovery case preserves and return True; on a setup fault
     record the NAMED cannot-evaluate failure and return False."""
@@ -2264,6 +2278,8 @@ def _test_cannot_evaluate_paths(failures, tmp):
              lambda probe: _make_badname_fixture(os.fsencode(str(missing / "bad")), probe)),
             ("cf4-stash-cannot-evaluate", lambda probe: _make_stash_fixture(missing, probe)),
             ("ws-cs-symlink-cannot-evaluate", lambda probe: _symlink_probe(tmp, missing / "link", probe)),
+            ("blank-probe-linesep-cannot-evaluate",
+             lambda probe: _make_linesep_fixture(missing / "\u2028", probe)),
     ):
         probe = []
         made = inject(probe)
@@ -7882,6 +7898,72 @@ def _main_isolated(monitor):
             failures.append("(rec-attrsource) with an ambient GIT_ATTR_SOURCE set to an unresolvable ref, "
                             "the allowlist scrub must drop it so the probe reads the REAL dirty repo (False), "
                             "got {}".format(probe_as))
+
+        # (blank-probe) a zero-exit status answer holding only blank lines is MALFORMED (porcelain prints one
+        # 'XY PATH' record per line), and so is one holding '!!' lines (porcelain prints '!!' only under
+        # --ignored, which the probe never passes), so _tree_is_clean reads either as None (cannot evaluate),
+        # never clean; a change line still wins (False). Only the non -z porcelain call (the clean probe) is
+        # injected; every other git call, the snapshot's own -z probe included, runs for real.
+        rec_bp = _init_repo(tmp / "rec-blank-probe")
+        _orig_run_bp = aiqt_hooks.subprocess.run
+        _bp_reads = []
+
+        def _bp_run(stdout):
+            def _run(cmd, *a, **kw):
+                if isinstance(cmd, list) and "--porcelain" in cmd and "-z" not in cmd:
+                    _bp_reads.append(cmd)
+                    return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+                return _orig_run_bp(cmd, *a, **kw)
+            return _run
+
+        for _case, _stdout, _want in (("one-blank", "\n", None), ("many-blank", "\n\n\n", None),
+                                      ("crlf-blank", "\r\n", None), ("ignored-blank", "!! build/\n\n", None),
+                                      ("blank-then-change", "\n M file.txt\n", False),
+                                      ("change-then-blank", " M file.txt\n\n", False),
+                                      ("ignored-only", "!! build/\n", None),
+                                      ("ignored-bare", "!!\n!!x\n", None),
+                                      ("change-then-ignored", " M file.txt\n!! build/\n", False),
+                                      ("ignored-then-change", "!! build/\n?? new.txt\n", False),
+                                      ("empty", "", True)):
+            _bp_reads.clear()
+            aiqt_hooks.subprocess.run = _bp_run(_stdout)
+            try:
+                _got = aiqt_hooks._tree_is_clean(str(rec_bp))
+            finally:
+                aiqt_hooks.subprocess.run = _orig_run_bp
+            if _got is not _want or len(_bp_reads) != 1:
+                failures.append("(blank-probe-{}) a zero-exit status answer {!r} must read as {}, got {} "
+                                "(injection reached {} time(s))".format(_case, _stdout, _want, _got,
+                                                                         len(_bp_reads)))
+        for _verb, _bp_tag, _bp_out in (("reset --hard", "reset", "\n"),
+                                        ("checkout -- file.txt", "checkout", "\n"),
+                                        ("clean -fd", "clean", "\n"),
+                                        ("reset --hard", "ignored-reset", "!! build/\n")):
+            _bp_repo = _init_repo(tmp / "rec-blank-probe-{}".format(_bp_tag))
+            _bp_reads.clear()
+            aiqt_hooks.subprocess.run = _bp_run(_bp_out)
+            try:
+                expect("(blank-probe-handler-{}) a malformed status answer {!r} on a clean tree snapshots then "
+                       "allows git {}, never a silent allow".format(_bp_tag, _bp_out, _verb), "git " + _verb,
+                       "allow-note", cwd=str(_bp_repo))
+            finally:
+                aiqt_hooks.subprocess.run = _orig_run_bp
+            _bp_refs = len(_recovery_refs(_bp_repo))
+            if not _bp_reads or _bp_refs != 1:
+                failures.append("(blank-probe-handler-{}-snap) expected the injected probe reached and one "
+                                "recovery ref, got {} read(s) and {} ref(s)".format(_bp_tag, len(_bp_reads),
+                                                                                 _bp_refs))
+        # (blank-probe-linesep) the blank fragment is reachable from REAL porcelain: with core.quotePath=false
+        # an untracked U+2028 name prints raw and str.splitlines() cuts its record into '?? ' plus ''. The
+        # change line must win, so the probe stays False and the whole-tree clobber still DENIES; a pre-scan
+        # reading any blank line as None turns this deny into a snapshot-then-allow.
+        rec_ls = _init_repo(tmp / "rec-blank-probe-linesep")
+        _git(rec_ls, "config", "core.quotePath", "false")
+        if _make_linesep_fixture(rec_ls / "\u2028", failures):
+            if aiqt_hooks._tree_is_clean(str(rec_ls)) is not False:
+                failures.append("(blank-probe-linesep) a raw U+2028 untracked name must keep the probe False")
+            expect("(blank-probe-linesep-clobber) git reset --hard on that dirty tree denies",
+                   "git reset --hard", "deny", cwd=str(rec_ls))
 
         # (rec-ledger-nonfatal) Fix B: the best-effort ledger must NEVER flip a SUCCESSFUL snapshot to a
         # failure. Monkeypatch _write_recovery_ledger to raise a non-OSError (a ValueError) AFTER the
