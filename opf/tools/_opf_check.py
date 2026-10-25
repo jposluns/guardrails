@@ -400,9 +400,9 @@ _RESIDUALS = (
 # Disclosed only on a homes-2 report, so a legacy report's residuals are unchanged.
 _HOMES2_RESIDUALS = (
     "Journal contents are not inspected by doctor, except that it lists the id reservation home of each "
-    "journal kind and reads each reservation file's bytes, for the reserved numbers alone; that read awaits "
-    "the homes-2 revision of spec section 4.2, which still says doctor excludes journals (a release "
-    "dependency). A staged plan does not prove recoverability. "
+    "journal kind and reads each reservation file's bytes, for the reserved numbers alone; that read is the "
+    "one exception spec section 4.2 makes to doctor excluding journals, read-only and for the section 8.2 "
+    "counter checks alone. A staged plan does not prove recoverability. "
     "Homes-2 evidence inventories establish local membership, not actor authenticity; losing a whole "
     "bundle, inventory and payload together, requires independent history to detect.",
     "A reserved number that no present record carries is treated as issued only where the prior committed "
@@ -762,7 +762,7 @@ def _close_fd_quietly(fd):
     """Close a descriptor on a cleanup / teardown path, swallowing an OSError so a close that raises
     (EINTR / EIO / EBADF) during teardown cannot crash the validator. The store verdict is already computed
     (or an exception is already in flight) by the time these closes run, so a cleanup-close irregularity is
-    never itself the store's verdict (fail-closed teardown; S1-F1 / S4-F3).
+    never itself the store's verdict (fail-closed teardown).
 
     Single close (P1, #378): the descriptor is closed with exactly ONE os.close. If it raises, the number
     counts as released and is never touched again: no fstat or fcntl probe, no second close. close(2) on
@@ -806,8 +806,8 @@ def _list_contained(root_fd, reldir):
                 entries = sorted(os.listdir(dfd))
             except OSError as exc:
                 # An I/O error listing the opened directory (EIO, ENOMEM, EBADF from an exotic fd) is a
-                # fail-closed StoreError naming the directory, never a raw OSError escaping the barrier
-                # (S1-F1); it routes through _list_dir to a named CANNOT-EVALUATE like the os.stat case.
+                # fail-closed StoreError naming the directory, never a raw OSError escaping the
+                # barrier; it routes through _list_dir to a named CANNOT-EVALUATE like the os.stat case.
                 raise StoreError("cannot list {} no-follow ({})".format(reldir, exc))
             for entry in entries:
                 try:
@@ -2193,13 +2193,13 @@ def _reserved_numbers(root_fd, rep):
     """Homes 2: the numbers the id reservations hold, per series key as {series key: set of numbers}, and
     whether every reservation evaluated. C-NO-DELETION and C-CONTIGUITY skip such a number only where no
     present record carries it and the prior committed snapshot held no record with that id
-    (_split_reserved), so this reads each reservation read-only and for that purpose alone. Spec 8.2
-    defines the reservation and the next-ID derivation, not this grading, and the grading does not reach
-    the release: no span can cover a reserved worklog number that no entry carries (spec 6.1), so the
-    release cut refuses a tail with one below its highest entry however doctor grades it. Reading the
-    journals at all is the one exception to the spec 4.2 sentence that doctor excludes journals, and it
-    awaits the homes-2 revision of that section (a release dependency). The homes are the allocations/
-    home under journals/ of every kind in _opf_store.JOURNAL_KINDS (read at call time), each derived through
+    (_split_reserved), so this reads each reservation read-only and for that purpose alone. Spec 8.2 at
+    2.0.0 defines the reservation, the next-ID derivation and this grading (the doctor treats a reserved
+    number as issued), and spec 4.2 names this read-only reservation read as the one exception to its
+    rule that doctor excludes journals. The grading does not reach the release: no span can cover a
+    reserved worklog number that no entry carries (spec 6.1), so the release cut refuses a tail with one
+    below its highest entry however doctor grades it. The homes are the allocations/ home under journals/
+    of every kind in _opf_store.JOURNAL_KINDS (read at call time), each derived through
     _opf_store.allocation_record, listed and read through the contained no-follow readers; no journal
     frame, projection or run directory is opened. A reservation is judged as the record writer judges
     one: its file name binds a run id of its own kind, and its bytes equal the exact canonical payload
@@ -3941,7 +3941,7 @@ def validate_store(resolution, supported_profiles=None, *, observations=None, an
                  "({})".format(type(exc).__name__, exc))
     finally:
         # The store verdict is already computed by the barrier above; a descriptor close that raises
-        # (EINTR / EIO / an invalid fd) during teardown must not crash the validator (S4-F3, outside B6).
+        # (EINTR / EIO / an invalid fd) during teardown must not crash the validator (outside B6).
         # Any other exception a close raises never abandons the other close, and goes through the one
         # first-interrupt selection, so an interrupt in flight here keeps propagating as itself.
         inflight, raised = _journal._in_flight_in(sys._getframe()), []
@@ -7942,7 +7942,7 @@ def self_test():
 
         # --- range-bounding: a huge declared high-water and span must NOT expand (F15). The engine must
         # terminate promptly (the overhang finding carries a COUNT, not a list), so the two vectors run
-        # behind a bounded child (S7-F1): a range-expansion REGRESSION would otherwise hang or OOM the
+        # behind a bounded child: a range-expansion REGRESSION would otherwise hang or OOM the
         # suite in-process; here it trips a deterministic TIMEOUT/OOM sentinel the INVALID assertion
         # catches. Requires os.fork; a fork-less host fails the setup check closed. ----------------------
         if not hasattr(os, "fork"):
@@ -8291,7 +8291,7 @@ def self_test():
               b5r is not None and b5r.status in (INVALID, CANNOT_EVALUATE))
 
         # --- B4: a FIFO planted as a declared read target fails closed to CANNOT-EVALUATE, never an
-        # unbounded BLOCK on the reader. The validate_store call runs behind a bounded child (S7-F2): a
+        # unbounded BLOCK on the reader. The validate_store call runs behind a bounded child: a
         # regression that opened the FIFO for a blocking read would HANG the suite in-process; here it trips
         # a TIMEOUT sentinel the assertion rejects. The setup needs os.mkfifo AND os.fork, so a host missing
         # either fails the setup check closed rather than silently skipping the no-hang guarantee. ---------
@@ -8311,7 +8311,7 @@ def self_test():
 
             check("b4-fifo-target-cannot-eval-not-hang", run_bounded(_fifo_probe) == "CANT-REGFILE")
 
-        # --- S1-F1: an OSError from os.listdir inside _list_contained maps to a fail-closed StoreError
+        # --- Listing leg: an OSError from os.listdir inside _list_contained maps to a fail-closed StoreError
         # (routed by _list_dir to a named CANNOT-EVALUATE), never a raw OSError escaping the walk; pre-fix
         # only the os.stat leg was wrapped. Exercised by forcing os.listdir to raise over a real dir fd. ---
         _s1_dir = base / "s1-listdir"
@@ -8336,7 +8336,7 @@ def self_test():
             _close_fd_quietly(_s1_fd)
         check("s1-listdir-oserror-is-storeerror", _s1_outcome == "storeerror")
 
-        # --- S1-F1 (close leg): the _list_contained `finally` closes are guarded, so a teardown close that
+        # --- Close leg: the _list_contained `finally` closes are guarded, so a teardown close that
         # raises does not escape as a raw OSError; pre-fix the raw os.close there propagated (reaching a
         # CANNOT-EVALUATE only via the far B6 barrier, spuriously downgrading a VALID store). Patch os.close
         # to really-close-then-raise over a real dir walk and confirm _list_contained still returns its
@@ -8479,7 +8479,7 @@ def self_test():
             check("p1-close-fd-quietly-probe-flip-red-by-probe-alone-" + _q_tag,
                   _q_vector(_q_probe, _q_err) == ["probe"])
 
-        # --- S4-F3: validate_store's `finally` block closes its store / product-root descriptors OUTSIDE
+        # --- Teardown closes: validate_store's `finally` block closes its store / product-root descriptors OUTSIDE
         # the B6 barrier, so a close that raises during teardown (EINTR / EIO / an invalid fd) must be
         # swallowed rather than crash the validator after the verdict is already computed. Exercised by
         # patching os.close to really close then raise for the whole call: post-fix the guarded finally

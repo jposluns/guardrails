@@ -124,16 +124,18 @@ open a transaction unless the canonical reservation of the run id it publishes u
 plan's claims. An unreadable, malformed or conflicting reservation refuses (exit 2),
 never a silent fallback to the homes-1 counters path; a run killed after reserving and before
 publishing leaves its reservation standing, its numbers conservatively still reserved, and the next run
-derives above them. The final doctor reads the reservations (a read that awaits the homes-2 revision of
-spec 4.2) and does not report a reserved number missing where the prior commit held no record with that
-id, so a reservation's [claims] number grades as issued and that next run records. A reservation keeps
+derives above them. The final doctor reads the reservations (the read-only read spec 4.2 at 2.0.0
+names for the spec 8.2 counter checks) and does not report a reserved number missing where the prior
+commit held no record with that id, so a reservation's [claims] number grades as issued and that next
+run records. A reservation keeps
 only its run's new high-water per key, so where an orphaned run claimed several numbers under one key,
 its lower numbers are still reported missing and the next run is held at the post-publication gate
 (conservative). A deletion already committed in HEAD is visible only to a doctor run before that commit:
 a published record whose number a reservation records and whose deletion is committed is then graded as
 an orphaned reservation's number and not reported missing, unlike homes 1, where the counters high-water
-keeps that deletion a C-NO-DELETION finding. The homes-2 revision of spec 4.2 must settle this before
-homes 2 is activated. This homes-2 path is reached only once activation sets
+keeps that deletion a C-NO-DELETION finding. Spec 8.2 settles this direction: the doctor treats a
+reserved number as issued wherever its checks would otherwise report it missing. This homes-2 path is
+reached only once activation sets
 _opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
 SUPPORTED_HOMES is 1, every subcommand refuses a store declaring homes 2 before any reconciliation or
 write (_probe_homes), so the shipped verb claims through homes 1 only. A legacy
@@ -614,15 +616,17 @@ class Context:
 
 def _load_manifest(ctx):
     """Read and validate the manifest (never an operand of this verb). It must be doctor-grade VALID at
-    the tooling spec_version, in the inline layout: an older store takes `opf upgrade` first."""
+    the tooling spec_version, in the inline layout. Validation already refuses an older store (spec 9.2),
+    so the version refusal below meets only a VALID store at another version, the reserved homes-2 pair,
+    which no upgrade carries back: such a store takes the tooling that implements its version."""
     manifest = _read_operand(ctx.root_fd, ctx.rel(_opf_store.MANIFEST_NAME)).model
-    mv = _opf_store.validate_manifest(manifest)
+    mv = _opf_store.validate_manifest(manifest, manifest_rel=ctx.rel(_opf_store.MANIFEST_NAME))
     if mv.status != _opf_store.VALID:
         raise RecordError("the store manifest is not VALID ({}); fail-closed".format("; ".join(mv.findings)))
     base = manifest.get(_opf_store.STANDARD_TOKEN)
     if base.get("spec_version") != _opf_store.SUPPORTED_SPEC_VERSION:
-        raise RecordError("the store declares spec_version {!r}, not the tooling's {}; run opf upgrade "
-                          "first (fail-closed)".format(base.get("spec_version"),
+        raise RecordError("the store declares spec_version {!r}, not the tooling's {}; use the tooling "
+                          "that implements it (fail-closed)".format(base.get("spec_version"),
                                                        _opf_store.SUPPORTED_SPEC_VERSION))
     if base.get("layout") != "inline":
         raise RecordError("layout {!r} is not supported by this build (inline only); fail-closed".format(
@@ -1837,7 +1841,7 @@ def _strict_equal(a, b):
     """The postcondition's comparator: strict, TYPE-AWARE structural equality (_opf_emit._model_equal, the
     round-trip comparator emit_checked already proves itself with), never Python's ==. Ordinary equality
     let a mutation that changed only a value's type (True for 1, 1.0 for 1) read as the allowed delta and
-    publish; here bool is never a bare int, int is never a float, and datetime is never a
+    publish (an exact-type rule); here bool is never a bare int, int is never a float, and datetime is never a
     date, so such a mutation refuses before anything is written."""
     return _opf_emit._model_equal(a, b)
 
@@ -3589,6 +3593,47 @@ def _self_test_units(check):
           and "nested deeper than" in deep_probe
           and len(deep_probe) <= 512 + _opf_store._DISPLAY_MAX_CHARS + _opf_store._DISPLAY_MARKER_MAX)
 
+    # The below-supported spec_version refusal read through this verb names the manifest's own
+    # path (validate_manifest's manifest_rel, here the resolved machine store's manifest); falling
+    # back to the unnamed "the store manifest" wording is red. The operand read is replaced the
+    # way the deep homes probe replaces it, so the refusal is _load_manifest's own.
+    old_model = {_opf_store.STANDARD_TOKEN: {
+                     "standard": _opf_store.STANDARD_TOKEN, "spec_version": "1.1.0",
+                     "layout": "inline", "posture": "required", "import_status": "none"},
+                 "types": {"worklog": {"namespace": "WL"}}}
+    old_globals = globals()
+    old_read = old_globals["_read_operand"]
+    old_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, old_model)
+    old_refusal = None
+    try:
+        _load_manifest(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+    except RecordError as exc:
+        old_refusal = str(exc)
+    finally:
+        old_globals["_read_operand"] = old_read
+    check("an older manifest refusal names the manifest path",
+          old_refusal is not None
+          and "'.working/toml/manifest.toml' declares [opf].spec_version '1.1.0'" in old_refusal)
+
+    # The one VALID manifest at another spec_version, the reserved homes-2 pair, reaches the version
+    # refusal, which is pinned whole: offering an upgrade, which never carries the pair back, is red.
+    import _opf_init
+    pair_model = tomllib.loads(_opf_init.build_manifest())
+    pair_model[_opf_store.STANDARD_TOKEN]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+    pair_model[_opf_store.STANDARD_TOKEN]["homes"] = 2
+    old_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, pair_model)
+    pair_refusal = None
+    try:
+        _load_manifest(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+    except RecordError as exc:
+        pair_refusal = str(exc)
+    finally:
+        old_globals["_read_operand"] = old_read
+    check("a VALID manifest at another spec_version is refused toward the tooling that implements it",
+          _opf_store.validate_manifest(pair_model).status == _opf_store.VALID
+          and pair_refusal == "the store declares spec_version '2.0.0', not the tooling's 1.2.0; use the "
+                              "tooling that implements it (fail-closed)")
+
 
 def _self_test_contexts(check, root_fd, now):
     from types import SimpleNamespace
@@ -3649,7 +3694,7 @@ def _self_test_contexts(check, root_fd, now):
     ctx = ctx_of(imported_full)
     check("an imported row breaks the proof at the shipped support",
           _counter_state(ctx, ctx.counters.model)[1] != [])
-    # Schema markers are exact integers everywhere this verb reads one:
+    # Schema markers are exact integers everywhere this verb reads one (the same rule at every site):
     # a bool or float marker (True == 1, 1.0 == 1 under ==) is refused, never read as schema 1.
     for marker in (True, 1.0):
         check("a non-integer index schema marker refuses ({!r})".format(marker), _refuses(
@@ -4121,7 +4166,7 @@ def _self_test_supersession(check, plan, post, full, now):
           op.new_model["record"][1]["links"] == [{"rel": SUPERSEDES, "id": "PD-1"}])
     # The doctor's chain rule over the planned index, on every landing at unqualified decided: the record
     # already superseded by an open successor (with or without --supersedes, and on a ratification), a
-    # link to a chain head that still leaves the joined chain with none (QA1 Case A), and a plain decide
+    # link to a chain head that still leaves the joined chain with none, and a plain decide
     # that would make a second current resolution each refuse; the same shapes keeping one current pass.
     plain = ["transition", "PD-2", "decided", "--actor", "maintainer"] + decide
     shadowed = [pd(1, "decided"), pd(2, "open"), pd(3, "open", links=[("supersedes", "PD-2")])]

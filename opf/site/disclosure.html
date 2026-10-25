@@ -98,7 +98,7 @@
         importer records, or a per-record store that declares views, doctor's overall verdict is
         cannot-evaluate (exit 2). Ordinary import is retired and refuses with exit 2, and nothing in the
         reference CLI creates <code>legacy_fragment</code> records; the type remains only for stores that
-        hold them from an import under the pre-1.3.0 contract. In such a store, as in a store with
+        already hold such records from the reference CLI's retired import path. In such a store, as in a store with
         module-tier records, doctor reports cannot-evaluate, <code>opf render --write</code> refuses, and
         <code>opf upgrade</code> exits 2 without offering the change, because the baseline validator does
         not validate those records' content schemas. If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before
@@ -123,36 +123,26 @@
         that its manifest matches the member bytes; it does not authenticate them or review what
         they say. The interim clean-start route initializes a store with <code>opf init</code>; it
         is not an adoption, and a later <code>opf adopt</code> run reads that store as
-        re-adoption.</li>
+        re-adoption. That reading is the reference tooling's 1.2.0 behaviour and diverges from the
+        specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a
+        store.</li>
       <li><b style="color:var(--ink)">A base tool</b> enforces only the base standard and the profiles
         it supports; a profile it does not support is recorded as present-but-unevaluated rather than
         failing base validation.</li>
       <li><b style="color:var(--ink)">The discovery token</b> is a single exact string. A mistyped
         or altered token is a cannot-evaluate that stops the tool, never a silent empty store. A rename
-        ships only with the tested <code>opf upgrade</code> migration, as the 1.0.0 to 1.1.0 rename of
-        <code>devprocess</code> to <code>opf</code> did.</li>
-      <li><b style="color:var(--ink)">A fresh-only implementation</b> (specification section 16.1)
-        proves tested admission and refusal behaviour, not authenticated history: it refuses by name
-        an older store or one in which its admission check detects an item on
-        the closed legacy-state list. It runs that check once before any write, and a store refused
-        there is left unchanged; only then does it recover, within a bound, its own interrupted
-        writes and reconcile a dead run's leftover lease as the base rules require, and it runs the
-        check again after them, so a store refused, or found cannot-evaluate, only by that second run
-        can carry their effects.
-        That check searches only the files section 16.1 permits and
-        the list catches only what it lists, so legacy state the list omits, or that sits where the
-        check does not search, goes undetected; an input it cannot read is cannot-evaluate, never
-        admitted.
-        For a partial or complete import status, where it cannot tell whether a file in the
-        adoption evidence area is another implementation's adoption receipt, it reports
-        cannot-evaluate rather than refusing the store as legacy, and it does not see an adoption
-        receipt kept outside that area, so it can refuse as legacy a store whose recorded import
-        status rests on such a receipt.
-        It offers no upgrade, repair, or continuity, so a store holding legacy state needs an
-        upgrade-capable implementation. The upgrade into base 1.3.0 is still a target that the
-        reference tooling does not yet perform, and the reference-tooling residuals above name stores
-        its current upgrade cannot carry. A class claim is self-asserted until validation tooling
-        ships.</li>
+        would be a store-breaking change the specification gives no path: every base-schema version
+        bump stays additive and keeps the exact token, so no bump the specification permits renames
+        it (specification sections 4.5 and 9.2).</li>
+      <li><b style="color:var(--ink)">Implementations</b> (specification section 16.1): the
+        specification defines one implementation model, with no conformance classes, and base 2.0.0,
+        with <code>homes = 2</code>, is the only base version it defines. The reference tooling does
+        not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it
+        makes no claim of conformance to the specification. The reference tooling's <code>opf
+        doctor</code> grades a manifest declaring <code>spec_version = "2.0.0"</code> with
+        <code>homes = 2</code> under its 1.2.0 rules, so its VALID verdict on such a store says
+        nothing about conformance to the specification; <code>opf upgrade</code> and <code>opf
+        record</code> refuse such a store.</li>
       <li><b style="color:var(--ink)">A host provider's conveniences</b> call the external API of the
         host the target names. The egress bound is that named host and nothing else; the standard
         cannot vouch for the host's own behaviour beyond that bound.</li>

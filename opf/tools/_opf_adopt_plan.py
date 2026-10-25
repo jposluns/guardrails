@@ -6,10 +6,12 @@ Only explicit source roots, .working, and DETECTION_ROOTS are inventoried.
 are exclusions, recorded in the inventory; foreign content inside those excluded
 subtrees is NOT covered. Companion stores refuse in this slice. Detection is by
 path only: a candidate is neither a parsed registration nor a working pipeline.
-Ancestry marks re-adoption when a pointer, a resolved store manifest, or unresolved
-content at an OPF-reserved .working name (ANCESTRY_RESERVED) is present, so store
-debris never reads as a zero-seedable first adoption. first-adoption only means none
-of these: git history is not read, and a manifestless store under any other .working
+Ancestry marks re-adoption when a pointer or a resolved store manifest is present.
+first-adoption means neither is: the pointers and the manifest alone decide, because a
+tree whose refused manifest the operator has moved aside by hand is ordinary foreign
+content for a section 14 first adoption (spec 4.5/9.2), and nothing distinguishes such
+a tree from other manifestless content at a reserved .working name. git history is not
+read, and a manifestless store under any .working
 name reads as foreign content. Durable OPF history outside .working also reads as
 first-adoption on its own, including: root import-promotion state (.aiqt/import,
 .aiqt/import/journal, .aiqt/import-archive), the record journal (.aiqt/record/journal)
@@ -98,11 +100,6 @@ DETECTION_ROOTS = (
     ".github/workflows", ".gitlab-ci.yml", "Jenkinsfile", ".circleci", "azure-pipelines.yml",
     "VERSION", "CHANGELOG.md", "release-notes.toml",
 )
-# OPF-reserved .working names, from the store module's own constants: the standard machine
-# subdirectory and every reserved store control subdirectory. Content at any is ancestry.
-ANCESTRY_RESERVED = tuple(sorted(
-    store.WORKING_DIRNAME + "/" + name
-    for name in (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS))
 RESIDUALS = (
     "Only the enumerated scope is covered; detection is by path, not semantics.",
     "Machine-store and unmanaged exclusions are not inspected for foreign files.",
@@ -111,8 +108,8 @@ RESIDUALS = (
     "Resolver reads retain the resolver limits; inventory caps are not a process sandbox.",
     "No coherent snapshot; apply must recheck inventory, preimages and absences.",
     "No commit, merge, network, journal, import staging, rendering or hook effects.",
-    "Ancestry reads pointers, the resolved manifest and reserved .working names; git history "
-    "and a manifestless store under another .working name are not read as ancestry. "
+    "Ancestry reads the pointers and the resolved manifest; git history and manifestless "
+    ".working content, a reserved name included, are not read as ancestry. "
     "Durable OPF history outside .working also reads as first-adoption on its own, including: "
     "root import-promotion state (.aiqt/import, .aiqt/import/journal, .aiqt/import-archive), "
     "the record journal (.aiqt/record/journal) and the .gitignore opf-managed block.",
@@ -628,7 +625,7 @@ def _inventory(root, sources, targets):
             raw = manifest_raw
             manifest_budget(len(raw), manifest_path)
             manifest = tomllib.loads(raw.decode("utf-8"))
-            checked = store.validate_manifest(manifest)
+            checked = store.validate_manifest(manifest, manifest_rel=manifest_path)
             if checked.status != store.VALID:
                 raise PlanError("resolved manifest is not valid: " + "; ".join(checked.findings))
             excluded.append({"path": resolution.machine_rel, "reason": "machine-store"})
@@ -659,11 +656,6 @@ def _inventory(root, sources, targets):
                                      exclusions=excluded, walk=walk)
         exclusions, requested = observed["exclusions"], observed["scope"]
         entries = dict((row["path"], row) for row in observed["entries"])
-        if resolution.status != store.RESOLVED:
-            # With no resolved store, content at a reserved name (for example counters and
-            # records, or import runs, left without a manifest) is still prior ancestry.
-            traces += [path for path in ANCESTRY_RESERVED
-                       if entries.get(path, {}).get("kind") in ("file", "directory")]
         check_fd = store._open_dir_nofollow(root)
         try:
             if _stamp(os.fstat(check_fd)) != _stamp(root_stat):
@@ -698,14 +690,16 @@ def _inventory(root, sources, targets):
                 for path in DETECTION_ROOTS if path in entries
             ],
             # Prior-OPF ancestry, from the same pointer and manifest reads that fixed the
-            # exclusions plus the walked reserved names, so the seeded-versus-zero counters
-            # choice is plan-visible. Debris is re-adoption, not a third value that a
-            # consumer testing only for re-adoption could zero-seed.
+            # exclusions, so the seeded-versus-zero counters choice is plan-visible. A tree
+            # with neither is a first adoption: once the spec 4.5/9.2 hand step has moved a
+            # refused manifest aside, its files are ordinary foreign content, and manifestless
+            # content at a reserved .working name is read the same way (an occupying candidate
+            # still takes a disposition and is archived before init-store writes there).
             "ancestry": {
                 "adoption": "re-adoption" if traces else "first-adoption",
                 "traces": traces,
-                "evidence": "live pointers, resolved manifest and reserved .working names; "
-                            "git history and other .working names are not ancestry. "
+                "evidence": "live pointers and the resolved manifest; git history and "
+                            "manifestless .working content are not ancestry. "
                             "Durable OPF history outside .working also reads as first-adoption "
                             "on its own, including: root import-promotion state (.aiqt/import, "
                             ".aiqt/import/journal, .aiqt/import-archive), the record journal "
@@ -1373,7 +1367,7 @@ def self_test():
                 decide(".working/toml/counters.toml", "migrate")])
             self.assertEqual(result.status, store.VALID, result.findings)
             p = tomllib.loads(result.plan.decode())
-            self.assertEqual(p["store"]["adoption"], "re-adoption")
+            self.assertEqual(p["store"]["adoption"], "first-adoption")
             rows = {row["path"]: row for row in p["sources"]}
             for path, disposition in ((".working/TODO.md", "move"),
                                       (".working/toml/counters.toml", "migrate")):
@@ -1837,12 +1831,16 @@ def self_test():
             self.assertEqual((ancestry()["adoption"], ancestry()["traces"]),
                              ("re-adoption", [".working/toml/manifest.toml"]))
 
-        def test_ancestry_store_debris_is_re_adoption(self):
+        def test_ancestry_ignores_manifestless_reserved_content(self):
             import shutil
 
             def ancestry():
                 return tomllib.loads(self.observation().observation.decode())["ancestry"]
-            # Oracle derived from the store constants, not from this module's own set.
+            # Oracle derived from the store constants, not from a set of this module's own.
+            # With no pointer and no resolved manifest, content at a reserved .working name is
+            # ordinary foreign content for a first adoption, exactly as a tree whose refused
+            # manifest the operator moved aside by hand (spec 4.5/9.2); the two are
+            # indistinguishable, so neither reads as ancestry.
             reserved = [store.WORKING_DIRNAME + "/" + name for name in
                         (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS]
             run = ".working/imports/imp-20260102T030405Z-0123456789abcdef"
@@ -1860,10 +1858,10 @@ def self_test():
                         doc = tomllib.loads(self.observation().observation.decode())
                         self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
                         self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
-                                         ("re-adoption", [name]))
+                                         ("first-adoption", []))
                     finally:
                         shutil.rmtree(self.root / ".working")
-            # Reserved files, even empty ones, and empty reserved directories are ancestry.
+            # Reserved files, even empty ones, and empty reserved directories are foreign too.
             name = ".working/toml"
             for kind, content in (("file", b""), ("file", b"[x]\n"), ("directory", None)):
                 with self.subTest(reserved=name, kind=kind, content=content):
@@ -1875,18 +1873,49 @@ def self_test():
                             (self.root / name).mkdir()
                         doc = tomllib.loads(self.observation().observation.decode())
                         self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
-                                         ("re-adoption", [name]))
+                                         ("first-adoption", []))
                     finally:
                         shutil.rmtree(self.root / ".working")
             # Foreign .working content, even a nested reserved-looking name, stays first-adoption.
             (self.root / ".working/notes").mkdir(parents=True)
             (self.root / ".working/notes/toml").write_bytes(b"notes")
             self.assertEqual((ancestry()["adoption"], ancestry()["traces"]), ("first-adoption", []))
-            # A pointer and debris are both traces, pointer first.
+            # A pointer beside manifestless reserved content is ancestry through the pointer alone.
             (self.root / ".working/toml").mkdir()
             (self.root / ".working/toml/counters.toml").write_bytes(b"[x]\n")
             (self.root / ".opf.toml").write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
-            self.assertEqual(ancestry()["traces"], [".opf.toml", ".working/toml"])
+            self.assertEqual(ancestry()["traces"], [".opf.toml"])
+
+        def test_refused_older_manifest_and_hand_step(self):
+            # A resolved manifest declaring a below-supported spec_version refuses investigation
+            # with the finding that names the manifest's own path, states that no store upgrade
+            # reaches spec_version 2.0.0, and states the operator hand step (spec 4.5/9.2); a
+            # refusal that falls back to "the store manifest" or offers an upgrade is red.
+            import _opf_init
+            (self.root / ".working/toml").mkdir(parents=True)
+            old_manifest = _opf_init.build_manifest().replace(
+                'spec_version = "' + store.SUPPORTED_SPEC_VERSION + '"', 'spec_version = "1.1.0"')
+            self.assertIn('spec_version = "1.1.0"', old_manifest)
+            (self.root / ".working/toml/manifest.toml").write_text(old_manifest, encoding="utf-8")
+            (self.root / ".working/toml/counters.toml").write_bytes(b"[x]\n")
+            refused = investigate(self.root, sources=self.sources)
+            self.assertEqual(refused.status, store.CANNOT_EVALUATE)
+            self.assertEqual(list(refused.findings), [
+                "resolved manifest is not valid: '.working/toml/manifest.toml' declares "
+                "[opf].spec_version '1.1.0', older than the {0} this tooling implements; "
+                "no store upgrade reaches spec_version 2.0.0, so the store is refused; "
+                "to adopt this tree instead, first move '.working/toml/manifest.toml' "
+                "aside by hand: its files are then ordinary foreign content for a first "
+                "adoption (spec 9.2; fail-closed)".format(store.SUPPORTED_SPEC_VERSION)])
+            # The hand step, as the refusal words it: the operator moves the manifest aside, a
+            # step no OPF command performs. The remaining files, the reserved-name counters
+            # included, are then ordinary foreign content for a first adoption.
+            (self.root / ".working/toml/manifest.toml").rename(
+                self.root / "manifest.toml.moved-aside")
+            doc = tomllib.loads(self.observation().observation.decode())
+            self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
+            self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
+                             ("first-adoption", []))
 
         def test_unreadable_declared_source(self):
             with mock.patch.object(sys.modules[__name__], "_read",
