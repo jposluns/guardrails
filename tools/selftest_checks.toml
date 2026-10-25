@@ -2320,6 +2320,12 @@ expected-check-ids = [
   "loader/aiqt-ancestor-dangling-refused",
   "loader/aiqt-ancestor-symlink-refused",
   "loader/absent-standards-reads-empty",
+  # ---------- open_dir holds the directory it judged ----------
+  "probe/open-dir-holds-directory",
+  "probe/open-dir-absent-reads-none",
+  "probe/open-dir-symlink-refused",
+  "probe/open-dir-swapped-before-open-refused",
+  "probe/open-dir-replaced-before-open-raises",
   # ---------- the placement gate over synthetic --root trees ----------
   "gate/absent-tree-passes",
   "gate/empty-directory-reads-tree",
@@ -2333,6 +2339,16 @@ expected-check-ids = [
   "gate/claude-ancestor-dangling-exits-2",
   "gate/aiqt-ancestor-symlink-exits-2",
   "gate/aiqt-ancestor-dangling-exits-2",
+  # ---------- the gate reads only the rules directory its probe judged ----------
+  "gate/rules-swapped-before-listing-exits-2",
+  "gate/rules-replaced-before-listing-exits-2",
+  "gate/rules-swapped-after-open-reads-judged",
+  # ---------- links and non-regular rule files below the rules directory ----------
+  "gate/family-symlink-exits-2",
+  "gate/rule-file-symlink-exits-2",
+  "gate/vendored-source-symlink-exits-2",
+  "gate/rule-file-fifo-exits-2",
+  "gate/rule-drift-fails",
   # ---------- probe mutants, each caught by its named vector ----------
   "mutant/stat-follows-links-caught",
   "mutant/wrong-type-reads-absent-caught",
@@ -2341,6 +2357,8 @@ expected-check-ids = [
   "mutant/nofollow-dropped-caught",
   "mutant/descriptor-close-skipped-caught",
   "mutant/loader-unrooted-caught",
+  "mutant/held-identity-unchecked-caught",
+  "mutant/held-final-unopened-caught",
   # ---------- the gate's own --root guard ----------
   "vector/every-vector-holds",
   "launch/nonexistent-root-cannot-evaluate",

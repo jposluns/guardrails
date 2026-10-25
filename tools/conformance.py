@@ -382,9 +382,11 @@ def check_c2(root, cache):
 def check_c3(root):
     """The read tree obeys the taxonomy: family, flatness, naming, frontmatter-derived path, apex,
     provenance. Reuses check_rule_placement.check_name / check_drift and its module constants, and
-    re-orchestrates the same walk main() does (there is no standalone walk function to import), so the
-    orchestrator keeps control of reporting. Runs unconditionally: it needs only .claude/rules/, which
-    every adopter has. An absent tree trivially conforms."""
+    re-orchestrates the placement walk by name, so the orchestrator keeps control of reporting. Unlike
+    the placement gate's main(), which lists and reads the tree only through descriptors held beneath
+    the probed .claude/rules, this walk reads by name: a symlink below .claude/rules is followed, and
+    the tree is not bound to the probe (a residual). Runs unconditionally: it needs only
+    .claude/rules/, which every adopter has. An absent tree trivially conforms."""
     rules = root / ".claude" / "rules"
     present, err = _reachable(rules, root)
     if err:

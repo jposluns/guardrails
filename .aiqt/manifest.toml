@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "14b97cf6b5ccce01160350b0fd524ae44d09087832effb35263e8fa8f5d31849"
+tree-sha256 = "f317ea839c29f17915216a9345da96a742843b517d12e41f955c9e85bd2bd1a1"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "6dd2dd4774b7848eae3129f3b5928c0ddf0c694de3d19222651c6ff7577089cc"
+sha256 = "0e2b8065a3eb2cee275fbc2cc27c531f42000a4d41e3e7bcb0d60f7387adb6f6"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3291,8 +3291,8 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_standards.py"
-bytes = 26763
-sha256 = "5c6b3b7a38ef891d35055ec374d0ab3da683c79a2c3960508b5c5fde0392ec41"
+bytes = 28402
+sha256 = "726df852e5054cfc5938f71bf9a237de75283b4e995f1181ffbb254fce131fd1"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -3531,8 +3531,8 @@ sha256 = "8432b91994571a4d2e8a41007d84d32b24990b15c772a134449a7b3cd57440a3"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
-bytes = 44358
-sha256 = "d6ff70837fb191ca3fa37e5a74d3c41aa88281d4f77528deddf38ddf7b5f046c"
+bytes = 60321
+sha256 = "0abf44529d934e0889784b361cb4ba2bfa91274d74b4153ffb1a38f7fc680da9"
 
 [[sources]]
 path = "tools/check_secrets.py"
@@ -3566,8 +3566,8 @@ sha256 = "eaf3ec71cc7f020ce5d2832eac881774a2bbfc3183b4841cca0bbe1d5ceff929"
 
 [[sources]]
 path = "tools/check_standards_urls_live.py"
-bytes = 8027
-sha256 = "120a15610df1fb09041893d512ffbad36734433a0cbe03790f63d676f01e694c"
+bytes = 8309
+sha256 = "7882aa87feeb46e00d0f76994e37c3b547bcddbd057d193a05c9fa8f1dff749a"
 
 [[sources]]
 path = "tools/check_version_monotonicity.py"
@@ -3586,8 +3586,8 @@ sha256 = "d5e68bcbdfc7f4910676d047b73f8ede82a3602b027b23e442f58fee2bba453d"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 77176
-sha256 = "a167737059d46b49c24602174c359c0fe238e7c75ddd7276097eb2c424ec7f2a"
+bytes = 77388
+sha256 = "8e1860b0cd6f596bbf0583b5582331c588a1cecda8a27a04766eafc6af2d4c3b"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -3696,8 +3696,8 @@ sha256 = "c59e2c19b2cb65c877d9600bd688f1e6984146f0145dad92cb559aa863978ba2"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 21080
-sha256 = "30c09ee7730ac76f9e05de3546bb479211fd80f71148a144b31daabfc0ae6fe1"
+bytes = 21212
+sha256 = "869f42cc6a78560bb6e876f3809f79a6c9d3a7365fb9292f1c64d785962a0aaa"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"
@@ -3786,8 +3786,8 @@ sha256 = "12394b5f41c65e553f2cf3786f2ef7919deeec6c03eedc3ebb51c20b0d1676ea"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 110244
-sha256 = "b07834acecca8bc7908d9ecf2762d8bc354485b5d3740bd8130c25305d8b023c"
+bytes = 111079
+sha256 = "8d2c452c6400da8f3ccff2f3feb6640f34de2cb2cba459ed9d4ccfb2f895c3d1"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

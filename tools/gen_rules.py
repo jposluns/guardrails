@@ -122,27 +122,31 @@ def _value(v):
 
 
 def parse_source(path):
-    text = path.read_text(encoding="utf-8")
+    return parse_source_text(path.read_text(encoding="utf-8"), path.name)
+
+
+def parse_source_text(text, name):
+    """The frontmatter of a rule source's text, already read; name labels every error."""
     if not text.startswith("---\n"):
-        raise ValueError("{}: no frontmatter".format(path.name))
+        raise ValueError("{}: no frontmatter".format(name))
     end = text.find("\n---\n", 4)
     if end == -1:
-        raise ValueError("{}: unterminated frontmatter".format(path.name))
+        raise ValueError("{}: unterminated frontmatter".format(name))
     fm = {}
     for line in text[4:end].splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         if ":" not in line:
-            raise ValueError("{}: bad frontmatter line {!r}".format(path.name, line))
+            raise ValueError("{}: bad frontmatter line {!r}".format(name, line))
         key, val = line.split(":", 1)
         key = key.strip()
         if key in fm:
-            raise ValueError("{}: duplicate key {}".format(path.name, key))
+            raise ValueError("{}: duplicate key {}".format(name, key))
         try:
             fm[key] = _value(val.strip())
         except ValueError as exc:
-            raise ValueError("{}: {}".format(path.name, exc))
+            raise ValueError("{}: {}".format(name, exc))
     return fm
 
 

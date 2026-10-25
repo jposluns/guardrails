@@ -206,27 +206,46 @@ def dir_present(path, *, root, search_only=False):
     final component would trust, and so follow, every ancestor, and read a dangling one as absence.
     A path that is not beneath root (or that climbs with '..') raises OSError (EINVAL), so the
     callers' handlers refuse it too. The probe judges the tree only while it runs: a later read of
-    the same path by name is not bound to it. Pairs with ensure_listable: dir_present catches an
-    unreachable or wrong-type entry, ensure_listable catches a reachable-but-unlistable directory.
+    the same path by name is not bound to it (open_dir returns a descriptor to read through
+    instead). Pairs with ensure_listable: dir_present catches an unreachable or wrong-type entry,
+    ensure_listable catches a reachable-but-unlistable directory.
 
     search_only opens root and every directory the walk passes through for search only (O_PATH where
     the platform has it), so a traversable but unreadable directory on the way does not raise; the
     default opens them for reading, so such a directory raises EACCES. Every judgement is the same
     either way: each component is judged by lstat, and O_PATH with O_DIRECTORY|O_NOFOLLOW refuses a
     symlink as O_RDONLY does."""
+    return _walk(path, root, _SEARCH if search_only else 0, False) is not None
+
+
+def open_dir(path, *, root):
+    """Probe path as dir_present does and return a descriptor for it, opened for reading, which the
+    caller owns and closes; return None on genuine absence. Every refusal dir_present makes, this
+    makes, and path must lie strictly beneath root (root itself raises EINVAL). The final component
+    is judged by lstat like every other, then opened beneath its parent's descriptor with
+    O_DIRECTORY|O_NOFOLLOW, and the opened directory's st_dev and st_ino must equal that lstat's: a
+    symlink swapped in between the judgement and the open is refused by the open, and another
+    directory swapped in raises OSError naming path, so the descriptor is always the directory the
+    probe judged. A caller that lists and reads through it (os.scandir on the descriptor, os.open
+    with dir_fd) is then bound to that directory whatever later happens to its name."""
+    return _walk(path, root, 0, True)
+
+
+def _walk(path, root, search, hold):
+    """The walk dir_present and open_dir share. Return None on genuine absence; otherwise True, or
+    with hold the final directory's descriptor, the only one it leaves open."""
     path = Path(path)
     base = Path(root)
     try:
         parts = path.relative_to(base).parts
     except ValueError:
         parts = None
-    if parts is None or ".." in parts:
+    if parts is None or ".." in parts or (hold and not parts):
         raise OSError(errno.EINVAL, "not a path beneath the probe root {}".format(base), str(path))
     if not _DIR_FD_OK:
         raise OSError(
             errno.ENOSYS, "directory probing bound beneath a descriptor (os.open and os.lstat "
             "with dir_fd) is unavailable on this platform", str(path))
-    search = _SEARCH if search_only else 0
     walked = base
     fds = []
     try:
@@ -239,16 +258,23 @@ def dir_present(path, *, root, search_only=False):
                     kind = "a symlink" if stat.S_ISLNK(st.st_mode) else "a non-directory entry"
                     raise NotADirectoryError(
                         errno.ENOTDIR, "{} where a directory is required".format(kind), str(walked))
-                if i + 1 < len(parts):
+                if hold or i + 1 < len(parts):
                     # The next component is judged beneath THIS component's descriptor; O_NOFOLLOW
                     # refuses even a symlink swapped in between the lstat above and this open. The
-                    # final component needs no descriptor: its lstat is the whole judgement.
+                    # final component is opened only when it is held: otherwise its lstat is the
+                    # whole judgement.
                     fds.append(os.open(name,
                                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
                                        | search, dir_fd=fds[-1]))
         except FileNotFoundError:
-            return False
-        return True
+            return None
+        if not hold:
+            return True
+        held = os.fstat(fds[-1])
+        if (held.st_dev, held.st_ino) != (st.st_dev, st.st_ino):
+            raise OSError(errno.ESTALE, "the directory opened is not the one the probe judged "
+                          "(it was replaced in between)", str(walked))
+        return fds.pop()
     finally:
         for fd in reversed(fds):
             os.close(fd)

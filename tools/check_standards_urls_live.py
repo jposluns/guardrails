@@ -12,12 +12,15 @@ falling back to GET when a server rejects HEAD) with a timeout, and reports any 
 with a 2xx/3xx status or that errors.
 
   check_standards_urls_live.py [--std DIR] [--timeout SECONDS]
-  check_standards_urls_live.py --self-test   offline self-test of the explicit --std probe (no network)
+  check_standards_urls_live.py --self-test   offline self-test of the explicit --std probe (no network;
+                                             neither check roster runs it yet)
 
-Exit convention:
+Exit convention for an audit run:
   0  every manifest url is reachable (2xx/3xx)
   1  at least one url is unreachable (non-2xx/3xx or a network error)
-  2  a malformed manifest, or a read error on .aiqt/standards/ (fail-closed, same as load_manifests)
+  2  a malformed manifest, no manifest at all, a read error on the standards directory, or an explicit
+     --std that is or sits beneath a symlink (fail-closed, same as load_manifests); also a usage error
+The --self-test exits 0 when every vector holds and 1 when any fails, naming it.
 """
 import sys
 
