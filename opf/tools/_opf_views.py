@@ -1188,12 +1188,20 @@ def render_blocks(src):
 
 
 def render_handoff(src):
-    """HANDOFF: the single current handoff first (at most one exists, spec 8.5), then the superseded ones
-    in ID order, and finally any proposal awaiting ratification. A `superseded/proposed` handoff is
+    """HANDOFF: the single current handoff first (at most one exists among clean records authored by
+    non-importer actors, spec 8.5/8.6), then the superseded ones in ID order, then any proposal awaiting
+    ratification, and finally any importer-authored history. A `superseded/proposed` handoff is
     NONTERMINAL (spec 8.4): it is held OUT of the superseded (terminal) list and surfaced under
-    `Awaiting ratification` with its FULL status, never shown as already superseded. Every valid handoff
-    status (current, superseded, superseded/proposed) thus lands in exactly one place."""
-    handoffs = src["handoff"]
+    `Awaiting ratification` with its FULL status, never shown as already superseded. An importer-authored
+    handoff is history outside every current-state join (spec 8.6): whatever its recorded status, it is
+    surfaced only under `Imported history` with that FULL status, never as the current handoff. Every
+    valid handoff status thus lands in exactly one place."""
+    def _imported(r):
+        actor = r.get("actor")
+        return isinstance(actor, dict) and actor.get("kind") == "importer"
+
+    imported = [r for r in src["handoff"] if _imported(r)]
+    handoffs = [r for r in src["handoff"] if not _imported(r)]
     out = ["## Current"]
     cur = t_sort(t_filter(handoffs, "state_in", states=("current",)))
     out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in cur] or [_EMPTY])
@@ -1205,6 +1213,10 @@ def render_handoff(src):
         out += ["", "## Awaiting ratification"]
         out += ["- {} ({}) {}".format(
             _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", ""))) for r in proposed]
+    if imported:
+        out += ["", "## Imported history"]
+        out += ["- {} ({}) {}".format(
+            _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", ""))) for r in t_sort(imported)]
     return "# {}\n\n{}\n".format("HANDOFF", "\n".join(out))
 
 
@@ -4363,6 +4375,7 @@ def _self_test():
             "schema = 1",
             _rec("HO-1", "handoff", "current", "the current handoff"),
             _rec("HO-2", "handoff", "superseded/proposed", "proposed supersede", actor="assistant"),
+            _rec("HO-3", "handoff", "current", "migrated history", actor="importer"),
         ]) + "\n")
         write_toml(proproot, "version.toml", "\n".join([
             "schema = 1", "", "[[release]]",
@@ -4394,6 +4407,15 @@ def _self_test():
         _sup = pho.index("## Superseded")
         _hawa = pho.index("## Awaiting ratification")
         check("handoff-proposed-not-in-superseded", "HO-2" in pho[_hawa:] and "HO-2" not in pho[_sup:_hawa])
+        # An importer-authored handoff is history outside every current-state join (spec 8.6): whatever
+        # its recorded status, it is surfaced only under Imported history with that full status, never as
+        # the current handoff (red when the Current group counts importer-authored rows again).
+        check("handoff-imported-history-section", "## Imported history" in pho)
+        # A missing section fails the three named checks (an empty tail holds neither needle), never an
+        # uncaught ValueError that would mask every later check in this run.
+        _himp = pho.index("## Imported history") if "## Imported history" in pho else len(pho)
+        check("handoff-imported-not-current", "HO-3" not in pho[:_sup] and "HO-3" in pho[_himp:])
+        check("handoff-imported-shows-full-status", "- HO-3 (current) migrated history" in pho[_himp:])
 
         # --- the composed U6 write gate (VC-4): render --write gates on validate_store == VALID ----------
         # A bare `render` (neither --check nor --write) is a usage error; --write on a NOT-ADOPTED root is

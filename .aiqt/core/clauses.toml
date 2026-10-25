@@ -26,6 +26,33 @@ canonical-text = "If a constraint forces a compromise on the tier, halt and esca
 source-digest = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
 
 [[clause]]
+clause-id = "prjint1.4"
+corpus-id = "prjint1"
+source-path = ".aiqt/core/rules/00-project-integrity.md"
+start-line = 11
+end-line = 11
+canonical-text = "(Accuracy = Integrity = Quality = Trust) > Progress > Speed > Cost."
+source-digest = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
+
+[[clause]]
+clause-id = "prjint1.5"
+corpus-id = "prjint1"
+source-path = ".aiqt/core/rules/00-project-integrity.md"
+start-line = 11
+end-line = 12
+canonical-text = "The four facets form one\nnon-negotiable top tier with no internal ranking"
+source-digest = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
+
+[[clause]]
+clause-id = "prjint1.6"
+corpus-id = "prjint1"
+source-path = ".aiqt/core/rules/00-project-integrity.md"
+start-line = 12
+end-line = 13
+canonical-text = "the tier is lexicographically above Progress, Progress\nabove Speed, Speed above Cost."
+source-digest = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
+
+[[clause]]
 clause-id = "clmobs.1"
 corpus-id = "clmobs"
 source-path = ".aiqt/core/rules/accur-claims-rest-on-observation.md"
@@ -593,6 +620,15 @@ canonical-text = "The same holds for a status a document,\ntest, or record asser
 source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
 
 [[clause]]
+clause-id = "obsbeh.10"
+corpus-id = "obsbeh"
+source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
+start-line = 30
+end-line = 33
+canonical-text = "You read the\nresource's own state, the host's available capacity, and your own footprint directly before asserting\nsuch a failure or reporting it onward; absent that reading the condition resolves to a local error to\ninvestigate while work continues, never a stop or a resource-wide alarm."
+source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+
+[[clause]]
 clause-id = "rdbchr.1"
 corpus-id = "rdbchr"
 source-path = ".aiqt/core/rules/accur-read-before-characterizing.md"
@@ -1124,13 +1160,22 @@ canonical-text = "Where a case is covered by a surviving sibling control rather 
 source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
+clause-id = "gatdis.21"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 18
+end-line = 19
+canonical-text = "No bypass flags, no piping a check to a\ntruncating sink, no `|| true`, no deleted tests, no lowered thresholds."
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
+
+[[clause]]
 clause-id = "gensrc.1"
 corpus-id = "gensrc"
 source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "42fb16d7257af3084dd556cd4ef4ac5053707ffd7aee70034843aab6673dfebc"
+source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
 
 [[clause]]
 clause-id = "gensrc.2"
@@ -1139,7 +1184,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "42fb16d7257af3084dd556cd4ef4ac5053707ffd7aee70034843aab6673dfebc"
+source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
 
 [[clause]]
 clause-id = "gensrc.3"
@@ -1148,7 +1193,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "42fb16d7257af3084dd556cd4ef4ac5053707ffd7aee70034843aab6673dfebc"
+source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
 
 [[clause]]
 clause-id = "gensrc.4"
@@ -1157,7 +1202,16 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 13
 end-line = 13
 canonical-text = "Source and derivative land in the same change, so the two cannot drift apart."
-source-digest = "42fb16d7257af3084dd556cd4ef4ac5053707ffd7aee70034843aab6673dfebc"
+source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
+
+[[clause]]
+clause-id = "gensrc.5"
+corpus-id = "gensrc"
+source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
+start-line = 14
+end-line = 16
+canonical-text = "Deriving an artefact leaves its source originals byte-for-byte unchanged and writes separate outputs;\nin-place derivation uses copies in an area excluding the originals and refuses any path or alias\nwriting outside it or back to an original."
+source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
 
 [[clause]]
 clause-id = "liccmp.1"
@@ -1247,6 +1301,15 @@ source-path = ".aiqt/core/rules/integ-protected-branch-integrity.md"
 start-line = 19
 end-line = 20
 canonical-text = "The protected line of development is never rewritten, overwritten, or changed directly; it changes only\nthrough a reviewed, verified integration."
+source-digest = "59c40e70c51a3915f791927248162ecff2887ec97ed65b428149b3d2c6d327cf"
+
+[[clause]]
+clause-id = "prtbrn.4"
+corpus-id = "prtbrn"
+source-path = ".aiqt/core/rules/integ-protected-branch-integrity.md"
+start-line = 20
+end-line = 21
+canonical-text = "On git that means no force-push and no direct commit to the\nprotected branch, only a merged pull request."
 source-digest = "59c40e70c51a3915f791927248162ecff2887ec97ed65b428149b3d2c6d327cf"
 
 [[clause]]
@@ -1652,6 +1715,15 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 57
 end-line = 59
 canonical-text = "This is a rule on what the orchestrator\nruns and where, not OS containment: only the full reading checks a path the code builds at run time or\nconfiguration it inherits."
+source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
+
+[[clause]]
+clause-id = "wowo01.21"
+corpus-id = "wowo01"
+source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
+start-line = 24
+end-line = 25
+canonical-text = "Narrow recovery-snapshot exception: a guard or hook that snapshots uncommitted work so a discard can be\nundone may write a private recovery ref under `refs/aiqt-recovery/` (and the objects it points to)."
 source-digest = "f792488e0a386d7ff3b93e31bf91dfe543a96175902a780496d892a5454284f9"
 
 [[clause]]
@@ -3914,6 +3986,15 @@ canonical-text = "A state-changing request authenticated by ambient credentials 
 source-digest = "78e3bb96a62f0d2a33bcc3d346503bc00ad387ee69926cd2f9f5b4c74ae200eb"
 
 [[clause]]
+clause-id = "sectok.8"
+corpus-id = "sectok"
+source-path = ".aiqt/core/rules/security-seci-session-token-management.md"
+start-line = 26
+end-line = 26
+canonical-text = "Code the assistant writes and operations it performs handle sessions and tokens securely."
+source-digest = "78e3bb96a62f0d2a33bcc3d346503bc00ad387ee69926cd2f9f5b4c74ae200eb"
+
+[[clause]]
 clause-id = "secssr.1"
 corpus-id = "secssr"
 source-path = ".aiqt/core/rules/security-seci-ssrf-prevention.md"
@@ -4289,6 +4370,15 @@ source-path = ".aiqt/core/rules/trust-authorization.md"
 start-line = 15
 end-line = 16
 canonical-text = "Execution of a plan-initiating unit of work begins only on an\nexplicit, work-naming go."
+source-digest = "0b4b235c936219010fda0629e5820600042dd1649845fcdc40e57468426bb45d"
+
+[[clause]]
+clause-id = "exauth.2"
+corpus-id = "exauth"
+source-path = ".aiqt/core/rules/trust-authorization.md"
+start-line = 15
+end-line = 15
+canonical-text = "A planning discussion is not authorization."
 source-digest = "0b4b235c936219010fda0629e5820600042dd1649845fcdc40e57468426bb45d"
 
 [[clause]]

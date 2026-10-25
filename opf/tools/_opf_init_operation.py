@@ -155,6 +155,7 @@ import _opf_observe        # noqa: E402
 import _opf_oplock         # noqa: E402
 import _opf_store          # noqa: E402
 import _opf_views          # noqa: E402
+import _opf_write_guard    # noqa: E402
 from _opf_schema import SUPPORTED_SCHEMA, validate_counters, high_water  # noqa: E402
 
 import tomllib  # noqa: E402
@@ -2524,7 +2525,28 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
         raise InitOperationError("planned destination(s) already tracked by git: {}; a deletion "
                                  "present only in the worktree or index is never re-initialized "
                                  "over".format(tracked))
+    _refuse_ignored_destinations(git, binding, plan)
     return plan, raw
+
+
+def _refuse_ignored_destinations(git, binding, plan):
+    """Refuse a plan whose creations git would ignore (OPF spec 5.1: an untracked or ignored store is a
+    hard failure in scaffolding, with no gitignore fallback). The planned creations, the permitted
+    directories and the S and V sets (an admitted pre-existing file is the adopter's and is never created
+    here), go to the ONE shared ignore preflight, _opf_write_guard.init_ignore_refusal, which the plain
+    `opf init` calls too. It runs under the held mutex before this attempt's first worktree write: for a
+    fresh adoption at the end of _fresh_plan, before the plan is persisted, so a refusal records no operation
+    and writes nothing; for a resume once the recorded plan is validated, before any effect group runs. An
+    ignored destination is REFUSED; a check that cannot evaluate is CANNOT-EVALUATE, never a pass."""
+    paths = sorted({d["path"] for d in plan["permitted_directories"]}
+                   | {s["path"] for s in plan["sets"]["S"]}
+                   | {v["path"] for v in plan["sets"]["V"]})
+    refusal = _opf_write_guard.init_ignore_refusal(
+        git, binding["repository_root"]["path"], Path(binding["product_prefix"]), paths)
+    if refusal is not None:
+        kind, message = refusal
+        raise InitOperationError(message, REFUSED if kind == _opf_write_guard.INIT_IGNORED
+                                 else CANNOT_EVALUATE)
 
 
 def _outcome(run, primary):
@@ -2751,6 +2773,7 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
                                           expected_head=head)
             _resume_binding_or_refuse(run.plan, rep.op_id, ancestral, admitted, operation_id,
                                       admitted_dirs)
+            _refuse_ignored_destinations(git, binding, run.plan)
             run.phases = _phase_names(run.sub)
             if not run.phases:
                 run.record("plan-recorded")
@@ -3361,6 +3384,8 @@ def _run_self_test_isolated():
         tests_run.append("views")
         _seam_tests(base, env, ok)
         tests_run.append("seam")
+        _ignore_tests(base, env, ok)
+        tests_run.append("ignore")
         import check_opf_init_qa
         ok("PR3a-QA-regressions", check_opf_init_qa.self_test() == 0)
     except Exception:
@@ -3377,7 +3402,7 @@ def _run_self_test_isolated():
     for lbl, why in failed:
         sys.stderr.write("SELF-TEST FAIL {}: {}\n".format(lbl, why))
     print("filesystem under test: {} (TMPDIR={})".format(base, os.environ.get("TMPDIR", "")))
-    if failed or tests_run != ["b6", "physical", "views", "seam"]:
+    if failed or tests_run != ["b6", "physical", "views", "seam", "ignore"]:
         sys.stderr.write("_opf_init_operation SELF-TEST: FAIL ({} of {})\n".format(
             len(failed), len(checks)))
         return 1
@@ -3701,6 +3726,128 @@ def _seam_tests(base, env, ok):
     ok("SEAM-admitted-dir-wrong-mode-refused", res.status == REFUSED
        and "preserved as found" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+
+
+def _ignore_tests(base, env, ok):
+    """OPF spec 5.1 over real git stores: the init operation refuses a store git would ignore, with
+    nothing written and no operation recorded, through the ONE shared ignore preflight the plain `opf
+    init` calls (_opf_write_guard.init_ignore_refusal), on a fresh run and on a resume; it admits a store
+    no rule ignores; and a check that cannot evaluate (check-ignore failing or not launching, a bare
+    repository, the indexed-blob probe failing or finding a blob unavailable) refuses, never reading as not
+    ignored. Without the shared preflight each refusal vector here publishes the store instead."""
+    from unittest import mock
+    d = os.path.join(base, "ignore")
+    git = _opf_observe._git_path()
+
+    def sub_ops(root):
+        ops = _ops_dir(root)
+        return sorted(os.listdir(ops)) if os.path.isdir(ops) else []
+
+    def ignoring(name, rules):
+        root = _plain_repo(os.path.join(d, name), env)
+        _write(os.path.join(root, ".gitignore"), rules)
+        _git(["add", "--", ".gitignore"], root, env)
+        _git(["commit", "-q", "-m", "ignore rules"], root, env)
+        return root
+
+    def untouched(label, res, code, needle, after, before, ops=()):
+        detail = (res.primary_failure or {}).get("detail", "")
+        ok(label, res.status == code and needle in detail and after == before and list(ops) == [],
+           "{} {}".format(res.status, res.primary_failure))
+
+    # An ignored store refuses with nothing written: the whole .working tree, only the views and
+    # the changelog (a pattern the toml sources escape), and only the committed pointer.
+    for name, rules in (("tree", b".working/\n"), ("views", b"*.md\n"),
+                        ("pointer", ("/" + _opf_store.POINTER_REL + "\n").encode("ascii"))):
+        root = ignoring(name, rules)
+        before = _tree_snapshot(root)
+        res = run_init_operation(root)
+        untouched("IGNORE-{}-refused-nothing-written".format(name), res, REFUSED, "git-ignored",
+                  _tree_snapshot(root), before, sub_ops(root))
+        ok("IGNORE-{}-not-adopted".format(name),
+           _opf_store.resolve_store(root).status == _opf_store.NOT_ADOPTED)
+
+    # A product root nested in its repository: the rule names the store under the prefix.
+    repo = ignoring("nested", b"/product/.working/\n")
+    root = os.path.join(repo, "product")
+    os.mkdir(root, 0o755)
+    before = _tree_snapshot(repo)
+    res = run_init_operation(root)
+    untouched("IGNORE-nested-prefix-refused-nothing-written", res, REFUSED, "./product/.working/",
+              _tree_snapshot(repo), before)
+
+    # A store no rule ignores is admitted: a rule naming only the machine-local pointer (a path init
+    # never creates and adopters legitimately ignore) leaves the store unignored.
+    root = ignoring("local-pointer", (_opf_store.LOCAL_POINTER_REL + "\n").encode("ascii"))
+    res = run_init_operation(root)
+    ok("IGNORE-unignored-store-admitted", res.status == VIEWS_READY
+       and _opf_store.resolve_store(root).status == _opf_store.RESOLVED and len(sub_ops(root)) == 1,
+       str(res.primary_failure))
+
+    # A check that cannot evaluate refuses: check-ignore exiting 128 or never launching.
+    real = _opf_observe._run_git_config_discovery
+
+    def failing(outcome):
+        def run(git_, store_root, args, *a, **k):
+            if "check-ignore" in args:
+                return outcome
+            return real(git_, store_root, args, *a, **k)
+        return run
+
+    for name, outcome, needle in (
+            ("rc128", _opf_observe._GitOutcome(True, 128, b"", "fatal: injected"),
+             "check-ignore failed (rc=128)"),
+            ("unlaunched", _opf_observe._GitOutcome(False, None, b"", "could not launch git (x)"),
+             "could not evaluate ignore status")):
+        root = _plain_repo(os.path.join(d, "git-" + name), env)
+        before = _tree_snapshot(root)
+        with mock.patch.object(_opf_observe, "_run_git_config_discovery", failing(outcome)):
+            res = run_init_operation(root)
+        untouched("IGNORE-git-{}-refused-cannot-evaluate".format(name), res, CANNOT_EVALUATE,
+                  needle, _tree_snapshot(root), before, sub_ops(root))
+
+    # The indexed-blob leg: a probe that cannot run, and an unavailable blob, each refuse.
+    root = _plain_repo(os.path.join(d, "blob"), env)
+    before = _tree_snapshot(root)
+
+    def unrunnable(*_a, **_k):
+        raise RuntimeError("injected: ls-files could not run")
+
+    for name, probe, needle in (("probe-failure", unrunnable, "injected: ls-files"),
+                                ("unavailable", lambda *_a, **_k: [".gitignore"],
+                                 "indexed .gitignore blob is unavailable")):
+        with mock.patch.object(_opf_observe, "indexed_ignore_availability", probe):
+            res = run_init_operation(root)
+        untouched("IGNORE-blob-{}-refused-cannot-evaluate".format(name), res, CANNOT_EVALUATE,
+                  needle, _tree_snapshot(root), before, sub_ops(root))
+
+    # Outside a work tree (a bare repository) the shared check itself cannot evaluate and refuses;
+    # observe_binding already refuses such a root before the mutex, so this calls the check directly.
+    bare = os.path.join(d, "bare.git")
+    _git(["init", "-q", "--bare", bare], d, env)
+    refusal = _opf_write_guard.init_ignore_refusal(git, bare, Path("."),
+                                                   [_opf_store.WORKING_DIRNAME, CHANGELOG_RELPATH])
+    ok("IGNORE-outside-worktree-cannot-evaluate", refusal is not None
+       and refusal[0] == _opf_write_guard.INIT_IGNORE_UNEVALUATED and "rc=128" in refusal[1],
+       str(refusal))
+
+    # A resume refuses too: a partial operation (killed after its second source) whose store an
+    # untracked .gitignore now ignores is refused with nothing further written (the lease the explicit
+    # recover clears aside), then finishes once the rule is gone.
+    root = _plain_repo(os.path.join(d, "resume"), env)
+    rc, _res, err = _child(root, env, kill="source:2")
+    partial = sub_ops(root)
+    _write(os.path.join(root, ".gitignore"), b".working/\n")
+    before = _worktree_without_lease(root)
+    res = run_init_operation(root, recover=True)
+    untouched("IGNORE-resume-refused-nothing-written", res, REFUSED, "git-ignored",
+              _worktree_without_lease(root), before)
+    ok("IGNORE-resume-kept-its-one-partial", rc != 0 and len(partial) == 1
+       and sub_ops(root) == partial, "{} {} {}".format(rc, partial, err[-400:]))
+    os.unlink(os.path.join(root, ".gitignore"))
+    res = run_init_operation(root, recover=True)
+    ok("IGNORE-resume-finishes-once-unignored", res.status == VIEWS_READY
+       and _opf_store.resolve_store(root).status == _opf_store.RESOLVED, str(res.primary_failure))
 
 
 def _b6_tests(base, env, ok, refuses):
