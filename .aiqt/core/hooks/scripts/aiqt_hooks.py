@@ -97,8 +97,9 @@ inline alias, an unrecognized flagged subcommand, an unresolvable worktree). The
 whole-tree clobber on a dirty tree is unchanged (it too carries a recovery snapshot when one could be made).
 So wherever the detailed prose below says a form "ASKS", read it as "snapshot-then-allows when recoverable,
 else denies-and-educates". UNLIKE the fail-closed controls above, it fails OPEN
-(ALLOW) at the TRUE BOUNDARY - a non-Bash or absent tool, a non-git command, or no recognized lossy
-verb - because none of those is a discard it can reason about, and it never silently allows a
+(ALLOW) at the TRUE BOUNDARY - a present non-Bash tool, a non-git command, or no recognized lossy
+verb - because none of those is a discard it can reason about (a payload with NO tool_name is malformed,
+not another tool, and denies under the shared missing-tool_name contract), and it never silently allows a
 recognized WORKING-TREE-CONTENT discard (a
 recognized verb in a genuinely non-destructive FORM - checkout -b, reset --soft, clean -n - preserves the
 index and worktree content, though reset --soft still MOVES HEAD, a reflog-recoverable ref move, so it
@@ -1795,6 +1796,57 @@ def _dequoted_text(command):
     joined, _raw_index = _join_continuations(command)
     joined = re.sub(r"\$(?=['\"])", "", joined)
     return joined.replace("'", "").replace('"', "").replace(chr(92), "")
+
+
+# An ANSI-C $'...' quote, its body running to the first single quote no backslash escapes, and one backslash
+# escape inside such a body, in the forms bash decodes there (_ansi_c_decoded).
+_ANSI_C_QUOTE_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL)
+_ANSI_C_ESCAPE_RE = re.compile(
+    r"\\(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|([0-7]{1,3})|c(.)|(.))", re.DOTALL)
+_ANSI_C_NAMED = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+                 "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c_escape(match):
+    """The text one ANSI-C escape (_ANSI_C_ESCAPE_RE) stands for, as bash decodes it: the character of a hex,
+    Unicode or octal value (an octal value keeps its low eight bits, as bash does; a code point past
+    U+10FFFF reads as nothing), the control character of \\cX, a named escape's character, and the escape
+    itself where bash keeps it unchanged (an unknown letter)."""
+    hex_value, short_point, long_point, octal, control, other = match.groups()
+    if hex_value is not None:
+        return chr(int(hex_value, 16))
+    if short_point is not None or long_point is not None:
+        point = int(short_point or long_point, 16)
+        return chr(point) if point <= 0x10FFFF else ""
+    if octal is not None:
+        return chr(int(octal, 8) & 0xFF)
+    if control is not None:
+        return "\x7f" if control == "?" else chr(ord(control) & 0x1F)
+    return _ANSI_C_NAMED.get(other, match.group(0))
+
+
+def _ansi_c_body(match):
+    """The decoded body of one ANSI-C quote (_ANSI_C_QUOTE_RE), with no quote characters around it."""
+    return _ANSI_C_ESCAPE_RE.sub(_ansi_c_escape, match.group(1))
+
+
+def _ansi_c_decoded(command):
+    """command with each ANSI-C $'...' quote replaced by its body decoded the way bash decodes it
+    (_ansi_c_escape), so a spelling bash assembles from escapes (--no-$'\\x76'erify) reads as that spelling.
+    The quote is found in the raw text without tracking the quoting around it, so a $' inside other quotes
+    is decoded too: it is read only beside the raw text and its plain de-quoted copy (_decoded_readings),
+    where an extra reading can only add a match. Linear, never raises."""
+    return _ANSI_C_QUOTE_RE.sub(_ansi_c_body, command)
+
+
+def _decoded_readings(command):
+    """The de-quoted readings a parse-failure fallback reads BESIDE the raw text: _dequoted_text(command)
+    and, when command holds an ANSI-C $'...' quote, _dequoted_text of command with each such quote's escapes
+    decoded first (_ansi_c_decoded). A probe that matches any reading matches, so each reading can only add
+    a match to the raw text's probes, never clear one."""
+    if "$'" not in command:
+        return (_dequoted_text(command),)
+    return (_dequoted_text(command), _dequoted_text(_ansi_c_decoded(command)))
 
 
 # The uncertainty causes _lex_uncertain_causes reports, worded for the deny messages.
@@ -5187,7 +5239,7 @@ def git_explicit_binding(data):
     except ValueError:
         return _expbnd_fallback(command)
 
-    # ROUND-2 FINDING 11 PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
+    # BREADTH-THEN-PUBLISH PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
     # FOLLOWED BY a PUBLISH ('git push') ANYWHERE later in the same reading DENIES-and-educates, regardless
     # of any cd/pushd between them. This runs BEFORE the dir-change/target logic below so a preceding cd
     # (which would otherwise short-circuit to the relocate allow-note) cannot mask the breadth+publish
@@ -5287,10 +5339,14 @@ def git_stash_ref(data):
     shell-state resolution. Other stash verbs, including bare stash (push), are outside this guard;
     drop/clear/export belong to git_discard. A command carrying a '#' whose comment reading depends on
     context (the shared lexer's comment rule) is judged on the segments of both readings of each such '#'.
-    Unparseable text silently allows, except a command whose '#' the lexer cannot judge that way and whose
+    Unparseable text is never passed clean where a bare pop/apply cannot be ruled out. On an ordinary parse
+    failure (an unbalanced quote, a here-string, a process substitution) a command whose text, as written or
+    in a de-quoted reading (_decoded_readings), names git and then stash gets the note (so does one naming
+    another stash verb, or an operand the lexer could not read: an over-note, never a refusal), and text
+    naming no such pair allows. A command whose '#' the lexer cannot judge that way gets the note when its
     text (_hash_doubt_scan) names git and stash, or holds quoting that text does not decode
-    (_hash_doubt_opaque), which gets the note, since the lexer read nothing past that '#'. An
-    absent/unreadable command gets the sibling's convention note.
+    (_hash_doubt_opaque), since the lexer read nothing past that '#'. An absent/unreadable command gets the
+    sibling's convention note.
     This note can co-occur with git_discard's raw/pristine fallback note on a wrapped or compound
     pop/apply, and with git_explicit_binding's note on a relocated form (e.g. `cd /x && git stash
     pop`); such sibling notes are consistent, never conflicting.
@@ -5316,9 +5372,9 @@ def git_stash_ref(data):
         # and no redirect is not built at all.
         segments = _segments(command, skip_empty=True)
     except _UncertainHashError:
-        # Unlike other unparseable text, which silently allows, a stash verb behind a '#' whose comment
-        # reading the lexer could not judge under both readings keeps the note it would earn, and so does a
-        # command whose quoting the fallback text does not decode, where a stash verb cannot be ruled out.
+        # A stash verb behind a '#' whose comment reading the lexer could not judge under both readings keeps
+        # the note it would earn, and so does a command whose quoting the fallback text does not decode,
+        # where a stash verb cannot be ruled out.
         if _hash_doubt_opaque(command):
             return _allow_note(
                 "AIQT expbnd (explicit-binding-over-ambient-context): this command carries a '#' whose comment "
@@ -5337,6 +5393,17 @@ def git_stash_ref(data):
                 "\"git stash apply 'stash@{2}'\".")
         return _allow()
     except ValueError:
+        # An ordinary parse failure (an unbalanced quote, a here-string, a process substitution) leaves the
+        # command unread, so it is not passed clean where a bare pop/apply cannot be ruled out: a command
+        # whose text, as written or in a de-quoted reading (_decoded_readings), names git and then stash
+        # keeps the note, as the uncertain-'#' branch above gives it; text naming no such pair allows.
+        if any(_STASH_WORD_RE.search(text) for text in (command,) + _decoded_readings(command)):
+            return _allow_note(
+                "AIQT expbnd (explicit-binding-over-ambient-context): this command could not be parsed by the "
+                "shell lexer (an unbalanced quote or an unsupported construct such as a here-string) and its "
+                "text names git stash, so a bare git stash pop/apply cannot be ruled out; one acts on the top "
+                "of the stash stack, ambient shared state that may not be the entry you mean. Run 'git stash "
+                "list', then name the entry explicitly, for example \"git stash apply 'stash@{2}'\".")
         return _allow()
 
     for tokens, _sep in segments:
@@ -7998,10 +8065,12 @@ def git_discard(data):
     exactly what FOO=<the same value> gets); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
     reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
-    reserved for the TRUE boundary (a non-Bash or absent tool, a non-git command, or no recognized lossy
-    verb); a tool_input whose command is MISSING or NOT A STRING is a cannot-evaluate input, not that
-    boundary, and DENIES under the shared fail-closed contract (check-fails-closed-on-unreadable), since a
-    discard could hide in what was not read. A wrapper is in scope while the raw scan, the continuation-joined text or
+    reserved for the TRUE boundary (a present non-Bash tool, a non-git command, or no recognized lossy
+    verb); a payload with NO tool_name is malformed, not another tool, and DENIES under the shared
+    missing-tool_name contract, and a tool_input whose command is MISSING or NOT A STRING is a
+    cannot-evaluate input, not that boundary, and DENIES under the shared fail-closed contract
+    (check-fails-closed-on-unreadable), since a discard could hide in what was not read. A wrapper is in
+    scope while the raw scan, the continuation-joined text or
     the DE-QUOTED copy (_dequoted_text: continuations joined, a '$' before a quote, quote characters and
     backslashes removed) sees a contiguous git verb keyword. The de-quoted copy is read on a
     certain lex too, so a wrapper that ALSO fragments the COMMAND WORD 'git' itself or the verb with quotes or
@@ -8064,8 +8133,12 @@ def git_discard(data):
         return _hard_block("aiqt_hooks: git_discard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
     tool_name = data.get("tool_name")
+    if tool_name is None:
+        # A missing tool_name is a malformed payload, not another tool: it cannot be matched, so it is not
+        # cleared (the shared fail-closed contract), whatever its tool_input holds.
+        return _deny_missing_tool_name("prsunc")
     if tool_name != "Bash":
-        return _allow()  # boundary: a missing or other tool is out of scope
+        return _allow()  # boundary: a present non-Bash tool is out of scope
     tool_input = data.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
@@ -10907,9 +10980,9 @@ _GATE_ALTS = (
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
 # deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
 # probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
-# These probes serve the plain parse-error fallback and the failed-main-reading floor, whose decisions
-# deliberately stand where they stood; behind a '#' whose comment reading the shared lexer could not
-# judge under both readings, gate_weakening takes the stricter bounded doubt tests below
+# These probes serve the plain parse-error fallback (which also runs the two deny probes over its de-quoted
+# readings, _decoded_readings) and the failed-main-reading floor; behind a '#' whose comment reading the
+# shared lexer could not judge under both readings, gate_weakening takes the stricter bounded doubt tests below
 # (_gate_doubt_bypass, _gate_doubt_checker) instead of these spelling probes, so widening a spelling here
 # is never the mechanism that closes a doubt-path gap.
 _RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
@@ -10990,8 +11063,8 @@ def _gate_doubt_sink(scan):
 # need not share a segment: a cross-segment match only over-denies, the fallback's safe direction. Each
 # search is one linear pass: the start class and the quote-and-backslash run share no character, so
 # every run is read from the one start before it. These doubt tests run
-# ONLY behind such an unjudged '#': the plain parse-error fallback and the failed-main-reading floor keep
-# the conservative spelling probes above, so a command outside the doubt path keeps its decision.
+# ONLY behind such an unjudged '#': the plain parse-error fallback (over its de-quoted readings too) and the
+# failed-main-reading floor keep the conservative spelling probes above, never these doubt tests.
 _RAW_DOUBT_OPTION_RE = re.compile(r"(?:^|[\s;&|<>()])(?:-(?:[^ \t\n;&|<>()]|[<>]\()|['\"\\]+-)")
 
 
@@ -11663,9 +11736,9 @@ def _gate_weakening_fallback(command):
     or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
     design, the documented posture of the sibling fallbacks (_diff_source_fallback,
     _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable. Which decision the
-    text earns is _gate_weakening_fallback_kind's. gate_weakening's ordinary-parse-failure caller passes
-    _hash_doubt_scan(command) (the text as written and with its quoting removed), so a simply
-    quote-fragmented spelling is probed decoded too; the floor callers pass the raw text."""
+    text earns is _gate_weakening_fallback_kind's. Every caller passes the raw text; gate_weakening's
+    ordinary-parse-failure branch first denies a bypass that only a de-quoted reading spells
+    (_decoded_readings), before it calls this."""
     kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
@@ -11778,17 +11851,16 @@ def gate_weakening(data):
     holding a checker-shaped word (_gate_doubt_checker, the parsed recognizer's own name splitter and
     lexicon, called rather than re-spelled) and a pipe, process substitution or here-string
     ALLOWS-WITH-NOTE, never a silent allow quieter than the note tier a readable spelling of the same
-    shape earns. An ORDINARY parse failure (an unbalanced quote, a here-string, a process substitution)
-    takes the same conservative stance on quoting: a command whose text holds quoting the fallback's
-    removal does not decode (_hash_doubt_opaque) DENIES, since a fragmented bypass verb (git co'mmit'
-    --no-verify) cannot be ruled out there, and otherwise the raw fallback probes read _hash_doubt_scan
-    (the text as written and with its backslash-newlines, quote characters and backslashes removed), so a
-    simply fragmented verb keeps the deny its plain spelling earns while an ordinary here-string command
-    with no bypass spelling still allows. The checker-word doubt tests beyond that run ONLY on the
-    uncertain-'#' path, and the failed-main-reading floor keeps the conservative raw probes alone (the
-    quoted here-document body that makes a command a floor case holds quote characters next to letters by
-    construction, so the undecoded-quoting deny there would refuse every such command; a disclosed
-    narrowing of the floor, not of the parse-failure fallback).
+    shape earns. These doubt tests run ONLY on the uncertain-'#' path. On an ORDINARY parse failure (an
+    unbalanced quote, a here-string, a process substitution) the raw fallback probes decide, and a
+    verification-hook bypass that only a de-quoted reading of the text spells (_decoded_readings: quote
+    characters, backslashes and a '$' before a quote removed, each ANSI-C quote's escapes decoded), such as
+    git co'mmit' --no-verify, git commit -"n" or --no-$'\\x76'erify, DENIES as its plain spelling does.
+    Quoting alone is no ground to deny there: a quoted argument or here-string that spells no bypass (git
+    commit -m "fix bug" <<<x, wc -l <<<"hello", diff <(sort "a.txt") <(sort "b.txt")) keeps the raw
+    probes' decision, and a bypass spelled so that no such reading assembles it (a variable, an alias) is
+    the open-grammar residual. The failed-main-reading floor keeps the conservative raw probes alone (a
+    disclosed narrowing of the floor, not of the parse-failure fallback).
     Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A
     FLOOR, above _MainHashReading), main's reading is one more reading here where it lexes. Where it fails, the
     decision of the path main's failed lex takes is a floor: the sink that main's partial lex proves past the
@@ -11830,26 +11902,27 @@ def gate_weakening(data):
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
         if not isinstance(exc, _UncertainHashError):
-            # An ordinary parse failure (an unbalanced quote, a here-string, a process substitution) is
-            # conservative about undecoded quoting exactly as the uncertain-'#' path below is: quoting the
-            # fallback's removal does not undo the way bash does can fragment a bypass verb past the raw
-            # probes (git co'mmit' --no-verify), so such a command denies unread, and otherwise the probes
-            # also read the text with its backslash-newlines, quote characters and backslashes removed
-            # (_hash_doubt_scan), so a simply fragmented verb keeps the deny its plain spelling earns while
-            # an ordinary here-string command with no bypass spelling still allows.
-            if _hash_doubt_opaque(command):
+            # An ordinary parse failure (an unbalanced quote, a here-string, a process substitution): the raw
+            # fallback probes decide, except that a verification-hook bypass the raw text hides behind quoting
+            # (git co'mmit' --no-verify, git commit -"n", --no-$'\x76'erify) denies when a de-quoted reading
+            # spells it (_decoded_readings: quote characters, backslashes and a '$' before a quote removed,
+            # each ANSI-C quote's escapes decoded). Quoting alone is no ground to deny: a quoted argument that
+            # spells no bypass (git commit -m "fix bug" <<<x) keeps the raw probes' decision.
+            if (_gate_weakening_fallback_kind(command) not in _GATE_FALLBACK_DENIES
+                    and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
+                            for text in _decoded_readings(command))):
                 return _deny(
                     "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell "
-                    "lexer (an unbalanced quote or an unsupported construct such as a here-string) and its "
-                    "text holds quoting this guard's fallback does not decode (an ANSI-C $'...' or locale "
-                    "$\"...\" quote, or a quote character or backslash next to a letter), so a "
-                    "verification-hook bypass (a --no-verify spelling, or -n on commit or am) spelled "
-                    "through that quoting cannot be ruled out; it is denied rather than allowed unread "
-                    "(check-fails-closed-on-unreadable). Re-issue it as a parseable command with plain "
-                    "spellings. " + _GATE_ALTS,
-                    "AIQT guardrail: denied an unparseable command in quoting its fallback does not decode "
-                    "(rule gatdis, fail-closed).")
-            return _gate_weakening_fallback(_hash_doubt_scan(command))
+                    "lexer (an unbalanced quote or an unsupported construct such as a here-string or a "
+                    "process substitution), and with its quoting removed (quote characters, backslashes and "
+                    "a '$' before a quote dropped, ANSI-C $'...' escapes decoded) it spells a "
+                    "verification-hook bypass (a --no-verify spelling, or -n on git commit or am) that its "
+                    "raw text does not show; it is denied fail-safe. Never weaken a gate to obtain a pass; "
+                    "re-issue it as a parseable command with plain spellings and no bypass so the hooks "
+                    "run. " + _GATE_ALTS,
+                    "AIQT guardrail: denied an unparseable command whose quoting spells a git "
+                    "verification-hook bypass (rule gatdis, fail-safe).")
+            return _gate_weakening_fallback(command)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -16361,17 +16434,25 @@ def orch_untracked_wait_loop(data):
     its pre-scope checks or its walk fail (those deny in every mode); where that walk finds
     a registry ABOVE a nested repository whose toplevel has none, the guard stays active (a plain call
     allows, a bare-& detach denies) while this component stays inert. NOT lease-gated: a
-    bounded worker building a fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash
-    or absent tool, no git toplevel, an absent registry, or an empty command (it runs nothing); in registry
-    scope a MISSING, NON-OBJECT or NON-STRING command is a cannot-evaluate input and DENIES
+    bounded worker building a fire-and-forget poll is equally wrong. A payload with NO tool_name is
+    malformed, not another tool, and DENIES in every session (the shared missing-tool_name contract,
+    checked before the registry scope as orch_truncation_guard checks it). Fail-open (silent allow) on a
+    present non-Bash tool, no git toplevel, an absent registry, or an empty command (it runs nothing); in
+    registry scope a MISSING, NON-OBJECT or NON-STRING command is a cannot-evaluate input and DENIES
     (check-fails-closed-on-unreadable), never a clean pass. A NUL, heredoc,
     unbalanced quote, or subshell-grouped detach classifies 'indeterminate' and emits nothing, deferring to
     the truncation guard's generic bare-`&` DENY-and-educate (or its open-quote deny) on the same event.
     Only a positive 'match' DENIES here. This is a specific companion to that generic deny, defence in
     depth on the same event: the truncation guard denies any bare-`&` detach it can read, this denies the
     specific untracked poll loop with a reason about the stranded poll."""
-    if data.get("tool_name") != "Bash":
-        return _allow()
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        # A missing tool_name is a malformed payload, not another tool: it is denied before the registry
+        # scope is read, as orch_truncation_guard denies it on the same event (the shared fail-closed
+        # contract).
+        return _deny_missing_tool_name("trkasy")
+    if tool_name != "Bash":
+        return _allow()                     # a present non-Bash tool is out of scope
     root = _orch_root(data)
     if root is None:
         return _allow()

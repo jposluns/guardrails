@@ -11363,6 +11363,15 @@ def _main_isolated(report_path=None):
         # pass.
         check("wl/failopen-nonbash", _verdict(aiqt_hooks.orch_untracked_wait_loop(
             w.payload("PreToolUse", "Write", {"command": BASE}))), "allow")
+        # A Bash-shaped payload whose tool_name is missing or null is malformed, not another tool: the shared
+        # missing-tool_name deny, before the registry scope is read (as the truncation guard on the same event
+        # denies it), so it denies with no registry too.
+        check("wl/failclosed-missing-tool-name", aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", extra={"tool_input": {"command": BASE}})),
+            aiqt_hooks._deny_missing_tool_name("trkasy"))
+        check("wl/failclosed-null-tool-name", aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", extra={"tool_name": None, "tool_input": {"command": BASE}})),
+            aiqt_hooks._deny_missing_tool_name("trkasy"))
         check("wl/failclosed-nonstr", _verdict(aiqt_hooks.orch_untracked_wait_loop(
             w.payload("PreToolUse", "Bash", {"command": 42}))), "deny")
         check("wl/failclosed-missing-command", _verdict(aiqt_hooks.orch_untracked_wait_loop(
@@ -11373,6 +11382,9 @@ def _main_isolated(report_path=None):
         (wi.root / ".aiqt" / "orchestration.local.json").unlink()
         check("wl/failopen-no-registry", _verdict(aiqt_hooks.orch_untracked_wait_loop(
             wi.payload("PreToolUse", "Bash", {"command": BASE}))), "allow")
+        check("wl/failclosed-missing-tool-name-no-registry", aiqt_hooks.orch_untracked_wait_loop(
+            wi.payload("PreToolUse", extra={"tool_input": {"command": BASE}})),
+            aiqt_hooks._deny_missing_tool_name("trkasy"))
 
         # ---------- Surface B: the validation membrane ----------
         import time as _time

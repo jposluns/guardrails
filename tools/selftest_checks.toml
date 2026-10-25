@@ -903,10 +903,13 @@ expected-check-ids = [
   "wl/handler-allow-b2",
   "wl/handler-allow-nested",
   "wl/failopen-nonbash",
+  "wl/failclosed-missing-tool-name",
+  "wl/failclosed-null-tool-name",
   "wl/failclosed-nonstr",
   "wl/failclosed-missing-command",
   "wl/failopen-empty",
   "wl/failopen-no-registry",
+  "wl/failclosed-missing-tool-name-no-registry",
   # ---------- Surface B: the validation membrane ----------
   "vB/exact-int-valid",
   "vB/exact-int-bool",
