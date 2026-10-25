@@ -412,6 +412,87 @@ def _ignore_file_candidates(prefix, paths):
     return sorted(candidates)
 
 
+INIT_IGNORED = "ignored"
+INIT_IGNORE_UNEVALUATED = "cannot-evaluate"
+
+
+def init_ignore_refusal(git, repo, prefix, paths):
+    """The ONE init ignore preflight (OPF spec 5.1: an untracked or ignored store is a hard failure in
+    scaffolding, with no gitignore fallback). MOVED here from opf.py _init_unignored (not a copy): the plain
+    `opf init` (opf.py _init_unignored, an adapter) and the init operation (_opf_init_operation
+    run_init_operation, which adoption's init-store composes, under its held mutex before its first write)
+    both call it. `repo` is the repository toplevel, `prefix` the product root relative to it (a PurePath,
+    "." at the toplevel), and `paths` the product-relative destinations the caller CREATES. Returns None when
+    no planned destination is ignored and that answer is sound, else (kind, message): INIT_IGNORED for a
+    destination git would ignore, INIT_IGNORE_UNEVALUATED for a check that cannot evaluate. Each caller
+    refuses on either kind; a cannot-evaluate never reads as not ignored.
+
+    check-ignore reports at least one ignored path with rc 0, none ignored with rc 1, and an error
+    with rc >= 128. The rc drives the three-way decision; the output is only for the diagnostic. Paths
+    are passed as arguments (git check-ignore accepts neither -z without --stdin, which the run helper has
+    no channel for, nor --literal-pathspecs, which it rejects as unsupported magic). Each scoped path is
+    given a literal "./" prefix so a leading colon or other pathspec-magic sigil in an adopter-supplied
+    --root prefix is read as a path, not as magic: without it a ":name/..." prefix has its colon consumed
+    as an empty magic signature and the check silently bypasses (rc 1, the store looks unignored), while a
+    recognized short-magic letter over-refuses (rc >= 128). The prefix is a plain string because Path
+    would normalize "./x" back to "x". The output is then one path per line over the controlled,
+    newline-free internal destinations. Outside a git work tree (no repository, or a bare one) check-ignore
+    exits 128, so the check answers cannot-evaluate; both callers already refuse such a root earlier.
+
+    OPF-D2B: the probe runs under _opf_observe._run_git_config_discovery, which lets git DISCOVER the
+    adopter's real global and system configuration through its default locations (unlike the default scrubbed
+    observer environment, which neutralizes it), so a store ignored ONLY by the adopter's global or system
+    core.excludesFile is caught here, matching what the adopter's own `git add` would honour
+    (guard-input-soundness). Env-based config overrides are dropped and trace/fsmonitor are forced off, so no
+    reachable configuration can turn the read-only probe into a write or a launched process. Lazy fetching is
+    forced off so a missing indexed ignore blob cannot trigger a promisor fetch that would reach
+    core.sshCommand. DISCLOSED RESIDUAL (disclose-guard-residuals): this rc-only check reads ignore rules
+    exactly as git add does when git add can read them too. For an ignore input git cannot READ (a
+    permission-denied core.excludesFile, ~/.config/git/ignore, or .git/info/exclude), git add is equally unable
+    to read it and stages the destination, so reading not-ignored here matches git add and the store is never
+    silently ignored. The one input where that parity BREAKS is a skip-worktree (or otherwise unmaterialized)
+    .gitignore whose blob is absent in a partial clone: this probe forces lazy fetch off and reads no-rule, but
+    the adopter's own git add fetches the blob and can then ignore the store. That case is NOT left as a
+    residual: after an rc-1 result the availability of every applicable indexed .gitignore blob is checked
+    (_opf_observe.indexed_ignore_availability), and an unavailable one is a cannot-evaluate that REFUSES rather
+    than passing (guard-input-soundness); so is that check failing to run (its RuntimeError). A fail-closed
+    treatment of the unreadable-FILE arms above is deliberately not attempted, because git and the caller
+    resolve config paths differently and refusing there would over-refuse a case git add itself skips. A
+    timeout, launch failure, or unexpected rc fails closed and refuses. Matching `git add`, a benign git
+    diagnostic on an rc-1 (not-ignored) result is not itself a refusal.
+
+    rc 1 (not ignored) is sound only when every applicable .gitignore is answerable WITHOUT a promisor fetch.
+    In a partial clone a skip-worktree (or otherwise unmaterialized) .gitignore whose blob is absent reads as
+    no-rule here (lazy fetch is forced off), yet the adopter's own `git add` fetches that blob and can then
+    silently ignore the store; an available blob is read identically by both (parity) and a checked-out
+    .gitignore is read from disk by both. So a missing indexed ignore blob is a cannot-evaluate, not a clean
+    pass (guard-input-soundness)."""
+    scoped = sorted("./" + str(prefix / path) for path in paths)
+    result = _opf_observe._run_git_config_discovery(
+        git, repo, ["check-ignore", "--"] + scoped)
+    if not result.completed:
+        return INIT_IGNORE_UNEVALUATED, (
+            "git preflight: could not evaluate ignore status for planned destinations ({})".format(
+                result.err))
+    if result.rc == 0:
+        ignored = [p for p in os.fsdecode(result.out).splitlines() if p]
+        return INIT_IGNORED, "planned destination is git-ignored: {!r}".format(ignored)
+    if result.rc != 1:
+        return INIT_IGNORE_UNEVALUATED, "git preflight: check-ignore failed (rc={}): {}".format(
+            result.rc, result.err)
+    try:
+        unavailable = _opf_observe.indexed_ignore_availability(
+            git, repo, _ignore_file_candidates(prefix, paths))
+    except RuntimeError as exc:
+        return INIT_IGNORE_UNEVALUATED, str(exc)
+    if unavailable:
+        return INIT_IGNORE_UNEVALUATED, (
+            "git preflight: an indexed .gitignore blob is unavailable in this partial clone, so ignore "
+            "status cannot be determined; `git add` would fetch it and could silently ignore the store "
+            "({}). Check out or fetch the blob and retry.".format(sorted(unavailable)))
+    return None
+
+
 def _homes_config_read(options):
     """Whether the tokens after a homes `config` verb form a read. git parses config options only up to
     `--` or the first positional (git 2.53.0: `config --file F -- k --get` and `config -z --file F k
