@@ -105,6 +105,7 @@ guarded-surfaces = [
     "tools/check_ci_parity.py",
     "tools/check_cited_standards.py",
     "tools/check_clauses.py",
+    "tools/check_control_retirement.py",
     "tools/check_crosswalk.py",
     "tools/check_dangerous_api.py",
     "tools/check_derived_command_parameters.py",

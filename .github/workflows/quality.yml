@@ -744,6 +744,16 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_entry_guard.py
 
+      # The control-retirement gate binds its own base: on a pull request the merge base of HEAD and
+      # origin/$GITHUB_BASE_REF, on a push the event payload's before commit (fetch-depth: 0 above keeps
+      # both reachable); an unresolvable base is cannot-evaluate (exit 2), never a pass.
+      - name: Control-retirement self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite control-retirement-selftest
+      - name: Control-retirement gate
+        shell: bash
+        run: python3 -I -B tools/check_control_retirement.py
+
   git-fixture-env-core:
     name: Git-fixture-env core self-test
     runs-on: ubuntu-latest

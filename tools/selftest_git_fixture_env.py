@@ -496,6 +496,13 @@ CONFIG_EXCLUSIONS = {
             "A bare launch is a real timing measurement of the shipped hooks, not a self-test:"
             " minutes at its defaults, and the hooks' own git calls drop GIT_CONFIG_NOSYSTEM by"
             " design; its self-test stays in this roster as the hook-latency-selftest suite step.",
+        ("tools/check_control_retirement.py",):
+            "A bare launch is the real control-retirement gate run against the real checkout and"
+            " its base binding, not a self-test: it reads git with no global or system"
+            " configuration and fails closed (exit 2) on a checkout owned by another account, so"
+            " a lane run there cannot own its verdict; the gate's immunity to caller git"
+            " configuration is pinned inside its own suite, which stays in this roster as the"
+            " control-retirement-selftest suite step.",
     },
     "archive": {
         ("tools/check_release_build.py", "--self-test"):
@@ -950,9 +957,10 @@ def _config_poison_fixture(base):
 # pass or fail depends on this bound. This lane asks a different question (does the
 # member stay clean under injected caller hooks, ignore files, attributes and fsmonitor). The
 # roster is every registered self-test except CONFIG_EXCLUSIONS["all"] (the four git-fixture-env
-# suite runners and the bare hook-latency measurement, whose self-test stays in the roster as its
-# --suite step); the combined and system lanes rerun every roster member, the malformed lane
-# every one outside CONFIG_EXCLUSIONS["malformed"], the fsmonitor pass four of them under
+# suite runners, the bare hook-latency measurement and the bare control-retirement gate run, whose
+# self-tests stay in the roster as their --suite steps); the combined and system lanes rerun every
+# roster member, the malformed lane every one outside CONFIG_EXCLUSIONS["malformed"], the
+# fsmonitor pass four of them under
 # --self-test (its _run_config_member calls), and the bound caps how long one stalled rerun can
 # hold that answer back. Cutting a rerun short leaves the question unanswered, never answered
 # wrongly: reaching the bound is cannot-evaluate (exit 2 when nothing definite was found), never a

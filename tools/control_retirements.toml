@@ -1,0 +1,32 @@
+# Recorded dispositions for retired controls, read by tools/check_control_retirement.py.
+#
+# A control present at the comparison base and absent at the head (a [[gate]] id in
+# .aiqt/core/gates/manifest.toml, a [[hook]] id in .aiqt/core/hooks/manifest.toml, or an expected check id
+# of a [[suite]] in tools/selftest_checks.toml) needs exactly one [[retirement]] row here, added BY HAND in
+# the same change, in one of the three states rule gate-discipline names:
+#
+#   control        gate:<id>, hook:<id> or check:<suite>/<check id>
+#   state          covered, unreachable or disclosed
+#   successor      covered only: the control, live at the head, that now handles the case
+#   evidence       covered and unreachable (optional on disclosed): the case exercised against the
+#                  successor and observed to be caught, or the change that removes the capability and the
+#                  observed attempt
+#   authorization  disclosed only: the reference to the maintainer's recorded authorization
+#
+# A rename is one covered row whose successor is the new id. A new row names a control live at the comparison
+# base, so a row for a control that was never there is a finding. Rows are append-only: a row stays unchanged
+# once it lands, and is deleted only while its control is live at the head, because no row may name a control
+# live at the head. A row lands in the same change that removes its control: a removal cannot rely on a row
+# already at the base that named its control while still live, so that stale row is a finding in the change
+# that removes the control, and is repaired by deleting it while its control stays live. Every field
+# holds a string (anything else cannot be evaluated). The gate checks that each field, optional evidence
+# included, is present and well-formed; whether the evidence is true and the authorization was given is for
+# review.
+#
+# Example (not live):
+#   [[retirement]]
+#   control = "check:orch-behaviour-selftest/trunc/head-denies"
+#   state = "covered"
+#   successor = "check:orch-behaviour-selftest/trunc/head-refuses"
+#   evidence = "case trunc/head-refuses exercised against the successor and observed to deny"
+format-version = 1
