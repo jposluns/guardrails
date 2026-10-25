@@ -15247,11 +15247,21 @@ def _init_store_self_test(check):
     # Fail-closed sources-row validation (round 2): a malformed consumed field never reads as
     # non-occupying, never freezes a source, and never authorizes a control-area copy; the
     # planner's own _validate_plan_sources is the ONE validator for these fields.
+    # Test-hermeticity: with an admitted file the pre-check refuses a group- or world-writable
+    # `.working`, so the fixture sets it to EXACTLY 0755 rather than leaving it at the ambient umask
+    # (0775 under umask 002), which would refuse on that mode instead of the row under test. The
+    # fixture is built under a pinned umask 002 (restored in the finally), so a dropped mode pin
+    # fails under every ambient umask, never only under a group-writable one.
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
         rel = store.WORKING_DIRNAME + "/notes.md"
-        (root / store.WORKING_DIRNAME).mkdir()
-        (root / rel).write_bytes(b"adopter notes\n")
+        saved_umask = os.umask(0o002)
+        try:
+            (root / store.WORKING_DIRNAME).mkdir()
+            os.chmod(root / store.WORKING_DIRNAME, 0o755)
+            (root / rel).write_bytes(b"adopter notes\n")
+        finally:
+            os.umask(saved_umask)
         digest = "sha256:" + _sha256(b"adopter notes\n")
         run = "adopt-20260917T120000Z-0123456789abcdef"
         rfd = _open_product_root(root)
@@ -15274,10 +15284,18 @@ def _init_store_self_test(check):
                               preservation=store.ARCHIVE_REL + "/adoption/other/x.md")
             check("init-store-wrong-preservation-home-refused-fail-closed",
                   "validated fail-closed" in (admitted_err([wrong_home]) or ""))
+            # A refusal of the valid row is this check's named failure, never an exception that
+            # ends the whole run as a harness error with every later check unreported.
             good = dict(path=rel, digest=digest, disposition="keep", occupying=False)
-            adm, adirs = _init_store_admitted(rfd, root, dict(run_id=run, sources=[good]))
+            adm, adirs, why = (), (), None
+            try:
+                adm, adirs = _init_store_admitted(rfd, root, dict(run_id=run, sources=[good]))
+            except AdoptApplyError as exc:
+                why = str(exc)
             check("init-store-valid-row-still-admits",
-                  [e["path"] for e in adm] == [rel] and adirs == ())
+                  why is None and [e["path"] for e in adm] == [rel] and adirs == (),
+                  observed="refusal={!r} admitted={!r} dirs={!r}".format(
+                      why, [e["path"] for e in adm], adirs))
         finally:
             store._close_fd_exc_safe(rfd)
 
