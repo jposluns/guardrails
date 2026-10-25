@@ -95,7 +95,12 @@ run_gate "site-versions" python3 -I -B tools/check_site_versions.py
 run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
 run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-test
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
-run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
+# The OPF tooling self-test runs as its named groups, as the CI shards run it; opf.py runs a group only
+# while the groups hold every registered self-test exactly once. The whole run stays in the host-patch
+# CI job (a ci-parity exception) and in opf/tools/run_all_checks.sh.
+run_gate "opf-tooling-selftest-core" python3 -I -B opf/tools/opf.py --self-test-group core
+run_gate "opf-tooling-selftest-adopt" python3 -I -B opf/tools/opf.py --self-test-group adopt
+run_gate "opf-tooling-selftest-watchdog" python3 -I -B opf/tools/opf.py --self-test-group watchdog
 run_gate "opf-journal-direct-selftest" python3 -I -B opf/tools/_journal.py --self-test
 run_gate "opf-observe-direct-selftest" python3 -I -B opf/tools/_opf_observe.py --self-test
 run_gate "opf-drift-selftest" python3 -I -B opf/tools/check_opf_drift.py --self-test
@@ -237,8 +242,8 @@ run_gate "python-floor-selftest" python3 -I -B tools/check_selftest_execution.py
 run_gate "python-floor" python3 -I -B tools/check_python_floor.py
 # The host-patch pin: the CI host-patch jobs run their suites on the release .aiqt/python-host.toml
 # names, and the live leg FAILS this run when this interpreter is another patch release (a run there does
-# not predict those required CI legs); when the host interpreter changes, update that file and both
-# host-job pins in .github/workflows/quality.yml together.
+# not predict those required CI legs); when the host interpreter changes, update that file and every
+# host-job pin in .github/workflows/quality.yml together.
 run_gate "python-host-pin-selftest" python3 -I -B tools/check_python_host_pin.py --self-test
 run_gate "python-host-pin" python3 -I -B tools/check_python_host_pin.py
 # The jobs-leg-only member mirrors the registry job's CI step, which judges the host-patch jobs from
