@@ -148,7 +148,13 @@ body, so the workflow that runs it must list opened, synchronize, reopened and
 edited (MSG_LEAKS_PULL_REQUEST_TYPES) in its pull_request types, and a workflow
 that does not run it must not carry edited on pull_request or
 pull_request_target (EDIT_EVENTS), because edited re-runs every job of that
-workflow on a metadata-only change. Each departure is a trigger finding (exit
+workflow on a metadata-only change. quality.yml must list exactly
+QUALITY_PULL_REQUEST_TYPES (labeled) on its pull_request event and carry no
+pull_request_target, because a pull request run of it is scheduled only by the
+label the merge lane applies to the train pull request, so a member head gets
+no Quality run; a quality.yml with no pull_request event draws no such finding
+(a train head then gets no run either, which tools/ci-status.sh reads as
+missing, never as passing). Each departure is a trigger finding (exit
 1). The rule reads the top-level on: block: an event key at indent 2 with no
 value reads as GitHub's default types (opened, synchronize, reopened); types:
 at indent 4 is a one-line flow list, one plain scalar, or a block list at
@@ -216,9 +222,9 @@ outside it because the registry job runs them unconditioned, so for the
 byte-canon-matrix job only its presence, its pinned if: and its members'
 parity are held, not a relocation of its commands); whether GitHub
 evaluates the pinned expressions as their text says (this rule compares text);
-and a cancelled run left on a live head (a reopen while its run is in progress,
-or a push back to an earlier head), which tools/ci-status.sh then refuses until
-a new head commit.
+and a cancelled run left on a live head (a label added while its run is in
+progress, the merge-train label re-applied included, or a push back to an
+earlier head), which tools/ci-status.sh then refuses until a new head commit.
 OPF GROUPS. The OPF tooling self-test runs in CI as parallel shards, one
 opf/tools/opf.py --self-test-group NAME step per group of SELF_TEST_GROUPS in
 that file. The self-test reads SELF_TEST_GROUPS from the live file with ast
@@ -634,6 +640,10 @@ MSG_LEAKS_WORKFLOW_MEMBERS = frozenset(
 EDIT_EVENTS = ("pull_request", "pull_request_target")
 DEFAULT_PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened")
 MSG_LEAKS_PULL_REQUEST_TYPES = DEFAULT_PULL_REQUEST_TYPES + ("edited",)
+# The only pull_request types quality.yml may list (module docstring, TRIGGER): a pull request run is
+# scheduled by the label the merge lane applies to the train pull request, never by a member's open,
+# push or reopen.
+QUALITY_PULL_REQUEST_TYPES = ("labeled",)
 
 ALLOWLIST = (
     {
@@ -709,6 +719,16 @@ ALLOWLIST = (
             "host patch release; the local runner, like the '3.14' OPF "
             "shards, runs it as its named groups (--self-test-group), which "
             "opf.py holds to every registered self-test exactly once."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "local-only",
+        "identity": "tools/check_gitleaks_pin.py",
+        "reason": (
+            "The local run requires the gitleaks version quality.yml pins on "
+            "PATH; the CI secrets job downloads that pinned binary and verifies "
+            "its checksum before it scans, so only the gate's self-test runs in CI."
         ),
         "backlog": "GD-123",
     },
@@ -1328,8 +1348,8 @@ RUNNER_SCAFFOLD_LINES = frozenset({
     "echo",
     'echo "--- secrets (gitleaks) ---"',
     'echo "PASS: gitleaks found no leaks"',
-    'echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"',
-    'echo "  in THIS run only, not in the pipeline. Install it to close the gap:"',
+    'echo "MISSING: gitleaks is not on PATH locally, so its scan cannot run here, and the"',
+    'echo "  gitleaks-pin gate below fails this run. Install the pinned version to fix it:"',
     'echo "  see the pinned version and checksum in .github/workflows/quality.yml"',
     'echo "RESULT: FAIL"',
     'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
@@ -2723,17 +2743,47 @@ def _edit_event_types(lines, source, diagnostics):
     return events
 
 
+def _quality_trigger_findings(events, source):
+    """Hold quality.yml's pull_request types to QUALITY_PULL_REQUEST_TYPES
+    and refuse pull_request_target there (module docstring, TRIGGER). A
+    workflow with no pull_request event draws no finding here."""
+    if source != CI_SOURCE:
+        return []
+    findings = []
+    types = events.get("pull_request")
+    if types is not None and types != QUALITY_PULL_REQUEST_TYPES:
+        findings.append(Finding(
+            "trigger",
+            source,
+            "{} lists pull_request types [{}], not exactly [{}]: a pull "
+            "request run of it is scheduled only by the label the merge lane "
+            "applies to the train pull request, so a member head gets no "
+            "Quality run".format(source, ", ".join(types),
+                                 ", ".join(QUALITY_PULL_REQUEST_TYPES)),
+        ))
+    if "pull_request_target" in events:
+        findings.append(Finding(
+            "trigger",
+            source,
+            "{} carries pull_request_target, which schedules runs outside "
+            "its labeled pull_request trigger".format(source),
+        ))
+    return findings
+
+
 def _trigger_findings(lines, members, source, diagnostics):
     """Require pull_request edited exactly where the message/metadata leak
-    scan runs (module docstring, TRIGGER)."""
+    scan runs, and quality.yml's labeled trigger (module docstring,
+    TRIGGER)."""
     events = _edit_event_types(lines, source, diagnostics)
+    findings = _quality_trigger_findings(events, source)
     if MSG_LEAKS_SCAN in members:
         types = events.get("pull_request", ())
         missing = [kind for kind in MSG_LEAKS_PULL_REQUEST_TYPES
                    if kind not in types]
         if not missing:
-            return []
-        return [Finding(
+            return findings
+        return findings + [Finding(
             "trigger",
             source,
             "{} runs {} but its pull_request types lack {}, so the scan does "
@@ -2741,7 +2791,7 @@ def _trigger_findings(lines, members, source, diagnostics):
             "a PR title/body change)".format(
                 source, MSG_LEAKS_SCAN, ", ".join(missing)),
         )]
-    return [Finding(
+    return findings + [Finding(
         "trigger",
         source,
         "{} carries {} type edited but does not run {}, so a PR title/body "
@@ -6545,7 +6595,9 @@ def self_test():
 
     defaults = pr_types("[opened, synchronize, reopened]")
     edited = pr_types("[opened, synchronize, reopened, edited]")
-    quality_side = with_on(ci_fixture(common), defaults)
+    # quality.yml lists the labeled type alone (module docstring, TRIGGER).
+    labeled = pr_types("[labeled]")
+    quality_side = with_on(ci_fixture(common), labeled)
     scan_text = ci_fixture((msg_selftest, msg_scan), top=(), heavy=False)
     msg_side = ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, edited)),)
 
@@ -6582,7 +6634,8 @@ def self_test():
                       block_list + "      - reopened\n      - edited\n"),
               msg_side, 1, ("trigger",))
     scan_case("35g a block list without edited on quality.yml passes",
-              with_on(ci_fixture(common), block_list + "      - reopened\n"),
+              with_on(ci_fixture(common),
+                      "  pull_request:\n    types:\n      - labeled\n"),
               msg_side, 0)
     scan_case("35h a block list with all four types on msg-leaks.yml passes",
               quality_side,
@@ -6598,14 +6651,25 @@ def self_test():
               ((MSG_LEAKS_CI_SOURCE, scan_text.replace(
                   "name: Test\n", "name: Test\non: [push, pull_request]\n", 1)),),
               1, ("trigger",))
-    scan_case("35k a one-line on: list on quality.yml passes (no edited)",
+    scan_case("35k a one-line on: list on quality.yml passes (no edited, no "
+              "pull_request)",
               ci_fixture(common).replace(
-                  "name: Test\n", "name: Test\non: [push, pull_request]\n", 1),
+                  "name: Test\n", "name: Test\non: [push, workflow_dispatch]\n", 1),
               msg_side, 0)
-    scan_case("35l the scan and edited in one workflow pass (the rule follows "
-              "the scan, not a file name)",
-              with_on(ci_fixture(common + (msg_selftest, msg_scan)), edited),
-              (), 0)
+    # 35l: the edited rule follows the scan, not a file name, so the scan with
+    # edited in quality.yml draws no edited finding; the labeled pin on
+    # quality.yml's own types is then the one finding.
+    together = evaluate(
+        local_msg, with_on(ci_fixture(common + (msg_selftest, msg_scan)), edited),
+        msg_waiver, ())
+    case("35l the scan and edited in one workflow draw only the labeled pin "
+         "(the edited rule follows the scan, not a file name)",
+         together, 1, ("trigger",))
+    count += 1
+    if [finding.message for finding in together.findings
+            if "not exactly [labeled]" not in finding.message]:
+        failures.append("35l a finding other than the labeled pin: {!r}".format(
+            together.findings))
     for label, shape in (
             ("a flow mapping", "  pull_request: {types: [edited]}\n"),
             ("a quoted event key", "  \"pull_request\":\n    types: [edited]\n"),
@@ -6776,7 +6840,7 @@ def self_test():
               with_on_header(ci_fixture(common), "on: push\n"), msg_side, 0)
     scan_case("35t a one-line flow list after on: on quality.yml is not "
               "refused (no edited: pass)",
-              with_on_header(ci_fixture(common), "on: [push, pull_request]\n"),
+              with_on_header(ci_fixture(common), "on: [push, workflow_dispatch]\n"),
               msg_side, 0)
     scan_case("35t a block on: value on quality.yml stays read (edited there "
               "is still a trigger finding)",
@@ -6858,7 +6922,7 @@ def self_test():
     scan_case("35q a gate moved from quality.yml into msg-leaks.yml is a "
               "relocation finding",
               with_on(ci_fixture(tuple(
-                  item for item in common if item != moved)), defaults),
+                  item for item in common if item != moved)), labeled),
               ((MSG_LEAKS_CI_SOURCE, with_on(
                   ci_fixture((msg_selftest, msg_scan, moved), top=(),
                              heavy=False),
@@ -6910,7 +6974,7 @@ def self_test():
                      "        run: |") + block_lines
         if on_quality:
             expr_report = evaluate(
-                local_msg, with_on(ci_fixture(common, expr_step), defaults),
+                local_msg, with_on(ci_fixture(common, expr_step), labeled),
                 msg_waiver, msg_side)
             expr_source = CI_SOURCE
         else:
@@ -6932,7 +6996,7 @@ def self_test():
                 "{!r}".format(label, expr_source, expr_report.diagnostics))
     inline_expr = evaluate(
         local_msg,
-        with_on(ci_fixture(common + ("echo " + pr_title,)), defaults),
+        with_on(ci_fixture(common + ("echo " + pr_title,)), labeled),
         msg_waiver, msg_side)
     case("35x control: an inline run: expression stays refused", inline_expr,
          2)
@@ -7139,7 +7203,7 @@ def self_test():
     dedented_comment = evaluate(
         local_msg,
         with_on(ci_fixture(common, block_step(
-            ("            echo ok", "          # " + pr_title))), defaults),
+            ("            echo ok", "          # " + pr_title))), labeled),
         msg_waiver, msg_side)
     case("36 a YAML comment dedented below the run: block content is "
          "outside the scalar (pass)", dedented_comment, 0)
@@ -7156,7 +7220,7 @@ def self_test():
              ("         echo ok", "         # " + pr_title))):
         inside = evaluate(
             local_msg,
-            with_on(ci_fixture(common, block_step(block_lines)), defaults),
+            with_on(ci_fixture(common, block_step(block_lines)), labeled),
             msg_waiver, msg_side)
         case("36 a comment inside the scalar carries the expression: "
              + label, inside, 2)
@@ -7170,7 +7234,7 @@ def self_test():
         local_msg,
         with_on(ci_fixture(common, block_step(
             ("            echo ok", "          # a dedented comment",
-             "            echo again"))), defaults),
+             "            echo again"))), labeled),
         msg_waiver, msg_side)
     case("36 content after a dedented comment is a layout YAML rejects, "
          "refused", reentry, 2)
@@ -7199,7 +7263,7 @@ def self_test():
         over = evaluate(
             local_msg,
             with_on(ci_fixture(common, block_step(
-                (blank, "            echo ok"), indicator)), defaults),
+                (blank, "            echo ok"), indicator)), labeled),
             msg_waiver, msg_side)
         case("37 an over-indented leading blank in a run: block is a "
              "layout YAML rejects, refused: " + label, over, 2)
@@ -7218,7 +7282,7 @@ def self_test():
         at_or_below = evaluate(
             local_msg,
             with_on(ci_fixture(common, block_step(
-                (blank, "            echo ok"), indicator)), defaults),
+                (blank, "            echo ok"), indicator)), labeled),
             msg_waiver, msg_side)
         case("37 control: a leading blank at or below the content "
              "indentation stays inside the scalar: " + label,
@@ -7244,7 +7308,7 @@ def self_test():
         two_blanks = evaluate(
             local_msg,
             with_on(ci_fixture(common, block_step(
-                blanks + ("            echo ok",))), defaults),
+                blanks + ("            echo ok",))), labeled),
             msg_waiver, msg_side)
         case("37 two leading blanks, one past the content indentation, are "
              "refused in either order: " + label, two_blanks, 2)
@@ -7263,7 +7327,7 @@ def self_test():
         local_msg,
         with_on(ci_fixture(common, block_step(
             ("            echo ok", " " * 20, "            echo again"))),
-            defaults),
+            labeled),
         msg_waiver, msg_side)
     case("37 control: a blank after the first content line, indented past "
          "the content indentation, stays inside the scalar", later_blank, 0)
@@ -7670,6 +7734,49 @@ def self_test():
     count += 1
     if _opf_group_names("SELF_TEST_GROUPS = (('a', ('x',)), ('b', ()))\n") != ("a", "b"):
         failures.append("40 SELF_TEST_GROUPS names are not read in order")
+
+    # 41 LABELED TRIGGER (module docstring, TRIGGER): quality.yml's pull_request
+    # types are exactly [labeled], so a member's open, push or reopen schedules
+    # no Quality run. The first departure is the trigger quality.yml carried
+    # before the change; each departure names the pin, and msg-leaks.yml, which
+    # runs the scan on its four types, draws no pin finding (35a).
+    def labeled_case(name, on_block, want_code, needle=None, header=False):
+        nonlocal count
+        quality = (with_on_header if header else with_on)(ci_fixture(common), on_block)
+        report = evaluate(local_msg, quality, msg_waiver, msg_side)
+        case(name, report, want_code, ("trigger",) if needle else ())
+        if needle is not None:
+            count += 1
+            if not any(finding.kind == "trigger" and needle in finding.message
+                       for finding in report.findings):
+                failures.append("{}: no trigger finding holds {!r}: {!r}".format(
+                    name, needle, report.findings))
+
+    pinned = "not exactly [labeled]"
+    labeled_case("41a the member-head trigger [opened, synchronize, reopened] "
+                 "is a trigger finding", defaults, 1, pinned)
+    labeled_case("41b labeled beside synchronize is a trigger finding",
+                 pr_types("[labeled, synchronize]"), 1, pinned)
+    labeled_case("41c labeled listed twice is a trigger finding",
+                 pr_types("[labeled, labeled]"), 1, pinned)
+    labeled_case("41d a pull_request event with no types (GitHub's default "
+                 "types) is a trigger finding",
+                 "  pull_request:\n    branches: [main]\n  push:\n", 1, pinned)
+    labeled_case("41e a one-line on: list naming pull_request is a trigger "
+                 "finding", "on: [push, pull_request]\n", 1, pinned,
+                 header=True)
+    labeled_case("41f a block list of other types is a trigger finding",
+                 "  pull_request:\n    types:\n      - opened\n      - labeled\n",
+                 1, pinned)
+    labeled_case("41g pull_request_target beside the labeled pull_request is a "
+                 "trigger finding",
+                 labeled + "  pull_request_target:\n    types: [labeled]\n", 1,
+                 "pull_request_target")
+    labeled_case("41h control: types: [labeled] passes", labeled, 0)
+    labeled_case("41h control: a plain scalar types: labeled passes",
+                 pr_types("labeled"), 0)
+    labeled_case("41h control: a quality.yml with no pull_request event draws "
+                 "no pin finding", "  push:\n    branches: [main]\n", 0)
 
     if failures:
         print("SELF-TEST FAIL:")

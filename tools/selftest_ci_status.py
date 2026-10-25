@@ -120,6 +120,8 @@ FIXTURE_REPO = "fixture/repository"
 FIXTURE_ORIGIN = "https://github.com/fixture/repository.git"
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 SUITE_ID = "ci-status-behaviour-selftest"
+# The workflow file every read of ci-status.sh requires a completed successful run of.
+QUALITY_PATH = ".github/workflows/quality.yml"
 # The fixture commit's committer date and the fixture clock. The script scans the unfiltered listing
 # back to min(committer date, now) minus its 24-hour margin; these mirror that arithmetic.
 COMMIT_TIME = 1789990000
@@ -379,9 +381,10 @@ def iso(epoch):
 
 
 def workflow_run(run_id, status, conclusion, name, head_sha, created=COMMIT_TIME + 600,
-                 event=None, pull_requests=None, path=None):
-    # event, pull_requests and path appear only when given: without --require-base the script never
-    # reads them, and the pre-option fixtures prove that by omitting them entirely.
+                 event=None, pull_requests=None, path=QUALITY_PATH):
+    # event and pull_requests appear only when given: without --require-base the script never reads
+    # them, and the pre-option fixtures prove that by omitting them entirely. Every read requires a
+    # completed successful quality.yml run, so path defaults to that file; path=None omits the key.
     run = {
         "created_at": iso(created),
         "id": run_id,
@@ -456,7 +459,7 @@ def run_jq(program, pages, requested_sha, scan_pages=None, mode="verdict"):
     return subprocess.run(
         [JQ, "-s", "-r", "--arg", "mode", mode, "--arg", "requested_sha", requested_sha,
          "--argjson", "lower_bound", str(LOWER_BOUND), "--argjson", "max_pages", str(MAX_PAGES),
-         "--arg", "require_base", "", "--arg", "require_workflow", "",
+         "--arg", "require_base", "", "--arg", "require_workflow", QUALITY_PATH,
          program],
         input=stdin, text=True,
         capture_output=True, timeout=10,
@@ -653,8 +656,8 @@ def _run_checks():
                                 [page(other_commits, 101), page([success_a], 101)])
             scan_short = run_jq(program, [page([])], head_sha, [page(other_commits, 101)])
             expected_rows = "\n".join(
-                "completed\tsuccess\t-\t-\t-\t-\t{}\t{}\t{}".format(
-                    run["id"], run["name"], run["html_url"])
+                "completed\tsuccess\t-\t-\tmatch\t{}\t{}\t{}\t{}".format(
+                    QUALITY_PATH, run["id"], run["name"], run["html_url"])
                 for run in (success_a, success_b)
             ) + "\n"
             direct_result = (
@@ -670,7 +673,7 @@ def _run_checks():
                 wrong_target.returncode != 0
                 and "malformed workflow run record" in wrong_target.stderr,
                 (scan_found.returncode, scan_found.stdout)
-                == (0, "completed\tsuccess\t-\t-\t-\t-\t101\tWeb generator health\t"
+                == (0, "completed\tsuccess\t-\t-\tmatch\t" + QUALITY_PATH + "\t101\tWeb generator health\t"
                     "https://example.invalid/runs/101\n"),
                 scan_short.returncode != 0
                 and "incomplete unfiltered workflow-runs listing" in scan_short.stderr,
@@ -1132,7 +1135,7 @@ def _run_checks():
         # against another base still passes a plain check.
         require = ("--require-base", "main")
         on_main = [{"base": {"ref": "main"}}]
-        quality_path = ".github/workflows/quality.yml"
+        quality_path = QUALITY_PATH
         leaks_path = ".github/workflows/msg-leaks.yml"
         pr_quality = workflow_run(901, "completed", "success", "Quality", head_sha,
                                   event="pull_request", pull_requests=on_main,
@@ -1229,7 +1232,8 @@ def _run_checks():
         # is unmet (exit 1, naming the missing workflow file) in one-shot and --wait mode alike.
         # Report-once refuses on its single snapshot; --wait keeps polling through
         # the settle window first (a qualifying run can be registered late on this same head; a
-        # reopen schedules one), so the refusal comes only once the run set has been stable for
+        # re-applying the merge-train label schedules one), so the refusal comes only once the run
+        # set has been stable for
         # five observations and still holds no qualifying run.
         missing_quality = ("no completed successful run of the workflow file "
                            + quality_path)
@@ -1362,7 +1366,7 @@ def _run_checks():
         # alike: without a usable path the required-workflow match cannot be evaluated, and
         # reading such a run as some other file would be the name-collision fail-open again.
         no_path = workflow_run(914, "completed", "success", "Quality", head_sha,
-                               event="pull_request", pull_requests=on_main)
+                               event="pull_request", pull_requests=on_main, path=None)
         pathless = []
         for run in (no_path,
                     workflow_run(915, "completed", "success", "Quality", head_sha,
@@ -1379,7 +1383,8 @@ def _run_checks():
 
         # A required-workflow run REGISTERED LATE must not
         # end the wait at once: the first poll holds only the conforming msg-leaks run, the
-        # qualifying Quality run appears from the second poll on (the shape a reopen produces
+        # qualifying Quality run appears from the second poll on (the shape re-applying the
+        # merge-train label produces
         # on the SAME head), and the wait settles green instead of refusing on poll one.
         polls = [[page([pr_leaks])]] + [[page([pr_leaks, pr_quality])]] * 5
         rc, _output, calls = fixture.invoke(polls, wait=True, extra_args=require)
@@ -1420,7 +1425,7 @@ def _run_checks():
         # would let a broken scan-source (or filtered-source) validation hide behind the other
         # source's.
         bad_sibling = workflow_run(919, "completed", "success", "Sibling", head_sha,
-                                   event="pull_request", pull_requests=on_main)
+                                   event="pull_request", pull_requests=on_main, path=None)
         single_source = []
         for polls in (
                 [{"filtered": [page([no_path])], "scan": [page([])]}],
@@ -1440,15 +1445,51 @@ def _run_checks():
         # display-only and unvalidated, so a path that is not a nonempty string reads as "-"
         # rather than collapsing the TSV row (IFS=tab folds an empty field, shifting every later
         # column) or aborting it (@tsv refuses an object). Status, conclusion, name and URL must
-        # all land in their own columns.
+        # all land in their own columns. Each read also holds a quality.yml run, which every read
+        # requires.
         plain_rows = []
         for raw_path in ("", {"x": 1}):
             pathological = workflow_run(920, "completed", "success", "Web generator health",
                                         head_sha, path=raw_path)
-            rc, output, _calls = fixture.invoke([[page([pathological])]])
+            rc, output, _calls = fixture.invoke([[page([pathological, success_b])]])
             plain_rows.append((rc, "Web generator health: completed / success" in output,
                                "  https://example.invalid/runs/920" in output))
         check("ci/plain-mode-path-column-inert", plain_rows, [(0, True, True)] * 2)
+
+        # Without --require-base too, a head whose only run is its msg-leaks.yml run (a member head,
+        # which the merge lane never labels) has no Quality evidence: it reads as missing (exit 1,
+        # naming quality.yml), never as passing, in one-shot mode on its single read and under --wait
+        # once the settle window still holds no qualifying run. So does a head whose run named
+        # Quality comes from another workflow file.
+        plain_leaks = workflow_run(922, "completed", "success", "Message/metadata leaks", head_sha,
+                                   path=leaks_path)
+        plain_impostor = workflow_run(923, "completed", "success", "Quality", head_sha,
+                                      path=".github/workflows/unrelated.yml")
+        required = []
+        for runs in ([plain_leaks], [plain_impostor, plain_leaks]):
+            for wait in (False, True):
+                rc, output, calls = fixture.invoke([[page(runs)]], wait=wait)
+                required.append((rc, calls, missing_quality + " on this head" in output))
+        check("ci/plain-quality-run-required", required, [(1, 1, True), (1, 5, True)] * 2)
+
+        # A push run of quality.yml (a commit on main) satisfies the plain read, and so does a
+        # quality.yml run that only the unfiltered listing shows beside the leaks run the head_sha
+        # filter returned: the scan keeps each run's path. A quality.yml run registered after the
+        # first --wait poll settles green on the same head.
+        plain_push = workflow_run(924, "completed", "success", "Quality", head_sha,
+                                  event="push", pull_requests=[])
+        missing_refusal = "RESULT: " + missing_quality
+        satisfied = []
+        rc, output, calls = fixture.invoke([[page([plain_push, plain_leaks])]])
+        satisfied.append((rc, calls, missing_refusal in output))
+        rc, output, calls = fixture.invoke([{"filtered": [page([plain_leaks])],
+                                             "scan": [page([plain_leaks, success_b])]}])
+        satisfied.append((rc, calls, missing_refusal in output))
+        polls = [[page([plain_leaks])]] + [[page([plain_leaks, success_b])]] * 5
+        rc, output, calls = fixture.invoke(polls, wait=True)
+        satisfied.append((rc, calls, missing_refusal in output))
+        check("ci/plain-quality-run-satisfied", satisfied,
+              [(0, 1, False), (0, 1, False), (0, 6, False)])
 
         # A second positional rev is refused (exit 2) before any git or API
         # read, never read last-wins: a stray positional that resolves (a branch name, say)

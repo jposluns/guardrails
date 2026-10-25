@@ -3,19 +3,33 @@ name: Quality
 on:
   pull_request:
     branches: [main]
+    # Only the labeled type schedules a pull request run. The merge lane applies the merge-train label
+    # to the train pull request after each push it makes there; adding a label the pull request
+    # already carries fires no labeled event (GitHub's behaviour, not verified live here), so to run
+    # on the same head again it removes the label and adds it back. An open, a push, a reopen, a
+    # retarget and a title/body edit schedule nothing, so a member head gets no Quality run at all:
+    # its evidence is the local tools/run_all_checks.sh run before its push (a process rule, not
+    # enforced per head), and that run fails when gitleaks is not on PATH or reports another version
+    # than the Secrets (gitleaks) step below pins. A label added to any other pull request into main
+    # starts a run whose heavy jobs are skipped (the job-level if: below, the second layer), so its
+    # Quality gates fails. A head with no run of this workflow reads as missing, never as passing:
+    # ci-status.sh requires a completed successful run of this workflow FILE on every read.
+    # tools/check_ci_parity.py holds these types to exactly [labeled].
     # no `edited`: it fires on a PR title/body edit AND on a base-branch retarget, and would re-run
     # every job here. The title/body side matters only to the message/metadata leak scan
-    # (check_msg_leaks), which runs in msg-leaks.yml, triggered on `edited`. A retarget alone
-    # therefore schedules no fresh Quality run; ci-status.sh --require-base closes that gap. That
-    # invocation is the merge lane's own tooling: no production caller in this repository passes
-    # the option (its behaviour self-test exercises it). It refuses a run whose recorded
+    # (check_msg_leaks), which runs in msg-leaks.yml on every pull request into main, triggered on
+    # `edited` too. A retarget alone therefore schedules no fresh Quality run; ci-status.sh
+    # --require-base closes that gap. That invocation is the merge lane's own tooling: no
+    # production caller in this repository passes the option (its behaviour self-test exercises
+    # it). It refuses a run whose recorded
     # pull_request base is not the merge target AND requires a conforming run of this workflow
     # FILE (matched by the run's recorded path, never its display name), so a pre-retarget run is
     # never trusted and a lone msg-leaks run cannot stand in. Recovery: only a RETAINED
-    # pre-retarget run forces a refresh push (a NEW head SHA); a merely missing Quality run is
-    # satisfied by a qualifying run on this same head, which a reopen schedules, and under --wait
-    # the check keeps polling for one within its settle window before refusing.
-    types: [opened, synchronize, reopened]
+    # pre-retarget run forces a refresh push (a NEW head SHA), labelled again after it; a merely
+    # missing Quality run is satisfied by a qualifying run on this same head, which removing and
+    # re-adding the merge-train label schedules, and under --wait the check keeps polling for one
+    # within its settle window before refusing.
+    types: [labeled]
   push:
     branches: [main]
 
@@ -26,8 +40,9 @@ permissions:
 # fails on a cancelled job), never green. A push run gets a group of its own (its run id), so a
 # push-to-main run is never cancelled and never queued behind another run. A cancelled run stays on its
 # commit and tools/ci-status.sh refuses a commit with any non-success run, so a cancelled run on a live
-# head (a reopen while its run is in progress, or a push back to an earlier head) needs a new head
-# commit. tools/check_ci_parity.py and tools/check_python_host_pin.py accept exactly this block.
+# head (a label added while its run is in progress, the merge-train label re-applied included, or a
+# push back to an earlier head) needs a new head commit, labelled again. tools/check_ci_parity.py and
+# tools/check_python_host_pin.py accept exactly this block.
 concurrency:
   group: quality-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -53,7 +68,9 @@ jobs:
   # The heavy jobs (the three OPF tooling shards opf, opf-adopt and opf-init, selftest-execution, the four
   # git-fixture-env lanes, the five host-patch jobs and byte-canon-matrix) carry one pinned job-level if:,
   # so they run only on a push and on a pull request whose head is a merge-train-* branch of this
-  # repository; every other job runs on every event. On any other pull request the heavy jobs are skipped
+  # repository; every other job runs in every run. That if: is the second layer behind the labeled
+  # trigger above, which already keeps a member head from running at all. In any other pull request
+  # run (a label added to a pull request that is not a train) the heavy jobs are skipped
   # and Quality gates fails by design (skipped is not success): such a change merges only by riding a
   # train. tools/check_ci_parity.py accepts that if: line exactly, and only on those jobs.
   secrets:
@@ -94,6 +111,14 @@ jobs:
           echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
           tar -xzf gitleaks.tar.gz gitleaks
           ./gitleaks dir . --no-banner --redact --exit-code 1
+
+      # The local runner requires this same gitleaks version on PATH (its live leg is local-only: the
+      # step above downloads and verifies the pinned binary here); CI runs the gate's vectors. The gate
+      # reads the pin only from the env: of the step above and refuses GITLEAKS_VERSION named anywhere
+      # else in this file, outside a comment and that step's expansions of it.
+      - name: Gitleaks pin self-test
+        shell: bash
+        run: python3 -I -B tools/check_gitleaks_pin.py --self-test
 
       - name: Leak denylist self-test
         shell: bash
