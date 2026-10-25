@@ -5386,14 +5386,26 @@ _ERREXIT_UNREADABLE_NOTE = (
     "AIQT guardrail (rule nocncl): this call's {} was {}, so the inline errexit check did not run on it. This "
     "guard never blocks a call, so it is allowed: the check was not run, not passed.")
 # What the rest of a command the lexer could not read in full (_errexit_unread) must mention for inline_errexit
-# to note that rest when the part it read shows no hazard: set or shopt as a word no letter, digit, _ or -
-# touches, or the text errexit or pipefail. A rest without one allows silently, so a process substitution or a
-# here-string alone draws no note.
+# to note that rest when the part it read shows no hazard and leaves errexit off where it stopped: set or shopt
+# as a word no letter, digit, _ or - touches, or the text errexit or pipefail, in the rest as written or with
+# its quoting removed (_errexit_unread_mentions). A rest without one allows silently, so a process substitution
+# or a here-string alone draws no note.
 _ERREXIT_UNREAD_RE = re.compile(r"(?<![\w-])(?:set|shopt)(?![\w-])|errexit|pipefail")
+# A line continuation (a backslash then a newline) and each backslash and quote character, removed from the
+# unread rest before it is searched again, so s\et, s''et and a set split by a line continuation are found: a
+# rough form of bash's quote removal, which can only add to what the search of the rest as written finds.
+_ERREXIT_UNREAD_QUOTING_RE = re.compile(r"\\\n|[\\'\"]")
 _ERREXIT_UNREAD_NOTE = (
     "AIQT guardrail (rule nocncl): the inline errexit check stopped at a construct it cannot parse, so the rest "
     "of this command was not read, and that rest mentions set, shopt, errexit or pipefail. This guard never "
     "blocks a call, so it is allowed: the rest was not checked, not passed.")
+# The note for that rest when errexit is on where the lexer stopped (_errexit_hazard's second value), whatever
+# the rest mentions: a later step there, after one errexit would stop at, was not checked.
+_ERREXIT_UNREAD_ON_NOTE = (
+    "AIQT guardrail (rule nocncl): the inline errexit check stopped at a construct it cannot parse, so the rest "
+    "of this command was not read, and errexit was turned on inline before that point, so a later step in that "
+    "rest after one errexit would stop at was not checked. This guard never blocks a call, so it is allowed: "
+    "the rest was not checked, not passed.")
 
 
 def _errexit_set_effect(words):
@@ -5499,6 +5511,14 @@ def _errexit_unread(text, segments, complete, in_progress):
     return text  # the lex stopped before any segment with text, so none of it counts as read
 
 
+def _errexit_unread_mentions(unread):
+    """Whether the unread rest of a command (_errexit_unread) mentions an option word (_ERREXIT_UNREAD_RE), as
+    written or with its quoting removed (_ERREXIT_UNREAD_QUOTING_RE). The rest as written is searched as well,
+    so a set that removing the quoting joins to a longer word ("$x"set) is still found."""
+    return bool(_ERREXIT_UNREAD_RE.search(unread) or
+                _ERREXIT_UNREAD_RE.search(_ERREXIT_UNREAD_QUOTING_RE.sub("", unread)))
+
+
 def _errexit_statements(command):
     """(pairs, tail, exact, unread) for the errexit walker: pairs are the (argv, sep_after, redirected) of each
     segment the shared lexer read in full, in order, redirected being whether the segment carries a
@@ -5570,15 +5590,18 @@ def _errexit_stops(word, after_or, piped, in_function, pipefail):
 
 
 def _errexit_hazard(pairs, tail):
-    """Truthy when errexit is on at a statement whose failure bash would stop at under errexit
-    (_errexit_stops) and a later statement of the same scope follows it after a ; or a newline
-    (_ERREXIT_JOINS): the shape whose later steps an inline set -e was seen not to stop in this tool. The
-    value is True for a certain such step, or "possible" when the only such step is a pipeline whose
-    stopping depends on a pipefail state the walker could not read. pairs and tail are _errexit_statements'
-    reading; the tail (None when there is none) counts only as a later statement, never as a set or as a
-    step that can fail, and a fully read statement of redirections only also counts as a later statement
-    (bash still runs its redirections, truncating a > target), whatever separator ends it; a closing fi,
-    done, esac or } that carries a redirection closes its construct and is no later statement.
+    """(hazard, on): hazard is truthy when errexit is on at a statement whose failure bash would stop at under
+    errexit (_errexit_stops) and a later statement of the same scope follows it after a ; or a newline
+    (_ERREXIT_JOINS): the shape whose later steps an inline set -e was seen not to stop in this tool. It is
+    True for a certain such step, or "possible" when the only such step is a pipeline whose stopping depends
+    on a pipefail state the walker could not read. on is whether errexit is on where the walk ended, counting,
+    once every pair is read, each (...) subshell, $(...) substitution or function body still open there, since
+    the rest of the command returns to the state saved as it opened when it closes it (a { } group restores
+    nothing); inline_errexit reads it when the lexer stopped early and hazard is false. pairs and tail are
+    _errexit_statements' reading; the tail (None when there is none) counts only as a later statement, never
+    as a set or as a step that can fail, and a fully read statement of redirections only also counts as a
+    later statement (bash still runs its redirections, truncating a > target), whatever separator ends it; a
+    closing fi, done, esac or } that carries a redirection closes its construct and is no later statement.
 
     Option changes are tracked in order (_errexit_set_effect), and only one that runs whenever its statement
     runs counts: the first command of its && or || list, outside a pipeline and not sent to the background;
@@ -5689,10 +5712,10 @@ def _errexit_hazard(pairs, tail):
             previous = ")"
             continue
         if not words and redirected and armed and not closer:
-            return armed  # a statement of redirections only is a later statement: bash still runs them
+            return armed, on  # a statement of redirections only is a later statement: bash still runs them
         if words:
             if armed:
-                return armed  # a later statement runs after one that failed with nothing to stop it
+                return armed, on  # a later statement runs after one that failed with nothing to stop it
             fn_pending = False
             if words[0] == "case":
                 frames.append(["case", False, kind != "close"])  # the first pattern ends at its ), here or later
@@ -5722,7 +5745,7 @@ def _errexit_hazard(pairs, tail):
             continued = True
         elif kind == "open":
             if armed:
-                return armed  # the subshell is a later statement
+                return armed, on  # the subshell is a later statement
             fn_pending = False
             substitution = bool(argv) and argv[-1].endswith("$")
             scopes.append((on, pipefail, armed, last, exempt, ignored, negated, joiner, piped, functions,
@@ -5757,9 +5780,11 @@ def _errexit_hazard(pairs, tail):
                 stops = _errexit_stops(last[1], joiner == "||", piped, functions > 0, pipefail)
                 armed = _errexit_armed(armed, stops)  # a later statement of this scope would run after this
             last, negated, joiner, piped, continued = None, False, None, False, False  # a new statement
+    # errexit where the walk ended, or where closing a subshell, a substitution or a function body returns to
+    on = on or any(scope[0] for scope in scopes) or any(entry[3] for entry in braces if entry[0])
     if tail is None:
-        return False  # the last statement never notes: nothing runs after it
-    return armed  # the tail counts only as a later statement, preserving a "possible" reading
+        return False, on  # the last statement never notes: nothing runs after it
+    return armed, on  # the tail counts only as a later statement, preserving a "possible" reading
 
 
 def _errexit_unreadable(field, present, value, kind):
@@ -5803,11 +5828,13 @@ def inline_errexit(data):
     heredoc is read again with its delimiter quoted, a best-effort reading the note says it is; where the lexer
     stops at any other construct it refuses, the rest of the command past the last segment it read in full is
     not read (_errexit_unread). Where the part read shows no hazard, that rest allows with a note saying it was
-    not read when it mentions set or shopt as a word, errexit or pipefail (_ERREXIT_UNREAD_RE), and silently
-    otherwise, so a later step there after an errexit turned on before it is unseen. Another tool silently allows. A
-    tool_name that is missing, empty or not a string, a tool_input that is not an object, and a command that
-    is missing, empty or not a string each allow with a note naming that field (_errexit_unreadable), never
-    silently and never with a deny."""
+    not read when errexit is on where the lexer stopped (_errexit_hazard's second value), or else when that
+    rest mentions set or shopt as a word, errexit or pipefail (_errexit_unread_mentions), each with its own
+    note, and silently otherwise, so a later step there after an errexit turned on before the stop only by a
+    change that may not run (true || set -e), or only inside a function body the rest may call, is unseen.
+    Another tool silently allows. A tool_name that is missing, empty or not a string, a tool_input that is not
+    an object, and a command that is missing, empty or not a string each allow with a note naming that field
+    (_errexit_unreadable), never silently and never with a deny."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: inline_errexit wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -5823,9 +5850,11 @@ def inline_errexit(data):
     if not isinstance(command, str) or not command:
         return _errexit_unreadable("command", "command" in tool_input, command, "a string")
     pairs, tail, exact, unread = _errexit_statements(command)
-    hazard = _errexit_hazard(pairs, tail)
+    hazard, on = _errexit_hazard(pairs, tail)
     if not hazard:
-        if _ERREXIT_UNREAD_RE.search(unread):
+        if unread and on:
+            return _allow_note(_ERREXIT_UNREAD_ON_NOTE)  # a later step past errexit turned on was not read
+        if _errexit_unread_mentions(unread):
             return _allow_note(_ERREXIT_UNREAD_NOTE)  # its unread rest mentions set, shopt, errexit or pipefail
         return _allow()
     note = _ERREXIT_NOTE
