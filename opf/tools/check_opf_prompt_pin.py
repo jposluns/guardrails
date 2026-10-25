@@ -44,14 +44,18 @@ Checks, each a named guard:
                   deliberately over-refuses: an adopter cannot keep an HTML comment, a link, an
                   image or a fenced code block info string (even one bare language name such as
                   text or python) in the pin section, even one that hides nothing; and the
-                  section's raw text and its rendered text, each after NFKC normalization, carry
-                  no Unicode format character (general category Cf: a zero-width space, a soft
-                  hyphen, a joiner, a bidirectional control, a byte order mark), refused by
-                  presence and named, because one renders as nothing and can split a key, a value
-                  or a commit spelling that a reader reads whole while every scan here reads past
-                  it; this over-refuses a format character that hides nothing, and an invisible
-                  or near-invisible character outside category Cf (a combining grapheme joiner, a
-                  variation selector, a filler letter) is not refused
+                  section's raw text and its rendered text carry no character other than
+                  printable ASCII (U+0020 to U+007E), TAB and LF, refused by presence before the
+                  section's own spelling, location, table and pack-facts reads, naming the first
+                  such code point and its offset in that text: one rule, so no such read depends
+                  on a list of the characters that can hide in or imitate a key, a value or a
+                  commit spelling (an invisible character such as a zero-width space, a combining
+                  grapheme joiner, a variation selector, a filler letter or a blank braille
+                  pattern, a look-alike letter from another script, a fullwidth form); the
+                  rendered side catches a character only a character reference builds, the raw
+                  side one the parse drops (a non-ASCII space opening a paragraph); this
+                  over-refuses every other character in the pin section, even one that hides
+                  nothing (an accented letter, a typographic quote or dash)
   pin-location    the pin sentence, the raw-URL template and the example URL each name the pinned
                   commit exactly once, so a movable name (a branch) in one of those places cannot
                   hide behind the spelling count elsewhere, and none can sit where a reader never
@@ -70,23 +74,21 @@ Checks, each a named guard:
                   silent skip
   pack-facts      the format and version the prompt states match opf/prompt-pack/pack.toml: the
                   pin section states each exactly once in the code-span form the gate reads
-                  (`format = "..."`, `version = "..."`), and its raw text and its rendered text,
-                  each after NFKC normalization, alike carry exactly one assignment-shaped
-                  spelling of each key (the key, case-insensitively and not preceded by a letter,
-                  digit or underscore, then optional whitespace, an ASCII `=`, optional
-                  whitespace and an ASCII single or double quote), so a second spelling of that
-                  shape in prose, behind an escaped backtick, in a code block, built from a
-                  character reference, spelled across a setext underline or written in fullwidth
-                  forms that NFKC folds to that shape is refused; that count is the only read of
-                  a second spelling, so a second, conflicting value is not read, and the gate
-                  stays VALID, where no ASCII quote follows the equals sign (unquoted, as in
-                  version = 9.9.9, curly-quoted or backticked), where another separator (a colon)
-                  stands for it, where an invisible or near-invisible character outside category
-                  Cf splits the key (a combining grapheme joiner, or a filler letter, which NFKC
-                  at most maps to another filler), where a letter of the key is a look-alike from
-                  another script that NFKC does not fold (a Cyrillic ie for the e of version, a
-                  Greek omicron for the o of format), or where the fact is stated in other words
-                  (version 9.9.9)
+                  (`format = "..."`, `version = "..."`), and its raw text and its rendered text
+                  alike carry exactly one assignment-shaped spelling of each key (the key,
+                  case-insensitively and not preceded by a letter, digit or underscore, then
+                  optional whitespace, an ASCII `=`, optional whitespace and an ASCII single or
+                  double quote), so a second spelling of that shape in prose, behind an escaped
+                  backtick, in a code block, built from a character reference or spelled across a
+                  setext underline is refused; the count reads text that pin-section has already
+                  held to printable ASCII, TAB and LF, so a spelling that carries any other
+                  character, visible or not, in the key, between its parts or in place of one, is
+                  refused there first; that count is the only read of a second spelling, so a
+                  second, conflicting value in any other ASCII shape is not read, and the gate
+                  stays VALID: one with anything other than whitespace between the key, the
+                  equals sign and an ASCII quote, or with one of those missing (unquoted, as in
+                  version = 9.9.9, backticked, or after a colon), or the fact stated in other
+                  words (version 9.9.9)
   quotation       every double-quoted span of MIN_QUOTE_CHARS or more normalized characters whose
                   nearby context (same paragraph, within _QUOTE_CONTEXT_CHARS before the opening
                   quote) attributes it to a pinned source appears word for word,
@@ -503,24 +505,37 @@ def _check_pin_section_markup(marko, section_nodes):
                      "text".format((node.lang + " " + node.extra).strip()))
 
 
-def _check_pin_format_chars(section, section_visible):
-    """The pin section's raw text and its rendered text, each after NFKC normalization, carry no
-    Unicode format character (general category Cf: a zero-width space, a soft hyphen, a joiner, a
-    bidirectional control, a byte order mark), refused by presence and named: one renders as
-    nothing, so it can split a pack-fact key or value, or a commit spelling, that a reader reads
-    whole while every scan of the section reads past it. A character reference that renders one
-    is caught on the rendered side. This over-refuses a format character that hides nothing, and
-    an invisible or near-invisible character outside category Cf (a combining grapheme joiner, a
-    variation selector, a filler letter) is not refused."""
+# Any character other than printable ASCII (U+0020 to U+007E), TAB and LF: the pin section may
+# carry none, in its raw text or its rendered text.
+_PIN_SECTION_REFUSED_CHAR_RE = re.compile("[^\t\n\x20-\x7e]")
+
+
+def _check_pin_section_chars(section, section_visible):
+    """The pin section's raw text and its rendered text carry no character other than printable
+    ASCII (U+0020 to U+007E), TAB and LF, refused by presence before the section's own spelling,
+    location, table and pack-facts reads, and named with its code point and its offset in that
+    text. One rule stands in for a list of the characters that can hide in or imitate a pack-fact
+    key or value, or a commit spelling, that a reader reads whole while every scan of the section
+    reads past it or reads it as something else: a format character (a zero-width space, a soft
+    hyphen, a joiner, a bidirectional control), any other invisible or near-invisible character
+    (a combining grapheme joiner, a variation selector, a filler letter, a blank braille pattern),
+    a look-alike letter from another script and a fullwidth form are all refused alike, so no
+    later read depends on enumerating them. The rendered side catches a character only a
+    character reference builds; the raw side catches one the parse drops (a non-ASCII space
+    opening a paragraph). The shipped pin section is pure ASCII. This over-refuses by design: an
+    accented letter, a typographic quote or dash, or a non-breaking space is refused there too,
+    even where it hides nothing."""
     for form, text in (("raw", section), ("rendered", section_visible)):
-        found = next((char for char in unicodedata.normalize("NFKC", text)
-                      if unicodedata.category(char) == "Cf"), None)
-        if found is not None:
+        match = _PIN_SECTION_REFUSED_CHAR_RE.search(text)
+        if match is not None:
+            found = match.group(0)
             raise _Refusal(INVALID, "pin-section",
-                           "the pin section's {} text carries the format character U+{:04X} "
-                           "({}): a format character renders as nothing, so the pin section "
-                           "may carry none at all".format(
-                               form, ord(found), unicodedata.name(found, "unnamed")))
+                           "the pin section's {} text carries U+{:04X} ({}) at offset {} of that "
+                           "text: the pin section may carry only printable ASCII, TAB and LF, so "
+                           "no character a reader cannot see, or may misread, can split or "
+                           "imitate a key, a value or a commit spelling".format(
+                               form, ord(found), unicodedata.name(found, "unnamed"),
+                               match.start()))
 
 
 def _check_pin_locations(section, pin):
@@ -643,17 +658,15 @@ def _check_history(root, pin, table):
 
 
 # The one shape of a pack-fact spelling the gate counts, read in the pin section's raw text and in
-# its rendered text, each after NFKC normalization (so a fullwidth equals sign or quotation mark
-# reads as its ASCII form): the key, case-insensitively and not preceded by a letter, digit or
-# underscore (so `spec_version` is not the pack version), then optional whitespace, an ASCII `=`,
-# optional whitespace and an ASCII single or double quote. The code-span statement the gate reads
-# is one such spelling. No other shape is read: a value with no ASCII quote straight after the
-# equals sign (unquoted, curly-quoted or backticked), another separator (a colon), a key split by
-# an invisible or near-invisible character outside category Cf (a combining grapheme joiner, or a
-# filler letter, which NFKC at most maps to another filler), a key with a look-alike letter from
-# another script that NFKC does not fold (a Cyrillic ie for the e of version, a Greek omicron for
-# the o of format), or a fact stated in other words is not counted, so a second, conflicting value
-# in one of those forms is not refused.
+# its rendered text, both already held by _check_pin_section_chars to printable ASCII, TAB and LF:
+# the key, case-insensitively and not preceded by a letter, digit or underscore (so `spec_version`
+# is not the pack version), then optional whitespace, an ASCII `=`, optional whitespace and an
+# ASCII single or double quote. The code-span statement the gate reads is one such spelling. A
+# spelling that carries any other character, visible or not, never reaches this count. No other
+# ASCII shape is read: a spelling with anything other than whitespace between the key, the equals
+# sign and the quote, or with one of those missing (unquoted, backticked, after a colon, or a fact
+# stated in other words), is not counted, so a second, conflicting value in such a spelling is not
+# refused.
 _PACK_FACT_SPELLING_RES = tuple(
     (key, re.compile(r"(?i)(?<![A-Za-z0-9_])" + key + r"\s*=\s*[\"']"))
     for key in ("format", "version"))
@@ -661,18 +674,19 @@ _PACK_FACT_SPELLING_RES = tuple(
 
 def _check_pack_facts(root, section, section_visible):
     """The format and version the pin section states match opf/prompt-pack/pack.toml, read from
-    the section's raw text after _check_pin_section_markup. The section must state each exactly
-    once in the code-span form read here, and its raw text and its rendered text, each after NFKC
-    normalization, must each carry exactly one assignment-shaped spelling of each key
+    the section's raw text after _check_pin_section_markup and _check_pin_section_chars. The
+    section must state each exactly once in the code-span form read here, and its raw text and
+    its rendered text must each carry exactly one assignment-shaped spelling of each key
     (_PACK_FACT_SPELLING_RES), so a second spelling of that shape outside the code-span form (in
     prose, behind an escaped backtick, in a code block, built from a character reference only the
-    rendered text decodes, spelled across a setext underline only the raw text keeps, or written
-    in fullwidth forms NFKC folds to it) is refused rather than read past. A second value in any
-    other form (unquoted, curly-quoted or backticked after the equals sign, after a colon, under a
-    key split by an invisible or near-invisible character outside category Cf such as a combining
-    grapheme joiner or a filler letter, under a key with a look-alike letter from another script
-    that NFKC does not fold such as a Cyrillic ie for the e of version, or stated in other words
-    such as version 9.9.9) is not read, so it is not refused."""
+    rendered text decodes, or spelled across a setext underline only the raw text keeps) is
+    refused rather than read past. Both texts reach this count already held to printable ASCII,
+    TAB and LF, so a second spelling that carries any other character, visible or not (a
+    look-alike letter, an invisible character in the key or between its parts, a fullwidth form),
+    was refused by that one rule first. A second value in any other ASCII shape (anything other
+    than whitespace between the key, the equals sign and the quote, or one of those missing:
+    unquoted, backticked, after a colon, or stated in other words such as version 9.9.9) is not
+    read, so it is not refused."""
     stated_fmt = re.findall(r"`format = \"([^\"`]+)\"`", section)
     stated_ver = re.findall(r"`version = \"([^\"`]+)\"`", section)
     _require(len(stated_fmt) == 1 and len(stated_ver) == 1, "pack-facts",
@@ -680,7 +694,7 @@ def _check_pack_facts(root, section, section_visible):
              "{} format and {} version statement(s)".format(len(stated_fmt), len(stated_ver)))
     for key, spelling_re in _PACK_FACT_SPELLING_RES:
         for form, text in (("raw", section), ("rendered", section_visible)):
-            spelled = len(spelling_re.findall(unicodedata.normalize("NFKC", text)))
+            spelled = len(spelling_re.findall(text))
             _require(spelled == 1, "pack-facts",
                      "the pin section's {} text spells the pack {} as an assignment {} time(s); "
                      "expected exactly one, the code-span statement this gate reads, so a "
@@ -1062,8 +1076,8 @@ def _validate(root):
     every refused character except a CRLF pair, and a prompt whose parse does not cover its text
     is CANNOT-EVALUATE at journal-parse, never mis-sliced. The pin section's markup rule runs
     before any spelling count or table read, so every later reading of the section's raw text
-    sees only text a reader sees, and its format-character rule runs before the section's own
-    spelling, location, table and pack-facts reads."""
+    sees only text a reader sees, and its character rule (printable ASCII, TAB and LF only) runs
+    before the section's own spelling, location, table and pack-facts reads."""
     root = Path(root)
     prompt_text = _read_text(root / "opf" / PROMPT_REL, "prompt")
     marko, document = _journal_markdown(prompt_text)
@@ -1074,7 +1088,7 @@ def _validate(root):
     _check_pin_shape(raw_commits, visible_commits)
     pin = raw_commits[0] if raw_commits else None
     section_visible = "\n".join(_rendered_text(marko, node) for node in section_nodes)
-    _check_pin_format_chars(section, section_visible)
+    _check_pin_section_chars(section, section_visible)
     _check_pin_spelling(section, section_visible)
     _check_pin_locations(section, pin)
     table = _parse_table(section)
@@ -1904,8 +1918,8 @@ def _vectors():
         _build_tree(base, extra_text="![Older notes name &#100;" + "d" * 39 + "](x.png)")
 
     def format_char_outside_section(base):
-        # A word joiner (U+2060) just outside the pin section: the format-character rule binds
-        # the pin section alone.
+        # A word joiner (U+2060) just outside the pin section: the character rule binds the pin
+        # section alone.
         _build_tree(base, extra_text="A plain" + chr(0x2060) + " note sits here.")
 
     def fence_in_section(opener):
@@ -2188,36 +2202,89 @@ def _vectors():
                                                "its value.")),
         ("pin-pack-spec-version-spelling", VALID, None, None,
          stale_in_section('The store declares `spec_version = "1.3.0"` here.')),
-        # A fullwidth equals sign (U+FF1D): NFKC folds it to `=`, so the assignment count reads
-        # the second spelling; read without the fold, nothing counts it.
-        ("pin-pack-version-second-spelling-fullwidth-equals", INVALID, "pack-facts",
-         "_check_pack_facts",
+        # A fullwidth equals sign (U+FF1D), which a reader takes for `=`: the assignment count
+        # reads only an ASCII equals sign, so only the character rule refuses it.
+        ("pin-pack-version-second-spelling-fullwidth-equals", INVALID, "pin-section",
+         "_check_pin_section_chars",
          stale_in_section("Older notes say version " + chr(0xFF1D) + ' "9.9.9" here.')),
-        # A zero-width space (U+200B, category Cf) between the key and the equals sign: no
-        # pattern reads the key across it, so only the format-character rule refuses it.
+        # A zero-width space (U+200B) between the key and the equals sign: no pattern reads the
+        # key across it, so only the character rule refuses it.
         ("pin-pack-version-second-spelling-zero-width-space", INVALID, "pin-section",
-         "_check_pin_format_chars",
+         "_check_pin_section_chars",
          stale_in_section("Older notes say version" + chr(0x200B) + ' = "9.9.9" here.')),
-        # A soft hyphen built from a character reference inside the key: the raw text carries
-        # no format character, so only the rendered side of that rule refuses it.
+        # A soft hyphen built from a character reference inside the key: the raw text is pure
+        # ASCII, so only the rendered side of the character rule refuses it.
         ("pin-pack-version-second-spelling-soft-hyphen-entity", INVALID, "pin-section",
-         "_check_pin_format_chars",
+         "_check_pin_section_chars",
          stale_in_section('Older notes say ver&shy;sion = "9.9.9" here.')),
+        # A combining grapheme joiner (U+034F) built from a character reference after the key:
+        # the raw text is pure ASCII, so only the rendered side of the character rule refuses it.
+        ("pin-pack-version-second-value-cgj-entity-after-key", INVALID, "pin-section",
+         "_check_pin_section_chars",
+         stale_in_section('Older notes say version&#x34F; = "9.9.9" here.')),
+        # An ideographic space (U+3000) opening a paragraph: the parse drops it, so the rendered
+        # text carries none and only the raw side of the character rule refuses it.
+        ("pin-non-ascii-space-opening-paragraph", INVALID, "pin-section",
+         "_check_pin_section_chars", stale_in_section(chr(0x3000) + "A plain note sits here.")),
         # A word joiner (U+2060) that splits nothing a scan reads: refused by presence, so this
         # fixture holds the rule's over-refusal.
-        ("pin-format-char-harmless", INVALID, "pin-section", "_check_pin_format_chars",
+        ("pin-format-char-harmless", INVALID, "pin-section", "_check_pin_section_chars",
          stale_in_section("A plain" + chr(0x2060) + " note sits here.")),
+        # A visible accented letter (U+00E9) that hides nothing: refused all the same, because
+        # the rule admits printable ASCII, TAB and LF and nothing else.
+        ("pin-non-ascii-letter-harmless", INVALID, "pin-section", "_check_pin_section_chars",
+         stale_in_section("A caf" + chr(0x00E9) + " note sits here.")),
         ("pin-format-char-outside-section", VALID, None, None, format_char_outside_section),
         # An unquoted second value: the assignment count needs an ASCII quote after the equals
         # sign, so this conflicting version is not read and the tree stays VALID, as the
         # pack-facts residual states.
         ("pin-pack-version-second-value-unquoted-not-read", VALID, None, None,
          stale_in_section("Older notes say version = 9.9.9 here.")),
-        # A second value under a key whose e is a Cyrillic ie (U+0435): NFKC does not fold a
-        # look-alike letter from another script, so the assignment count does not read this
-        # conflicting version and the tree stays VALID, as the pack-facts residual states.
-        ("pin-pack-version-second-value-look-alike-key-not-read", VALID, None, None,
+        # A second value under a key whose e is a Cyrillic ie (U+0435), or a format key whose o
+        # is a Greek omicron (U+03BF): no pattern reads a look-alike letter as the key, so only
+        # the character rule refuses it.
+        ("pin-pack-version-second-value-look-alike-key", INVALID, "pin-section",
+         "_check_pin_section_chars",
          stale_in_section("Older notes say v" + chr(0x0435) + 'rsion = "9.9.9" here.')),
+        ("pin-pack-format-second-value-look-alike-key", INVALID, "pin-section",
+         "_check_pin_section_chars",
+         stale_in_section("Older notes say f" + chr(0x03BF) + 'rmat = "x/v2" here.')),
+        # A key split by a combining grapheme joiner (U+034F), and a stale commit split by one:
+        # no pattern reads either across it, so only the character rule refuses them.
+        ("pin-pack-version-second-value-cgj-in-key", INVALID, "pin-section",
+         "_check_pin_section_chars",
+         stale_in_section("Older notes say ver" + chr(0x034F) + 'sion = "9.9.9" here.')),
+        ("pin-stale-commit-cgj-split", INVALID, "pin-section", "_check_pin_section_chars",
+         stale_in_section("Older notes name the commit " + "d" * 20 + chr(0x034F) + "d" * 20
+                          + " here.")),
+        # An invisible or blank character between the whole key and the equals sign, or between
+        # the equals sign and the quote (a combining grapheme joiner U+034F, a variation selector
+        # U+FE0F, a Hangul filler U+3164, a blank braille pattern U+2800): the assignment count
+        # lets only whitespace sit there, so only the character rule refuses each.
+        ("pin-pack-version-second-value-cgj-after-key", INVALID, "pin-section",
+         "_check_pin_section_chars",
+         stale_in_section("Older notes say version" + chr(0x034F) + ' = "9.9.9" here.')),
+        ("pin-pack-version-second-value-variation-selector-after-key", INVALID, "pin-section",
+         "_check_pin_section_chars",
+         stale_in_section("Older notes say version" + chr(0xFE0F) + ' = "9.9.9" here.')),
+        ("pin-pack-version-second-value-hangul-filler-after-key", INVALID, "pin-section",
+         "_check_pin_section_chars",
+         stale_in_section("Older notes say version" + chr(0x3164) + '= "9.9.9" here.')),
+        ("pin-pack-version-second-value-braille-blank-after-key", INVALID, "pin-section",
+         "_check_pin_section_chars",
+         stale_in_section("Older notes say version" + chr(0x2800) + '= "9.9.9" here.')),
+        ("pin-pack-version-second-value-cgj-after-equals", INVALID, "pin-section",
+         "_check_pin_section_chars",
+         stale_in_section("Older notes say version =" + chr(0x034F) + '"9.9.9" here.')),
+        ("pin-pack-version-second-value-variation-selector-after-equals", INVALID,
+         "pin-section", "_check_pin_section_chars",
+         stale_in_section("Older notes say version =" + chr(0xFE0F) + '"9.9.9" here.')),
+        ("pin-pack-version-second-value-hangul-filler-after-equals", INVALID, "pin-section",
+         "_check_pin_section_chars",
+         stale_in_section("Older notes say version =" + chr(0x3164) + '"9.9.9" here.')),
+        ("pin-pack-version-second-value-braille-blank-after-equals", INVALID, "pin-section",
+         "_check_pin_section_chars",
+         stale_in_section("Older notes say version =" + chr(0x2800) + '"9.9.9" here.')),
     ]
 
 
