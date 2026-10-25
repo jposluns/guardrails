@@ -720,7 +720,8 @@ def _read_toml(root_fd, relpath, rep):
     (None, "error"). Absence is (None, "absent") and left to the caller to grade. The bytes of a file read
     are kept on the report (the first read per path; the worklog ledger reads in _gather_worklog feed the
     same cache), so the canonical-bytes leg proves the bytes the checks graded and never reads them again
-    (the manifest and each worklog ledger are read once per run)."""
+    (the manifest and each worklog ledger are read once per validation; store discovery reads the
+    manifest separately, before it)."""
     try:
         found = _read_toml_contained(root_fd, relpath, with_raw=True)
     except StoreError as exc:
@@ -1765,6 +1766,13 @@ def _archive_triaged_file(archive_rel, path):
     if len(parts) != 2:
         return True
     return parts[1] not in (ARCHIVE_MANIFEST_NAME, WORKLOG_NAME) and not parts[1].endswith(INDEX_SUFFIX)
+
+
+def _archive_triaged_dir(archive_rel, path):
+    """Whether _validate_archive grades the directory `path` under `archive_rel` as one path through
+    _archive_unmanaged without listing it: a subdirectory of a bucket, or any directory beneath one. The
+    archive root and each bucket directly under it are listed there, so neither is."""
+    return path != archive_rel and len(path[len(archive_rel) + 1:].split("/")) >= 2
 
 
 def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=1):
@@ -3231,11 +3239,13 @@ def _check_evidence(root_fd, homes, rep):
 # `imports_root` the derived structures the walk needs; `homes` the store's active homes generation and
 # `control_roots` / `evidence_roots` the store control and homes-2 evidence roots it registers.
 # `worklog_errors` holds generation failures separately from malformed [unmanaged] entries.
+# `managed_dir` is the manifest-derived half of the walk's directory test (a directory it enters rather
+# than grading as one unregistered path), shared with the canonical-bytes leg.
 ContainmentClassification = collections.namedtuple(
     "ContainmentClassification",
     ("view_targets", "valid_unmanaged", "malformed", "colliding", "managed_file", "layout",
      "perrecord_body_dirs", "archive_root", "imports_root", "control_roots", "evidence_roots", "homes",
-     "worklog_errors"))
+     "worklog_errors", "managed_dir"))
 
 
 def classify_containment(manifest_data, machine_rel):
@@ -3409,13 +3419,28 @@ def classify_containment(manifest_data, machine_rel):
                 "unmanaged declaration cannot name or contain a managed file; spec 14.2)".format(u))
         else:
             valid_unmanaged.append(u)
+    # The legacy store registers only the imports tree; homes 2 also registers the staging tree (spec 4.2).
+    staged_roots = (imports_root, _opf_store.STAGING_REL) if homes >= 2 else (imports_root,)
+
+    def managed_dir(full):
+        # A directory the walk enters as a managed namespace rather than grading as one unregistered path:
+        # the machine-store root, a staged root and its run interior, the generation-2 worklog directory, a
+        # per-record type-body dir, or an ancestor of a store-scope view target. The adoption namespaces an
+        # adopting store adds come from the adoption state, so _check_containment adds them itself.
+        if full == mrel or _under_any(full, staged_roots):
+            return True
+        if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
+            return worklog2
+        if layout == "per-record" and full in perrecord_body_dirs:
+            return True
+        return any(vt == full or vt.startswith(full + "/") for vt in view_targets)
 
     return ContainmentClassification(
         view_targets=view_targets, valid_unmanaged=valid_unmanaged, malformed=malformed,
         colliding=colliding, managed_file=managed_file, layout=layout,
         perrecord_body_dirs=perrecord_body_dirs, archive_root=archive_root, imports_root=imports_root,
         control_roots=control_roots, evidence_roots=evidence_roots, homes=homes,
-        worklog_errors=worklog_errors)
+        worklog_errors=worklog_errors, managed_dir=managed_dir)
 
 
 # The legacy import staging area `<machine>/imports` (`.working/toml/imports` under the default layout): where
@@ -3460,15 +3485,20 @@ def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, impor
     next write refuses it. A file an earlier emitter wrote with a literal U+2028 or U+2029 inside a basic
     string passes, as it does for the writers (_opf_emit.matches_store_bytes). A file whose bytes a check
     already read (rep.toml_reads: _read_toml and the worklog ledger reads) is proven from those same bytes
-    and never read again, so the manifest and each worklog ledger keep one content read per run; a file no
-    check read is read here, once. The walk covers only the machine store, never the evidence homes or the
-    journals beside it. NOT every machine-store TOML file is graded, by design: a valid [unmanaged]
-    declaration and the legacy imports staging are skipped (_check_containment grades them); during a
-    partial import substantiated by an active imports/<run-id> run (the same predicate _check_containment
-    and _validate_archive use) only the stray paths those walks triage are skipped: outside the archive
-    tree, a file outside the classifier's managed set (the containment walk's stray, which it triages, or
-    in an adopting store grades as a finding that already fails the store), and inside it, a path
-    _validate_archive routes through _archive_unmanaged (_archive_triaged_file). A triaged stray is
+    and never read again, so the manifest and each worklog ledger keep one content read per validation
+    (store discovery reads the manifest separately, before it); a file no check read is read here, once.
+    The walk covers only the machine store, never the evidence homes or the journals beside it. NOT every
+    machine-store TOML file is graded, by design: a path under a valid [unmanaged] declaration and the
+    legacy imports staging are skipped (_check_containment grades the declaration, never the files under
+    it, and refuses the staging area); during a partial import substantiated by an active imports/<run-id>
+    run (the same predicate _check_containment and _validate_archive use) only the stray paths those walks
+    triage are skipped: outside the archive tree, a file outside the classifier's managed set (the
+    containment walk's stray, which it triages, or in an adopting store grades as a finding that already
+    fails the store), and inside it, a path _validate_archive routes through _archive_unmanaged
+    (_archive_triaged_file). A directory either walk grades as one such path without listing it (outside
+    the archive, one the classifier's managed_dir does not admit; inside it, a bucket subdirectory,
+    _archive_triaged_dir) is not entered, since every file beneath it is such a stray, so a symlink, a
+    listing fault or deep nesting inside it cannot turn the store CANNOT-EVALUATE. A triaged stray is
     therefore never a canonical-bytes finding, while a bucket's archive.toml, worklog.toml and
     <type>.index.toml, which _validate_archive grades, keep this check during the partial import. A file
     that cannot be read or parsed is left to the check that reads it, EXCEPT init.toml, whose only reader
@@ -3547,8 +3577,17 @@ def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, impor
                                     full))
         for d in subdirs:
             full = reldir + "/" + d
-            if not _under_any(full, skipped):
-                walk(full, depth + 1)
+            if _under_any(full, skipped):
+                continue
+            if partial_active and (_archive_triaged_dir(cls.archive_root, full)
+                                   if _under_any(full, (cls.archive_root,)) else not cls.managed_dir(full)):
+                # Under a substantiated partial import, a directory those walks grade as one path without
+                # listing it is not entered either: outside the archive, one the containment walk does not
+                # enter (it triages it, or, adopting, reports it as a finding); inside it, a bucket
+                # subdirectory (_archive_unmanaged). Every file beneath it is a stray the file test above
+                # already skips, so listing it could only add a CANNOT-EVALUATE that grading never needs.
+                continue
+            walk(full, depth + 1)
 
     walk(machine_rel, 0)
 
@@ -3598,11 +3637,8 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
             rep.cant("C-CONTAINMENT: [unmanaged] path {!r} declares {!r}, {}".format(
                 u, legacy_rel, legacy_review))
     mrel = machine_rel
-    view_targets = cls.view_targets
     valid_unmanaged = cls.valid_unmanaged
     managed_file = cls.managed_file
-    layout = cls.layout
-    perrecord_body_dirs = cls.perrecord_body_dirs
     archive_root = cls.archive_root
     imports_root = cls.imports_root
     staging_root = _opf_store.STAGING_REL
@@ -3670,16 +3706,9 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
         # handled by the caller's skip.) Anything else under the store is an UNREGISTERED directory, graded
         # as a stray even when empty (round-14: the walk previously graded files only, so an empty rogue
         # directory, or a tree of only empty dirs, escaped grading entirely).
-        if full == mrel or _under_any(full, staged_roots) or full in adoption_dirs:
-            return True
-        if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
-            try:
-                return _opf_worklog.generation(manifest_data) == 2
-            except _opf_worklog.WorklogError:
-                return False
-        if layout == "per-record" and full in perrecord_body_dirs:
-            return True
-        return any(vt == full or vt.startswith(full + "/") for vt in view_targets)
+        # The manifest-derived namespaces are the classifier's (cls.managed_dir, which the canonical-bytes
+        # leg shares); an adopting store's adoption namespaces are added here.
+        return full in adoption_dirs or cls.managed_dir(full)
 
     def walk(reldir, depth):
         if depth > _CONTAINMENT_MAX_DEPTH:
@@ -5692,6 +5721,66 @@ def self_test():
               and all(_archive_triaged_file(_ar, _ar + "/" + p) for p in (
                   "notes.toml", "2026/notes.toml", "2026/sub/archive.toml", "2026/sub/deeper/worklog.toml",
                   "2026/archive.toml.toml")))
+        # A stray DIRECTORY under the same substantiated partial: the containment walk grades an
+        # unregistered directory, and the archive walk a bucket subdirectory, as one triaged path and never
+        # lists it, so the leg does not enter it either. A symlink inside it, a chain deeper than the walk
+        # ceiling, or a listing failure leaves the store VALID with the directory in triage. Flip: entering
+        # every directory again turns each of these CANNOT-EVALUATE.
+        def _partial_stray_dir(rel, shape):
+            sd = clean_machine()
+            sd["manifest.toml"] = base_manifest()
+            sd["manifest.toml"]["opf"]["import_status"] = "partial"
+            sd[rel + "/notes.toml"] = "a = 1 # a hand comment\n"
+            sd_root = build(sd, working={"imports/{}/plan.toml".format(RUNID): "schema = 1"})
+            sd_dir = sd_root / ".working" / "toml" / rel
+            if shape == "symlink":
+                os.symlink("nowhere", str(sd_dir / "link"))
+            elif shape == "deep":
+                for _ in range(_CONTAINMENT_MAX_DEPTH + 16):
+                    sd_dir = sd_dir / "d"
+                sd_dir.mkdir(parents=True)
+            sd_res = resolve_store(sd_root)
+            if shape != "unlistable":
+                return validate_store(sd_res, observations=clean_prior())
+            from unittest.mock import patch as _sd_patch
+            sd_rel, real_list = ".working/toml/" + rel, _list_contained
+
+            def refused_list(fd, reldir):
+                if reldir == sd_rel:
+                    raise StoreError("synthetic unlistable stray directory")
+                return real_list(fd, reldir)
+
+            with _sd_patch.dict(globals(), {"_list_contained": refused_list}):
+                return validate_store(sd_res, observations=clean_prior())
+
+        for label, rel, shape in (
+                ("stray-dir-symlink", "stray", "symlink"), ("stray-dir-deep", "stray", "deep"),
+                ("stray-dir-unlistable", "stray", "unlistable"),
+                ("bucket-subdir-symlink", "archive/2026/stray", "symlink"),
+                ("bucket-subdir-deep", "archive/2026/stray", "deep"),
+                ("bucket-subdir-unlistable", "archive/2026/stray", "unlistable")):
+            _psd = _partial_stray_dir(rel, shape)
+            check("canonical-partial-{}-valid".format(label),
+                  _psd is not None and _psd.status == VALID and not _psd.cannot_evaluate
+                  and any("'.working/toml/{}'".format(rel) in t for t in _psd.triage))
+        # The directory exemption covers only those triaged directories: under the same substantiated
+        # partial, a per-record type-body directory is a managed namespace the containment walk enters, so a
+        # non-canonical record body inside it is still the named finding; and the archive root and each
+        # bucket are listed by the archive walk, so the leg enters them too. Flip: skipping every directory
+        # under the partial turns the body store VALID.
+        _pb = copy.deepcopy(pr_machine)
+        _pb["manifest.toml"]["opf"]["import_status"] = "partial"
+        _pb["finding/FN-1.toml"] = _opf_emit.emit(fn(1)) + "# a hand comment\n"
+        _pbr = run(_pb, product=pr_product, obs=pr_obs,
+                   working={"imports/{}/plan.toml".format(RUNID): "schema = 1"})
+        check("canonical-partial-managed-dir-entered",
+              _pbr is not None and _pbr.status == INVALID
+              and any("'.working/toml/finding/FN-1.toml'" in m and _canon in m
+                      for m in _pbr.by_check.get("C-CONTAINMENT", [])))
+        check("canonical-archive-dir-triage-scope",
+              not any(_archive_triaged_dir(_ar, _ar + p) for p in ("", "/2026", "/x"))
+              and all(_archive_triaged_dir(_ar, _ar + "/" + p)
+                      for p in ("2026/sub", "2026/sub/deeper", "x/sub")))
         # Staged ids join the C-ID-SPACE uniqueness union under a substantiated partial (spec 11: uniqueness
         # across active, archive, and staging). Containment only triages the run interior there, so a
         # staged BI-1 duplicating committed BI-1 is caught by the staged-id enumeration alone; without
