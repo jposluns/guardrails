@@ -18265,6 +18265,24 @@ def _main_isolated(monitor):
                      "allow", "e=mer; gh pr ${e}ge 3", mpd)
             mpexpect("(mp-a41c) a brace expansion inside the merge token stays the disclosed "
                      "escape", "allow", "gh pr m{e..e}rge 3", mpd)
+            # the GLOB read: a pathname-expansion metacharacter ('*', '?' or a '[' bracket
+            # expression) is a word-building construct beside a literal 'merge', so a glob
+            # spelling of the gh, pr or subcommand word (over a matching filename) that escaped
+            # the whole-word read now denies in the declaring checkout. mp-d77/d77b/d77c/d77d
+            # each allow at base (no whole-word gh/pr and no pre-glob construct) and deny only
+            # once the glob metacharacters join the expansion read; mp-k20* pin inertness with no
+            # declaration, and mp-a43 pins that a glob INSIDE the merge letters, carrying no
+            # literal 'merge', stays the disclosed escape
+            mpexpect("(mp-d77) a glob spelling of the pr subcommand beside a literal merge DENIES "
+                     "in the declaring checkout", "deny", "gh p? merge 3", mpd)
+            mpexpect("(mp-d77b) a glob spelling of the gh word DENIES too", "deny",
+                     "./g? pr merge 3", mpd)
+            mpexpect("(mp-d77c) a '*' glob beside git merge DENIES too (the stated over-refusal "
+                     "with no gh word)", "deny", "git merge feature/*", mpd)
+            mpexpect("(mp-d77d) a '[' bracket-expression glob of the pr word DENIES too", "deny",
+                     "gh p[r] merge 3", mpd)
+            mpexpect("(mp-a43) a glob inside the merge letters, carrying no literal 'merge', stays "
+                     "the disclosed escape", "allow", "gh pr m?rge 3", mpd)
             # the descriptor-digit blanking survives the linear redirect rewrite: an operator
             # abutting a digit-suffixed word is blanked WITH its digits, so the word boundary
             # the whole-word pr read needs still appears (both spellings also denied under the
@@ -18376,6 +18394,16 @@ def _main_isolated(monitor):
                      'gh pr create --title "Emergency: page $oncall" --body x', mpn)
             mpexpect("(mp-k19) the digit-abutting redirect spellings stay inert with no "
                      "declaration", "allow", "gh pr2>&1 merge 3", mpn)
+            mpexpect("(mp-k19b) the digit-abutting forced-clobber redirect stays inert too (the "
+                     "no-declaration twin of mp-d75b)", "allow", "gh pr2>|x merge 3", mpn)
+            mpexpect("(mp-k20) the pr glob spelling stays inert with no declaration", "allow",
+                     "gh p? merge 3", mpn)
+            mpexpect("(mp-k20b) the gh glob spelling stays inert too", "allow",
+                     "./g? pr merge 3", mpn)
+            mpexpect("(mp-k20c) the '*' glob beside git merge stays inert too", "allow",
+                     "git merge feature/*", mpn)
+            mpexpect("(mp-k20d) the '[' bracket-expression glob stays inert too", "allow",
+                     "gh p[r] merge 3", mpn)
             # read-only and scope spellings: every merge spelling denies, only the literal -R/--repo
             # out-of-scope read allows
             mpexpect("(mp-d32) --disable-auto beside a method flag DENIES", "deny",

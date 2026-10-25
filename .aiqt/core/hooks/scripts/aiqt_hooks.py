@@ -11232,14 +11232,16 @@ _MERGE_VALUE_LONGS = frozenset((
 # modelling this guard no longer performs). The scan is TWO presence reads of the WHOLE reading,
 # each term searched once over the whole text, in ANY order, with NO gap bound and NO order
 # requirement: the EXPANSION read fires where the text carries any construct that can BUILD a
-# word at run time (_RAW_EXPANSION_RE: a dollar sign, a backquote, a brace, the eval or alias
-# word) beside 'merge' or 'enqueuepullrequest' as a case-insensitive SUBSTRING, WHATEVER the gh,
-# pr and api words look like: an expansion can assemble those words out of the scan's sight
-# ('x=g; ${x}h pr merge 3', 'm=xpr; gh ${m#x} merge 3', 'a=xapi; gh ${a#x} -X PUT
-# repos/owner/repo/pulls/3/merge' each ran unseen under a whole-word gh/pr/api requirement), but
-# it cannot hide the literal 'merge' those spellings still carry, so the carried letters decide
-# alone. The WORD read, for text with NO such construct (its command words run as spelled, so no
-# merge word can be assembled around them): 'gh' present as a whole word beside 'pr' or 'api' as
+# word at run time (_RAW_EXPANSION_RE: a dollar sign, a backquote, a brace, a glob metacharacter
+# '*', '?' or '[', the eval or alias word) beside 'merge' or 'enqueuepullrequest' as a case-
+# insensitive SUBSTRING, WHATEVER the gh, pr and api words look like: an expansion or glob can
+# assemble those words out of the scan's sight ('x=g; ${x}h pr merge 3', 'm=xpr; gh ${m#x} merge
+# 3', 'a=xapi; gh ${a#x} -X PUT repos/owner/repo/pulls/3/merge', 'gh p? merge 3' and './g? pr
+# merge 3' each ran unseen under a whole-word gh/pr/api requirement), but it cannot hide the
+# literal 'merge' those spellings still carry, so the carried letters decide alone. The WORD
+# read, for text with NO such construct (no construct in the text can assemble a merge word around
+# them, though a word another PROGRAM builds and feeds back is the disclosed residual below):
+# 'gh' present as a whole word beside 'pr' or 'api' as
 # a whole word, with 'merge' as a case-insensitive substring (or, beside 'api', the whole word
 # 'enqueuepullrequest'), keeping ordinary commands that never name gh outside the rule. For
 # 'merge' there is NO token requirement (any
@@ -11300,24 +11302,31 @@ _RAW_ENQUEUE_RE = re.compile(r"(?i)\benqueuepullrequest\b")
 # letters: a dollar sign (a parameter expansion, a command or process substitution, an arithmetic
 # expansion, a $'...' or $"..." quote), a backquote, a brace (a brace expansion such as {m,x} or
 # {e..e}; a lone brace expands nothing, the blunt over-deny direction, since telling an expanding
-# brace from a literal one takes the shell parser this scan refuses), and the whole words eval
-# and alias (either can rebind or assemble the command that runs; bash reads both case-
-# sensitively, so only the lowercase words are read). Short bounded alternatives only, searched
-# once, so this read is linear in the text.
-_RAW_EXPANSION_RE = re.compile(r"[$`{]|\beval\b|\balias\b")
+# brace from a literal one takes the shell parser this scan refuses), a pathname-expansion
+# metacharacter ('*', '?' or a '[' bracket expression: 'gh p? merge', './g? pr merge' and
+# 'gh pr merge*' each let bash build the gh, pr or subcommand word from a matching filename, the
+# same over-deny direction as a lone brace, and a '*', '?' or '[' that matches nothing - or a '['
+# that opens no real bracket expression - only over-denies), and the whole words eval and alias
+# (either can rebind or assemble the command that runs; bash reads both case-sensitively, so only
+# the lowercase words are read). Short bounded alternatives only, searched once, so this read is
+# linear in the text.
+_RAW_EXPANSION_RE = re.compile(r"[$`{*?\[]|\beval\b|\balias\b")
 
 
 def _merge_blank_redirects(text):
     """text with every descriptor-redirection spelling (2>&1, >&2, <&-, &>file, &>>file) and '>|'
     redirect blanked (replaced with one space), any digit run abutting a '<' or '>' operator
     removed with it (the descriptor number: 'pr2>|x' blanks to 'pr x', so an abutting number
-    cannot hide the word boundary the gh/pr/api whole-word match needs, exactly the spellings the
-    earlier '\\d*'-prefixed regex blanked). The operator regex carries no digit prefix (unanchored,
-    a '\\d*' prefix re-walked overlapping suffixes of a long digit run, in time quadratic in the
-    run's length); the digits are removed here instead, each walked at most once because the walk
-    never crosses the previous blank, so one pass is linear in the text. Blanking removes only
-    operator characters and digits, never a letter, so it can only ADD a word-boundary match (the
-    over-deny direction), never hide a gh, pr or api word or a 'merge' substring. Never raises."""
+    cannot hide the word boundary the gh/pr/api whole-word match needs; the walk uses
+    str.isdigit(), a SUPERSET of the earlier '\\d*'-prefixed regex - it removes a non-decimal
+    digit-like character such as a superscript digit that '\\d' leaves, which drops one more
+    character before the operator, the over-deny direction, never a letter). The operator regex
+    carries no digit prefix (unanchored, a '\\d*' prefix re-walked overlapping suffixes of a long
+    digit run, in time quadratic in the run's length); the digits are removed here instead, each
+    walked at most once because the walk never crosses the previous blank, so one pass is linear in
+    the text. Blanking removes only operator characters and digits, never a letter, so it can only
+    ADD a word-boundary match (the over-deny direction), never hide a gh, pr or api word or a
+    'merge' substring. Never raises."""
     out = []
     last = 0
     for match in _RAW_REDIRECT_NEUTRAL_RE.finditer(text):
@@ -11857,14 +11866,17 @@ def _merge_raw_hit(text):
     reads over the ONE whole reading. The EXPANSION read: 'merge' present as a case-insensitive
     SUBSTRING anywhere (or 'enqueuepullrequest' as a substring, the one governed mutation name
     that does not itself contain 'merge') beside ANY construct that can build a word at run time
-    (_RAW_EXPANSION_RE: a dollar sign, a backquote, a brace, the eval or alias word) is a hit
-    WHATEVER the gh, pr and api words look like: a fragment or affix-strip spelling of any of
+    (_RAW_EXPANSION_RE: a dollar sign, a backquote, a brace, a glob metacharacter '*', '?' or '[',
+    the eval or alias word) is a hit
+    WHATEVER the gh, pr and api words look like: a fragment, affix-strip or glob spelling of any of
     those words ('x=g; ${x}h pr merge 3', 'g=xgh; ${g#x} pr merge 3', 'm=xpr; gh ${m#x} merge 3',
-    'a=xapi; gh ${a#x} -X PUT repos/owner/repo/pulls/3/merge', "gh $'\\x70r' merge 3")
+    'a=xapi; gh ${a#x} -X PUT repos/owner/repo/pulls/3/merge', "gh $'\\x70r' merge 3",
+    'gh p? merge 3', './g? pr merge 3')
     assembles the word out of the scan's sight, so a whole-word gh/pr/api requirement gave each of
     those a pass, while the one word such a spelling still carries literally is 'merge' itself;
-    beside an expansion the carried letters alone decide. The WORD read, for text with NO such
-    construct (its command words run as spelled, so no merge word can be assembled around them):
+    beside such a construct the carried letters alone decide. The WORD read, for text with NO such
+    construct (no construct in the text can assemble a merge word around them, though a word another
+    PROGRAM builds and feeds back stays the disclosed residual below):
     'gh' present as a word beside 'pr' or 'api' as a word, and 'merge' present as a
     case-insensitive substring, in ANY order, with no bound on the gaps (or, beside 'api', the
     whole word enqueuePullRequest); the whole-word gh requirement keeps ordinary commands that
@@ -12013,10 +12025,11 @@ def merge_path_guard(data):
     (_merge_raw_hit, line continuations joined and descriptor-redirection spellings (2>&1, >&2,
     <&-, &>file, &>>file) and the '>|' redirect, with any abutting descriptor digits, blanked
     first, then TWO presence reads: where the text carries any construct that can BUILD a word at
-    run time (a dollar sign, a backquote, a brace, the eval or alias word), 'merge' present as a
+    run time (a dollar sign, a backquote, a brace, a glob metacharacter '*', '?' or '[', the eval
+    or alias word), 'merge' present as a
     case-insensitive SUBSTRING anywhere in the ONE whole reading (or enqueuePullRequest as a
     substring) is a merge spelling by ITSELF, whatever the gh, pr and api words look like (a
-    fragment or affix-strip expansion assembles those words out of sight but still carries the
+    fragment, affix-strip or glob expansion assembles those words out of sight but still carries the
     literal 'merge'); for text with NO such construct, gh present as a word beside pr or
     api as a word, with that 'merge' substring,
     in ANY order (or, beside api, the whole word enqueuePullRequest); NOTHING splits either
@@ -12076,9 +12089,11 @@ def merge_path_guard(data):
     'e=merge; gh api -X PUT repos/owner/repo/pulls/3/$e' and 'echo repos/owner/repo/pulls/3/merge
     | xargs gh api -X PUT' deny there too), ANY 'gh pr' or 'gh api' command whose text holds
     'merge' inside a longer token ('gh pr view 3 --json mergeable', an affix-strip spelling such
-    as 'm=xmerge; gh pr ${m#x} 3'), and, through the expansion read, ANY command whose text holds
+    as 'm=xmerge; gh pr ${m#x} 3', a glob subcommand such as 'gh p? merge 3' or './g? pr merge 3'),
+    and, through the expansion read, ANY command whose text holds
     'merge' beside a word-building construct with NO gh word at all: 'git merge $branch',
-    'git merge ${1}', an echo of "merged $f", and a PR title, body or label naming an emergency
+    'git merge ${1}', 'git merge feature/*', an echo of "merged $f", and a PR title, body or label
+    naming an emergency
     beside an expansion ('emergency', 'emerge', 'submerge' and 'merger' all contain the letters)
     deny there too. Every single-command mention that is not
     the exact declared argv also denies: 'gh pr merge --help' and -h, '--disable-auto', the GET
@@ -12119,16 +12134,21 @@ def merge_path_guard(data):
     arming reads only the session cwd and there is no network lookup of a target repository's
     own declaration. Also unseen: a merge whose spelling never survives into the
     command text or its de-quoted reading. Beside ANY word-building construct (a dollar sign, a
-    backquote, a brace, the eval or alias word) a carrier of the whole literal 'merge', however
-    embedded and WHATEVER the gh, pr and api words look like, IS seen, so what escapes both reads
+    backquote, a brace, a glob metacharacter '*', '?' or '[', the eval or alias word) a carrier of
+    the whole literal 'merge', however
+    embedded and WHATEVER the gh, pr and api words look like, IS seen (a fragment, affix-strip or
+    glob spelling of gh, pr or api beside a literal 'merge' - 'gh p? merge 3', './g? pr merge 3' -
+    denies through the expansion read), so what escapes both reads
     is a spelling with no literal 'merge' in either reading: a split inside the five letters
     (e=mer beside ge), a brace or glob
     expansion inside the one token (bash expands 'm{e..e}rge' and 'm?rge' to the word this scan
-    never sees spelled; the brace read fires only beside a literal 'merge' elsewhere in the text),
-    or a $'...' escape of any of the five letters ($'\\x6derge', the disclosed de-quoting
-    boundary); with NO such construct anywhere in the text, a glob spelling of the gh word itself
-    (./g? over a file named gh) escapes the whole-word gh read (the other ways to assemble a word
-    spell one of the constructs the expansion read fires on). Also unseen: a merge
+    never sees spelled; the brace and glob reads fire only beside a literal 'merge' elsewhere in the
+    text), or a $'...' escape of any of the five letters ($'\\x6derge', the disclosed de-quoting
+    boundary); and, with NO word-building construct in the text, a gh, pr, api or merge word that
+    ANOTHER PROGRAM builds and feeds back (printf escape bytes piped to a shell, 'rev' or 'tr'
+    output, an 'xargs -I' feed, an interpreter call: 'printf g\\150... | sh', 'echo hg | rev |
+    xargs -I@ @ pr merge 3' run the assembled command, which to see would take the shell and
+    sub-process modelling this scan refuses). Also unseen: a merge
     read from a file written in an earlier
     command or session, a gh alias or extension, a renamed binary, another forge, a raw curl, or a
     tool outside the Bash and MCP matchers; an alias or function REBINDING THE LITERAL 'gh' WORD
