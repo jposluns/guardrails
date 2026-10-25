@@ -47,8 +47,93 @@ the doctor and the resume audit report and arm from it):
 
 - DEFAULT (`AIQT_ORCH_REQUIRE_REGISTRY` unset or an explicit off value: `""`, `0`, `false`, `no`,
   `off`, ASCII case-insensitive, matched exactly with nothing stripped): with no registry in its
-  scope the truncation guard is inert and allows every Bash call that passes those pre-scope
-  checks. A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
+  scope the truncation guard denies nothing and allows every Bash call that passes those pre-scope
+  checks. It allows silently, except that a readable foreground command that detaches work (a bare
+  `&`, or a `setsid` without `-w`, a `nohup` or a `disown` in command position) is allowed with a
+  note naming the tracked background mechanism (`run_in_background`, or a foreground wait); its scan
+  reads a `#` by the in-scope deny's comment rule, so a `#` whose reading depends on context (right
+  after a `)`, as in `x=$(true)#`, or at a word start inside an open `${...}` or backquote
+  substitution, as in `echo ${x:- #} & job`) draws the note rather than being read as a comment; a
+  scan that ends inside an open quote reads as unreadable and draws the note too, never a silent
+  allow, and so does a backslash-newline line continuation anywhere outside a single-quoted span,
+  wherever the scan meets it (bash removes the pair before it tokenizes, so any token can be split
+  across one, a `<(` or `>(` process-substitution opener included; a pair inside single quotes, a
+  single-quoted span inside a double-quoted substitution included, is literal data to bash and stays
+  silent; the rule holds as far as the scan reads quotes, so where its quote reading diverges from
+  bash's, as in the disclosed ANSI-C false allow, a continuation can sit in text the scan reads as
+  quoted and is missed with the rest of that divergence); it
+  skips here-document bodies opened at the outer quoting level, while no parenthesis, `${...}` or
+  backquote substitution is open, and arithmetic, which the in-scope
+  deny still reads as code (a `<<` met inside a double-quoted command or backquote substitution, the
+  commit-message form, draws the note at the operator itself, whatever the body holds, as a
+  best-effort rule: bash reads such a body under its own here-document rules, while reading it as
+  double-quoted text let a stray body quote shift the scan's quote state onto a later real `&`, a
+  silent miss confirmed against bash; the scan tracks quotes and parentheses inside such a
+  substitution only approximately, so any shape whose quote or parenthesis state it misreads can
+  leave a real background operator unnoted, for example a nested double-quoted string, as in
+  `: "$(cat "-" <<'EOF'` or `"$(x="a"; cat <<'EOF'`, a single-quoted span holding a double quote,
+  as in `echo "$(echo 'x"y')" & job # '`, a case pattern's close paren, as in
+  `: "$(case a in a) cat <<'EOF'`, or a close paren inside `${...}`, as in
+  `: "$(echo ${y%)}; cat <<'EOF'`; these examples are not a complete list), and passes over a redirect
+  operator and its target without losing the command position (a here-string `<<<`, the noclobber
+  `>|`, a named descriptor such as `{fd}>`, a redirect between `setsid` and its wait option, and a
+  `${...}` parameter expansion that is the whole redirect target, read as one word when it is
+  provably simple (a name, then only literal characters up to the first `}`; a literal `{` in a
+  default does not nest, as in bash), all
+  included; a number or `{fd}` before `&>` is a word to bash, never an fd prefix, and is read as
+  one). The scan skips a here-document body or a `${...}` redirect target silently ONLY when the
+  span passes an allow-list: a here-document opened while no parenthesis, `${...}` or backquote
+  substitution is open, under a delimiter whose whole word is letters, digits and `_ . + -`, ended
+  where bash ends it (a blank, a newline, the end of the command, or one of `; & | )`, or a `<` or
+  `>` that opens no process substitution), over a body with no backslash-newline up to its closing
+  line, and a target that opens with a name and holds nothing beyond literal characters. Every
+  other such span draws the same note instead of a silent skip, and never a block: any other
+  delimiter (a quoted, ANSI-C or escaped spelling, one continued with a backslash-newline, one
+  holding a `$`, backquote or brace, such as `<<$(true)` or `<<${x:-a b}`, one with a `(`, `<(` or
+  `>(` glued to it, a quote left open, or no delimiter word at all), a here-document opened while a
+  parenthesis, `${...}` or backquote substitution is open (bash 5.3 ends such a body inside a
+  command or process substitution or backquotes at a line that merely starts with the delimiter
+  when a `)` or a backquote follows it on that line, as in `x=$(cat <<EOF ... EOF)`, and reads the
+  rest of that line as commands, so where such a body ends is unknown; whether such a substitution
+  is open is read from the scan's own count of unquoted `$(`, `<(` and `>(` openers as well as from
+  its nesting stack, because a bare case pattern's `)` pops the stack's parenthesis, as in
+  `x=$(case y in y) :;; esac; cat <<EOF`; the count falls only at a `)` that same stack matches
+  against a `(` on top, so a `)` that is text inside a `${...}` expansion or a backquote span, as
+  in `x=$(echo ${y%)}; ...)`, closes nothing and the substitution stays counted open to the end of
+  the command, and once a `case` keyword has been read in command
+  position no `)` is counted as closing a substitution, so a here-document after a closed one in
+  such a command draws the note too, an over-note), a body with a
+  backslash-newline
+  up to its closing line (bash joins it before matching that line), a `${...}` target left
+  unclosed, not opened by a name (a bash 5.3 `${ cmd; }` or `${| cmd; }` command substitution
+  included) or holding any quote, backslash, `$`, backquote, `<` or `>`, and any further `${` in a
+  redirect target. A scan that ends with an opened construct still open draws the note too: an
+  unterminated here-document body, a here-document opener with no body line, an unclosed
+  parenthesis, `${...}` or backquote substitution, or a trailing backslash that escapes nothing
+  (bash would still be reading input there, or rejects the command, so nothing the open construct
+  holds was checked; a substitution whose `(` the scan already read as closed at a `)` that closes
+  nothing to bash, such as a bare case pattern's, is not seen by that end check, a disclosed miss
+  when nothing after it opens a here-document or detaches).
+  Command position includes the word after a case pattern's `)`, parenthesised
+  (`(pat)`) or bare, and a function body the command itself defines (`f() { ...; }` or
+  `function f { ...; }`); a detacher renamed by an alias or by a function defined outside the
+  command is still not seen, and neither is one after an unquoted expansion as the command word
+  (`$SUDO setsid -f job`: an empty expansion vanishes to bash, which runs the word after it as the
+  command, while the scan reads that word as an argument). The excluded characters are the ones known to let bash read further or run a
+  command there; nothing shows the list is complete, which is why the rules allow rather than deny.
+  Outside registry scope this scan only ever notes; where it is unsure it over-notes rather than
+  misses, apart from the known misses the manifest residue lists. No command content makes the scan
+  deny or raise. The guard's fail-closed paths outside registry scope are the ones that do not read
+  the command: a hook payload on stdin that is not a readable JSON object, and a handler crash,
+  each exit 2; a `tool_name` or a Bash `cwd` that fails the pre-scope checks above is denied; and
+  the dispatcher's 8-second deadline, disclosed in the manifest residue, exits 2. A malformed
+  `tool_input` (missing, null or not an object, a `command` that is missing or not a string, or a
+  `run_in_background` that is present and not a real boolean, such as the string `"true"`) is
+  allowed WITH A NOTE naming the field the guard could not read, never silently and never a deny:
+  no note scan runs on those shapes, so a detach they carry is still not named, but ignorance is
+  no longer read as clean. A readable background dispatch (`run_in_background` exactly the boolean
+  `true`) stays the silent allow outside registry scope.
+  A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
   `.aiqt` directory the guard's process lacks search (execute) permission on, such as mode `0600`
   or `0000` for a process those modes bind; a `.aiqt` of mode `0100` evaluates normally for its owner
   where `O_PATH` exists (Linux), because the `O_PATH` open needs no read permission, and for a process

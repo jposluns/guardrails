@@ -153,6 +153,10 @@ def _verdict(result):
     return "unexpected({!r})".format(result)
 
 
+def _fg(command):
+    return {"command": command, "run_in_background": False}
+
+
 def _registry_ceiling(root, probe):
     """Wrap a registry probe of the truncation guard's ancestor walk (aiqt_hooks._orch_dirfd_has_registry)
     so that every directory STRICTLY ABOVE root reads as carrying no registry while every other directory
@@ -9809,15 +9813,685 @@ def _main_isolated(report_path=None):
         check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
         check("trunc/fg-comment-then-detach-denies", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "deny")
         check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
-        # inert BY DEFAULT when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
-        ti = Fixture(tmp, "trunc-inert")
+        # Inside registry scope the deny reads a here-document body and arithmetic as code and does not
+        # read setsid, nohup or disown, exactly as before the out-of-scope note was added: the note's own
+        # scan must not leak into the deny.
+        check("trunc/fg-heredoc-amp-still-denies",
+              _verdict(bg("cat > /tmp/f <<'EOF'\nFix A & B\nEOF", rib=False)), "deny")
+        check("trunc/fg-arith-amp-still-denies", _verdict(bg("echo $(( 6 & 3 ))", rib=False)), "deny")
+        check("trunc/fg-setsid-still-allows", _verdict(bg("setsid long_job", rib=False)), "allow")
+        # With no orchestration registry the guard denies nothing, but a readable foreground command that
+        # detaches work is allowed WITH A NOTE (the reducer's "warn") naming the tracked background
+        # mechanism; every other call stays the silent allow.
+        ti = Fixture(tmp, "trunc-no-registry")
         (ti.root / ".aiqt" / "orchestration.local.json").unlink()
-        check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
+        check("trunc/fg-detach-no-registry-notes", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash",
-                       {"command": "long_job &", "run_in_background": False}))), "allow")
+                       {"command": "long_job &", "run_in_background": False}))), "warn")
+        # The same no-registry fixture: (check id, tool_input, reduced verdict). A foreground command that
+        # detaches work notes ("warn"); the controls stay the silent allow ("allow"). Each control carries an
+        # ampersand or a detach word that a scan ignoring quotes, comments, here-document bodies, arithmetic,
+        # command position (redirect targets included), setsid -w or the background flag would note.
+        for check_id, tool_input, want in (
+                ("trunc/oos-detach-no-space-notes", _fg("long_job&"), "warn"),
+                ("trunc/oos-detach-loop-end-notes", _fg('for d in a b; do run_one "$d"; done &'), "warn"),
+                ("trunc/oos-detach-loop-body-notes", _fg('for d in a b; do run_one "$d" & done'), "warn"),
+                ("trunc/oos-detach-subshell-notes", _fg("( long_job ) &"), "warn"),
+                ("trunc/oos-detach-brace-notes", _fg("{ long_job; } &"), "warn"),
+                ("trunc/oos-detach-redirect-notes", _fg("long_job > /tmp/log 2>&1 &"), "warn"),
+                ("trunc/oos-detach-here-string-notes", _fg('grep foo <<< "$x" &'), "warn"),
+                ("trunc/oos-detach-second-line-notes", _fg("cd /tmp\nlong_job &"), "warn"),
+                ("trunc/oos-detach-after-comment-notes", _fg("echo hi  # note\nsleep 100 &"), "warn"),
+                ("trunc/oos-detach-after-heredoc-notes",
+                 _fg("cat <<EOF\nthe user's file & more\nEOF\nlong_job &"), "warn"),
+                ("trunc/oos-detach-omitted-flag-notes", {"command": "long_job &"}, "warn"),
+                ("trunc/oos-setsid-notes", _fg("setsid long_job"), "warn"),
+                ("trunc/oos-setsid-fork-notes", _fg("setsid -f long_job"), "warn"),
+                ("trunc/oos-nohup-notes", _fg("nohup long_job > /tmp/log 2>&1"), "warn"),
+                ("trunc/oos-disown-notes", _fg("long_job; disown"), "warn"),
+                ("trunc/oos-wrapped-nohup-notes", _fg("timeout 5 nohup long_job"), "warn"),
+                ("trunc/oos-assign-setsid-notes", _fg("X=1 setsid long_job"), "warn"),
+                ("trunc/oos-after-and-setsid-notes", _fg("cd /tmp && setsid long_job"), "warn"),
+                ("trunc/oos-logical-and-allows", _fg("build && test"), "allow"),
+                ("trunc/oos-amp-redirect-allows", _fg("build &> /tmp/o"), "allow"),
+                ("trunc/oos-dup-allows", _fg("build 2>&1"), "allow"),
+                ("trunc/oos-pipe-stderr-allows", _fg("build |& tee /tmp/l"), "allow"),
+                ("trunc/oos-single-quoted-amp-allows", _fg("echo 'a & b'"), "allow"),
+                ("trunc/oos-double-quoted-amp-allows", _fg('echo "a & b"'), "allow"),
+                ("trunc/oos-escaped-amp-allows", _fg("echo a \\& b"), "allow"),
+                ("trunc/oos-comment-amp-allows", _fg("echo done # & comment"), "allow"),
+                # A here-document delimiter that is one plain word is its own delimiter, so the body is
+                # skipped as data (an `&` or a detacher word in it stays silent); a QUOTED delimiter is a
+                # spelling the note scan does not model (bash joins and quote-removes it), so it draws the
+                # note rather than a guessed skip.
+                ("trunc/oos-heredoc-quoted-delim-notes",
+                 _fg("cat > /tmp/f <<'EOF'\nFix A & B\nEOF"), "warn"),
+                ("trunc/oos-heredoc-unquoted-amp-allows",
+                 _fg("cat > /tmp/f <<EOF\nFix A & B\nEOF"), "allow"),
+                ("trunc/oos-heredoc-detach-word-allows", _fg("cat <<EOF\nsetsid x\nEOF"), "allow"),
+                ("trunc/oos-arith-expansion-allows", _fg("echo $(( 6 & 3 ))"), "allow"),
+                ("trunc/oos-arith-command-allows", _fg("(( x = 6 & 3 ))"), "allow"),
+                ("trunc/oos-setsid-wait-allows", _fg("setsid -w long_job"), "allow"),
+                ("trunc/oos-setsid-wait-long-allows", _fg("setsid --wait long_job"), "allow"),
+                ("trunc/oos-detach-word-argument-allows", _fg("git log --grep setsid"), "allow"),
+                ("trunc/oos-detach-word-redirect-target-allows", _fg("echo hi > nohup"), "allow"),
+                # A redirect operator and its target operand leave the pending command position alone, with
+                # a blank between operator and target or not: a leading redirect must not hide the real
+                # command word behind its target, and a spaced redirect target named like a detacher is a
+                # filename, not a command (bash runs long_job in `> nohup long_job`).
+                ("trunc/oos-redirect-target-detacher-name-allows", _fg("> nohup long_job"), "allow"),
+                ("trunc/oos-redirect-first-setsid-notes", _fg("2> /dev/null setsid -f long_job"), "warn"),
+                ("trunc/oos-redirect-first-nohup-notes", _fg("> /tmp/log nohup long_job"), "warn"),
+                ("trunc/oos-redirect-stdin-first-setsid-notes", _fg("< /dev/null setsid long_job"), "warn"),
+                ("trunc/oos-redirect-first-no-space-setsid-notes", _fg("2>/dev/null setsid long_job"), "warn"),
+                ("trunc/oos-redirect-target-no-space-detacher-notes", _fg(">nohup setsid long_job"), "warn"),
+                ("trunc/oos-redirect-pair-first-setsid-notes",
+                 _fg("> /dev/null 2> /tmp/e setsid long_job"), "warn"),
+                ("trunc/oos-redirect-mid-wrapper-nohup-notes",
+                 _fg("timeout 5 > /dev/null nohup long_job"), "warn"),
+                ("trunc/oos-redirect-quoted-target-setsid-notes", _fg("> 'nohup' setsid long_job"), "warn"),
+                # a dup target that is not a number: the blank after `>&` must not end the redirect hold
+                ("trunc/oos-dup-spaced-target-setsid-notes", _fg(">& /dev/null setsid long_job"), "warn"),
+                # A here-string `<<<` is a redirect whose word is its target, never a here-document opener:
+                # the command after the word is still read, and the lines after it are code, not a body.
+                # The escaped `\<` row is the control: bash reads `\<` as a word and `<<EOF` as a real
+                # here-document, so only an unquoted `<` before `<<` stops the opener.
+                ("trunc/oos-here-string-first-setsid-notes", _fg("<<< word setsid long_job"), "warn"),
+                ("trunc/oos-here-string-first-no-space-setsid-notes", _fg("<<<word setsid long_job"), "warn"),
+                ("trunc/oos-here-string-mid-wrapper-setsid-notes", _fg("nice <<< word setsid long_job"),
+                 "warn"),
+                ("trunc/oos-here-string-next-line-detach-notes", _fg("cat <<< word\nlong_job &"), "warn"),
+                ("trunc/oos-here-string-target-detacher-name-allows", _fg("<<< nohup long_job"), "allow"),
+                ("trunc/oos-escaped-lt-heredoc-body-allows", _fg("\\<<<EOF\nsetsid x\nEOF"), "allow"),
+                # The noclobber redirect `>|` is one operator, not a redirect then a pipe: its target named
+                # like a detacher is a filename, and the command after its target is still read. A pipe after
+                # the target still starts a command.
+                ("trunc/oos-noclobber-target-detacher-name-allows", _fg(">| nohup long_job"), "allow"),
+                ("trunc/oos-noclobber-trailing-detacher-name-allows", _fg("echo hi >| nohup"), "allow"),
+                ("trunc/oos-noclobber-first-setsid-notes", _fg(">| /tmp/f setsid long_job"), "warn"),
+                ("trunc/oos-noclobber-fd-first-setsid-notes", _fg("2>| /tmp/e setsid long_job"), "warn"),
+                ("trunc/oos-noclobber-then-pipe-nohup-notes", _fg("echo hi >| /tmp/f | nohup long_job"),
+                 "warn"),
+                # A named descriptor written directly before its operator is part of the redirect; a brace
+                # word with a blank after it is the command itself.
+                ("trunc/oos-named-fd-first-setsid-notes", _fg("{fd}> /tmp/x setsid long_job"), "warn"),
+                ("trunc/oos-brace-word-command-allows", _fg("{fd} setsid long_job"), "allow"),
+                # setsid waits under -w, --wait, or any unique prefix of --wait; --w is the shortest such
+                # prefix (just inside the bound), while `--` ends the options and --waitx is no prefix
+                # (both just outside, so each still notes).
+                ("trunc/oos-setsid-wait-prefix-allows", _fg("setsid --w long_job"), "allow"),
+                ("trunc/oos-setsid-double-dash-notes", _fg("setsid -- long_job"), "warn"),
+                ("trunc/oos-setsid-wait-nonprefix-notes", _fg("setsid --waitx long_job"), "warn"),
+                # bash removes a redirect from setsid's argument list, so a redirect between setsid and its
+                # wait option must be passed over while the options are read: `-w` after a redirect still
+                # makes setsid wait (allow), while a redirect before a non-waiting setsid still notes.
+                ("trunc/oos-setsid-redirect-then-wait-allows",
+                 _fg("setsid > /dev/null -w long_job"), "allow"),
+                ("trunc/oos-setsid-redirect-then-nonwait-notes",
+                 _fg("setsid > /dev/null -f long_job"), "warn"),
+                # A `${...}` parameter expansion that is the whole redirect target is ONE word to bash, so
+                # its inner blank does not end the operand: the command after it is still read (here setsid
+                # is noted), while a detacher word that sits INSIDE such an expansion is data, not a
+                # command: without the one-word consumption the inner `setsid` reads as a command word and
+                # draws a false note.
+                ("trunc/oos-redirect-param-expansion-target-setsid-notes",
+                 _fg("x=/dev/null; > ${x:-a b} setsid -f long_job"), "warn"),
+                ("trunc/oos-redirect-param-expansion-detacher-data-allows",
+                 _fg("> ${x:-a setsid b} echo done"), "allow"),
+                # A literal `{` in a default does not nest (bash ends the expansion at its matching `}`),
+                # so the command after the target is still read. A `${...}` target that is not provably
+                # simple (anything beyond a name and literal characters up to the first `}`) draws the
+                # note: one holding a `$(...)` or backtick command substitution or a `<(...)`/`>(...)`
+                # process substitution (bash runs each even in a redirect target), one whose quoting can
+                # hide a substitution (a nested default or quoted span included), and one left unclosed.
+                ("trunc/oos-param-expansion-literal-brace-setsid-notes",
+                 _fg("x=/dev/null; > ${x:-{ b} setsid -f long_job"), "warn"),
+                ("trunc/oos-param-expansion-nested-default-setsid-notes",
+                 _fg("> ${x:-${y:-a b}} setsid -f long_job"), "warn"),
+                ("trunc/oos-param-expansion-cmdsubst-target-notes",
+                 _fg("> ${x:-$(long_job &)} echo done"), "warn"),
+                ("trunc/oos-param-expansion-backtick-target-notes",
+                 _fg("> ${x:-`long_job`} echo done"), "warn"),
+                ("trunc/oos-param-expansion-procsub-out-target-notes",
+                 _fg("> ${x:->(long_job &)} echo done"), "warn"),
+                ("trunc/oos-param-expansion-procsub-in-target-notes",
+                 _fg("> ${x:-<(setsid -f long_job)} echo done"), "warn"),
+                ("trunc/oos-param-expansion-nested-quote-cmdsubst-notes",
+                 _fg("> ${x:-\"${y:-\"'$(long_job &)'\"}\"} echo done"), "warn"),
+                ("trunc/oos-param-expansion-unclosed-target-notes",
+                 _fg("> ${x:-a b setsid -f long_job"), "warn"),
+                # A `${...}` target must open with a name: a blank or `|` after `${` opens a bash 5.3
+                # `${ cmd; }` or `${| cmd; }` command substitution, which runs its command even in a
+                # redirect target. An escaped `\}` does not close the expansion to bash, so a scan that
+                # closed it there would read the rest of bash's expansion as a `#` comment and miss the
+                # real detach after it.
+                ("trunc/oos-param-expansion-funsub-target-notes",
+                 _fg("> ${ long_job & } echo done"), "warn"),
+                ("trunc/oos-param-expansion-funsub-setsid-target-notes",
+                 _fg("> ${ setsid -f long_job; } echo done"), "warn"),
+                ("trunc/oos-param-expansion-valsub-target-notes",
+                 _fg("> ${|long_job & } echo done"), "warn"),
+                ("trunc/oos-param-expansion-funsub-nohup-target-notes",
+                 _fg("2> ${ nohup long_job; } echo done"), "warn"),
+                ("trunc/oos-param-expansion-escaped-brace-comment-notes",
+                 _fg("x=/dev/null; > ${x:-a\\} #} long_job &"), "warn"),
+                # Any further `${` in a redirect target operand notes, unquoted or double-quoted: it is
+                # never read char by char as code. A `$` that opens no brace is still read (control).
+                ("trunc/oos-glued-target-funsub-setsid-notes",
+                 _fg("echo x > a${ setsid -f long_job; }"), "warn"),
+                ("trunc/oos-quoted-target-funsub-setsid-notes",
+                 _fg("> \"${ setsid -f long_job; }\" echo done"), "warn"),
+                ("trunc/oos-quoted-target-plain-param-allows", _fg("echo x > \"$out\""), "allow"),
+                # bash takes an fd prefix before `>` but never before `&>`: `2&>/dev/null` is the word `2`
+                # (setsid's command) then a redirect, so this setsid runs `2` and does not wait on
+                # long_job (note), while the prefixed `>` form really is a redirect and `-w` still waits.
+                ("trunc/oos-number-before-amp-redirect-setsid-notes",
+                 _fg("setsid 2&>/dev/null -w long_job"), "warn"),
+                ("trunc/oos-number-before-gt-redirect-wait-allows",
+                 _fg("setsid 2>/dev/null -w long_job"), "allow"),
+                # Control: a named descriptor before `&>` is a word, not an fd prefix, exactly as the
+                # number form above (bash runs `{fd}` as setsid's command, which does not wait on
+                # long_job), so this setsid still notes.
+                ("trunc/oos-named-fd-before-amp-redirect-setsid-notes",
+                 _fg("setsid {fd}&>/dev/null -w long_job"), "warn"),
+                # A here-document delimiter spec that is not one plain word draws the note rather than a
+                # guessed skip: a backslash in the word is an escape or a line continuation (bash removes
+                # the continuation and reads the joined delimiter, so a raw scan that kept it would skip
+                # the body at an invented delimiter and read the real detach after the body as data).
+                ("trunc/oos-heredoc-continued-delim-notes",
+                 _fg("cat <<EO\\\nF\nbody\nEOF\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-quoted-continued-delim-notes",
+                 _fg("cat <<\"EO\\\nF\"\nbody\nEOF\nlong_job &"), "warn"),
+                # Only a whole word of letters, digits and `_ . + -` is a plain delimiter. bash keeps a
+                # `$(...)`, `$((...))`, `${...}` or backquoted span in the delimiter word, blanks and
+                # metacharacters included, and reads a `>(...)` or an extglob `+(...)` glued to the word as
+                # part of it; a scan that cut the word short would wait for a line that never comes and
+                # read the real detach after bash's delimiter line as body. The plain rows are controls.
+                ("trunc/oos-heredoc-cmdsubst-delim-notes",
+                 _fg("cat <<$(true)\nbody\n$(true)\nlong_job &\n$\n"), "warn"),
+                ("trunc/oos-heredoc-param-blank-delim-notes",
+                 _fg("cat <<${x:-a b}\nbody\n${x:-a b}\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-backtick-blank-delim-notes",
+                 _fg("cat <<`a b`\nbody\n`a b`\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-arith-delim-notes",
+                 _fg("cat <<$((1+1))\nbody\n$((1+1))\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-procsub-glued-delim-notes",
+                 _fg("cat <<EOF>(x y)\nbody\nEOF>(x y)\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-extglob-delim-notes",
+                 _fg("shopt -s extglob\ncat <<a+(b c)\nbody\na+(b c)\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-plain-set-delim-allows",
+                 _fg("cat <<-END.v1+x\n\tFix A & B\n\tEND.v1+x"), "allow"),
+                ("trunc/oos-heredoc-delim-then-redirect-allows",
+                 _fg("cat <<EOF>/tmp/f\nFix A & B\nEOF"), "allow"),
+                # bash joins a backslash-newline in an unquoted body before it matches the closing line,
+                # so `EO\` then `F` closes the body and a raw `x\` then `EOF` does not; either way the raw
+                # line match would skip the real detach, so one anywhere up to the closing line notes. A
+                # continuation after the closing line is live command text, and a live backslash-newline
+                # anywhere outside a single-quoted span notes too (the class is closed as a whole, below);
+                # a backslash before another character stays silent.
+                ("trunc/oos-heredoc-continued-close-line-notes",
+                 _fg("cat <<EOF\nbody\nEO\\\nF\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-continued-body-line-notes",
+                 _fg("cat <<EOF\nx\\\nEOF\nit's\nEOF\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-body-backslash-allows", _fg("cat <<EOF\na\\b & c\nEOF"), "allow"),
+                ("trunc/oos-heredoc-continuation-after-close-notes",
+                 _fg("cat <<EOF\nA & B\nEOF\necho a \\\nb"), "warn"),
+                # An ANSI-C $'...' delimiter is a quoted spelling, so it notes like any other non-plain
+                # delimiter; its body is never skipped at a guessed line, and a body that once shifted
+                # the quote state onto a later real detach now notes at the delimiter instead.
+                ("trunc/oos-ansi-c-delim-notes",
+                 _fg("cat <<$'E\\x4fF'\na & b\nEOF"), "warn"),
+                ("trunc/oos-ansi-c-delim-heredoc-hidden-detach-notes",
+                 _fg("cat <<$'E\\x4fF'\n'\nEOF\nlong_job &"), "warn"),
+                # Controls: an unparseable delimiter spec (a quote left open, or no delimiter word at
+                # all) keeps drawing the note, and so do the ANSI-C escape forms the retired decoder
+                # once handled case by case: a control escape (including one whose uppercase form is two
+                # characters, which once raised out of the handler and blocked), a NUL from any escape
+                # form, and a byte above 0x7F.
+                ("trunc/oos-heredoc-open-quote-delim-notes", _fg("cat <<'EOF\nbody"), "warn"),
+                ("trunc/oos-heredoc-no-word-delim-notes", _fg("cat <<\nlong_job &"), "warn"),
+                ("trunc/oos-ansi-c-ctl-escape-delim-notes",
+                 _fg("cat <<$'\\c\u00df'\ntext\nEOF\n"), "warn"),
+                ("trunc/oos-ansi-c-nul-octal-delim-notes",
+                 _fg("cat <<$'EOF\\0junk'\ntext\nEOF\nlong_job &"), "warn"),
+                ("trunc/oos-ansi-c-nul-hex-delim-notes",
+                 _fg("cat <<$'E\\x00F'\nx\nE\nlong_job &"), "warn"),
+                ("trunc/oos-ansi-c-high-byte-delim-notes",
+                 _fg("cat <<$'E\\xe9F'\nx\nlong_job &"), "warn"),
+                # bash 5.3 ends a here-document body inside a command or process substitution or
+                # backquotes at a line that merely STARTS with the delimiter when a `)` or a backquote
+                # follows it on that line (bash runs the rest of that line as commands, so the
+                # exact-delimiter-line skip would read real commands as data), so a here-document
+                # opened while a parenthesis, `${...}` or backquote substitution is open notes as
+                # unreadable instead of a guessed skip. The close-on-its-own-line row pins the
+                # disclosed over-note for the well-formed shape: nothing in it detaches, and the
+                # note still fires.
+                ("trunc/oos-heredoc-in-cmdsubst-eof-paren-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-in-cmdsubst-eof-spaced-paren-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF )\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-in-backquote-notes",
+                 _fg("msg=`cat <<EOF\nhello\nEOF`\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-in-procsub-notes",
+                 _fg("cat <(cat <<EOF\nhello\nEOF)\nlong_job &\nEOF"), "warn"),
+                ("trunc/oos-heredoc-in-cmdsubst-nohup-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF)\nnohup long_job"), "warn"),
+                ("trunc/oos-heredoc-in-cmdsubst-close-own-line-notes",
+                 _fg("msg=$(cat <<EOF\nhello\nEOF\n)\necho done"), "warn"),
+                ("trunc/oos-heredoc-in-subshell-overnote-notes",
+                 _fg("(cat <<EOF\nhello\nEOF\n)"), "warn"),
+                # A bare case pattern's `)` inside a substitution pops the nesting stack's parenthesis
+                # but cannot close the scan's substitution count, so a here-document after it is still
+                # read as opened inside the substitution (bash ends such a body at a line that merely
+                # starts with the delimiter) and the real detach after it draws the note. The
+                # parenthesised-pattern row is the same shape held open by the stack alone (control).
+                ("trunc/oos-heredoc-after-case-bare-paren-cmdsubst-notes",
+                 _fg("x=$(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-in-case-branch-cmdsubst-setsid-notes",
+                 _fg("x=$(case y in y) cat <<EOF;; esac\nhi\nEOF)\nsetsid -f long_job"), "warn"),
+                ("trunc/oos-heredoc-after-case-bare-paren-procsub-notes",
+                 _fg("cat <(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-after-case-parenthesised-pattern-notes",
+                 _fg("x=$(case y in (y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                # A `)` that is text inside a `${...}` expansion is matched against nothing on the
+                # nesting stack, so it closes nothing on the substitution count either: the
+                # substitution stays counted open, the here-document after the bare case pattern
+                # still notes, and the real detach after it is never silently allowed (a count any
+                # `)` lowered read the substitution as closed there and skipped the body at a wrong
+                # line, so the detach got no note).
+                ("trunc/oos-heredoc-after-expansion-paren-cmdsubst-notes",
+                 _fg("x=$(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"),
+                 "warn"),
+                ("trunc/oos-heredoc-after-expansion-paren-default-notes",
+                 _fg("x=$(echo ${y:-)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"),
+                 "warn"),
+                ("trunc/oos-heredoc-after-expansion-paren-procsub-notes",
+                 _fg("cat <(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"),
+                 "warn"),
+                ("trunc/oos-heredoc-after-expansion-paren-setsid-notes",
+                 _fg("x=$(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\n"
+                     "setsid -f long_job"), "warn"),
+                # A backslash-newline line continuation outside a single-quoted span notes as
+                # unreadable wherever the scan meets it: bash removes the pair before it tokenizes,
+                # so any token can be split across one. A `<` or `>` split from its `(` still opens
+                # a process substitution to bash, whose inner here-document body bash ends at a line
+                # that merely STARTS with the delimiter, exactly the shape the substitution count
+                # guards; a raw per-shape scan of the unjoined text counted no substitution there
+                # and skipped the body at a wrong line, so the real detach after it was silently
+                # allowed (bash 5.3.9 runs it). The split `$(` rows are the same split-opener shape
+                # through the `$` path; the plain-word, double-quoted, comment-line and arithmetic
+                # rows pin the rest of the class (bash does not continue a comment past its newline,
+                # so that row is an over-note, never a miss); the single-quoted row is the boundary
+                # (the pair is literal data to bash and stays silent), and a backslash before
+                # another character stays silent too (the body-backslash row above).
+                ("trunc/oos-split-procsub-opener-heredoc-notes",
+                 _fg("cat <\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-split-procsub-opener-setsid-notes",
+                 _fg("cat <\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nsetsid -f long_job"),
+                 "warn"),
+                ("trunc/oos-split-outsub-opener-heredoc-notes",
+                 _fg("echo hi >\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-split-cmdsubst-dollar-heredoc-notes",
+                 _fg("x=$\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\nlong_job &"), "warn"),
+                ("trunc/oos-split-cmdsubst-dollar-plain-notes",
+                 _fg("x=$\\\n(true)\necho done"), "warn"),
+                ("trunc/oos-continuation-plain-word-notes", _fg("echo a \\\nb"), "warn"),
+                ("trunc/oos-continuation-double-quoted-notes", _fg("echo \"a \\\nb\""), "warn"),
+                ("trunc/oos-continuation-comment-line-notes",
+                 _fg("true # tail \\\necho done"), "warn"),
+                ("trunc/oos-continuation-arith-notes", _fg("echo $((1 + \\\n2))"), "warn"),
+                ("trunc/oos-continuation-single-quoted-allows", _fg("echo 'a \\\nb'"), "allow"),
+                # Disclosed SILENT miss (the manifest residue): an unquoted expansion as the command
+                # word can vanish, so bash runs the word after it as the command; this scan reads
+                # that word as an argument and stays silent.
+                ("trunc/oos-expansion-command-word-detacher-allows",
+                 _fg("$(true) nohup long_job"), "allow"),
+                # A case pattern's `)` restores command position whether the pattern is parenthesised
+                # or bare (bash runs the word after `(x)`), and a function body the command itself
+                # defines is scanned as code (the empty `()` parens and the `function` keyword with
+                # its name each keep command position for the body); a word after a non-empty
+                # substitution's `)` is still an argument (the control row).
+                ("trunc/oos-case-paren-pattern-setsid-notes",
+                 _fg("case x in (x) setsid -f long_job;; esac"), "warn"),
+                ("trunc/oos-case-bare-pattern-setsid-notes",
+                 _fg("case x in x) setsid -f long_job;; esac"), "warn"),
+                ("trunc/oos-func-body-setsid-notes",
+                 _fg("f() { setsid -f long_job; }\nf"), "warn"),
+                ("trunc/oos-func-keyword-body-setsid-notes",
+                 _fg("function f { setsid -f long_job; }\nf"), "warn"),
+                ("trunc/oos-subst-then-word-argument-allows", _fg("echo $(true) nohup"), "allow"),
+                # A `<<` met inside a double-quoted command or backquote substitution (the
+                # commit-message form) draws the note at the operator itself, whatever the body holds,
+                # as a best-effort rule (the miss rows below show shapes it misses): the
+                # earlier reading of such a body as double-quoted text let a stray body quote flip
+                # the scan's quote state so that a later REAL bare `&` outside the substitution read as
+                # quoted text and was silently allowed (bash 5.3 backgrounds the job: the shifted-amp
+                # row's command sets `$!`). The balanced-body row is the disclosed over-note (nothing
+                # in it detaches, and the note still fires); the literal `<<` rows are the boundary:
+                # a `<<` inside plain double quotes with no substitution open, or inside a
+                # single-quoted span within the substitution, is data and stays silent.
+                ("trunc/oos-commit-heredoc-amp-exposed-notes",
+                 _fg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\""), "warn"),
+                ("trunc/oos-commit-heredoc-amp-body-notes",
+                 _fg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\""), "warn"),
+                ("trunc/oos-commit-heredoc-open-quote-notes",
+                 _fg("git commit -m \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"\nlong_job &"), "warn"),
+                ("trunc/oos-dq-subst-heredoc-shifted-amp-notes",
+                 _fg(": \"$(cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+                 "warn"),
+                ("trunc/oos-dq-subst-heredoc-detach-control-notes",
+                 _fg(": \"$(cat <<'EOF'\nSupport 5 screens\nEOF\n)\" & long_job"), "warn"),
+                ("trunc/oos-dq-backquote-heredoc-notes",
+                 _fg("echo \"`cat <<EOF\nhi\nEOF`\""), "warn"),
+                ("trunc/oos-dq-literal-heredoc-chars-allows", _fg("echo \"a << b\""), "allow"),
+                ("trunc/oos-dq-subst-single-quoted-lt-allows",
+                 _fg("echo \"$(echo '<<')\""), "allow"),
+                # Disclosed SILENT misses (the manifest residue): the scan tracks quotes and
+                # parentheses inside a double-quoted substitution only approximately, so a shape
+                # whose quote or parenthesis state it misreads can leave a real `&` unnoted. These
+                # rows are examples, not a complete list: a nested double-quoted string, a double
+                # quote in a single-quoted span, a bare case pattern's `)` and a `)` inside `${...}`
+                # (each `)` pops the scan's substitution stack, so the `<<` is not read as inside a
+                # substitution and the body's stray quote carries the real `&` into quoted text).
+                # bash 5.3.9 backgrounds the job in each (`$!` is set). These rows record the
+                # current outcome (no note), so a scanner change that alters it shows here.
+                ("trunc/oos-dq-subst-nested-dq-heredoc-miss-allows",
+                 _fg(": \"$(cat \"-\" <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+                 "allow"),
+                ("trunc/oos-dq-subst-assign-dq-heredoc-miss-allows",
+                 _fg(": \"$(x=\"a\"; cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+                 "allow"),
+                ("trunc/oos-dq-subst-printf-dq-heredoc-miss-allows",
+                 _fg("git_commit_stub -m \"$(printf '%s\\n' \"Title\"; cat <<'EOF'\nSupport 5\" screens\n"
+                     "EOF\n)\" & long_job # 5\" screens"), "allow"),
+                ("trunc/oos-dq-subst-sq-dq-amp-miss-allows",
+                 _fg("echo \"$(echo 'x\"y')\" & job # '"), "allow"),
+                ("trunc/oos-dq-subst-case-pattern-heredoc-miss-allows",
+                 _fg(": \"$(case a in a) cat <<'EOF'\nSupport 5\" screens\nEOF\n;; esac)\" & long_job"
+                     " # 5\" screens"), "allow"),
+                ("trunc/oos-dq-subst-param-paren-heredoc-miss-allows",
+                 _fg(": \"$(echo ${y%)}; cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job"
+                     " # 5\" screens"), "allow"),
+                # A backslash inside a single-quoted span within a double-quoted substitution is
+                # literal data to bash (bash prints the pair as written), so a backslash-newline
+                # there stays silent; outside that span, inside the same substitution, it is a live
+                # continuation and notes.
+                ("trunc/oos-dq-subst-sq-continuation-allows",
+                 _fg("echo \"$(echo 'a \\\nb')\""), "allow"),
+                ("trunc/oos-dq-subst-continuation-notes",
+                 _fg("echo \"$(echo a \\\nb)\""), "warn"),
+                # A scan that ends with an opened construct still open notes: an unterminated
+                # here-document body consumes the rest of the command while bash is still reading
+                # here-document input (bash 5.3 reads the trailing `long_job &` as body data, so
+                # nothing after the opener was really checked), a here-document opener with no body
+                # line, an unclosed `$(`, `${` or backquote (bash rejects or waits), and a trailing
+                # backslash that escapes nothing (bash joins it with whatever input follows). Each
+                # once ended the scan with nothing outstanding checked and allowed silently.
+                ("trunc/oos-unterminated-heredoc-notes", _fg("cat <<EOF\nbody"), "warn"),
+                ("trunc/oos-unterminated-heredoc-trailing-detach-notes",
+                 _fg("cat <<EOF\nbody\nlong_job &"), "warn"),
+                ("trunc/oos-heredoc-opener-no-newline-notes", _fg("cat <<EOF"), "warn"),
+                ("trunc/oos-unclosed-cmdsubst-notes", _fg("echo $("), "warn"),
+                ("trunc/oos-unclosed-param-expansion-end-notes", _fg("echo ${x"), "warn"),
+                ("trunc/oos-unclosed-backquote-notes", _fg("echo `true"), "warn"),
+                # The closing backquote pops the `(` from the nesting stack but not from the saved
+                # groups, so only the groups term of the end rule sees this parenthesis still open.
+                ("trunc/oos-unclosed-paren-in-backquote-notes", _fg("echo `(true`"), "warn"),
+                ("trunc/oos-trailing-escape-notes", _fg("echo a\\"), "warn"),
+                ("trunc/oos-plain-allows", _fg("python3 build.py"), "allow"),
+                ("trunc/oos-unbalanced-quote-notes", _fg("echo 'oops & bg"), "warn"),
+                # A readable background dispatch (run_in_background exactly the boolean true) stays
+                # the silent allow; a flag that is present but not a real boolean cannot be read as
+                # foreground or background, so it draws the unreadable-input note instead of the
+                # silent allow it was (the boolean rows are the boundary on each side of it).
+                ("trunc/oos-background-allows",
+                 {"command": "setsid long_job &", "run_in_background": True}, "allow"),
+                ("trunc/oos-flag-not-boolean-notes",
+                 {"command": "long_job &", "run_in_background": "true"}, "warn"),
+                ("trunc/oos-flag-string-false-notes",
+                 {"command": "long_job &", "run_in_background": "false"}, "warn"),
+                ("trunc/oos-flag-null-notes",
+                 {"command": "long_job &", "run_in_background": None}, "warn"),
+                ("trunc/oos-flag-number-notes",
+                 {"command": "long_job &", "run_in_background": 0}, "warn"),
+                ("trunc/oos-missing-command-notes", {}, "warn"),
+                ("trunc/oos-nonstring-command-notes", {"command": 7}, "warn")):
+            check(check_id, _verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", tool_input))), want)
+        _oos = aiqt_hooks.orch_truncation_guard(ti.payload(
+            "PreToolUse", "Bash", {"command": "setsid long_job", "run_in_background": False}))
+        _oos_note = (_oos[1] or {}).get("systemMessage", "")
+        check("trunc/oos-note-names-mechanism",
+              (_verdict(_oos), "run_in_background" in _oos_note, "setsid" in _oos_note), ("warn", True, True))
+        # The unreadable note's text is pinned: it names the causes the scan cannot read with
+        # certainty, including a substitution open or not provably closed, a backslash-newline line
+        # continuation outside a single-quoted span and a scan that ends inside an open quote
+        # (without this pin, reverting the note's wording to an older text that omits those causes
+        # would pass every check).
+        _unr = aiqt_hooks.orch_truncation_guard(ti.payload(
+            "PreToolUse", "Bash", _fg("msg=$(cat <<EOF\nhello\nEOF)\necho done")))
+        _unr_note = (_unr[1] or {}).get("systemMessage", "")
+        check("trunc/oos-unreadable-note-text-pins-causes",
+              (_verdict(_unr),
+               "a here-document opened while a parenthesis, '${...}' or backquote substitution is "
+               "open or not provably closed" in _unr_note,
+               "a backslash-newline line continuation outside a single-quoted "
+               "span, which can split any token" in _unr_note,
+               "a here-document opened inside a double-quoted command substitution" in _unr_note,
+               "a here-document, substitution or escape left open at the end of the command"
+               in _unr_note,
+               "or a scan that ends inside an open quote), so work that detaches and runs on after "
+               "this call returns cannot be ruled out" in _unr_note),
+              ("warn", True, True, True, True, True))
+        # The whole dispatcher, in a child process: a here-document delimiter the note scan cannot read
+        # with certainty (here an ANSI-C escape whose `\c` form once raised out of the handler and
+        # blocked) stays a NOTE with exit 0 outside registry scope: stdout is one JSON object whose keys
+        # are exactly systemMessage, holding non-whitespace text (a structured deny also exits 0 with a
+        # systemMessage, and a top-level decision or a hookSpecificOutput of any type would change what
+        # the platform does, so the whole key set is asserted), and no fail-closed stderr.
+        _ctl_env = {k: v for k, v in os.environ.items()
+                    if k != aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV}
+        _ctl = subprocess.run(
+            [sys.executable, "-I", "-B", aiqt_hooks.__file__, "orch_truncation_guard"],
+            input=json.dumps(ti.payload("PreToolUse", "Bash", {
+                "command": "cat <<$'\\c\u00df'\ntext\nEOF\n", "run_in_background": False})),
+            capture_output=True, text=True, timeout=60, env=_ctl_env)
+        try:
+            _ctl_out = json.loads(_ctl.stdout)
+        except ValueError:
+            _ctl_out = None
+        _ctl_keys = sorted(_ctl_out) if isinstance(_ctl_out, dict) else None
+        _ctl_note = _ctl_out.get("systemMessage") if isinstance(_ctl_out, dict) else None
+        check("trunc/oos-ctl-escape-dispatcher-notes-exit-0",
+              (_ctl.returncode, _ctl_keys, isinstance(_ctl_note, str) and bool(_ctl_note.strip()),
+               "failing closed" in _ctl.stderr),
+              (0, ["systemMessage"], True, False))
+        # Scanner-level: a literal `{` in a `${...}` default ends the target at the first `}` (as bash
+        # does), so the setsid after it is read in command position and named; a depth scan that nested
+        # the literal `{` read the target as unreadable or unclosed and never named it.
+        check("trunc/scan-param-literal-brace-reads-following-setsid",
+              aiqt_hooks._orch_foreground_note_kind("x=/dev/null; > ${x:-{ b} setsid -f long_job"),
+              "setsid")
+        # Scanner-level: a `${...}` redirect target that is not provably simple reports the unreadable
+        # kind itself, never the word after the target: a scan that modelled the nested or quoted span
+        # instead (the retired depth-and-quote walk) consumed it and named the following setsid, so
+        # these rows tell the two apart where the reduced verdict (both "warn") cannot. The same holds
+        # for a quoted here-document delimiter, which the plain-word rule declines rather than models.
+        check("trunc/scan-param-nested-default-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("> ${x:-${y:-a b}} setsid -f long_job"),
+              "unreadable")
+        check("trunc/scan-param-quoted-default-unreadable",
+              aiqt_hooks._orch_foreground_note_kind('x=/dev/null; > ${x:-"a b"} setsid -f long_job'),
+              "unreadable")
+        check("trunc/scan-heredoc-quoted-delim-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("cat > /tmp/f <<'EOF'\nFix A & B\nEOF"),
+              "unreadable")
+        # Scanner-level: a here-document opened inside a command substitution reports the unreadable
+        # kind itself (never "detach" from a guessed body end), and a scan that ends inside an open
+        # quote reports unreadable rather than returning None (the silent allow it once was).
+        check("trunc/scan-heredoc-in-cmdsubst-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("msg=$(cat <<EOF\nhello\nEOF)\nlong_job &"),
+              "unreadable")
+        check("trunc/scan-open-quote-end-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("echo 'oops & bg"),
+              "unreadable")
+        # Scanner-level: the substitution count, not the poppable nesting stack alone, gates the
+        # here-document rule. A bare case pattern's `)` leaves the count up (unreadable); the `)` of
+        # a substitution met before any `case` keyword closes it, so a later here-document is still
+        # skipped silently; after a `case` keyword no `)` is counted as closing, so a later
+        # here-document after a closed substitution notes (the disclosed over-note).
+        check("trunc/scan-heredoc-after-case-bare-paren-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "x=$(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\necho done"),
+              "unreadable")
+        check("trunc/scan-heredoc-after-closed-subst-skips-silently",
+              aiqt_hooks._orch_foreground_note_kind("x=$(true)\ncat <<EOF\nhello & 'hi\nEOF"),
+              None)
+        check("trunc/scan-heredoc-after-case-then-closed-subst-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "case a in a) :;; esac\nx=$(true)\ncat <<EOF\nhi\nEOF"),
+              "unreadable")
+        # Scanner-level: the count falls only at a `)` the nesting stack itself matches against a
+        # `(` on top. A `)` that is text inside a `${...}` expansion closes nothing, so the
+        # substitution stays counted open and the here-document inside it notes (a count any `)`
+        # lowered read it as closed and skipped the body at a wrong line). The closed row is the
+        # boundary: the same expansion inside a substitution the stack does prove closed leaves a
+        # later here-document silently skipped, exactly as one with no `)` in it.
+        check("trunc/scan-heredoc-after-expansion-paren-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "x=$(echo ${y%)}; case z in z) :;; esac; cat <<EOF\nhi\nEOF)\necho done"),
+              "unreadable")
+        check("trunc/scan-heredoc-after-expansion-closed-subst-skips-silently",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "x=$(echo ${y%)}; true)\ncat <<EOF\nhello & 'hi\nEOF"),
+              None)
+        # Scanner-level: a backslash-newline reports the unreadable kind itself, before any other
+        # reading. The split `<(` row was a silent None (the `(` after the raw newline was counted as
+        # no substitution, so the here-document body was skipped at a wrong line past the real
+        # detach), and the split `$(` row read the joined substitution and reported the detach from a
+        # guessed remainder; both now stop at the continuation.
+        check("trunc/scan-split-procsub-opener-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  "cat <\\\n(case y in y) :;; esac; cat <<EOF\nhi\nEOF)\necho done"),
+              "unreadable")
+        check("trunc/scan-continuation-before-detach-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("x=$\\\n(true)\nlong_job &"),
+              "unreadable")
+        # The glued-close emptiness test is pinned to the in-place running-index walk
+        # (_orch_span_blank): the slice it replaced copied the whole enclosed text once per closer,
+        # so nested glued substitutions cost time quadratic in the nesting depth while the manifest
+        # states linear passes, and the timed deadline shape alone cannot pin the walk (the sliced
+        # test stayed under the 1 MB CPU bound when measured). The rows pin the exact semantics the
+        # slice had: an empty span and a spaces-and-tabs span are blank, a newline or any other
+        # character is not (in "x=$( \t)" the span runs from index 4 up to the `)`).
+        _span = getattr(aiqt_hooks, "_orch_span_blank", None)
+        check("trunc/scan-glued-close-running-index-walk",
+              None if _span is None else
+              (_span("x=$( \t)", 4, 6), _span("x=$()", 4, 4),
+               _span("x=$(\n)", 4, 5), _span("x=$(a)", 4, 5)),
+              (True, True, False, False))
+        # The semantics rows above pass with the scan's call site reverted to the old slice (the
+        # helper still exists and answers the same), and with the helper's body reverted to a slice
+        # copy (the slice has the same semantics), so neither revert was red anywhere. This row pins
+        # both, deterministically, with no timing: the scan of a nested glued shape must CALL the
+        # walk once per glued close (a call site reverted to the slice makes zero calls), and the
+        # positions the walk reads over the whole scan, counted through an instrumented command
+        # string (a slice read counts every position it copies), must stay within the command's
+        # length (a walk body reverted to a slice copy reads the whole enclosed span at every close,
+        # quadratic in the nesting depth: about 100,000 positions here against 200 for the walk).
+        _walk_depth = 200
+        _walk_cmd = "x=$(" * _walk_depth + "true" + ")" * _walk_depth
+        _walk_calls = [0]
+        _walk_reads = [0]
+
+        class _ReadCountingStr(str):
+            def __getitem__(self, key):
+                if isinstance(key, slice):
+                    _s, _e, _st = key.indices(len(self))
+                    _walk_reads[0] += len(range(_s, _e, _st))
+                else:
+                    _walk_reads[0] += 1
+                return str.__getitem__(self, key)
+
+        _walk_orig = aiqt_hooks._orch_span_blank
+
+        def _walk_counting(command, start, end):
+            _walk_calls[0] += 1
+            return _walk_orig(_ReadCountingStr(command), start, end)
+
+        try:
+            aiqt_hooks._orch_span_blank = _walk_counting
+            _walk_kind = aiqt_hooks._orch_note_scan(_walk_cmd, False)
+        finally:
+            aiqt_hooks._orch_span_blank = _walk_orig
+        check("trunc/scan-glued-close-walk-called-linear",
+              (_walk_kind, _walk_calls[0], _walk_reads[0] <= len(_walk_cmd)),
+              (None, _walk_depth, True))
+        # Scanner-level kinds for the dq-substitution here-document rule and the open-construct end
+        # rule: each reports the unreadable kind itself (the shifted-amp shape was a silent None at
+        # the head this fix amends, while bash backgrounds the job; the unterminated body consumed
+        # the detach as data and returned None too).
+        check("trunc/scan-dq-subst-heredoc-unreadable",
+              aiqt_hooks._orch_foreground_note_kind(
+                  ": \"$(cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+              "unreadable")
+        check("trunc/scan-unterminated-heredoc-unreadable",
+              aiqt_hooks._orch_foreground_note_kind("cat <<EOF\nbody\nlong_job &"),
+              "unreadable")
+        # The note scan reads a `#` by the in-scope scan's comment rule: a `#` whose reading depends on
+        # context (at a word start inside an open ${...} or backquote substitution, right after a `)`, or
+        # after a blank inside a double-quoted "$(...)") notes as unreadable, where the deny scan denies it.
+        # Before this fix each `#` read as a comment that hid the `&` after it, so the first, second and
+        # fourth rows stayed silent, and the third noted only because the historical word-start rule read
+        # its `#` as text; each row pairs the verdict with the scan's kind, which tells that apart. The
+        # spaced row is the CONTROL: a `#` after a blank with nothing open is a comment, as in bash.
+        for check_id, command in (
+                ("trunc/oos-param-expansion-hash-notes", "echo ${x:- #} & job"),
+                ("trunc/oos-backquote-hash-notes", "echo `true #` & job"),
+                ("trunc/oos-subst-glued-hash-notes", "x=$(true)# & job"),
+                ("trunc/oos-dq-subst-hash-notes", 'echo "$(echo a # "\n)" & job # "')):
+            check(check_id, (_verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", _fg(command)))),
+                aiqt_hooks._orch_foreground_note_kind(command)), ("warn", "unreadable"))
+        check("trunc/oos-subst-spaced-hash-comment-allows", _verdict(aiqt_hooks.orch_truncation_guard(
+            ti.payload("PreToolUse", "Bash", _fg("x=$(true) # & job")))), "allow")
+        # Input this guard cannot read outside registry scope draws the note naming the unreadable
+        # field, never the silent allow it was (a detach such an input carries is never scanned, so
+        # the silent allow read ignorance as clean), and never a deny. The rows cover each unreadable
+        # field (a tool_input that is missing, null or not an object; the command and flag rows are
+        # in the table above), and the note's text is pinned to name the field and the repair.
+        _oos_bad = ti.payload("PreToolUse", "Bash")
+        _oos_bad["tool_input"] = "long_job &"
+        check("trunc/oos-malformed-input-notes", _verdict(aiqt_hooks.orch_truncation_guard(_oos_bad)),
+              "warn")
+        _oos_missing = ti.payload("PreToolUse", "Bash")
+        del _oos_missing["tool_input"]
+        check("trunc/oos-missing-tool-input-notes",
+              _verdict(aiqt_hooks.orch_truncation_guard(_oos_missing)), "warn")
+        _oos_null = ti.payload("PreToolUse", "Bash")
+        _oos_null["tool_input"] = None
+        check("trunc/oos-null-tool-input-notes",
+              _verdict(aiqt_hooks.orch_truncation_guard(_oos_null)), "warn")
+        _oos_array = ti.payload("PreToolUse", "Bash")
+        _oos_array["tool_input"] = ["long_job &"]
+        check("trunc/oos-array-tool-input-notes",
+              _verdict(aiqt_hooks.orch_truncation_guard(_oos_array)), "warn")
+        _bad_note = (aiqt_hooks.orch_truncation_guard(_oos_bad)[1] or {}).get("systemMessage", "")
+        _flag_note = (aiqt_hooks.orch_truncation_guard(ti.payload(
+            "PreToolUse", "Bash",
+            {"command": "long_job &", "run_in_background": "true"}))[1] or {}).get("systemMessage", "")
+        check("trunc/oos-unreadable-input-note-text",
+              ("input could not be read" in _bad_note,
+               "its tool_input is a string, not a JSON object" in _bad_note,
+               "this is a note, not a deny" in _bad_note,
+               "a tool_input object carrying a string command and a boolean run_in_background"
+               in _bad_note,
+               "its run_in_background is a string, not a boolean" in _flag_note),
+              (True, True, True, True, True))
         # REGISTRY-REQUIRED MODE (opt-in, AIQT_ORCH_REQUIRE_REGISTRY): an ABSENT registry DENIES instead
-        # of leaving the guard inert, with a reason naming the mode and its repair; an explicit off value
-        # keeps the default inert allow, and a PRESENT registry behaves identically in both modes.
+        # of the default no-registry outcome (no deny, a readable foreground detach draws only the note),
+        # with a reason naming the mode and its repair; an explicit off value keeps that default outcome,
+        # and a PRESENT registry behaves identically in both modes.
         _rr = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
         _rr_old = os.environ.get(_rr)
         try:
@@ -9828,14 +10502,24 @@ def _main_isolated(report_path=None):
                 "permissionDecisionReason", "")
             check("trunc/registry-required-absent-denies",
                   (_verdict(rr), _rr in rr_reason, "orchestration" in rr_reason), ("deny", True, True))
+            # The reason's default-mode wording states the posture this mode replaces (with no
+            # registry the guard denies nothing), so that sentence is pinned, not only the mode name.
+            check("trunc/registry-required-reason-pins-default-wording",
+                  "instead of the default, in which this guard denies nothing" in rr_reason, True)
+            # The repair sentence's closing clause is pinned too: it restates the default scoping
+            # that unsetting the variable restores, so a reworded reason that drops it fails here.
+            check("trunc/registry-required-reason-pins-restore-wording",
+                  "restore the default scoping (with no registry this guard denies nothing and "
+                  "allows)." in rr_reason, True)
             check("trunc/registry-required-present-plain-allows", _verdict(bg("python3 build.py")),
                   "allow")
             check("trunc/registry-required-present-detach-denies",
                   _verdict(bg("long_job &", rib=False)), "deny")
             os.environ[_rr] = "off"
-            check("trunc/registry-required-off-value-inert", _verdict(aiqt_hooks.orch_truncation_guard(
+            # an explicit off value keeps the default no-registry outcome: no deny, the detach note only
+            check("trunc/registry-required-off-value-notes", _verdict(aiqt_hooks.orch_truncation_guard(
                 ti.payload("PreToolUse", "Bash",
-                           {"command": "long_job &", "run_in_background": False}))), "allow")
+                           {"command": "long_job &", "run_in_background": False}))), "warn")
             # The off values are matched EXACTLY, nothing stripped (ASCII case-insensitive): a comparison that
             # stripped the value first would read a tab, a newline, or an off word wrapped in spaces or
             # no-break spaces as OFF and allow without a registry. Each reads as ON.
@@ -9890,11 +10574,19 @@ def _main_isolated(report_path=None):
         check("trunc/rib-omitted-foreground-detach-denies", raw({"tool_input": {"command": "sleep 5 &"}}),
               "deny")
         # Registry scope, the disclosed residual: BY DEFAULT (this run pops AIQT_ORCH_REQUIRE_REGISTRY) with NO
-        # registry file the guard is inert (malformed input
-        # included), while a PRESENT but unreadable or invalid registry keeps it active (fail-closed).
-        check("trunc/malformed-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
+        # registry file the guard denies nothing (a readable foreground detach draws only the note,
+        # and input it cannot read draws the unreadable-input note, never a deny), while a PRESENT
+        # but unreadable or invalid registry keeps it active (fail-closed).
+        check("trunc/malformed-no-registry-notes", _verdict(aiqt_hooks.orch_truncation_guard(
             {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
-             "tool_input": None})), "allow")
+             "tool_input": None})), "warn")
+        # The doctor's default-mode scope report for a no-registry root is pinned the same way: it
+        # says the guard denies nothing there, and reports no deny.
+        _scope_lines, _scope_denies = aiqt_hooks._orch_guard_scope_report(str(ti.root))
+        check("trunc/doctor-scope-line-pins-denies-nothing",
+              (_scope_denies,
+               any("denies nothing for a Bash call" in line for line in _scope_lines)),
+              (False, True))
         tb = Fixture(tmp, "trunc-badreg")
         (tb.root / ".aiqt" / "orchestration.local.json").write_text("{not json", encoding="utf-8")
         check("trunc/bad-registry-detach-denies", _verdict(aiqt_hooks.orch_truncation_guard(
@@ -10058,7 +10750,9 @@ def _main_isolated(report_path=None):
         bare = tmp / "cwd-bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True,
                        timeout=30)
-        check("trunc/cwd-bare-repo-no-registry-allows", _cwd_case(str(bare))[0], "allow")
+        # nocwd carries a detach (sleep 5 &), so each out-of-scope row below reads the out-of-scope note
+        # ("warn"): an allow, never a deny, and a note that only a no-registry read produces.
+        check("trunc/cwd-bare-repo-no-registry-allows", _cwd_case(str(bare))[0], "warn")
         barein = t.root / "inner-bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(barein)], check=True, capture_output=True,
                        timeout=30)
@@ -10106,7 +10800,7 @@ def _main_isolated(report_path=None):
                                (_git_dubious, "trunc/git-dubious-ownership-no-registry-allows"),
                                (_git_badconfig, "trunc/git-broken-config-no-registry-allows")):
                 aiqt_hooks._recovery_git = _sim
-                check(_row, _cwd_case(str(norig))[0], "allow")
+                check(_row, _cwd_case(str(norig))[0], "warn")
             # the same failing git INSIDE an orchestrated tree: the registry is on the walk, so the guard
             # still applies its rules (the detach denies with the DETACH reason, a plain command allows).
             aiqt_hooks._recovery_git = _git_missing
@@ -10123,7 +10817,7 @@ def _main_isolated(report_path=None):
         cv, cw = _cwd_case(str(t.root / ".git"))
         check("trunc/cwd-inside-git-dir-with-registry-detach-denies",
               (cv, "detaches a child" in cw), ("deny", True))
-        check("trunc/cwd-inside-git-dir-no-registry-allows", _cwd_case(str(norig / ".git"))[0], "allow")
+        check("trunc/cwd-inside-git-dir-no-registry-allows", _cwd_case(str(norig / ".git"))[0], "warn")
         # the walk's own failure DENIES with an actionable fix: an ancestor directory it cannot open (the
         # openat of ".." is patched to refuse, as a root-run self-test reads every directory as readable).
         anc = tmp / "anc-noread"
@@ -10169,7 +10863,7 @@ def _main_isolated(report_path=None):
                                capture_output=True, text=True, timeout=30,
                                env=dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.realpath(str(tmp))))
         check("trunc/cwd-confirmed-outside-repo-allows",
-              (probe.returncode, _cwd_case(str(outside))[0]), (128, "allow"))
+              (probe.returncode, _cwd_case(str(outside))[0]), (128, "warn"))
         # HERMETICITY of every truncation-guard row: a registry ABOVE the fixture root never decides a
         # verdict (before this, a live registry above TMPDIR turned each out-of-scope row above into a
         # deny and let each registry-present row pass on the host's registry instead of its fixture's).
@@ -10811,7 +11505,7 @@ def _main_isolated(report_path=None):
               ((True, "warn", True, True, True), (True, "warn", True, True, True)))
         # ROUND 8, A MISSING GIT TOPLEVEL READS AS ABSENT (decided, not a fault): git names a toplevel that
         # does not exist (core.worktree naming a removed directory). It holds no registry, so the union leg
-        # returns False and the scope is ('none', None): inert by default, and DENIED in registry-required
+        # returns False and the scope is ('none', None): denies nothing by default, and DENIED in registry-required
         # mode with the absent-registry reason (fail-closed there), never the unopenable-toplevel reason.
         _mt_top = aiqt_hooks._recovery_toplevel
         _mt_old = os.environ.get(_doc_env)
@@ -14090,7 +14784,9 @@ def _main_isolated(report_path=None):
           "ALLOWS-WITH-NOTE (reducer 'warn') any other shell syntax or reserved word, DENIES-and-educates a "
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
           "producer's full output and exit status) and a "
-          "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment "
+          "foreground bare-& detach (historically an ASK for both), allows-with-note a readable foreground "
+          "detach where no registry is found (naming the tracked background mechanism; redirect operands "
+          "keep their command position pending), while dropping a word-start `#` comment "
           "and failing a scan that ends inside an open quote toward a deny with its own reason (a quote the "
           "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
           "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "

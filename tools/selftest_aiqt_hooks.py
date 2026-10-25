@@ -3294,6 +3294,23 @@ _DEADLINE_SHAPES = {
         "question": "q" * n, "header": "h", "multiSelect": False,
         "options": [{"label": "a", "description": "b"}, {"label": "c", "description": "d"}]}]}),
     "wakeup_long": lambda n, base: ("ScheduleWakeup", {"prompt": "p" * n, "delaySeconds": 60, "reason": "r"}),
+    "fg_detach_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "long_job &")}),
+    "fg_arith_open": lambda n, base: ("Bash", {"command": _repeat("$((", n)}),
+    "fg_heredocs_amp": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na & b's\nE\n", n)}),
+    "fg_heredoc_ops_open": lambda n, base: ("Bash", {"command": _repeat("cat <<A ", n, "\nx & y")}),
+    "fg_subshells": lambda n, base: ("Bash", {"command": "(" * (n // 2 - 2) + "true" + ")" * (n // 2 - 2)}),
+    # Nested GLUED command substitutions: each `(` sits directly after a `$`, so, unlike the bare
+    # subshell parentheses above, every closer takes the glued branch of the note scan's `)` handling.
+    # That branch once tested the enclosed text for emptiness by slicing it (one copy per closer, so
+    # the characters copied grew with the square of the nesting depth); the running-index test reads
+    # each enclosed position at most once, keeping the scan linear on this shape. The bounds here are
+    # not what pins the running-index test (the sliced test measured about 3.6 s of CPU for both scan
+    # passes at 1 MB, in-process on a 24-core host with Python 3.14.4, 2026-10-24, under that size's
+    # 7 s bound, against about 0.49 s for the running index); the orch-behaviour self-test's
+    # running-index-walk row does.
+    "fg_nested_glued_substs": lambda n, base: ("Bash", {"command": "x=$(" * (n // 5 - 1) + "true"
+                                                        + ")" * (n // 5 - 1)}),
+    "fg_setsid_options": lambda n, base: ("Bash", {"command": "setsid" + _repeat(" -c", n - 6)}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
     # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
@@ -3353,6 +3370,13 @@ _DEADLINE_CASES = {
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
     "write_scope_guard": ("write_content", "write_deep_path"),
 }
+# Cases run from the plain cwd, which no orchestration registry scopes, for a handler the table above runs
+# from the orchestration repository: the truncation guard scans a foreground command there too, for its
+# out-of-scope detach note.
+_DEADLINE_PLAIN_CASES = {
+    "orch_truncation_guard": ("fg_detach_after", "fg_arith_open", "fg_heredocs_amp", "fg_heredoc_ops_open",
+                              "fg_subshells", "fg_nested_glued_substs", "fg_setsid_options"),
+}
 # The (handler, shape) cases whose hazard must still be denied, each within its bound.
 _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
@@ -3360,6 +3384,25 @@ _DEADLINE_DENY_CASES = frozenset((
     ("git_explicit_binding", "breadth_push_after_unbal"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
+# The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
+# a detach or detacher (fg_detach_after, fg_setsid_options), or a construct left open at the end of the
+# scan (the repeated unclosed `$((` openers and the unterminated heredoc body), which the scan reports as
+# unreadable instead of a silent allow.
+_DEADLINE_NOTE_CASES = frozenset((
+    ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
+    ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open")))
+# The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
+# bound: the plain-delimiter heredoc bodies (their `&`
+# and apostrophe are skipped data and every body is closed; a quoted delimiter would note, and its early
+# note would also cut the
+# timing short), the balanced subshells and the nested glued command
+# substitutions are all skipped, provably closed or carry no outer
+# detach, so none draws a note. Pinning the outcome keeps these timing shapes from passing a scanner that
+# mistook one for a detach.
+_DEADLINE_ALLOW_CASES = frozenset((
+    ("orch_truncation_guard", "fg_heredocs_amp"),
+    ("orch_truncation_guard", "fg_subshells"),
+    ("orch_truncation_guard", "fg_nested_glued_substs")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
@@ -3436,7 +3479,36 @@ def _deadline_shape_runs(tmp, sizes):
         for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
                 runs.append((name, shape, size, cwd) + _deadline_shape_case(name, shape, size, cwd))
+    with _no_registry_above(plain):
+        for name, shapes in sorted(_DEADLINE_PLAIN_CASES.items()):
+            for shape in shapes:
+                for size in sorted(sizes):
+                    runs.append((name, shape, size, str(plain))
+                                + _deadline_shape_case(name, shape, size, str(plain)))
     return runs
+
+
+@contextlib.contextmanager
+def _no_registry_above(root):
+    """While the block runs, every directory STRICTLY ABOVE root (matched by device and inode on root's
+    resolved path) reads as carrying no orchestration registry, so a registry on the host above the
+    fixture cannot scope a no-registry case in; root and the directories under it are probed as usual."""
+    above = set()
+    path = os.path.realpath(str(root))
+    while os.path.dirname(path) != path:
+        path = os.path.dirname(path)
+        st = os.stat(path)
+        above.add((st.st_dev, st.st_ino))
+    probe = aiqt_hooks._orch_dirfd_has_registry
+
+    def ceiling(dirfd):
+        st = os.fstat(dirfd)
+        return False if (st.st_dev, st.st_ino) in above else probe(dirfd)
+    aiqt_hooks._orch_dirfd_has_registry = ceiling
+    try:
+        yield
+    finally:
+        aiqt_hooks._orch_dirfd_has_registry = probe
 
 
 def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
@@ -3451,6 +3523,10 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
             wall, _DEADLINE_WALL_BOUND))
     if (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
         problems.append("expected deny, got {}".format(outcome))
+    elif (name, shape) in _DEADLINE_NOTE_CASES and outcome != "allow-note":
+        problems.append("expected allow-note, got {}".format(outcome))
+    elif (name, shape) in _DEADLINE_ALLOW_CASES and outcome != "allow":
+        problems.append("expected allow, got {}".format(outcome))
     elif shape in _DEADLINE_HASH_SHAPES and outcome != _deadline_hash_decision(name, shape, size):
         problems.append("expected {}, got {}".format(_deadline_hash_decision(name, shape, size), outcome))
     elif outcome not in ("allow", "allow-note", "deny"):
@@ -20162,6 +20238,35 @@ def _main_isolated(monitor):
             failures.append("(noask-trunc-note) orch_truncation_guard must ALLOW WITH A NOTE a background "
                             "dispatch whose shell syntax it does not parse (a redirect, no truncating sink) "
                             "on a real repo; got {}".format(_f18_note))
+        # (noask-trunc-out-of-scope-note) with NO orchestration registry, a foreground bare-& detach reaches
+        # the out-of-scope allow-with-note. Falsifiable: the silent allow reads "allow", a deny "deny".
+        _f18_plain = _f18_tmp / "plain"
+        _f18_plain.mkdir()
+        with _no_registry_above(_f18_plain):
+            _f18_oos = _decision_any(aiqt_hooks.orch_truncation_guard, {
+                "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "sleep 1 &", "run_in_background": False}, "cwd": str(_f18_plain)})
+        if _f18_oos != "allow-note":
+            failures.append("(noask-trunc-out-of-scope-note) orch_truncation_guard must ALLOW WITH A NOTE a "
+                            "foreground bare-& detach where no orchestration registry is found; got {}"
+                            .format(_f18_oos))
+        # (noask-trunc-oos-unreadable-input) with NO orchestration registry, input the guard cannot read
+        # draws the unreadable-input note naming the field, never the silent allow it was and never ask
+        # or deny: a tool_input that is not an object, a command that is not a string, and a
+        # run_in_background that is present but not a real boolean, one probe per note site.
+        with _no_registry_above(_f18_plain):
+            _f18_oos_badinput = [
+                _decision_any(aiqt_hooks.orch_truncation_guard, {
+                    "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": _f18_ti, "cwd": str(_f18_plain)})
+                for _f18_ti in ("long_job &",
+                                {"command": 7},
+                                {"command": "long_job &", "run_in_background": "true"})]
+        if _f18_oos_badinput != ["allow-note"] * 3:
+            failures.append("(noask-trunc-oos-unreadable-input) orch_truncation_guard must ALLOW WITH A "
+                            "NOTE an out-of-scope Bash call whose input it cannot read (a non-object "
+                            "tool_input, a non-string command, a non-boolean run_in_background); got {}"
+                            .format(_f18_oos_badinput))
     except (OSError, subprocess.SubprocessError) as _f18_exc:
         failures.append("(noask-orch-fixture) could not build the finding-18 armed orch fixture: {}"
                         .format(_f18_exc))
