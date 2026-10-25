@@ -22,10 +22,23 @@ Checks, each a named guard:
                   child of the document, whose raw source line is byte-for-byte the fixed text,
                   present exactly once with the head before the tail, so a section hidden inside
                   an HTML comment or any other container, whose bytes survive but which never
-                  renders, does not bound the pin checks
+                  renders, does not bound the pin checks; and the section, judged on the same
+                  parse before any spelling count or table read, carries only Markdown whose
+                  source renders as text: raw HTML anywhere in it (a tag, a comment, a processing
+                  instruction, a declaration or a CDATA section, block or inline, matched where
+                  the vendored parser starts one) is refused by name, the way step 8 refuses it,
+                  and so is every other node whose source carries text a reader never sees (a
+                  link reference definition, a link or an image, whose destination, title and
+                  alt text render only as attributes or not at all, a fenced code block whose
+                  info string is more than one bare word, and any node kind that
+                  _pin_section_text_kinds does not name), so every later reading of the section
+                  (the location, table and pack-facts reads) sees only text a reader sees; this
+                  deliberately over-refuses: an adopter cannot keep an HTML comment, a link or an
+                  image in the pin section, even one that hides nothing
   pin-location    the pin sentence, the raw-URL template and the example URL each name the pinned
                   commit exactly once, so a movable name (a branch) in one of those places cannot
-                  hide behind the spelling count elsewhere
+                  hide behind the spelling count elsewhere, and none can sit where a reader never
+                  sees it, because pin-section has refused every such place first
   table-shape     every pipe-led line of the pin section other than the fixed header and the
                   separator is a well-formed table row, and the rows list exactly the seven pinned
                   paths, each once, each digest 64 lowercase hex; a malformed row is a finding,
@@ -75,15 +88,17 @@ Checks, each a named guard:
                   and it keeps the rule that the upgrade check counts every journal entry; a
                   clause of JOURNAL_GRADING_DENIED is refused where the step's visible text or
                   its raw source carries it. Visible text is derived from the vendored HTML
-                  renderer's own output (_visible_from_html): comments and tags drop, character
-                  references decode exactly once, and inline markup (a code span's delimiters,
-                  emphasis markers, link brackets) leaves exactly the text the rendered output
-                  shows, so a clause spelled through a character reference or split by inline
-                  markup is judged as a reader sees it; a link or image destination or title, a
-                  link reference definition and raw HTML never contribute. The clause literals
-                  are rendered through the same pipeline, so both sides of every comparison
-                  carry one form. Code-block content and image alt text render, but only as
-                  literal code and as an attribute, so neither earns required-clause credit,
+                  renderer's own output (_visible_from_html): comments (each ending where the
+                  vendored parser ends one, so `<!-->` and `<!--->` are whole comments) and tags
+                  drop, character references decode exactly once, and inline markup (a code
+                  span's delimiters, emphasis markers, link brackets) leaves exactly the text the
+                  rendered output shows, so a clause spelled through a character reference or
+                  split by inline markup is judged as a reader sees it; a link or image
+                  destination or title, a link reference definition and raw HTML never
+                  contribute. The clause literals are rendered through the same pipeline, so
+                  both sides of every comparison carry one form. Code-block content and image
+                  alt text render, but only as literal code and as an attribute, so neither
+                  earns required-clause credit,
                   while the denied-clause scan reads both, and the step's raw source besides as
                   a backstop, keeping the denial wider than the credit. The rule deliberately
                   over-refuses (a heading spelled with trailing spaces or a closing hash run, a
@@ -382,10 +397,68 @@ def _pin_section(marko, document, prompt_text):
     return prompt_text[raw_start:raw_end], children[head_index:tail_index]
 
 
+# A fenced code block's info string renders only as a class attribute (its first word) or not at
+# all (the rest), so the pin section allows at most one bare word there, a language name, which
+# cannot spell a URL, a table row or a pack fact.
+_FENCE_INFO_WORD_RE = re.compile(r"[A-Za-z0-9_+-]*")
+
+
+def _pin_section_text_kinds(marko):
+    """The node kinds of the vendored parse whose source carries no text beyond markup that the
+    rendered output does not show: headings, paragraphs, blank lines, lists and their items,
+    blockquotes, code blocks, thematic breaks, and inline text, code spans, emphasis, line
+    breaks, backslash escapes and autolinks (an autolink shows its own address as link text).
+    Every other kind is refused in the pin section, so a kind this tuple does not name, including
+    one a later vendored marko adds, fails closed."""
+    block, inline = marko.block, marko.inline
+    return (block.Heading, block.SetextHeading, block.Paragraph, block.BlankLine, block.List,
+            block.ListItem, block.Quote, block.CodeBlock, block.FencedCode, block.ThematicBreak,
+            inline.RawText, inline.CodeSpan, inline.Emphasis, inline.StrongEmphasis,
+            inline.LineBreak, inline.Literal, inline.AutoLink)
+
+
+def _check_pin_section_markup(marko, section_nodes):
+    """The pin section carries only Markdown whose source renders as text, judged on the vendored
+    parse before any spelling count or table read. Raw HTML anywhere in it, block or inline (a
+    tag, a comment, a processing instruction, a declaration or a CDATA section, matched exactly
+    where the vendored parser starts one), is refused by name, as step 8 refuses it: rendered
+    output drops or transforms raw HTML, and a browser shows nothing inside a comment, a script or
+    a style element. Every other node whose kind _pin_section_text_kinds does not name is refused
+    too (a link reference definition, a link or an image, whose destination, title and alt text
+    render only as attributes or not at all), and so is a fenced code block whose info string is
+    more than one bare word. The location, table and pack-facts reads take the section's raw text,
+    so once this holds every byte they can credit is text a reader sees. This over-refuses by
+    design: an HTML comment, a link or an image that hides nothing is refused as well, so an
+    adopter cannot keep one in the pin section. A lookalike the vendored parser reads as text (an
+    opener inside a code span or after a backslash escape, or a bare comment closer in prose)
+    renders as text and is not refused."""
+    text_kinds = _pin_section_text_kinds(marko)
+    for node in _md_walk(section_nodes):
+        _require(not isinstance(node, (marko.block.HTMLBlock, marko.inline.InlineHTML)),
+                 "pin-section",
+                 "the pin section carries raw HTML, an unsupported form here: rendered output "
+                 "drops or transforms raw HTML, so nothing inside it is text a reader sees, while "
+                 "the pin checks read the section's raw text")
+        _require(type(node) in text_kinds, "pin-section",
+                 "the pin section carries a node of kind {}, an unsupported form here: its "
+                 "source holds text the rendered output never shows as text (a destination, "
+                 "title, alt text or definition), while the pin checks read the section's raw "
+                 "text".format(type(node).__name__))
+        if isinstance(node, marko.block.FencedCode):
+            _require(_FENCE_INFO_WORD_RE.fullmatch(node.lang) is not None and not node.extra,
+                     "pin-section",
+                     "the pin section carries a fenced code block whose info string is more "
+                     "than one bare word ({!r}): an info string renders only as an attribute, "
+                     "never as text a reader sees".format(
+                         (node.lang + " " + node.extra).strip()))
+
+
 def _check_pin_locations(section, pin):
     """The three places that must each name the pinned commit: the pin sentence, the raw-URL
     template and the example URL. Counting identical spellings alone is not enough: one of these
-    places could name a branch while the spelling count stays satisfied by text elsewhere."""
+    places could name a branch while the spelling count stays satisfied by text elsewhere. The
+    section's raw text is read here only after _check_pin_section_markup has held it to text a
+    reader sees, so a location hidden from rendering cannot satisfy this check."""
     sentence = _PIN_SENTENCE_RE.findall(section)
     _require(sentence == [pin], "pin-location",
              "the pin sentence must name the pinned commit exactly once; found {}".format(
@@ -402,7 +475,9 @@ def _check_pin_locations(section, pin):
 def _parse_table(section):
     """The pin table as {path: digest}, parsed structurally: every pipe-led line of the pin
     section other than the fixed header and the separator must be a well-formed row, so a
-    malformed row is a finding rather than a line the row pattern silently drops."""
+    malformed row is a finding rather than a line the row pattern silently drops. Like the
+    location check, it reads raw text that _check_pin_section_markup has already held to text a
+    reader sees, so a row hidden from rendering is refused before it could count."""
     rows = []
     malformed = []
     for raw in section.splitlines():
@@ -498,7 +573,8 @@ def _check_history(root, pin, table):
 
 
 def _check_pack_facts(root, section):
-    """The format and version the pin section states match opf/prompt-pack/pack.toml."""
+    """The format and version the pin section states match opf/prompt-pack/pack.toml, read from
+    the section's raw text after _check_pin_section_markup."""
     stated_fmt = re.findall(r"`format = \"([^\"`]+)\"`", section)
     stated_ver = re.findall(r"`version = \"([^\"`]+)\"`", section)
     _require(len(stated_fmt) == 1 and len(stated_ver) == 1, "pack-facts",
@@ -742,11 +818,15 @@ def _check_step8_html(marko, section):
 # The rendered output's own markup, used to derive visible text from the vendored renderer's
 # HTML. The renderer escapes every text and attribute character it emits, so no visible "<"
 # survives to be read as a tag here; raw HTML it passes through verbatim is refused inside step 8
-# before any scan, and elsewhere it is read conservatively (tags dropped, text kept). Its inline
-# tags (a, code, em, strong) wrap text without separating it, so they drop to nothing and a clause
-# split by inline markup reads exactly as rendered; every other tag opens or closes a block (or is
-# a line break), so it reads as a line break and adjacent blocks never glue together.
-_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+# and inside the pin section before any scan, and elsewhere (the whole-prompt spelling count) it
+# is read conservatively (tags dropped, text kept). A comment ends exactly where the vendored
+# inline parser ends one (opf/tools/_vendor/marko/inline.py: `<!-->` and `<!--->` are whole
+# comments, as they are to a browser), so text after either one reads as the visible text it is
+# rather than as part of a comment running on to a later closer. Its inline tags (a, code, em,
+# strong) wrap text without separating it, so they drop to nothing and a clause split by inline
+# markup reads exactly as rendered; every other tag opens or closes a block (or is a line break),
+# so it reads as a line break and adjacent blocks never glue together.
+_HTML_COMMENT_RE = re.compile(r"<!--(?:>|->|.*?-->)", re.DOTALL)
 _HTML_PRE_RE = re.compile(r"<pre>.*?</pre>", re.DOTALL)
 _HTML_IMG_RE = re.compile(r"<img\b[^>]*>")
 _HTML_IMG_ALT_RE = re.compile(r'\balt="([^"]*)"')
@@ -772,10 +852,11 @@ def _render_html(marko, node):
 
 def _visible_from_html(rendered, code_blocks=True, image_alt=True):
     """The text a reader of the rendered output sees, derived from the vendored renderer's own
-    HTML with the standard library: comments drop (nothing inside one renders); code-block
-    content stays only where code_blocks keeps it (it renders literally, but text shown only as
-    code is not the prompt stating a rule, so required-clause credit excludes it); an image
-    contributes its alt text only where image_alt keeps it (HTML shows alt only as an attribute);
+    HTML with the standard library: comments drop (nothing inside one renders), each ending where
+    the vendored parser ends one; code-block content stays only where code_blocks keeps it (it
+    renders literally, but text shown only as code is not the prompt stating a rule, so
+    required-clause credit excludes it); an image contributes its alt text only where image_alt
+    keeps it (HTML shows alt only as an attribute);
     inline tags drop to nothing; every other tag reads as a line break; and character references
     decode exactly once with html.unescape, after tag removal, so a reference the renderer left
     encoded reads as the character a reader sees while text the renderer escaped (a code span's
@@ -868,12 +949,15 @@ def _validate(root):
     ahead of the control-character refusal, which stays inside the journal leg that VALID still
     requires, and they stay sound ahead of it: marko's preprocessing is length-preserving for
     every refused character except a CRLF pair, and a prompt whose parse does not cover its text
-    is CANNOT-EVALUATE at journal-parse, never mis-sliced."""
+    is CANNOT-EVALUATE at journal-parse, never mis-sliced. The pin section's markup rule runs
+    before any spelling count or table read, so every later reading of the section's raw text
+    sees only text a reader sees."""
     root = Path(root)
     prompt_text = _read_regular(root / "opf" / PROMPT_REL, "prompt").decode(
         "utf-8", errors="backslashreplace")
     marko, document = _journal_markdown(prompt_text)
     section, section_nodes = _pin_section(marko, document, prompt_text)
+    _check_pin_section_markup(marko, section_nodes)
     raw_commits = _COMMIT_RE.findall(prompt_text)
     visible_commits = _COMMIT_RE.findall(_rendered_text(marko, document))
     _check_pin_shape(raw_commits, visible_commits)
@@ -1601,16 +1685,103 @@ def _vectors():
         _build_tree(base, extra_text="Historic note: " + "D" * 40 + " was a draft id.")
 
     def example_url_in_html_comment(base):
-        # The example URL wrapped in an HTML comment: its bytes still satisfy the raw location
-        # scan, but the rendered output shows only two pin spellings, so the rendered side of
-        # the spelling count refuses a location a reader never sees. The comment carries an
-        # inner ">", which only the comment rule of _visible_from_html spans, so this fixture
-        # discriminates that rule from the generic tag rule behind it.
+        # The example URL wrapped in an HTML comment: its bytes would still satisfy the raw
+        # location scan, so the pin section's markup rule refuses the comment before any count;
+        # with that rule disabled the rendered side of the spelling count still refuses it (only
+        # two pin spellings render), so no single check covers it.
         root = _build_tree(base)
         _edit_prompt(root, "For example, https://example.invalid/" + _FIXTURE_PIN +
                      "/opf/spec/OPF-SPEC.md.",
                      "<!-- note > For example, https://example.invalid/" + _FIXTURE_PIN +
                      "/opf/spec/OPF-SPEC.md. -->")
+
+    example_url = "https://example.invalid/" + _FIXTURE_PIN + "/opf/spec/OPF-SPEC.md"
+    example_sentence = "For example, " + example_url + "."
+
+    def example_replaced(new, extra_text=None):
+        # The example URL sentence replaced by the given text; extra_text (a spare visible pin
+        # spelling) keeps the rendered spelling count at three where the replacement hides the
+        # example, so only a rule that refuses the hiding form itself can catch it.
+        def build(base):
+            root = _build_tree(base, extra_text=extra_text)
+            _edit_prompt(root, example_sentence, new)
+        return build
+
+    def section_body_in_element(tag):
+        # The whole pin section body inside the given raw HTML element: a browser shows nothing
+        # inside a script or style element, while a reading that drops tags and keeps their text
+        # still finds every location and row, so only the pin section's markup rule refuses it.
+        def build(base):
+            root = _build_tree(base)
+            _edit_prompt(root, _PIN_SECTION_HEAD + "\n\n",
+                         _PIN_SECTION_HEAD + "\n\n<" + tag + ">\n")
+            _edit_prompt(root, "\n\n" + _PIN_SECTION_TAIL,
+                         "\n</" + tag + ">\n\n" + _PIN_SECTION_TAIL)
+        return build
+
+    def table_wrapped(opener, closer):
+        # The whole pin table, header and separator included, between the given opener and
+        # closer lines: every row would still satisfy the raw table read, so only the pin
+        # section's markup rule refuses it.
+        def build(base):
+            root = _build_tree(base)
+            _edit_prompt(root, _TABLE_HEADER, opener + "\n" + _TABLE_HEADER)
+            _edit_prompt(root, "\n\nEach raw URL names the commit:",
+                         "\n" + closer + "\n\nEach raw URL names the commit:")
+        return build
+
+    def section_comment_harmless(base):
+        # An inline HTML comment in the pin section that hides nothing: refused by the pin
+        # section's markup rule alone, so this fixture discriminates that rule's over-refusal.
+        root = _build_tree(base)
+        _edit_prompt(root, "` of the repository.",
+                     "` of the repository. <!-- a note that hides nothing -->")
+
+    def pack_facts_in_fence_info(base):
+        # The pack facts moved into a tilde fence's info string, which renders nothing of them,
+        # while the visible sentence states another version: the raw pack-facts read would still
+        # find exactly one format and one version statement, so only the pin section's markup
+        # rule refuses it.
+        root = _build_tree(base)
+        _edit_prompt(root, '(`format = "opf.prompt-pack/v1"`, `version = "0.5.1"`)',
+                     "(format opf.prompt-pack/v1, version 0.6.0)")
+        _edit_prompt(root, "\n\nThe pack manifest",
+                     '\n\n~~~text `format = "opf.prompt-pack/v1"` `version = "0.5.1"`\nx\n~~~'
+                     "\n\nThe pack manifest")
+
+    def html_lookalikes_render_as_text(base):
+        # A comment opener inside a code span, one after a backslash escape, and a bare comment
+        # closer in prose: the vendored parser starts no raw HTML at any of them, they render as
+        # text a reader sees, and the pin section's markup rule does not refuse them.
+        root = _build_tree(base)
+        _edit_prompt(root, "` of the repository.",
+                     "` of the repository; `<!--` in a code span, \\<!-- after an escape and a "
+                     "bare --> closer all render as text.")
+
+    # A stale commit after an empty comment `<!-->` inside the pin section: the vendored parser
+    # ends that comment at once, so the rendered output shows the entity-built stale spelling,
+    # which a comment pattern running on to the later closer would hide from the visible scan.
+    # The markup rule refuses the comments first; with it disabled, the rendered side of the
+    # spelling comparison still refuses the stale spelling, so no single check covers it.
+    stale_after_empty_comment = stale_in_section(
+        "Older notes name the commit <!--> &#100;" + "d" * 39 + " here. <!-- -->")
+
+    def stale_after_comment_outside_section(opener):
+        # The same stale spelling after the given empty comment outside the pin section, where
+        # raw HTML is read rather than refused: only the comment rule of _visible_from_html,
+        # ending the comment where the vendored parser does, lets the rendered side of the
+        # spelling comparison see and refuse it.
+        def build(base):
+            _build_tree(base, extra_text="Older notes name the commit " + opener + " &#100;" +
+                        "d" * 39 + " here. <!-- -->")
+        return build
+
+    def stale_inside_comment_outside_section(base):
+        # An entity-built stale spelling inside a whole comment outside the pin section, after
+        # an inner ">": nothing of it renders and the raw text never spells 40 hex characters,
+        # so it passes; a reading that ended the comment at the inner ">" (the generic tag rule)
+        # would expose the spelling, so this fixture discriminates the comment rule's span.
+        _build_tree(base, extra_text="Older notes <!-- note > &#100;" + "d" * 39 + " --> end.")
 
     return [
         ("valid-tree", VALID, None, None, valid),
@@ -1790,8 +1961,48 @@ def _vectors():
          "_check_pin_spelling", stale_commit_entity_uppercase),
         ("pin-uppercase-commit-outside-section", VALID, None, None,
          uppercase_commit_outside_section),
-        ("pin-example-url-in-html-comment", INVALID, "pin-shape", "_check_pin_shape",
+        ("pin-example-url-in-html-comment", INVALID, "pin-section", None,
          example_url_in_html_comment),
+        ("pin-section-body-in-script", INVALID, "pin-section", "_check_pin_section_markup",
+         section_body_in_element("script")),
+        ("pin-section-body-in-style", INVALID, "pin-section", "_check_pin_section_markup",
+         section_body_in_element("style")),
+        ("pin-example-url-in-script", INVALID, "pin-section", "_check_pin_section_markup",
+         example_replaced("<script>\n" + example_sentence + "\n</script>")),
+        ("pin-example-url-in-html-comment-spare-mention", INVALID, "pin-section",
+         "_check_pin_section_markup",
+         example_replaced("<!-- " + example_sentence + " -->", extra_text=spare_pin)),
+        ("pin-table-in-html-comment", INVALID, "pin-section", "_check_pin_section_markup",
+         table_wrapped("<!--", "-->")),
+        ("pin-section-comment-harmless", INVALID, "pin-section", "_check_pin_section_markup",
+         section_comment_harmless),
+        ("pin-stale-commit-after-empty-comment", INVALID, "pin-section", None,
+         stale_after_empty_comment),
+        ("pin-stale-commit-after-empty-comment-outside-section", INVALID, "pin-shape",
+         "_check_pin_shape", stale_after_comment_outside_section("<!-->")),
+        ("pin-stale-commit-after-dash-empty-comment-outside-section", INVALID, "pin-shape",
+         "_check_pin_shape", stale_after_comment_outside_section("<!--->")),
+        ("pin-stale-commit-inside-comment-outside-section", VALID, None, None,
+         stale_inside_comment_outside_section),
+        ("pin-example-url-in-link-reference-definition", INVALID, "pin-section",
+         "_check_pin_section_markup",
+         example_replaced("[e]: " + example_url, extra_text=spare_pin)),
+        ("pin-example-url-in-link-destination", INVALID, "pin-section",
+         "_check_pin_section_markup",
+         example_replaced("For example, [the specification](" + example_url + ").",
+                          extra_text=spare_pin)),
+        ("pin-example-url-in-image-alt", INVALID, "pin-section", "_check_pin_section_markup",
+         example_replaced("For example, ![" + example_url + "](x.png).")),
+        ("pin-example-url-in-fence-info-string", INVALID, "pin-section",
+         "_check_pin_section_markup",
+         example_replaced("```" + example_url + "\nx\n```", extra_text=spare_pin)),
+        ("pin-table-in-link-title", INVALID, "pin-section", "_check_pin_section_markup",
+         table_wrapped('[t]: /u\n"', '"')),
+        ("pin-pack-facts-in-fence-info-string", INVALID, "pin-section",
+         "_check_pin_section_markup", pack_facts_in_fence_info),
+        ("pin-example-url-autolink", VALID, None, None,
+         example_replaced("For example, <" + example_url + ">.")),
+        ("pin-html-lookalikes-render-as-text", VALID, None, None, html_lookalikes_render_as_text),
     ]
 
 
