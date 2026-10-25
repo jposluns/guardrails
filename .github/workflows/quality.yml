@@ -3,12 +3,15 @@ name: Quality
 on:
   pull_request:
     branches: [main]
-    # Quality runs once per merge train, on the train head: only the labeled type schedules it, and
-    # the merge lane applies the merge-train label after each push it makes to the train pull
-    # request. A member push, an open, a reopen, a retarget and a title/body edit schedule nothing
-    # here; before each member push its author runs run_all_checks.sh, the member head's evidence.
-    # ANY label added to a pull request into main starts a full run (CI time, never a pass). A head
-    # with no run has no Quality gates status, which reads as missing, never as passing.
+    # Quality runs once per merge train, on the train head: only the labeled type schedules it. After
+    # each push it makes to the train pull request the merge lane removes the merge-train label and
+    # adds it again, because adding a label the pull request already carries fires no labeled event
+    # (GitHub's behaviour, not verified live here). A member push, an open, a reopen, a retarget and
+    # a title/body edit schedule nothing here, so a member head gets no Quality run at all; before
+    # each member push its author runs run_all_checks.sh, the member head's evidence (a process rule,
+    # not enforced per head). ANY label added to a pull request into main starts a full run (CI time,
+    # never a pass). A head with no run has no Quality gates status, which reads as missing, never as
+    # passing, and ci-status.sh reports it missing (exit 1).
     # no `edited`: it fires on a PR title/body edit AND on a base-branch retarget, and would re-run
     # every job here. The title/body side matters only to the message/metadata leak scan
     # (check_msg_leaks), which runs in msg-leaks.yml on every pull request into main, triggered on
@@ -100,6 +103,8 @@ jobs:
 
       # The local runner requires this same gitleaks version on PATH (its live leg is local-only:
       # the step above installs and verifies the pinned binary here); CI runs the gate's vectors.
+      # The gate reads the pin only from the env: of the step above and refuses GITLEAKS_VERSION
+      # named anywhere else in this file, outside a comment and that step's expansions of it.
       - name: Gitleaks pin self-test
         shell: bash
         run: python3 -I -B tools/check_gitleaks_pin.py --self-test

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8cf4dd83098796523a57b9899ebb0955da3e48436009e579f5e04a48f9f04240"
+tree-sha256 = "5788c1ec9a5bf10ecefc5d47744fec6f93890be7b6bc267894cb68886373fbc2"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 456107
-sha256 = "d08e651c6a3bc27a160225b2e9827f9dbe4b6518aef65404ddfd3e3489624ddb"
+bytes = 456851
+sha256 = "c335bb75fc3289c8b3fb63bd79facbc344174a2964bf7d271c8ad4ddfb6dfcde"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3391,8 +3391,8 @@ sha256 = "8452eefa4ea89f00c6cac593951443ba4e6113cd804655fb040eb3e29d85b833"
 
 [[sources]]
 path = "tools/check_gitleaks_pin.py"
-bytes = 9295
-sha256 = "d74849774ceda53b4c19d63e1f2e89f52a1a9779205ca77c73fe8603f17a0ca8"
+bytes = 16313
+sha256 = "86531e1f0771fd378d681eda79774f6444e88cc3bad54a983a88a3cd4b55adbe"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
@@ -3586,8 +3586,8 @@ sha256 = "7a1d4b43ed1953ae2efb555354f5e2f1661a9fa47ed83459a071abfc0c3f7c75"
 
 [[sources]]
 path = "tools/ci-status.sh"
-bytes = 74465
-sha256 = "7dd82f6e9fb9ecc455cca0bb8a74c470a12425a71bf97b4f3cf1f841a155b5bc"
+bytes = 76282
+sha256 = "53b61cf697de73f38ed1bbd7b3da83e8a107d16af99551651982b2fd70b3ccbf"
 
 [[sources]]
 path = "tools/conformance.py"
@@ -3791,13 +3791,13 @@ sha256 = "12394b5f41c65e553f2cf3786f2ef7919deeec6c03eedc3ebb51c20b0d1676ea"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 108379
-sha256 = "78cfad61bdbf3c7e99860918a38de8014e8edd0724070db0e0117a99b9158224"
+bytes = 108450
+sha256 = "4a6ec38d39c3717122075c408dd4b4385509fe1e1f85956e7603c87fcb3108ad"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
-bytes = 161419
-sha256 = "8fecd6cb8675910f3586b062a426e6a024fbcd9dccb6ab85919a582dc9ae69ca"
+bytes = 164263
+sha256 = "3d0e1a65eb4fe9c81e610ee5e1a8e87735dd7cf8e860d8de9e9145d6ae4b3035"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"

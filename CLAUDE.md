@@ -71,21 +71,27 @@ the Checks API) and never `commits/<sha>/status` (which always reads pending). T
 toward the full pack roster (portability, dogfood and adapter parity, version monotonicity).
 
 Quality runs once per merge train, on the train head. `quality.yml` triggers on the `labeled`
-pull-request type alone, and the merge lane applies the `merge-train` label after each push it makes to
-the train pull request; a member push, open, reopen, retarget or title/body edit schedules no Quality
-run. Run `tools/run_all_checks.sh` before every member push: that local run is the member head's
-evidence, and it fails when gitleaks is not on PATH or reports another version than `quality.yml` pins
-(`tools/check_gitleaks_pin.py`). Any label added to a pull request into main starts a full run. A
-workflow-level concurrency group lets a newer run cancel the older one on the same pull-request head
-branch; each push to main has a group of its own and is never cancelled, and `tools/check_ci_parity.py`
-pins the block. `msg-leaks.yml` still runs on every pull request into main. A head with no Quality run has
-no `Quality gates` status, which reads as missing, never as passing; a second label event while a head's
-run is in flight cancels that run, which `tools/ci-status.sh` reads as a failure of that head, so only a
-refresh push, labelled again, recovers. The maintainer explicitly authorized (2026-10-25) what member
-heads no longer get from CI, each still run once on the train head: the CI-only pull-request legs
-(branch-root and version monotonicity against the base), the hostile `core.autocrlf` byte-canon legs on
-ubuntu and macOS, setup-python's resolution of `3.14` on the runner, evaluation of the merge ref against
-current main in a clean clone, and CI evidence for each intermediate member commit.
+pull-request type alone. After each push it makes to the train pull request, the merge lane removes the
+`merge-train` label and adds it again, because adding a label the pull request already carries fires no
+`labeled` event (GitHub's behaviour, not verified live here). A member push, open, reopen, retarget or
+title/body edit schedules no Quality run, so a member head gets no Quality run at all: every Quality job
+runs once, on the train head. Run `tools/run_all_checks.sh` before every member push: that local run is
+the member head's evidence, and it fails when gitleaks is not on PATH or reports another version than the
+gitleaks step of `quality.yml` pins (`tools/check_gitleaks_pin.py`). Nothing enforces that the local run
+happens: it is a process rule, not enforced per head. Any label added to a pull request into main starts
+a full run. A workflow-level concurrency group lets a newer run cancel the older one on the same
+pull-request head branch; each push to main has a group of its own and is never cancelled, and
+`tools/check_ci_parity.py` pins the block. `msg-leaks.yml` still runs on every pull request into main. A
+head with no Quality run has no `Quality gates` status, which reads as missing, never as passing, and
+`tools/ci-status.sh` reports it missing (exit 1) with or without `--require-base`; a second label event
+while a head's run is in flight cancels that run, which `tools/ci-status.sh` reads as a failure of that
+head, so only a refresh push, labelled again, recovers. The maintainer explicitly authorized (2026-10-25)
+what member heads no longer get from CI, each still run once on the train head: every Quality job. The
+gates in token parity with `tools/run_all_checks.sh` (gitleaks included) and the host-patch suites rest
+on the local run alone; the CI-only pull-request legs (branch-root and version monotonicity against the
+base), the hostile `core.autocrlf` byte-canon legs on ubuntu and macOS, setup-python's resolution of
+`3.14` on the runner, evaluation of the merge ref against current main in a clean clone, and CI evidence
+for each intermediate member commit have no member-head substitute.
 
 CI runs two Python legs. Two required jobs in `.github/workflows/quality.yml`, `opf-host-patch` and
 `git-fixture-env-host-patch`, run the OPF tooling self-test and the four git-fixture-env suites on

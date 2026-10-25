@@ -24,6 +24,9 @@
 # permission (not verified live); a private repository's token also needs Pull requests: Read, or
 # every --wait exits 2.
 #
+# Every invocation requires a completed successful run of the workflow file
+# .github/workflows/quality.yml on the commit (see THE REQUIRED WORKFLOW below).
+#
 # Usage:
 #   tools/ci-status.sh                              # current HEAD, report once
 #   tools/ci-status.sh <sha>                        # a given commit, report once
@@ -41,8 +44,8 @@
 #                                                   # is PATH instead of the default quality.yml
 #
 # Exit codes: 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
-# does not satisfy --require-base, or no conforming completed successful run of the required
-# workflow file under --require-base (report-once refuses at once; --wait refuses after its
+# does not satisfy --require-base, or no completed successful run of the required workflow file
+# (a conforming one under --require-base; report-once refuses at once; --wait refuses after its
 # settle window), a --wait whose head, with no merge into the base shown in its associated pull
 # requests, has no open pull request (still at the last of the probe's reads), only open pull
 # requests into another base, or only open pull requests into the base that GitHub reports
@@ -77,18 +80,18 @@ set -uo pipefail
 # fail-open these options exist to prevent, and a hyphen-led one is a swallowed flag, not a
 # name. A repeated --require-base or --require-workflow is also refused (exit 2), never read
 # last-wins: under last-wins a forgotten earlier value would silently replace the requirement
-# the caller believes is in force. --require-workflow without --require-base is refused too,
-# because alone it would be a silent no-op.
+# the caller believes is in force. --require-workflow without --require-base is refused too, so
+# the workflow file a plain read requires is always quality.yml.
 SHA_IN="HEAD"
 SHA_IN_SET=0
 WAIT=""
 REQUIRE_BASE=""
 REQUIRE_BASE_SET=0
-# The workflow FILE whose conforming completed successful run --require-base additionally
-# demands, matched against each run's recorded workflow path (the runs API's .path), never its
-# display name: any workflow can carry name: Quality, so a name match would let a same-named
-# run from another file stand in. quality.yml is this repository's aggregated workflow, the one
-# required status the merge lane reads.
+# The workflow FILE whose completed successful run every invocation demands (a conforming one
+# under --require-base), matched against each run's recorded workflow path (the runs API's .path),
+# never its display name: any workflow can carry name: Quality, so a name match would let a
+# same-named run from another file stand in. quality.yml is this repository's aggregated workflow,
+# the one required status the merge lane reads.
 REQUIRE_WORKFLOW=".github/workflows/quality.yml"
 REQUIRE_WORKFLOW_SET=0
 EXPECT_VALUE=""
@@ -331,6 +334,18 @@ SETTLE_OBSERVATIONS=5
 # payload plus a complete GitHub workflow YAML, event-filter, and glob implementation; the SHA and
 # repository files alone cannot answer that question for pull_request base branches or paths.
 
+# THE REQUIRED WORKFLOW (every invocation). quality.yml runs on a pull request only when the pull
+# request is labelled, so a head can carry nothing but its msg-leaks.yml run, which would otherwise
+# read green with no Quality evidence at all. Every invocation, with or without --require-base and
+# --wait, therefore requires at least one completed successful run whose workflow FILE is
+# REQUIRE_WORKFLOW (quality.yml unless --require-base names another with --require-workflow), matched
+# inside jq on the run's raw recorded .path, never its display name; under --require-base that run
+# must also conform (see below). Absent one the head reads as missing, never as passing (exit 1,
+# naming the workflow file): report-once refuses on its single snapshot, and --wait keeps polling
+# within the settle window first, because a run can still be registered late on this head. Without
+# --require-base the path is not otherwise validated: a path that is not a string never matches, so
+# such a run cannot be the required one, while the path column stays display-only.
+#
 # THE BASE-BRANCH REQUIREMENT (--require-base BRANCH). The merge lane trusts
 # a green run for a merge into BRANCH only when that run evaluated its pull request against BRANCH: a
 # run that passed while the PR targeted another branch says nothing about a merge into BRANCH, and
@@ -380,8 +395,8 @@ SETTLE_OBSERVATIONS=5
 # BARE repository-relative workflow file path (observed live 2026-10-13 on this repository's runs:
 # exactly .github/workflows/quality.yml, with no ref suffix); that format is observed GitHub
 # behaviour, not a documented contract. Should GitHub ever return another format (an @ref suffix,
-# say), the exact raw-JSON comparison fails for every run, so every --require-base check exits 1
-# and the merge lane is blocked: fail closed, never a pass.
+# say), the exact raw-JSON comparison fails for every run, so every check, with or without
+# --require-base, exits 1 and the merge lane is blocked: fail closed, never a pass.
 # NOT CHECKED (disclosed): only each recorded entry's base.ref is read, never its base.repo or its
 # head.sha, so an entry naming the required branch of another repository reads as conforming;
 # whether GitHub ever records such an entry on a pull_request run is unverified. AVAILABILITY COST
@@ -395,10 +410,11 @@ SETTLE_OBSERVATIONS=5
 # "more", then the page reduced to the fields used here as one compact JSON line. "verdict" receives the
 # head_sha query's pages and the reduced scan pages, re-checks every completeness condition, and emits
 # the run rows. Status, conclusion, the base-requirement verdict (a fixed token: "-", "met" or
-# "unmet") and the required-workflow verdict (a fixed token: "-", "match" or "other") come FIRST
-# in every TSV row, then the base verdict's display detail, then the run's recorded workflow path
-# (display-only; anything but a nonempty string reads as "-", so an empty or non-string path in
-# plain mode can neither shift later columns nor abort the row), then id, name and URL.
+# "unmet") and the required-workflow verdict (a fixed token: "match" or "other", in every mode) come
+# FIRST in every TSV row, then the base verdict's display detail, then the run's recorded workflow
+# path (display-only; anything but a nonempty string reads as "-", so an empty or non-string path in
+# plain mode can neither shift later columns nor abort the row), then id, name and URL. The step
+# mode keeps each run's path in every mode, so a run only the scan sees can still be the required one.
 # The required-workflow match is computed INSIDE jq, on the run's raw JSON .path
 # against the required path passed in as --arg require_workflow, and only the fixed token reaches
 # Bash. An earlier revision compared Bash's @tsv-escaped path column with the unescaped required
@@ -496,8 +512,8 @@ def explained_shift($previous):
 def scan_page_overrun($index):
   .total_count < (100 * $index + (.workflow_runs | length));
 def projection:
-  [.head_sha, .status, .conclusion, .name, .html_url]
-  + (if $require_base == "" then [] else [.event, .path, [.pull_requests[] | .base.ref]] end);
+  [.head_sha, .status, .conclusion, .name, .html_url, .path]
+  + (if $require_base == "" then [] else [.event, [.pull_requests[] | .base.ref]] end);
 def base_requirement:
   if $require_base == "" then ["-", "-"]
   elif .event != "pull_request" then
@@ -512,9 +528,7 @@ def base_requirement:
     ["unmet", "its recorded base is " + ([.pull_requests[].base.ref] | unique | join(", "))]
   end;
 def workflow_requirement:
-  if $require_base == "" then "-"
-  elif .path == $require_workflow then "match"
-  else "other" end;
+  if .path == $require_workflow then "match" else "other" end;
 def display_path:
   if ((.path | type) == "string") and ((.path | length) > 0) then .path else "-" end;
 if $mode == "step" then
@@ -527,8 +541,8 @@ if $mode == "step" then
     | (if terminal_page then "stop" else "more" end),
       ({total_count,
         workflow_runs: [.workflow_runs[]
-                        | {id, head_sha, status, conclusion, name, html_url, created_at}
-                          + (if $require_base == "" then {} else {event, path, pull_requests} end)]}
+                        | {id, head_sha, status, conclusion, name, html_url, created_at, path}
+                          + (if $require_base == "" then {} else {event, pull_requests} end)]}
        | tojson)
   end
 elif $mode != "verdict" then
@@ -641,8 +655,8 @@ report() {
 }
 
 # THE PULL-REQUEST PROBE (--wait only). quality.yml runs on pull requests into main only, for the
-# labeled type alone (the merge lane applies the merge-train label after each push to a train pull
-# request), so only an open, labelled pull request into main gets a Quality run,
+# labeled type alone (after each push to a train pull request the merge lane removes the merge-train
+# label and adds it again), so only an open, labelled pull request into main gets a Quality run,
 # and GitHub's Actions documentation states that a pull_request workflow does not run while the pull
 # request has a merge conflict (not verified live here). So under --wait, before EVERY poll, not only
 # the first, the probe lists the repository's open pull requests and keeps those whose head SHA is
@@ -1083,16 +1097,16 @@ while :; do
     report "$status" "$concl" "$name" "$url"
     run_ids+=("$id")
     # The gating tokens come from the jq program's fixed sets ("-", "met", "unmet" for the base
-    # requirement; "-", "match", "other" for the required workflow), never from a display field;
-    # under the requirement anything other than "met" or "match" fails closed, so an unexpected
+    # requirement; "match", "other" for the required workflow), never from a display field;
+    # anything other than "met" (under --require-base) or "match" fails closed, so an unexpected
     # token never passes. base_detail is display-only (@tsv-escaped); path is display-only too:
     # the required-workflow match is wf_state, computed in jq on the run's raw JSON
-    # .path (validated nonempty under the requirement), never on this escaped column; name stays
+    # .path (validated nonempty under --require-base), never on this escaped column; name stays
     # display-only.
     if [ -n "$REQUIRE_BASE" ] && [ "$base_state" != "met" ]; then
       base_unmet+=("${name}: ${base_detail}")
     fi
-    if [ -n "$REQUIRE_BASE" ] && [ "$base_state" = "met" ] && [ "$status" = "completed" ] \
+    if { [ -z "$REQUIRE_BASE" ] || [ "$base_state" = "met" ]; } && [ "$status" = "completed" ] \
         && [ "$concl" = "success" ] && [ "$wf_state" = "match" ]; then
       require_workflow_met=1
     fi
@@ -1170,19 +1184,23 @@ while :; do
     fi
     echo "RESULT: ${last_summary}; reading again."
   else
-    # THE BASE-BRANCH REQUIREMENT (see above): a conforming run set without a completed successful
-    # run of the required workflow file is unmet (exit 1), but the two modes refuse at different
-    # times. Report-once refuses on its single snapshot. Under --wait a qualifying run can still
-    # be REGISTERED LATE on this same head (re-applying the merge-train label schedules one, and
-    # registration also lags
+    # THE REQUIRED WORKFLOW (see above), in every mode: a run set without a completed successful
+    # run of the required workflow file (a conforming one under --require-base) is missing (exit 1),
+    # but the two modes refuse at different times. Report-once refuses on its single snapshot.
+    # Under --wait a qualifying run can still be REGISTERED LATE on this same head (re-applying
+    # the merge-train label schedules one, and registration also lags
     # the event), so the poll keeps watching and refuses only once the run set has been stable
     # for the whole settle window and still holds no qualifying run. Only a RETAINED
     # nonconforming run (the base_unmet refusal above) needs a NEW head SHA to recover.
     missing_required=0
-    if [ -n "$REQUIRE_BASE" ] && [ "$require_workflow_met" -ne 1 ]; then
+    if [ "$require_workflow_met" -ne 1 ]; then
       missing_required=1
     fi
-    missing_message="RESULT: no completed successful run of the workflow file ${REQUIRE_WORKFLOW} satisfies --require-base ${REQUIRE_BASE}; a conforming run of that workflow file on this head is required for a green verdict (re-applying the merge-train label schedules one on the same head; a refresh push under a new head SHA earns one once the label is applied again)."
+    if [ -n "$REQUIRE_BASE" ]; then
+      missing_message="RESULT: no completed successful run of the workflow file ${REQUIRE_WORKFLOW} satisfies --require-base ${REQUIRE_BASE}; a conforming run of that workflow file on this head is required for a green verdict (re-applying the merge-train label schedules one on the same head; a refresh push under a new head SHA earns one once the label is applied again)."
+    else
+      missing_message="RESULT: no completed successful run of the workflow file ${REQUIRE_WORKFLOW} on this head, so its Quality evidence is missing, not passing; a run of that workflow file on this head is required for a green verdict (re-applying the merge-train label schedules one on a pull-request head; a push to main schedules one for its head)."
+    fi
     if [ "$WAIT" != "--wait" ]; then
       if [ "$missing_required" -eq 1 ]; then
         echo "$missing_message"
