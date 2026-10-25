@@ -250,7 +250,39 @@ or `unattended` (compound annotations such as `attended (ipad); continuous mode`
 are allowed) or it fails closed; the match is word-anchored at the start, never a substring, so `disattended`
 and `not-attended` do not match. A JSON marker must be exactly `{"mode": "<attended|unattended...>"}` (parsed
 strict-exact with a duplicate-key-rejecting hook and no extra keys) or it fails closed. A recognized mode
-whose value begins with the `unattended` token arms the ask blocker. The reader fails CLOSED to the
+whose value begins with the `unattended` token arms the ask blocker's unattended deny; a recognized
+attended-family mode does not disarm it: for a session within the live scope (the yield guard's gate, so
+a co-located worker a holder-scoped lease does not name never inherits the global backlog; under such a
+lease the judgement is off for every session where no holder can be confirmed, a lease file that cannot
+be stat'ed, and, for a non-empty lease the session-id and holder-token checks run on (one classified
+fresh or cannot-evaluate under a declared `max_age_hours`, or, with no horizon declared, every non-empty
+lease whatever its mtime), a lease that cannot be read, a call that carries no session id or a lease
+that names no session, while every other lease shape, an empty lease, a lease that declares no path (an
+absent, empty or non-string path), a lease stale past a declared `max_age_hours` or a lease future-dated
+past the tolerated clock skew under a declared usable `max_age_hours` (an unusable one is cannot-evaluate
+whatever the mtime, so the holder check runs), skips the holder check and a live mode record then keeps
+every session in scope, an id-less caller included, the judgement staying on there, erring toward
+denying), where the
+registry declares a backlog enumerator, a blocking question is judged against the same fresh enumeration
+the yield guard uses (ctx kind `ask`, no wake-naming requirement, counted by its own
+`ask_denials`/`ask_basis` pair in `turn-state.json`, which genuine human input resets exactly as it
+resets the schedule pair) and is denied while actionable items are neither dispatched (waiting on a live
+tracked task) nor blocked by a human decision recorded in the pending-decisions record; the deny names the
+items and the two exits (dispatch them, or record them as blocked by this decision, then re-issue the
+question) and is never cap-relieved, since both exits stay available (a backlog holding both an actionable
+item and a cannot-evaluate item keeps that deny, which then also names the held items, so held work never
+buys relief past work the enumeration still classifies as actionable; a proof-source failure that holds
+every otherwise-actionable item, such as one schema-invalid dispatch-ledger line, an unreadable or
+undeclared pending-decisions record, or a declared attestation register whose validated snapshot is
+absent or stale, or an enumeration failure that hides items, such as a duplicate item id, leaves
+nothing classified actionable, so the cap can still relieve such a shape; each relief attempts a
+forced_unresolved record and a guard-events row, a failed write is reported in the released message,
+and the relief still proceeds); only the cannot-evaluate denies (an
+enumerator error, a declared non-object enumerator, or an unreadable item proof source) carry the schedule
+path's three-denial cap on an unchanged basis, and only while no item is actionable, and the ask blocker's
+manifest residue carries the full
+contract and its residuals (a mode change after the question is asked, work the enumerator does not list,
+and question tools other than AskUserQuestion stay out of its view). The reader fails CLOSED to the
 guards-armed (`unattended`) posture, never silently disarming, when a marker IS present but cannot yield a
 recognized value: every outcome of reading the mode path other than not found or a decoded text (a mode path
 holding a NUL character, or one that is not strict UTF-8 (a lone surrogate, which is also how a
@@ -333,7 +365,8 @@ effect.
 
 A declared `attestations` register is a chained, append-only row file (AT-N ids; the
 mistakes-register machinery under a different prefix: `tools/orch_register.py append --prefix AT`
-writes it and `tools/check_mistakes_register.py` gates it). It is validated at audit cadence (the
+writes it, its first row with `--bootstrap`, which establishes the anchor later appends require,
+and `tools/check_mistakes_register.py` gates it). It is validated at audit cadence (the
 resume audit and `tools/orch_doctor.py --resume-audit`), never synchronously at yield time: the
 validation pass writes `attestations-validated.json`, and the stop guard classifies an external or
 foreign-lease blocker as blocked only when its ref is covered by a fresh validated row (the

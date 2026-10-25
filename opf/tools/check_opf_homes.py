@@ -356,14 +356,33 @@ _CONTRACT = {
         _D('Gitignore is not access control: git add -f can stage ignored state.'),
         'Journals are machine-local even after completion; a clone without them cannot recover those transactions, and requested recovery MUST fail closed on a missing journal.',
         _D('Containment and doctor exclude journals and make no recovery claim; a rogue file there is outside their coverage.'),
-        _D("Under pre-1.3.0 tooling, every store within that tooling's own version ceiling keeps its legacy grading: the homes-2 names are ordinary store paths there, graded, detected, and dispositioned exactly as before, and the pre-1.3.0 doctor's check roster and residuals are unchanged."),
+        _D("Under pre-1.3.0 tooling, a store that has not started an adoption keeps, within that tooling's own version ceiling, its legacy grading: the homes-2 names are ordinary store paths there, graded, detected, and dispositioned exactly as before, and the pre-1.3.0 doctor's check roster and residuals are unchanged for such a store."),
+        _D("A store whose adoption home .working/imported/adoption/ exists has started an adoption and receives the adoption grading from the same pre-1.3.0 tooling: each admitted run's recorded paths are registered, the non-occupying retire, move and migrate rows of its plan (and only those) are its frozen sources, a frozen source whose live bytes still match its plan digest is graded as bounded adoption state while a drifted or vanished source is a containment failure at required (section 11), and the adopting residuals are disclosed in addition to the legacy residuals."),
+        "The doctor MUST decide that a run is admitted, and that its retirement is recorded, from the committed adoption evidence alone, the bundle under .working/imported/adoption/<run-id>/ and the run archive, which travel with every clone, and MUST NOT read the machine-local journal, so a clone without journals grades exactly as the original store.",
+        _D("That evidence check verifies internal consistency: the sealed inventories, plan and approval bound to the run id of the directory they sit in, and the listed bundle, archive and Move-root bytes at their recorded digests (a Move-root row counts only as a move destination the run's own plan records)."),
+        "On homes 1 too, the apply side MUST write each adoption inventory's [adoption] identity table, whose keys are exactly run_id, phase and plan_digest as the bundle layout below defines, when it derives the inventory, and the doctor MUST refuse an adoption inventory whose identity is missing or malformed, names another run, names a phase other than the one its file name carries, or names a plan digest other than the run's proven plan's own (the frozen plan that re-seals its own bytes and that its approval binds), so an inventory copied from another run or phase, an empty retirement record included, never evaluates as this run's record.",
+        "The apply side's bundle verifier, through which opf adopt status reports a run, MUST hold every adoption inventory to that bar against its bundle's own plan.toml: it MUST yield cannot-evaluate for an inventory that names a phase other than the one its file name carries or a plan digest other than that plan's, and, except for an inventory in the recognized legacy format below, which is its named finding, for every inventory of a bundle whose plan.toml is absent, unreadable or not canonical, names another run, or carries a plan_digest that does not re-seal its own bytes, an empty base inventory included (a bundle with no inventory is its own named finding).",
+        "It MUST check that plan's inventory row against the same bytes its seal was proven from.",
+        _D("It does not check the approval's binding, which the doctor's admission checks."),
+        _D("Verification stops at the first finding, a bundle without an inventory or an inventory in the recognized legacy format, so a cannot-evaluate that a later inventory would yield is not reported for that bundle."),
+        _D("A retirement is recorded only by a sealed retirement inventory in the shape the retirement-phase transaction derives from its own create ops: one row per move row of the plan, occupying or not, whose recorded Move destination (its move-file destination) lies beneath .working/archive/moved/, naming that destination at the moved source's plan digest, and nothing else, so the record of a plan without such a move row lists no files."),
+        _D("Those are the bytes the relocation writes: the frozen live source of a non-occupying move, and for an occupying move the committed archive copy the base inventory claims at that same digest."),
+        _D("Retire and migrate preimages are preserved at apply and claimed by the base inventory, never re-listed by the retirement record; that shape also binds the record to its phase, because a base inventory copied to the retirement name lists at least the plan and the approval, which are never Move destinations."),
+        "A retirement row whose path a base inventory row also names is a path claimed twice and MUST yield cannot-evaluate; a listed destination that does not hold its recorded bytes live MUST yield cannot-evaluate, and before a recorded retirement a file at a plan Move destination beneath .working/archive/moved/, occupying or not, MUST be a containment finding, since only the retirement-phase transaction creates that path (containment never grades an explicit destination outside the store).",
+        _D("The whole check detects accidents: an interrupted apply, a hand edit that is non-canonical or that changes listed bytes, and a misplaced or stale record."),
+        _D("It does not detect deliberate forgery: a hand edit that re-emits a canonical, self-consistent record, and any other crafted self-consistent bundle, is outside the accident-detection model, consistent with the rest of OPF."),
         _D('Tooling that carries the section 9.2 ceiling refuses an above-ceiling declaration as a fail-closed INVALID finding; tooling released before that ceiling grades such a store as legacy instead, a disclosed residual of section 9.2.'),
         'Activated 1.3.0 tooling MUST register on homes 1 the imported managed leaves, the adoption archive .working/archive/adoption/<run-id>/, the Move destination .working/archive/moved/, and the evidence bundles .working/imported/<kind>/<run-id>/, all recognized by containment as OPF control area, and MUST add the four section 8.3 imported-series checks to the doctor roster.',
         'C-EVIDENCE-ENUM MUST NOT run or read anything until homes 2 is activated; on homes 1 the section 14.1 completion checks MUST carry the evidence digest verification themselves.',
         _D('The boundary below applies only to a store that declares both homes = 2 and spec_version = "2.0.0" once the tooling activates that generation.'),
         _D('Each evidence bundle .working/imported/<kind>/<run-id>/ carries its own inventories at its root: inventory.toml, plus a new inventory-<phase>.toml for each later phase, where <phase> is a lowercase letter followed by up to 31 lowercase letters or digits.'),
-        _D('Each holds exactly format = "opf.evidence.inventory/v1" and a file array whose rows have exactly path (a canonical store-relative file path spelled from .working/), size (a nonnegative integer), and sha256 (64 lowercase hex digits).'),
-        _D('A row may name a member of its own bundle other than a bundle-root inventory, a default Move destination under .working/archive/moved/, or, for an adoption bundle, a preserved file of the same run, a retire preimage or an archived occupying source, under .working/archive/adoption/<run-id>/.'),
+        _D('Each holds exactly format = "opf.evidence.inventory/v1", a file array and, in an adoption bundle only, the [adoption] identity table below; the file rows have exactly path (a canonical store-relative file path spelled from .working/), size (a nonnegative integer), and sha256 (64 lowercase hex digits).'),
+        _D('A row may name a member of its own bundle other than a bundle-root inventory, a Move destination, default or explicit, under .working/archive/moved/, or, for an adoption bundle, a preserved file of the same run, a retire preimage or an archived occupying source, under .working/archive/adoption/<run-id>/.'),
+        "An adoption bundle's inventory MUST also hold exactly one [adoption] identity table whose keys are exactly run_id, phase and plan_digest: the bundle's own run id, the phase this inventory records, spelled base for inventory.toml and as the file name's <phase> for a later phase, whose name MUST NOT be base, and the run's approved plan's own plan_digest in the sha256: form with 64 lowercase hex digits.",
+        'An inventory of any other kind MUST NOT carry that identity table.',
+        'The apply side MUST write that identity when it derives the inventory.',
+        "Except for an inventory in the recognized legacy format below, which is its named finding, C-EVIDENCE-ENUM MUST yield cannot-evaluate for an adoption inventory whose identity is missing or malformed, names another run, names a phase other than the one its file name carries, or names a plan digest other than its bundle's own sealed plan.toml digest, and for every inventory of an adoption bundle whose plan.toml is absent, unreadable or not canonical, names another run, or carries a plan_digest that does not re-seal its own bytes, so an inventory copied from another run or phase never evaluates as this run's record.",
+        "C-EVIDENCE-ENUM MUST check that plan.toml's inventory row against the same bytes its seal was proven from, so a plan swapped between two reads never combines into a clean result.",
         "The owning writer MUST derive each inventory from the run's transaction record or receipt and MUST publish it exclusively with the retained bytes.",
         'An inventory MUST NOT be rewritten, so a bundle stays immutable and an evidence commit changes only its bundle folder.',
         _D('An inventory is not a journal projection and remains available in a clone without journals.'),
@@ -444,6 +463,10 @@ _CONTRACT = {
         _D('**Parallel branches allocate against the integration base.** The lease serializes writers on one store, but two branches of a store that rides the product repository each start from the same committed counters.toml, so each can claim the same record ID.'),
         "Store files therefore MUST NOT be hand-merged: after a merge conflict on a store path, take the integration base's version of the conflicted store files and redo the authoring operation on that base, which claims the next ID afresh (section 8.8).",
         _D('The byte-reproduction precondition of opf record and opf upgrade refuses only a store file whose bytes are not the canonical serialization of its content, such as one carrying comments or non-canonical formatting.'),
+        _D('The canonical serialization writes U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR inside a string as the escapes \\u2028 and \\u2029; a file that differs from it only by holding either character literally inside a basic string, as files written by earlier tooling do, still passes, reads back as the same values, and is re-spelled with the escapes by its next write.'),
+        _D("A write that would grow a store file past the store reader's size cap refuses instead, before anything is written, so an upgrade or record operation never rewrites a readable store into one the reader refuses."),
+        _D('The DECISIONS.toml machine projection (section 10.5) takes the same re-spelling without a generator-version bump: a projection an earlier tool rendered from a record holding either character differs from the current render in exactly that spelling, and the byte-level view-drift gate reports it as drifted until one re-render re-spells it.'),
+        _D('A projection over records holding neither character renders byte-identically, so a store without these characters sees no drift.'),
         _D('A hand edit or hand merge that leaves canonical bytes passes it undetected, so this integration-base rule is a separate requirement that the precondition does not enforce.'),
         _D('A merge that resolves without a conflict yet duplicates an ID is caught by opf doctor, which checks store-wide ID uniqueness and that every ID lies within its counter (section 8.2).'),
         'A collision MUST NOT be resolved by decrementing a counter or reusing an ID.',
@@ -805,7 +828,7 @@ _CONTRACT = {
         'A fresh-only implementation (section 16.1) MUST NOT use the preserved-legacy-evidence route: it substantiates partial and complete only through an adoption receipt with completion results, and it refuses a partial or complete status in a store that holds no adoption receipt as legacy state under section 16.1, which yields cannot-evaluate instead where it cannot establish whether the store holds one.',
         'The section 16.1 admission check belongs to neither layer above: it MUST run at every posture, and off and warn MUST NOT disable or soften it.',
         'From the recorded approval until its retirement is recorded, a path the approved plan enumerates as a frozen retire, move or migrate source (section 14.2) is bounded adoption state: while its live bytes still match its plan digest, containment MUST report it as migration_incomplete detail rather than failing it, at "none" during a clean start as much as at "partial".',
-        'A digest mismatch (a drifted source) or an unenumerated path MUST remain a containment-gate failure at required; the bounded treatment is never a blanket exemption.',
+        'A digest mismatch (a drifted source), a source that is gone before its retirement is recorded (a vanished source), or an unenumerated path MUST remain a containment-gate failure at required; the bounded treatment is never a blanket exemption.',
         'A formerly occupied destination needs no bounded treatment: its occupying source was archived at apply (section 14.2), the destination is an ordinary managed path from apply onward, and a check that reads the adoption archive, the section 14.1 completion check and import included, MUST fail at required, naming the path, on a missing, unreadable or digest-mismatched archived copy.',
         _D("Adoption coverage (which types are populated, which modules are wired, how much of the project's operational surface has moved into the store) is a report, never a gate: breadth of adoption is a journey, and failing a build over it would train bypasses."),
         'It MUST stay report-only at every posture.',
@@ -953,6 +976,7 @@ _CONTRACT = {
         _D('The reserved children archive/, imported/, staging/, and journals/ are OPF control area.'),
         'Detection MUST NOT surface them as adopter content, an adoption option MUST NOT select them, and an [unmanaged] declaration MUST NOT equal, contain, or lie within them.',
         "Adoption evidence MUST be committed and immutable under .working/imported/adoption/<run-id>/; append-only outcome events retain the receipt's history.",
+        "Every adoption evidence inventory MUST carry the section 4.2 [adoption] identity table, naming its own run id, its phase and the approved plan's plan_digest.",
         _D('In homes 2, transaction records live under .working/journals/adoption/; homes 1 retains its legacy journal paths and completion-carried evidence checks.'),
         'After adoption, containment uses the receipt-bound import_status and the bounded treatment of section 11: a plan-enumerated frozen retire, move or migrate source whose live bytes still match its plan digest MUST be reported rather than failed until its retirement is recorded, whatever the status, and a drifted source MUST fail at required exactly as section 11 defines.',
         'An unregistered path outside that enumerated scope MUST fail containment at required.',
@@ -2179,9 +2203,14 @@ def boundary_self_test():
     vanished = set()
     inventories = {}
 
+    # The one journal read doctor makes: it lists the id reservation home of each kind and reads the
+    # reservation files directly inside one, for the reserved numbers alone.
+    allocation_homes = tuple(".working/journals/{}/allocations".format(kind)
+                             for kind in ("import", "ingest", "adoption", "layout", "preview", "record"))
+
     def listing(_fd, rel):
         listed.append(rel)
-        if rel == ".working/journals" or rel.startswith(".working/journals/"):
+        if (rel == ".working/journals" or rel.startswith(".working/journals/")) and rel not in allocation_homes:
             raise AssertionError("doctor read journals")
         if rel in unreadable or rel in files:
             raise store.StoreError("unreadable or wrong-type input: " + rel)
@@ -2214,6 +2243,9 @@ def boundary_self_test():
         return (copy.deepcopy(inventories[rel]), "ok") if rel in inventories else (None, "absent")
 
     def read_bytes(_fd, rel, rep):
+        if (rel == ".working/journals" or rel.startswith(".working/journals/")) and rel.rsplit("/", 1)[0] not in \
+                allocation_homes:
+            raise AssertionError("doctor read journal bytes outside the reservation files: " + rel)
         if rel in unreadable:
             rep.cant("unreadable " + rel)
             return None, "error"
@@ -2233,6 +2265,24 @@ def boundary_self_test():
 
     def doc(*rows):
         return {"format": "opf.evidence.inventory/v1", "file": list(rows)}
+
+    import _opf_emit
+
+    def sealed_plan(body):
+        # A plan sealed as the planner seals it: plan_digest is the digest of its canonical emission
+        # without that field (spec 4.2, 14.1).
+        digest = "sha256:" + hashlib.sha256(_opf_emit.emit_checked(body).encode("utf-8")).hexdigest()
+        return _opf_emit.emit_checked(dict(body, plan_digest=digest)).encode("utf-8"), digest
+
+    plan_bytes, plan_digest = sealed_plan(dict(format="opf.adoption.plan/v2", run_id=adopt_run))
+
+    def adoc(*rows, phase="base", digest=None):
+        # An adoption bundle's inventory carries the [adoption] identity table (spec 4.2), naming the
+        # bundle's own sealed plan.toml digest unless a vector passes another.
+        out = doc(*rows)
+        out["adoption"] = dict(run_id=adopt_run, phase=phase,
+                               plan_digest=plan_digest if digest is None else digest)
+        return out
 
     def row(path, raw=b"retained"):
         return {"path": path, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
@@ -2280,14 +2330,17 @@ def boundary_self_test():
             source = bundle + "/sources/notes.txt"
             moved = ".working/archive/moved/old/notes.txt"
             receipt = adoption + "/receipt.toml"
+            plan = adoption + "/plan.toml"
             preimage = ".working/archive/adoption/" + adopt_run + "/AGENTS.md"
             members = (source, moved, receipt, preimage)
             for path in members:
                 add(path, b"retained")
-            for inventory, rows in ((bundle + "/inventory.toml", (row(source), row(moved))),
-                                    (adoption + "/inventory.toml", (row(receipt), row(preimage)))):
+            add(plan, plan_bytes)
+            for inventory, built in ((bundle + "/inventory.toml", doc(row(source), row(moved))),
+                                     (adoption + "/inventory.toml",
+                                      adoc(row(receipt), row(preimage), row(plan, plan_bytes)))):
                 add(inventory, b"")
-                inventories[inventory] = doc(*rows)
+                inventories[inventory] = built
             check("evidence-members-match", lambda: not evidence().findings and not evidence().cannot)
             check("evidence-not-containment-graded", lambda: not containment(model=manifest2).findings)
         # Nothing reads a homes-1 store's evidence homes; its containment walk grades them as before.
@@ -2339,26 +2392,131 @@ def boundary_self_test():
             add(probe, b"retained")
             check("evidence-unclaimed-phase-member", lambda: graded(evidence(), probe))
             add(adoption + "/inventory-evidence.toml", b"")
-            inventories[adoption + "/inventory-evidence.toml"] = doc(row(probe))
+            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
             check("evidence-phase-inventory", lambda: not evidence().findings and not evidence().cannot)
+            # The [adoption] identity binds each inventory to its run and its phase (spec 4.2): a
+            # foreign run id, a phase other than the file name's, a later phase named base, a missing
+            # identity, and an identity on a non-adoption inventory are each cannot-evaluate.
+            good_phase = copy.deepcopy(inventories[adoption + "/inventory-evidence.toml"])
+            foreign = adoc(row(probe), phase="evidence")
+            foreign["adoption"] = dict(foreign["adoption"],
+                                           run_id=adopt_run.replace("0123", "4567"))
+            for label, broken in (("foreign-run", foreign),
+                                  ("foreign-phase", adoc(row(probe), phase="completion")),
+                                  ("base-phase-name", adoc(row(probe), phase="base")),
+                                  ("missing-identity", doc(row(probe))),
+                                  ("phase-foreign-plan-digest", adoc(row(probe), phase="evidence",
+                                                                     digest="sha256:" + "0" * 64))):
+                inventories[adoption + "/inventory-evidence.toml"] = broken
+                check("evidence-identity-" + label, lambda: bool(evidence().cannot)
+                      and not evidence().findings)
+            inventories[adoption + "/inventory-evidence.toml"] = good_phase
+            # The plan digest binds each adoption inventory to its bundle's own sealed plan.toml
+            # (spec 4.2): a well-formed foreign digest on the base inventory, a bundle with no plan, an
+            # edited plan whose digest no longer seals it, and a sealed plan of another run each cannot
+            # evaluate, even when every member's row matches its bytes.
+            first = adoption + "/inventory.toml"
+            good_first = copy.deepcopy(inventories[first])
+            inventories[first] = dict(good_first, adoption=dict(good_first["adoption"],
+                                                                plan_digest="sha256:" + "0" * 64))
+            check("evidence-identity-base-foreign-plan-digest", lambda: any(
+                "plan digest" in s for s in evidence().cannot) and not evidence().findings)
+            del files[plan]
+            inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan))
+            check("evidence-identity-missing-plan", lambda: any(
+                "no plan.toml" in s for s in evidence().cannot) and not evidence().findings)
+            edited = plan_bytes.replace(b"opf.adoption.plan/v2", b"opf.adoption.plan/v9")
+            alien_bytes, alien_digest = sealed_plan(dict(format="opf.adoption.plan/v2",
+                                                         run_id=adopt_run.replace("0123", "4567")))
+            for label, raw, digest in (("plan-not-sealed", edited, plan_digest),
+                                       ("plan-of-another-run", alien_bytes, alien_digest)):
+                add(plan, raw)
+                inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
+                                          row(plan, raw), digest=digest)
+                inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence",
+                                                                           digest=digest)
+                check("evidence-identity-" + label, lambda: bool(evidence().cannot)
+                      and not evidence().findings)
+            # Each clause of the plan proof alone (spec 4.2), with every inventory naming the plan's
+            # RECOMPUTED seal, so only that clause refuses: an edited canonical plan whose plan_digest no
+            # longer re-seals it, a sealed plan that is not canonical (a trailing comment), and a plan.toml
+            # that is not a regular file (an unreadable plan proves nothing, never a crash).
+            edited_seal = sealed_plan(dict(format="opf.adoption.plan/v9", run_id=adopt_run))[1]
+            for label, raw, digest, needle in (
+                    ("plan-edited-recomputed-seal", edited, edited_seal, "seals its own bytes"),
+                    ("plan-not-canonical", plan_bytes + b"# trailing comment\n", plan_digest,
+                     "seals its own bytes"),
+                    ("plan-not-regular", plan_bytes, plan_digest, "is unreadable")):
+                add(plan, raw)
+                inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
+                                          row(plan, raw), digest=digest)
+                inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence",
+                                                                           digest=digest)
+                if label == "plan-not-regular":
+                    unreadable.add(plan)
+                check("evidence-identity-" + label, lambda n=needle: any(
+                    "plan.toml" in s and n in s for s in evidence().cannot) and not evidence().findings)
+                unreadable.clear()
+            add(plan, plan_bytes)
+            inventories[first] = good_first
+            inventories[adoption + "/inventory-evidence.toml"] = good_phase
+            check("evidence-identity-plan-restored", lambda: not evidence().findings
+                  and not evidence().cannot)
+            # ONE read of plan.toml per bundle (spec 4.2): plan A is swapped for B (A plus a newline)
+            # between the seal proof's read and the membership check, under a base inventory whose plan
+            # row names B. The seal proof reads A; the row is checked against those same bytes, so the
+            # swap is the plan's digest mismatch, never a clean result built from two reads.
+            swapped = plan_bytes + b"\n"
+            inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
+                                      row(plan, swapped))
+            plan_reads = []
+
+            def swapping_read(_fd, rel, rep):
+                answer = read_bytes(_fd, rel, rep)
+                if rel == plan:
+                    plan_reads.append(answer[0])
+                    files[plan] = swapped
+                return answer
+
+            def swap_between_reads():
+                del plan_reads[:]
+                add(plan, plan_bytes)
+                with patch.object(doctor, "_read_bytes", swapping_read):
+                    report = evidence()
+                return (not report.cannot and any("mismatch" in s and repr(plan) in s for s in report.findings)
+                        and plan_reads == [plan_bytes])
+
+            check("evidence-plan-swapped-between-reads", swap_between_reads)
+            add(plan, plan_bytes)
+            inventories[first] = good_first
+            check("evidence-identity-plan-restored-after-swap", lambda: not evidence().findings
+                  and not evidence().cannot)
+            crossed_kind = doc(row(source), row(moved))
+            crossed_kind["adoption"] = dict(good_phase["adoption"])
+            inventories[bundle + "/inventory.toml"] = crossed_kind
+            check("evidence-identity-foreign-kind", lambda: bool(evidence().cannot)
+                  and not evidence().findings)
+            inventories[bundle + "/inventory.toml"] = doc(row(source), row(moved))
+            check("evidence-identity-restored", lambda: not evidence().findings and not evidence().cannot)
             # A phase inventory never substitutes for a missing inventory.toml: the founding claims are
             # unknown, so the bundle cannot evaluate, even when the phase inventory lists every member.
             first = adoption + "/inventory.toml"
             founding = inventories.pop(first)
             del files[first]
-            inventories[adoption + "/inventory-evidence.toml"] = doc(row(probe), *founding["file"])
+            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), *founding["file"],
+                                                                       phase="evidence")
             check("evidence-phase-without-first-cannot", lambda: any(
                 "no inventory.toml" in s for s in evidence().cannot) and not evidence().findings)
             add(first, b"")
             inventories[first] = founding
-            inventories[adoption + "/inventory-evidence.toml"] = doc(row(probe))
+            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
             check("evidence-phase-restored", lambda: not evidence().findings and not evidence().cannot)
             inventory = bundle + "/inventory.toml"
             good = copy.deepcopy(inventories)
             # A claim on another bundle's member or another run's preimage is refused on its own, so the
             # rightful owner's inventory drops that row here rather than masking it as a duplicate claim.
             # An import bundle claiming a preimage path under its OWN run id is refused by its kind alone.
-            sole = {"cross-bundle": doc(row(preimage)), "foreign-preimage": doc(row(receipt))}
+            sole = {"cross-bundle": adoc(row(preimage)), "foreign-preimage": adoc(row(receipt))}
             own_preimage = ".working/archive/adoption/" + run + "/file"
             # Every malformed or unreadable inventory is cannot-evaluate and grades nothing partially.
             for label, broken in (
@@ -2381,7 +2539,7 @@ def boundary_self_test():
                 inventories[adoption + "/inventory.toml"] = sole.get(label, good[adoption + "/inventory.toml"])
                 check("evidence-malformed-" + label, lambda: bool(evidence().cannot) and not evidence().findings)
             inventories.update(copy.deepcopy(good))
-            inventories[adoption + "/inventory.toml"] = doc(row(receipt), row(preimage), row(moved))
+            inventories[adoption + "/inventory.toml"] = adoc(row(receipt), row(preimage), row(moved))
             check("evidence-cross-duplicate-refused", lambda: bool(evidence().cannot))
             inventories.update(copy.deepcopy(good))
             # An unreadable or vanished inventory leaves its bundle's claims unknown: cannot-evaluate
@@ -2468,8 +2626,15 @@ def boundary_self_test():
           and len(report.checks) == 29)
     check("doctor-dispatches-evidence", lambda: report.checks.get("C-EVIDENCE-ENUM") == "FINDING")
     check("doctor-homes2-residual", lambda: all(r in report.residuals for r in doctor._HOMES2_RESIDUALS))
+    # Homes 2 lists nothing under journals/ but the id reservation home of each kind (the read_bytes mock
+    # refuses any journal byte read outside a reservation file), and a legacy store lists none of it.
     check("doctor-skips-journals", lambda: not contained(report, ".working/journals")
-          and not any(p == ".working/journals" or p.startswith(".working/journals/") for p in homes2_listed))
+          and not any((p == ".working/journals" or p.startswith(".working/journals/"))
+                      and p not in allocation_homes for p in homes2_listed))
+    check("doctor-lists-allocation-homes", lambda: sorted(
+        p for p in homes2_listed if p.startswith(".working/journals/")) == sorted(allocation_homes))
+    check("doctor-legacy-reads-no-reservations", lambda: not any(
+        p == ".working/journals" or p.startswith(".working/journals/") for p in legacy_listed))
     # Activated tooling alone widens nothing: a legacy manifest keeps the legacy roster and residuals.
     with active():
         activated_legacy, _ = dispatch(full_manifest)
@@ -2975,7 +3140,19 @@ def boundary_self_test():
                                                  [dict(op="create", path=reservation_rel)],
                                                  lambda _name: b"")) or ""))
     check("reservation-no-caller-path", lambda: list(inspect.signature(
-        home_journal.reserve_allocation).parameters) == ["cap", "kind", "run_id", "claims"])
+        home_journal.reserve_allocation).parameters) == ["cap", "kind", "run_id", "demand", "expected"])
+    # The seam derives the claims (spec 8.2); a caller states only how many ids it takes per counter
+    # key. The demand grammar is the claims key grammar for the reserving kind, each count in
+    # 1..2**63 - 1, each bound tested just inside, at, and just outside it.
+    for bad in (None, {}, [("BI", 1)], {"BI": 0}, {"BI": -1}, {"BI": True}, {"bi": 1}, {"ZZ": 1},
+                {"imported:BI": 1}, {"BI": 2 ** 63}, {"BI": "1"}):
+        check("reservation-demand-refused-{!r}".format(bad), lambda b=bad: journal_refuses(
+            lambda: home_journal._check_demand("record", b)))
+    check("reservation-demand-bounds", lambda: not journal_refuses(
+        lambda: home_journal._check_demand("record", {"BI": 1, "WL": 2 ** 63 - 1})))
+    check("reservation-import-demand-series", lambda: not journal_refuses(
+        lambda: home_journal._check_demand("import", {"imported:BI": 1, "BI": 1}))
+        and journal_refuses(lambda: home_journal._check_demand("import", {"imported:LF": 1})))
     check("reservation-typed-record", lambda: tomllib.loads(home_journal.reservation_payload(
         "record", record_run, "held-operation", {"WL": 12, "BI": 7}).decode()) == {
         "format": "opf.journal.allocation/v1", "kind": "record", "run_id": record_run,
@@ -3009,8 +3186,11 @@ def boundary_self_test():
                                          ("foreign-run", "record", run)):
             check("reservation-identity-" + label, lambda k=bad_kind, r=bad_run: journal_refuses(
                 lambda: home_journal.reserve_allocation(object(), k, r, {"BI": 1})))
-        check("reservation-claims-before-capability", lambda: "claims" in (refusal(
+        check("reservation-demand-before-capability", lambda: "demand" in (refusal(
             lambda: home_journal.reserve_allocation(object(), "record", record_run, {})) or ""))
+        check("reservation-expected-before-capability", lambda: "claims" in (refusal(
+            lambda: home_journal.reserve_allocation(object(), "record", record_run, {"BI": 1},
+                                                    expected={"BI": 0})) or ""))
     check("reservation-capability-required", lambda: journal_refuses(
         lambda: home_journal.reserve_allocation(object(), "record", record_run, {"BI": 1})))
 
@@ -3018,10 +3198,13 @@ def boundary_self_test():
     def held_root(_cap):
         yield 100
 
-    held = SimpleNamespace(op_id="held-operation")
+    held = SimpleNamespace(op_id="held-operation", machine_rel=".working/toml")
     trace = []
     with patch.object(home_journal, "_held_root", held_root), \
-            patch.object(journal, "ensure_journal_dirs") as mkdirs, \
+            patch.object(home_journal, "_derive_claims",
+                         side_effect=lambda *args: (trace.append("derive"), {"BI": 7})[1]) as derive, \
+            patch.object(journal, "ensure_journal_dirs",
+                         side_effect=lambda *args: trace.append("mkdirs")) as mkdirs, \
             patch.object(journal, "_open_parent", return_value=(106, record_run + ".toml")) as parent, \
             patch.object(journal, "_lstat_at",
                          side_effect=lambda *args: trace.append("existence")) as prior, \
@@ -3038,8 +3221,13 @@ def boundary_self_test():
         # The order is judged on the one recorded trace: garbage retired, THEN the final name
         # judged, THEN publication; call arguments alone cannot show it (fix round 1, codex
         # MEDIUM; claude MINOR-1).
-        check("reservation-garbage-removed-first", lambda: trace == ["garbage", "existence", "publish"]
+        check("reservation-garbage-removed-first", lambda: trace[-3:] == ["garbage", "existence", "publish"]
               and garbage.call_args.args == (106, record_run + ".toml", "id reservation"))
+        # The derivation runs first inside the held scope, before any directory is created, so a
+        # refused derivation writes nothing (spec 8.2: one atomic claim under the store's lock).
+        check("reservation-derived-before-writes", lambda: trace == [
+            "derive", "mkdirs", "garbage", "existence", "publish"]
+            and derive.call_args.args == (100, ".working/toml", "record", record_run, {"BI": 7}))
         check("reservation-published-exact-payload", lambda: reserved.call_args.args ==
               (106, record_run + ".toml", reserved_payload, "id reservation") and reserved_payload ==
               home_journal.reservation_payload("record", record_run, "held-operation", {"BI": 7}))
@@ -3057,6 +3245,18 @@ def boundary_self_test():
             check("reservation-existing-idempotent", lambda: home_journal.reserve_allocation(
                 held, "record", record_run, {"BI": 7}) == reserved_payload
                 and reserved.call_count == 1)
+        # A planned caller's `expected` claims that the derivation no longer matches refuse with the
+        # dedicated error, before any directory is created or anything published.
+        made, published = mkdirs.call_count, reserved.call_count
+
+        def mismatch():
+            try:
+                home_journal.reserve_allocation(held, "record", record_run, {"BI": 7}, expected={"BI": 8})
+            except home_journal.ReservationDerivationChanged as exc:
+                return str(exc)
+            return None
+        check("reservation-expected-mismatch-refused", lambda: "changed from the planned claims" in (
+            mismatch() or "") and mkdirs.call_count == made and reserved.call_count == published)
 
     check("evidence-homes2-roster", lambda: "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS
           and doctor.required_checks(2).index("C-EVIDENCE-ENUM") == doctor.REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
@@ -3891,10 +4091,19 @@ def _self_test_vectors():
             return str(exc)
         return None
 
+    def counters_text(table):
+        # A counters.toml the seam reads (spec 8.2): the schema marker and one quoted key per counter.
+        return "schema = 1\n\n[counters]\n" + "".join(
+            "\"{}\" = {}\n".format(key, value) for key, value in table.items())
+
     with tempfile.TemporaryDirectory(prefix="opf-homes-") as tmp:
         root = Path(tmp) / "store"
         machine_dir = root / ".working" / "toml"
         machine_dir.mkdir(parents=True)
+        # The seam derives each claim above the counters.toml high-water (spec 8.2), so the fixture
+        # carries one; at zero, a demand of n claims exactly n while no other reservation stands.
+        (machine_dir / "counters.toml").write_text(
+            counters_text({"BI": 0, "WL": 0, "imported:BI": 0}), encoding="utf-8")
         anchor_file = root / "anchor"
         anchor_file.write_bytes(b"")
         cap = oplock.OpCapability.__new__(oplock.OpCapability)
@@ -4000,22 +4209,83 @@ def _self_test_vectors():
             check("reservation-leftover-retried-same-capability", lambda: home_journal.reserve_allocation(
                 cap, "record", record_run, {"BI": 7, "WL": 12}) == payload
                 and not leftover.exists() and os.stat(target).st_nlink == 1)
+
+            def fresh_capability():
+                # A second fixture capability on the same store under a NEW operation id (what a retry
+                # after a kill holds when it re-enters through acquire_operation); the caller closes
+                # its anchor descriptor.
+                fresh_cap = oplock.OpCapability.__new__(oplock.OpCapability)
+                fresh_cap._claim = threading.Lock()
+                fresh_cap._claimant = None
+                fresh_cap._released = False
+                fresh_cap._acquirer_pid = os.getpid()
+                fresh_cap._acquirer_pid_start = native_journal._pid_start(os.getpid())
+                fresh_cap._anchor_fd = os.open(str(anchor_file), os.O_RDONLY)
+                fresh_cap._anchor_ident = cap._anchor_ident
+                fresh_cap._machine_ident = cap._machine_ident
+                fresh_cap.store_root = root
+                fresh_cap.machine_rel = ".working/toml"
+                fresh_cap.op_id = "fresh-operation"
+                fresh_cap.holder = "fixture"
+                return fresh_cap
+
+            # A retry after a kill that re-enters through acquire_operation holds a NEW capability (a
+            # fresh op_id per acquisition), and it stays refused: the payload embeds the op_id, so the
+            # bytes differ. It is judged here, while the run's own reservation is the only entry and
+            # counters.toml and the demand are unchanged, so the derivation yields the published claims
+            # again and the operation id alone tells the bytes apart. The killed run's leftover
+            # reservation is the disclosed residual; its numbers stay reserved (conservative). The
+            # byte-equal idempotent answer serves a repeat call under the SAME capability: a plain
+            # repeat, or a resumed init, which attaches the persisted operation id rather than minting
+            # a new one.
+            def new_capability_retry():
+                fresh_cap = fresh_capability()
+                try:
+                    return reservation_refusal(lambda: home_journal.reserve_allocation(
+                        fresh_cap, "record", record_run, {"BI": 7, "WL": 12}))
+                finally:
+                    os.close(fresh_cap._anchor_fd)
+            alone = sorted(os.listdir(target.parent)) == [record_run + ".toml"]
+            fresh = new_capability_retry()
+            check("reservation-new-capability-refused", lambda: alone and fresh is not None
+                  and "already exists with different content" in fresh
+                  and "does not establish that the run holds" in fresh
+                  and target.read_bytes() == payload)
+            # The paired mutation, in place: a payload that does not bind the operation id (the fresh
+            # capability's id replaced by the published one) answers the same retry idempotently, so
+            # the check above turns red on it.
+            real_reservation_payload = home_journal.reservation_payload
+
+            def payload_without_operation(kind, run_id, operation_id, claims):
+                return real_reservation_payload(
+                    kind, run_id, cap.op_id if operation_id == "fresh-operation" else operation_id, claims)
+            with _patch.object(home_journal, "reservation_payload", payload_without_operation):
+                check("reservation-new-capability-flip-unbound-operation",
+                      lambda: new_capability_retry() is None and target.read_bytes() == payload)
             run2 = "record-20260917T120001Z-0123456789abcdef"
             torn = target.parent / oplock._staging_name(run2 + ".toml")
             torn.write_bytes(b"torn")
             payload2 = home_journal.reserve_allocation(cap, "record", run2, {"BI": 9})
+            # run2 derives above the record_run reservation (BI = 7): 7 + 9.
             check("reservation-crash-before-link-completes", lambda: not torn.exists()
-                  and (target.parent / (run2 + ".toml")).read_bytes() == payload2)
+                  and (target.parent / (run2 + ".toml")).read_bytes() == payload2
+                  and payload2 == home_journal.reservation_payload(
+                      "record", run2, "held-operation", {"BI": 16}))
+            # Each squat below binds the requesting run's OWN name, which the derivation leaves out
+            # of its scan, so the refusal is the read-back's; the squat is removed after its check,
+            # since any other run's scan refuses a non-reservation entry.
             run3 = "record-20260917T120002Z-0123456789abcdef"
             (target.parent / (run3 + ".toml")).mkdir()
             check("reservation-occupied-refused", lambda: "non-regular entry" in (reservation_refusal(
                 lambda: home_journal.reserve_allocation(cap, "record", run3, {"BI": 1})) or ""))
+            (target.parent / (run3 + ".toml")).rmdir()
             # A symlink squat cannot be read back through the O_NOFOLLOW non-blocking read
             # and refuses naming the read-back, never implying held numbers.
             run4 = "record-20260917T120004Z-0123456789abcdef"
             os.symlink("elsewhere", target.parent / (run4 + ".toml"))
             check("reservation-symlink-refused", lambda: "cannot read back" in (reservation_refusal(
                 lambda: home_journal.reserve_allocation(cap, "record", run4, {"BI": 1})) or ""))
+            os.unlink(target.parent / (run4 + ".toml"))
             # A final name appearing only between the existence check and the exclusive link
             # (unreachable under the held capability) refuses with the reservation-specific
             # message, never the oplock anchor-recovery advice (fix round 1, claude MINOR-4).
@@ -4049,42 +4319,60 @@ def _self_test_vectors():
                   and len(stranded_names) == 1 and stranded_names[0] in stranded
                   and "injected unlink failure" in stranded
                   and target.read_bytes() == payload)
-            # Fix round 2 (claude MEDIUM-1, decided stricter-safe; wording fixed in fix round 3):
-            # a retry after a kill that re-enters through acquire_operation holds a NEW capability
-            # (a fresh op_id per acquisition), and it stays refused: the payload embeds the op_id,
-            # so the bytes differ. The killed run's leftover reservation is the disclosed
-            # residual; its numbers stay reserved (conservative). The byte-equal idempotent answer
-            # serves a repeat call under the SAME capability: a plain repeat, or a resumed init,
-            # which attaches the persisted operation id rather than minting a new one.
-            cap2 = oplock.OpCapability.__new__(oplock.OpCapability)
-            cap2._claim = threading.Lock()
-            cap2._claimant = None
-            cap2._released = False
-            cap2._acquirer_pid = os.getpid()
-            cap2._acquirer_pid_start = native_journal._pid_start(os.getpid())
-            cap2._anchor_fd = os.open(str(anchor_file), os.O_RDONLY)
-            cap2._anchor_ident = cap._anchor_ident
-            cap2._machine_ident = cap._machine_ident
-            cap2.store_root = root
-            cap2.machine_rel = ".working/toml"
-            cap2.op_id = "fresh-operation"
-            cap2.holder = "fixture"
-            try:
-                fresh = reservation_refusal(lambda: home_journal.reserve_allocation(
-                    cap2, "record", record_run, {"BI": 7, "WL": 12}))
-            finally:
-                os.close(cap2._anchor_fd)
-            check("reservation-new-capability-refused", lambda: fresh is not None
-                  and "already exists with different content" in fresh
-                  and "does not establish that the run holds" in fresh
+            # The same new-capability retry once another run's reservation has advanced the BI
+            # high-water (run2 at BI = 16): it is refused as different bytes, the reservation unchanged.
+            # The fresh operation id alone changes the bytes, so this check cannot show that the
+            # derivation moved as well; reservation-new-capability-after-advance-derived-refused below
+            # judges the same retry with the operation id unbound, so only the derivation (16 + 7) can
+            # refuse it.
+            advanced = new_capability_retry()
+            check("reservation-new-capability-after-advance-refused", lambda: advanced is not None
+                  and "already exists with different content" in advanced
+                  and "does not establish that the run holds" in advanced
                   and target.read_bytes() == payload)
             # Fix round 3 (claude MINOR, decided assert): the cleanup-detail vector's comment
             # claimed the stranded leftover is retired as garbage by the next reserving call;
-            # that next call is the cap2 refusal just above, and the retirement is asserted here
-            # rather than claimed, with the reservation keeping its single link.
+            # that next call is the after-advance refusal just above, and the retirement is asserted
+            # here rather than claimed, with the reservation keeping its single link.
             check("reservation-stranded-leftover-retired", lambda: len(stranded_names) == 1
                   and not (target.parent / stranded_names[0]).exists()
                   and os.stat(target).st_nlink == 1)
+            # The same advance retried under the SAME capability with the same demand: the operation
+            # id matches, so only the derivation can tell the bytes apart. Another run's reservation
+            # now holds BI at 16, so the repeat derives BI = 16 + 7 and is refused as different bytes,
+            # the reservation unchanged. The paired mutation, in place: a repeat whose derivation
+            # scans no other reservation once the run's own entry exists derives the published claims
+            # again and answers the retry idempotently, so the check turns red on it. The same
+            # mutation under the unbound-operation payload shows the fresh-capability retry above is
+            # refused by the derivation too, not by its operation id alone.
+            real_derive_claims = home_journal._derive_claims
+
+            def derive_without_scan_on_repeat(root_fd, machine_rel, kind, run_id, demand):
+                if not os.path.lexists(root / store.allocation_record(kind, run_id)):
+                    return real_derive_claims(root_fd, machine_rel, kind, run_id, demand)
+                with _patch.object(home_journal, "reservation_high", lambda root_fd, exclude=None: {}):
+                    return real_derive_claims(root_fd, machine_rel, kind, run_id, demand)
+
+            def same_capability_retry():
+                return reservation_refusal(lambda: home_journal.reserve_allocation(
+                    cap, "record", record_run, {"BI": 7, "WL": 12}))
+            advanced_same = same_capability_retry()
+            check("reservation-same-capability-after-advance-refused", lambda: advanced_same is not None
+                  and "already exists with different content" in advanced_same
+                  and "does not establish that the run holds" in advanced_same
+                  and target.read_bytes() == payload)
+            with _patch.object(home_journal, "_derive_claims", derive_without_scan_on_repeat):
+                check("reservation-same-capability-after-advance-flip-scan-omitted",
+                      lambda: same_capability_retry() is None and target.read_bytes() == payload)
+            with _patch.object(home_journal, "reservation_payload", payload_without_operation):
+                derived_refusal = new_capability_retry()
+                check("reservation-new-capability-after-advance-derived-refused",
+                      lambda: derived_refusal is not None
+                      and "already exists with different content" in derived_refusal
+                      and target.read_bytes() == payload)
+                with _patch.object(home_journal, "_derive_claims", derive_without_scan_on_repeat):
+                    check("reservation-new-capability-after-advance-flip-scan-omitted",
+                          lambda: new_capability_retry() is None and target.read_bytes() == payload)
             # Fix round 2 (claude MINOR-1): a FIFO squatting a reservation name refuses AT ONCE
             # (the read-back open carries O_NONBLOCK, so a writer-less FIFO cannot block it),
             # judged in a BOUNDED child: a blocking mutant turns this check red at the deadline
@@ -4120,6 +4408,7 @@ def _self_test_vectors():
                 os.waitpid(fifo_child, 0)
             check("reservation-fifo-refused-bounded", lambda s=fifo_status: s is not None
                   and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 7)
+            os.unlink(target.parent / (run5 + ".toml"))
             # Fix round 2 (codex MEDIUM-1), reworked in fix round 3 (both reviews, MAJOR):
             # _project's EXISTING-projection branch restores the same ancestor and
             # containing-directory durability a fresh publication gets, and it retires staging
@@ -4196,6 +4485,446 @@ def _self_test_vectors():
                     cap, "record", "record-20260917T120003Z-0123456789abcdef", {"BI": 1})) is not None)
         finally:
             os.close(cap._anchor_fd)
+
+    # The spec 8.2 next-ID rule inside the seam: every call derives its claims under the held
+    # capability from counters.toml and every other reservation of every journal kind, so runs that
+    # each ask for one id never share it, and an input the derivation cannot read and validate
+    # refuses with nothing written (no reservation and no directory). Each case runs on a store of
+    # its own (derivation_store), with a fixture capability built as above.
+    import contextlib
+    import errno
+
+    @contextlib.contextmanager
+    def derivation_store(table, op_id="derive-operation"):
+        with tempfile.TemporaryDirectory(prefix="opf-homes-derive-") as derive_tmp:
+            store_root = Path(derive_tmp) / "store"
+            machine = store_root / ".working" / "toml"
+            machine.mkdir(parents=True)
+            if table is not None:
+                (machine / "counters.toml").write_text(counters_text(table), encoding="utf-8")
+            (store_root / "anchor").write_bytes(b"")
+            held = oplock.OpCapability.__new__(oplock.OpCapability)
+            held._claim = threading.Lock()
+            held._claimant = None
+            held._released = False
+            held._acquirer_pid = os.getpid()
+            held._acquirer_pid_start = native_journal._pid_start(os.getpid())
+            held._anchor_fd = os.open(str(store_root / "anchor"), os.O_RDONLY)
+            try:
+                anchor_ident = os.fstat(held._anchor_fd)
+                held._anchor_ident = (anchor_ident.st_dev, anchor_ident.st_ino)
+                machine_ident = os.stat(machine)
+                held._machine_ident = (machine_ident.st_dev, machine_ident.st_ino)
+                held.store_root = store_root
+                held.machine_rel = ".working/toml"
+                held.op_id = op_id
+                held.holder = "fixture"
+                yield store_root, held
+            finally:
+                os.close(held._anchor_fd)
+
+    def derive_run(kind, number):
+        return "{}-20260918T{:06d}Z-0123456789abcdef".format(store._HOME_RUN_PREFIXES[kind], number)
+
+    def derived(held, kind, run_id, demand, claims):
+        # The call publishes exactly the canonical reservation of `claims` (and nothing else is judged).
+        return home_journal.reserve_allocation(held, kind, run_id, demand) == \
+            home_journal.reservation_payload(kind, run_id, held.op_id, claims)
+
+    def set_counters(store_root, table):
+        (store_root / ".working" / "toml" / "counters.toml").write_text(counters_text(table), encoding="utf-8")
+
+    def refused_unwritten(store_root, thunk, *needles):
+        # A refusal naming every needle, with no journals directory created at all.
+        message = reservation_refusal(thunk)
+        return (message is not None and all(needle in message for needle in needles)
+                and not (store_root / ".working" / "journals").exists())
+
+    def five_sequential():
+        with derivation_store({"BI": 0, "WL": 0}) as (derive_root, held):
+            runs = [derive_run("record", n) for n in range(1, 6)]
+            ok = all(derived(held, "record", r, {"BI": 1}, {"BI": n}) for n, r in enumerate(runs, 1))
+            home = derive_root / ".working" / "journals" / "record" / "allocations"
+            return ok and sorted(os.listdir(home)) == sorted(r + ".toml" for r in runs)
+    check("reservation-five-sequential-distinct", five_sequential)
+
+    def counter_high_water():
+        with derivation_store({"BI": 40, "WL": 0}) as (_derive_root, held):
+            return derived(held, "record", derive_run("record", 1), {"BI": 1}, {"BI": 41})
+    check("reservation-counter-high-water-respected", counter_high_water)
+
+    def counter_versus_reservations():
+        with derivation_store({"BI": 3}) as (derive_root, held):
+            planted = derived(held, "record", derive_run("record", 1), {"BI": 7}, {"BI": 10})
+            above_reservation = derived(held, "record", derive_run("record", 2), {"BI": 1}, {"BI": 11})
+            set_counters(derive_root, {"BI": 20})
+            above_counter = derived(held, "record", derive_run("record", 3), {"BI": 1}, {"BI": 21})
+            return planted and above_reservation and above_counter
+    check("reservation-max-counter-vs-reservations", counter_versus_reservations)
+
+    def cross_kind():
+        with derivation_store({"BI": 0}) as (derive_root, held):
+            imported_run = derive_run("import", 1)
+            planted = derived(held, "import", imported_run, {"BI": 10}, {"BI": 10})
+            before = (derive_root / store.allocation_record("import", imported_run)).read_bytes()
+            above = derived(held, "record", derive_run("record", 2), {"BI": 1}, {"BI": 11})
+            return planted and above and (
+                derive_root / store.allocation_record("import", imported_run)).read_bytes() == before
+    check("reservation-cross-kind-scan", cross_kind)
+
+    def series_independent():
+        with derivation_store({"BI": 0, "imported:BI": 0}) as (derive_root, held):
+            planted = derived(held, "import", derive_run("import", 1), {"imported:BI": 50},
+                              {"imported:BI": 50})
+            clean = derived(held, "record", derive_run("record", 2), {"BI": 1}, {"BI": 1})
+            set_counters(derive_root, {"BI": 0, "imported:BI": 5})
+            imported = derived(held, "import", derive_run("import", 3), {"imported:BI": 1},
+                               {"imported:BI": 51})
+            return planted and clean and imported
+    check("reservation-series-independent", series_independent)
+
+    def foreign_garbage():
+        with derivation_store({"BI": 0}) as (derive_root, held):
+            home = derive_root / ".working" / "journals" / "record" / "allocations"
+            home.mkdir(parents=True)
+            leftover = home / oplock._staging_name(derive_run("record", 9) + ".toml")
+            leftover.write_bytes(b"torn")
+            return derived(held, "record", derive_run("record", 1), {"BI": 1}, {"BI": 1}) \
+                and leftover.read_bytes() == b"torn"
+    check("reservation-foreign-garbage-skipped", foreign_garbage)
+
+    foreign_run = derive_run("import", 7)
+    foreign_name = foreign_run + ".toml"
+    foreign_canonical = home_journal.reservation_payload("import", foreign_run, "op", {"BI": 1})
+
+    @contextlib.contextmanager
+    def unreadable_foreign():
+        real_open = os.open
+
+        def opening(path, flags, *args, **kwargs):
+            if path == foreign_name and kwargs.get("dir_fd") is not None:
+                raise PermissionError(errno.EACCES, "synthetic unreadable reservation", path)
+            return real_open(path, flags, *args, **kwargs)
+        with _patch.object(os, "open", opening), \
+                _patch.object(os, "supports_dir_fd", set(os.supports_dir_fd) | {opening}):
+            yield
+
+    # Each bad entry stands in the import kind's home, so the refused record run must leave its own
+    # home uncreated: nothing written, not even a directory.
+    for label, name, plant, needle in (
+            ("nonregular", foreign_name, lambda p: p.mkdir(), "is not a regular file"),
+            ("malformed", foreign_name, lambda p: p.write_bytes(b"not toml ["), "is malformed"),
+            ("misnamed", "junk.txt", lambda p: p.write_bytes(b"x"), "is not an id reservation"),
+            ("conflicting", foreign_name, lambda p: p.write_bytes(home_journal.reservation_payload(
+                "ingest", foreign_run, "op", {"BI": 1})), "conflicts with the exact canonical reservation"),
+            ("unreadable", foreign_name, lambda p: p.write_bytes(foreign_canonical),
+             "synthetic unreadable reservation")):
+        def foreign_refused(name=name, plant=plant, needle=needle, label=label):
+            with derivation_store({"BI": 0}) as (derive_root, held):
+                home = derive_root / ".working" / "journals" / "import" / "allocations"
+                home.mkdir(parents=True)
+                plant(home / name)
+                with unreadable_foreign() if label == "unreadable" else contextlib.nullcontext():
+                    message = reservation_refusal(lambda: home_journal.reserve_allocation(
+                        held, "record", derive_run("record", 1), {"BI": 1}))
+                return (message is not None and needle in message
+                        and not (derive_root / ".working" / "journals" / "record").exists())
+        check("reservation-foreign-{}-refused".format(label), foreign_refused)
+
+    # A symlinked, oversized or FIFO reservation of another run refuses through the seam's own scan too
+    # (the run's own name is the read-back's, tested above), each paired in place with the mutation it
+    # discriminates. The symlink points at a file holding that run's exact canonical payload, so only
+    # the no-follow open refuses it; the oversized entry is that canonical payload under an 8-byte read
+    # cap, so only the cap refuses it.
+    def planted_foreign(derive_root, plant):
+        # One import-kind entry planted under another run's name; the record kind's home stays absent.
+        home = derive_root / ".working" / "journals" / "import" / "allocations"
+        home.mkdir(parents=True)
+        plant(derive_root, home / foreign_name)
+
+    def foreign_attempt(derive_root, held):
+        # The record run's reservation call over the planted entry: its refusal (None when it
+        # reserved) and whether the record kind's home stayed uncreated.
+        message = reservation_refusal(lambda: home_journal.reserve_allocation(
+            held, "record", derive_run("record", 1), {"BI": 1}))
+        return message, not (derive_root / ".working" / "journals" / "record").exists()
+
+    def plant_foreign_symlink(derive_root, path):
+        (derive_root / "elsewhere.toml").write_bytes(foreign_canonical)
+        os.symlink(str(derive_root / "elsewhere.toml"), path)
+
+    def plant_foreign_canonical(derive_root, path):
+        path.write_bytes(foreign_canonical)
+
+    real_read_fd = native_journal._read_fd
+    for label, plant, needle, context, mutant in (
+            ("symlink", plant_foreign_symlink, "cannot read the id reservation", contextlib.nullcontext,
+             lambda: _patch.object(os, "O_NOFOLLOW", 0)),
+            ("oversize", plant_foreign_canonical, "exceeds the 8-byte read cap",
+             lambda: _patch.object(native_journal, "_MAX_PRODUCT_READ_BYTES", 8),
+             lambda: _patch.object(native_journal, "_read_fd",
+                                   lambda fd, cap=None, stop_at_cap=False: real_read_fd(fd)))):
+        def foreign_seam(plant=plant, context=context, mutant=contextlib.nullcontext):
+            with derivation_store({"BI": 0}) as (derive_root, held):
+                planted_foreign(derive_root, plant)
+                with context(), mutant():
+                    return foreign_attempt(derive_root, held)
+
+        def foreign_seam_refused(seam=foreign_seam, needle=needle):
+            message, untouched = seam()
+            return message is not None and foreign_name in message and needle in message and untouched
+        check("reservation-foreign-{}-refused".format(label), foreign_seam_refused)
+        check("reservation-foreign-{}-flip-admitted".format(label), lambda seam=foreign_seam, m=mutant:
+              seam(mutant=m)[0] is None)
+
+    def bounded_child(thunk, deadline):
+        # Run `thunk` in a forked child of this process that exits 7 only when it returns True:
+        # "passed" for that exit within `deadline` seconds, "timed-out" for a child still running at
+        # the deadline (this test's own, killed and reaped), and "failed" for any other end.
+        pid = os.fork()
+        if pid == 0:
+            code = 1
+            try:
+                if thunk():
+                    code = 7
+            except BaseException:
+                code = 1
+            finally:
+                os._exit(code)
+        end = time.monotonic() + deadline
+        status = None
+        while time.monotonic() < end:
+            waited, raw_status = os.waitpid(pid, os.WNOHANG)
+            if waited == pid:
+                status = raw_status
+                break
+            time.sleep(0.05)
+        if status is None:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            return "timed-out"
+        return "passed" if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 7 else "failed"
+
+    # A FIFO reservation of another run refuses AT ONCE (the scan's read opens non-blocking), judged in
+    # a bounded child; the paired mutation, a blocking open, is judged under a short deadline and must
+    # block until it. The store is built and removed by this process; the child only makes the call,
+    # re-binding the fixture capability's acquirer identity to itself.
+    def foreign_fifo(blocking, deadline):
+        with derivation_store({"BI": 0}) as (derive_root, held):
+            planted_foreign(derive_root, lambda _root, path: os.mkfifo(path))
+
+            def attempt():
+                held._acquirer_pid = os.getpid()
+                held._acquirer_pid_start = native_journal._pid_start(os.getpid())
+                with _patch.object(os, "O_NONBLOCK", 0) if blocking else contextlib.nullcontext():
+                    message, untouched = foreign_attempt(derive_root, held)
+                return (message is not None and foreign_name in message
+                        and "is not a regular file" in message and untouched)
+            return bounded_child(attempt, deadline)
+    check("reservation-foreign-fifo-refused", lambda: foreign_fifo(False, 30.0) == "passed")
+    check("reservation-foreign-fifo-flip-blocking", lambda: foreign_fifo(True, 3.0) == "timed-out")
+
+    # Every counters.toml the derivation cannot read and validate refuses, naming the file, with
+    # nothing written; an absent counter is never read as 0.
+    def plant_symlink(machine):
+        (machine / "counters-real.toml").write_text(counters_text({"BI": 0}), encoding="utf-8")
+        os.symlink("counters-real.toml", machine / "counters.toml")
+
+    def plant_hardlink(machine):
+        (machine / "counters.toml").write_text(counters_text({"BI": 0}), encoding="utf-8")
+        os.link(machine / "counters.toml", machine / "counters-second.toml")
+
+    def plant_bytes(data):
+        return lambda machine: (machine / "counters.toml").write_bytes(data)
+
+    oversize = _patch.object(native_journal, "_MAX_PRODUCT_READ_BYTES", 8)
+    for label, plant, needle, context in (
+            ("absent", lambda machine: None, "[Errno {}]".format(errno.ENOENT), None),
+            ("symlink", plant_symlink, "cannot read", None),
+            ("hardlink", plant_hardlink, "hard links", None),
+            ("not-toml", plant_bytes(b"not toml ["), "is malformed", None),
+            ("not-utf8", plant_bytes(b"\xff\xfe"), "is malformed", None),
+            ("no-schema", plant_bytes(b"[counters]\nBI = 0\n"), "schema marker", None),
+            ("unknown-key", plant_bytes(b"schema = 1\nextra = 1\n\n[counters]\nBI = 0\n"),
+             "unknown top-level key", None),
+            ("key-absent", plant_bytes(b"schema = 1\n\n[counters]\nWL = 0\n"), "no high-water for BI", None),
+            ("bool", plant_bytes(b"schema = 1\n\n[counters]\nBI = true\n"), "non-negative integer", None),
+            ("negative", plant_bytes(b"schema = 1\n\n[counters]\nBI = -1\n"), "non-negative integer", None),
+            ("non-table", plant_bytes(b"schema = 1\ncounters = 1\n"), "is not a table", None),
+            ("oversize", plant_bytes(counters_text({"BI": 0}).encode()), "read cap", oversize)):
+        def counters_refused(plant=plant, needle=needle, context=context):
+            with derivation_store(None) as (derive_root, held):
+                plant(derive_root / ".working" / "toml")
+                with context if context is not None else contextlib.nullcontext():
+                    return refused_unwritten(derive_root, lambda: home_journal.reserve_allocation(
+                        held, "record", derive_run("record", 1), {"BI": 1}), "counters.toml", needle)
+        check("reservation-counters-{}-refused".format(label), counters_refused)
+
+    # A FIFO at counters.toml refuses AT ONCE (the read opens non-blocking), judged in a BOUNDED child
+    # that exits 7 only on that refusal with nothing written; a blocking read turns this red at the
+    # deadline instead of hanging the suite.
+    with derivation_store(None) as (derive_root, held):
+        os.mkfifo(derive_root / ".working" / "toml" / "counters.toml")
+        counters_child = os.fork()
+        if counters_child == 0:
+            code = 1
+            try:
+                held._acquirer_pid = os.getpid()
+                held._acquirer_pid_start = native_journal._pid_start(os.getpid())
+                if refused_unwritten(derive_root, lambda: home_journal.reserve_allocation(
+                        held, "record", derive_run("record", 1), {"BI": 1}),
+                        "counters.toml", "not a regular file"):
+                    code = 7
+            except BaseException:
+                code = 1
+            finally:
+                os._exit(code)
+        counters_deadline = time.monotonic() + 30.0
+        counters_status = None
+        while time.monotonic() < counters_deadline:
+            waited, raw_status = os.waitpid(counters_child, os.WNOHANG)
+            if waited == counters_child:
+                counters_status = raw_status
+                break
+            time.sleep(0.05)
+        if counters_status is None:
+            os.kill(counters_child, signal.SIGKILL)
+            os.waitpid(counters_child, 0)
+        check("reservation-counters-fifo-refused", lambda s=counters_status: s is not None
+              and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 7)
+
+    # A counters.toml that cannot be opened, and one whose open succeeds but whose read fails, each
+    # refuse naming the file with nothing written. The paired mutation, in place, reads a counters
+    # file the derivation cannot read as a zero high-water, which reserves instead.
+    @contextlib.contextmanager
+    def unreadable_counters(fault):
+        real_open, real_read = os.open, os.read
+        counters_fds = set()
+
+        def opening(path, flags, *args, **kwargs):
+            if path == "counters.toml" and kwargs.get("dir_fd") is not None:
+                if fault == "open":
+                    raise PermissionError(errno.EACCES, "synthetic unopenable counters", path)
+                fd = real_open(path, flags, *args, **kwargs)
+                counters_fds.add(fd)
+                return fd
+            return real_open(path, flags, *args, **kwargs)
+
+        def reading(fd, length):
+            if fd in counters_fds:
+                raise OSError(errno.EIO, "synthetic unreadable counters")
+            return real_read(fd, length)
+        with _patch.object(os, "open", opening), \
+                _patch.object(os, "supports_dir_fd", set(os.supports_dir_fd) | {opening}), \
+                _patch.object(os, "read", reading):
+            yield
+
+    def counters_read_as_zero():
+        real_counter_high = home_journal._counter_high
+
+        def zero_when_unreadable(root_fd, machine_rel, keys):
+            try:
+                return real_counter_high(root_fd, machine_rel, keys)
+            except native_journal.JournalError as exc:
+                if str(exc).startswith("cannot read "):
+                    return {key: 0 for key in keys}
+                raise
+        return _patch.object(home_journal, "_counter_high", zero_when_unreadable)
+
+    for fault, needle in (("open", "synthetic unopenable counters"), ("read", "synthetic unreadable counters")):
+        def counters_fault(fault=fault, needle=needle):
+            with derivation_store({"BI": 0}) as (derive_root, held), unreadable_counters(fault):
+                return refused_unwritten(derive_root, lambda: home_journal.reserve_allocation(
+                    held, "record", derive_run("record", 1), {"BI": 1}), "counters.toml", needle)
+
+        def counters_fault_flipped(fault=fault):
+            with derivation_store({"BI": 0}) as (_derive_root, held), counters_read_as_zero(), \
+                    unreadable_counters(fault):
+                return derived(held, "record", derive_run("record", 1), {"BI": 1}, {"BI": 1})
+        check("reservation-counters-unreadable-{}-refused".format(fault), counters_fault)
+        check("reservation-counters-unreadable-{}-flip-read-as-zero".format(fault), counters_fault_flipped)
+
+    # The exhaustion boundary (2**63 - 1, the largest value a reservation carries): just inside, at,
+    # and just outside it, plus a counter already at and above it.
+    top = 2 ** 63 - 1
+    for label, counter, demand, claim in (("inside", top - 2, 1, top - 1), ("at", top - 2, 2, top),
+                                          ("outside", top - 2, 3, None), ("full", top, 1, None),
+                                          ("above-range", top + 1, 1, None)):
+        def exhaustion(counter=counter, demand=demand, claim=claim):
+            with derivation_store({"BI": counter}) as (derive_root, held):
+                run_id = derive_run("record", 1)
+                if claim is not None:
+                    return derived(held, "record", run_id, {"BI": demand}, {"BI": claim})
+                return refused_unwritten(derive_root, lambda: home_journal.reserve_allocation(
+                    held, "record", run_id, {"BI": demand}), "range is used up")
+        check("reservation-exhaustion-" + label, exhaustion)
+
+    # A repeat under the same capability derives again: once counters.toml has advanced, the derived
+    # claims differ from the published ones, so the repeat is refused as different bytes and the
+    # reservation stands unchanged.
+    def repeat_after_advance():
+        with derivation_store({"BI": 0}) as (derive_root, held):
+            run_id = derive_run("record", 1)
+            first = derived(held, "record", run_id, {"BI": 1}, {"BI": 1})
+            published = (derive_root / store.allocation_record("record", run_id)).read_bytes()
+            set_counters(derive_root, {"BI": 5})
+            message = reservation_refusal(lambda: home_journal.reserve_allocation(
+                held, "record", run_id, {"BI": 1}))
+            return first and message is not None and "already exists with different content" in message \
+                and (derive_root / store.allocation_record("record", run_id)).read_bytes() == published
+    check("reservation-repeat-after-counter-advance-refused", repeat_after_advance)
+
+    # A repeat under the same capability after changes that leave the demanded key's maximum where it
+    # was derives the published claims again and is answered from the read-back entry. Another run's
+    # reservation holds BI at 5 and this run's at 6 (demand 1); then counters.toml raises BI to a value
+    # just inside or exactly at that reservation (4, 5) and raises WL, a key this run does not demand,
+    # to 9, above that maximum, and a third run reserves WL. Just outside (BI at 6) the maximum moves
+    # and the repeat is refused as different bytes. The reservation stays unchanged in every case. The
+    # paired mutation, in place: a counters base taken over every key the file carries, not the
+    # demanded key's own, derives above WL and refuses the repeat at the unchanged maximum.
+    def repeat_unchanged_maximum(counter):
+        # The repeat's outcome ("answered" when it returns the published payload, else its refusal
+        # text, None when the setup failed) and whether the reservation bytes stayed unchanged.
+        with derivation_store({"BI": 0, "WL": 0}) as (derive_root, held):
+            run_id = derive_run("record", 2)
+            planted = derived(held, "record", derive_run("record", 1), {"BI": 5}, {"BI": 5})
+            first = derived(held, "record", run_id, {"BI": 1}, {"BI": 6})
+            published = (derive_root / store.allocation_record("record", run_id)).read_bytes()
+            set_counters(derive_root, {"BI": counter, "WL": 9})
+            third = derived(held, "record", derive_run("record", 3), {"WL": 1}, {"WL": 10})
+            if not (planted and first and third):
+                return None, False
+            try:
+                outcome = "answered" if home_journal.reserve_allocation(
+                    held, "record", run_id, {"BI": 1}) == published else "other bytes"
+            except native_journal.JournalError as exc:
+                outcome = str(exc)
+            unchanged = (derive_root / store.allocation_record("record", run_id)).read_bytes() == published
+            return outcome, unchanged
+
+    def repeat_answered(counter):
+        outcome, unchanged = repeat_unchanged_maximum(counter)
+        return outcome == "answered" and unchanged
+
+    def counters_any_key():
+        real_counter_high = home_journal._counter_high
+
+        def highest_of_every_key(root_fd, machine_rel, keys):
+            # The fixture's counters.toml carries exactly BI and WL.
+            high = real_counter_high(root_fd, machine_rel, keys)
+            top = max(real_counter_high(root_fd, machine_rel, ["BI", "WL"]).values())
+            return {key: max(value, top) for key, value in high.items()}
+        return _patch.object(home_journal, "_counter_high", highest_of_every_key)
+
+    check("reservation-repeat-unchanged-maximum-inside-answered", lambda: repeat_answered(4))
+    check("reservation-repeat-unchanged-maximum-at-answered", lambda: repeat_answered(5))
+
+    def repeat_refused(counter):
+        outcome, unchanged = repeat_unchanged_maximum(counter)
+        return outcome is not None and "already exists with different content" in outcome and unchanged
+    check("reservation-repeat-moved-maximum-outside-refused", lambda: repeat_refused(6))
+    with counters_any_key():
+        check("reservation-repeat-unchanged-maximum-flip-any-key", lambda: repeat_refused(5))
 
     # PR-3 fix round 1 (codex MAJOR), reworked in fix round 2 (codex MEDIUM-2): ensure_journal_dirs
     # makes each component entry durable on EVERY call. mkdir and fsync are recorded on ONE shared
