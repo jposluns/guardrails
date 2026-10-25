@@ -227,9 +227,62 @@ state. Journals are machine-local even after completion; a clone without them ca
 transactions, and requested recovery MUST fail closed on a missing journal. Containment and doctor
 exclude journals and make no recovery claim; a rogue file there is outside their coverage.
 
-Under pre-1.3.0 tooling, every store within that tooling's own version ceiling keeps its legacy
-grading: the homes-2 names are ordinary store paths there, graded, detected, and dispositioned
-exactly as before, and the pre-1.3.0 doctor's check roster and residuals are unchanged. Tooling
+Under pre-1.3.0 tooling, a store that has not started an adoption keeps, within that tooling's
+own version ceiling, its legacy grading: the homes-2 names are ordinary store paths there, graded,
+detected, and dispositioned exactly as before, and the pre-1.3.0 doctor's check roster and
+residuals are unchanged for such a store. A store whose adoption home
+`.working/imported/adoption/` exists has started an adoption and receives the adoption grading
+from the same pre-1.3.0 tooling: each admitted run's recorded paths are registered, the
+non-occupying retire, move and migrate rows of its plan (and only those) are its frozen
+sources, a frozen source whose live bytes still match its plan digest is graded as bounded
+adoption state while a drifted or vanished source is a containment failure at `required`
+(section 11), and the adopting residuals are disclosed in addition to the legacy residuals.
+The doctor MUST decide that a run is admitted, and that its retirement is recorded, from the
+committed adoption evidence alone, the bundle under `.working/imported/adoption/<run-id>/` and
+the run archive, which travel with every clone, and MUST NOT read the machine-local journal, so
+a clone without journals grades exactly as the original store. That evidence check verifies
+internal consistency: the sealed inventories, plan and approval bound to the run id of the
+directory they sit in, and the listed bundle, archive and Move-root bytes at their recorded
+digests (a Move-root row counts only as a move destination the run's own plan records).
+On homes 1 too, the apply side MUST write each adoption inventory's `[adoption]` identity table,
+whose keys are exactly `run_id`, `phase` and `plan_digest` as the bundle layout below defines,
+when it derives the inventory, and the doctor MUST refuse an adoption inventory whose identity is
+missing or malformed, names another run, names a phase other than the one its file name carries,
+or names a plan digest other than the run's proven plan's own (the frozen plan that re-seals its
+own bytes and that its approval binds), so an inventory copied from another run or phase, an
+empty retirement record included, never evaluates as this run's record.
+The apply side's bundle verifier, through which `opf adopt status` reports a run, MUST hold every
+adoption inventory to that bar against its bundle's own `plan.toml`: it MUST yield cannot-evaluate
+for an inventory that names a phase other than the one its file name carries or a plan digest
+other than that plan's, and, except for an inventory in the recognized legacy format below, which
+is its named finding, for every inventory of a bundle whose `plan.toml` is absent, unreadable or
+not canonical, names another run, or carries a `plan_digest` that does not re-seal its own bytes,
+an empty base inventory included (a bundle with no inventory is its own named finding). It MUST
+check that plan's inventory row against the same bytes its seal was proven from. It does not check
+the approval's binding, which the doctor's admission checks. Verification stops at the first
+finding, a bundle without an inventory or an inventory in the recognized legacy format, so a
+cannot-evaluate that a later inventory would yield is not reported for that bundle.
+A retirement is recorded only by a sealed retirement inventory in the shape the
+retirement-phase transaction derives from its own create ops: one row per move row of the plan,
+occupying or not, whose recorded Move destination (its move-file destination) lies beneath
+.working/archive/moved/, naming that destination at the moved source's plan digest, and nothing
+else, so the record of a plan without such a move row lists no files. Those are the bytes the
+relocation writes: the frozen live source of a non-occupying move, and for an occupying move
+the committed archive copy the base inventory claims at that same digest. Retire and migrate
+preimages are preserved at apply and claimed by the base inventory, never re-listed by the
+retirement record; that shape also binds the record to its phase, because a base inventory
+copied to the retirement name lists at least the plan and the approval, which are never Move
+destinations. A retirement row whose path a base inventory row also names is a path claimed
+twice and MUST yield cannot-evaluate; a listed destination that does not hold its recorded bytes
+live MUST yield cannot-evaluate, and before a recorded retirement a file at a plan Move
+destination beneath .working/archive/moved/, occupying or not, MUST be a containment finding,
+since only the retirement-phase transaction creates that path (containment never grades an
+explicit destination outside the store).
+The whole check detects accidents: an interrupted apply, a hand edit that is
+non-canonical or that changes listed bytes, and a misplaced or stale record. It does not detect
+deliberate forgery: a hand edit that re-emits a canonical, self-consistent record, and any
+other crafted self-consistent bundle, is outside the accident-detection model, consistent with
+the rest of OPF. Tooling
 that carries the section 9.2 ceiling refuses an above-ceiling declaration as a fail-closed
 INVALID finding; tooling released before that ceiling grades such a store as legacy instead, a
 disclosed residual of section 9.2. Activated 1.3.0
@@ -245,12 +298,28 @@ the tooling activates that generation.
 Each evidence bundle `.working/imported/<kind>/<run-id>/` carries its own inventories at its
 root: `inventory.toml`, plus a new `inventory-<phase>.toml` for each later phase, where `<phase>`
 is a lowercase letter followed by up to 31 lowercase letters or digits. Each holds exactly
-`format = "opf.evidence.inventory/v1"` and a `file` array whose rows have exactly `path` (a
-canonical store-relative file path spelled from `.working/`), `size` (a nonnegative integer), and
-`sha256` (64 lowercase hex digits). A row may name a member of its own bundle other than a
-bundle-root inventory, a default Move destination under `.working/archive/moved/`, or, for an
+`format = "opf.evidence.inventory/v1"`, a `file` array and, in an adoption bundle only, the
+`[adoption]` identity table below; the `file` rows have exactly `path` (a canonical
+store-relative file path spelled from `.working/`), `size` (a nonnegative integer), and `sha256`
+(64 lowercase hex digits). A row may name a member of its own bundle other than a
+bundle-root inventory, a Move destination, default or explicit, under `.working/archive/moved/`, or, for an
 adoption bundle, a preserved file of the same run, a retire preimage or an archived occupying
 source, under `.working/archive/adoption/<run-id>/`.
+An adoption bundle's inventory MUST also hold exactly one `[adoption]` identity table whose keys
+are exactly `run_id`, `phase` and `plan_digest`: the bundle's own run id, the phase this
+inventory records, spelled `base` for `inventory.toml` and as the file name's `<phase>` for a
+later phase, whose name MUST NOT be `base`, and the run's approved plan's own `plan_digest` in
+the `sha256:` form with 64 lowercase hex digits. An inventory of any other kind MUST NOT carry
+that identity table. The apply side MUST write that identity when it derives the inventory.
+Except for an inventory in the recognized legacy format below, which is its named finding,
+C-EVIDENCE-ENUM MUST yield cannot-evaluate for an adoption inventory whose identity is missing or
+malformed, names another run, names a phase other than the one its file name carries, or names a
+plan digest other than its bundle's own sealed `plan.toml` digest, and for every inventory of an
+adoption bundle whose `plan.toml` is absent, unreadable or not canonical, names another run, or
+carries a `plan_digest` that does not re-seal its own bytes, so an inventory copied from another
+run or phase never evaluates as this run's record. C-EVIDENCE-ENUM MUST check that `plan.toml`'s
+inventory row against the same bytes its seal was proven from, so a plan swapped between two
+reads never combines into a clean result.
 The owning writer MUST derive each inventory from the run's transaction record or receipt and
 MUST publish it exclusively with the retained bytes. An inventory MUST NOT be rewritten,
 so a bundle stays immutable and an evidence commit changes only its bundle folder. An inventory is
@@ -600,7 +669,18 @@ hand-merged: after a merge conflict on a store path, take the integration base's
 conflicted store files and redo the authoring operation on that base, which claims the next ID
 afresh (section 8.8). The byte-reproduction precondition of `opf record` and `opf upgrade` refuses
 only a store file whose bytes are not the canonical serialization of its content, such as one
-carrying comments or non-canonical formatting. A hand edit or hand merge that leaves canonical bytes
+carrying comments or non-canonical formatting. The canonical serialization writes U+2028 LINE
+SEPARATOR and U+2029 PARAGRAPH SEPARATOR inside a string as the escapes `\u2028` and `\u2029`; a
+file that differs from it only by holding either character literally inside a basic string, as files
+written by earlier tooling do, still passes, reads back as the same values, and is re-spelled with
+the escapes by its next write. A write that would grow a store file past the store reader's size cap
+refuses instead, before anything is written, so an upgrade or record operation never rewrites a
+readable store into one the reader refuses. The `DECISIONS.toml` machine projection (section 10.5)
+takes the same re-spelling without a generator-version bump: a projection an earlier tool rendered
+from a record holding either character differs from the current render in exactly that spelling, and
+the byte-level view-drift gate reports it as drifted until one re-render re-spells it. A projection
+over records holding neither character renders byte-identically, so a store without these characters
+sees no drift. A hand edit or hand merge that leaves canonical bytes
 passes it undetected, so this integration-base rule is a separate requirement that the precondition
 does not enforce. A merge that resolves without a conflict yet duplicates an ID is caught by `opf
 doctor`, which checks store-wide ID uniqueness and that every ID lies within its counter (section
@@ -1639,7 +1719,12 @@ generator.
 
 A deterministic render is byte-reproducible: UTF-8, LF line endings, stable ordering, no
 locale-dependent sorting, no wall-clock content in compared bytes, no network access, and no model
-involvement. Every generated file opens with a header stating that it is generated and must not be
+involvement. A record field value rendered into a Markdown view stays on one line: LF, CR, U+0085
+NEXT LINE, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR each collapse to a single space (a
+CR LF pair to one space), and DEL and the other C0 controls except TAB are dropped, so the rendered
+value holds no character that Python's str.splitlines() treats as a line boundary; the store keeps
+the value as written.
+Every generated file opens with a header stating that it is generated and must not be
 hand-edited, naming its source paths, the schema and generator versions, a digest of the source
 set, and the regeneration command; the header carries no timestamp.
 
@@ -1717,8 +1802,9 @@ From the recorded approval until its retirement is recorded, a path the approved
 as a frozen retire, move or migrate source (section 14.2) is bounded adoption state: while its
 live bytes still match its plan digest, containment MUST report it as `migration_incomplete`
 detail rather than failing it, at `"none"` during a clean start as much as at `"partial"`. A
-digest mismatch (a drifted source) or an unenumerated path MUST remain a containment-gate
-failure at `required`; the bounded treatment is never a blanket exemption. A formerly occupied
+digest mismatch (a drifted source), a source that is gone before its retirement is recorded (a
+vanished source), or an unenumerated path MUST remain a containment-gate failure at `required`;
+the bounded treatment is never a blanket exemption. A formerly occupied
 destination needs no bounded treatment: its occupying source was archived at apply (section
 14.2), the destination is an ordinary managed path from apply onward, and a check that reads the
 adoption archive, the section 14.1 completion check and import included, MUST fail at `required`,
@@ -2068,7 +2154,9 @@ The reserved children `archive/`, `imported/`, `staging/`, and `journals/` are O
 Detection MUST NOT surface them as adopter content, an adoption option MUST NOT select them, and
 an `[unmanaged]` declaration MUST NOT equal, contain, or lie within them. Adoption evidence MUST
 be committed and immutable under `.working/imported/adoption/<run-id>/`; append-only outcome
-events retain the receipt's history. In homes 2, transaction records live under `.working/journals/adoption/`;
+events retain the receipt's history. Every adoption evidence inventory MUST carry the
+section 4.2 `[adoption]` identity table, naming its own run id, its phase and the approved
+plan's `plan_digest`. In homes 2, transaction records live under `.working/journals/adoption/`;
 homes 1 retains its legacy journal paths and completion-carried evidence checks.
 
 After adoption, containment uses the receipt-bound `import_status` and the bounded treatment of

@@ -819,9 +819,11 @@ that takes the unit to `lane=merge`.
   the pinned reviewed revision, each leg briefed to refute. **VERIFY** runs after fixes land, to
   check the fixes and regressions on the fixed revision, before the next discovery panel.
 - Every finding is validated at source (a finding is a hypothesis until reproduced), fixed at
-  the width of its class, and committed before VERIFY dispatches. A verdict whose quoted
-  evidence does not match the reviewed revision fails the delivery: it is re-dispatched, and the
-  failure is recorded.
+  the width of its class, and committed before VERIFY dispatches. A brief asks each reviewer to
+  give a proposed wording fix as a complete replacement sentence, never a fragment or an
+  ellipsis, and whoever applies one re-checks every verb of the edited sentence against the
+  lines it cites. A verdict whose quoted evidence does not match the reviewed revision fails the
+  delivery: it is re-dispatched, and the failure is recorded.
 - **Convergence** is declared only on a complete, non-degraded DISCOVERY panel, every
   required family returning a real, non-empty, non-timed-out verdict on the same pinned
   revision, and is judged by one plain rule: the unit is converged when that latest
@@ -1186,17 +1188,18 @@ convergence rule.
   posting a new handoff "MUST supersede the previous in the same act", so the closing handoff
   requires a writer that supersedes the previous `current` handoff in the posting operation
   itself; where no clean `current` handoff authored by a non-importer actor exists, the new one
-  supersedes nothing and any writer may post it. The reference writer lacks that capability: it
-  documents that "posting a new handoff does not supersede the previous one in the same act"
-  (`opf record`), and a `create` followed by a separate `transition` of the old handoff is two
-  acts, not one, so the run never composes the two. Where the writer in use lacks it, as the
-  reference writer does, and such a `current` handoff exists, the run records the enumeration
-  and the pending-decisions queue in full (every `open` `pending_decision` ID) in one `infra`
-  worklog entry whose `detail` opens with the single line `flow handoff-deferred` and which
-  links with `relates` the `current` handoff it could not supersede, tying the newer state to
-  that handoff by record, posts no `handoff` record, since a second one would leave two live
-  handoffs, and surfaces the gap, a writer capability the adopter must supply, in its report and
-  at the next attended boundary. The handoff rests on that enumerated fact, not on OPF
+  supersedes nothing and any writer may post it. The reference writer has that capability:
+  `opf record create --type handoff` supersedes the previous `current` handoff in the same
+  journaled write, all or nothing, so on the reference writer the run posts the closing handoff
+  directly. A `create` followed by a separate `transition` of the old handoff is two acts, not
+  one, so the run never composes the two where the writer in use lacks the single-act
+  capability; where it lacks it and such a `current` handoff exists, the run records the
+  enumeration and the pending-decisions queue in full (every `open` `pending_decision` ID) in
+  one `infra` worklog entry whose `detail` opens with the single line `flow handoff-deferred`
+  and which links with `relates` the `current` handoff it could not supersede, tying the newer
+  state to that handoff by record, posts no `handoff` record, since a second one would leave two
+  live handoffs, and surfaces the gap, a writer capability the adopter must supply, in its
+  report and at the next attended boundary. The handoff rests on that enumerated fact, not on OPF
   actionability: an item awaiting a decision stays actionable in the section 8.5 sense, its
   parked steps wait on their triggers, and the next run resumes at the first step whose trigger
   has resolved; no proposal is thereby treated as ratified, and no stop is granted by one. A

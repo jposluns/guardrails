@@ -387,8 +387,8 @@ others) can differ between the host and the runner, and this gate does not compa
 that the committed patch is what the host runs: when the host interpreter changes, the maintainer updates the
 source and both host-patch pins in one reviewed change, and until then every local run fails on the
 interpreter leg. CI cost: the two jobs run the OPF tooling self-test and the four git-fixture-env suites a
-second time in every run of the workflow, and an edit to a pull request's title or body starts a run (the workflow
-runs on edited).
+second time in every run of the workflow, and an edit to a pull request's title or body starts no Quality run (the
+workflow does not run on edited).
 
 Run this gate isolated: python3 -I -B tools/check_python_host_pin.py
 """
