@@ -30,10 +30,10 @@ neither side and a scheduling view surfaces an importer-authored item only as hi
 the decision-resolution supersession-chain join (the current effective resolution is the head of each
 supersedes chain, spec 8.5; an importer-authored decision never becomes a current effective resolution,
 its links confer no authority, and DECISIONS surfaces it only as history, while a chain whose
-`supersedes` link joins an importer-authored decision to a non-importer one is a cannot-evaluate, since
-the reading for chains joining imported and current decisions is not yet decided, spec 8.5/8.6). Nothing
-beyond this vocabulary enters a
-generator; a new composition shape is a specification version bump, not ad hoc logic here.
+`supersedes` link, a proposal's included, joins an importer-authored decision to a non-importer one is a
+cannot-evaluate of the whole join, since the reading for chains joining imported and current decisions
+is not yet decided, spec 8.5/8.6). Nothing beyond this vocabulary enters a generator; a new composition
+shape is a specification version bump, not ad hoc logic here.
 
 Determinism (spec 10.3): UTF-8, LF, stable ordering, no locale-dependent sorting, no wall-clock content,
 no network, and no model. Every generated .md view OPENS with a do-not-edit header naming its source
@@ -64,9 +64,12 @@ Scope and disclosed deferrals: U4 renders the `inline` store layout only. A mani
 mis-reported as a downstream malformed-record error, and never silently rendered as if inline. The
 `<TYPE>-INDEX.md` mirrors cover the baseline record types only; module-type mirrors are DEFERRED until
 module-type record schemas ship (`_opf_schema.validate_record` knows only the baseline specs, so no
-module-type mirror can be rendered regardless).
+module-type mirror can be rendered regardless). Every record source is read from its ACTIVE
+`<type>.index.toml` only (_source_relpath); no view reads a record rotated to the archive, whereas the
+doctor's decision-chain check reads archived records beside the active ones, so a decision supersession
+chain is evaluated here over its active decisions alone (join_resolution states what that leaves unseen).
 
-The write path (spec 5.7/5.8/11): a mutating render gates on the U6 `_opf_check.validate_store`
+The write path (spec 5.7/5.8/11): a mutating render gates on the `_opf_check.validate_store`
 store-integrity layer (cross-record uniqueness, coverage, reconciliation, view drift, changelog/version
 integrity), the same engine `opf doctor` runs. `render --write` is SOURCE-GATED-REGENERATE, three phases,
 all after the root RESOLVES as an adopter (a non-adopter root returns NOT APPLICABLE (0) first and nothing
@@ -301,7 +304,8 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, 
     _load_records pins MANDATORY and exact, the ledger schema marker follows U3 optional-marker
     contract: _opf_release.validate_worklog type-pins a PRESENT marker (a non-integer or unsupported
     version is refused) but PERMITS an absent one. A schema-less ledger authored for another schema
-    version is not caught here; grading an unsupported-schema-version ledger is U3/U6 remit."""
+    version is not caught here; grading an unsupported-schema-version ledger is the remit of the release
+    ledger validators and the doctor's validate_store."""
     got = _with_worklog_diagnostics(lambda: _opf_worklog.load_worklog_at(
         store_root_fd, relpath.rsplit("/", 1)[0], required=False, with_raw=True,
         read_legacy=_read_raw_and_parsed, on_legacy_conflict=on_legacy_conflict,
@@ -638,10 +642,11 @@ def _mixed_provenance_chains(decisions):
     """The supersession chains of `decisions` in which a `supersedes` link joins an importer-authored
     decision to a non-importer one, in either direction. A chain is a connected component over EVERY
     `supersedes` link in either direction between two decisions of the set, whatever the linking
-    decision's state, importer-authored decisions included (spec 8.8), as the doctor's decision_chains
-    builds it. Provenance is read through the registered `importer_authored` predicate, like every
-    importer split in this module. Returns each such chain as its member IDs in numeric id order, the
-    chains ordered by their first member; [] when there is none."""
+    decision's state or `/proposed` qualifier, importer-authored decisions and proposals included (spec
+    8.8), as the doctor's decision_chains builds it over the decisions it reads; a link to an ID outside
+    the set links nothing. Provenance is read through the registered `importer_authored` predicate, like
+    every importer split in this module. Returns each such chain as its member IDs in numeric id order,
+    the chains ordered by their first member; [] when there is none."""
     imported = {d.get("id") for d in t_filter(decisions, "importer_authored")}
     parent = {d.get("id"): d.get("id") for d in decisions if isinstance(d.get("id"), str)}
 
@@ -678,24 +683,39 @@ def _mixed_provenance_chains(decisions):
 def join_resolution(decisions):
     """The decision-resolution supersession-chain join (spec 8.5): a decided decision may be superseded by
     a newer one linking `supersedes`, and exactly one current effective resolution exists per chain.
-    Returns (current, superseded, supersedes_map) over the decisions NOT authored by an importer: current
-    is the set of their IDs that no decided one of them supersedes (the chain heads), superseded is the
-    complementary set, and supersedes_map maps each decided one's ID to the sorted IDs among them that it
-    directly supersedes. The chains are first built over the WHOLE input, importer-authored decisions
-    included: a chain is a connected component over every `supersedes` link in either direction,
-    whatever the linking decision's state (spec 8.8, as the doctor's decision_chains builds it). A chain
-    in which such a link joins an importer-authored decision to a non-importer one raises ViewsError (a
-    cannot-evaluate) naming the chain's IDs: the reading for chains joining imported and current
-    decisions is not yet decided, so this join neither counts nor drops that link. Every other chain is
-    evaluated as before. An importer-authored decision is imported history outside every current-state
-    join (spec 8.5/8.6): the input is then filtered through the registered `not_importer_authored`
-    predicate, so such a decision never becomes a current effective resolution and lands in none of the
-    returned sets (the DECISIONS renderer surfaces it only as history), and its `supersedes` links, which
-    reach no non-importer decision once the check above has passed, confer no authority. Over the
-    remaining decisions the edges come from decided decisions only; a FORK (a decision superseded by more
-    than one other) or a CYCLE among those edges raises ViewsError (a cannot-evaluate), and with neither,
-    every chain those edges connect has exactly one head. A chain the doctor connects only through a link
-    from a non-decided decision is more than one chain here, each with its own head."""
+    `decisions` is every pending decision a view reads, proposals and importer-authored ones included.
+    Returns (current, superseded, supersedes_map) over the SETTLED (unqualified) decisions NOT authored by
+    an importer: current is the set of their IDs that no decided one of them supersedes (the chain heads),
+    superseded is the complementary set, and supersedes_map maps each decided one's ID to the sorted IDs
+    among them that it directly supersedes. The chains are first built over the WHOLE input: a chain is a
+    connected component over every `supersedes` link in either direction, whatever the linking decision's
+    state or `/proposed` qualifier, importer-authored decisions included (spec 8.8, as the doctor's
+    decision_chains builds it). A chain in which such a link joins an importer-authored decision to a
+    non-importer one raises ViewsError (a cannot-evaluate) naming the chain's IDs: the reading for chains
+    joining imported and current decisions is not yet decided, so this join neither counts nor drops that
+    link. The refusal is of the whole join, so its caller gets no sets at all: a clean chain beside a
+    refused one is not rendered either, since a view cannot render part of a graph it cannot evaluate.
+    When no chain is refused, every chain is evaluated as before. An importer-authored decision is
+    imported history outside every current-state join (spec 8.5/8.6): the input is then filtered through
+    the registered `not_importer_authored` predicate, so such a decision never becomes a current effective
+    resolution and lands in none of the returned sets (the DECISIONS renderer surfaces it only as
+    history), and its `supersedes` links, which reach no non-importer decision once the check above has
+    passed, confer no authority. A chain of importer-authored decisions only is therefore neither
+    evaluated nor refused here, a fork or a cycle among them included: two importer-authored decisions
+    superseding a third land in no set and raise nothing, while the doctor's C-DECISION-CHAINS, which
+    counts a chain's current resolutions whatever their provenance, reports that chain's two current
+    resolutions as a finding. A `/proposed` decision is then filtered out through the registered
+    `not_proposed` predicate: a proposal does not yet supersede anything, so it builds no edge, never
+    becomes a head, and lands in no returned set. Over the remaining decisions the edges come from decided
+    decisions only; a FORK (a decision superseded by more than one other) or a CYCLE among those edges
+    raises ViewsError (a cannot-evaluate), and with neither, every chain those edges connect has exactly
+    one head. A chain the doctor connects only through a link from a non-decided decision or a proposal
+    is more than one chain here, each with its own head. The join sees only the decisions it is given,
+    and the views read the active pending_decision index, never the archive, while the doctor's
+    decision_chains also reads the decisions rotated to the archive. A `supersedes` link to an archived
+    decision therefore links nothing here, and an archived decision's link to an active one is not seen:
+    a chain the doctor joins through an archived decision is evaluated over its active decisions alone,
+    so a chain joined through an archived importer-authored decision is NOT refused."""
     mixed = _mixed_provenance_chains(decisions)
     if mixed:
         raise ViewsError("cannot evaluate decision supersession {} {}: a `supersedes` link joins an "
@@ -703,7 +723,7 @@ def join_resolution(decisions):
                          "joining imported and current decisions is not yet decided (spec 8.5/8.6); "
                          "fail-closed".format("chain" if len(mixed) == 1 else "chains",
                                               "; ".join("[" + ", ".join(m) + "]" for m in mixed)))
-    decisions = t_filter(decisions, "not_importer_authored")
+    decisions = t_filter(t_filter(decisions, "not_importer_authored"), "not_proposed")
     supersedes_map = {}
     superseded = set()
     ids = {d.get("id") for d in decisions if isinstance(d.get("id"), str)}
@@ -720,12 +740,12 @@ def join_resolution(decisions):
         supersedes_map[did] = targets
         superseded.update(targets)
     # Spec 8.5/10.2: exactly ONE current effective resolution per supersession chain. Here a chain is a
-    # component connected by the edges built above (links from decided non-importer decisions); a chain
-    # joining imported and current decisions never reaches this point, since it was refused before the
-    # importer filter. A FORK is a node with in-degree > 1. Refusing every fork and every CYCLE leaves
-    # exactly one head per such chain, since an acyclic connected chain with no in-degree > 1 node has
-    # one node no edge reaches. Both are cannot-evaluate: fail closed rather than render an invalid
-    # DECISIONS view with two effective heads.
+    # component connected by the edges built above (links from settled, decided non-importer decisions); a
+    # chain joining imported and current decisions never reaches this point, since it was refused before
+    # the importer and proposal filters. A FORK is a node with in-degree > 1. Refusing every fork and
+    # every CYCLE leaves exactly one head per such chain, since an acyclic connected chain with no
+    # in-degree > 1 node has one node no edge reaches. Both are cannot-evaluate: fail closed rather than
+    # render an invalid DECISIONS view with two effective heads.
     indegree = {}
     for _did, targets in supersedes_map.items():
         for t in targets:
@@ -1083,16 +1103,14 @@ def render_decisions(src):
     whatever its recorded status, it is held OUT of every section and join result above and surfaced only
     under a trailing `Imported history` section with that FULL status (as PIPELINE and HANDOFF surface
     theirs), never as a pending/effective/superseded/withdrawn decision, an autonomous or maintainer ruling,
-    or an active pattern. A settled pending decision chain that joins imported and current decisions is a
-    cannot-evaluate (join_resolution). Every valid record of
-    every source thus lands in exactly one place."""
+    or an active pattern. A pending decision chain that joins imported and current decisions through any
+    `supersedes` link, a proposal's included, is a cannot-evaluate (join_resolution), and so is the whole
+    view: a clean chain beside it is not rendered either. A decision rotated to the archive is not read
+    (join_resolution states what that leaves unseen). When the view renders, every valid record of every
+    source thus lands in exactly one place."""
     pend, auto = src["pending_decision"], src["autonomous_decision"]
     md = src.get("maintainer_decision", [])
     pp = src.get("preference_pattern", [])
-    # The resolution join takes every SETTLED pending decision, importer-authored ones included, so it
-    # builds each chain over every `supersedes` link and refuses a chain joining imported and current
-    # decisions; it holds importer-authored decisions out of its returned sets itself.
-    joinable = t_filter(pend, "not_proposed")
     # The imported-history firewall (spec 8.5/8.6) keys on provenance: an importer-authored record of any
     # decision-register source confers no current-state authority, so it is held out of every section
     # below and surfaced only under the trailing Imported history section with its full status. The
@@ -1105,9 +1123,12 @@ def render_decisions(src):
     pp = t_filter(pp, "not_importer_authored")
     settled = t_filter(pend, "not_proposed")
     proposed = t_sort(t_filter(pend, "is_proposed"))
-    # The ratified supersession graph is over the SETTLED decisions only: a proposal does not yet supersede
-    # anything, so it neither becomes an effective head nor removes another decision from `current`.
-    current, superseded, supersedes_map = join_resolution(joinable)
+    # The resolution join takes EVERY pending decision, proposals and importer-authored ones included: it
+    # builds each chain over every `supersedes` link, as the doctor does, and refuses a chain joining
+    # imported and current decisions. Its ratified supersession graph is over the SETTLED non-importer
+    # decisions only: a proposal does not yet supersede anything, so it neither becomes an effective head
+    # nor removes another decision from `current`.
+    current, superseded, supersedes_map = join_resolution(src["pending_decision"])
     decided = t_filter(settled, "state_in", states=("decided",))
     open_pd = t_sort(t_filter(settled, "state_in", states=("open",)))
     effective = t_sort(t_filter(decided, "id_in", ids=current))
@@ -1263,16 +1284,17 @@ def render_decisions_toml(src):
     decision-resolution join's effective/superseded output over the SETTLED pending decisions (no vocabulary
     beyond spec 10.2). The projected rows are the faithful full-record mirror, so an importer-authored
     record still projects as a row; the `[derived]` table is a CURRENT-STATE join, so join_resolution's own
-    provenance firewall (spec 8.5/8.6) keeps an importer-authored decision out of both derived sets, and a
-    chain joining imported and current decisions is a cannot-evaluate there. x-<vendor> tables are
-    excluded (profile-owned). The body is emitted through
+    provenance firewall (spec 8.5/8.6) keeps an importer-authored decision out of both derived sets. The
+    join is handed every pending decision, so a chain joining imported and current decisions through any
+    link, a proposal's included, is a cannot-evaluate there, and the whole projection then refuses, a
+    clean chain beside it included; a decision rotated to the archive is not read (join_resolution).
+    x-<vendor> tables are excluded (profile-owned). The body is emitted through
     _opf_emit.emit_checked, which reparses and byte-canon-proves its own output (fail-closed)."""
     sources = ("pending_decision", "autonomous_decision", "maintainer_decision", "preference_pattern")
     doc = {"projection": "decisions", "schema": PROJECTION_SCHEMA}
     for t in sources:
         doc[t] = [_projection_row(r, _PROJECTION_EXTRA[t]) for r in sorted(src.get(t, []), key=_id_key)]
-    settled = t_filter(src.get("pending_decision", []), "not_proposed")
-    current, superseded, _supersedes_map = join_resolution(settled)
+    current, superseded, _supersedes_map = join_resolution(src.get("pending_decision", []))
     doc["derived"] = {"effective": _sorted_ids(current), "superseded": _sorted_ids(superseded)}
     return _opf_emit.emit_checked(doc)
 
@@ -1503,9 +1525,9 @@ def _write_contained(root_fd, relpath, text, check, preimages=None, scope=None):
     unaffected. With the gate composed the flag is True, so this backstop passes and render()'s validate_store
     verdict is what actually gates the write (spec 5.7/5.8/11)."""
     if not check and not _WRITE_GATE_COMPOSED:
-        raise ViewsError("refusing to write {}: store-integrity gate (U6 validate_store) not composed; a "
-                         "mutating render is refused at the write boundary as a defence-in-depth backstop "
-                         "(fail-closed, spec 5.7/5.8/11)".format(relpath))
+        raise ViewsError("refusing to write {}: the store-integrity gate (the doctor's validate_store) is not "
+                         "composed; a mutating render is refused at the write boundary as a defence-in-depth "
+                         "backstop (fail-closed, spec 5.7/5.8/11)".format(relpath))
     new_bytes = text.encode("utf-8")
     try:
         pfd, name = _journal._open_parent(root_fd, relpath)
@@ -1616,8 +1638,8 @@ def render(argv, observations=None, accepted=None):
     """`opf render [--root DIR] (--check | --write)`: render every declared view of the store at a PRODUCT
     root. Exactly one of --check / --write is required (a bare `render` is a usage error, exit 2). --check is
     strictly read-only and returns 0 clean, 1 on drift, 2 cannot-evaluate. --write is the MUTATING half and is
-    SOURCE-GATED-REGENERATE: after resolve_store succeeds it (A) composes the U6 gate and refuses
-    (exit 2, nothing written) unless source integrity is sound (_opf_check.source_integrity_ok), which
+    SOURCE-GATED-REGENERATE: after resolve_store succeeds it (A) composes the doctor's validate_store gate
+    and refuses (exit 2, nothing written) unless source integrity is sound (_opf_check.source_integrity_ok), which
     EXCLUDES the deliverable-drift checks render itself regenerates; (B) regenerates the owned set (the
     declared views + the VERSION deliverable); (C) re-validates and requires every OWNED drift check to now
     pass, rolling back on a render/check disagreement (exit 2). A drifted OWNED deliverable is thus render's
@@ -2887,7 +2909,8 @@ def self_test():
               _tw[0].get("actor") == {"kind": "maintainer", "id": "a"}
               and _tw[1].get("actor") == {"kind": "importer", "id": "b"})
         # A source name outside the projection's declared set is impossible (the sources tuple is fixed), but a
-        # `/proposed` pending decision is EXCLUDED from the derived resolution join (settled-only, spec 8.4).
+        # `/proposed` pending decision builds no edge in the derived resolution join and lands in neither
+        # derived set (settled-only, spec 8.4). Red when the join builds edges from proposals.
         _projd = render_decisions_toml({"pending_decision": [
             {"id": "PD-1", "status": "decided", "title": "t", "decision": "x"},
             {"id": "PD-2", "status": "decided/proposed", "title": "t", "decision": "y",
@@ -2936,7 +2959,7 @@ def self_test():
         # non-decided decision's link. PD-1 is a decided head; PD-2 is WITHDRAWN yet links supersedes PD-1.
         # PD-1 must stay in `current` and out of `superseded`. Sourcing edges from every decision regardless
         # of state would put PD-1 in `superseded`, flipping this. (Cross-record resolution GRADING otherwise
-        # remains U6 validate_store's remit; this closes only the mislabel window.)
+        # remains the doctor's validate_store remit; this closes only the mislabel window.)
         _decd = {"id": "PD-1", "status": "decided", "links": []}
         _wdrw = {"id": "PD-2", "status": "withdrawn", "links": [{"rel": "supersedes", "id": "PD-1"}]}
         try:
@@ -3010,6 +3033,50 @@ def self_test():
             pending_decision=_shape_b, autonomous_decision=[])), ("PD-1", "PD-2", "PD-3")))
         check("projection-derived-joined-chain-cannot-evaluate", _refused_naming(_outcome(
             render_decisions_toml, {"pending_decision": _shape_b}), ("PD-1", "PD-2", "PD-3")))
+
+        # A chain joined through a `/proposed` decision is refused too: the doctor's decision_chains builds
+        # every chain over all pending decisions, proposals included, so both decision renderers hand the
+        # join every pending decision, and the join builds its edges from the settled ones only. Shape R:
+        # the assistant proposal PD-2 supersedes the maintainer PD-1 and the importer-authored PD-3
+        # supersedes PD-2. P1: the assistant proposal PD-2 supersedes the importer-authored PD-1. P2: the
+        # importer-authored proposal PD-2 supersedes the maintainer PD-1. P3: the assistant proposal PD-3
+        # supersedes the maintainer PD-1 and the importer-authored PD-2. Red when either renderer drops the
+        # proposals before the join, or the join drops them before its mixed-chain test: each shape then
+        # renders with no refusal.
+        def _pd(n, status, kind, *targets):
+            return {"id": "PD-{}".format(n), "status": status, "title": "t", "actor": {"kind": kind},
+                    "links": [{"rel": "supersedes", "id": "PD-{}".format(t)} for t in targets]}
+
+        def _both_refuse(shape, ids):
+            return (_refused_naming(_outcome(render_decisions, dict(pending_decision=shape,
+                                                                    autonomous_decision=[])), ids)
+                    and _refused_naming(_outcome(render_decisions_toml, {"pending_decision": shape}), ids))
+
+        check("decisions-chain-joined-through-proposal-r-cannot-evaluate", _both_refuse(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided/proposed", "assistant", 1),
+             _pd(3, "decided", "importer", 2)], ("PD-1", "PD-2", "PD-3")))
+        check("decisions-chain-joined-through-proposal-p1-cannot-evaluate", _both_refuse(
+            [_pd(1, "decided", "importer"), _pd(2, "decided/proposed", "assistant", 1)], ("PD-1", "PD-2")))
+        check("decisions-chain-joined-through-proposal-p2-cannot-evaluate", _both_refuse(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided/proposed", "importer", 1)], ("PD-1", "PD-2")))
+        check("decisions-chain-joined-through-proposal-p3-cannot-evaluate", _both_refuse(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided", "importer"),
+             _pd(3, "decided/proposed", "assistant", 1, 2)], ("PD-1", "PD-2", "PD-3")))
+        # A refused chain refuses the whole view: a clean chain (PD-2 supersedes PD-1) beside a joined one
+        # (the importer-authored PD-4 supersedes the maintainer PD-3) renders nothing in either renderer,
+        # and the refusal names only the joined chain. Red when a renderer renders the clean chain alone
+        # or the message names the clean chain.
+        check("decisions-clean-chain-beside-joined-chain-refuses-whole-view", _both_refuse(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided", "maintainer", 1),
+             _pd(3, "decided", "maintainer"), _pd(4, "decided", "importer", 3)], ("PD-3", "PD-4")))
+        # A fork among importer-authored decisions only is neither evaluated nor refused by the join: the
+        # imported PD-2 and PD-3 both supersede the imported PD-1, no link joins an importer-authored
+        # decision to a non-importer one, and none of the three lands in a returned set. (The doctor's
+        # C-DECISION-CHAINS, which ignores provenance, reports that chain's two current resolutions.)
+        # Red when the join's fork test also runs over importer-authored decisions.
+        check("resolution-importer-only-fork-not-refused", _outcome(join_resolution, [
+            _pd(1, "decided", "importer"), _pd(2, "decided", "importer", 1),
+            _pd(3, "decided", "importer", 1)]) == ("ok", (set(), set(), {})))
 
         # The DECISIONS renderer surfaces an importer-authored record of ANY decision-register source only
         # under a trailing Imported history section with its FULL status: never as an effective or
@@ -3885,8 +3952,8 @@ def self_test():
               and _epe["pending_decision"] == [] and _epe["derived"] == {"effective": [], "superseded": []})
 
         # --- a declared VERSION with an EMPTY version ledger fails closed, never a zero-byte write --------
-        # (Driven through render_write, which bypasses the U6 gate, so it reaches rendering and fails at the
-        # empty ledger, not at the store-integrity gate.)
+        # (Driven through render_write, which bypasses the store-integrity gate, so it reaches rendering and
+        # fails at the empty ledger, not at that gate.)
         vroot = new_root()
         write_toml(vroot, "manifest.toml", manifest)
         empty_indexes(vroot)
@@ -4503,7 +4570,7 @@ def self_test():
                   "## awaiting ratification\n- BI-7 (done/proposed) proposed done\n\n"
                   "## Imported history\n- BI-5 (open) imported history\n"))
 
-        # --- the composed U6 write gate: render --write gates on validate_store's source integrity ------
+        # --- the composed write gate: render --write gates on validate_store's source integrity ---------
         # A bare `render` (neither --check nor --write) is a usage error; --write on a NOT-ADOPTED root is
         # NOT APPLICABLE (0) and writes nothing (resolution precedes the gate); the CLI parser rejects a
         # dangling/empty/option-looking --root before the mode check. The gate ITSELF is exercised over a

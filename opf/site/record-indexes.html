@@ -298,6 +298,7 @@
     </div>
       <p class="code-cap">Illustrative excerpt: title, created_at, updated_at, and actor are omitted for brevity.</p>
     <p>The shared index shape with the standard envelope plus the resolution bundle fields: <code>decision</code>, <code>decided_at</code>, and <code>decided_by</code>. An open decision carries none of the three; a decided one carries all three. A decided record may be superseded by a new decision linking <code>supersedes</code>; the decision-resolution join walks that chain to find the current effective resolution.</p>
+    <p>An importer-authored decision is imported history: the join never makes it the current effective resolution. A chain whose <code>supersedes</code> link joins an importer-authored decision to a non-importer one, through any decision including a proposal, cannot be evaluated until the reading for such chains is decided, so <code>opf render</code> stops with a cannot-evaluate before writing any view, and a clean chain beside it is not rendered either. The views read the active index only, not the archive: a chain that runs through an archived decision is evaluated over its active decisions alone, so a chain joined through an archived importer-authored decision is not refused there, although <code>opf doctor</code> reads archived decisions beside active ones when it counts a chain's resolutions.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Half-recorded decisions are worse than none.</blockquote>

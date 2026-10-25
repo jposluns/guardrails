@@ -9,10 +9,11 @@ self-test wired in; store verbs that have not yet landed are recognized names th
 NOT-YET-IMPLEMENTED and fail closed (exit 2) until their unit lands, so a stub can never read as a
 passing operation. `render` HAS landed: the `opf render` CLI requires exactly one of
 `--check | --write` (a bare `render` is a usage error, exit 2); `--check` is the read-only drift check
-(forwarding to the U4 engine) and `--write` is the mutating half: it gathers the inert git-derived
-observations caller-side (_opf_observe.gather) and hands them to the U4 engine, which composes the EXISTING U6
-`validate_store` store-integrity gate and permits writing when source integrity holds. Post-write validation
-checks source integrity and regenerated outputs; other deliverable failures can remain. `doctor` HAS landed: `opf doctor
+(forwarding to the views engine, `_opf_views.render`) and `--write` is the mutating half: it gathers the
+inert git-derived observations caller-side (_opf_observe.gather) and hands them to the same engine, which
+composes the EXISTING doctor `validate_store` store-integrity gate and permits writing when source
+integrity holds. Post-write validation checks source integrity and regenerated outputs; other
+deliverable failures can remain. `doctor` HAS landed: `opf doctor
 [--root DIR] [--require-store]` RESOLVES the store, gathers the inert git-derived observations
 (_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 `validate_store` store-integrity engine
 over them, returning that engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0;
