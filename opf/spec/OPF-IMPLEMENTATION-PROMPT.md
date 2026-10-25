@@ -39,7 +39,7 @@ store can be built by hand from those sections.
 ## Read the specification first
 
 Read these files in full before you write any code, at the pinned commit
-`443d19bab79bfba1ad3d650ab023f58798553738` of `jposluns/guardrails`. These pins name the
+`ff9c505dccd9c8ac2e20747f86b6ffa6017c58df` of `jposluns/guardrails`. These pins name the
 specification this prompt quotes: every quotation of OPF-SPEC.md in this prompt is taken from that
 file at that commit, whose SHA-256 the table gives. Read them from the pinned URLs, not from a
 branch, so the text cannot change under you. After downloading each file, compute its
@@ -49,21 +49,21 @@ stop and report it. Do not work from memory or from a summary, this one included
 | File | Role | SHA-256 at the pinned commit |
 |---|---|---|
 | `opf/spec/OPF-SPEC.md` | The authoritative specification | `80131d168abae3bcbfaf3c2a314a545f044d5a4373ec337d327b1ab8ddf34504` |
-| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `d52a9e62b500b123aa1adf45d0916bf2deedb0d6300936a849c1208561619cdf` |
+| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `d3996926941a2ebaacf8f64cc21fb93596c25e999f2d06f862ef3b1b5ad7a254` |
 | `opf/spec/OPF-INIT-D2B.md` | The coupled initialization contract | `4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec` |
 | `opf/spec/OPF-INIT-D2B-REVIEW.md` | The review register for that contract | `5b29499173ed8ad47607d3d604bb77e59cd47a639f35046fb4815e241a794ffa` |
 | `opf/enforcement/ci/opf-ci.sh` | The reference CI recipe (read for behaviour; do not copy) | `0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104` |
 | `opf/enforcement/ci/github-actions.yml` | The reference CI workflow template (read; do not copy) | `3048d80af20e7c6699aa54d908c6bddb905fe1f4b056b85c30559e5e94be5262` |
-| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `50dd2c36c25afd69cacb3ed3ebe0285347cccaa67d15338b8ccffe4ad9b3310e` |
+| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `9f4d59444e836c255bc26f7759e2b9e7e8e3df0165ffc634e540dc3f5bff136d` |
 
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
 ```text
-https://raw.githubusercontent.com/jposluns/guardrails/443d19bab79bfba1ad3d650ab023f58798553738/<path>
+https://raw.githubusercontent.com/jposluns/guardrails/ff9c505dccd9c8ac2e20747f86b6ffa6017c58df/<path>
 ```
 
 For example, the specification itself is at
-`https://raw.githubusercontent.com/jposluns/guardrails/443d19bab79bfba1ad3d650ab023f58798553738/opf/spec/OPF-SPEC.md`.
+`https://raw.githubusercontent.com/jposluns/guardrails/ff9c505dccd9c8ac2e20747f86b6ffa6017c58df/opf/spec/OPF-SPEC.md`.
 
 Facts about these sources that shape the work:
 
@@ -88,7 +88,7 @@ Facts about these sources that shape the work:
   contract (`spec_version = "2.0.0"`, `[opf].homes = 2`) is a separate, later activation, and that
   the section 9 manifest example describes the 1.3.0 target on legacy homes.
 - The prompt pack manifest at the pinned commit (`format = "opf.prompt-pack/v1"`,
-  `version = "0.5.2"`) lists three members: `adopt/SKILL.md`, an adoption procedure that drives the
+  `version = "0.5.4"`) lists three members: `adopt/SKILL.md`, an adoption procedure that drives the
   reference tooling's `opf adopt` verb; `adopt/clean-start.md`, its companion for a project with no
   prior records, whose interim route runs the reference tooling's `opf init`; and `flow/SKILL.md`,
   an operating-loop skill for an assistant. None of them is an import prompt, and this prompt uses
