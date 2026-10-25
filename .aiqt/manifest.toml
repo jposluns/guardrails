@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c7566dd8e3fe784b64401dbd0099ae35e987548a54fd2d1e6641d21a5bca1238"
+tree-sha256 = "f15b8d160754692cc93501e377657f6bfc6443f467797a4a44fa0bcbbfce7a61"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 452180
-sha256 = "f315c72458b8faa147622b8fadf04cedc1a755e9884ef8b68c7ca9627bea0cbf"
+bytes = 453801
+sha256 = "00c477c69fa2aadcf88061be9cadca548235da1ebe915537c5b5452aa26506cb"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2756,13 +2756,13 @@ sha256 = "ff68b232100070ad28b1683ebbb7f1d7b223f4129b80872246f86a193a764231"
 
 [[sources]]
 path = "opf/tools/_opf_init_observe.py"
-bytes = 19339
-sha256 = "77afb1dcded7f7990f1c2055b5a13c5df0c8fff59505f3e8da5b4a0608350334"
+bytes = 24392
+sha256 = "04db95a8471c0792ee73a3731eed9a28e4516155fe74b3290b262145a2a5a8db"
 
 [[sources]]
 path = "opf/tools/_opf_init_operation.py"
-bytes = 270412
-sha256 = "695c0c8fa95d97d70d49e25ac87b72f66f0bab9f051773d35098c79c1b52ad87"
+bytes = 281392
+sha256 = "32968741f73bf0b8aa0dfd2d58cf9505e7abca09ff178ad4a4669705a01ac8f2"
 
 [[sources]]
 path = "opf/tools/_opf_init_p0.py"
@@ -3011,8 +3011,8 @@ sha256 = "181a809502d0e340561a932d6bb193c599162d483b7b6b6a53994480daba24b0"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
-bytes = 455706
-sha256 = "3554bdc0089d432dfa318425468fc74451dc74672c3209b3399966c463e573ac"
+bytes = 458601
+sha256 = "71c4a96a0a131e2b2a131e3c3189702d3e5ac42344a42b2d238d5114331d3c6b"
 
 [[sources]]
 path = "opf/tools/check_opf_init_contract.py"
@@ -3021,8 +3021,8 @@ sha256 = "45b4489813b273f3bbaca33ceff41bf0c8187d56b92151b8637309f4e278fb6f"
 
 [[sources]]
 path = "opf/tools/check_opf_init_observe.py"
-bytes = 31026
-sha256 = "affd9fbfd4a608f0625a9b6129a045b64b36534bba37225e466e8f3b9ef5158c"
+bytes = 37195
+sha256 = "a4ef12865f0f238ad9a056aa073d664d2c7c44f97b6419d6d4249bc563848258"
 
 [[sources]]
 path = "opf/tools/check_opf_init_p0.py"
