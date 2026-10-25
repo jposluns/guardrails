@@ -15505,9 +15505,10 @@ def _orch_note_scan(command, bash_word_starts):
     pattern's, so after a `case` a closed substitution stays counted open
     and a later here-document in the same command draws the note, an over-note; and a `<<` met inside a
     double-quoted command or backquote substitution (the commit-message form) returns "unreadable" at
-    the operator itself, but only while no nested double-quoted string precedes the operator in that
-    substitution (after one, the scan no longer reads the `<<` as inside a substitution: the known
-    misses below): bash reads such a body under its own here-document rules, while this scan read
+    the operator itself, a best-effort rule: the scan tracks quotes and parentheses inside such a
+    substitution only approximately, and any shape whose quote or parenthesis state it misreads can
+    leave the `<<` unread as inside a substitution (the known misses below): bash reads such a body
+    under its own here-document rules, while this scan read
     it as double-quoted text whose quote state each body quote toggles, so a stray quote in the body
     once shifted that state onto a later real bare `&` outside the substitution, which read as quoted
     text and was silently allowed; the note replaces that reading (a `<<<` here-string there, and a
@@ -15543,26 +15544,30 @@ def _orch_note_scan(command, bash_word_starts):
     read in command position; an unquoted expansion as the
     command word hides the detacher after it ($SUDO setsid -f job, $(true) nohup job: an empty
     expansion vanishes to bash, which runs the word after it as the command, while this scan reads
-    that word as an argument); a `case` keyword hidden from command position after coproc, which is
-    not a recognized command prefix, is not read (a spelling hidden by a backslash-newline line
-    continuation, split by one or followed by one, draws the continuation note above instead),
-    so a bare pattern's `)` after it still reads as a substitution's close on the count exactly as it
-    pops the stack, and a later here-document inside that substitution can be skipped at a
-    wrong line; a command substitution inside
+    that word as an argument); a `case` keyword this scan does not read in command position, such as
+    one after coproc, which is not a recognized command prefix (a spelling hidden by a
+    backslash-newline line continuation, split by one or followed by one, draws the continuation note
+    above instead), leaves a bare pattern's `)` after it read as a substitution's close on the count
+    exactly as it pops the stack, so a later here-document inside that substitution can be skipped at
+    a wrong line; a command substitution inside
     skipped arithmetic is skipped with it; a `<<` inside the old-style $[ ... ] arithmetic reads as a
     here-document opener and skips the lines after it; a redirect target written as an arithmetic
     expansion drops the pending command position; a bash 5.3 `${ cmd; }` or `${| cmd; }` command
     substitution outside a redirect target (`echo ${ setsid -f job; }`) is read char by char, so an `&`
     in it notes but a detacher word in it is not read in command position, and one in an unquoted
     here-document body is skipped with the body. Inside a double-quoted command or backquote
-    substitution this scan reads every unescaped double quote as the end of the outer string, while
-    bash reads one there as opening a nested string, or as data inside a single-quoted span, so the
-    scan's quote state shifts from that point in two known shapes: after a nested double-quoted string
-    (`: "$(cat "-" <<'EOF'`, or `"$(x="a"; cat <<'EOF'`) a later `<<` in the substitution is not
-    seen as inside one, its body is read as double-quoted text again, and a stray quote in it can
-    carry a real bare `&` after the substitution into quoted text; and a double quote inside a
-    single-quoted span there (`echo "$(echo 'x"y')" & job # '`) shifts the state the same way. In
-    both shapes the `&` stays silent while bash backgrounds the job. A setsid whose wait option sits
+    substitution this scan tracks quotes and parentheses only approximately (it reads every unescaped
+    double quote there as the end of the outer string, and a `)` there as closing the innermost open
+    parenthesis, where bash may read the character otherwise), so the here-document rule above is best
+    effort there: any shape whose quote or parenthesis state the scan misreads can leave a real
+    background operator unnoted. Such a shape can hide a later `<<` in the substitution from that
+    rule, its body is then read as double-quoted text again, and a stray quote in it can carry a real
+    bare `&` after the substitution into quoted text; or it can shift the quote state onto that `&`
+    directly. Known examples, not a complete list: a nested double-quoted string (`: "$(cat "-"
+    <<'EOF'`, or `"$(x="a"; cat <<'EOF'`), a single-quoted span holding a double quote (`echo "$(echo
+    'x"y')" & job # '`), a case pattern's close paren (`: "$(case a in a) cat <<'EOF'`) and a close
+    paren inside `${...}` (`: "$(echo ${y%)}; cat <<'EOF'`). In each the `&` stays silent while bash
+    backgrounds the job. A setsid whose wait option sits
     behind a redirect target that is not a plain word (an expansion or a quoted word) reads the redirect as the end of
     the options, so that setsid is still noted: an over-note of a setsid that in fact waits, never a
     miss.
@@ -15570,7 +15575,7 @@ def _orch_note_scan(command, bash_word_starts):
     Returns "detach" when it meets a bare `&` control operator, "unreadable" the moment it meets a
     backslash-newline line continuation outside a single-quoted span, a span it
     would skip but cannot read with certainty (the here-document and `${...}` redirect-target cases above,
-    a `<<` inside a double-quoted substitution included while no nested double-quoted string precedes it)
+    a `<<` the scan reads as inside a double-quoted substitution included, a best-effort rule)
     or a `#` whose comment reading depends on context (everything past that point is unknown, so the note
     is emitted unconditionally), else the first such
     command word it met (setsid, nohup or disown), else None. A scan that ends inside an open quote
@@ -15579,8 +15584,9 @@ def _orch_note_scan(command, bash_word_starts):
     that ends with any opened construct still open (a here-document opener whose body never started or
     whose closing delimiter line never came, an unclosed parenthesis, `${...}` or backquote
     substitution, or a trailing backslash that escapes nothing): bash would still be reading input
-    there, so what the open construct holds was never really checked (a substitution whose `(` a bare
-    case pattern's `)` already popped is not seen by this end check; its here-documents are still noted
+    there, so what the open construct holds was never really checked (a substitution whose `(` the
+    scan already read as closed at a `)` that closes nothing to bash, such as a bare case pattern's,
+    is not seen by this end check; its here-documents are still noted
     through the substitution count, and with no here-document and no detach after it the scan stays
     silent, a disclosed miss). The in-scope deny
     does not use this scan; it keeps _orch_foreground_detach_kind."""
@@ -15660,7 +15666,9 @@ def _orch_note_scan(command, bash_word_starts):
                 # bare `&` outside the substitution, which read as quoted text and was silently
                 # allowed. Where that body ends cannot be read with certainty, so the scan notes at
                 # the `<<` itself (a `<<<` here-string here draws the same note: an over-note, never
-                # a miss).
+                # a miss). Best effort only: dq_nest follows quotes and parentheses in the
+                # substitution approximately, so a misread quote or `)` can hide this `<<` (the
+                # known misses in the docstring).
                 return "unreadable"
             elif dq_nest and ch == "'":
                 dq_single = True
@@ -15927,8 +15935,9 @@ def _orch_note_scan(command, bash_word_starts):
         # command), or an unclosed parenthesis, `${...}` or backquote substitution. bash would still
         # be reading input there, or rejects the command, so what the opened construct holds was
         # never really checked and a detach in it cannot be ruled out: the note is emitted, never a
-        # silent allow. A substitution whose `(` a bare case pattern's `)` already popped is not
-        # seen here (its here-documents are still noted through the substitution count above, and
+        # silent allow. A substitution whose `(` the scan already read as closed at a `)` that
+        # closes nothing to bash, such as a bare case pattern's, is not seen here (its
+        # here-documents are still noted through the substitution count above, and
         # with no here-document and no detach after it the scan stays silent, a disclosed miss).
         return "unreadable"
     return found
@@ -15939,8 +15948,8 @@ def _orch_foreground_note_kind(command):
     comment rule (_orch_note_scan) meets a bare `&`, else the first kind either rule met ("unreadable"
     for a skipped span it could not read with certainty, a backslash-newline line continuation outside
     a single-quoted span, a `#` whose comment reading depends on context, a scan that ends inside an
-    open quote or with an opened construct still open, or a `<<` inside a double-quoted substitution
-    that no nested double-quoted string precedes there, or a setsid, nohup or disown command word),
+    open quote or with an opened construct still open, or a `<<` it reads as inside a double-quoted
+    substitution, a best-effort rule, or a setsid, nohup or disown command word),
     else None. Any non-None kind draws the note; none of them ever blocks."""
     kinds = (_orch_note_scan(command, False), _orch_note_scan(command, True))
     if "detach" in kinds:
@@ -16509,9 +16518,9 @@ def orch_truncation_guard(data):
     also skips outer-level here-document bodies, arithmetic and redirect operands), and one whose scan met
     a span it would skip but cannot read with certainty (a here-document delimiter that is not a whole
     word of letters, digits and `_ . + -`, a here-document opened while a parenthesis, `${...}` or
-    backquote substitution is open or not provably closed, a here-document opened inside a double-quoted
-    command substitution while no nested double-quoted string precedes its `<<` there (the disclosed
-    misses in _orch_note_scan), a body holding a backslash-newline up to its
+    backquote substitution is open or not provably closed, a here-document the scan reads as opened
+    inside a double-quoted command substitution, a best-effort rule (the disclosed misses in
+    _orch_note_scan), a body holding a backslash-newline up to its
     closing line, a `${...}` redirect target left unclosed, not opened by a name or holding anything
     beyond literal characters, or a further `${` in a redirect target), or a backslash-newline line
     continuation anywhere outside a single-quoted span, or whose scan ends inside an

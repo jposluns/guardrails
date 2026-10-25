@@ -10162,7 +10162,7 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-subst-then-word-argument-allows", _fg("echo $(true) nohup"), "allow"),
                 # A `<<` met inside a double-quoted command or backquote substitution (the
                 # commit-message form) draws the note at the operator itself, whatever the body holds,
-                # while no nested double-quoted string precedes it there (the miss rows below): the
+                # as a best-effort rule (the miss rows below show shapes it misses): the
                 # earlier reading of such a body as double-quoted text let a stray body quote flip
                 # the scan's quote state so that a later REAL bare `&` outside the substitution read as
                 # quoted text and was silently allowed (bash 5.3 backgrounds the job: the shifted-amp
@@ -10186,13 +10186,14 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-dq-literal-heredoc-chars-allows", _fg("echo \"a << b\""), "allow"),
                 ("trunc/oos-dq-subst-single-quoted-lt-allows",
                  _fg("echo \"$(echo '<<')\""), "allow"),
-                # Disclosed SILENT misses (the manifest residue): the scan reads every unescaped double
-                # quote inside a double-quoted substitution as the end of the outer string, while bash
-                # reads one there as opening a nested string or as data in a single-quoted span. After
-                # a nested double-quoted string the `<<` is not read as inside a substitution, so its
-                # body is read as double-quoted text and its stray quote carries the real `&` into
-                # quoted text; a double quote in a single-quoted span there shifts the state the same
-                # way. bash 5.3.9 backgrounds the job in each (`$!` is set). These rows record the
+                # Disclosed SILENT misses (the manifest residue): the scan tracks quotes and
+                # parentheses inside a double-quoted substitution only approximately, so a shape
+                # whose quote or parenthesis state it misreads can leave a real `&` unnoted. These
+                # rows are examples, not a complete list: a nested double-quoted string, a double
+                # quote in a single-quoted span, a bare case pattern's `)` and a `)` inside `${...}`
+                # (each `)` pops the scan's substitution stack, so the `<<` is not read as inside a
+                # substitution and the body's stray quote carries the real `&` into quoted text).
+                # bash 5.3.9 backgrounds the job in each (`$!` is set). These rows record the
                 # current outcome (no note), so a scanner change that alters it shows here.
                 ("trunc/oos-dq-subst-nested-dq-heredoc-miss-allows",
                  _fg(": \"$(cat \"-\" <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
@@ -10205,6 +10206,12 @@ def _main_isolated(report_path=None):
                      "EOF\n)\" & long_job # 5\" screens"), "allow"),
                 ("trunc/oos-dq-subst-sq-dq-amp-miss-allows",
                  _fg("echo \"$(echo 'x\"y')\" & job # '"), "allow"),
+                ("trunc/oos-dq-subst-case-pattern-heredoc-miss-allows",
+                 _fg(": \"$(case a in a) cat <<'EOF'\nSupport 5\" screens\nEOF\n;; esac)\" & long_job"
+                     " # 5\" screens"), "allow"),
+                ("trunc/oos-dq-subst-param-paren-heredoc-miss-allows",
+                 _fg(": \"$(echo ${y%)}; cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job"
+                     " # 5\" screens"), "allow"),
                 # A backslash inside a single-quoted span within a double-quoted substitution is
                 # literal data to bash (bash prints the pair as written), so a backslash-newline
                 # there stays silent; outside that span, inside the same substitution, it is a live

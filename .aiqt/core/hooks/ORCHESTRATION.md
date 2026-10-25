@@ -65,15 +65,16 @@ the doctor and the resume audit report and arm from it):
   skips here-document bodies opened at the outer quoting level, while no parenthesis, `${...}` or
   backquote substitution is open, and arithmetic, which the in-scope
   deny still reads as code (a `<<` met inside a double-quoted command or backquote substitution, the
-  commit-message form, draws the note at the operator itself, whatever the body holds, but only
-  while no nested double-quoted string precedes the operator in that substitution: bash reads
-  such a body under its own here-document rules, while reading it as double-quoted text let a stray
-  body quote shift the scan's quote state onto a later real `&`, a silent miss confirmed against
-  bash; the scan reads every unescaped double quote inside such a substitution as the end of the
-  outer string, so two known shapes still miss a real `&` silently: a `<<` after a nested
-  double-quoted string, as in `: "$(cat "-" <<'EOF'` or `"$(x="a"; cat <<'EOF'`, whose body is
-  then read as double-quoted text again, and a double quote inside a single-quoted span there, as
-  in `echo "$(echo 'x"y')" & job # '`), and passes over a redirect
+  commit-message form, draws the note at the operator itself, whatever the body holds, as a
+  best-effort rule: bash reads such a body under its own here-document rules, while reading it as
+  double-quoted text let a stray body quote shift the scan's quote state onto a later real `&`, a
+  silent miss confirmed against bash; the scan tracks quotes and parentheses inside such a
+  substitution only approximately, so any shape whose quote or parenthesis state it misreads can
+  leave a real background operator unnoted, for example a nested double-quoted string, as in
+  `: "$(cat "-" <<'EOF'` or `"$(x="a"; cat <<'EOF'`, a single-quoted span holding a double quote,
+  as in `echo "$(echo 'x"y')" & job # '`, a case pattern's close paren, as in
+  `: "$(case a in a) cat <<'EOF'`, or a close paren inside `${...}`, as in
+  `: "$(echo ${y%)}; cat <<'EOF'`; these examples are not a complete list), and passes over a redirect
   operator and its target without losing the command position (a here-string `<<<`, the noclobber
   `>|`, a named descriptor such as `{fd}>`, a redirect between `setsid` and its wait option, and a
   `${...}` parameter expansion that is the whole redirect target, read as one word when it is
@@ -110,8 +111,9 @@ the doctor and the resume audit report and arm from it):
   unterminated here-document body, a here-document opener with no body line, an unclosed
   parenthesis, `${...}` or backquote substitution, or a trailing backslash that escapes nothing
   (bash would still be reading input there, or rejects the command, so nothing the open construct
-  holds was checked; a substitution whose `(` a bare case pattern's `)` already popped is not seen
-  by that end check, a disclosed miss when nothing after it opens a here-document or detaches).
+  holds was checked; a substitution whose `(` the scan already read as closed at a `)` that closes
+  nothing to bash, such as a bare case pattern's, is not seen by that end check, a disclosed miss
+  when nothing after it opens a here-document or detaches).
   Command position includes the word after a case pattern's `)`, parenthesised
   (`(pat)`) or bare, and a function body the command itself defines (`f() { ...; }` or
   `function f { ...; }`); a detacher renamed by an alias or by a function defined outside the

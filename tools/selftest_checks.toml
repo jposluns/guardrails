@@ -887,6 +887,8 @@ expected-check-ids = [
   "trunc/oos-dq-subst-assign-dq-heredoc-miss-allows",
   "trunc/oos-dq-subst-printf-dq-heredoc-miss-allows",
   "trunc/oos-dq-subst-sq-dq-amp-miss-allows",
+  "trunc/oos-dq-subst-case-pattern-heredoc-miss-allows",
+  "trunc/oos-dq-subst-param-paren-heredoc-miss-allows",
   "trunc/oos-dq-subst-sq-continuation-allows",
   "trunc/oos-dq-subst-continuation-notes",
   "trunc/oos-unterminated-heredoc-notes",
