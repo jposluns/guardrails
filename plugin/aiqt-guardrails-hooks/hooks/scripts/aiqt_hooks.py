@@ -4761,7 +4761,8 @@ _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
 # missed WRITE spelling would be a fail-open (forbidden), so WRITE recognition is complete across every
 # spelling form; a missed READ is only an over-ASK (safe), so READ recognition may be incomplete. Roles,
 # one char per long option: 'W' write (immediate mutating); 'L' list trigger (no value); 'V' tag verify
-# (read mode, no value); 'F' filter (sets list mode, takes a value that is optional only when last); 'D'
+# (read mode, no value); 'F' filter (sets list mode, takes a value that is optional only when last); 'Q'
+# filter whose value git REQUIRES even when last (sets list mode; a missing or empty value is malformed); 'D'
 # display taking a REQUIRED value but NOT setting list mode (a following name still creates); 'O' optional
 # '='-attached value only (consumes NOTHING following); 'R' plain read (no value, no list mode). The long
 # universe is a conservative SUPERSET of git's real per-subcommand option table (hidden aliases, the
@@ -4787,11 +4788,13 @@ _GIT_REF_SPECS = {
             # git 2.56: --delete-merged deletes merged local branches; --dry-run and --no-dry-run decide
             # whether it does, so they are W too (a dry run beside the deletion is judged like the deletion).
             "--delete-merged": "W", "--dry-run": "W", "--no-dry-run": "W",
-            # L / F: list trigger and filters (set list mode; F takes a value, optional only when last).
+            # L / F / Q: list trigger and filters (set list mode; F takes a value, optional only when last;
+            # Q takes a value git requires, so 'git branch --points-at' alone is an error, not a listing).
             "--list": "L",
             "--contains": "F", "--no-contains": "F", "--merged": "F", "--no-merged": "F",
-            "--points-at": "F", "--with": "F", "--without": "F",
-            "--forked": "F",  # git 2.56: lists branches whose upstream matches; implies --list
+            "--with": "F", "--without": "F",
+            "--points-at": "Q",
+            "--forked": "Q",  # git 2.56: lists branches whose upstream matches; implies --list
             # D: required value, NO list mode (a following name creates).
             "--format": "D", "--sort": "D",
             # O: optional '='-attached value only (never consumes a following token).
@@ -4968,14 +4971,18 @@ def _git_ref_cmd_mutating(sub, args):
                 if sep:
                     return True  # '=' on a no-value option is malformed -> MUTATING
                 list_mode = True
-            elif role == "F":
+            elif role in ("F", "Q"):
                 list_mode = True
-                if not sep:
-                    if i < n and not pre[i].startswith("-"):
-                        i += 1       # separate filter value consumed
-                    elif i < n:
-                        return True  # a dash-leading separate value cannot be certified -> MUTATING
-                    # at end: the filter value is optional-when-last (defaults HEAD) -> stays list mode
+                if sep:
+                    if not _val:
+                        return True  # an empty '=' value is malformed (git refuses it) -> MUTATING
+                elif i < n and not pre[i].startswith("-"):
+                    i += 1           # separate filter value consumed
+                elif i < n:
+                    return True      # a dash-leading separate value cannot be certified -> MUTATING
+                elif role == "Q":
+                    return True      # at end with no value: git refuses a required value -> MUTATING
+                # F at end: the filter value is optional-when-last (defaults HEAD) -> stays list mode
             elif role == "D":
                 if not sep:
                     if i < n and not pre[i].startswith("-"):

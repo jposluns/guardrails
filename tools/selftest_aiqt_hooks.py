@@ -19134,21 +19134,47 @@ def _main_isolated(monitor):
                                 .format(_rc_label, _rc_sub, _rc_args, _rc_want, _rc_got))
         # A W entry and the unknown-option default give the same MUTATING verdict, so the git 2.56
         # spellings are also pinned by role: each resolves to its own entry, and a prefix git 2.56
-        # rejects as ambiguous (--d, --del, --fo) resolves to None.
+        # rejects as ambiguous (--d, --del, --fo) resolves to None. --forked and --points-at take a value
+        # git requires even when last, so they are Q, not the optional-when-last F.
         _rr_long = aiqt_hooks._GIT_REF_SPECS["branch"]["long"]
-        for _rr_label, _rr_name, _rr_want in (
-                ("eb-e161", "--delete-merged", "W"), ("eb-e162", "--delete-m", "W"),
-                ("eb-e163", "--dry-run", "W"), ("eb-e164", "--dr", "W"), ("eb-e165", "--no-dry-run", "W"),
-                ("eb-e166", "--forked", "F"), ("eb-e167", "--fork", "F"),
-                ("eb-e168", "--del", None), ("eb-e169", "--d", None), ("eb-e170", "--fo", None)):
+        for _rr_name, _rr_want in (
+                ("--delete-merged", "W"), ("--delete-m", "W"),
+                ("--dry-run", "W"), ("--dr", "W"), ("--no-dry-run", "W"),
+                ("--forked", "Q"), ("--fork", "Q"), ("--points-at", "Q"), ("--contains", "F"),
+                ("--del", None), ("--d", None), ("--fo", None)):
             _rr_got = aiqt_hooks._resolve_long_role(_rr_name, _rr_long)
             if _rr_got != _rr_want:
-                failures.append("({}) branch {} resolves to role {!r}, expected {!r}"
-                                .format(_rr_label, _rr_name, _rr_got, _rr_want))
+                failures.append("branch {} resolves to role {!r}, expected {!r}"
+                                .format(_rr_name, _rr_got, _rr_want))
+        # A required filter value that is missing (last, or before '--') or empty is a command git refuses;
+        # the classifier must not call it a read. An optional-when-last filter alone stays a read.
+        for _rq_sub, _rq_args, _rq_want in (
+                ("branch", ["--forked"], _M),
+                ("branch", ["--forked="], _M),
+                ("branch", ["--fork"], _M),
+                ("branch", ["--list", "--forked"], _M),
+                ("branch", ["--forked", "--", "NAME"], _M),
+                ("branch", ["--forked", "main", "--forked"], _M),
+                ("branch", ["--forked", "main", "--forked", "origin/*"], _R),
+                ("branch", ["--points-at"], _M),
+                ("branch", ["--points-at="], _M),
+                ("branch", ["--points-at", "HEAD", "-v"], _R),
+                ("branch", ["--points-at=HEAD"], _R),
+                ("branch", ["--contains="], _M),
+                ("branch", ["--merged"], _R),
+                ("tag", ["--points-at"], _R),
+                ("tag", ["--points-at="], _M),
+        ):
+            _rq_got = aiqt_hooks._git_is_mutating(_rq_sub, _rq_args)
+            if _rq_got is not _rq_want:
+                failures.append("_git_is_mutating({!r}, {!r}): expected {}, got {}"
+                                .format(_rq_sub, _rq_args, _rq_want, _rq_got))
         ebexpect("(eb-e171) branch --delete-merged under cd allows with a note (a deletion)",
                  "cd /x && git branch --delete-merged main", "allow-note")
         ebexpect("(eb-e172) branch --forked listing under cd is read-only",
                  "cd /x && git branch --forked main", "allow")
+        ebexpect("branch --forked with no value under cd is not a read (a note, never an ask)",
+                 "cd /x && git branch --forked", "allow-note")
         ebexpect("(eb-e173) a dry run beside --delete-merged is judged like the deletion under cd",
                  "cd /x && git branch --dry-run --delete-merged main", "allow-note")
         for _eb_sub, _eb_args, _eb_want in (

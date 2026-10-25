@@ -65,8 +65,8 @@ SHORT_FIELDS = {
     "short_write": "W", "short_list": "L",
     "short_read": "R", "short_optnum": "N",
 }
-LONG_ROLES = frozenset("WLVFDOR")
-VALUE_ROLES = frozenset("WFD")
+LONG_ROLES = frozenset("WLVFQDOR")
+VALUE_ROLES = frozenset("WFQD")
 
 # Derived from _git_ref_cmd_mutating and _short_cluster_verdict in SOURCE_REL.
 # Columns: OPTION; OPTION name; OPTION value name; OPTION=value;
@@ -79,6 +79,7 @@ ROLE_VERDICTS = {
     "L": (False, False, False, True, True, False),
     "V": (False, False, False, True, True, False),
     "F": (False, False, False, False, False, False),
+    "Q": (True, False, False, False, False, True),
     "D": (True, False, True, False, True, True),
     "O": (False, True, True, False, True, True),
     "R": (False, True, True, True, True, True),
@@ -88,7 +89,8 @@ ROLE_VERDICTS = {
 # Independent safety catalog, not copied or inferred at runtime from the hook.
 # Each entry selects the expected classifier role profile from git semantics:
 # W: mutation/control, conservatively immediate MUTATING; L/V: list/verify;
-# F: filter that implies listing and consumes a value; D: required display value
+# F: filter that implies listing and consumes a value, optional when last;
+# Q: filter that implies listing and requires its value; D: required display value
 # without list mode; O: optional attached value; R: no value or list mode;
 # N: optional attached decimal and list mode. W over-roles always remain safe.
 # Short entries specify exact roles, independently of the hook's short fields:
@@ -109,7 +111,9 @@ ROLE_VERDICTS = {
 # https://raw.githubusercontent.com/git/git/v2.53.0/parse-options.h
 # G: installed git 2.56.0 git-branch(1) OPTIONS and git branch -h, with the behaviour
 # observed in a scratch repository: --delete-merged deletes, --forked implies --list,
-# and --dry-run is refused without --delete-merged. Not reviewed against pinned source.
+# and --dry-run is refused without --delete-merged. git-branch(1) gives --forked a
+# required <branch>, where --contains and --merged take an optional [<commit>].
+# Not reviewed against pinned source.
 ROLE_CATALOG = {
     ("branch", "--verbose"): "R",  # B: verbosity.
     ("branch", "--no-verbose"): "R",  # B/P: reset verbosity.
@@ -167,7 +171,7 @@ ROLE_CATALOG = {
     ("branch", "--no-column"): "R",  # B/P: display.
     ("branch", "--sort"): "D",  # B: sorting.
     ("branch", "--no-sort"): "R",  # B/P: sorting.
-    ("branch", "--points-at"): "F",  # B: filter.
+    ("branch", "--points-at"): "Q",  # B: filter; value required (no default when last).
     ("branch", "--no-points-at"): "W",  # B/P: clears filter.
     ("branch", "--ignore-case"): "R",  # B: matching.
     ("branch", "--no-ignore-case"): "R",  # B/P: matching.
@@ -179,7 +183,7 @@ ROLE_CATALOG = {
     ("branch", "--delete-merged"): "W",  # G: deletes merged local branches.
     ("branch", "--dry-run"): "W",  # G: deletion control, judged like the deletion.
     ("branch", "--no-dry-run"): "W",  # G: deletion control.
-    ("branch", "--forked"): "F",  # G: upstream filter.
+    ("branch", "--forked"): "Q",  # G: upstream filter; value required (no default when last).
     ("tag", "--list"): "L",  # T: list mode.
     ("tag", "-l"): "L",  # T: list mode.
     ("tag", "-n"): "N",  # T: list message lines, optional attached decimal.
@@ -711,8 +715,8 @@ def self_test():
     # The long-role comparison still permits equal verdict profiles.
     check("r3 long equal profiles", 0, {"--list"}, {"--list": "V"}, ROLE_CATALOG)
     # git 2.56 branch spellings: the deletion and its dry-run controls are W and the
-    # upstream filter is F; a read-side role for any of them is a finding.
-    git256 = {"--delete-merged": "W", "--dry-run": "W", "--no-dry-run": "W", "--forked": "F"}
+    # upstream filter is Q; a read-side role for any of them is a finding.
+    git256 = {"--delete-merged": "W", "--dry-run": "W", "--no-dry-run": "W", "--forked": "Q"}
     check("git 2.56 roles", 0, set(git256), git256, ROLE_CATALOG, {"--delete-merged", "--forked"})
     check("git 2.56 delete-merged as filter", 1, {"--delete-merged"},
           {"--delete-merged": "F"}, ROLE_CATALOG)
@@ -723,6 +727,18 @@ def self_test():
     check("git 2.56 forked as display", 1, {"--forked"}, {"--forked": "D"}, ROLE_CATALOG)
     check("git 2.56 forked value form", 1, {"--forked"}, {"--forked": "R"}, ROLE_CATALOG,
           {"--forked"})
+    # git requires the --forked and branch --points-at values even when last, so the
+    # optional-when-last F profile would class a bare 'git branch --forked' as a read.
+    check("forked as optional filter", 1, {"--forked"}, {"--forked": "F"}, ROLE_CATALOG,
+          {"--forked"})
+    check("branch points-at as optional filter", 1, {"--points-at"}, {"--points-at": "F"},
+          ROLE_CATALOG)
+    check("branch points-at required", 0, {"--points-at"}, {"--points-at": "Q"}, ROLE_CATALOG,
+          {"--points-at"})
+    check("branch points-at conservative", 0, {"--points-at"}, {"--points-at": "W"}, ROLE_CATALOG)
+    check("contains as required filter", 1, {"--contains"}, {"--contains": "Q"}, ROLE_CATALOG)
+    case("tag points-at as required filter", 1, lambda: verdict(compare(
+        "tag", {"--points-at"}, {"--points-at": "Q"}, ROLE_CATALOG)))
 
     if failures:
         print("SELF-TEST FAIL:\n  " + "\n  ".join(failures))
