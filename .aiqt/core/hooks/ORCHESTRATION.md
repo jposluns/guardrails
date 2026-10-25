@@ -1061,8 +1061,11 @@ git identity probe cannot answer (git could not be run, timed out, ran past the 
 exited nonzero or on a signal with anything but git's specific not-a-git-repository answer, a
 dubious-ownership fatal included, or exited 0 with a reply that is not EXACTLY the expected two
 newline-terminated path
-lines, empty, one line, carrying extra lines, missing its final newline or an echoed option, or
-answered a `core.worktree` lookup with neither the set nor the unset reply) fails closed the same
+lines with an absolute first line, empty, one line, carrying extra lines, missing its final
+newline, a relative first line or an echoed option, or answered a `core.worktree` lookup with
+neither the set nor the unset reply or ambiguously: an empty value, a value missing git's final
+newline, or the unset exit carrying output; a configured `core.worktree` is otherwise kept
+byte-exact apart from that final newline) fails closed the same
 way: the probe failure is never
 read as "not a
 repository", which would hide a live hold there, while git's specific answer that a directory is
@@ -1077,9 +1080,19 @@ operand's file path, still read the markers of the repository each lands in; a c
 existence cannot be read at all is probed itself and the probe failure fails closed, and a
 PROCESS-RELATIVE candidate in any structural position (an operand, an option value, a `-C`, `cd`
 or `pushd` target, a `--git-dir` or `--work-tree` value, a `GIT_` assignment, an `ln` operand:
-`/proc/self/...`, `/proc/<pid>/...`, `/dev/fd/...`) cannot be resolved by the hook at all, since
-its meaning depends on the process that opens it, so it counts as held and the command is
-withheld outright (the read-only grammar still passes such a read). A git too
+`/proc/self/...`, `/proc/<pid>/...`, `/dev/fd/...`, judged on its literal components with a run
+of leading slashes collapsed first, so `//proc` is read as `/proc`) cannot be resolved by the
+hook at all, since its meaning depends on the process that opens it, so it counts as held and
+the command is withheld outright (the read-only grammar still passes such a read). An `ln`
+segment carrying any option word other than `-s`, `-r`, `-sr`, `-rs`, `--symbolic` or
+`--relative` (another cluster such as `-sf`, `-t`/`--target-directory`, `-T`, `-n` or an
+unknown option) leaves where that link lands or points unmodelled, so while a hold is live a
+git command in the same Bash call is withheld. Its operands are still consulted under every
+reading the modelled forms make at once (the target at the directory the segment runs from and
+at the link's directory, and the link recorded for the rewrite even over an existing directory,
+since `-n` and `-T` read a link name that points to a directory as the name itself, not as a
+directory to enter), so a hold any of those readings reaches is seen; with no live hold in any consulted repository the decision is the inert allow, unchanged
+for adopters who write no markers. Create the link in a separate command first. A git too
 old to answer the probe's options echoes them back
 on exit 0, so it fails closed the same way (it was previously read as inert). A marker-directory
 path that exists but does not lead to a directory (a dangling `review-holds` or `aiqt` symlink)
@@ -1125,12 +1138,19 @@ the raw text names after `-C`, `--git-dir`, `--work-tree` (the `=` and the separ
 bodies, heredoc bodies and option values included), of every other literal ABSOLUTE path any
 segment's tokens carry (a bare operand, the payload after the first `=` of any token, or an
 attached short-option value such as `-o/abs/path`), of every operand of an `ln` segment (the
-target and the name of a link the command creates, a relative one resolved against the directory
-the segment runs from; one no literal text resolves leaves the created link's destination unknown
-and is withheld while a hold is live), and of every literal ABSOLUTE path ANYWHERE in the raw
+name of a link the command creates resolved against the directory the segment runs from; a
+relative target of a plain symbolic link, `ln -s` without `-r`, resolved against the link's own
+directory, where the kernel resolves it, and that of a hard link or an `ln -r`, `ln -sr` or
+`--relative` link resolved against the directory the segment runs from, where `ln` opens it;
+an operand no literal text resolves leaves the created link's destination unknown and is
+withheld while a hold is live; and a two-operand link recorded so that a later path stepping
+through it is also consulted where the link will point, one level, matched on the path's text),
+and of every literal ABSOLUTE path ANYWHERE in the raw
 text (so a held path inside a quoted `bash -c`/`sh -c`/`eval` body or a heredoc body still
-surfaces its hold; a path glued to a word, an attached short-option value in raw text included,
-is left to the token scan), every candidate resolved PHYSICALLY first and one that names no
+surfaces its hold; a run of leading slashes is collapsed to one, a quoted span that is one whole
+absolute path is read whole with its spaces, and a path glued to a word, an attached
+short-option value in raw text included, is left to the token scan), every candidate resolved
+PHYSICALLY first and one that names no
 existing directory then
 consulted at its nearest existing ancestor, and each expanded
 through its configured `core.worktree` (a repository-file `core.worktree` adds the configured
@@ -1361,7 +1381,19 @@ inside one, or with any other hold the rule can see, the program gate, the one-p
 the process-relative withhold refuses the
 form that carries such a value. A symlink that already exists on disk and points through a
 process-relative magic link is resolved by the hook's own process when a candidate traverses it,
-which can differ from git's resolution, the same class of residual. A program-running spelling outside the gate's lists (an alias or
+which can differ from git's resolution, the same class of residual. An UNQUOTED path containing
+spaces in the raw text is truncated at the space (only a quoted span is read whole), the same
+residual. A link created by a LATER command or by another tool is not modelled, and the rewrite
+that follows a link the same command creates is one level, in text order, and matched on the
+path's text, so each of these steps reaches the directory the link points to without that
+directory's holds being read: a step through a chain of two created links, or a loop running a
+later segment first; a step that spells the link's path another way (`.`, `..` or another link
+in it); a step through a link created INSIDE a directory that already exists (a link is
+recorded under its own name only); a step whose path the command already
+named earlier; and a step
+whose rewritten path is process-relative, which is dropped from the hold set rather than
+refused (a link to `/` and then `-C <link>/proc/self/cwd/...`). From a session outside every
+held repository such a command stays allowed even where it reaches a held worktree. A program-running spelling outside the gate's lists (an alias or
 a `git-<name>` program on PATH, a hook or a program the configuration already names) is the same
 residual: the gate is bounded by its enumeration, not a certified absence of programs. An
 unreadable or
@@ -1460,7 +1492,9 @@ Limits:
   the held worktree, a path that literally contains `$`, a backquote, a glob or brace character or
   a leading `~`, a PROCESS-RELATIVE path in any structural position, whatever the marker state
   (and one seen only in the raw text while any reachable hold is live), an `ln` operand no
-  literal text resolves while any reachable hold is live, a `core.worktree` lookup that cannot
+  literal text resolves while any reachable hold is live, an `ln` option word other than `-s`,
+  `-r`, `-sr`, `-rs`, `--symbolic` or `--relative` (`-sf`, `-t` and `-T` included) beside any
+  git word while any reachable hold is live, a `core.worktree` lookup that cannot
   answer, in any consulted repository and whatever the marker state (the configured worktree's
   holds are exactly what cannot be read), a held or unrelated absolute path mentioned only as
   data in a body or message making its repository's holds visible (one more consulted

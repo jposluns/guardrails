@@ -19251,6 +19251,14 @@ _RWH_RAW_QUOTED_ABS_RE = re.compile(r"\"(/+[^\"\n]*)\"|'(/+[^'\n]*)'")
 # The shell words that change which variables a later segment sees (export GIT_DIR=..., unset
 # GIT_DIR); an assignment-shaped token is caught separately by _RWH_GIT_ASSIGN_RE.
 _RWH_ENV_WORDS = frozenset(("export", "unset", "declare", "typeset", "local", "readonly"))
+# The ln option spellings the hold-set scan classifies, each mapped to the letters that decide
+# where a relative link target is resolved: 's' makes the link symbolic and 'r' makes ln itself
+# resolve the target against the directory it runs from. -sr and -rs are the only short-option
+# clusters classified; any other option word (another cluster such as -sf, -t or
+# --target-directory, -T, -n, or an option this table does not name) leaves where the link lands
+# or points unmodelled, which withholds the command while a hold is live (_rwh_hold_dirs).
+_RWH_LN_OPTS = {"-s": "s", "--symbolic": "s", "-r": "r", "--relative": "r", "-sr": "sr",
+                "-rs": "sr"}
 # git symbolic-ref's complete long-option set, for the fail-closed delete/write reader: an option
 # outside it, an ambiguous abbreviation, or an unexpected value leaves the written operand
 # undetermined, which denies while a hold is live rather than guessing the operand.
@@ -20656,10 +20664,14 @@ def _rwh_hold_dirs(command, segments, cwd):
     eval string still contributes), every OTHER literal ABSOLUTE path any segment's tokens carry
     (a bare operand, the payload after the first = of any token, and an attached short-option
     value), every operand of an ln segment (the name of a link the command creates resolved
-    against the directory the segment runs from; a relative TARGET resolved against the LINK'S
-    OWN directory, the way the kernel resolves it, never against the shell cwd; and the plain
-    two-operand link recorded so a later candidate stepping through it is also consulted where
-    the link will point), every literal
+    against the directory the segment runs from; a relative TARGET of a plain symbolic link
+    (-s without -r) resolved against the LINK'S OWN directory, where the kernel resolves it, and
+    that of a hard link or a -r/--relative link against the directory the segment runs from,
+    where ln opens it; under an option word _RWH_LN_OPTS does not classify, every one of those
+    readings taken at once, the link recorded even over an existing directory, and the command
+    withheld while a hold is live; and the
+    plain two-operand link recorded so a later candidate stepping through it is also consulted
+    where the link will point), every literal
     ABSOLUTE path anywhere in the raw text (_RWH_RAW_ABS_PATH_RE, so a held path inside a quoted
     shell body or heredoc body still surfaces its hold, a run of leading slashes collapsed first),
     every QUOTED span that is one whole absolute path (_RWH_RAW_QUOTED_ABS_RE, so a quoted path
@@ -20689,8 +20701,8 @@ def _rwh_hold_dirs(command, segments, cwd):
     a repository whose holds are read, so an over-read never loosens the decision; a spelling this
     scan cannot read ($, a backquote, a glob or brace character, a leading ~) leaves the candidate
     out, the disclosed allow residual of a hold set built from literal text. Returns (dirs,
-    raw_dirs, raw_relative, proc_strict, proc_live, link_unresolved): dirs is the whole candidate
-    set; raw_dirs is the subset the RAW-text step
+    raw_dirs, raw_relative, proc_strict, proc_live, link_unresolved, link_held): dirs is the whole
+    candidate set; raw_dirs is the subset the RAW-text step
     patterns added (the holds the command's text names directly, as against the session cwd or the
     ambient environment), which the caller reads to tell a hold a directory step outside the
     resolved target reaches from a hold it only learned about through the session; raw_relative is
@@ -20699,15 +20711,18 @@ def _rwh_hold_dirs(command, segments, cwd):
     proc_strict and proc_live carry the first process-relative path a structural candidate and the
     raw-text widening saw (None otherwise): the caller withholds a structural sighting outright,
     and names a raw-text sighting as the cause while a hold is live; link_unresolved is True when
-    an ln operand could not be resolved or the ln form's destination is unmodelled
-    (-t/--target-directory), which
-    the caller withholds while a hold is live (the created link's destination is unknown)."""
+    an ln operand could not be resolved, which the caller withholds while a hold is live (the
+    created link's destination is unknown); link_held is the first ln option word _RWH_LN_OPTS
+    does not classify (None otherwise), which the caller withholds while a hold is live (where
+    the link lands or points is not modelled); with every hold the set shows clear, the
+    decision is unchanged."""
     dirs = []
     raw_dirs = []
     raw_relative = False
     proc_strict = None
     proc_live = None
     link_unresolved = False
+    link_held = None
     bases = []
     seen = set()
     links = []  # (link path, resolved target) for each two-operand link this command creates
@@ -20749,7 +20764,14 @@ def _rwh_hold_dirs(command, segments, cwd):
             # the markers of the repository the step lands in (a link toward a held worktree's
             # PARENT included, whose own path shows no repository); one rewrite level only, in
             # text order, so a chain of created links, or a loop running a later segment first,
-            # stays a disclosed residual
+            # stays a disclosed residual. The match is on the TEXT (leading slashes collapsed,
+            # nothing else normalised), so a spelling of the link path through '.', '..' or
+            # another link is not rewritten; a two-operand link is recorded under its own name
+            # only (a modelled one only when that name does not already resolve to a
+            # directory), so a link created INSIDE an existing directory is not followed; a
+            # candidate already seen earlier in the command is not
+            # rewritten; and a rewritten path that is process-relative is dropped, not refused.
+            # Each is a disclosed residual of this one-level text rewrite.
             for name, target in links:
                 if value == name or value.startswith(name + os.sep):
                     stepped = target + value[len(name):]
@@ -20803,26 +20825,51 @@ def _rwh_hold_dirs(command, segments, cwd):
             # a link this command creates re-points a later directory step at the link's TARGET,
             # so every ln operand joins the hold set. The LINK NAME (the last operand of the
             # plain form) is a filesystem path of the shell's, resolved against the directory
-            # the segment runs from; a relative TARGET is resolved by the KERNEL against the
-            # directory that holds the link, never against the shell cwd, so it is resolved
-            # against the link's directory here (the link name itself when that names an
-            # existing directory, since the link is then created inside it, otherwise the link
-            # name's parent). An operand that cannot be resolved (relative with the needed base
-            # unknown, or expansion-built), and a -t/--target-directory form whose destination
-            # this scan does not model, leave the created link's destination unknown, which the
-            # caller withholds while a hold is live. The plain two-operand link is also recorded
-            # so a later candidate stepping through it is consulted where it will point.
+            # the segment runs from. A relative TARGET is resolved where ln's form resolves it:
+            # a plain symbolic link (-s without -r) stores the text, which the KERNEL resolves
+            # against the directory that holds the link (the link name itself when that names
+            # an existing directory, since the link is then created inside it, otherwise the
+            # link name's parent); a hard link (no -s) and a -r/--relative link are opened by
+            # ln itself against the directory the segment runs from. Only the option words of
+            # _RWH_LN_OPTS are modelled: any other (a short-option cluster other than -sr and
+            # -rs, -t or --target-directory, -T, an option word the table does not name) leaves
+            # where the link lands or points unmodelled, so the caller withholds the command
+            # while a hold is live; its operands still join the hold set under every modelled
+            # reading at once, and with every hold the set shows clear the decision is
+            # unchanged. An operand that cannot be resolved (relative with the needed base
+            # unknown, or expansion-built) leaves the created link's destination unknown, which
+            # the caller withholds while a hold is live. The plain two-operand link is also
+            # recorded so a later candidate stepping through it is consulted where it will point.
             rest = eff[_command_word_index(eff) + 1:]
             operands = [o for o in rest if o and not o.startswith("-")]
-            if any(o == "-t" or o.startswith("--target-directory") or
-                   (o.startswith("-") and not o.startswith("--") and "t" in o[1:])
-                   for o in rest if o.startswith("-")):
-                # the destination directory travels in an option this scan does not pair with
-                # its value: every operand still joins the hold set best-effort, and the
-                # unmodelled destination withholds while a hold is live
+            letters = ""
+            unmodelled = None
+            for opt in rest:
+                if opt.startswith("-"):
+                    if opt not in _RWH_LN_OPTS:
+                        unmodelled = opt
+                        break
+                    letters += _RWH_LN_OPTS[opt]
+            if unmodelled is not None:
+                # where the link lands or points is not modelled, so every reading the modelled
+                # forms make is taken at once, additive only: each operand at the directory the
+                # segment runs from, the target also at the link's directory (the link name
+                # itself and its parent), and the two-operand link recorded for the rewrite even
+                # when its name resolves to an existing directory (ln's -n and -T read a link
+                # name that points to a directory as the name itself, not as a directory to
+                # enter), so a hold any of those readings reaches is seen and withholds while it
+                # is live
                 for operand in operands:
                     add(operand, c_chain)
-                link_unresolved = True
+                if len(operands) == 2:
+                    dest_abs = add(operands[1], c_chain)
+                    if dest_abs is not None:
+                        for target_base in (c_chain, dest_abs, os.path.dirname(dest_abs)):
+                            target = add(operands[0], target_base)
+                            if target is not None:
+                                links.append((dest_abs, target))
+                if link_held is None:
+                    link_held = unmodelled
             else:
                 dest_abs = None
                 dest_is_dir = False
@@ -20835,14 +20882,18 @@ def _rwh_hold_dirs(command, segments, cwd):
                             dest_is_dir = stat.S_ISDIR(os.stat(dest_abs).st_mode)
                         except (OSError, ValueError):
                             dest_is_dir = False
-                if dest_abs is not None:
-                    link_dir = dest_abs if dest_is_dir else os.path.dirname(dest_abs)
+                if "s" not in letters or "r" in letters:
+                    # a hard link, or a -r link: ln opens the target from the directory the
+                    # segment runs from, which the accumulated chain approximates
+                    target_base = c_chain
+                elif dest_abs is not None:
+                    target_base = dest_abs if dest_is_dir else os.path.dirname(dest_abs)
                 else:
                     # the one-operand form creates the link in the shell cwd, which the
                     # accumulated chain approximates
-                    link_dir = c_chain if len(operands) == 1 else None
+                    target_base = c_chain if len(operands) == 1 else None
                 for operand in (operands[:-1] if len(operands) > 1 else operands):
-                    target = add(operand, link_dir)
+                    target = add(operand, target_base)
                     if target is None:
                         link_unresolved = True
                     elif dest_abs is not None and not dest_is_dir and len(operands) == 2:
@@ -20905,7 +20956,7 @@ def _rwh_hold_dirs(command, segments, cwd):
         add(next(g for g in match.groups() if g is not None), None, structural=False)
     for key in _RDP_AMBIENT_GIT:
         add(os.environ.get(key), None)
-    return dirs, raw_dirs, raw_relative, proc_strict, proc_live, link_unresolved
+    return dirs, raw_dirs, raw_relative, proc_strict, proc_live, link_unresolved, link_held
 
 
 def _rwh_set_state(dirs, views, holds, cw_cache, notes):
@@ -21050,9 +21101,13 @@ def _rwh_decide(data):
     values included), of every other literal ABSOLUTE path any segment's tokens carry (a bare
     operand, an option-value payload after = or attached to a short option), of every ln
     operand (the name of a link the command creates resolved against the directory the segment
-    runs from; a relative target resolved against the LINK'S OWN directory, the way the kernel
-    resolves it; the plain two-operand link recorded so a later candidate stepping through it is
-    consulted where the link will point), and of every literal ABSOLUTE path anywhere in the raw
+    runs from; a relative target of a plain symbolic link resolved against the LINK'S OWN
+    directory, where the kernel resolves it, and that of a hard link or a -r link against the
+    directory the segment runs from, where ln opens it; the plain two-operand link recorded so a
+    later candidate stepping through it is consulted where the link will point; an ln option
+    word outside _RWH_LN_OPTS withholds the command while a hold is live, and leaves the
+    decision unchanged when every hold the set shows is clear), and of every literal ABSOLUTE
+    path anywhere in the raw
     text (a quoted shell body or heredoc body included; a quoted span that is one whole absolute
     path read whole, spaces included; a run of leading slashes collapsed first), a candidate
     resolved physically and one
@@ -21184,8 +21239,9 @@ def _rwh_decide(data):
         # leaves a target with no -C unresolved: fail closed for every git-word command outside
         # the read-only grammar, in the standalone preflight as in the composed hook
         return ("unverifiable", _rwh_cwd_text(cwd))
-    dirs, raw_dirs, raw_relative, proc_strict, proc_live, link_unresolved = _rwh_hold_dirs(
-        command, segments if segments is not None else [], cwd if cwd_ok else None)
+    dirs, raw_dirs, raw_relative, proc_strict, proc_live, link_unresolved, link_held = \
+        _rwh_hold_dirs(command, segments if segments is not None else [],
+                       cwd if cwd_ok else None)
     set_state, set_payload = _rwh_set_state(dirs, views, holds, cw_cache, notes)
     bad_detail = s_payload if s_state == "bad" else (set_payload if set_state == "bad" else None)
     if bad_detail is not None:
@@ -21210,6 +21266,18 @@ def _rwh_decide(data):
                 "path.".format(proc_strict))
     if not s_live and set_state != "live":
         return ("note", " ".join(notes)) if notes else ("allow", None)
+    if link_held is not None:
+        # a live hold is reachable and an ln segment carries an option word the hold-set scan
+        # does not classify: where the link lands, or what its target resolves against, is not
+        # modelled, so whether a later step through it reaches the held worktree cannot be
+        # ruled out. Only while a hold is live: with every hold the set shows clear (its ln
+        # operands consulted best-effort), the decision is the inert allow above
+        return ("unverifiable", "AIQT rule rvwpin: this command creates a link (ln) with the "
+                "option {!r}, which this rule does not model (only -s, -r, -sr, -rs, --symbolic "
+                "and --relative are modelled), while a review hold is live, so whether a later "
+                "step through that link reaches the held worktree cannot be ruled out; create "
+                "the link in a separate command first, spell it with only those options, or end "
+                "the hold first.".format(link_held))
     gate_live = (list(set_payload) if set_state == "live" else []) + list(s_live)
     word = _rwh_program_gate(segments) if segments is not None else None
     if word is not None:
@@ -21422,10 +21490,13 @@ def review_workdir_hold(data):
     anywhere in the raw text, quotes stripped, every other literal ABSOLUTE path any
     segment's tokens carry, a bare operand, an = payload or an attached short-option value
     included, every ln operand of a link the command creates (the link name resolved against the
-    directory the segment runs from, a relative target against the link's own directory as the
-    kernel resolves it, the plain two-operand link recorded so a later candidate stepping through
-    it is consulted where the link will point, and an unresolved operand or a -t form withheld
-    while a hold is live), and every literal ABSOLUTE path
+    directory the segment runs from, a relative target of a plain symbolic link against the
+    link's own directory as the kernel resolves it and that of a hard link or a -r link against
+    the directory the segment runs from as ln opens it, the plain two-operand link recorded so a
+    later candidate stepping through it is consulted where the link will point, an unresolved
+    operand withheld while a hold is live, and an option word other than -s, -r, -sr, -rs,
+    --symbolic or --relative, a -t, -T or -sf included, withheld while a hold is live and
+    inert when none is), and every literal ABSOLUTE path
     anywhere in the raw text, a quoted shell body or heredoc body included, a quoted span that is
     one whole absolute path read whole with its spaces, and a run of leading slashes collapsed,
     each expanded through its configured core.worktree)
@@ -21498,12 +21569,20 @@ def review_workdir_hold(data):
     leading assignment or a global option other than a literal -C, and a read option outside the
     closed per-verb set each deny while a hold is live, stated safe over-denies). A crash reaches
     main's PreToolUse fail-closed exit 2.
-    THIS HOOK IS A BEST-EFFORT GUARD; judge it against this stated claim. What it does NOT catch,
-    from a session outside every held repository whose command text names no held path: a path
+    THIS HOOK IS A BEST-EFFORT GUARD; judge it against this stated claim. The shapes it is known
+    NOT to catch (those found so far, not a proof that nothing else escapes), from a session
+    outside every held repository whose command text names no held path: a path
     the shell builds at RUN TIME (a parameter or command substitution, a glob or brace pattern, a
     tilde, a CDPATH-resolved cd), since the hold set is built from literal text only; a link
     created by a LATER command or by another tool, and a chain of two links or two relative steps
-    created by one command (the created-link rewrite is one level, in text order); a held path
+    created by one command (the created-link rewrite is one level, in text order); a step through
+    a link the same command creates that the rewrite does not match, because the match is on the
+    text: the link path spelled another way ('.', '..' or another link in it), a link created
+    INSIDE a directory that already exists (a link is recorded under its own name only), or a
+    step whose path the command already named earlier; a step
+    through a created link whose rewritten path is process-relative, which is dropped from the
+    hold set rather than refused (a link to / followed by a -C through <link>/proc/self/cwd); a
+    held path
     carried only in CONTENT (a patch, stream, file or stdin the command reads), which no argv or
     raw-text scan sees, so the input-path admissions are refused only while some hold is visible;
     an UNQUOTED path containing spaces in raw text (only a quoted span is read whole); a relative
