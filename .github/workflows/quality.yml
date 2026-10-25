@@ -311,6 +311,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_import_batch.py --self-test
 
+      - name: OPF import completion per-source evaluator self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_import_complete.py --self-test
+
       - name: OPF pack manifest parser self-test
         shell: bash
         run: python3 -I -B opf/tools/_opf_pack_manifest.py --self-test

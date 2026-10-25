@@ -673,7 +673,7 @@ def _open_product_root(product_root):
                               "fail-closed".format(str(root), exc))
 
 
-def verify_bundle(product_root, run_id):
+def verify_bundle(product_root, run_id, *, inventory_bytes=None):
     """Homes-1 evidence verification carried by the completion checks (spec 14.1, 4.2): RE-READ every
     bundle-root inventory of this adoption run from disk, then every payload those inventories list,
     contained and single-linked. Read-only. A missing bundle, a bundle with no inventory, a missing listed
@@ -690,17 +690,19 @@ def verify_bundle(product_root, run_id):
     mid-verification (round 3). Each inventory's [adoption] identity is held to the doctor's bar (spec
     4.2): a phase other than its file name's, or a plan digest other than the one the bundle's own
     plan.toml proves (read once, and its row checked against those same bytes), is CANNOT-EVALUATE, as
-    is a bundle whose plan.toml is absent, unreadable or unproven."""
+    is a bundle whose plan.toml is absent, unreadable or unproven. `inventory_bytes` (default None): a
+    dict that receives {inventory path: the exact bytes read} for each bundle-root inventory this
+    verification read, so a caller grades those bytes instead of reading the inventory a second time."""
     if not is_run_id(run_id):
         return schema._cannot("bundle run id {!r} does not match the adoption grammar".format(run_id))
     root_fd = _open_product_root(product_root)
     try:
-        return _verify_bundle_at(root_fd, run_id, evidence_home_rel(run_id))
+        return _verify_bundle_at(root_fd, run_id, evidence_home_rel(run_id), inventory_bytes=inventory_bytes)
     finally:
         store._close_fd_exc_safe(root_fd)
 
 
-def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
+def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None, *, inventory_bytes=None):
     # Round-3 identity retention (the read_lock_owner_at posture applied to the bundle): ONE descriptor
     # per directory, opened contained/no-follow beneath its retained parent and HELD from the bundle
     # listing through every inventory and payload read, so no read re-resolves a pathname from root_fd
@@ -802,6 +804,8 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
             rel = bundle + "/" + name
             try:
                 raw, _fst = read_retained(rel)
+                if inventory_bytes is not None:
+                    inventory_bytes[rel] = raw
                 doc = tomllib.loads(raw.decode("utf-8"))
             except (_journal.JournalError, OSError, ValueError, RecursionError, MemoryError) as exc:
                 # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
