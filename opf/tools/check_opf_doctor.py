@@ -1190,7 +1190,7 @@ def _self_test_isolated():
                 env.update(extra)
             return env
 
-        def _run(args, cwd, extra=None):
+        def _run(args, cwd, extra=None, stdout=subprocess.DEVNULL):
             # Run a pack script under sh and return its exit status. A missing sh is a harness error.
             sh = shutil.which("sh")
             if sh is None:
@@ -1198,7 +1198,7 @@ def _self_test_isolated():
             argv = [os.path.abspath(sh)] + list(args)
             try:
                 proc = subprocess.run(argv, cwd=str(cwd), env=_env(extra),
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+                                      stdout=stdout, stderr=subprocess.DEVNULL, timeout=300)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise OSError("could not run {} in {} ({})".format(args, cwd, exc))
             return proc.returncode
@@ -1567,22 +1567,38 @@ def _self_test_isolated():
                 finally:
                     os.chmod(str(unreg / ".git" / "worktrees"), 0o755)
                 expect("install-refuses-unreadable-worktree-registry", (rc, _stub(unreg)), (EXIT_ERROR, None))
+            # A worktree entry git cannot read as a git directory (its HEAD removed; its gitdir file still
+            # names the worktree) reads every key as unset, the core.hooksPath its config.worktree sets
+            # included: the install is refused (2), with no stub written, rather than taking it as unset.
+            broken = _fixture("install-broken-worktree-entry")
+            _git(broken, home, "config", "extensions.worktreeConfig", "true")
+            _git(broken, home, "worktree", "add", "-q", "-b", "side", str(base / "install broken worktree entry wt"))
+            _git(base / "install broken worktree entry wt", home, "config", "--worktree", "core.hooksPath",
+                 str(base / "elsewhere"))
+            broken_entries = os.listdir(str(broken / ".git" / "worktrees"))
+            if len(broken_entries) != 1:
+                raise OSError("the linked worktree entry of " + str(broken) + " could not be found")
+            os.remove(str(broken / ".git" / "worktrees" / broken_entries[0] / "HEAD"))
+            expect("install-refuses-unreadable-worktree-entry", (_install(broken), _stub(broken)), (EXIT_ERROR, None))
             # Something that arrives at the stub path between the last check and ln (a stand-in ln makes it
-            # arrive, then runs the real ln): a link to another repository's hooks directory, and a
-            # directory. Each is refused (2) and kept; nothing this run wrote is left in either repository.
+            # arrive, then runs the real ln): a link to another repository's hooks directory, a directory,
+            # and a regular file (a hook another process wrote; ln never replaces it). Each is refused (2) and
+            # kept; nothing this run wrote is left in either repository.
             real_ln = shutil.which("ln")
             real_mkdir = shutil.which("mkdir")
             if real_ln is None or real_mkdir is None:
                 raise OSError("ln or mkdir not found on PATH; the placement race vectors cannot be built")
             race_target = _fixture("install-race-target")
             (race_target / ".git" / "hooks").mkdir(exist_ok=True)
-            for kind in ("link", "dir"):
+            theirs = "#!/bin/sh\necho theirs\n"
+            for kind in ("link", "dir", "file"):
                 racer = _fixture("install-race-" + kind)
                 (racer / ".git" / "hooks").mkdir(exist_ok=True)
                 race_env = _path_without("ln", install_tools, "install-race-" + kind)
                 shim = Path(race_env["PATH"]) / "ln"
-                arrive = ('"$OPF_QA_REAL_LN" -s -- "$OPF_QA_TARGET" "$last" || exit 1\n' if kind == "link"
-                          else '"$OPF_QA_REAL_MKDIR" -- "$last" || exit 1\n')
+                arrive = {"link": '"$OPF_QA_REAL_LN" -s -- "$OPF_QA_TARGET" "$last" || exit 1\n',
+                          "dir": '"$OPF_QA_REAL_MKDIR" -- "$last" || exit 1\n',
+                          "file": 'printf "#!/bin/sh\\necho theirs\\n" > "$last" || exit 1\n'}[kind]
                 shim.write_text("#!/bin/sh\nfor last in \"$@\"; do :; done\n" + arrive
                                 + 'exec "$OPF_QA_REAL_LN" "$@"\n', encoding="utf-8")
                 os.chmod(str(shim), 0o755)
@@ -1590,8 +1606,13 @@ def _self_test_isolated():
                                 OPF_QA_TARGET=str(race_target / ".git" / "hooks"))
                 race_stub = racer / ".git" / "hooks" / "pre-commit"
                 rc = _install(racer, race_env)
-                kept = os.path.islink(str(race_stub)) if kind == "link" else (
-                    race_stub.is_dir() and not os.path.islink(str(race_stub)) and os.listdir(str(race_stub)) == [])
+                if kind == "link":
+                    kept = os.path.islink(str(race_stub))
+                elif kind == "dir":
+                    kept = race_stub.is_dir() and not os.path.islink(str(race_stub)) and os.listdir(str(race_stub)) == []
+                else:
+                    kept = (race_stub.is_file() and not os.path.islink(str(race_stub))
+                            and race_stub.read_text(encoding="utf-8") == theirs)
                 expect("install-placement-race-" + kind + "-leaves-nothing",
                        (rc, kept, sorted(n for n in os.listdir(str(racer / ".git" / "hooks")) if n.startswith(".opf-")),
                         [n for n in os.listdir(str(race_target / ".git" / "hooks"))
@@ -1786,15 +1807,17 @@ def _self_test_isolated():
             # A signal that lands just after a write (the stand-in runs the real command, then sends TERM; the
             # installer runs the trap as soon as that command returns). After the ln or the final rmdir it
             # leaves no stub and no private directory and names nothing at either. After a mkdir, the trap
-            # runs before the directory is recorded as this run's, so that one empty directory is left and
-            # named (the disclosed instant).
+            # runs before the directory is recorded as this run's, so that empty directory is left and named
+            # (the disclosed instant); after the private mkdir in a run that made the hooks directory too,
+            # that hooks directory is left as well, holding it, and both are named.
             for label, tool, real, when in (("hooks-mkdir", "mkdir", real_mkdir, '[ "$1" = -- ]'),
                                             ("private-mkdir", "mkdir", real_mkdir, '[ "$1" = -m ]'),
+                                            ("private-mkdir-in-made-hooks", "mkdir", real_mkdir, '[ "$1" = -m ]'),
                                             ("ln", "ln", real_ln, ":"),
                                             ("rmdir", "rmdir", real_rmdir, ":")):
                 after = _fixture("install-signal-after-" + label)
                 after_hooks = after / ".git" / "hooks"
-                if label == "hooks-mkdir":
+                if label in ("hooks-mkdir", "private-mkdir-in-made-hooks"):
                     if after_hooks.exists():
                         shutil.rmtree(str(after_hooks))
                 else:
@@ -1803,12 +1826,14 @@ def _self_test_isolated():
                     '"$OPF_QA_REAL_' + tool.upper() + '" "$@" || exit $?\n' + when
                     + ' && kill -TERM "$PPID"\nexit 0\n'))})
                 rc, lines, priv = _install_seen(after, after_env, "install-signal-after-" + label)
-                outcome = ("names-the-directory" if label.endswith("mkdir") else "leaves-nothing")
+                private = label.startswith("private-mkdir")
+                outcome = ("names-both-directories" if label == "private-mkdir-in-made-hooks"
+                           else "names-the-directory" if label.endswith("mkdir") else "leaves-nothing")
                 expect("install-signal-after-" + label + "-" + outcome,
                        (rc, _opf_names(after), lines[-1]),
-                       (EXIT_ERROR, [(priv, [])] if label == "private-mkdir" else [],
+                       (EXIT_ERROR, [(priv, [])] if private else [],
                         _seen("stopped by a signal", after, priv, "a directory",
-                              priv_kind="a directory" if label == "private-mkdir" else "nothing")))
+                              priv_kind="a directory" if private else "nothing")))
             # A mkdir that fails because a directory arrived after the check (the stand-in makes it, then runs
             # the real mkdir) leaves that directory and its contents alone and names it: the hooks directory,
             # and a private directory holding a file at the temporary stub's name.
@@ -1880,14 +1905,18 @@ def _self_test_isolated():
                                  if n.startswith(".opf-pre-commit-install.")] or ["missing"], True))
             # A hooks directory that cannot be searched when the rollback runs (the stand-in chmod makes it
             # so, then sends TERM) leaves the stub path and the private directory named as not known, not
-            # as nothing (unprivileged user only: root searches any directory).
+            # as nothing (unprivileged user only: root searches any directory). The stand-in is given the
+            # hooks directory by name, not derived from the path the installer passes it, so an installer
+            # that changes what it chmods still meets the unsearchable directory and fails this vector,
+            # never the harness.
             if hasattr(os, "geteuid") and os.geteuid() != 0:
                 blind = _fixture("install-signal-unsearchable-hooks")
                 blind_hooks = blind / ".git" / "hooks"
                 blind_hooks.mkdir(exist_ok=True)
                 blind_env = _shimmed("install-signal-unsearchable-hooks", {"chmod": (real_chmod, (
-                    '"$OPF_QA_REAL_CHMOD" "$@" || exit 1\n"$OPF_QA_REAL_CHMOD" 600 "${2%/*/*}" || exit 1\n'
+                    '"$OPF_QA_REAL_CHMOD" "$@" || exit 1\n"$OPF_QA_REAL_CHMOD" 600 "$OPF_QA_BLIND_HOOKS" || exit 1\n'
                     'kill -TERM "$PPID"\n'))})
+                blind_env["OPF_QA_BLIND_HOOKS"] = str(blind_hooks)
                 try:
                     rc, lines, priv = _install_seen(blind, blind_env, "install-signal-unsearchable-hooks")
                 finally:
@@ -1897,6 +1926,28 @@ def _self_test_isolated():
                        (rc, lines[-1]),
                        (EXIT_ERROR, _seen("stopped by a signal", blind, priv, "a directory", stub_kind=unknown,
                                           priv_kind=unknown)))
+
+            def _install_quiet(root, label):
+                # The installer with a standard output it cannot write: closed (the shell closes it, then
+                # execs the installer), or a pipe whose read end is closed before the installer starts.
+                if label == "closed":
+                    return _run(["-c", 'exec 1>&- && exec "$1" "$0"', str(root / rel / "install.sh"),
+                                 os.path.abspath(sh_path)], base)
+                r, w = os.pipe()
+                try:
+                    os.close(r)
+                    return _run([str(root / rel / "install.sh")], base, stdout=w)
+                finally:
+                    os.close(w)
+
+            # A standard output the closing message cannot reach does not change the status: the install and
+            # the already-installed rerun each exit 0 (not 1 for a closed one, nor a death by SIGPIPE).
+            for label in ("closed", "broken-pipe"):
+                quiet = _fixture("install-stdout-" + label)
+                first = _install_quiet(quiet, label)
+                ok = _stub_ok(quiet)
+                expect("install-stdout-" + label + "-exits-zero", (first, ok, _install_quiet(quiet, label)),
+                       (EXIT_OK, True, EXIT_OK))
             # A branch cannot add a hook: a post-checkout and a post-merge committed in the pack directory on
             # another branch do not run on checkout or merge, since no tracked directory is a hooks path.
             branchy = _fixture("branch-hooks")
@@ -2046,8 +2097,10 @@ def _self_test_isolated():
                 "CI stays the shared floor" in hook_text,
                 "is the floor that every change meets" in inst_text,
                 "CI is the shared floor" in inst_text,
-                "or an includeIf onbranch: for a branch checked out later) is not seen" in inst_text),
-                (True, True, True, True, True, True, True, True, True, False, False, False, False, False, True))
+                "or an includeIf onbranch: for a branch checked out later) is not seen" in inst_text,
+                "can leave that empty directory, and the hooks directory holding it when this run made that one"
+                in inst_text),
+                (True, True, True, True, True, True, True, True, True, False, False, False, False, False, True, True))
 
             # --- The hook's contract, run by hand under a recording stub tool. ---
             serial = [0]
@@ -2177,10 +2230,10 @@ def _self_test_isolated():
               "hooksPath (another linked worktree's included), an existing pre-commit hook (compared byte "
               "for byte, never through a symlink), a symlinked hooks destination, a git directory in any "
               "worktree's top level (from a linked worktree, from the main one, and equal to the top level) "
-              "while a separate git directory installs, a core.worktree top level (linked and main, from a linked worktree, the main one with no .git entry), an empty core.worktree, a top level of /, a worktree at the hooks directory, an unregistered or moved working tree, a signal rolled back with what is left named by file type (after chmod, ln and the last rmdir nothing; after either mkdir that empty directory; before the hooks mkdir no directory; an unreadable stub named; an unsearchable hooks directory named not known), a directory arriving at either mkdir kept, a stale private directory refused and kept, an unreadable worktree registry, an "
+              "while a separate git directory installs, a core.worktree top level (linked and main, from a linked worktree, the main one with no .git entry), an empty core.worktree, a top level of /, a worktree at the hooks directory, an unregistered or moved working tree, a signal rolled back with what is left named by file type (after chmod, ln and the last rmdir nothing; after either mkdir that empty directory, and the hooks directory holding it when this run made that too; before the hooks mkdir no directory; an unreadable stub named; an unsearchable hooks directory named not known), a directory arriving at either mkdir kept, a stale private directory refused and kept, an unreadable worktree registry, a worktree entry git cannot read, a closed or broken stdout leaving a successful install at 0, an "
               "unreadable pack hook and an ambient GIT_DIR redirect; no dirname, inherited GIT_TRACE*, a "
-              "configured trace2 target, read-back rollback, a partial write left nowhere, a link or "
-              "directory arriving at the stub path refused and kept with nothing left, a backslash kept in "
+              "configured trace2 target, read-back rollback, a partial write left nowhere, a link, "
+              "directory or regular file arriving at the stub path refused and kept with nothing left, a backslash kept in "
               "a refusal, "
               "branch-added hooks not run, "
               "linked worktree with spaces, stub refuses a missing pack hook, cherry-pick residual held; "
