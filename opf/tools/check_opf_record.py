@@ -2086,7 +2086,7 @@ def t16_recorded_predecessor(fx):
         _set_status(fx, root, "done/proposed", "proposed by hand")
         refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
                           "no pre-proposal state")
-    # Merge styles of a reject-and-re-propose cycle (the QA3 F1 reproduction): the recorded field rides
+    # Merge styles of a reject-and-re-propose cycle: the recorded field rides
     # the merge, so the rejection still restores the true predecessor and the forged line still fails.
     for style in ("no-ff", "squash"):
         root = fx.case("t16-merge-" + style)
@@ -2123,7 +2123,7 @@ def t16_recorded_predecessor(fx):
 
 
 # A schema-invalid current row (a doctor finding) is never trusted or overwritten, so the verb never launders
-# a doctor-INVALID store into a VALID one (QA4 F1). Each refusal is its own test, so flip_t16_trust must turn
+# a doctor-INVALID store into a VALID one. Each refusal is its own test, so flip_t16_trust must turn
 # EACH one red, not only the first.
 
 def _forged_predecessor(fx, name):
@@ -2201,7 +2201,7 @@ def flip_t16_trust():
     return patch.object(record, "_require_valid_current", lambda row, rtype, ctx, rid, rel: None)
 
 
-# --- T17: the strict type-aware delta comparison (codex QA3 F2) ----------------------------------------------
+# --- T17: the strict type-aware delta comparison -------------------------------------------------------------
 
 MANIFEST = MACH + "/manifest.toml"
 
@@ -2816,7 +2816,7 @@ def flip_t72_archive():
 
 
 def t72_archived_head(fx):
-    """QA4 MINOR-3. PD-2 decided superseding PD-1, then PD-2, the chain's head, rotated to the archive:
+    """An archived chain head. PD-2 decided superseding PD-1, then PD-2, the chain's head, rotated to the archive:
     doctor VALID. PD-3 decided with --supersedes PD-2 finds the archived head through the chain rule's
     record set, so it lands and the doctor stays VALID, PD-3 the chain's one current resolution."""
     root = fx.case("t72-archived-head")
