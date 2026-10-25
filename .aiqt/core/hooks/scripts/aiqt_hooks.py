@@ -4592,8 +4592,9 @@ def bash_absolute_paths(data):
 #                           form-classifier cannot resolve - ASKS without ever consulting the probe; and a
 #                           pristine lossy form on a not-provably-clean tree (tracked OR untracked change),
 #                           a worktree the guard cannot resolve to the session cwd, a status probe that did
-#                           not complete, or a softer/index-only discard (clean of untracked files, stash
-#                           drop/clear, branch -D, restore --staged, mixed/path reset, rm --cached) also ASKS.
+#                           not complete or answered malformed, or a softer/index-only discard (clean of
+#                           untracked files, stash drop/clear, branch -D, restore --staged, mixed/path reset,
+#                           rm --cached) also ASKS.
 # The gate is PURELY LEXICAL and never parses the bash grammar: the presence of any shell metacharacter in a
 # lossy-verb command is treated as a reason to ASK (a safe over-ask), so ONLY a metacharacter-free
 # 'git <verb> <plain args>' ever reaches the probe. This closes the residual silent-allows that survived the
@@ -5442,8 +5443,13 @@ def _tree_is_clean(repo):
     read-only porcelain probe reports NOTHING that a lossy verb could destroy: no uncommitted tracked change
     (any staged or unstaged modification, in EITHER porcelain column) AND no untracked ('??') entry. False
     when it reports either, None when the probe could not run (a subprocess error, a non-zero return, an
-    unreadable repo). Untracked files are uncommitted work a force-checkout, a 'git clean', or a 'git reset
-    --hard' can destroy, so an untracked-only-dirty tree is NOT provably clean.
+    unreadable repo) or answered MALFORMED: a zero-exit answer holding a blank line and no change line is not
+    well-formed porcelain (one 'XY PATH' record per line), so a blank-only answer (a broken or substituted
+    git) reads as cannot-evaluate, never as clean. A change line still WINS (False): a raw U+2028/U+0085 path,
+    which a repo-local core.quotePath=false leaves unquoted, is cut by str.splitlines() into its record plus a
+    blank fragment, and False is the stricter answer at the clobber gate (DENY, where None snapshots then
+    allows). Untracked files are uncommitted work a force-checkout, a 'git clean', or a 'git reset --hard' can
+    destroy, so an untracked-only-dirty tree is NOT provably clean.
 
     The probe FORCES untracked reporting - 'git -c status.showUntrackedFiles=all status --porcelain
     --untracked-files=all' - so a repo-local 'status.showUntrackedFiles=no' config cannot hide an untracked
@@ -5468,11 +5474,15 @@ def _tree_is_clean(repo):
             capture_output=True, text=True, timeout=5, env=env)
         if result.returncode != 0:
             return None
+        blank = False
         for line in result.stdout.splitlines():
-            if not line or line[:2] == "!!":
+            if not line:
+                blank = True  # not a porcelain record: malformed on its own, but a change line still wins
+                continue
+            if line[:2] == "!!":
                 continue  # only an ignored entry is treated as clean
             return False  # a tracked change (staged or unstaged) OR an untracked file: not provably clean
-        return True
+        return None if blank else True  # blank-only (or blank plus ignored-only): cannot evaluate, never clean
     except Exception:
         return None
 
@@ -8563,8 +8573,8 @@ def git_discard(data):
     if clean is None:
         # probe-uncertain: a snapshot was attempted above (snap set); fold its outcome into the ASK reason.
         return _discard_recovery_result(
-            kind, "targets a repository whose status probe did not complete, so this guard cannot prove "
-                  "the working tree clean", snap, note)
+            kind, "targets a repository whose status probe did not complete or answered malformed, so this "
+                  "guard cannot prove the working tree clean", snap, note)
     # clean is False: the tree holds uncommitted tracked changes or untracked files this verb could reach.
     if role == "clobber":
         return _deny_with_recovery(kind, snap, note)  # a confirmed whole-tree loss, still recoverable if approved
