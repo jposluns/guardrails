@@ -66,7 +66,10 @@ SHORT_FIELDS = {
     "short_read": "R", "short_optnum": "N",
 }
 LONG_ROLES = frozenset("WLVFQDOR")
-VALUE_ROLES = frozenset("WFQD")
+# Roles the hook may give an option that git's completion helper marks as requiring
+# a value. F is excluded: it treats the value as optional when last, so it would
+# class the bare option, which git refuses, as a read.
+VALUE_ROLES = frozenset("WQD")
 
 # Derived from _git_ref_cmd_mutating and _short_cluster_verdict in SOURCE_REL.
 # Columns: OPTION; OPTION name; OPTION value name; OPTION=value;
@@ -739,6 +742,14 @@ def self_test():
     check("contains as required filter", 1, {"--contains"}, {"--contains": "Q"}, ROLE_CATALOG)
     case("tag points-at as required filter", 1, lambda: verdict(compare(
         "tag", {"--points-at"}, {"--points-at": "Q"}, ROLE_CATALOG)))
+    # The helper marks a value git requires; a hook F role for it is a finding even
+    # when the catalog agrees, so catalog drift cannot hide the optional-when-last F.
+    check("helper-required value roled F in hook and catalog", 1, {"--forked"},
+          {"--forked": "F"}, catalog(forked="F"), {"--forked"})
+    check("helper-required value roled Q in hook and catalog", 0, {"--forked"},
+          {"--forked": "Q"}, catalog(forked="Q"), {"--forked"})
+    check("helper-optional value roled F", 0, {"--contains"}, {"--contains": "F"},
+          catalog(contains="F"))
 
     if failures:
         print("SELF-TEST FAIL:\n  " + "\n  ".join(failures))

@@ -4749,26 +4749,32 @@ _GIT_MUTATING_VERBS = frozenset((
     "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
     "switch", "tag", "update-index", "update-ref", "worktree"))
 _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
-# branch/tag classification (GD-158 rounds 1-6, synthesis; flag behaviour pinned to git 2.53, plus the
-# git 2.56 branch options marked in the table; the long
-# universe is a conservative SUPERSET of git 2.53's branch/tag option table, validated against git 2.53
-# by the eb-e57..e147 differential self-test and an out-of-suite real-git differential; a future git
-# option-table change, such as a new write option absent from the table, is a DISCLOSED drift residual
-# caught by re-validating the table on a git upgrade, with a dedicated option-table drift-tripwire gate a
-# tracked follow-up, GD-158-T7). The classifier is FAIL-SAFE by
+# branch/tag classification (flag behaviour pinned to git 2.53, plus the git 2.56 branch options marked in
+# the table; the long universe is a conservative SUPERSET of git 2.53's branch/tag option table, validated
+# against git 2.53 by the classifier's differential self-test vectors and an out-of-suite real-git
+# differential; a future git option-table change, such as a new write option absent from the table, is a
+# DISCLOSED drift residual caught by re-validating the table on a git upgrade and by the option-table
+# drift-tripwire gate, tools/check_git_option_table.py). The classifier is FAIL-SAFE by
 # construction: it DEFAULTS to MUTATING and returns READ only when every token positively resolves to a
 # recognized read-neutral role and no create/rename/delete TARGET is present (before OR after '--'). A
 # missed WRITE spelling would be a fail-open (forbidden), so WRITE recognition is complete across every
-# spelling form; a missed READ is only an over-ASK (safe), so READ recognition may be incomplete. Roles,
+# spelling form; a missed READ only adds a note (safe), so READ recognition may be incomplete. Roles,
 # one char per long option: 'W' write (immediate mutating); 'L' list trigger (no value); 'V' tag verify
 # (read mode, no value); 'F' filter (sets list mode, takes a value that is optional only when last); 'Q'
-# filter whose value git REQUIRES even when last (sets list mode; a missing or empty value is malformed); 'D'
+# filter whose value git REQUIRES even when last (sets list mode; a missing value is malformed); 'D'
 # display taking a REQUIRED value but NOT setting list mode (a following name still creates); 'O' optional
-# '='-attached value only (consumes NOTHING following); 'R' plain read (no value, no list mode). The long
+# '='-attached value only (consumes NOTHING following); 'R' plain read (no value, no list mode). One value
+# rule covers every role and both spellings ('=' or a separate argument): an EMPTY value never yields a
+# READ (git refuses an empty filter object or branch, an empty sort key, and an empty --color or --abbrev;
+# the empty values git accepts, --format and --column, only add a note), and neither does a filter value
+# that leads with a dash (git 2.53 refuses '-x' there as a malformed object name; any such value git does
+# accept only adds a note). The classifier does not check a value's content beyond that, so a nonempty
+# value git rejects (an unknown ref or sort key) stays a READ; git refuses that command, so no ref
+# changes. The long
 # universe is a conservative SUPERSET of git's real per-subcommand option table (hidden aliases, the
 # deprecated --set-upstream, and generated --no-* forms included): a MISSING entry could let a unique
 # prefix resolve to a read where real git sees a write or an ambiguity (a fail-open), while an EXTRA entry
-# only over-ASKs. Mode and filter CANCELLERS (--no-list, --no-verify, --no-points-at, --no-with,
+# only adds a note. Mode and filter CANCELLERS (--no-list, --no-verify, --no-points-at, --no-with,
 # --no-without, --no-show-current) are roled W: roling --no-list read would fail-open
 # 'git branch --list --no-list NAME' (a real create). Display negatives (--no-color, --no-sort, ...) are R
 # (no value, no mode; a positional beside them still catches the create).
@@ -4906,8 +4912,9 @@ def _resolve_long_role(name, long_roles):
     (ambiguous, exactly what real git rejects) resolve to None, which the caller treats as MUTATING. The
     universe MUST be a superset of git's real option table: a missing entry could let a prefix resolve
     uniquely to a read where git sees a write or an ambiguity (a fail-open); the table is validated against
-    git 2.53 by the eb differential self-test and an out-of-suite real-git differential, with the drift
-    residual disclosed and a dedicated option-table drift-tripwire gate tracked as follow-up GD-158-T7."""
+    git 2.53 by the classifier's differential self-test vectors and an out-of-suite real-git differential,
+    with the drift residual disclosed and checked by the option-table drift-tripwire gate,
+    tools/check_git_option_table.py."""
     if name in long_roles:
         return long_roles[name]
     matches = [k for k in long_roles if k.startswith(name)]
@@ -4945,7 +4952,7 @@ def _short_cluster_verdict(chars, spec):
 
 
 def _git_ref_cmd_mutating(sub, args):
-    """Fail-safe branch/tag mutation classifier (GD-158 rounds 1-6 + tri-family synthesis). DEFAULTS to
+    """Fail-safe branch/tag mutation classifier. DEFAULTS to
     MUTATING (return True); returns READ (return False) ONLY when every option token resolves to a known
     non-W role with a parseable value form, every positional is absent or covered by list/verify mode, and
     the post-'--' region is empty or covered by list/verify mode. Any unknown, ambiguous, or malformed form
@@ -4971,28 +4978,33 @@ def _git_ref_cmd_mutating(sub, args):
                 if sep:
                     return True  # '=' on a no-value option is malformed -> MUTATING
                 list_mode = True
-            elif role in ("F", "Q"):
-                list_mode = True
+            elif role in ("F", "Q", "D"):
+                if role != "D":
+                    list_mode = True  # a filter sets list mode; a display value does not
                 if sep:
-                    if not _val:
-                        return True  # an empty '=' value is malformed (git refuses it) -> MUTATING
-                elif i < n and not pre[i].startswith("-"):
-                    i += 1           # separate filter value consumed
+                    value = _val
                 elif i < n:
-                    return True      # a dash-leading separate value cannot be certified -> MUTATING
-                elif role == "Q":
-                    return True      # at end with no value: git refuses a required value -> MUTATING
-                # F at end: the filter value is optional-when-last (defaults HEAD) -> stays list mode
-            elif role == "D":
-                if not sep:
-                    if i < n and not pre[i].startswith("-"):
-                        i += 1       # separate display value consumed
-                    else:
-                        return True  # missing OR dash-leading required value -> MUTATING (closes D-3)
+                    value = pre[i]
+                    i += 1           # separate value consumed
+                elif role == "F":
+                    continue         # F at end: the filter value is optional-when-last (defaults HEAD)
+                else:
+                    return True      # Q or D at end with no value: git refuses a required value -> MUTATING
+                # One value rule for both spellings, so a form cannot pass in one and fail in the other.
+                if not value:
+                    return True      # an empty value is never certified -> MUTATING
+                # A dash-leading value is never certified either: git 2.53 refuses '-x' as a filter object,
+                # and a separate one may be an option git consumes as the value. Only a D value attached
+                # with '=' may lead with a dash (--sort=-committerdate is a valid descending key).
+                if value.startswith("-") and (role != "D" or not sep):
+                    return True      # -> MUTATING
             elif role == "R":
                 if sep:
                     return True  # '=' on a no-value option -> MUTATING
-            # role "O": optional '='-attached value only; consumes NOTHING following, sets no mode
+            elif role == "O":
+                if sep and not _val:
+                    return True  # an empty '=' value is never certified -> MUTATING
+                # otherwise an optional '='-attached value only; consumes NOTHING following, sets no mode
         else:
             verdict = _short_cluster_verdict(tok[1:], spec)
             if verdict == "MUT":
