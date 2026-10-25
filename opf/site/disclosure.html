@@ -86,8 +86,10 @@
       <li><b style="color:var(--ink)">The single-writer lease</b> has a propagation window in the
         standard's cross-system contract: a second system may begin before observing the held lease.
         The contract requires a divergence check to detect that collision afterward. These are
-        specified controls, not complete CLI coverage: <code>opf sync</code> is planned, and
-        <code>opf init</code> takes no lock or lease and does not serialize concurrent writers.</li>
+        specified controls, not complete CLI coverage: <code>opf sync</code> is planned, and the
+        operation lock <code>opf init</code> takes, with the lease it holds while it writes, excludes
+        other OPF runs on the same store only, not runs on another store in the same repository
+        and not writers on another system.</li>
       <li><b style="color:var(--ink)">Reference-tooling residuals</b>: doctor reports per-record
         view drift and the content schemas of module-tier and importer records, including
         <code>legacy_fragment</code>, as cannot-evaluate. A declared view outside the baseline set,
