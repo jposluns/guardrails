@@ -76,7 +76,7 @@ It also covers the gate-weakening guard (gate_weakening, gatdis): a git verifica
 commit/am, where -n IS --no-verify, with a value-aware '--' boundary so a '--' eaten as an option value
 does not hide a following -n) denies; every raw git naming is held to a closed literal allowlist
 grammar (bare literal words, one standalone single-quoted literal per word, one standalone
-double-quoted literal per word holding no $, backquote or backslash, literal global-option
+double-quoted literal per word on one line holding no $, backquote, backslash or !, literal global-option
 values, the >/dev/null, 2>/dev/null and 2>&1 redirections), so on a roster verb any expansion,
 substitution, process substitution, backslash, glob, brace, comment, here-document or
 other redirection denies fail-closed (on a parsed command the one exception is the git commit message
@@ -14137,11 +14137,11 @@ def _main_isolated(monitor):
                 "git commit -m 'fix; git commit -nv'", "deny")
         gexpect("(gw-dq-h8b) a single-quoted message naming an OFF-roster git (log) stays allowed (control)",
                 "git commit -m 'see git log for history'", "allow")
-        # Finding 2 boundary: the backslash interior check is load-bearing. Bash reads this as -m 'a" '
+        # Boundary: the backslash interior check is load-bearing. Bash reads this as -m 'a" '
         # then a live -nv; dropping the interior backslash check would mis-pair the quotes and allow it.
         gexpect("(gw-dq-h11) a backslash inside double quotes guards a hidden -nv on the fallback, denies",
                 'git commit -m "a\\" " -nv "; echo "\necho "', "deny")
-        # Finding 5: an interior '!' can be rewritten by bash history expansion, so it denies (re-issue the
+        # An interior '!' can be rewritten by bash history expansion, so it denies (re-issue the
         # text single-quoted, gw-dq-h13, which never history-expands and is accepted like a bare word).
         gexpect("(gw-dq-h12) a '!' inside double quotes denies (history expansion could rewrite it)",
                 'git commit -m "ship it!"', "deny")
@@ -14178,29 +14178,30 @@ def _main_isolated(monitor):
         # ALLOWED before the raw-scan hides-roster-git rule (the all-bare-word span was consumed data).
         gexpect("(gw-wr-unparse) an unparseable wrapper line hiding git commit -nv denies on the fallback",
                 "env 'A=git log ' git commit -nv -m ' fix'\necho '", "deny")
-        # The env form of the double-quote single-quote ambiguity (MEDIUM 2): bash runs git commit -nv (the
+        # The env form of the double-quote single-quote ambiguity: bash runs git commit -nv (the
         # quoted assignment 'A=git log "' sets A), now caught on the parsed path by the wrapper peel.
         gexpect("(gw-wr-envdqsq) env hiding git commit -nv behind mixed quotes denies",
                 "env 'A=git log \"' git commit -nv -m '\" fix'", "deny")
         # PEEL-DISCRIMINATING VECTORS: a quote-concatenated 'g'i't' decodes to the token 'git' bash would
-        # run, but the RAW \bgit\b scan cannot see it (the source bytes are g,',i,',t). So these deny ONLY
-        # through the parsed path's wrapper peel/dequoted judgement, and each ALLOWS under the matching
-        # mutant, pinning that path (both prior reviews named them).
+        # run, but the RAW \bgit\b scan cannot see it (the source bytes are g,',i,',t). These deny through
+        # the parsed path's wrapper peel/dequoted judgement with its own message ("this git commit carries");
+        # under the matching mutant each still denies, through the de-quoted reading behind any word, with
+        # that reading's message instead, so the needle pins the path.
         # gw-wr-concat1 pins the resolved peel: dropping the peel judges the raw word 'env' and the g'i't
-        # is never re-assembled, so it allows.
-        gexpect("(gw-wr-concat1) env with a quote-concatenated git commit -nv denies (resolved peel)",
-                "env g'i't commit -nv", "deny")
+        # is never re-assembled by it.
+        gdeny_names("(gw-wr-concat1) env with a quote-concatenated git commit -nv denies (resolved peel)",
+                    "env g'i't commit -nv", "this git commit carries")
         # gw-wr-concat2/concat3 pin the FAIL-CLOSED path for a wrapper option the grammar cannot resolve
         # (an attached short-option value): the peel returns _GATE_PEEL_UNRESOLVED and the dequoted words
-        # are judged. Reverting that to return None (the prior behaviour) allows them.
-        gexpect("(gw-wr-concat2) env -uX (attached short value) + quote-concatenated git commit -nv denies",
-                "env -uX g'i't commit -nv", "deny")
-        gexpect("(gw-wr-concat3) nice -n5 (attached short value) + quote-concatenated git commit -nv denies",
-                "nice -n5 g'i't commit -nv", "deny")
+        # are judged; reverting that to return None (the prior behaviour) loses that message.
+        gdeny_names("(gw-wr-concat2) env -uX (attached short value) + quote-concatenated git commit -nv denies",
+                    "env -uX g'i't commit -nv", "this git commit carries")
+        gdeny_names("(gw-wr-concat3) nice -n5 (attached short value) + quote-concatenated git commit -nv denies",
+                    "nice -n5 g'i't commit -nv", "this git commit carries")
         # gw-wr-concat4 pins the UNLISTED-wrapper dequoted judgement (sudo/xargs/setsid/stdbuf): the raw
-        # scan cannot see g'i't and the peel returns the sudo-led argv, so only the dequoted scan denies.
-        gexpect("(gw-wr-concat4) sudo with a quote-concatenated git commit -nv denies (unlisted wrapper)",
-                "sudo g'i't commit -nv", "deny")
+        # scan cannot see g'i't and the peel returns the sudo-led argv, so only the dequoted scan gives it.
+        gdeny_names("(gw-wr-concat4) sudo with a quote-concatenated git commit -nv denies (unlisted wrapper)",
+                    "sudo g'i't commit -nv", "this git commit carries")
         # The span/global-option vectors: a quoted global-option value between the real 'git' and its verb
         # (git --namespace ' x' commit -nv) behind a wrapper the peel does not resolve or does not list.
         # These allowed before the hides-roster-git run-out rule (the span's option walk ran off its
@@ -14225,13 +14226,14 @@ def _main_isolated(monitor):
         gexpect("(gw-wr-runout2) a message ending at git --namespace denies (run-out, disclosed over-deny)",
                 "git commit -m 'look at git --namespace'", "deny")
         # FALLBACK-DISCRIMINATING VECTORS: the trailing unterminated quote sends each line to the unparseable
-        # fallback, and the raw-text scan cannot see the quote-concatenated g'i't, so only the fallback's
-        # wrapper judgement over each recovered segment denies. Each allows under a mutant that drops that
-        # judgement (the fallback's bypass is never computed).
-        gexpect("(gw-wr-fallback1) env -uX + g'i't commit -nv on an unparseable line denies "
-                "(fallback, unresolved)", "env -uX g'i't commit -nv\necho '", "deny")
-        gexpect("(gw-wr-fallback2) sudo + g'i't commit -nv on an unparseable line denies "
-                "(fallback, unlisted)", "sudo g'i't commit -nv\necho '", "deny")
+        # fallback, and the raw-text scan cannot see the quote-concatenated g'i't, so the fallback's wrapper
+        # judgement over each recovered segment denies with the parsed path's message. Under a mutant that
+        # drops that judgement each still denies, through the de-quoted reading of each complete segment,
+        # with that reading's message instead, so the needle pins the judgement.
+        gdeny_names("(gw-wr-fallback1) env -uX + g'i't commit -nv on an unparseable line denies "
+                    "(fallback, unresolved)", "env -uX g'i't commit -nv\necho '", "this git commit carries")
+        gdeny_names("(gw-wr-fallback2) sudo + g'i't commit -nv on an unparseable line denies "
+                    "(fallback, unlisted)", "sudo g'i't commit -nv\necho '", "this git commit carries")
         # IN-PROGRESS-SEGMENT VECTORS: a here-string or process substitution stops the full lex INSIDE the git
         # segment, and the raw-text scans cannot see the quote-concatenated g'i't. The segment the lexer was
         # still inside is judged exactly as a complete one over the words read before the construct, so each
@@ -14289,6 +14291,87 @@ def _main_isolated(monitor):
                 "cat <<<x; echo 'see git log -n 3'", "allow")
         gexpect("(gw-pe-ctl-find) find -name before a here-string and a later ls -n allow",
                 "find . -name z <<<y; ls -n", "allow")
+        # BEHIND-ANY-WORD VECTORS: a git behind a command word on no wrapper list, or inside an option's value,
+        # spelled so the raw \bgit\b scan cannot see it. The parsed path reads each segment's de-quoted text
+        # (_gate_behind_bypass) whatever runs that git, so each denies with that reading's message; each allowed
+        # before it and allows again under a mutant that drops it.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-bh-ionice", "ionice g'i't commit -nv"),
+                ("gw-bh-ionice-c3", "ionice -c3 g'i't commit -nv"),
+                ("gw-bh-taskset", "taskset 1 g'i't commit -nv"),
+                ("gw-bh-chrt", "chrt -o 0 g'i't commit -nv"),
+                ("gw-bh-doas", "doas g'i't commit -nv"),
+                ("gw-bh-flock", "flock /tmp/l g'i't commit -nv"),
+                ("gw-bh-unbuffer", "unbuffer g'i't commit -nv"),
+                ("gw-bh-chroot", "chroot / g'i't commit -nv"),
+                ("gw-bh-builtin-exec", "builtin exec g'i't commit -nv"),
+                ("gw-bh-env-ionice", "env ionice g'i't commit -nv"),
+                ("gw-bh-timeout-ionice", "timeout 5 ionice g'i't push --no-verify"),
+                ("gw-bh-env-s", "env -S 'g\"i\"t commit -nv'"),
+                ("gw-bh-env-s-dq", "env -S \"g'i't commit -nv\""),
+                ("gw-bh-env-s-attached", "env -S'g\"i\"t commit -nv'"),
+                ("gw-bh-env-split-string", "env --split-string='g\"i\"t commit -nv'"),
+                ("gw-bh-env-ux-ansic", "env -uX $'g\\x69t' commit -nv"),
+                ("gw-bh-ansic-bare", "$'g\\x69t' commit -nv"),
+                ("gw-bh-ansic-flag", "ionice g'i't commit $'\\x2dn'"),
+                ("gw-bh-sh-c", "sh -c 'g\"i\"t commit -nv'"),
+                ("gw-bh-pe-before", "ionice g'i't commit -nv; cat <<<x")):
+            gdeny_names("({}) a git bypass behind another word, read from the de-quoted text, denies".format(
+                _gw_lbl), _gw_cmd, "after another word of the same command")
+        # The disclosed over-deny of that reading, pinned so a change to it is a deliberate one: text that only
+        # names such a command behind any word, and a quoted value holding a blank and a -n behind a command
+        # word the wrapper peel does not resolve to git.
+        gexpect("(gw-bh-overdeny-echo) an echoed quote-concatenated git commit -nv denies (disclosed over-deny)",
+                "echo g'i't commit -nv", "deny")
+        gexpect("(gw-bh-overdeny-sudo-msg) sudo + a quoted message holding ' -n' denies (disclosed over-deny)",
+                "sudo git commit -m 'fix -n'", "deny")
+        # Controls: an off-roster verb, push's -n (--dry-run) and a plain message behind an unlisted wrapper
+        # allow, and the segment's own git, the one the wrapper peel resolves, keeps its value-aware reading,
+        # so a quoted value holding ' -n' after it allows; an attached option value naming a path that only
+        # ends in .git is not a git word.
+        gexpect("(gw-bh-ctl-log) ionice + g'i't log -n3 allows", "ionice g'i't log -n3", "allow")
+        gexpect("(gw-bh-ctl-pushn) ionice + g'i't push -n (dry run) allows",
+                "ionice g'i't push -n origin main", "allow")
+        gexpect("(gw-bh-ctl-msg) ionice + g'i't commit -m x allows", "ionice g'i't commit -m x", "allow")
+        gexpect("(gw-bh-ctl-env-s-log) env -S with a quoted git log -n3 allows", "env -S 'g\"i\"t log -n3'",
+                "allow")
+        gexpect("(gw-bh-ctl-own-env) env A=1 + git commit -m 'fix -n' allows (own git, value-aware)",
+                "env A=1 git commit -m 'fix -n'", "allow")
+        gexpect("(gw-bh-ctl-own-timeout) timeout 60 + git commit -m 'fix -n' allows (own git, value-aware)",
+                "timeout 60 git commit -m 'fix -n'", "allow")
+        gexpect("(gw-bh-ctl-own-assign) a quoted assignment holding a blank before git commit -m 'fix -n' "
+                "allows", "GIT_AUTHOR_NAME='A B' git commit -m 'fix -n'", "allow")
+        gexpect("(gw-bh-ctl-gitdir) --git-dir=/srv/r.git is no git word, git commit -m 'fix -n' allows",
+                "git --git-dir=/srv/r.git commit -m 'fix -n'", "allow")
+        # Direct unit cases for _gate_dequoted_words: the ANSI-C decoding (each escape form, and the \U code
+        # just inside, at and just past the last Unicode code point) and the attached-value git word (a
+        # single-dash word of four characters, the boundary, and five and six).
+        _gw_dqw = getattr(aiqt_hooks, "_gate_dequoted_words", None)
+
+        def dqwexpect(label, text, want):
+            got = _gw_dqw(text) if _gw_dqw is not None else "no _gate_dequoted_words"
+            if got != want:
+                failures.append("{}: _gate_dequoted_words({!r}) = {!r}, expected {!r}".format(label, text, got, want))
+
+        dqwexpect("(gw-dqw-hex) a \\x code decodes", "$'g\\x69t' x", ["git", "x"])
+        dqwexpect("(gw-dqw-octal) an octal code decodes", "$'g\\151t'", ["git"])
+        dqwexpect("(gw-dqw-u4) a \\u code decodes", "$'g\\u0069t'", ["git"])
+        dqwexpect("(gw-dqw-flag) an escape-coded dash decodes", "$'\\x2dn'", ["-n"])
+        dqwexpect("(gw-dqw-ctrl) a \\c control character is a blank-free byte", "$'a\\cAb'", ["a\x01b"])
+        dqwexpect("(gw-dqw-letter) \\t splits like a tab", "$'a\\tb'", ["a", "b"])
+        dqwexpect("(gw-dqw-u8-in) \\U0010FFFE decodes", "$'a\\U0010FFFEb'", ["a\U0010fffeb"])
+        dqwexpect("(gw-dqw-u8-at) \\U0010FFFF decodes", "$'a\\U0010FFFFb'", ["a\U0010ffffb"])
+        dqwexpect("(gw-dqw-u8-past) \\U00110000 is past Unicode and reads as nothing", "$'a\\U00110000b'",
+                  ["ab"])
+        dqwexpect("(gw-dqw-dash4) a four-character single-dash word adds no git (boundary)", "-git x",
+                  ["-git", "x"])
+        dqwexpect("(gw-dqw-dash5) -Sgit adds a git word", "-Sgit x", ["-Sgit", "git", "x"])
+        dqwexpect("(gw-dqw-dash6) -iSgit adds a git word", "-iSgit x", ["-iSgit", "git", "x"])
+        dqwexpect("(gw-dqw-long) --split-string=git adds a git word", "--split-string=git x",
+                  ["--split-string=git", "git", "x"])
+        dqwexpect("(gw-dqw-long-path) a long option's value whose basename is git adds a git word",
+                  "--x=/usr/bin/git", ["--x=/usr/bin/git", "git"])
+        dqwexpect("(gw-dqw-long-dotgit) a value ending in .git adds none", "--git-dir=r.git", ["--git-dir=r.git"])
         # The run-out over-deny reaches a quoted URL or path ending in '.git' on ANY git line, roster verb or
         # not (the 'git' after the dot is a word-boundary match whose walk runs off the span end); the
         # gate-weakening residue discloses it. Pinned so a change to it updates that disclosure; the
@@ -14299,9 +14382,9 @@ def _main_isolated(monitor):
                 'git clone "https://example.com/a/b.git" d', "deny")
         gexpect("(gw-wr-runout-url-bare) the same URL unquoted allows (control)",
                 "git clone https://example.com/a/b.git d", "allow")
-        # (gw-res) The gate-weakening residue must disclose that over-deny and the wrapper residual held
-        # open for a maintainer decision. Read from the manifest the generator renders into
-        # ENFORCEMENT.md, so reverting either disclosure fails here.
+        # (gw-res) The gate-weakening residue must disclose that over-deny, the over-deny of the de-quoted
+        # reading behind any word and what that reading still cannot see. Read from the manifest the
+        # generator renders into ENFORCEMENT.md, so reverting any of these disclosures fails here.
         try:
             _gw_hooks = load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]
             _gw_residue = [h for h in _gw_hooks if h.get("id") == "gate-weakening-guard"][0]["residue"]
@@ -14310,8 +14393,8 @@ def _main_isolated(monitor):
             failures.append("(gw-res-read) could not read the gate-weakening-guard residue: {}".format(exc))
         for _gw_rlbl, _gw_needle in (
                 ("gw-res-runout-url", "so a quoted URL or path ending in .git on any git line denies too"),
-                ("gw-res-wrapper",
-                 "still gets past behind command-running wrappers the change does not model")):
+                ("gw-res-behind-overdeny", "so sudo git commit -m \"fix -n\" denies"),
+                ("gw-res-behind-residual", "it cannot see a git word built at run time")):
             if _gw_needle not in _gw_residue:
                 failures.append("({}) the gate-weakening-guard residue must carry {!r}"
                                 .format(_gw_rlbl, _gw_needle))
@@ -14411,8 +14494,8 @@ def _main_isolated(monitor):
         # The double-quote branch's single-quote trigger is the mirror: a '"' the scan meets may be bash's
         # CLOSING double quote, and a single quote in its interior is where bash's own close and the next
         # open bracket live command text. Here too bash runs only 'git log' (the double-quoted a' is one
-        # operand), a safe-direction over-deny, but dropping the interior single-quote test (and it alone,
-        # the MG mutant) swallows the hidden 'git commit -nv' and allows, so this isolates that trigger;
+        # operand), a safe-direction over-deny, but dropping the interior single-quote test, and it alone,
+        # swallows the hidden 'git commit -nv' and allows, so this isolates that trigger;
         # the parsed path sees an off-roster 'git log', so the deny comes purely from the raw scan.
         gexpect("(gw-dq-q2) a single quote inside a double-quoted span marks the pairing ambiguous, so the "
                 "hidden git commit -nv is re-judged and denies (pins the double-quote branch's \"'\" "
@@ -14426,14 +14509,14 @@ def _main_isolated(monitor):
         # t_n clears a 0.02s floor; if it never does, the check FAILS 'linearity not evaluated' rather than
         # passing silently (the former early-pass path). A ROSTER-verb-dense line is still super-linear by
         # design and relies on the deadline's fail-closed, as the scan docstring states.
-        # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear at the pin and here.
+        # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
         # gw-lin-opts (`git ` + `-C 'a;' `*n): the subcommand never resolves (all global options), so the
         #   off-roster stop never fires and the former per-quote re-walk of `words` was quadratic; the
-        #   cached offroster_resolved makes it linear. Quadratic at the pin.
+        #   cached offroster_resolved makes it linear. Quadratic before that cache.
         # gw-lin-span-roster (`git commit -m '` + `git x `*n + `'`) and gw-lin-span-off (`git log '` +
         #   `git log `*n + `'`): one quoted span naming many inner git words. The former
         #   _gate_span_hides_roster_git re-split the suffix per 'git' match (quadratic); the one-pass token
-        #   walk makes both linear. Both quadratic at the pin. (These are the three shapes both reviews named.)
+        #   walk makes both linear. Both quadratic before that walk.
         # gw-lin-span-optgit (`git log '` + `-git `*n + `log'`) and gw-lin-span-chain (`git commit -m 'git` +
         #   ` -C git`*n + ` x'`): every option word holds a 'git' match, or each '-C' consumes a git word as
         #   its value, so an option walk per match crossed every later option word (quadratic). The helper
@@ -14441,8 +14524,12 @@ def _main_isolated(monitor):
         # gw-lin-dq-off (`sudo` + `git log`*n) and gw-lin-dq-chain (`sudo git` + `-C git`*n + `log`) time
         #   _gate_novrf_dequoted_bypass over the word list itself: it copied the words after each git word
         #   and re-walked a '-C git' chain from each, both quadratic. It now reads each git word's
-        #   subcommand from tables filled once from the end, so both are linear. A list of many ROSTER-verb
-        #   git words still reads each one's arguments and stays super-linear, as its docstring states.
+        #   subcommand from tables filled once from the end, so both are linear.
+        # gw-lin-dq-roster (`echo` + `git push`*n + `-n`) and gw-lin-dq-roster-m (`echo` + `git commit -m`*n +
+        #   `-n`) pack ROSTER-verb git words before a '-n' that is a bypass for none of them (push's dry run,
+        #   or -m's value): each git word's walk read every later word, quadratic. A walk that found no bypass
+        #   now passes over every later git word of the same verb whose words it already read, so both are
+        #   linear. gw-lin-unread-roster times the de-quoted text reading over the quote-concatenated shape.
         # Each timed scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
         # gives each shape at every size: none of them names a refused segment or a bypass), so a scan made
         # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
@@ -14475,6 +14562,7 @@ def _main_isolated(monitor):
 
         _gw_cmd_scan = aiqt_hooks._gate_closed_grammar_scan
         _gw_dq_scan = aiqt_hooks._gate_novrf_dequoted_bypass
+        _gw_unread_scan = aiqt_hooks._gate_unread_bypass
         _gw_lin_cases = (
             ("gw-dq-lin-sq", "git -C 'a;' log ", "", "", _gw_cmd_scan, None),
             ("gw-dq-lin-dq", 'git log "a;" ', "", "", _gw_cmd_scan, None),
@@ -14485,6 +14573,9 @@ def _main_isolated(monitor):
             ("gw-lin-span-chain", " -C git", "git commit -m 'git", " x'", _gw_cmd_scan, None),
             ("gw-lin-dq-off", ["git", "log"], ["sudo"], [], _gw_dq_scan, None),
             ("gw-lin-dq-chain", ["-C", "git"], ["sudo", "git"], ["log"], _gw_dq_scan, None),
+            ("gw-lin-dq-roster", ["git", "push"], ["echo"], ["-n"], _gw_dq_scan, None),
+            ("gw-lin-dq-roster-m", ["git", "commit", "-m"], ["echo"], ["-n"], _gw_dq_scan, None),
+            ("gw-lin-unread-roster", " g'i't push", "echo", " -n", _gw_unread_scan, None),
         )
         for _gw_lbl, _gw_unit, _gw_pre, _gw_suf, _gw_scan, _gw_want in _gw_lin_cases:
             _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n, _gw_got = _gw_scan_ratio(_gw_unit, _gw_pre, _gw_suf, _gw_scan)
@@ -14855,8 +14946,10 @@ def _main_isolated(monitor):
                 "(true #'\n)\ngit status -s", "allow")
         # The option test needs a character after an unquoted '-' that does not end the token in bash, so
         # a lone '-' (git am's stdin operand) allows when a shell operator ends it just as when a blank or
-        # the end of the command does. The end, space, tab and newline controls allowed before this rule
-        # too; each fails if its blank is dropped from the ending set. A character bash does not split
+        # the end of the command does. The end and newline controls allowed before this rule too, and the
+        # newline control fails if the newline is dropped from the ending set; the space and tab rows below
+        # now deny through the closed literal grammar (their '<p' redirection), so no row pins the space or
+        # the tab in that set (dropping either can only add a deny). A character bash does not split
         # on, a carriage return included, stays in the token and counts; a process substitution glued to
         # the '-' forms the dash-prefixed word '-/dev/fd/N' and counts too, in either direction (guards:
         # both denied before this rule, and a rule that excluded '<' and '>' alone, or kept only '<(',
