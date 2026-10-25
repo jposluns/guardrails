@@ -601,7 +601,7 @@ class _Rec:
                  "body", "unparsed")
 
     def __init__(self, rid, rtype, namespace, state, qual, links, actor_kind, location, scopes, body=None,
-                 unparsed=False):
+                 unparsed=frozenset()):
         self.id = rid                 # the raw id value (a str for a well-formed record)
         self.rtype = rtype            # the record's type name
         self.namespace = namespace    # the two-letter namespace, or None when the id is malformed
@@ -612,22 +612,24 @@ class _Rec:
         self.location = location      # "active", "archive/<YYYY>", or "imported" (an imported leaf row)
         self.scopes = scopes          # a block's scoped ids (list), or [] (spec 8.5)
         self.body = body              # the raw record table, read by the immutable-body preservation check
-        self.unparsed = unparsed      # True when a status or links value a current-state join reads did not parse
+        self.unparsed = unparsed      # the fields ("status", "links", "scopes") that did not parse
 
 
 def _make_rec(table, rtype, location):
     """Build a best-effort _Rec from a parsed record table. A malformed id yields namespace None (the
     cross-record checks skip it); the per-record schema faults are reported separately by validate_record.
-    `unparsed` is True when a field the current-state joins read could not be interpreted: the status of
-    a type with a shipped schema that is absent, not a string or does not parse, or a links value that is
-    not an array of tables with a string rel and a string id. A join over the readable fields of such a
-    record cannot stand in for one over the record, so the joins of its type grade the population as not
-    fully read (fail-closed); the per-record schema findings name the defect itself."""
+    `unparsed` names each field a cross-record check reads that could not be interpreted: "status", the
+    status of a type with a shipped schema that is absent, not a string or does not parse; "links", a
+    links value that is not an array of tables, each with a rel in the closed vocabulary and a string
+    id; and "scopes", a block's scopes value that is not an array of strings. A check over the readable
+    fields of such a record cannot stand in for one over the record, so each check that reads the field
+    grades the population as not fully read (fail-closed): the current-state joins over any of the
+    three, C-LINKS over links and scopes. The per-record schema findings name the defect itself."""
     rid = table.get("id")
     shape = _valid_id_shape(rid)
     namespace = shape[0] if shape is not None else None
     spec = BASELINE_SPECS.get(rtype)
-    unparsed = False
+    unparsed = set()
     if rtype == "worklog":
         state, qual = "recorded", None            # the reduced envelope carries no status (spec 8.3)
     else:
@@ -640,7 +642,7 @@ def _make_rec(table, rtype, location):
             if parsed is not None:
                 state, qual = parsed
             else:
-                unparsed = True
+                unparsed.add("status")
     links = []
     lk = table.get("links")
     if isinstance(lk, list):
@@ -648,16 +650,23 @@ def _make_rec(table, rtype, location):
             if isinstance(l, dict) and isinstance(l.get("rel"), str):
                 links.append((l.get("rel"), l.get("id")))
                 if not isinstance(l.get("id"), str):
-                    unparsed = True
+                    unparsed.add("links")
+                elif l.get("rel") not in LINK_RELS:
+                    unparsed.add("links")
             else:
-                unparsed = True
+                unparsed.add("links")
     elif lk is not None:
-        unparsed = True
+        unparsed.add("links")
     actor = table.get("actor")
     akind = actor.get("kind") if isinstance(actor, dict) and isinstance(actor.get("kind"), str) else None
     scopes = table.get("scopes")
+    if rtype == "block" and scopes is not None:
+        if not isinstance(scopes, list):
+            unparsed.add("scopes")
+        elif not all(isinstance(s, str) for s in scopes):
+            unparsed.add("scopes")
     scopes = list(scopes) if isinstance(scopes, list) else []
-    return _Rec(rid, rtype, namespace, state, qual, links, akind, location, scopes, table, unparsed)
+    return _Rec(rid, rtype, namespace, state, qual, links, akind, location, scopes, table, frozenset(unparsed))
 
 
 def _status_string(state, qual):
@@ -1458,13 +1467,16 @@ def _worklog_legacy_conflict(_relpath):
 
 
 def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine_rel=None,
-                    *, propagate_manifest_failure=False, supported_profiles=None, manifest_model=None):
+                    *, propagate_manifest_failure=False, supported_profiles=None, manifest_model=None,
+                    unread=None):
     """Read and validate a worklog.toml (active or an archive bucket) through U3's validate_worklog, and
     return its WL-number -> entry map. A required (active) worklog that is absent is CANNOT-EVALUATE; an
     archive-bucket worklog that is absent returns None (the caller only reads it when the bucket has one).
     The enclosing traversal receives manifest failures before diagnostic translation so it can
     attribute the original diagnostics and stop dependent archive reads; an ordinary ledger
-    failure still permits archive diagnostics."""
+    failure still permits archive diagnostics. An entry the map leaves out (not a table, no well-formed
+    WL id, or a reused id) puts "worklog" in `unread` (when given), since its links are then never read;
+    a caller that gets None back adds it the same way."""
     try:
         if machine_rel is None:       # explicitly named archive bucket, never shape-probed (M7)
             data = _opf_worklog.load_archive_worklog_at(root_fd, relpath)
@@ -1520,16 +1532,21 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
         return None
     for f in idf:
         rep.finding("{}: {}".format(relpath, f))
+    if idf and unread is not None:
+        unread.add("worklog")      # each _entries_by_id finding is an entry left out of the map
     return by_id
 
 
 # --- the archive (C-ARCHIVE-ENUM / C-ROTATION and the merged worklog) --------------------------------
 
-def _parse_archive_manifest(data, where, rep):
+def _parse_archive_manifest(data, where, rep, dropped=None):
     """Parse and validate an `archive.toml` (shape defined here). Returns (moved, worklog_moved) where
     `moved` is a list of (id, type, destination) triples and `worklog_moved` a list of (span, destination),
     or (None, None) when the file is not a table, carries an unsupported/absent schema, or an array is
-    malformed (each CANNOT-EVALUATE). A malformed individual row is an INVALID finding."""
+    malformed (each CANNOT-EVALUATE). A malformed individual row is an INVALID finding and is left out of
+    the returned lists; when `dropped` is given, each such row is appended to it as its raw (id, type),
+    and a worklog_moved row as (None, "worklog"), so the caller can grade the population the row names as
+    not reconciled."""
     if not isinstance(data, dict):
         rep.cant("{}: archive.toml is not a table".format(where))
         return None, None
@@ -1558,12 +1575,18 @@ def _parse_archive_manifest(data, where, rep):
         mid, mtype, dest = m.get("id"), m.get("type"), m.get("destination")
         if _valid_id_shape(mid) is None:
             rep.finding("{}: id {} is not a well-formed <NS>-<n> id (spec 8.2)".format(rw, _safe_display(mid)))
+            if dropped is not None:
+                dropped.append((mid, mtype))
             continue
         if not isinstance(mtype, str) or not mtype:
             rep.finding("{}: type must be a non-empty string (spec 12)".format(rw))
+            if dropped is not None:
+                dropped.append((mid, mtype))
             continue
         if not isinstance(dest, str) or not dest:
             rep.finding("{}: destination must be a non-empty string".format(rw))
+            if dropped is not None:
+                dropped.append((mid, mtype))
             continue
         moved.append((mid, mtype, dest))
     wl_raw = data.get("worklog_moved", [])
@@ -1582,12 +1605,32 @@ def _parse_archive_manifest(data, where, rep):
         span, dest = s.get("span"), s.get("destination")
         if not (isinstance(span, list) and len(span) == 2):
             rep.finding("{}: span must be a two-element [WL-a, WL-b] array".format(rw))
+            if dropped is not None:
+                dropped.append((None, "worklog"))
             continue
         if not isinstance(dest, str) or not dest:
             rep.finding("{}: destination must be a non-empty string".format(rw))
+            if dropped is not None:
+                dropped.append((None, "worklog"))
             continue
         wl_moved.append((span, dest))
     return moved, wl_moved
+
+
+def _moved_row_types(mid, mtype, enabled_types):
+    """The enabled types whose record population a moved row that was not reconciled leaves incomplete:
+    the type it declares and the type its id's namespace binds, each when it names an enabled type, so a
+    missing, non-string or mislabelled type still reaches the record's own joins. When neither names
+    one, the row could stand for any record, so every enabled type is returned."""
+    types = set()
+    if isinstance(mtype, str) and mtype in enabled_types:
+        types.add(mtype)
+    shape = _valid_id_shape(mid)
+    if shape is not None:
+        types.update(t for t, ns in enabled_types.items() if ns == shape[0])
+    if not types:
+        types.update(enabled_types)
+    return types
 
 
 def _dest_index_has_id(root_fd, machine_rel, dest, target_id, rep):
@@ -1743,9 +1786,14 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     never 'no rotation happened'. No loop is sized by a declared span endpoint. Every type whose
     archived records could not all be seated joins `unread` (when given): an archived index that is
     unreadable or malformed or a row that is skipped adds its type, a bucket or archive tree that
-    cannot be walked adds every enabled type, and an enumerated moved id whose declared destination is
-    wrong or cannot confirm the record adds its declared type (that record is then confirmed seated
-    nowhere, so its type's population is incomplete for the current-state joins)."""
+    cannot be walked adds every enabled type, and a moved row that cannot be reconciled adds the types
+    _moved_row_types names for it: a row dropped as malformed (its id, type or destination), a row
+    whose declared type is not a roster type or disagrees with its id's namespace, and an enumerated
+    moved id whose declared destination is wrong or cannot confirm the record (that record is then
+    confirmed seated nowhere, so its type's population is incomplete for the current-state joins). The
+    archived worklog adds "worklog" when the bucket's worklog.toml is listed but cannot be read, when an
+    entry is left out of its map, and when a worklog_moved row is dropped as malformed or its span
+    enumerates an entry the bucket's worklog does not hold."""
     if unread is None:
         unread = set()
     archive_recs = []
@@ -1791,10 +1839,15 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
         if ast != "ok":
             unread.update(enabled_types)
             continue
-        moved, wl_moved = _parse_archive_manifest(amf, bucket, rep)
+        dropped = []
+        moved, wl_moved = _parse_archive_manifest(amf, bucket, rep, dropped)
         if moved is None:
             unread.update(enabled_types)
             continue
+        for mid, mtype in dropped:
+            # A row dropped as malformed names a rotation that cannot be reconciled: the population of
+            # each type it could stand for is incomplete.
+            unread.update(_moved_row_types(mid, mtype, enabled_types))
         if moved and not wl_moved:
             # gemini/claude round-11 BLOCKER: per-bucket rotation binding. A bucket that rotates non-worklog
             # records MUST carry an archived worklog span to bind them to a released period (spec 12).
@@ -1871,7 +1924,12 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
         wl_map = {}
         if WORKLOG_NAME in bfiles:
             wl_map = _gather_worklog(root_fd, _rel(bucket, WORKLOG_NAME), registered_vendors, rep,
-                                     required=False) or {}
+                                     required=False, unread=unread)
+            if wl_map is None:
+                # A listed bucket worklog that is unreadable, invalid or gone at read: its entries were
+                # not read.
+                unread.add("worklog")
+                wl_map = {}
         archive_worklogs[year] = wl_map
 
         # F5 / F12 non-worklog reconciliation, BOTH directions.
@@ -1879,12 +1937,20 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             shape = _valid_id_shape(mid)
             id_ns = shape[0] if shape is not None else None
             norm_ns = _ROSTER_NAMESPACES.get(mtype)
+            # Every type the row could stand for: the declared one and the one its id's namespace binds.
+            row_types = _moved_row_types(mid, mtype, enabled_types)
             if norm_ns is None:
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} declares type {!r}, which is not a roster type "
                             "(spec 8.1)".format(mid, mtype))
+                # No type index can seat the record under a type the roster does not have: the type its
+                # id binds is incomplete.
+                unread.update(row_types)
             elif id_ns is not None and id_ns != norm_ns:
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} declares type {!r} (namespace {}) but the id "
                             "namespace is {} (spec 8.1)".format(mid, mtype, norm_ns, id_ns))
+                # Whatever the destination holds, the record is not seated as the type its id binds, and
+                # which of the two it is cannot be told: both populations are incomplete.
+                unread.update(row_types)
             want_base = "{}{}".format(mtype, INDEX_SUFFIX)
             expected_dest = _rel(bucket_rel, want_base)
             if dest != expected_dest:
@@ -1894,7 +1960,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} destination {!r} is not this bucket's type index "
                             "{!r} (a rotation lands in its declaring bucket; spec 12)".format(
                                 mid, dest, expected_dest))
-                unread.add(mtype)
+                unread.update(row_types)
             elif not _dest_index_has_id(root_fd, machine_rel, dest, mid, rep):
                 rep.finding("C-ARCHIVE-ENUM: enumerated moved id {!r} is absent from its destination {!r} "
                             "(a rotation must land where it says; spec 12:981-982)".format(mid, dest))
@@ -1902,7 +1968,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 # (an absent, unreadable or malformed destination, or one without the row): the type's
                 # record population is incomplete, so its current-state join must not read as a pass
                 # over the records that were found (spec 8.5).
-                unread.add(mtype)
+                unread.update(row_types)
             found_type = present_types.get(mid)
             if found_type is not None and found_type != mtype:
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} declares type {!r} but the archived record found "
@@ -1933,6 +1999,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             if a is None or b is None or a > b:
                 rep.finding("C-ARCHIVE-ENUM: worklog_moved span {} in {} is not a well-formed [WL-a, WL-b] "
                             "range (spec 8.2/12)".format(_safe_display(span), bucket))
+                unread.add("worklog")      # the entries it names cannot be reconciled
                 continue
             spans.append((a, b, dest))
         spans.sort()
@@ -1965,6 +2032,10 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 rep.finding("C-ARCHIVE-ENUM: worklog_moved span WL-{}..WL-{} in {} enumerates {} id(s) not "
                             "present in {!r}; the first missing is WL-{} (spec 12:981-982)".format(
                                 a, b, bucket, width - len(in_range), dest, first_missing))
+                # The store says those entries were rotated here, yet the bucket's worklog does not hold
+                # them: the worklog population is not confirmed complete, as for a moved record its
+                # destination cannot confirm.
+                unread.add("worklog")
     return archive_recs, archive_worklogs, rotatable
 
 
@@ -2162,15 +2233,30 @@ def _check_links(recs, by_id, all_ids, rep, imported_recs, imported_targets, unr
     another type's namespace, in an imported leaf) never makes a link or scope resolve. This check reads
     every record of BOTH series as a link source and as a target, so its source set is complete only when
     every collection was: when any record type could not be read in full (`unread`, from the collectors),
-    or the imported-row collection skipped an unreadable, absent or malformed leaf or an unidentifiable
-    row (`imported_complete` False), the check is CANNOT-EVALUATE and is not run. A target could lie in
-    the unread population (a false dangling finding) and an unread record's own links or scopes could
-    dangle unseen (a false pass), so neither direction is evaluated over a partial set."""
-    if unread or not imported_complete:
-        rep.cant("C-LINKS: the records of {} could not all be read (see C-RECORDS, C-PERRECORD-RECONCILE, "
-                 "C-ARCHIVE-ENUM and C-IMPORTED-SCHEMA); link and scope resolution is not evaluated over "
-                 "a partial set (spec 8.5/8.6)".format(
-                     ", ".join(repr(t) for t in sorted(unread)) if unread else "the imported series"))
+    the imported-row collection skipped an unreadable, absent or malformed leaf or an unidentifiable row
+    (`imported_complete` False), or a record of either series carries a links or scopes value that could
+    not be interpreted (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not run, and its
+    message names every one of those causes that holds. A target could lie in the unread population (a
+    false dangling finding) and an unread or uninterpreted record's own links or scopes could dangle
+    unseen (a false pass), so neither direction is evaluated over a partial set."""
+    link_fields = {"links", "scopes"}
+    uninterpreted = {r.rtype for r in recs if r.unparsed & link_fields}
+    imported_uninterpreted = any(r.unparsed & link_fields for r in imported_recs)
+    if unread or uninterpreted or not imported_complete or imported_uninterpreted:
+        causes = []
+        if unread:
+            causes.append("the records of {} could not all be read".format(
+                ", ".join(repr(t) for t in sorted(unread))))
+        if uninterpreted:
+            causes.append("the links or scopes of {} records could not be interpreted".format(
+                ", ".join(repr(t) for t in sorted(uninterpreted))))
+        if not imported_complete:
+            causes.append("the imported series could not all be read")
+        if imported_uninterpreted:
+            causes.append("the links or scopes of imported-series records could not be interpreted")
+        rep.cant("C-LINKS: {} (see C-RECORDS, C-PERRECORD-RECONCILE, C-ARCHIVE-ENUM and C-IMPORTED-SCHEMA); "
+                 "link and scope resolution is not evaluated over a partial set (spec 8.5/8.6)".format(
+                     "; ".join(causes)))
         return
     imported_by_id = {}
     for r in imported_targets:
@@ -3869,13 +3955,18 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         active_worklog = _gather_worklog(
             root_fd, _rel(machine_rel, WORKLOG_NAME), registered_vendors, rep,
             required=True, machine_rel=machine_rel, propagate_manifest_failure=True,
-            manifest_model=manifest_model) or {}
+            manifest_model=manifest_model, unread=unread)
     except (_opf_worklog.ManifestShapeError, _opf_worklog.ManifestValidationError,
             _opf_worklog.ManifestReadError) as exc:
         _attribute_manifest_failure(rep, exc)
         rep.cant("{} is not evaluated: {} failed manifest validation "
                  "(see C-MANIFEST)".format(_rel(machine_rel, WORKLOG_NAME), exc.relpath))
         return evaluated_profiles, unevaluated_profiles
+    if active_worklog is None:
+        # The active ledger was absent, unreadable or invalid (its cant is recorded): its entries, each a
+        # link source and target, were not read.
+        unread.add("worklog")
+        active_worklog = {}
 
     # --- C-PERRECORD-RECONCILE: replay the bidirectional index<->body reconciliation (spec 13) --------
     rep.ran("C-PERRECORD-RECONCILE")
@@ -6050,6 +6141,70 @@ def self_test():
             _xl["backlog_item.imported.index.toml"] = idx(["not a table"])
             check("r4-links-cannot-evaluate-when-imported-row-unidentifiable",
                   _xs_links_unread(xs_run(_xl)))
+
+            def _xs_links_imported_unread(res):
+                return (_xs_links_unread(res)
+                        and any("the imported series could not all be read" in m
+                                for m in res.by_check.get("C-LINKS", [])))
+            # The two imported collectors read each leaf separately, so one read can fail while the other
+            # succeeds (a leaf replaced between them). Each half of C-LINKS's imported completeness is
+            # driven alone by failing the leaf read inside one collector only: the C-IMPORTED-SCHEMA
+            # collector (red when its unreadable-leaf branch stops marking the collection partial), and the
+            # per-series id collector (red when the caller stops reading that collector's unread set). A
+            # leaf at an unsupported schema is malformed to the C-IMPORTED-SCHEMA collector alone, since
+            # the id collector reads its rows without the schema (red when the malformed-leaf branch stops
+            # marking the collection partial).
+            _real_read_toml = _read_toml
+
+            def _leaf_unreadable_in(collector_name):
+                _real_collector = globals()[collector_name]
+
+                def _failing_read(fd, relpath, rep_):
+                    if relpath.endswith("backlog_item.imported.index.toml"):
+                        rep_.cant("cannot read {}: synthetic: unreadable at this read".format(relpath))
+                        return None, "error"
+                    return _real_read_toml(fd, relpath, rep_)
+
+                def _collector(*args, **kwargs):
+                    globals()["_read_toml"] = _failing_read
+                    try:
+                        return _real_collector(*args, **kwargs)
+                    finally:
+                        globals()["_read_toml"] = _real_read_toml
+                globals()[collector_name] = _collector
+                try:
+                    return xs_run(act_machine())
+                finally:
+                    globals()[collector_name] = _real_collector
+            check("r4-links-cannot-evaluate-when-schema-collector-leaf-unreadable",
+                  _xs_links_imported_unread(_leaf_unreadable_in("_gather_imported_records")))
+            check("r4-links-cannot-evaluate-when-id-collector-leaf-unreadable",
+                  _xs_links_imported_unread(_leaf_unreadable_in("_gather_imported_rows")))
+            _xl = act_machine()
+            _xl["backlog_item.imported.index.toml"] = {"schema": 2, "record": []}
+            check("r4-links-cannot-evaluate-when-imported-leaf-schema-unsupported",
+                  _xs_links_imported_unread(xs_run(_xl)))
+            # An imported row whose links value C-LINKS cannot interpret (a rel outside the closed
+            # vocabulary, which C-IMPORTED-SCHEMA refuses while still seating the row) leaves C-LINKS
+            # CANNOT-EVALUATE, never a pass that skipped the link (red when C-LINKS ignores the unparsed
+            # links of imported rows).
+            _xl_run = xs_run(xs_machine(imported_link={"rel": "relates-to", "id": "imported:BI-9"}))
+            check("r4-links-cannot-evaluate-when-imported-links-uninterpreted",
+                  _xs_links_unread(_xl_run)
+                  and any("the links or scopes of imported-series records could not be interpreted" in m
+                          for m in _xl_run.by_check.get("C-LINKS", [])))
+            # With a clean type unread and the imported series partial, the C-LINKS message names both
+            # causes, compared in full (red when either is dropped).
+            _xl = act_machine()
+            _xl["finding.index.toml"] = {"schema": 1, "record": "FN-1"}
+            _xl["backlog_item.imported.index.toml"] = "garbage = ["
+            _xl_run = xs_run(_xl)
+            check("r4-links-message-names-clean-and-imported-causes",
+                  _xl_run is not None and _xl_run.by_check.get("C-LINKS") == [
+                      "C-LINKS: the records of 'finding' could not all be read; the imported series could "
+                      "not all be read (see C-RECORDS, C-PERRECORD-RECONCILE, C-ARCHIVE-ENUM and "
+                      "C-IMPORTED-SCHEMA); link and scope resolution is not evaluated over a partial set "
+                      "(spec 8.5/8.6)"])
             # The writer/doctor agreement on a declaration-only activation: a 1.3.0 store on homes 1
             # whose [unmanaged] names an imported-leaf name certifies, the name not being a
             # managed leaf there, and plan_write_scope plans the SAME manifest without refusing (red
@@ -7503,6 +7658,154 @@ def self_test():
         check("r1-malformed-links-done-cannot-evaluate",
               _r1_mlr is not None and _r1_mlr.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
               and not any("has no done receipt" in f_ for f_ in _r1_mlr.findings))
+
+        def _receipts_unread(res):
+            return (res is not None and res.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
+                    and any("receipt join is not evaluated" in m for m in res.by_check.get("C-RECEIPTS", [])))
+
+        def _chains_unread(res):
+            return (res is not None and res.checks.get("C-DECISION-CHAINS") == "CANNOT-EVALUATE"
+                    and any("chains are not evaluated" in m for m in res.by_check.get("C-DECISION-CHAINS", [])))
+
+        def _links_uninterpreted(res, rtype):
+            return (_links_unread(res)
+                    and any("the links or scopes of {!r} records could not be interpreted".format(rtype) in m
+                            for m in res.by_check.get("C-LINKS", [])))
+        # Each links entry _make_rec cannot interpret leaves the receipt join, and C-LINKS, which reads
+        # every links value as a link source, CANNOT-EVALUATE the same way, one entry shape per branch: an
+        # entry that is not a table, a rel that is not a string, an id that is not a string, and a rel
+        # outside the closed vocabulary (red when that branch alone is reverted: the done then reads as
+        # carrying no receipt, a false finding, and C-LINKS passes over the entry it skipped).
+        for _name, _entry in (("entry-not-table", "receipt_of BI-1"),
+                              ("rel-not-string", {"rel": 7, "id": "BI-1"}),
+                              ("id-not-string", {"rel": "receipt_of", "id": 1}),
+                              ("rel-not-in-vocabulary", {"rel": "receipt-of", "id": "BI-1"})):
+            f = clean_machine()
+            f["done.index.toml"] = idx([envelope("DN-1", "done", "recorded", links=[_entry])])
+            _r1_le = run(f)
+            check("r1-link-{}-done-cannot-evaluate".format(_name),
+                  _receipts_unread(_r1_le) and _links_uninterpreted(_r1_le, "done")
+                  and not any("has no done receipt" in f_ for f_ in _r1_le.findings))
+        # C-LINKS over a links value that is not an array, and over a block's scopes value that is not an
+        # array or holds an id that is not a string: CANNOT-EVALUATE, never a pass that skipped the value
+        # (red when C-LINKS ignores _make_rec's unparsed links or scopes, or when either scopes branch
+        # alone is reverted).
+        f = clean_machine()
+        f["finding.index.toml"] = idx([envelope("FN-1", "finding", "open", links="relates FN-404")])
+        f["counters.toml"] = counters(FN=1)
+        check("r4-links-cannot-evaluate-when-links-not-array", _links_uninterpreted(run(f), "finding"))
+        f = clean_machine()
+        f["block.index.toml"] = idx([envelope("BL-1", "block", "active", scopes="FN-99")])
+        f["counters.toml"] = counters(BL=1)
+        check("r4-links-cannot-evaluate-when-scopes-not-array", _links_uninterpreted(run(f), "block"))
+        f = clean_machine()
+        f["block.index.toml"] = idx([envelope("BL-1", "block", "active", scopes=["BI-1", 99])])
+        f["counters.toml"] = counters(BL=1)
+        check("r4-links-cannot-evaluate-when-scope-not-string", _links_uninterpreted(run(f), "block"))
+        # The C-LINKS message names every cause that holds: a type the collectors could not read in full
+        # beside another whose links value could not be interpreted, compared in full (red when either
+        # cause is dropped from the message).
+        f = clean_machine()
+        f["reference.index.toml"] = {"schema": 1, "record": "RF-1"}
+        f["finding.index.toml"] = idx([envelope("FN-1", "finding", "open", links="relates FN-404")])
+        f["counters.toml"] = counters(FN=1)
+        _r4_two = run(f)
+        check("r4-links-message-names-every-cause",
+              _r4_two is not None and _r4_two.by_check.get("C-LINKS") == [
+                  "C-LINKS: the records of 'reference' could not all be read; the links or scopes of "
+                  "'finding' records could not be interpreted (see C-RECORDS, C-PERRECORD-RECONCILE, "
+                  "C-ARCHIVE-ENUM and C-IMPORTED-SCHEMA); link and scope resolution is not evaluated over "
+                  "a partial set (spec 8.5/8.6)"])
+        # The worklog collectors feed the same completeness: every worklog entry is a link source and a
+        # link target, so C-LINKS is CANNOT-EVALUATE, never a pass or a false dangling finding, when the
+        # active ledger cannot be read, when a listed bucket worklog cannot be read (beside a link to one
+        # of its entries, which must not read as dangling), when an entry is left out of the map of the
+        # active ledger or of a bucket worklog (a reused id here, whose own dangling link is then never
+        # read), when a worklog_moved span
+        # enumerates an entry the bucket's worklog does not hold, when a span is not a well-formed range,
+        # and when a worklog_moved row is dropped as malformed (its span, then its destination). Each is
+        # red when its branch alone stops recording the worklog population as unread.
+        def _links_worklog_unread(res):
+            return (_links_unread(res)
+                    and any("the records of 'worklog' could not all be read" in m
+                            for m in res.by_check.get("C-LINKS", [])))
+        f = clean_machine()
+        f["worklog.toml"] = "garbage = ["
+        check("r4-links-cannot-evaluate-when-active-worklog-unreadable", _links_worklog_unread(run(f)))
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([bi(1, "done"), envelope(
+            "BI-2", "backlog_item", "open", links=[{"rel": "relates", "id": "WL-1"}])])
+        f["archive/2026/worklog.toml"] = "garbage = ["
+        # No span names the bucket's entries, so the unreadable ledger alone leaves them unread (a span
+        # would also report them absent through its own branch).
+        f["archive/2026/archive.toml"]["worklog_moved"] = []
+        _r4_awl = run(f)
+        check("r4-links-cannot-evaluate-when-archived-worklog-unreadable",
+              _links_worklog_unread(_r4_awl) and not any("dangling" in f_ for f_ in _r4_awl.findings))
+        f = clean_machine()
+        _r4_dup = wl(4)
+        _r4_dup["links"] = [{"rel": "relates", "id": "FN-404"}]
+        f["worklog.toml"] = {"schema": 1, "entry": [wl(3), wl(4), _r4_dup]}
+        _r4_dupr = run(f)
+        check("r4-links-cannot-evaluate-when-worklog-entry-left-out",
+              _links_worklog_unread(_r4_dupr) and not any("dangling" in f_ for f_ in _r4_dupr.findings))
+        f = clean_machine()
+        _r4_adup = wl(2)
+        _r4_adup["links"] = [{"rel": "relates", "id": "FN-404"}]
+        f["archive/2026/worklog.toml"] = {"schema": 1, "entry": [wl(1), wl(2), _r4_adup]}
+        _r4_adupr = run(f)
+        check("r4-links-cannot-evaluate-when-archived-worklog-entry-left-out",
+              _links_worklog_unread(_r4_adupr) and not any("dangling" in f_ for f_ in _r4_adupr.findings))
+        f = clean_machine()
+        f["archive/2026/worklog.toml"] = {"schema": 1, "entry": [wl(1)]}
+        check("r4-links-cannot-evaluate-when-span-entry-absent", _links_worklog_unread(run(f)))
+        for _name, _row in (("span-not-a-range", {"span": ["WL-2", "WL-1"],
+                                                  "destination": "archive/2026/worklog.toml"}),
+                            ("span-not-two-ids", {"span": ["WL-1"], "destination": "archive/2026/worklog.toml"}),
+                            ("destination-not-string", {"span": ["WL-1", "WL-2"], "destination": 7})):
+            f = clean_machine()
+            f["archive/2026/archive.toml"]["worklog_moved"] = [_row]
+            check("r4-links-cannot-evaluate-when-worklog-moved-{}".format(_name), _links_worklog_unread(run(f)))
+        # A moved row that cannot be reconciled leaves the population of every type it could stand for
+        # incomplete, for each check that joins through moved rows (red when its branch alone stops
+        # recording that population unread). A row dropped as malformed still names a record through its
+        # id's namespace or its declared type: a missing type (handoff, then pending_decision), a type
+        # that is not a string (done), a malformed id and a destination that is not a string. A row with
+        # neither a usable id nor a usable type could stand for any record, so every join is
+        # CANNOT-EVALUATE. A row whose declared type is not a roster type, or names a type its id's
+        # namespace does not bind, leaves the type its id binds incomplete even where the destination
+        # holds the id; and a mislabelled row whose destination is absent adds that type beside the
+        # declared one.
+        def _moved_rows_run(rows, extra=None, **cnt):
+            m = clean_machine()
+            m["archive/2026/archive.toml"]["moved"] = rows
+            m["counters.toml"] = counters(**cnt)
+            m.update(extra or {})
+            return run(m)
+        _mv_ho = _moved_rows_run([{"id": "HO-2", "destination": "archive/2026/handoff.index.toml"}], HO=2)
+        check("r2-moved-row-type-missing-cannot-evaluate", _handoff_unread(_mv_ho) and _links_unread(_mv_ho))
+        check("r3-moved-row-type-missing-cannot-evaluate", _chains_unread(_moved_rows_run(
+            [{"id": "PD-1", "destination": "archive/2026/pending_decision.index.toml"}], PD=1)))
+        check("r1-moved-row-type-not-string-cannot-evaluate", _receipts_unread(_moved_rows_run(
+            [{"id": "DN-2", "type": 7, "destination": "archive/2026/done.index.toml"}], DN=2)))
+        check("r2-moved-row-id-malformed-cannot-evaluate", _handoff_unread(_moved_rows_run(
+            [{"id": "HO-x", "type": "handoff", "destination": "archive/2026/handoff.index.toml"}])))
+        check("r2-moved-row-destination-not-string-cannot-evaluate", _handoff_unread(_moved_rows_run(
+            [{"id": "HO-2", "type": "handoff", "destination": 5}], HO=2)))
+        _mv_any = _moved_rows_run([{"id": "x", "type": 5, "destination": 5}])
+        check("current-state-joins-cannot-evaluate-when-moved-row-unidentifiable",
+              _mv_any is not None
+              and all(_mv_any.checks.get(cid) == "CANNOT-EVALUATE"
+                      for cid in ("C-RECEIPTS", "C-HANDOFF", "C-DECISION-CHAINS", "C-LINKS")))
+        check("r2-moved-row-type-not-roster-cannot-evaluate", _handoff_unread(_moved_rows_run(
+            [{"id": "HO-2", "type": "bogus", "destination": "archive/2026/bogus.index.toml"}],
+            extra={"archive/2026/bogus.index.toml": idx([ho(2)])}, HO=2)))
+        check("r1-moved-row-mislabelled-destination-holds-id-cannot-evaluate", _receipts_unread(_moved_rows_run(
+            [{"id": "DN-2", "type": "reference", "destination": "archive/2026/reference.index.toml"}],
+            extra={"archive/2026/reference.index.toml": idx([envelope(
+                "DN-2", "reference", "recorded", refs=[{"kind": "doc", "locator": "x", "note": "n"}])])}, DN=2)))
+        check("r1-moved-row-mislabelled-destination-absent-cannot-evaluate", _receipts_unread(_moved_rows_run(
+            [{"id": "DN-2", "type": "reference", "destination": "archive/2026/reference.index.toml"}], DN=2)))
         # The section 8.6 firewall on the sibling joins (the maintainer ruling: keyed on provenance, on
         # every store): an importer-authored done confers no receipt on a non-importer ratified
         # backlog_item (red when the receipt join reads importer-authored records).
@@ -7543,6 +7846,56 @@ def self_test():
               _r3_imp is not None and _r3_imp.status == INVALID
               and any("has 0 current effective resolutions" in f_
                       for f_ in _r3_imp.by_check.get("C-DECISION-CHAINS", [])))
+        # Only the exact kind `importer` is exempt from the receipt join and from the chain derivation: a
+        # done authored by a lookalike kind (another case, an extension, a prefix, padding) or by an actor
+        # whose kind cannot be read still confers its receipt, and such a decided pending_decision still
+        # resolves its chain, while the exact kind confers neither in the same harness (red when either
+        # filter widens to a case-insensitive, prefix, substring or stripped match, or exempts None).
+        _r13_kinds = ("Importer", "IMPORTER", "importers", "importer-legacy", "import", " importer", None)
+
+        def _with_kind(row, kind):
+            if kind is None:
+                del row["actor"]
+            else:
+                row["actor"] = {"kind": kind, "id": "import-assistant"}
+            return row
+
+        def _r1_kind_findings(kind):
+            _krecs = [_make_rec(bi(1, "done"), "backlog_item", "active"),
+                      _make_rec(_with_kind(dn(1, "BI-1"), kind), "done", "active")]
+            _krep = _Report()
+            _krep.ran("C-RECEIPTS")
+            _check_receipts(_krecs, {r.id: r for r in _krecs}, _krep)
+            return _krep.findings
+
+        def _r3_kind_current(kind):
+            _krecs = [_make_rec(pd(1), "pending_decision", "active"),
+                      _make_rec(pd(2, status="withdrawn", supersedes="PD-1"), "pending_decision", "active"),
+                      _make_rec(_with_kind(pd(3, supersedes="PD-2"), kind), "pending_decision", "active")]
+            return [cur for _members, cur in decision_chains(_krecs, {r.id: r for r in _krecs})]
+        check("r1-importer-lookalike-kinds-confer-receipt",
+              len(_r1_kind_findings("importer")) == 1
+              and all(_r1_kind_findings(k) == [] for k in _r13_kinds))
+        check("r3-importer-lookalike-kinds-resolve-chain",
+              _r3_kind_current("importer") == [[]]
+              and all(_r3_kind_current(k) == [["PD-3"]] for k in _r13_kinds))
+        # An imported-series row neither confers nor owes a receipt, and resolves no chain, whatever its
+        # actor (the series half of each filter, the backstop for a direct caller, since the doctor never
+        # routes an imported row into these joins; red when either filter reads imported rows).
+        _r1_srecs = [_make_rec(bi(1, "done"), "backlog_item", "active"),
+                     _make_rec(dn(1, "BI-1"), "done", "imported"),
+                     _make_rec(bi(2, "done"), "backlog_item", "imported")]
+        _r1_srep = _Report()
+        _r1_srep.ran("C-RECEIPTS")
+        _check_receipts(_r1_srecs, {r.id: r for r in _r1_srecs}, _r1_srep)
+        check("r1-imported-series-rows-neither-confer-nor-owe-receipts",
+              _r1_srep.findings == ["C-RECEIPTS: ratified backlog_item 'BI-1' (at 'done') has no done receipt "
+                                    "(the receipt is one-to-one; spec 8.5)"])
+        _r3_srecs = [_make_rec(pd(1), "pending_decision", "active"),
+                     _make_rec(pd(2, status="withdrawn", supersedes="PD-1"), "pending_decision", "active"),
+                     _make_rec(pd(3, supersedes="PD-2"), "pending_decision", "imported")]
+        check("r3-imported-series-row-resolves-no-chain",
+              [cur for _members, cur in decision_chains(_r3_srecs, {r.id: r for r in _r3_srecs})] == [[]])
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1), pd(2, supersedes="PD-1"), pd(3, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=3)
@@ -7709,8 +8062,8 @@ def self_test():
         # --- range-bounding: a huge declared high-water and span must NOT expand (F15). The engine must
         # terminate promptly (the overhang finding carries a COUNT, not a list), so the two vectors run
         # behind a bounded child (S7-F1): a range-expansion REGRESSION would otherwise hang or OOM the
-        # suite in-process; here it trips a deterministic TIMEOUT/OOM sentinel the INVALID assertion
-        # catches. Requires os.fork; a fork-less host fails the setup check closed. ----------------------
+        # suite in-process; here it trips a deterministic TIMEOUT/OOM sentinel the status assertions
+        # catch. Requires os.fork; a fork-less host fails the setup check closed. ------------------------
         if not hasattr(os, "fork"):
             check("f15-bounded-runner-available", False)   # fail-closed: the range vectors need a bounded child
         else:
@@ -7736,7 +8089,10 @@ def self_test():
             _sp_root = build(f, product={"VERSION": "1.0.0\n", "CHANGELOG.md": one_cl2})   # span WL-1..WL-1e9
             _sp_status = run_bounded(
                 lambda: validate_store(resolve_store(_sp_root), observations=clean_prior()).status)
-            check("f15-huge-span-bounded-invalid", _sp_status == INVALID)
+            # The span enumerates entries the bucket's worklog does not hold, so the worklog population
+            # is not confirmed complete and C-LINKS fails closed: the bounded run reports CANNOT-EVALUATE
+            # (the sentinel still fails this assertion on a range-expansion regression).
+            check("huge-span-bounded-fails-closed", _sp_status == CANNOT_EVALUATE)
 
             # --- F7 bounded-runner hardening (fail pre-fix, pass post-fix) ----------------------------
             import signal as _sig7
