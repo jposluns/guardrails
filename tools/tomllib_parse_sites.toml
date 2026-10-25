@@ -314,7 +314,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_adopt_plan.py"
-function = "self_test.PlanningTests.test_ancestry_store_debris_is_re_adoption"
+function = "self_test.PlanningTests.test_ancestry_ignores_manifestless_reserved_content"
 form = "call"
 count = 2
 class = "EXEMPT"
@@ -322,7 +322,15 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_adopt_plan.py"
-function = "self_test.PlanningTests.test_ancestry_store_debris_is_re_adoption.ancestry"
+function = "self_test.PlanningTests.test_refused_older_manifest_and_hand_step"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_ancestry_ignores_manifestless_reserved_content.ancestry"
 form = "call"
 count = 1
 class = "EXEMPT"
