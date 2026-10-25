@@ -2582,6 +2582,24 @@ _IE_MUTANTS = {
                            "return _allow()"),),
     "unread-command": (('return _errexit_unreadable("command", "command" in tool_input, command, "a string")',
                         "return _allow()"),),
+    "unread-empty-command": (("if not isinstance(command, str) or not command:\n"
+                              '        return _errexit_unreadable("command"',
+                              "if not isinstance(command, str):\n"
+                              '        return _errexit_unreadable("command"'),),
+    "unread-rest": (("if _ERREXIT_UNREAD_RE.search(unread):", "if False:"),),
+    "unread-any": (("if _ERREXIT_UNREAD_RE.search(unread):", "if unread:"),),
+    "unread-complete": (('return ""  # the lex read it all', "pass"),),
+    "unread-tail-start": (("return segments[-1].raw  # the segment the lex stopped inside, to the end of text",
+                           "return text"),),
+    "unread-read-end": (("return text[at + len(seg.raw):] if at >= 0 else text", "return text"),),
+    "unread-none": (("return text  # the lex stopped before any segment with text, so none of it counts as read",
+                     'return ""'),),
+    "unread-word-left": ((r'_ERREXIT_UNREAD_RE = re.compile(r"(?<![\w-])(?:set|shopt)',
+                          r'_ERREXIT_UNREAD_RE = re.compile(r"(?:set|shopt)'),),
+    "unread-word-right": ((r'(?:set|shopt)(?![\w-])|errexit|pipefail")', r'(?:set|shopt)|errexit|pipefail")'),),
+    "unread-shopt": ((r'(?:set|shopt)(?![\w-])|errexit|pipefail")', r'(?:set)(?![\w-])|errexit|pipefail")'),),
+    "unread-errexit": ((r'(?![\w-])|errexit|pipefail")', r'(?![\w-])|pipefail")'),),
+    "unread-pipefail": ((r'(?![\w-])|errexit|pipefail")', r'(?![\w-])|errexit")'),),
 }
 
 # (label, command, mutant): rows the real handler must note, each silent under its mutant.
@@ -2598,7 +2616,7 @@ _IE_FIRE_ROWS = (
     ("(ie-f8) after a quoted heredoc that writes a file",
      "cat <<'EOF' > /abs/s.sh\nx\nEOF\nset -e; a; b", "quoted-body-end"),
     ("(ie-f9) after an unquoted heredoc (best-effort reading)",
-     "cat <<EOF > /abs/out.txt\nbody $X\nEOF\nset -e; a; b", "no-fallback"),
+     "set -e; cat <<EOF > /abs/out.txt\nbody $X\nEOF\na; b", "no-fallback"),
     ("(ie-f10) shopt -so errexit", "shopt -so errexit; a; b", "shopt"),
     ("(ie-f11) shopt -s -o errexit", "shopt -s -o errexit; a; b", "shopt"),
     ("(ie-f13) a later statement the lexer stopped inside", "set -e; a; b <(true)", "tail"),
@@ -2659,10 +2677,7 @@ _IE_FIRE_ROWS = (
      "branch-pipefail"),
 )
 
-# (label, command, mutant): rows the real handler must leave silent, each noted by its mutant. "over-broad"
-# is a stub that notes whenever the raw text holds set -e or errexit and shares no code with the hook; n35
-# uses it as a vacuity check for a disclosed bound (the text after a construct the lexer refuses is never
-# read), which no single source edit removes.
+# (label, command, mutant): rows the real handler must leave silent, each noted by its mutant.
 _IE_SILENT_ROWS = (
     ("(ie-n1) a ; chain with no inline errexit", "bash /abs/s.sh; echo done", "initial-on"),
     ("(ie-n2) a script file run with bash after set -e", "set -e; bash /abs/s.sh", "later-step"),
@@ -2701,8 +2716,6 @@ _IE_SILENT_ROWS = (
     ("(ie-n32) else opens another branch", "set -e; if a; then b; else c; fi", "branch"),
     ("(ie-n33) shopt -u -o errexit", "shopt -so errexit; shopt -uo errexit; a; b", "shopt-unset"),
     ("(ie-n34) set -o errexit turned off by +o", "set -o errexit; set +o errexit; a; b", "plus-sign"),
-    ("(ie-n35) nothing after a construct the lexer refuses is read (disclosed bound)",
-     "set -e <(true); a; b", "over-broad"),
     ("(ie-n36) a || branch handles the failure before it", "set -e; a || recover; b", "or-handled"),
     ("(ie-n37) a || true branch", "set -e; x || true; b", "or-and-never"),
     ("(ie-n38) an && list ending in true", "set -e; a && true; b", "never-fails"),
@@ -2759,10 +2772,44 @@ _IE_SILENT_ROWS = (
      "set -e; f() { set -o pipefail; }; false | true; echo after", "function-pipefail"),
 )
 
+# (label, command, mutant, noted): commands the lexer could not read in full whose read part shows no hazard.
+# The real handler gives exactly the unread-rest note on a noted row and a silent allow on the others, and
+# each row gets the other result under its mutant.
+_IE_UNREAD_ROWS = (
+    ("(ie-u1) a process substitution before set -e", "cat <(true); set -e; false; echo after", "unread-rest",
+     True),
+    ("(ie-u2) a here-string before set -e", "cat <<< x; set -e; false; echo after", "unread-rest", True),
+    ("(ie-u3) a {fd} redirect before set -e", "exec {fd}>/tmp/x; set -e; false; echo after", "unread-rest", True),
+    ("(ie-n35) a set the lexer stopped inside, never read as a set", "set -e <(true); a; b", "unread-rest", True),
+    ("(ie-u4) a construct that stops the lexer at the start of a segment", "a; <<< x; set -e; false; echo after",
+     "unread-rest", True),
+    ("(ie-u5) a NUL stops the lexer before any segment", "true\x00; set -e; false; echo after", "unread-none",
+     True),
+    ("(ie-u6) a rest past an unquoted heredoc read again",
+     "cat <<EOF > /abs/out.txt\nbody\nEOF\ndiff <(a) <(b); set -e; false; echo after", "unread-rest", True),
+    ("(ie-u7) a rest that mentions only shopt", "cat <(true); shopt -s nullglob; a; b", "unread-shopt", True),
+    ("(ie-u8) a rest that mentions only errexit", "cat <(true); SHELLOPTS=errexit bash /abs/s.sh",
+     "unread-errexit", True),
+    ("(ie-u9) a rest that mentions only pipefail", "cat <(true); SHELLOPTS=pipefail bash /abs/s.sh",
+     "unread-pipefail", True),
+    ("(ie-u10) a process substitution whose rest mentions no option word",
+     "diff <(sort /abs/a) <(sort /abs/b); echo done", "unread-any", False),
+    ("(ie-u11) a here-string whose rest mentions no option word", 'grep -q x <<< "$v"; echo done', "unread-any",
+     False),
+    ("(ie-u12) a set word before the segment the lexer stopped inside was read", "echo set; diff <(a) <(b)",
+     "unread-tail-start", False),
+    ("(ie-u13) a set word in a segment read before the stop", "echo set; <<< x; a; b", "unread-read-end", False),
+    ("(ie-u14) a set -e only in the body of an unquoted heredoc read again in full",
+     "cat <<EOF > /abs/out.txt\nset -e\nEOF", "unread-complete", False),
+    ("(ie-u15) set joined to a longer word by a hyphen", "git remote set-url origin /abs/r <(true); a; b",
+     "unread-word-right", False),
+    ("(ie-u16) set at the end of a longer word", "cat <(true) /abs/reset.txt; a; b", "unread-word-left", False),
+)
+
 
 def _ie_mutant_handlers(failures, tmp):
     """{mutant name: its inline_errexit} for each _IE_MUTANTS entry whose anchors each occur once in the live
-    hook source (an entry whose anchor does not is a failure and builds no handler), plus "over-broad"."""
+    hook source (an entry whose anchor does not is a failure and builds no handler)."""
     source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
     base = tmp / "inline-errexit-mutants"
     base.mkdir()
@@ -2783,14 +2830,6 @@ def _ie_mutant_handlers(failures, tmp):
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             handlers[name] = module.inline_errexit
-
-    def over_broad(data):
-        command = data["tool_input"]["command"]
-        if "set -e" in command or "errexit" in command:
-            return aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_NOTE)
-        return aiqt_hooks._allow()
-
-    handlers["over-broad"] = over_broad
     return handlers
 
 
@@ -2880,8 +2919,8 @@ def _ie_dispatch_failures():
 def _test_inline_errexit(failures, tmp):
     """(ie-*) inline_errexit, called directly; no submitted Bash command is executed. Each fire row must
     allow with the note and no decision, and each silent row must allow silently; each row must then flip
-    under its mutant (_IE_MUTANTS, or the over-broad stub for n35), so every row is red when the rule, or
-    for the "or-and-never" rows the two rules, that decide it are removed."""
+    under its mutant (_IE_MUTANTS), so every row is red when the rule, or for the "or-and-never" rows the two
+    rules, that decide it are removed."""
     handler = aiqt_hooks.inline_errexit
     mutants = _ie_mutant_handlers(failures, tmp)
     used = set()
@@ -2910,16 +2949,19 @@ def _test_inline_errexit(failures, tmp):
                 failures.append("{}: the {} mutant must {} this row, so the row shows the rule decides it; got "
                                 "{!r}".format(label, mutant, "silence" if want_note else "note", flipped))
     # Wording-level rules need wording-level flips: the stronger of two armed readings must win whichever
-    # order the branches close in, and a "possible" reading must survive the tail path. Each check pins the
-    # exact note from the real handler, then shows its mutant degrading that wording.
-    for label, command, suffix, mutant, degraded_suffix in (
+    # order the branches close in, a "possible" reading must survive the tail path, and the heredoc fallback
+    # is what reads a set -e after an unquoted heredoc as a step, where without it the rest is unread. Each
+    # check pins the exact note from the real handler, then shows its mutant changing that wording.
+    for label, command, suffix, mutant, degraded_note in (
             ("(ie-note-armed-merge)",
              "set -e; if a; then set -o pipefail; fi; if b; then false | true; else false; fi; echo after",
-             "", "armed-merge", aiqt_hooks._ERREXIT_PIPEFAIL_NOTE),
+             "", "armed-merge", aiqt_hooks._ERREXIT_NOTE + aiqt_hooks._ERREXIT_PIPEFAIL_NOTE),
             ("(ie-note-possible-tail-flip)",
              "set -e; true || set -o pipefail; false | true; echo after <(true)",
              aiqt_hooks._ERREXIT_PIPEFAIL_NOTE + aiqt_hooks._ERREXIT_PARTIAL_NOTE, "possible-tail",
-             aiqt_hooks._ERREXIT_PARTIAL_NOTE)):
+             aiqt_hooks._ERREXIT_NOTE + aiqt_hooks._ERREXIT_PARTIAL_NOTE),
+            ("(ie-note-heredoc-fallback)", "cat <<EOF > /abs/out.txt\nbody $X\nEOF\nset -e; a; b",
+             aiqt_hooks._ERREXIT_PARTIAL_NOTE, "no-fallback", aiqt_hooks._ERREXIT_UNREAD_NOTE)):
         used.add(mutant)
         want = aiqt_hooks._ERREXIT_NOTE + suffix
         if handler(payload(command)) != aiqt_hooks._allow_note(want):
@@ -2927,7 +2969,7 @@ def _test_inline_errexit(failures, tmp):
         if mutant not in mutants:
             failures.append("{}: its mutant {} was not built".format(label, mutant))
             continue
-        degraded = aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_NOTE + degraded_suffix)
+        degraded = aiqt_hooks._allow_note(degraded_note)
         if mutants[mutant](payload(command)) != degraded:
             failures.append("{}: the {} mutant must change the note wording for {!r}, so the check shows the "
                             "rule decides it".format(label, mutant, command))
@@ -2956,8 +2998,8 @@ def _test_inline_errexit(failures, tmp):
              "command", "null, not a string"),
             ("(ie-m11) a number command", {"tool_name": "Bash", "tool_input": {"command": 42}}, "unread-command",
              "command", "a number, not a string"),
-            ("(ie-m12) an empty command", {"tool_name": "Bash", "tool_input": {"command": ""}}, "unread-command",
-             "command", "empty"),
+            ("(ie-m12) an empty command", {"tool_name": "Bash", "tool_input": {"command": ""}},
+             "unread-empty-command", "command", "empty"),
             ("(ie-m13) an array command", {"tool_name": "Bash", "tool_input": {"command": ["set -e; a; b"]}},
              "unread-command", "command", "an array, not a string")):
         used.add(mutant)
@@ -2971,6 +3013,23 @@ def _test_inline_errexit(failures, tmp):
         if mutants[mutant](data) != (0, None, None):
             failures.append("{}: the {} mutant must silence this row, so the row shows the note decides it; got "
                             "{!r}".format(label, mutant, mutants[mutant](data)))
+    # A command the lexer could not read in full, whose read part shows no hazard, notes that the rest was not
+    # read only where that rest mentions set or shopt as a word, errexit or pipefail; each row must then give
+    # the other result under its mutant.
+    unread_note = aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_UNREAD_NOTE)
+    for label, command, mutant, want_note in _IE_UNREAD_ROWS:
+        used.add(mutant)
+        want, flip = (unread_note, (0, None, None)) if want_note else ((0, None, None), unread_note)
+        got = handler(payload(command))
+        if got != want:
+            failures.append("{}: expected {!r} from the real handler, got {!r}".format(label, want, got))
+        if mutant not in mutants:
+            failures.append("{}: its mutant {} was not built".format(label, mutant))
+            continue
+        flipped = mutants[mutant](payload(command))
+        if flipped != flip:
+            failures.append("{}: the {} mutant must give {!r} for this row, so the row shows the rule decides it; "
+                            "got {!r}".format(label, mutant, flip, flipped))
 
     unused = sorted(set(_IE_MUTANTS) - used)
     if unused:
@@ -2999,24 +3058,33 @@ def _test_inline_errexit(failures, tmp):
     # _lex_command's real partial return shape: the segment it stopped inside is the tail, never a set; a
     # tail holding only a redirect is [], and a command with no tail gives None. Each fully read segment
     # carries whether it holds a redirection, so a redirect-only statement is told from a bare separator, and
-    # a run of segments with no word and no redirect that end with ';' keeps only its first two.
+    # a run of segments with no word and no redirect that end with ';' keeps only its first two. The unread
+    # rest starts at the tail's segment, or past the last segment read when there is no tail, and is empty
+    # when the lexer, or its reading again with each unquoted heredoc delimiter quoted, read everything.
     for label, command, want in (
             ("(ie-lex-tail)", "set -e; a; b <(true)",
-             ([(["set", "-e"], ";", False), (["a"], ";", False)], ["b"], False)),
+             ([(["set", "-e"], ";", False), (["a"], ";", False)], ["b"], False, " b <(true)")),
             ("(ie-lex-tail-redirect)", "set -e; a; > /abs/out <(b)",
-             ([(["set", "-e"], ";", False), (["a"], ";", False)], [], False)),
-            ("(ie-lex-set-unread)", "set -e <(true); a; b", ([], ["set", "-e"], False)),
-            ("(ie-lex-complete)", "set -e; a", ([(["set", "-e"], ";", False), (["a"], "", False)], None, True)),
+             ([(["set", "-e"], ";", False), (["a"], ";", False)], [], False, " > /abs/out <(b)")),
+            ("(ie-lex-set-unread)", "set -e <(true); a; b", ([], ["set", "-e"], False, "set -e <(true); a; b")),
+            ("(ie-lex-unread-stop)", "a; <<< x; b", ([(["a"], ";", False)], None, False, "; <<< x; b")),
+            ("(ie-lex-unread-heredoc)", "cat <<EOF\nset -e\nEOF",
+             ([(["cat"], "", False), ([], "", False)], None, False, "")),
+            ("(ie-lex-complete)", "set -e; a",
+             ([(["set", "-e"], ";", False), (["a"], "", False)], None, True, "")),
             ("(ie-lex-redirect-only)", "set -e; a; > /abs/log",
-             ([(["set", "-e"], ";", False), (["a"], ";", False), ([], "", True)], None, True)),
+             ([(["set", "-e"], ";", False), (["a"], ";", False), ([], "", True)], None, True, "")),
             ("(ie-lex-separator-run-under)", "set -e;; a",
-             ([(["set", "-e"], ";", False), ([], ";", False), (["a"], "", False)], None, True)),
+             ([(["set", "-e"], ";", False), ([], ";", False), (["a"], "", False)], None, True, "")),
             ("(ie-lex-separator-run-at)", "set -e;;; a",
-             ([(["set", "-e"], ";", False), ([], ";", False), ([], ";", False), (["a"], "", False)], None, True)),
+             ([(["set", "-e"], ";", False), ([], ";", False), ([], ";", False), (["a"], "", False)], None, True,
+              "")),
             ("(ie-lex-separator-run-over)", "set -e;;;; a",
-             ([(["set", "-e"], ";", False), ([], ";", False), ([], ";", False), (["a"], "", False)], None, True)),
+             ([(["set", "-e"], ";", False), ([], ";", False), ([], ";", False), (["a"], "", False)], None, True,
+              "")),
             ("(ie-lex-separator-run)", "set -e;;;;; a",
-             ([(["set", "-e"], ";", False), ([], ";", False), ([], ";", False), (["a"], "", False)], None, True))):
+             ([(["set", "-e"], ";", False), ([], ";", False), ([], ";", False), (["a"], "", False)], None, True,
+              ""))):
         got = aiqt_hooks._errexit_statements(command)
         if got != want:
             failures.append("{} _errexit_statements({!r}) gave {!r}, want {!r}".format(label, command, got, want))
@@ -3033,6 +3101,14 @@ def _test_inline_errexit(failures, tmp):
     if not (code == 2 and stdout_obj is None and isinstance(stderr, str) and
             "inline_errexit wired to unexpected event" in stderr):
         failures.append("(ie-event) an unexpected event must use the sibling hard-block contract")
+    # A payload that names no event hard-blocks the same way: its missing event is not PreToolUse.
+    data = payload("set -e; a; b")
+    del data["hook_event_name"]
+    code, stdout_obj, stderr = handler(data)
+    if not (code == 2 and stdout_obj is None and isinstance(stderr, str) and
+            "inline_errexit wired to unexpected event None" in stderr):
+        failures.append("(ie-event-missing) a payload with no hook_event_name must use the same hard-block "
+                        "contract, got {!r}".format((code, stdout_obj, stderr)))
 
     if (aiqt_hooks.HANDLERS.get("inline_errexit") is not aiqt_hooks.inline_errexit or
             aiqt_hooks.HANDLER_EVENT.get("inline_errexit") != aiqt_hooks.PRETOOL or
@@ -3854,7 +3930,8 @@ _ERREXIT_RUN_ALPHABET = ("set -e", ";", ";", ";;", ";;;", " ", "\n", "(", ")", "
 
 
 def _errexit_pairs_full(command):
-    """_errexit_statements' (pairs, tail, exact) for command with every segment kept, no run cut."""
+    """The first three of _errexit_statements' (pairs, tail, exact, unread) for command with every segment
+    kept, no run cut."""
     segments, exact, in_progress = aiqt_hooks._lex_command(command, partial=True)
     if not exact:
         quoted = aiqt_hooks._ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)
@@ -3884,7 +3961,7 @@ def _errexit_run_mismatches(statements, texts):
     for text in texts:
         pairs, tail, exact = _errexit_pairs_full(text)
         want = (aiqt_hooks._errexit_hazard(pairs, tail), tail, exact)
-        pairs, tail, exact = statements(text)
+        pairs, tail, exact = statements(text)[:3]
         got = (aiqt_hooks._errexit_hazard(pairs, tail), tail, exact)
         if got != want:
             out.append((text, got, want))
@@ -3974,6 +4051,9 @@ _DEADLINE_SHAPES = {
     "errexit_case_arms": lambda n, base: ("Bash", {"command": "set -e; case $x in "
                                                    + _repeat("a) true;; ", n - 24) + "esac"}),
     "errexit_note_after": lambda n, base: ("Bash", {"command": "set -e; " + _repeat("true; ", n - 8, "a; b")}),
+    # A run of separators the lexer reads before a here-string it stops at, set -e past it: the unread rest is
+    # found past the last segment read, across the whole run, and searched for an option word.
+    "errexit_unread_after": lambda n, base: ("Bash", {"command": "a" + ";" * (n - 21) + " <<< x; set -e; a; b"}),
     "diff_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git diff")}),
     "push_force_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git push --force origin main")}),
     "noverify_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git commit --no-verify -m x")}),
@@ -4025,7 +4105,7 @@ _DEADLINE_SHAPES = {
 # gate_weakening on seps_hash5 at 1 MB, 0.63 s against the 7 s bound, and commit_identity on seps_hash_lines
 # at 64 KB, under 0.01 s against the 1.5 s bound; before those changes they measured 3.1 s and 0.7 s on the
 # same host, which overran those bounds on hosts 3 to 4.5 times slower. Those figures predate inline_errexit,
-# which is timed on these shapes too and costs more: its slowest, paren_hash4 at 1 MB, used 2.07 to 2.09 s of
+# which is timed on these shapes too and costs more: its slowest, paren_hash4 at 1 MB, used 2.19 to 2.22 s of
 # CPU over two runs on a 24-core host with Python 3.14.4 (2026-10-25), against the same 7 s bound.
 _DEADLINE_HASH_SHAPES = ("seps_hash", "seps_hash_lines", "seps_hash_nested", "paren_hash4", "seps_hash5")
 _DEADLINE_HASH_DECISIONS = {
@@ -4053,7 +4133,7 @@ _DEADLINE_CASES = {
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens"),
     "inline_errexit": ("sep_semicolon", "heredocs", "nest_parens", "cd_git_fetch_unbal", "errexit_guarded",
-                       "errexit_nest_parens", "errexit_case_arms", "errexit_note_after"),
+                       "errexit_nest_parens", "errexit_case_arms", "errexit_note_after", "errexit_unread_after"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
@@ -4071,9 +4151,11 @@ _DEADLINE_DENY_CASES = frozenset((
     ("gate_weakening", "noverify_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
-# The (handler, shape) cases whose note must still arrive, each within its bound: errexit is on for the
-# whole long prefix, and the hazard is at its end.
-_DEADLINE_NOTE_CASES = frozenset((("inline_errexit", "errexit_note_after"),))
+# The (handler, shape) cases whose note must still arrive, each within its bound: on errexit_note_after
+# errexit is on for the whole long prefix and the hazard is at its end, and on errexit_unread_after the set -e
+# is in the rest past the long prefix that the lexer did not read.
+_DEADLINE_NOTE_CASES = frozenset((("inline_errexit", "errexit_note_after"),
+                                  ("inline_errexit", "errexit_unread_after")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python

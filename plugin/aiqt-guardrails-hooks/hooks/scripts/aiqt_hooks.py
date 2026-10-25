@@ -5385,6 +5385,15 @@ _ERREXIT_PIPEFAIL_NOTE = (
 _ERREXIT_UNREADABLE_NOTE = (
     "AIQT guardrail (rule nocncl): this call's {} was {}, so the inline errexit check did not run on it. This "
     "guard never blocks a call, so it is allowed: the check was not run, not passed.")
+# What the rest of a command the lexer could not read in full (_errexit_unread) must mention for inline_errexit
+# to note that rest when the part it read shows no hazard: set or shopt as a word no letter, digit, _ or -
+# touches, or the text errexit or pipefail. A rest without one allows silently, so a process substitution or a
+# here-string alone draws no note.
+_ERREXIT_UNREAD_RE = re.compile(r"(?<![\w-])(?:set|shopt)(?![\w-])|errexit|pipefail")
+_ERREXIT_UNREAD_NOTE = (
+    "AIQT guardrail (rule nocncl): the inline errexit check stopped at a construct it cannot parse, so the rest "
+    "of this command was not read, and that rest mentions set, shopt, errexit or pipefail. This guard never "
+    "blocks a call, so it is allowed: the rest was not checked, not passed.")
 
 
 def _errexit_set_effect(words):
@@ -5469,15 +5478,37 @@ def _errexit_armed(current, new):
     return current or new
 
 
+def _errexit_unread(text, segments, complete, in_progress):
+    """The part of text, the command as _errexit_statements lexed it into segments, that the lex may not have
+    read: "" when it read the whole text (complete); else the rest of text from the start of the segment it
+    stopped inside (in_progress), whose unread words could change it, or else from the end of the last segment
+    whose raw text is not blank. That end is taken where its raw text first occurs in text, at or before where
+    the segment ends, so the part returned holds every character the lex did not reach, with any separator or
+    quoted heredoc body before them. Under several readings of an uncertain '#' each reading's segments follow
+    the one before's (_lex_command), so the segment found here is the last one some reading read, and that
+    reading read the text before it: a character one reading reached counts as read."""
+    if complete:
+        return ""  # the lex read it all
+    if in_progress:
+        return segments[-1].raw  # the segment the lex stopped inside, to the end of text
+    for seg, _run in itertools.groupby(reversed(segments)):  # a run of equal segments is judged once
+        if seg.raw.strip():
+            at = text.find(seg.raw)
+            # raw is a slice of text, so it is always found; a miss would read the whole text, never less
+            return text[at + len(seg.raw):] if at >= 0 else text
+    return text  # the lex stopped before any segment with text, so none of it counts as read
+
+
 def _errexit_statements(command):
-    """(pairs, tail, exact) for the errexit walker: pairs are the (argv, sep_after, redirected) of each
+    """(pairs, tail, exact, unread) for the errexit walker: pairs are the (argv, sep_after, redirected) of each
     segment the shared lexer read in full, in order, redirected being whether the segment carries a
     redirection (a statement of redirections only still runs them); tail is the argv of the segment it
     stopped inside (_lex_command's in_progress segment: [] for one that holds only redirects so far, None
     when there is none), whose unread words could change it; exact is False when the lexer could not read
-    the whole command. On such a command, one that holds an unquoted heredoc is read again with its
+    the whole command; and unread is the rest of the command the lexer did not read (_errexit_unread), "" when
+    it read all of it. On such a command, one that holds an unquoted heredoc is read again with its
     delimiters quoted (_ERREXIT_UNQUOTED_HEREDOC_RE), so the body is skipped as data and the statements
-    after it are read.
+    after it are read, and unread is taken from that reading.
 
     Of each run of consecutive segments with no word and no redirect that end with ';' (a ';;;;' run, which
     the lexer returns again for each reading of an uncertain '#'), only the first two are kept. _errexit_hazard
@@ -5487,10 +5518,12 @@ def _errexit_statements(command):
     state as it found it, its decision is the same, and a long run costs one comparison per segment
     (itertools.groupby over equal segments) instead of a walker step and a pair."""
     segments, exact, in_progress = _lex_command(command, partial=True)
+    text, complete = command, exact
     if not exact:
         quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)
         if quoted != command:
-            segments, _complete, in_progress = _lex_command(quoted, partial=True)
+            segments, complete, in_progress = _lex_command(quoted, partial=True)
+            text = quoted
     pairs = []
     for seg, run in itertools.groupby(segments):
         pair = (seg.argv, seg.sep_after, bool(seg.redirects))
@@ -5498,7 +5531,7 @@ def _errexit_statements(command):
             run = itertools.islice(run, 2)  # the rest of the run changes nothing the walker reads
         pairs.extend(pair for _seg in run)
     tail = pairs.pop()[0] if in_progress else None
-    return pairs, tail, exact
+    return pairs, tail, exact, _errexit_unread(text, segments, complete, in_progress)
 
 
 def _errexit_stops(word, after_or, piped, in_function, pipefail):
@@ -5744,14 +5777,14 @@ def _errexit_unreadable(field, present, value, kind):
 
 def inline_errexit(data):
     """nocncl (integ/no-concealed-failure), PreToolUse/Bash. NOTE-ONLY: it allows every Bash command, and
-    blocks only when wired to an event other than PreToolUse (the sibling hard-block convention); main()
-    turns each of its error paths, its deadline included, into a warning on exit 0 (NOTE_ONLY_PRETOOL_MODES).
-    A Bash command that turns errexit on inline (set -e, set -o errexit, shopt -s -o errexit) and then runs a
-    later step after a ; or a newline, past a step whose failure errexit would stop at (_errexit_hazard),
-    ALLOWS with one informational note: in this tool an inline set -e was seen not to stop such a later step,
-    on one reported command shape. Steps joined by &&, a step whose failure a || branch handles, and a chain
-    inside bash -c '...' or a quoted heredoc (quoted text and a quoted heredoc body are data to the shared
-    lexer) do not fire.
+    blocks only when wired to an event other than PreToolUse, a payload with no hook_event_name included (the
+    sibling hard-block convention); main() turns each of its error paths, its deadline included, into a
+    warning on exit 0 (NOTE_ONLY_PRETOOL_MODES). A Bash command that turns errexit on inline (set -e, set -o
+    errexit, shopt -s -o errexit) and then runs a later step after a ; or a newline, past a step whose
+    failure errexit would stop at (_errexit_hazard), ALLOWS with one informational note: in this tool an
+    inline set -e was seen not to stop such a later step, on one reported command shape. Steps joined by &&,
+    a step whose failure a || branch handles, and a chain inside bash -c '...' or a quoted heredoc (quoted
+    text and a quoted heredoc body are data to the shared lexer) do not fire.
 
     HONEST RESIDUAL: it reads the command text only and cannot see how the tool evaluates it, so where an
     inline set -e does stop at a failure the note is a false alarm, and the note never says a step failed.
@@ -5767,11 +5800,14 @@ def inline_errexit(data):
     plainly: bash
     ignores errexit inside a function called in an && or || list, a condition or a ! pipeline, which is not
     modelled. Compound commands are read only through their reserved words (_errexit_hazard). An unquoted
-    heredoc is read again with its delimiter quoted, a best-effort reading the note says it is; nothing after
-    any other construct the lexer refuses is read. Another tool silently allows. A tool_name that is missing,
-    empty or not a string, a tool_input that is not an object, and a command that is missing, empty or not a
-    string each allow with a note naming that field (_errexit_unreadable), never silently and never with a
-    deny."""
+    heredoc is read again with its delimiter quoted, a best-effort reading the note says it is; where the lexer
+    stops at any other construct it refuses, the rest of the command past the last segment it read in full is
+    not read (_errexit_unread). Where the part read shows no hazard, that rest allows with a note saying it was
+    not read when it mentions set or shopt as a word, errexit or pipefail (_ERREXIT_UNREAD_RE), and silently
+    otherwise, so a later step there after an errexit turned on before it is unseen. Another tool silently allows. A
+    tool_name that is missing, empty or not a string, a tool_input that is not an object, and a command that
+    is missing, empty or not a string each allow with a note naming that field (_errexit_unreadable), never
+    silently and never with a deny."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: inline_errexit wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -5786,9 +5822,11 @@ def inline_errexit(data):
     command = tool_input.get("command")
     if not isinstance(command, str) or not command:
         return _errexit_unreadable("command", "command" in tool_input, command, "a string")
-    pairs, tail, exact = _errexit_statements(command)
+    pairs, tail, exact, unread = _errexit_statements(command)
     hazard = _errexit_hazard(pairs, tail)
     if not hazard:
+        if _ERREXIT_UNREAD_RE.search(unread):
+            return _allow_note(_ERREXIT_UNREAD_NOTE)  # its unread rest mentions set, shopt, errexit or pipefail
         return _allow()
     note = _ERREXIT_NOTE
     if hazard == "possible":
