@@ -245,7 +245,9 @@ def imported_series_active(manifest_data):
     its emptied-roster tripwire; and the observer's prior imported baseline (_opf_observe._reconstruct_prior,
     which reads _reconstruct_imported only where it holds) and the record counter proof
     (_opf_record._counter_state) read it too. So they cannot disagree on which stores carry
-    the imported series or on the imported managed set."""
+    the imported series or on the imported managed set. homes2_carries_imported_series, asserted by
+    the self-test at the shipped constants, makes this flag read exactly the homes-2 grade
+    (homes_generation >= 2) on every tooling that can ship homes 2."""
     return (_opf_store.homes_generation(manifest_data) >= 2
             and _opf_store.imported_series_declared(manifest_data))
 
@@ -294,6 +296,35 @@ def imported_content_checks_landed():
         return False
     return all(ids <= set(required_checks(h, imported=True))
                for h in range(1, _opf_store.SUPPORTED_HOMES + 1))
+
+
+def homes2_carries_imported_series():
+    """The tooling-side coupling of the homes-2 and imported-series activations (spec 4.2/8.2),
+    asserted by the self-test at the SHIPPED constants: a tooling that activates homes 2
+    (_opf_store.SUPPORTED_HOMES at or above 2) must also support the imported series
+    (_opf_store.imported_series_supported, the ONE support comparison), since the series activates
+    only inside the 2.0.0 / homes = 2 declaration. Under this coupling imported_series_active reads
+    exactly the homes-2 grade (_opf_store.homes_generation >= 2) for every manifest: the graded
+    declaration is HOMES2_SPEC_VERSION, at or above IMPORTED_SPEC_VERSION, so the declared arm holds,
+    and this predicate supplies the support arm. C-CONTAINMENT's registration, its tripwire and the
+    write guard therefore open on every graded homes-2 store, and raising SUPPORTED_HOMES without
+    SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION fails the suite instead of shipping a
+    homes-2 store whose imported leaves grade as unregistered strays. True while homes 2 is inactive
+    (SUPPORTED_HOMES exactly 1). Reads every constant through the _opf_store module (never this
+    module's by-value SUPPORTED_SPEC_VERSION import) and fails closed: a SUPPORTED_HOMES that is
+    missing, not an int (a bool included) or below 1, or a SUPPORTED_SPEC_VERSION or
+    IMPORTED_SPEC_VERSION that is missing, not a string, or not a bare SemVer, answers False rather
+    than raising."""
+    homes = getattr(_opf_store, "SUPPORTED_HOMES", None)
+    if type(homes) is not int or homes < 1:
+        return False
+    if homes < 2:
+        return True
+    for name in ("SUPPORTED_SPEC_VERSION", "IMPORTED_SPEC_VERSION"):
+        version = getattr(_opf_store, name, None)
+        if not isinstance(version, str) or _opf_store._parse(version) is None:
+            return False
+    return _opf_store.imported_series_supported()
 
 
 # --- source-integrity vs deliverable-drift partition (PR-C, the render --write source gate) ---------
@@ -6283,7 +6314,8 @@ def self_test():
                   and any("C-CONTAINMENT" in f and "worklog.imported.toml" in f and "unregistered" in f
                           for f in _h1_run.findings))
             # The pure flag over its arms, the support threshold sampled just below, at, and just
-            # above IMPORTED_SPEC_VERSION: True only for the 2.0.0 / homes = 2 pair with both
+            # above IMPORTED_SPEC_VERSION, and the support level also sampled at the homes-2 spec
+            # version HOMES2_SPEC_VERSION: True only for the 2.0.0 / homes = 2 pair with both
             # tooling gates raised (red when either arm, or the threshold, moves).
             _pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
             _flag_rows = (
@@ -6292,7 +6324,9 @@ def self_test():
                 (2, "1.3.0", {"opf": {"spec_version": "1.3.0"}}, False),
                 (2, "1.3.0", {"opf": {"spec_version": "1.3.0", "homes": 2}}, False),
                 (2, "1.3.0", {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION}}, False),
-                (2, "1.3.0", None, False))
+                (2, "1.3.0", None, False),
+                (2, _opf_store.HOMES2_SPEC_VERSION, _pair, True),
+                (2, _opf_store.HOMES2_SPEC_VERSION, {"opf": {"spec_version": "1.3.0"}}, False))
             _flag_got = []
             for _fh, _fv, _fm, _want in _flag_rows:
                 _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _fh, _fv
@@ -6623,6 +6657,78 @@ def self_test():
             _icc_g["required_checks"] = _icc_prev_rc
             _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
             _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
+        # The homes-2 / imported-series coupling at the SHIPPED constants (red when SUPPORTED_HOMES
+        # reaches 2 while SUPPORTED_SPEC_VERSION stays below IMPORTED_SPEC_VERSION): under it
+        # imported_series_active reads exactly the homes-2 grade, so a homes-2 store never ships with
+        # its imported leaves graded as unregistered strays. The SAME predicate is then exercised
+        # under controlled constants (both restored in finally; no store fixture runs inside this
+        # block). A probe that raises reads "raised", never False, so an exception never passes as a
+        # fail-closed answer.
+        check("homes2-carries-imported-series-at-shipped-constants", homes2_carries_imported_series())
+        _h2c_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        _h2c_prev_homes = _opf_store.SUPPORTED_HOMES
+        _h2c_missing = object()
+
+        def _h2c_probe(homes, support):
+            _opf_store.SUPPORTED_HOMES = homes
+            if support is _h2c_missing:
+                if hasattr(_opf_store, "SUPPORTED_SPEC_VERSION"):
+                    del _opf_store.SUPPORTED_SPEC_VERSION
+            else:
+                _opf_store.SUPPORTED_SPEC_VERSION = support
+            try:
+                return homes2_carries_imported_series()
+            except Exception:  # noqa: BLE001  a raise is its own result, never a False
+                return "raised"
+
+        try:
+            # Homes 2 or later without imported-series support refuses (red when the predicate
+            # stops consulting the support comparison).
+            check("homes2-imported-coupling-refuses-unsupported",
+                  all(_h2c_probe(_h2c_h, _h2c_v) is False
+                      for _h2c_h, _h2c_v in ((2, "1.2.0"), (2, "1.2.99"), (3, "1.2.0"))))
+            # Homes 2 with support at, above, and well above IMPORTED_SPEC_VERSION is admitted (red
+            # when the support comparison is narrowed to a window below the homes-2 spec version).
+            check("homes2-imported-coupling-admits-supported",
+                  all(_h2c_probe(2, _h2c_v) is True
+                      for _h2c_v in ("1.3.0", "1.3.1", _opf_store.HOMES2_SPEC_VERSION)))
+            # While homes 2 is inactive the coupling defers, whatever the support (red when the
+            # homes-1 deferral is dropped).
+            check("homes2-imported-coupling-defers-below-homes2", _h2c_probe(1, "1.2.0") is True)
+            # A malformed SUPPORTED_HOMES (a bool, a string, None, a float, or below 1) or a
+            # malformed or missing SUPPORTED_SPEC_VERSION at homes 2 answers False and never raises
+            # (red when either guard is dropped).
+            _h2c_bad = ([_h2c_probe(_h2c_h, "1.3.0") for _h2c_h in (True, "2", None, 0, -1, 2.0)]
+                        + [_h2c_probe(2, _h2c_v)
+                           for _h2c_v in ("one.three", None, 130, "1.3.0\n", "", _h2c_missing)])
+            check("homes2-imported-coupling-malformed-fails-closed",
+                  len(_h2c_bad) == 12 and all(_h2c_r is False for _h2c_r in _h2c_bad))
+            # Under each coupled pair of constants the flag equals the homes-2 grade on every manifest
+            # shape; the control at homes 2 without support grades the pair 2, leaves it inactive,
+            # and reads the coupling False (red when the flag reads the homes-2 grade alone, or when
+            # the support threshold moves above the homes-2 spec version).
+            _h2c_pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
+            _h2c_manifests = (
+                _h2c_pair, {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION}},
+                {"opf": {"homes": 2}}, {"opf": {"spec_version": "1.3.0", "homes": 2}},
+                {"opf": {"spec_version": "1.3.0", "homes": 1}},
+                {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": True}},
+                {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": "2"}},
+                {"opf": {}}, {"opf": []}, {}, None)
+            _h2c_agree = []
+            for _h2c_h, _h2c_v in ((1, "1.2.0"), (2, "1.3.0"), (2, _opf_store.HOMES2_SPEC_VERSION)):
+                _h2c_agree.append(
+                    _h2c_probe(_h2c_h, _h2c_v) is True
+                    and all(imported_series_active(_h2c_m) is (_opf_store.homes_generation(_h2c_m) >= 2)
+                            for _h2c_m in _h2c_manifests))
+            _h2c_control = _h2c_probe(2, "1.2.0")
+            check("imported-active-is-homes2-grade-when-coupled",
+                  _h2c_agree == [True, True, True] and _h2c_control is False
+                  and _opf_store.homes_generation(_h2c_pair) == 2
+                  and imported_series_active(_h2c_pair) is False)
+        finally:
+            _opf_store.SUPPORTED_SPEC_VERSION = _h2c_prev_ssv
+            _opf_store.SUPPORTED_HOMES = _h2c_prev_homes
         # The per-series id grading (spec 8.2/8.3), keyed on imported_series_active alone: the graded 2.0.0 /
         # homes = 2 declaration and this tooling's imported-series support. BOTH tooling gates are patched
         # inside the block (the check_opf_homes per-vector idiom), SUPPORTED_HOMES to 2 and
