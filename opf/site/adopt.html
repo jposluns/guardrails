@@ -201,22 +201,26 @@
 
     <h3 id="cmd-init"><code>opf init</code></h3>
     <p><b style="color:var(--ink)">Purpose.</b> Create validated source documents and a
-      committed-store pointer for a project with no store, without git writes or rendering.</p>
+      committed-store pointer for a project with no store, without rendering and with no git write
+      beyond its operation lock.</p>
     <p><b style="color:var(--ink)">How it works.</b> A read-only preflight runs first: it inspects the
       target for an existing store, an existing pointer, foreign content already under
       <code>.working/</code>, or an existing root <code>CHANGELOG.md</code> or <code>VERSION</code>, and
       refuses rather than absorbing what it finds. It then builds the machine
       sources in memory (the manifest, the ID counters, the version ledger, the worklog, and the eleven
-      typed indexes), writes them under <code>.working/toml/</code>, writes the <code>.opf.toml</code>
+      typed indexes), takes the shared operation lock and repeats its checks under it, holds the lease
+      while it writes them under <code>.working/toml/</code>, writes the <code>.opf.toml</code>
       pointer at the product root, and creates a starter <code>CHANGELOG.md</code>. Publication is
       create-only: it writes new paths and does not overwrite an existing one.</p>
     <p><b style="color:var(--ink)">Result.</b> A scaffolded store, a committed-store pointer, and a
       starter changelog, all left untracked for your review; <code>init</code> does not
       stage or commit them. See <a href="./core-files">core store files</a> for what the scaffold writes
       into the manifest. Publication is create-only but not transactional: a later failure can leave
-      partial output for review. The initializer takes no lock or lease and does not serialize
-      concurrent writers; a successful scaffold is not a whole-store validity verdict.</p>
-    <p class="refchips"><code>opf init</code> <code>opf init --root .</code></p>
+      partial output for review. The lock and the lease exclude other OPF runs on the same
+      store, not other writers, and not runs on another store in the same repository; a run that stopped partway can leave its lock record, which
+      <code>opf init --recover</code> clears once its holder is confirmed dead. A successful
+      scaffold is not a whole-store validity verdict.</p>
+    <p class="refchips"><code>opf init</code> <code>opf init --root .</code> <code>opf init --recover</code></p>
 
     <h3 id="cmd-render"><code>opf render</code></h3>
     <p><b style="color:var(--ink)">Purpose.</b> Regenerate the store's declared views and check them
