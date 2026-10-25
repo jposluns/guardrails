@@ -2142,7 +2142,8 @@ def self_test():
     """Fail-closed invariants over synthetic vectors: every validator ACCEPTS its canonical shape and
     REJECTS a malformed case, and an op outside ADOPT_OPS is refused. Judged on the returned status values,
     never by grepping output (spec 8; the isolate-verifiers rule). No journal, no network, and no filesystem
-    beyond reading the shipped enforcement members ENFORCEMENT_LAUNCHERS is pinned to (section 15i)."""
+    beyond reading the shipped enforcement members ENFORCEMENT_LAUNCHERS is pinned to (section 15i), the
+    shipped deny hook, and the adopt skill's worksheet sample."""
     failures = []
     checked = [0]
 
@@ -3002,6 +3003,55 @@ def self_test():
     check("deny-hook-members-instructions-row-valid", _validated(lambda p: p["enforcement"][2].update(
         means="instructions", members=p["enforcement"][2]["members"][:1],
         residuals=["unverified-platform-denial", "shell-or-interpreter-wrapping"])).status == VALID)
+    # The adopt skill's planning-worksheet sample is the worksheet an adopter copies, so its enforcement rows
+    # and its install-pack row, parsed from the shipped member with every placeholder digest filled as _D9,
+    # stand in for the canonical plan's and must validate whole: a sample this validator refuses (a deny-hook
+    # row binding its registration alone, say) is red here, and so is a sample that cannot be found or parsed.
+    # Its claude-code row must bind its registration and then exactly the ENFORCEMENT_DENY_MEMBERS paths, so
+    # the vector keeps covering them, and that row cut to its registration alone is refused for both.
+    import tomllib
+    try:
+        _skill = (Path(__file__).resolve().parent.parent / "prompt-pack" / "adopt"
+                  / "SKILL.md").read_text(encoding="utf-8")
+        _samples = re.findall(r"(?ms)^```\n(schema = 1\n.*?)^```$", _skill)
+        _sheet = tomllib.loads(_samples[0]) if len(_samples) == 1 else None
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError, MemoryError):
+        _sheet = None
+
+    def _sample_rows():
+        # the sample's enforcement rows and install-pack row, every placeholder digest filled as _D9, or None
+        # when the sample carries no such rows
+        try:
+            sheet = copy.deepcopy(_sheet)
+            rows = sheet["bindings"]["enforcement"]
+            pack = [op for op in sheet["ops"] if op["op"] == "install-pack"][0]
+            for member in [m for row in rows for m in row["members"]] + pack["members"]:
+                member["digest"] = _D9
+        except (TypeError, KeyError, IndexError):
+            return None
+        return rows, pack
+
+    def _sample_validated(keep=None):
+        # the base plan with the sample's rows in place, validated whole; keep cuts the sample's claude-code
+        # row (enforcement[2]) to its first `keep` members
+        def mutate(p):
+            rows, pack = _sample_rows()
+            if keep is not None:
+                rows[2]["members"] = rows[2]["members"][:keep]
+            p["enforcement"], p["ops"][3] = rows, pack
+        return None if _sample_rows() is None else _validated(mutate)
+    _sample = _sample_rows()
+    check("worksheet-sample-claude-code-deny-hook", _sample is not None and len(_sample[0]) > 2
+          and _sample[0][2].get("platform") == "claude-code" and _sample[0][2].get("means") == "deny-hook"
+          and [m.get("path") for m in _sample[0][2]["members"]][1:]
+          == list(ENFORCEMENT_DENY_MEMBERS["claude-code"]))
+    _sample_result = _sample_validated()
+    check("worksheet-sample-rows-valid", _sample_result is not None and _sample_result.status == VALID)
+    _sample_result = _sample_validated(keep=1)
+    check("worksheet-sample-registration-only-invalid", _sample_result is not None
+          and _sample_result.status == INVALID
+          and len(_sample_result.findings) == len(ENFORCEMENT_DENY_MEMBERS["claude-code"])
+          and all(_deny_reason in finding for finding in _sample_result.findings))
     # 15h, continued: the unnamed-launcher clause covers every op that writes a file, not only the three that
     # install a member. With the decoy chain named in the pre-commit row, the real pair written by each other
     # op, a hook repoint-consumer rewrites in place, and a launcher an init-store or record-adoption row

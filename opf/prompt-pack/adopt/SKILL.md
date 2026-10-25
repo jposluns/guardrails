@@ -93,8 +93,9 @@ the sources and targets you pass. It never enters `.git`.
 - **Targets** are paths the plan will create outside the scanned roots, for example `opf`, the
   directory of the OPF pack mirror. The plan installs there only the members it names: the
   pre-commit hook at `opf/enforcement/precommit/pre-commit` with `install.sh` beside it, the CI
-  recipe and the tool entry point `opf/tools/opf.py`. The modules that entry point imports come
-  from a later install step (section 4). The planner needs to see that each target is absent.
+  recipe, the Claude Code deny hook at `opf/enforcement/claude/pretooluse_deny.py` and the tool
+  entry point `opf/tools/opf.py`. The modules that entry point imports come from a later install
+  step (section 4). The planner needs to see that each target is absent.
 
 **Discover the sources first.** Do not ask the adopter which old files exist; find them. Run the
 read-only discovery entry, with an absolute product root and the tooling directory that holds
@@ -285,6 +286,14 @@ residuals = ["shell-or-interpreter-wrapping", "same-user-tampering"]
 path = ".claude/settings.json"
 digest = "<digest of the bytes to install there>"
 
+[[bindings.enforcement.members]]
+path = "opf/enforcement/claude/pretooluse_deny.py"
+digest = "<digest of the bytes to install there>"
+
+[[bindings.enforcement.members]]
+path = "opf/tools/opf.py"
+digest = "<digest of the bytes to install there>"
+
 [[bindings.enforcement]]
 platform = "codex"
 means = "instructions"
@@ -405,6 +414,10 @@ path = ".claude/settings.json"
 digest = "<digest of the bytes to install there>"
 
 [[ops.members]]
+path = "opf/enforcement/claude/pretooluse_deny.py"
+digest = "<digest of the bytes to install there>"
+
+[[ops.members]]
 path = "AGENTS.md"
 digest = "<digest of the bytes to install there>"
 
@@ -441,9 +454,11 @@ How to fill it:
   `instructions` carries `unverified-platform-denial`. Across all rows, the plan must disclose
   each of `per-clone-installation-and-bypass`, `canonical-hand-edits`,
   `shell-or-interpreter-wrapping`, `same-user-tampering` and `unverified-platform-denial` at
-  least once. Each row lists the member files that carry it. The `claude-code`, `codex`,
-  `gemini-cli` and `cursor` member paths in the sample are examples; name the files you would
-  install. The `ci` and `pre-commit` paths are fixed by the pack. Each of their files runs another
+  least once. Each row lists the member files that carry it. The `codex`, `gemini-cli` and
+  `cursor` member paths in the sample, and the `claude-code` row's registration, are examples;
+  name the files you would install. The `claude-code` `deny-hook` row's other two members are
+  fixed by the pack, as the next item says. The `ci` and `pre-commit` paths are fixed by the
+  pack. Each of their files runs another
   file at a path relative to itself, and that path must land inside the `opf/` mirror the plan
   installs. So the pre-commit hook sits at `opf/enforcement/precommit/pre-commit` with
   `install.sh` beside it, the CI recipe sits at `opf/enforcement/ci/opf-ci.sh`, where the
@@ -507,6 +522,20 @@ How to fill it:
   with exit 2 for another reason first. Neither another platform's row naming that file instead,
   nor a row naming a member path that no operation installs, nor a malformed operation row is an
   exit-2 reason on its own.
+- A `claude-code` row whose means is `deny-hook` names three members, as the sample shows. The
+  first is the registration, the Claude Code settings file that registers the hook
+  (`.claude/settings.json` in the sample, an example path). The second is the deny program that
+  registration runs, `opf/enforcement/claude/pretooluse_deny.py`, the Claude Code deny hook the
+  pack ships. The third is `opf/tools/opf.py`, the sanctioned writer the hook allows: the hook
+  recognizes the writer only at `../../tools/opf.py` from its own directory, so the writer is
+  the tool entry point beside the mirrored hook, the same file the `ci` and `pre-commit` rows
+  name. The second and third paths are fixed: a `deny-hook` row that does not name each of them
+  at exactly that path refuses with exit 1. A row that names the registration alone, as the
+  sample did through prompt pack 0.5.4, is refused that way; add the two members and plan
+  again. List the deny program among the `install-pack` members too, as the sample does;
+  `opf/tools/opf.py` is already one. The planner requires neither file in a `claude-code` row
+  whose means is `instructions`. The pack ships no deny program for `codex`, `gemini-cli` or
+  `cursor`, so the planner fixes no member of their rows.
 - Compatibility with earlier worksheets: the samples in prompt pack 0.4.0 and 0.4.1 named only
   the workflow in the `ci` row, placed the pre-commit hook alone at `.opf/hooks/pre-commit`, and
   listed that path in `targets`. A plan from such a worksheet now refuses with exit 2, because
