@@ -166,7 +166,7 @@ _ROUTE_BANNED = frozenset(["print", "builtins", "stdout", "stderr",
 # spelling in one function is a violation in another, str.__new__ is permitted
 # in _InitRestoreLine alone, and a binding (an import alias included) of a
 # rostered external base anywhere on the graph or at module level, other than
-# the five pinned module imports, is a violation. The spellings are
+# the seven pinned module imports, is a violation. The spellings are
 # deliberately variable-name-specific (journal._open_parent, touched.out.split):
 # a rename in opf.py fails the gate until this roster is re-reviewed.
 _ROUTE_ALLOWED_REFS = dict(
@@ -193,19 +193,23 @@ _ROUTE_ALLOWED_REFS = dict(
         "_opf_init.INDEX_TYPES", "_opf_init.build_counters",
         "_opf_init.build_index", "_opf_init.build_manifest",
         "_opf_init.build_version", "_opf_init.build_worklog",
+        "_opf_oplock.OpLockError", "_opf_oplock.acquire_init_operation",
+        "_opf_oplock.attach_init_lease", "_opf_oplock.detach_init_lease",
+        "_opf_oplock.release_init_holder", "_opf_oplock.release_operation",
         "_opf_store.DEFAULT_MACHINE_SUBDIR", "_opf_store.LOCAL_POINTER_REL",
         "_opf_store.MANIFEST_NAME", "_opf_store.NOT_ADOPTED",
         "_opf_store.POINTER_REL", "_opf_store.RESOLVED",
         "_opf_store.WORKING_DIRNAME", "_opf_store._close_fd_exc_safe",
         "_opf_store._journal", "_opf_store._journal._close_fd_quietly",
         "_opf_store._open_dir_nofollow", "_opf_store.resolve_store", "all",
-        "any", "ascii", "dict", "documents.extend", "exc.restore_lines",
+        "any", "ascii", "cap._released", "dict", "documents.extend",
+        "exc.restore_lines", "held._released", "held._spent",
         "journal._check_rel", "journal._lstat_at", "journal._lstat_contained",
         "journal._open_parent", "journal.require_containment", "json.dumps",
         "len", "list", "os.fsync", "os.mkdir", "os.path.abspath",
         "path.startswith", "payloads.items", "res.detail", "res.status", "set",
         "str", "str-literal.format", "str-literal.join", "text.encode", "type",
-        "type().__name__", "val.startswith",
+        "type().__name__", "unwind.append", "uuid.uuid4", "val.startswith",
     ]),
     _init_bare=frozenset([
         "_INIT_BARE_SAFE", "all",
@@ -288,12 +292,7 @@ _ROUTE_ALLOWED_REFS = dict(
         "opened.st_dev", "opened.st_ino", "os.fstat",
     ]),
     _init_unignored=frozenset([
-        "RuntimeError", "_opf_observe._run_git_config_discovery",
-        "_opf_observe.indexed_ignore_availability",
-        "_opf_write_guard._ignore_file_candidates", "os.fsdecode",
-        "os.fsdecode().splitlines", "result.completed", "result.err",
-        "result.out", "result.rc", "root.relative_to", "sorted", "str",
-        "str-literal.format",
+        "RuntimeError", "_opf_write_guard.init_ignore_refusal", "root.relative_to",
     ]),
     _init_untracked=frozenset([
         "RuntimeError", "os.fsdecode", "root.relative_to", "sorted", "str",
@@ -311,9 +310,9 @@ _ROUTE_EXTERNAL_BASES = frozenset([
     "RuntimeError", "UnicodeError", "all", "any", "ascii", "bool", "dict", "enumerate",
     "float", "int", "isinstance", "issubclass", "json", "len", "list", "ord", "os", "set",
     "sorted", "stat",
-    "str", "super", "tuple", "type",
-    "_opf_check", "_opf_emit", "_opf_init", "_opf_observe", "_opf_store",
-    "_opf_write_guard",
+    "str", "super", "tuple", "type", "uuid",
+    "_opf_check", "_opf_emit", "_opf_init", "_opf_observe", "_opf_oplock",
+    "_opf_store", "_opf_write_guard",
 ])
 
 _ROUTE_EXTERNAL_IMPORTS = dict(
@@ -322,6 +321,8 @@ _ROUTE_EXTERNAL_IMPORTS = dict(
     stat=("import", "stat"),
     Path=("from", "pathlib", "Path"),
     _opf_init=("import", "_opf_init"),
+    _opf_oplock=("import", "_opf_oplock"),
+    uuid=("import", "uuid"),
 )
 
 
@@ -557,7 +558,7 @@ def _init_route_violations(source):
     _InitRestoreLine alone, so minting an instance of that type anywhere else on
     the graph is a violation. Returns a list of violation descriptions; the suite
     requires it empty on the real source and NON-empty on every seeded mutant, so
-    each recognizer is discriminated. RESIDUAL (D-STATIC-PIN-RESIDUAL, stated
+    each recognizer is discriminated. RESIDUAL (what the static pin cannot see, stated
     exactly): a static reference check sees spelled references, not values,
     dataflow or runtime bindings. It cannot see what an ALLOWED spelling does at
     runtime on a hostile or rebound OBJECT, code in ANOTHER MODULE (the sibling
@@ -897,7 +898,11 @@ def _init_route_violations(source):
 
 
 def _suite(invoke):
-    """Isolate fixture configuration and restore the caller even on failure."""
+    """Isolate fixture configuration and restore the caller even on failure. The fixture
+    environment keeps the caller's PATH unchanged; a caller that drives init must already sit
+    inside the OPF git lifecycle (see _self_test), because the init operation mutex's rev-parse
+    strips every GIT_* variable and only that lifecycle's PATH git wrapper puts the system-config
+    pins back."""
     import tempfile
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
@@ -913,6 +918,7 @@ def _suite_isolated(invoke):
         from pathlib import PureWindowsPath
         import _opf_check
         import _opf_observe
+        import _opf_oplock
         import _opf_release
         import _opf_schema
         import _opf_store
@@ -1123,6 +1129,8 @@ def _suite_isolated(invoke):
                     (["--root", "--bogus"], "non-empty directory argument"),
                     (["--root", str(parser_root), "--root", str(parser_root)],
                      "--root given more than once"),
+                    (["--root", str(parser_root), "--recover", "--recover"],
+                     "--recover given more than once"),
                 )
                 for rest, reason in parser_vectors:
                     rc, output = call(["init"] + rest)
@@ -1138,7 +1146,17 @@ def _suite_isolated(invoke):
                       "SOURCES created" in output and "NOT yet git-tracked" in output
                       and "git " in output and "Commit" in output
                       and "opf render --write" in output)
-                check("no git mutation", _snapshot(clean / ".git") == git_before)
+                # The one git write is the operation-lock home: the shared init mutex's anchor, which
+                # is never unlinked, with no active record left behind. Literal names, independent of
+                # _opf_oplock's constants. DISCRIMINATOR: the pre-lease init writes nothing under
+                # .git, so the anchor is absent.
+                git_after = _snapshot(clean / ".git")
+                git_changed = {key for key in set(git_before) | set(git_after)
+                               if git_before.get(key) != git_after.get(key)}
+                check("git writes are only the operation-lock home, anchor kept, no active record",
+                      all(key.split("/")[0] == "opf-oplock" for key in git_changed)
+                      and git_after.get("opf-oplock/mutex.lock", ("absent",))[0] == "file"
+                      and "opf-oplock/active.toml" not in git_after)
                 check("no root VERSION", not (clean / "VERSION").exists())
                 check("heading-only changelog",
                       (clean / "CHANGELOG.md").is_file()
@@ -1224,13 +1242,163 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and inert("store resolution refused") in output)
                 check("empty partial store preserved", _snapshot(empty_working) == before)
 
-                changelog = make_git("existing-changelog")
-                (changelog / "CHANGELOG.md").write_bytes(b"Existing changelog.\n")
-                rc, _output = run(changelog)
-                check("existing changelog permits source initialization",
-                      rc == EXIT_OK and valid_sources(changelog))
-                check("existing changelog preserved",
-                      (changelog / "CHANGELOG.md").read_bytes() == b"Existing changelog.\n")
+                # Spec 14.2: plain init never keeps an undispositioned root deliverable, so a
+                # pre-existing root CHANGELOG.md or VERSION is refused at preflight, nothing is
+                # written, and the refusal names opf adopt. The plain changelog has no level-2
+                # heading, so doctor would accept it beside the fresh ledger; it is refused all the
+                # same. The entry-heading changelog is the case doctor reports INVALID (its ##
+                # heading matches no release in the fresh, empty version ledger). Each name is read
+                # through lstat, so a symlink there (to an outside file, or dangling) is refused,
+                # never followed. DISCRIMINATOR: rc 0 against the pre-fix init, which kept the
+                # changelog and never read VERSION; a followed VERSION link passes the dangling
+                # vector (rc 0), and a followed CHANGELOG.md link leaves only the generic
+                # destination refusal, which lacks this text.
+                outside = base / "deliverable-outside"
+                outside.write_bytes(b"untouched\n")
+                dangling = base / "deliverable-absent"
+                for number, (label, name, content) in enumerate((
+                        ("existing changelog", "CHANGELOG.md", b"Existing changelog.\n"),
+                        ("existing changelog with an entry heading", "CHANGELOG.md",
+                         b"# History\n\n## 2.4.0\n"),
+                        ("existing changelog symlink", "CHANGELOG.md", outside),
+                        ("dangling changelog symlink", "CHANGELOG.md", dangling),
+                        ("existing VERSION", "VERSION", b"2.4.0\n"),
+                        ("dangling VERSION symlink", "VERSION", dangling))):
+                    target = make_git("deliverable-" + str(number))
+                    if isinstance(content, bytes):
+                        (target / name).write_bytes(content)
+                    else:
+                        (target / name).symlink_to(content)
+                    before = _snapshot(target)
+                    rc, output = run(target)
+                    check(label + " refused",
+                          rc == EXIT_ERROR and "during preflight: RuntimeError(" in output
+                          and inert("an existing " + name + " sits at") in output
+                          and inert("opf adopt") in output
+                          and "preflight refused; no publication attempted." in output)
+                    check(label + " preserved", _snapshot(target) == before)
+                check("deliverable symlink targets untouched (none followed or created)",
+                      outside.read_bytes() == b"untouched\n" and not dangling.exists()
+                      and not dangling.is_symlink())
+
+                # Spec 5.7 and 9: plain init publishes under the shared init operation mutex, the
+                # anchor the coupled init and adoption take for the same root. Held here by the
+                # harness, it refuses init at the acquisition, after the read-only preflight, and
+                # nothing is written. DISCRIMINATOR: the pre-lease init takes no mutex and
+                # publishes (rc 0).
+                def anchor_free(root):
+                    try:
+                        probe = _opf_oplock.acquire_init_operation(str(root), "fixture-probe")
+                    except _opf_oplock.OpLockError:
+                        return False
+                    _opf_oplock.release_init_holder(probe)
+                    return True
+
+                # _snapshot never descends into .git, so the control area the lock writes
+                # (.git/opf-oplock: the anchor and any records beside it) is compared
+                # separately, entry names and bytes both; without this the refused
+                # acquisition could write under .git unnoticed.
+                def control_area(root):
+                    area = root / ".git" / "opf-oplock"
+                    if not area.is_dir():
+                        return None
+                    entries = {}
+                    for path in sorted(area.rglob("*")):
+                        rel = path.relative_to(area).as_posix()
+                        entries[rel] = path.read_bytes() if path.is_file() else "non-file"
+                    return entries
+
+                held_root = make_git("lease-held")
+                held = _opf_oplock.acquire_init_operation(str(held_root), "fixture-holder")
+                try:
+                    before = _snapshot(held_root)
+                    held_area = control_area(held_root)
+                    rc, output = run(held_root)
+                finally:
+                    _opf_oplock.release_init_holder(held)
+                check("lease: a held init mutex refuses plain init",
+                      rc == EXIT_ERROR
+                      and "during taking-the-init-operation-mutex: OpLockError(" in output
+                      and inert("held by another process") in output
+                      and "preflight refused; no publication attempted." in output)
+                check("lease: a held init mutex refusal wrote nothing",
+                      _snapshot(held_root) == before
+                      and held_area is not None
+                      and control_area(held_root) == held_area)
+
+                # Stale-record recovery: a dead run's leftover active record under the free
+                # anchor refuses a later init until --recover, which clears it only once its
+                # holder is confirmed dead; a live holder's record is never seized. The planted
+                # record names this root's ABSENT machine store. Plain init writes the record
+                # only after the store directories exist, so a run that stopped before its
+                # directories existed leaves NO record; this state is what remains once a
+                # crashed run's partly published .working/ was later moved aside, the recovery
+                # case the refusal exists for. DISCRIMINATOR: the pre-lease init never reads the
+                # record (rc 0 on the first vector), and an init that ignores --recover keeps
+                # refusing.
+                def plant_active(root, pid):
+                    # The fixture acquisition creates the control directory and its anchor with
+                    # the modes the lock requires; the record is then written beside them.
+                    _opf_oplock.release_init_holder(
+                        _opf_oplock.acquire_init_operation(str(root), "fixture-holder"))
+                    record = root / ".git" / "opf-oplock" / "active.toml"
+                    op_id = "00000000-0000-4000-8000-000000000000"
+                    node = os.uname().nodename
+                    record.write_text("\n".join((
+                        "schema = 2",
+                        "op_id = " + json.dumps(op_id),
+                        "holder = " + json.dumps("opf:{}:{}".format(node, pid)),
+                        'operation = "opf-init-plain"',
+                        'acquired_at = "2026-01-01T00:00:00Z"',
+                        "",
+                        "[owner]",
+                        "pid = {}".format(pid),
+                        "uid = {}".format(os.getuid()),
+                        "nodename = " + json.dumps(node),
+                        "session = " + json.dumps(op_id),
+                        'utc = "2026-01-01T00:00:00Z"',
+                        'pid-start = ""',
+                        "",
+                        "[machine_store]",
+                        "path = " + json.dumps(str(root / working / machine_name)),
+                        'dev = "1"',
+                        'ino = "1"',
+                        "")), encoding="utf-8")
+                    return record
+
+                stale_root = make_git("lease-stale-record")
+                dead = subprocess.Popen([sys.executable, "-I", "-c", ""])
+                dead.wait()
+                stale_record = plant_active(stale_root, dead.pid)
+                stale_bytes = stale_record.read_bytes()
+                before = _snapshot(stale_root)
+                rc, output = run(stale_root)
+                # The rendered refusal is pinned WHOLE: it names the CLI flag --recover before
+                # the API keyword, so an operator at the command line is never pointed at
+                # recover=True alone. The record is compared by its exact bytes, not merely
+                # its presence.
+                check("lease: a dead run's leftover record refuses plain init without --recover",
+                      rc == EXIT_ERROR
+                      and inert("stale operation record(s) under a free anchor (active.toml); "
+                                "refusing without EXPLICIT recovery (--recover on the opf "
+                                "command line; recover=True from the API), which itself "
+                                "proceeds only when the recorded holder is confirmed dead")
+                      in output
+                      and "preflight refused; no publication attempted." in output
+                      and _snapshot(stale_root) == before and stale_record.is_file()
+                      and stale_record.read_bytes() == stale_bytes)
+                rc, output = call(["init", "--root", str(stale_root), "--recover"])
+                check("lease: --recover clears a dead holder's record, then init publishes",
+                      rc == EXIT_OK and valid_sources(stale_root) and not stale_record.exists())
+                live_root = make_git("lease-live-record")
+                live_record = plant_active(live_root, os.getpid())
+                live_bytes = live_record.read_bytes()
+                before = _snapshot(live_root)
+                rc, output = call(["init", "--root", str(live_root), "--recover"])
+                check("lease: --recover never seizes a live holder's record",
+                      rc == EXIT_ERROR and inert("not confirmed dead") in output
+                      and _snapshot(live_root) == before
+                      and live_record.read_bytes() == live_bytes)
 
                 # Symlinked root, containment-isolated: the symlink target is a REAL directory INSIDE
                 # the same git repo, and --root names the sibling symlink. _init_repo's repo-containment
@@ -1677,6 +1845,19 @@ def _suite_isolated(invoke):
                     created |= swept()
                     return sorted(created)
 
+                def init_store(root):
+                    # A store fixture's FIRST init. Plain init refuses a pre-existing root
+                    # CHANGELOG.md ahead of its history scan (spec 14.2), so a fixture that commits
+                    # this store and later deletes only the store paths would stop there, short of
+                    # the scan it exercises. The starter changelog is renamed to an inert file
+                    # before the fixture commits: the root still holds one non-store file once the
+                    # store is deleted (so git rm keeps the directory), and none at a deliverable
+                    # destination.
+                    result = run(root)
+                    if (root / "CHANGELOG.md").is_file():
+                        (root / "CHANGELOG.md").rename(root / "notes.txt")
+                    return result
+
                 # SPEC 8.2 ancestry (fix-init-ancestry): plain init must never restart counters
                 # over a store git HISTORY shows existed. Reproduction: init, commit the store,
                 # raise a counter high-water and commit, `git rm -r .working .opf.toml` and
@@ -1686,7 +1867,7 @@ def _suite_isolated(invoke):
                 # not the deletion commit), and give the remedy (restore, or `opf adopt`).
                 # DISCRIMINATOR: rc 0 against the pre-fix init.
                 ancestry = make_git("ancestry-prior-store")
-                rc, output = run(ancestry)
+                rc, output = init_store(ancestry)
                 check("ancestry fixture first init succeeds", rc == EXIT_OK)
                 git_call(ancestry, ["--literal-pathspecs", "add", "-A"])
                 git_call(ancestry, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -1729,6 +1910,28 @@ def _suite_isolated(invoke):
                       output == prior_store_output(ancestry, ancestry, held_commit,
                                                    [".opf.toml", ".working"], True))
                 check("ancestry: refusing init wrote nothing", _snapshot(ancestry) == before)
+                # The same reproduction with the starter CHANGELOG.md left in place (the file the
+                # fixture above renames away): plain init refuses that changelog at preflight,
+                # ahead of the history scan (spec 14.2), so the counters stay protected either way
+                # and nothing is written. DISCRIMINATOR: against the pre-fix init the history scan
+                # refuses instead, without the changelog text.
+                kept = make_git("ancestry-kept-changelog")
+                rc, output = run(kept)
+                check("ancestry kept-changelog fixture first init succeeds", rc == EXIT_OK)
+                git_call(kept, ["--literal-pathspecs", "add", "-A"])
+                git_call(kept, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                "commit", "-m", "store"])
+                git_call(kept, ["rm", "-r", "-q", "--", working, _opf_store.POINTER_REL])
+                git_call(kept, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                "commit", "-m", "drop store"])
+                before = _snapshot(kept)
+                rc, output = run(kept)
+                check("ancestry: a deleted store whose CHANGELOG.md stayed is refused at the "
+                      "changelog check, ahead of the history scan",
+                      rc == EXIT_ERROR and "during preflight: RuntimeError(" in output
+                      and inert("an existing CHANGELOG.md sits at") in output
+                      and "prior store" not in output)
+                check("ancestry: that changelog refusal wrote nothing", _snapshot(kept) == before)
 
                 # SPEC 8.2 ancestry, fail closed: a SHALLOW clone truncates the first-parent
                 # history, so it cannot prove no prior store existed -- the clipped commits of
@@ -1915,7 +2118,7 @@ def _suite_isolated(invoke):
                 # was the only thing hiding the store. DISCRIMINATOR: rc 0 and a re-zeroed
                 # counters.toml against a scan that lets git resolve grafts.
                 grafted = make_git("ancestry-graft")
-                rc, output = run(grafted)
+                rc, output = init_store(grafted)
                 check("ancestry graft fixture first init succeeds", rc == EXIT_OK)
                 git_call(grafted, ["--literal-pathspecs", "add", "-A"])
                 git_call(grafted, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -2085,9 +2288,13 @@ def _suite_isolated(invoke):
                 # #516: a NESTED product root beneath an enclosing repository with search but no read
                 # permission (0111). _init_repo opens the repository root only as a no-follow probe it
                 # closes unread, and _init_same_root only fstat-s its descriptor, so both open
-                # traverse_only: where os.O_PATH exists init proceeds and a search-only root binds.
+                # traverse_only: where os.O_PATH exists the preflight passes and a search-only root
+                # binds. The init operation mutex then refuses that nested root, with nothing written:
+                # the shared lock binds a nested store's path by listing the git toplevel, which needs
+                # read permission there (the residual _opf_oplock._bind_repository_view discloses).
                 # DISCRIMINATORS: the readable open restored at either site refuses EACCES (the nested
-                # init exits 2 in preflight; the identity check raises PermissionError). Mode bits do not
+                # init exits 2 in preflight, never at the mutex; the identity check raises
+                # PermissionError). Mode bits do not
                 # bind uid 0, so that run discloses a skip. Without os.O_PATH the walk keeps its
                 # documented O_RDONLY fallback, so the EACCES refusal is asserted there instead
                 # (fail-closed); the root refusal is compared by its errno (errno.EACCES, never the
@@ -2145,7 +2352,12 @@ def _suite_isolated(invoke):
                           so_moved == ("moved", "root changed since its contained directory was opened"))
                     if hasattr(os, "O_PATH"):
                         check(label + "a nested product root beneath a search-only (0111) enclosing "
-                              "repository initializes", rc == EXIT_OK and valid_sources(so_product))
+                              "repository passes the preflight and is refused at the init mutex, "
+                              "nothing written",
+                              rc == EXIT_ERROR
+                              and "during taking-the-init-operation-mutex: OpLockError(" in output
+                              and inert(os.strerror(errno.EACCES)) in output
+                              and sorted(entry.name for entry in so_product.iterdir()) == [])
                         check(label + "the root identity check binds a search-only (0111) root",
                               so_bound == ("bound",))
                         return
@@ -2274,7 +2486,7 @@ def _suite_isolated(invoke):
                     repo = make_git(fixture)
                     sub = repo / name
                     sub.mkdir()
-                    first_rc, first_output = run(sub)
+                    first_rc, first_output = init_store(sub)
                     git_call(repo, ["--literal-pathspecs", "add", "-A"])
                     git_call(repo, ["-c", "user.email=t@t", "-c", "user.name=t",
                                     "commit", "-m", "store"])
@@ -2399,7 +2611,7 @@ def _suite_isolated(invoke):
                 # DISCRIMINATOR: M-gate-ignores-repo ([str(repo)] dropped from the gate)
                 # prints a shell-ready command with a raw ESC and fails both checks.
                 ctl_repo = make_git("ancestry-repo\x1b[31mred")
-                rc, output = run(ctl_repo)
+                rc, output = init_store(ctl_repo)
                 check("ancestry control-character repository: fixture first init succeeds",
                       rc == EXIT_OK)
                 git_call(ctl_repo, ["--literal-pathspecs", "add", "-A"])
@@ -2435,7 +2647,7 @@ def _suite_isolated(invoke):
                 # follows the replacement in this fixture, so the byte comparison
                 # DISCRIMINATES M-no-replace-flag (the flag dropped from the printed command).
                 repl = make_git("ancestry-replace")
-                rc, output = run(repl)
+                rc, output = init_store(repl)
                 check("ancestry replacement fixture first init succeeds", rc == EXIT_OK)
                 git_call(repl, ["--literal-pathspecs", "add", "-A"])
                 git_call(repl, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -2488,7 +2700,7 @@ def _suite_isolated(invoke):
                 # probe removed) prints the round-3 single pointer-only command labelled as
                 # the store restore and fails the text and the byte comparison.
                 split = make_git("ancestry-split-working-first")
-                rc, output = run(split)
+                rc, output = init_store(split)
                 check("ancestry split-deletion fixture first init succeeds", rc == EXIT_OK)
                 git_call(split, ["--literal-pathspecs", "add", "-A"])
                 git_call(split, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -2526,7 +2738,7 @@ def _suite_isolated(invoke):
                 # pointer arm of the probe: the named commit holds .working alone and the
                 # additional command restores .opf.toml.
                 split2 = make_git("ancestry-split-pointer-first")
-                rc, output = run(split2)
+                rc, output = init_store(split2)
                 check("ancestry pointer-first split fixture first init succeeds",
                       rc == EXIT_OK)
                 git_call(split2, ["--literal-pathspecs", "add", "-A"])
@@ -2562,7 +2774,7 @@ def _suite_isolated(invoke):
                 # high-water deleted with no disclosure; it fails the complete text and the
                 # phrase bans below.
                 inside = make_git("ancestry-split-inside-counters")
-                rc, output = run(inside)
+                rc, output = init_store(inside)
                 check("ancestry counters-first inside-split fixture first init succeeds",
                       rc == EXIT_OK)
                 git_call(inside, ["--literal-pathspecs", "add", "-A"])
@@ -2612,7 +2824,7 @@ def _suite_isolated(invoke):
                 # and fails the complete text; a scan without working_gaps presents the
                 # manifest-less .working with no PARTIAL disclosure and fails it too.
                 minside = make_git("ancestry-split-inside-manifest")
-                rc, output = run(minside)
+                rc, output = init_store(minside)
                 check("ancestry manifest-first inside-split fixture first init succeeds",
                       rc == EXIT_OK)
                 git_call(minside, ["--literal-pathspecs", "add", "-A"])
@@ -2658,7 +2870,7 @@ def _suite_isolated(invoke):
                 wrepo = make_git("ancestry-withheld-split")
                 wsub = wrepo / wname
                 wsub.mkdir()
-                rc, wfirst = run(wsub)
+                rc, wfirst = init_store(wsub)
                 check("ancestry withheld-split fixture first init succeeds", rc == EXIT_OK)
                 git_call(wrepo, ["--literal-pathspecs", "add", "-A"])
                 git_call(wrepo, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -2918,7 +3130,7 @@ def _suite_isolated(invoke):
                 # says PARTIAL and names both. DISCRIMINATOR: the round-6 code prints this
                 # refusal with no PARTIAL block and fails the complete text.
                 sb = make_git("ancestry-split-both-structural")
-                rc, output = run(sb)
+                rc, output = init_store(sb)
                 check("ancestry split-both fixture first init succeeds", rc == EXIT_OK)
                 git_call(sb, ["--literal-pathspecs", "add", "-A"])
                 git_call(sb, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -2961,7 +3173,7 @@ def _suite_isolated(invoke):
                 # working_gaps without the history union sees a complete surviving
                 # subdirectory and prints no PARTIAL block, failing the complete text.
                 ws = make_git("ancestry-whole-subdir")
-                rc, output = run(ws)
+                rc, output = init_store(ws)
                 check("ancestry whole-subdir fixture first init succeeds", rc == EXIT_OK)
                 ws_zeta = ws / working / "zeta-machine"
                 ws_zeta.mkdir()
@@ -3086,6 +3298,279 @@ def _suite_isolated(invoke):
                       and "QA-DRIVE-CHILD" in output
                       and inert("qa capture probe") in output)
 
+                # The fresh changelog payload is UNCONDITIONAL: a CHANGELOG.md that appears after
+                # the deliverable refusal (planted here while the payloads are built, a stand-in
+                # for a concurrent writer) is refused by the destination check, never silently
+                # left out of the publication. DISCRIMINATOR: a payload built only when the file
+                # is absent skips it and publishes the store with no fresh changelog (rc 0).
+                late_repo = make_git("deliverable-late-changelog")
+                real_emit = opf._opf_emit
+
+                class _LateChangelogEmit:
+                    @staticmethod
+                    def emit_checked(document):
+                        (late_repo / "CHANGELOG.md").write_bytes(b"late\n")
+                        return real_emit.emit_checked(document)
+
+                rc, output = drive_cmd_init(late_repo, dict(_opf_emit=_LateChangelogEmit))
+                check("a CHANGELOG.md appearing after the refusal check is refused, never "
+                      "skipped",
+                      rc == EXIT_ERROR and inert("destination already exists") in output
+                      and "CHANGELOG.md" in output
+                      and "preflight refused; no publication attempted." in output)
+                check("that late CHANGELOG.md is the only new entry; nothing was published",
+                      sorted(entry.name for entry in late_repo.iterdir())
+                      == [".git", "CHANGELOG.md"]
+                      and (late_repo / "CHANGELOG.md").read_bytes() == b"late\n")
+
+                # Spec 5.7: every source create runs with .working/toml/lease.toml and its
+                # control-side active record present, both naming the plain init operation; after
+                # success neither remains and the anchor is free again, which this in-process
+                # driver can see (a child process frees it on exit). DISCRIMINATOR: the pre-lease
+                # init creates every source with no lease.
+                lease_repo = make_git("lease-during-publication")
+                lease_real_create = opf._init_create
+                lease_seen = []
+
+                def lease_recording_create(root_fd, relpath, data):
+                    # Both records are canonical emitter output, so the top-level operation key is
+                    # matched as its exact line (no TOML parse in the harness).
+                    lease_path = lease_repo / working / machine_name / "lease.toml"
+                    active_path = lease_repo / ".git" / "opf-oplock" / "active.toml"
+                    operation_line = 'operation = "opf-init-plain"'
+                    lease_seen.append(
+                        lease_path.is_file() and active_path.is_file()
+                        and operation_line in lease_path.read_text(encoding="utf-8").splitlines()
+                        and operation_line in active_path.read_text(encoding="utf-8").splitlines())
+                    return lease_real_create(root_fd, relpath, data)
+
+                rc, output = drive_cmd_init(lease_repo, dict(_init_create=lease_recording_create))
+                check("lease: lease.toml and its active record are held at every source create",
+                      rc == EXIT_OK and len(lease_seen) == len(expected_paths) and all(lease_seen))
+                check("lease: nothing is held after success (no lease, no active record, a free "
+                      "anchor)",
+                      valid_sources(lease_repo)
+                      and not (lease_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                      and anchor_free(lease_repo))
+
+                # Under the mutex the absence checks run again in the preflight's words. A file a
+                # cooperating writer lands between the preflight and the acquisition (planted here
+                # from the preflight's history scan, its last read-only step) is refused with the
+                # deliverable wording; VERSION is no payload, so only the explicit re-read catches
+                # it. The refusal releases the mutex. DISCRIMINATOR: the pre-lease init publishes
+                # beside a planted VERSION (rc 0) and reports a planted CHANGELOG.md only as a
+                # partial publication; without the deliverable re-read under the mutex, VERSION
+                # publishes and CHANGELOG.md is refused only in the generic destination wording.
+                real_scan = opf._init_no_prior_store
+                for plant_name, plant_bytes in (("VERSION", b"2.4.0\n"),
+                                                ("CHANGELOG.md", b"late\n")):
+                    plant_repo = make_git("lease-recheck-" + plant_name.lower().replace(".", "-"))
+
+                    def planting_scan(git_arg, repo_arg, root_arg, plant_repo=plant_repo,
+                                      plant_name=plant_name, plant_bytes=plant_bytes):
+                        result = real_scan(git_arg, repo_arg, root_arg)
+                        if not (plant_repo / plant_name).exists():
+                            (plant_repo / plant_name).write_bytes(plant_bytes)
+                        return result
+
+                    rc, output = drive_cmd_init(plant_repo,
+                                                dict(_init_no_prior_store=planting_scan))
+                    check("lease: a " + plant_name + " landing before the mutex is refused under it",
+                          rc == EXIT_ERROR
+                          and "during re-checking-the-destinations-under-the-mutex: RuntimeError("
+                          in output
+                          and inert("an existing " + plant_name + " sits at") in output
+                          and "preflight refused; no publication attempted." in output)
+                    check("lease: that " + plant_name + " refusal published nothing and left "
+                          "nothing held",
+                          sorted(entry.name for entry in plant_repo.iterdir())
+                          == [".git", plant_name]
+                          and not (plant_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                          and anchor_free(plant_repo))
+
+                # The OTHER re-checks under the mutex, each landed in the same window (planted
+                # from the preflight's history scan, its last read-only step) and each refused
+                # under the mutex with nothing published and nothing held. DISCRIMINATOR for
+                # each: without its own re-check the failure is no clean refusal, so the pinned
+                # "preflight refused" sentence and the untouched-root assertion both break: a
+                # landed payload destination fails only mid-publication in the
+                # partial-publication wording, a landed local pointer publishes and fails the
+                # post-publish observation, a destination turned tracked fails only at the
+                # post-publish index read, and an ignored destination publishes and exits 0.
+                dest_repo = make_git("lease-recheck-destination")
+
+                def dest_planting_scan(git_arg, repo_arg, root_arg):
+                    result = real_scan(git_arg, repo_arg, root_arg)
+                    if not (dest_repo / _opf_store.POINTER_REL).exists():
+                        (dest_repo / _opf_store.POINTER_REL).write_bytes(b"junk\n")
+                    return result
+
+                rc, output = drive_cmd_init(dest_repo,
+                                            dict(_init_no_prior_store=dest_planting_scan))
+                check("lease: a planned destination landing before the mutex is refused by the "
+                      "destination re-check under it",
+                      rc == EXIT_ERROR
+                      and "during re-checking-the-destinations-under-the-mutex: RuntimeError("
+                      in output
+                      and inert("destination already exists") in output
+                      and _opf_store.POINTER_REL in output
+                      and "preflight refused; no publication attempted." in output)
+                check("lease: that destination refusal published nothing and left nothing held",
+                      sorted(entry.name for entry in dest_repo.iterdir())
+                      == sorted([".git", _opf_store.POINTER_REL])
+                      and (dest_repo / _opf_store.POINTER_REL).read_bytes() == b"junk\n"
+                      and not (dest_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                      and anchor_free(dest_repo))
+
+                lp_repo = make_git("lease-recheck-local-pointer")
+
+                def lp_planting_scan(git_arg, repo_arg, root_arg):
+                    result = real_scan(git_arg, repo_arg, root_arg)
+                    if not (lp_repo / _opf_store.LOCAL_POINTER_REL).exists():
+                        (lp_repo / _opf_store.LOCAL_POINTER_REL).write_bytes(b"junk\n")
+                    return result
+
+                rc, output = drive_cmd_init(lp_repo,
+                                            dict(_init_no_prior_store=lp_planting_scan))
+                check("lease: a local pointer landing before the mutex is refused by the "
+                      "re-check under it",
+                      rc == EXIT_ERROR
+                      and "during re-checking-the-destinations-under-the-mutex: RuntimeError("
+                      in output
+                      and inert("existing pointer: "
+                                + _opf_store.LOCAL_POINTER_REL) in output
+                      and "preflight refused; no publication attempted." in output)
+                check("lease: that local-pointer refusal published nothing and left nothing "
+                      "held",
+                      sorted(entry.name for entry in lp_repo.iterdir())
+                      == sorted([".git", _opf_store.LOCAL_POINTER_REL])
+                      and (lp_repo / _opf_store.LOCAL_POINTER_REL).read_bytes() == b"junk\n"
+                      and not (lp_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                      and anchor_free(lp_repo))
+
+                tr_repo = make_git("lease-recheck-tracked")
+                tr_calls = []
+
+                def tracking_scan(git_arg, repo_arg, root_arg):
+                    tr_calls.append(root_arg)
+                    result = real_scan(git_arg, repo_arg, root_arg)
+                    if len(tr_calls) == 1:
+                        # Tracked but absent from the working tree, so only the index re-read
+                        # under the mutex can see it (the lstat re-checks find nothing).
+                        (tr_repo / "CHANGELOG.md").write_bytes(b"# tracked\n")
+                        git_call(tr_repo, ["add", "--", "CHANGELOG.md"])
+                        (tr_repo / "CHANGELOG.md").unlink()
+                    return result
+
+                rc, output = drive_cmd_init(tr_repo, dict(_init_no_prior_store=tracking_scan))
+                check("lease: a destination turning git-tracked before the mutex is refused by "
+                      "the index re-check under it",
+                      rc == EXIT_ERROR and len(tr_calls) == 1
+                      and "during re-checking-the-destinations-under-the-mutex: RuntimeError("
+                      in output
+                      and inert("planned destination already git-tracked") in output
+                      and "preflight refused; no publication attempted." in output)
+                check("lease: that index refusal published nothing and left nothing held",
+                      sorted(entry.name for entry in tr_repo.iterdir()) == [".git"]
+                      and not (tr_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                      and anchor_free(tr_repo))
+
+                ig_repo = make_git("lease-recheck-ignored")
+
+                def ignoring_scan(git_arg, repo_arg, root_arg):
+                    result = real_scan(git_arg, repo_arg, root_arg)
+                    if not (ig_repo / ".gitignore").exists():
+                        (ig_repo / ".gitignore").write_bytes(b".working\n")
+                    return result
+
+                rc, output = drive_cmd_init(ig_repo, dict(_init_no_prior_store=ignoring_scan))
+                check("lease: a destination turning git-ignored before the mutex is refused by "
+                      "the ignore re-check under it",
+                      rc == EXIT_ERROR
+                      and "during re-checking-the-destinations-under-the-mutex: RuntimeError("
+                      in output
+                      and inert("planned destination is git-ignored") in output
+                      and "preflight refused; no publication attempted." in output)
+                check("lease: that ignore refusal published nothing and left nothing held",
+                      sorted(entry.name for entry in ig_repo.iterdir())
+                      == [".git", ".gitignore"]
+                      and (ig_repo / ".gitignore").read_bytes() == b".working\n"
+                      and not (ig_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                      and anchor_free(ig_repo))
+
+                # The history scan runs again under the mutex: a store committed and then deleted
+                # between the preflight scan and the acquisition (committed here from the first
+                # scan, a stand-in for a concurrent writer) is refused as a prior store, nothing is
+                # published, and the mutex is released. DISCRIMINATOR: without the re-scan, init
+                # zero-seeds a fresh store over that history (rc 0), which spec 8.2 forbids.
+                race_repo = make_git("lease-recheck-history")
+                race_calls = []
+
+                def committing_scan(git_arg, repo_arg, root_arg):
+                    race_calls.append(root_arg)
+                    result = real_scan(git_arg, repo_arg, root_arg)
+                    if len(race_calls) == 1:
+                        (race_repo / working / machine_name).mkdir(parents=True)
+                        (race_repo / working / machine_name
+                         / _opf_store.MANIFEST_NAME).write_bytes(b"[opf]\n")
+                        (race_repo / _opf_store.POINTER_REL).write_bytes(
+                            b'[store]\ntarget = "dir:."\n')
+                        git_call(race_repo, ["add", "-A"])
+                        git_call(race_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                             "commit", "-q", "-m", "a store"])
+                        git_call(race_repo, ["rm", "-r", "-q", "--", working,
+                                             _opf_store.POINTER_REL])
+                        git_call(race_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                             "commit", "-q", "-m", "drop the store"])
+                    return result
+
+                rc, output = drive_cmd_init(race_repo, dict(_init_no_prior_store=committing_scan))
+                check("lease: a prior store committed before the mutex is refused by the re-scan "
+                      "under it",
+                      rc == EXIT_ERROR and len(race_calls) == 2
+                      and "during checking-git-history-for-a-prior-store" in output
+                      and "prior store" in output
+                      and "preflight refused; no publication attempted." in output)
+                check("lease: the re-scan refusal published nothing and left nothing held",
+                      sorted(entry.name for entry in race_repo.iterdir()) == [".git"]
+                      and not (race_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                      and anchor_free(race_repo))
+
+                # A release failure is reported beside the failure being unwound, on its own
+                # rendered line, never instead of it; after a complete publication a failed final
+                # release is a failure, never exit 0. The injected release closes the holder for
+                # real first, so nothing stays held. DISCRIMINATOR: the pre-lease init releases
+                # nothing (no unwind line, and the clean root exits 0); an unwind that swallowed
+                # the error drops the line, and one that raised it would replace the refusal.
+                real_release = _opf_oplock.release_init_holder
+
+                def failing_release(holder):
+                    real_release(holder)
+                    raise _opf_oplock.OpLockError("injected release failure")
+
+                unwind_repo = make_git("lease-unwind-release-failure")
+                with mock.patch.object(_opf_oplock, "release_init_holder", failing_release):
+                    rc, output = drive_cmd_init(unwind_repo, dict(
+                        _init_no_prior_store=lambda git_arg, repo_arg, root_arg: (
+                            (unwind_repo / "VERSION").write_bytes(b"2.4.0\n")
+                            if not (unwind_repo / "VERSION").exists() else None)))
+                check("lease: a release failure while a refusal unwinds is reported beside it",
+                      rc == EXIT_ERROR
+                      and "opf init: releasing the operation lock failed while this failure "
+                      "unwound: " + inert("injected release failure") in output
+                      and inert("an existing VERSION sits at") in output
+                      and "preflight refused; no publication attempted." in output
+                      and anchor_free(unwind_repo))
+                final_repo = make_git("lease-final-release-failure")
+                with mock.patch.object(_opf_oplock, "release_init_holder", failing_release):
+                    rc, output = drive_cmd_init(final_repo, {})
+                check("lease: a failed final release after publication exits 2, never 0",
+                      rc == EXIT_ERROR
+                      and "during releasing-the-init-operation-mutex: OpLockError(" in output
+                      and inert("injected release failure") in output
+                      and "publication may be partial" in output
+                      and anchor_free(final_repo))
+
                 pp_repo = make_git("partial'$(touch PWNED)" + '"' + "`;#")
 
                 def fail_create(root_fd, relpath, data):
@@ -3111,6 +3596,68 @@ def _suite_isolated(invoke):
                       and "$" not in output and "`" not in output
                       and not (pp_repo / "PWNED").exists()
                       and not (base / "PWNED").exists())
+
+                # Spec 5.7 unwind: a create failing mid-publication, under the attached lease,
+                # must leave no capability state behind: the unwind releases the lease
+                # capability, so lease.toml and the active record are gone and the anchor is
+                # free for the next writer. The failure is injected on the THIRD create, so the
+                # lease is demonstrably attached and in use when it strikes. DISCRIMINATOR:
+                # without the capability unwind the spent holder releases nothing, both records
+                # survive the failure and the anchor stays held, so every lock assertion below
+                # breaks.
+                uw_repo = make_git("lease-unwind-after-create-failure")
+                uw_real_create = opf._init_create
+                uw_calls = []
+
+                def uw_fail_third_create(root_fd, relpath, data):
+                    uw_calls.append(relpath)
+                    if len(uw_calls) >= 3:
+                        raise RuntimeError("driven create failure under the lease")
+                    return uw_real_create(root_fd, relpath, data)
+
+                rc, output = drive_cmd_init(uw_repo, {"_init_create": uw_fail_third_create})
+                check("lease: a failed mid-publication create unwinds the lease and its active "
+                      "record and frees the anchor",
+                      rc == EXIT_ERROR
+                      and inert("driven create failure under the lease") in output
+                      and "publication may be partial" in output
+                      and len(uw_calls) >= 3
+                      and not (uw_repo / working / machine_name / "lease.toml").exists()
+                      and not (uw_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                      and anchor_free(uw_repo))
+
+                # Spec 5.7 unwind after the detach: once the lease is detached, the capability is
+                # spent and the mutex is held through the holder the detach returned, so a
+                # failure in the final observation must release THAT holder. The failure is
+                # injected on the first published-path observation (the disclosure's own
+                # observation afterwards runs for real), and the stand-in records that the lease
+                # and its active record were already gone when it struck, so the failure is
+                # demonstrably after the detach. DISCRIMINATOR: an unwind that releases only the
+                # original (spent) holder leaves the detached holder's flock held in this process,
+                # so the later acquisition below is refused.
+                dt_repo = make_git("lease-unwind-after-detach")
+                dt_real_observed = opf._init_observed
+                dt_seen = []
+
+                def dt_fail_first_observed(root_fd, directories, payloads):
+                    if not dt_seen:
+                        dt_seen.append((
+                            (dt_repo / working / machine_name / "lease.toml").exists(),
+                            (dt_repo / ".git" / "opf-oplock" / "active.toml").exists()))
+                        raise RuntimeError("driven observation failure after the detach")
+                    return dt_real_observed(root_fd, directories, payloads)
+
+                rc, output = drive_cmd_init(dt_repo, {"_init_observed": dt_fail_first_observed})
+                check("lease: a failure after the lease detach releases the detached holder, "
+                      "leaving no lease or active record and the anchor free",
+                      rc == EXIT_ERROR
+                      and inert("driven observation failure after the detach") in output
+                      and "during observing-published-source-paths" in output
+                      and "publication may be partial" in output
+                      and dt_seen == [(False, False)]
+                      and not (dt_repo / working / machine_name / "lease.toml").exists()
+                      and not (dt_repo / ".git" / "opf-oplock" / "active.toml").exists()
+                      and anchor_free(dt_repo))
 
                 # QA round 12 C (claude round-11 MEDIUM 2): a non-Exception raised
                 # after publication started (an interrupt or SystemExit) must still
@@ -5094,7 +5641,7 @@ def _suite_isolated(invoke):
                 # and printed a false PARTIAL naming both of them, whose remedy
                 # ("supply each missing path") would create a second store.
                 rnm = make_git("ancestry-renamed-machine")
-                rc, output = run(rnm)
+                rc, output = init_store(rnm)
                 check("ancestry renamed-machine fixture first init succeeds",
                       rc == EXIT_OK)
                 git_call(rnm, ["--literal-pathspecs", "add", "-A"])
@@ -5132,7 +5679,7 @@ def _suite_isolated(invoke):
                 # DISCRIMINATOR: a walk that skipped every rename source, wherever
                 # its destination landed, would print no PARTIAL block here.
                 rno = make_git("ancestry-renamed-out")
-                rc, output = run(rno)
+                rc, output = init_store(rno)
                 check("ancestry renamed-out fixture first init succeeds",
                       rc == EXIT_OK)
                 rno_zeta = rno / working / "zeta-machine"
@@ -5904,7 +6451,7 @@ def _suite_isolated(invoke):
                 moved = make_git("ancestry-renamed-root")
                 old_root = moved / "old"
                 old_root.mkdir()
-                rc, output = run(old_root)
+                rc, output = init_store(old_root)
                 check("ancestry renamed-root fixture first init succeeds", rc == EXIT_OK)
                 git_call(moved, ["--literal-pathspecs", "add", "-A"])
                 git_call(moved, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -6516,13 +7063,28 @@ def _suite_isolated(invoke):
         return EXIT_ERROR
 
 
+def _self_test():
+    """The gate's fixture run inside the OPF git lifecycle (_opf_oplock._st_with_git_lifecycle).
+    Each init child inherits the lifecycle's PATH git wrapper through _suite's fixture
+    environment, and so does every in-process mutex acquisition in the lease fixtures, so the
+    init operation mutex's rev-parse, which strips every GIT_* variable, still runs with the
+    system-config pins and never reads the host's system configuration."""
+    import _opf_oplock
+    return _opf_oplock._st_with_git_lifecycle(_self_test_lifecycle)
+
+
+def _self_test_lifecycle():
+    """The lifecycle-wrapped leg of _self_test: the fixture suite over the isolated child."""
+    return _suite(_run_init)
+
+
 def main(argv=None):
     try:
         args = list(sys.argv[1:] if argv is None else argv)
         if args not in ([], ["--self-test"]):
             print("usage: check_opf_init.py [--self-test]", file=sys.stderr)
             return EXIT_ERROR
-        return _suite(_run_init)
+        return _self_test()
     except Exception as exc:  # noqa: BLE001  final class-width fail-closed backstop
         print("check_opf_init: cannot evaluate: {}; exit 2".format(ascii(exc)), file=sys.stderr)
         return EXIT_ERROR

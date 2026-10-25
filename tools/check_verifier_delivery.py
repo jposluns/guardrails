@@ -1438,7 +1438,7 @@ def _boundary_shown(line):
     value after it) or with "qacomplete" refuses the line, so the link-stripped reading catches
     a boundary carried or split by link text while the whole-line reading keeps one spelled
     inside a removed target ("<verdict:hold>", whose target CommonMark renders visibly) refused.
-    It replaces the round-9 to round-11 enumerated readings (D-475-BOUNDARY-SKELETON); the
+    It replaces the round-9 to round-11 enumerated readings; the
     canonical boundary parse (_verdict_of, _verdict_value, _delivery_body) reads the raw text
     alone and is unchanged. DISCLOSED FALSE-REFUSAL BOUNDARY: both tests are prefix tests, so
     ordinary prose or code whose visible letters begin a boundary word ("Verdict no. 2: blockers
@@ -1579,7 +1579,7 @@ def _parse_delivery(lines, question_count):
         undecodable = _undecodable_reference(text)
         if undecodable:
             refuse(number, _undecodable_refusal(undecodable))
-    # The letter-skeleton boundary sweep (ONE fail-closed test, D-475-BOUNDARY-SKELETON), over
+    # The letter-skeleton boundary sweep (ONE fail-closed test), over
     # every raw body line, after the over-long pre-scan and still before any block is segmented:
     # ordinary text, fenced and indented code content, fence opening lines and their info
     # strings, and blockquote lines alike. Only the canonical boundary pair, found by position
@@ -3156,7 +3156,7 @@ def _self_test_cases(fx):
           refusal(fx.run(_mixed(sha, {2: "Q2. src/beta.py:\n```\n&#" + "9" * 4301 + ";\n```"})),
                   "digit run is longer than the grammar bound"), refused)
 
-    # The letter-skeleton boundary refusal (D-475-BOUNDARY-SKELETON), through the CLI end to
+    # The letter-skeleton boundary refusal, through the CLI end to
     # end: each row's letter skeleton begins a boundary word under a composition, markup or
     # link form the enumerated round-11 readings missed (emphasis marks inside the word, an
     # escaped stop beside a dropped reference, a control character beside an escape, an encoded
