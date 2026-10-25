@@ -575,7 +575,10 @@ HEAVY_JOBS = frozenset({
     "opf", "selftest-execution", "git-fixture-env-core",
     "git-fixture-env-config-combined", "git-fixture-env-config-malformed",
     "git-fixture-env-config-system", "opf-host-patch",
-    "git-fixture-env-host-patch", "byte-canon-matrix",
+    "git-fixture-env-core-host-patch",
+    "git-fixture-env-config-combined-host-patch",
+    "git-fixture-env-config-malformed-host-patch",
+    "git-fixture-env-config-system-host-patch", "byte-canon-matrix",
 })
 
 # The members that may run only in a job carrying the pinned HEAVY_JOB_IF_LINE
@@ -7405,6 +7408,18 @@ def self_test():
               evaluate(multi_local,
                        lane_ci(drop_heavy=("byte-canon-matrix",)), ()),
               1, "heavy job 'byte-canon-matrix' is missing")
+    # Each git-fixture-env lane's host-patch job is a heavy job of its own
+    # (the four run as parallel jobs): removing any one of them is a lane
+    # finding. While HEAVY_JOBS named one serial host-patch job for the four
+    # suites, none of these ids was heavy, so each fixture passed with exit 0.
+    for lane_job in ("git-fixture-env-core-host-patch",
+                     "git-fixture-env-config-combined-host-patch",
+                     "git-fixture-env-config-malformed-host-patch",
+                     "git-fixture-env-config-system-host-patch"):
+        lane_case("39j a removed git-fixture-env host-patch job is a lane "
+                  "finding: " + lane_job,
+                  evaluate(multi_local, lane_ci(drop_heavy=(lane_job,)), ()),
+                  1, "heavy job {!r} is missing".format(lane_job))
     renamed = evaluate(
         local_fixture(common + ("python3 tools/a.py", heavy_member)),
         lane_ci(opf_id="opf-renamed", heavy_if=None,

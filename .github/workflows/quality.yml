@@ -50,7 +50,7 @@ jobs:
   # the local runner runs check_ci_parity.
   # Within a job the steps keep their original relative order. The Quality gates job at the end
   # is the one required status of this workflow and aggregates every job (msg-leaks.yml is a second).
-  # The heavy jobs (opf, selftest-execution, the four git-fixture-env lanes, the two host-patch jobs and
+  # The heavy jobs (opf, selftest-execution, the four git-fixture-env lanes, the five host-patch jobs and
   # byte-canon-matrix) carry one pinned job-level if:, so they run only on a push and on a pull request
   # whose head is a merge-train-* branch of this repository; every other job runs on every event. On any
   # other pull request the heavy jobs are skipped and Quality gates fails by design (skipped is not
@@ -826,19 +826,22 @@ jobs:
 
   # The host-patch legs. Every other job of this workflow that sets up Python pins '3.14' (Quality gates
   # sets up none); with check-latest off, the Python setup action may resolve that pin to a 3.14 already on
-  # the runner rather than the newest patch release. Those jobs stay required. These two run the suites a
+  # the runner rather than the newest patch release. Those jobs stay required. These five run the suites a
   # newer patch release most often breaks on the exact patch release the maintainer host runs, which
   # .aiqt/python-host.toml names, so a passing local suite predicts a required CI leg, and a failure on the
   # '3.14' legs alone is diagnostic evidence of a patch-release difference, not proof that the change is
-  # innocent. tools/check_python_host_pin.py holds this workflow's top-level keys (name, on, permissions,
+  # innocent. opf-host-patch runs the OPF tooling self-test, and each git-fixture-env-*-host-patch job runs
+  # the one git-fixture-env suite of its '3.14' lane, so the four suites run as parallel jobs, as they do on
+  # '3.14', and the host leg takes about as long as its longest suite rather than the sum of the four.
+  # tools/check_python_host_pin.py holds this workflow's top-level keys (name, on, permissions,
   # jobs, and concurrency only as the pinned block) and each job whole: no job key but name, runs-on,
   # steps and the pinned heavy-job if: line, runs-on ubuntu-24.04 (on 2026-10-12 the Python versions
   # manifest listed Linux x64 builds of 3.14.4 for Ubuntu 22.04 and 24.04 only, so ubuntu-latest would
   # fail these jobs on an image without one), this checkout step as written, no env: on the job or any
   # step, one Python setup step pinning that release, the gate itself as the next step (it fails when the
-  # job does not run that release) and the job's suites in order, each held step with exactly name, run
+  # job does not run that release) and the job's one suite, each held step with exactly name, run
   # and shell: bash; its jobs leg also runs outside these jobs, in the registry job (--jobs-only), which
-  # carries no if:, so an edit here cannot silence every CI run of it. Both are required through Quality
+  # carries no if:, so an edit here cannot silence every CI run of it. All five are required through Quality
   # gates. They are heavy jobs, so they run the OPF tooling self-test and the four git-fixture-env suites
   # a second time in every run on a push or on a merge-train-* pull request of this repository, and in no
   # other pull request run; an edit to a pull request's title or body starts no Quality run.
@@ -868,8 +871,8 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/opf.py --self-test
 
-  git-fixture-env-host-patch:
-    name: Git-fixture-env self-test (host patch)
+  git-fixture-env-core-host-patch:
+    name: Git-fixture-env core self-test (host patch)
     if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     steps:
@@ -890,13 +893,67 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
 
+  git-fixture-env-config-combined-host-patch:
+    name: Git-fixture-env combined config lane (host patch)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
       - name: Git-fixture-env combined config-injection lane (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
 
+  git-fixture-env-config-malformed-host-patch:
+    name: Git-fixture-env malformed config lane (host patch)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
       - name: Git-fixture-env malformed-config lane (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
+
+  git-fixture-env-config-system-host-patch:
+    name: Git-fixture-env system config lane (host patch)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
 
       - name: Git-fixture-env system-config lane (execution-reconciled, host patch)
         shell: bash
@@ -992,7 +1049,7 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_python_floor.py
 
-      # The host-pin jobs leg, run OUTSIDE the two host-patch jobs it judges, so an edit to those
+      # The host-pin jobs leg, run OUTSIDE the five host-patch jobs it judges, so an edit to those
       # jobs (a job-level env: or defaults: that silences their own steps among them) cannot silence
       # every CI run of this gate; this job pins '3.14', not the host patch, so only the source and
       # jobs legs run (--jobs-only), never the interpreter leg.
@@ -1187,7 +1244,10 @@ jobs:
       - git-fixture-env-config-malformed
       - git-fixture-env-config-system
       - opf-host-patch
-      - git-fixture-env-host-patch
+      - git-fixture-env-core-host-patch
+      - git-fixture-env-config-combined-host-patch
+      - git-fixture-env-config-malformed-host-patch
+      - git-fixture-env-config-system-host-patch
       - registry
       - byte-canon-matrix
     runs-on: ubuntu-latest

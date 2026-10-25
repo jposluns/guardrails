@@ -234,8 +234,8 @@ run_gate "python-floor-selftest" python3 -I -B tools/check_selftest_execution.py
 run_gate "python-floor" python3 -I -B tools/check_python_floor.py
 # The host-patch pin: the CI host-patch jobs run their suites on the release .aiqt/python-host.toml
 # names, and the live leg FAILS this run when this interpreter is another patch release (a run there does
-# not predict those required CI legs); when the host interpreter changes, update that file and both
-# host-job pins in .github/workflows/quality.yml together.
+# not predict those required CI legs); when the host interpreter changes, update that file and every
+# host-job pin in .github/workflows/quality.yml together.
 run_gate "python-host-pin-selftest" python3 -I -B tools/check_python_host_pin.py --self-test
 run_gate "python-host-pin" python3 -I -B tools/check_python_host_pin.py
 # The jobs-leg-only member mirrors the registry job's CI step, which judges the host-patch jobs from
