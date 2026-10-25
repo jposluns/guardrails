@@ -414,6 +414,11 @@ class = "adopter-state"
 note = "Adopter-authored configuration for tools/check_derived_command_parameters.py; reserved, never a pack-shipped file (absent = gate NOT APPLICABLE)."
 
 [[namespace-class]]
+path = ".aiqt/relied-exit-pipes.toml"
+class = "adopter-state"
+note = "Adopter-authored configuration for tools/check_relied_exit_pipes.py; reserved, never a pack-shipped file (absent = gate NOT APPLICABLE)."
+
+[[namespace-class]]
 path = ".aiqt/pin.toml"
 class = "adopter-state"
 
