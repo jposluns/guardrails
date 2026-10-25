@@ -225,7 +225,9 @@ line, with no backtracking pattern):
     the tree and a token holding a glob or placeholder character (* ? < > { } $) are not references.
 
 LIMITS. An input file is read up to MAX_INPUT_BYTES (16 MiB); a delivery is parsed in time linear in its
-size (the self-test runs, in a capped child each under RUNTIME_CAP_SECONDS, a 16 MiB backtick run after a
+size (the self-test runs, in a capped child each under RUNTIME_CPU_CAP_SECONDS of child CPU time, wall
+time serving only as a guard that refuses a run still going after RUNTIME_WALL_GUARD_SECONDS, a 16 MiB
+backtick run after a
 quote, a 16 MiB run of inch marks in the last answer, a 16 MiB whitespace run on the VERDICT line and a
 16 MiB zero-width-space run, digit run and U+FDFA ligature run (the longest NFKC expansion, 18
 characters; bare and after a leading Q) on marker-shaped lines, a 16 MiB line of one repeated
@@ -327,7 +329,11 @@ targets); a recording seam also shows the NFKC input for the
 two U+FDFA runtime fixtures is the bounded head only (whole-remainder normalisation fails those two
 checks on any host, however fast), and recording seams on the decoders and the destination read show
 a line of one repeated reference is decoded once per reading and a "[](" run with no ")" reads no
-destination (a decode per copy or a read per "](" fails those checks on any host). The prefix form
+destination (a decode per copy or a read per "](" fails those checks on any host). A capped child that
+sleeps past the CPU bound before its scan still passes, so the runtime cases are judged by CPU time (a
+judge reading elapsed time fails that check on any host); seams on the child's wait and on the clock
+pin the CPU bound's edge (a run exactly at it passes), the wall guard's refusal and its edge, and the
+kill and reap of a child whose wait fails. The prefix form
 of the QA-COMPLETE test has a CLI fixture whose
 letters run past the word ("QA COMPLETED tasks:"), which an exact test would pass, but no flip/
 check. These have a fixture but no flip/ check, since they
@@ -375,9 +381,11 @@ import html.entities
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import tempfile
+import time
 import unicodedata
 import zlib
 from pathlib import Path
@@ -2813,6 +2821,76 @@ def _self_test_cases(fx):
     check("runtime/backtick-run-at-cap-bounded",
           (len(backticks.encode("utf-8")), _capped_run(fx, backticks, "linear")), (MAX_INPUT_BYTES, (0, "PASS")))
     check("flip/runtime-backtick-run-backtracking", _capped_run(fx, backticks, "backtracking"), "timeout")
+    # The judge applies a bound at all: with the bound set below the linear scan's own CPU cost, the
+    # same linear run is judged over the bound, so a pass above can never come from a judge that
+    # measures nothing or always passes. Which clock it reads is pinned by the next check.
+    check("flip/runtime-cpu-bound-discriminates",
+          _patched("RUNTIME_CPU_CAP_SECONDS", 0, lambda: _capped_run(fx, backticks, "linear")), "timeout")
+    # The judge reads the child's CPU time, not elapsed time: a child that sleeps past the CPU bound
+    # before its scan spends that wall time with no CPU, so it still passes, and the run is timed
+    # here to show its wall time did pass the bound. A judge reading any elapsed clock reports this
+    # run as a timeout, on any host.
+    short_delivery = _mixed(sha)
+
+    def _slept_past_bound():
+        started = time.monotonic()
+        got = _patched("CAPPED_CHILD", "import time\ntime.sleep({})\n".format(RUNTIME_CPU_CAP_SECONDS + 1) + CAPPED_CHILD,
+                       lambda: _capped_run(fx, short_delivery, "linear"))
+        return got, time.monotonic() - started > RUNTIME_CPU_CAP_SECONDS
+
+    check("runtime/cpu-judge-ignores-wall-sleep", _slept_past_bound(), ((0, "PASS"), True))
+    # The bound's edge, with the reaped child's CPU reading replaced (_WaitSeam): CPU time is user
+    # plus system time, and a run exactly at the bound is within it. Just inside, exactly at (user
+    # time alone, and split across the two), then just outside (user time alone, and pushed over by
+    # system time). The child exits normally each time, so no kernel CPU stop takes part.
+    bound = RUNTIME_CPU_CAP_SECONDS
+    check("runtime/cpu-bound-edge",
+          [_patched("os", _WaitSeam(cpu=cpu), lambda: _capped_run(fx, short_delivery, "linear"))
+           for cpu in ((bound - 0.01, 0.0), (bound, 0.0), (bound - 0.5, 0.5), (bound + 0.01, 0.0), (bound - 0.5, 0.51))],
+          [(0, "PASS")] * 3 + ["timeout"] * 2)
+
+    # The wall guard only refuses: when it fires, the run is the CannotEvaluate refusal that names
+    # the wall guard (the suite aborts as a harness error), never a pass and never a judgement
+    # against the scanners, and the child is killed and reaped before the refusal arrives. The
+    # setting is looked up before the run and the refusal text is matched, so no other
+    # CannotEvaluate (the one for patching a missing setting among them) stands in for the guard.
+    def _wall_guard_result():
+        if not hasattr(sys.modules[__name__], "RUNTIME_WALL_GUARD_SECONDS"):
+            return "no wall guard setting"
+        waits = _WaitSeam()
+        try:
+            got = _patched("os", waits, lambda: _patched(
+                "RUNTIME_WALL_GUARD_SECONDS", 0, lambda: _capped_run(fx, backticks, "linear")))
+        except CannotEvaluate as exc:
+            return str(exc).startswith(WALL_GUARD_REFUSAL), _child_gone(waits.pids[0])
+        return got
+
+    check("runtime/wall-guard-fires-cannot-evaluate", _wall_guard_result(), (True, True))
+    # The guard's edge, with a clock frozen at the guard's start plus the guard (_FrozenClock): just
+    # inside and exactly at it the child is waited on and judged; just outside it is refused.
+    def _guard_at(offset):
+        try:
+            return _patched("time", _FrozenClock(RUNTIME_WALL_GUARD_SECONDS + offset),
+                            lambda: _capped_run(fx, backticks, "linear"))
+        except CannotEvaluate as exc:
+            return "refused" if str(exc).startswith(WALL_GUARD_REFUSAL) else str(exc)
+
+    check("runtime/wall-guard-edge", [_guard_at(offset) for offset in (-0.01, 0, 0.01)],
+          [(0, "PASS"), (0, "PASS"), "refused"])
+
+    # A failure in this process between spawning the capped child and reaping it (the first wait
+    # fails, as an interrupt or an OS error would) must not leave the child behind: by the time the
+    # failure reaches the caller, the child is killed and reaped, so its pid holds no process, not
+    # even an unreaped one.
+    def _parent_failure_result():
+        waits = _WaitSeam(failure=OSError("injected wait failure"))
+        try:
+            got = _patched("os", waits, lambda: _capped_run(fx, short_delivery, "linear"))
+        except OSError as exc:
+            return str(exc), _child_gone(waits.pids[0])
+        return got
+
+    check("runtime/parent-failure-reaps-child", _parent_failure_result(), ("injected wait failure", True))
     spaces = _padded(_mixed(sha).replace("VERDICT: NO BLOCKERS\n", ""), "VERDICT: x", " ", "\n" + COMPLETE_LINE)
     check("runtime/verdict-whitespace-at-cap-bounded",
           (len(spaces.encode("utf-8")), _capped_run(fx, spaces, "linear")), (MAX_INPUT_BYTES, (0, "PASS")))
@@ -2835,7 +2913,7 @@ def _self_test_cases(fx):
           (MAX_INPUT_BYTES, (0, "PASS")))
     # A reference-dense line: about 2.8 million NEL references at the 16 MiB cap. A runtime bound
     # only (performance coverage): a pass shows one full evaluation of this one input completes
-    # inside RUNTIME_CAP_SECONDS in the capped child, a measured cap at a single input size, not
+    # inside RUNTIME_CPU_CAP_SECONDS of CPU time in the capped child, a measured cap at a single input size, not
     # a linearity proof and not that any decode runs; decode discrimination lives in the decode/
     # and shape/ fixtures.
     reference_run = _padded(_mixed(sha), "text ", "&#133;", "\nVERDICT:")
@@ -3281,38 +3359,132 @@ def _backtracking_without_link_targets(line):
     return _ANGLE_TARGET_RE.sub("", _BACKTRACKING_INLINE_DESTINATION_RE.sub("", line))
 
 
-# The capped child for the runtime checks: its own address-space limit, then the tool's main(), with
-# the scanners optionally swapped for their 8a61dfb9 forms. It is passed to the interpreter with -c.
+# The capped child for the runtime checks: its own address-space limit and a kernel CPU-time stop
+# (RLIMIT_CPU, one whole second past the judged bound, so a variant over the bound is stopped
+# instead of running on), then the tool's main(), with the scanners optionally swapped for their
+# 8a61dfb9 forms. It is passed to the interpreter with -c.
 CAPPED_CHILD = (
     "import resource, sys\n"
     "limit = int(sys.argv[2])\n"
     "resource.setrlimit(resource.RLIMIT_AS, (limit, limit))\n"
+    "cpu_stop = int(sys.argv[3])\n"
+    "resource.setrlimit(resource.RLIMIT_CPU, (cpu_stop, cpu_stop + 5))\n"
     "sys.path.insert(0, sys.argv[1])\n"
     "import check_verifier_delivery as tool\n"
-    "if sys.argv[3] == 'backtracking':\n"
+    "if sys.argv[4] == 'backtracking':\n"
     "    tool._code_spans = tool._backtracking_code_spans\n"
     "    tool._verdict_of = tool._backtracking_verdict_of\n"
-    "if sys.argv[3] == 'backtracking-link-targets':\n"
+    "if sys.argv[4] == 'backtracking-link-targets':\n"
     "    tool._without_link_targets = tool._backtracking_without_link_targets\n"
-    "sys.exit(tool.main(sys.argv[4:]))\n")
+    "sys.exit(tool.main(sys.argv[5:]))\n")
 CHILD_ADDRESS_LIMIT = 2 * 1024 * 1024 * 1024
-RUNTIME_CAP_SECONDS = 20
+# The runtime cases are judged by the child's CPU time (os.wait4), never by wall time, so load and
+# scheduling delay cannot stretch a linear scan into a timeout; a slower core still raises the CPU
+# cost itself, and a linear case that crosses the bound fails its check red. Measured 2026-10-25 on
+# a 24-core host at load average 30 to 36, five runs of each case: the linear scanners finish every
+# 16 MiB case in 0.21 to 3.83 CPU seconds (the inch-mark run the slowest, 3.40 to 3.83), and every
+# 8a61dfb9 backtracking form was still running when a 31-second kernel CPU stop ended it at about
+# 30.9 CPU seconds. The bound below sits about 2.6 times above the slowest linear run measured and
+# under a third of the CPU time every backtracking form was seen to exceed. The wall clock is only
+# a guard against waiting without end on a child that is hung or too slow to finish; when it fires
+# the run is refused (CannotEvaluate, its text starting WALL_GUARD_REFUSAL), never passed.
+RUNTIME_CPU_CAP_SECONDS = 10
+RUNTIME_WALL_GUARD_SECONDS = 300
+WALL_GUARD_REFUSAL = "runtime child still alive past the wall guard"
 
 
 def _capped_run(fx, delivery, scanners):
-    """(exit code, verdict) of the tool on delivery in a capped child, or "timeout" past the cap."""
+    """(exit code, verdict) of the tool on delivery in a capped child, or "timeout" when the
+    child's CPU time (os.wait4) exceeds RUNTIME_CPU_CAP_SECONDS. A child still alive after
+    RUNTIME_WALL_GUARD_SECONDS of wall time is killed and the run refused (CannotEvaluate),
+    never passed and never judged against the scanners. A failure here between spawn and reap
+    also kills and reaps the child before it propagates, so the child never outlives this call."""
     brief_path, delivery_path = fx.files(delivery)
+    out_path = fx.base / "runtime-stdout-{}.json".format(fx.count)
+    deadline = time.monotonic() + RUNTIME_WALL_GUARD_SECONDS
+    with open(out_path, "w", encoding="utf-8") as stdout:
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", CAPPED_CHILD, str(Path(__file__).resolve().parent),
+             str(CHILD_ADDRESS_LIMIT), str(int(RUNTIME_CPU_CAP_SECONDS) + 1), scanners,
+             "--brief", brief_path, "--delivery", delivery_path, "--repo", str(fx.repo)],
+            stdout=stdout, stderr=subprocess.DEVNULL)
+    reaped = False
     try:
-        result = subprocess.run([sys.executable, "-I", "-B", "-c", CAPPED_CHILD, str(Path(__file__).resolve().parent),
-                                 str(CHILD_ADDRESS_LIMIT), scanners, "--brief", brief_path, "--delivery", delivery_path,
-                                 "--repo", str(fx.repo)], capture_output=True, text=True,
-                                timeout=RUNTIME_CAP_SECONDS, check=False)
-    except subprocess.TimeoutExpired:
+        while True:
+            pid, status, usage = os.wait4(process.pid, os.WNOHANG)
+            if pid == process.pid:
+                reaped = True
+                break
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.02)
+    finally:
+        if not reaped:
+            # Past the wall guard, or on any failure above, the child is killed and reaped before the
+            # refusal or the failure leaves. Its pid is signalled directly: only this function reaps
+            # the child, so the pid cannot have been reused (Popen.kill polls first, and a poll that
+            # reaps the child would leave os.wait4 nothing to read the CPU time from).
+            os.kill(process.pid, signal.SIGKILL)
+            _, status, usage = os.wait4(process.pid, 0)
+        process.returncode = os.waitstatus_to_exitcode(status)
+    if not reaped:
+        raise CannotEvaluate("{} of {} seconds; killed with {:.2f} CPU seconds used".format(
+            WALL_GUARD_REFUSAL, RUNTIME_WALL_GUARD_SECONDS, usage.ru_utime + usage.ru_stime))
+    if usage.ru_utime + usage.ru_stime > RUNTIME_CPU_CAP_SECONDS:
         return "timeout"
+    with open(out_path, "r", encoding="utf-8") as handle:
+        payload = handle.read()
     try:
-        return result.returncode, json.loads(result.stdout)["verdict"]
+        return process.returncode, json.loads(payload)["verdict"]
     except (ValueError, KeyError, TypeError):
-        return result.returncode, None
+        return process.returncode, None
+
+
+class _WaitSeam:
+    """A stand-in for the os module inside _capped_run (self-test only): every attribute is the real
+    one, but wait4 records each pid it is asked about, raises `failure` (when given) in place of the
+    first wait, as a failure in this process between spawn and reap would, and reports a reaped
+    child's CPU time as `cpu` (user and system seconds, when given) in place of the measured one.
+    It holds the real module itself, since the module-level name os is this seam while patched."""
+
+    def __init__(self, failure=None, cpu=None):
+        self.pids, self._failure, self._cpu, self._os = [], failure, cpu, os
+
+    def __getattr__(self, name):
+        return getattr(self._os, name)
+
+    def wait4(self, pid, options):
+        import resource
+        self.pids.append(pid)
+        failure, self._failure = self._failure, None
+        if failure is not None:
+            raise failure
+        reaped, status, usage = self._os.wait4(pid, options)
+        if reaped == pid and self._cpu is not None:
+            usage = resource.struct_rusage(tuple(self._cpu) + tuple(usage)[2:])
+        return reaped, status, usage
+
+
+class _FrozenClock:
+    """A stand-in for the time module inside _capped_run (self-test only): the first monotonic reading,
+    the wall guard's start, is 0 and every later one is `now`; sleep is the real one."""
+
+    sleep = staticmethod(time.sleep)
+
+    def __init__(self, now):
+        self._readings, self._now = [0.0], now
+
+    def monotonic(self):
+        return self._readings.pop() if self._readings else self._now
+
+
+def _child_gone(pid):
+    """Whether no process, running or exited and unreaped, holds pid (signal 0 probes, sending nothing)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
 
 
 def _padded(text, line_head, fill, anchor):
