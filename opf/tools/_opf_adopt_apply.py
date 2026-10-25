@@ -2219,7 +2219,9 @@ def _journal_listing(root_fd, keep=None, raised=None):
     of the descriptor it opened, never by the stat by name before the open: one whose identity differs
     between the two (swapped in between) is keyed to ("unlisted", reason) and not traversed. A directory
     the walk cannot open or list is keyed `<dir>/` to ("unlisted", reason), a key no entry name can take
-    (a name is never empty), so a listing never stands for what it did not see. When `keep` is a list, the
+    (a name is never empty), so a listing never stands for what it did not see. A JOURNAL_REL ancestor's
+    next component is stated by name even when the ancestor's own entries could not be listed; when the
+    ancestor could not be opened, that component is keyed unlisted itself. When `keep` is a list, the
     descriptors this listing opened for the JOURNAL_REL components are handed to it as (rel, fd) pairs and
     stay open: while they are HELD no filesystem can hand a removed component's freed inode number to a
     recreation, so a later listing compared against this one can never read a recreated component as
@@ -2311,6 +2313,10 @@ def _journal_listing(root_fd, keep=None, raised=None):
                 cur = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
             except OSError as exc:
                 found[rel + "/"] = ("unlisted", str(exc))
+                if i + 1 < len(parts):
+                    # the next component is then never stated by name: keyed unlisted itself, so this
+                    # marker never has to stand for it (_unseen_below)
+                    found[rel + "/" + parts[i + 1]] = ("unlisted", "{} could not be opened ({})".format(rel, exc))
                 break
             opened.append((rel, cur))
             if not opened_as(rel, st, cur):
@@ -2333,6 +2339,20 @@ def _journal_components():
     """The JOURNAL_REL path components, shallowest first: .aiqt, .aiqt/adopt, .aiqt/adopt/journal."""
     parts = JOURNAL_REL.split("/")
     return ["/".join(parts[:i + 1]) for i in range(len(parts))]
+
+
+def _unseen_below(rel, key):
+    """True when a _journal_listing that keyed `key` ("unlisted") did not observe `rel` beneath it. An entry
+    it could not state, or whose identity changed before its open, was never traversed, so it hides
+    everything below it. A directory it could not open or list (keyed `<dir>/`) hides everything below it
+    too, except at a JOURNAL_REL ancestor, whose next component the listing states by name whatever the
+    ancestor's own listing did (keying it unlisted when the ancestor could not be opened): that marker
+    never stands for the next component or what is below it, which the component's own keys decide."""
+    if not key.endswith("/"):
+        return rel.startswith(key + "/")
+    comps = _journal_components()
+    nxt = dict(zip(comps, comps[1:])).get(key[:-1])
+    return rel.startswith(key) and not (nxt is not None and (rel == nxt or rel.startswith(nxt + "/")))
 
 
 def _entry_named(rel, seen, created, txn, mine, maybe_mine, lock_gone=False):
@@ -2374,14 +2394,17 @@ def _entry_named(rel, seen, created, txn, mine, maybe_mine, lock_gone=False):
 
 def _observed(before, after, created, txn, mine=None, maybe_mine=False, lock_gone=False):
     """What the run's closing listing shows against its first one: ([], False) when the two are equal and
-    each saw everything, else (clauses, ours). A directory EITHER listing could not open or list makes the
-    journal not fully observed, which is named first and always stands in place of the claim, even when
-    both listings failed alike. Then each entry present now that was not (or not as the same type and
-    inode), under a lead-in that attributes them to this run only when one of them is (or may be) its
-    own, then each entry gone. An entry either listing could not state hides itself and everything below
-    it; a directory either listing stated but could not list (keyed `<dir>/`) hides only what is below it,
-    so an entry the closing listing observed absent is always named gone. `ours` is True when any clause
-    concerns what this run wrote or cannot rule out. `lock_gone` is _entry_named's."""
+    each saw everything, else (clauses, ours). An entry EITHER listing could not state, or a directory
+    either could not open or list, makes the journal not fully observed, which is named first and always
+    stands in place of the claim, even when both listings failed alike. Then each entry present now that
+    was not (or not as the same type and inode), under a lead-in that attributes them to this run only
+    when one of them is (or may be) its own, then each entry gone. Each listing speaks only for what it
+    observed (_unseen_below): an entry present now is named only where the opening listing looked, never
+    below an entry or directory that listing could not see; an entry the opening listing stated is named
+    gone exactly when the closing listing observed it absent, never below an entry or directory the
+    closing listing could not see, and what the opening listing could not see hides nothing it did state.
+    An entry the opening listing could not state is named in the first clause only, never as gone. `ours`
+    is True when any clause concerns what this run wrote or cannot rule out. `lock_gone` is _entry_named's."""
     blind = {}
     for listing in (before, after):
         for rel, seen in listing.items():
@@ -2392,16 +2415,18 @@ def _observed(before, after, created, txn, mine=None, maybe_mine=False, lock_gon
         said.append("the adoption journal could not be fully observed, so what this run left there is not "
                     "known: {}".format("; ".join("{} could not be listed ({})".format(rel, why)
                                                  for rel, why in sorted(blind.items()))))
+    unseen_then = [rel for rel, seen in before.items() if seen[0] == "unlisted"]
+    unseen_now = [rel for rel, seen in after.items() if seen[0] == "unlisted"]
     named = [_entry_named(rel, after[rel], created, txn, mine, maybe_mine, lock_gone)
-             for rel in sorted(rel for rel in after if rel not in blind and after[rel] != before.get(rel))]
+             for rel in sorted(rel for rel in after if rel not in blind and after[rel] != before.get(rel)
+                               and not any(_unseen_below(rel, key) for key in unseen_then))]
     ours = bool(blind) or any(own for _text, own in named)
     if named:
         said.append(("the adoption journal now holds entries it did not hold when this run began: " if ours
                      else "the adoption journal now holds entries it did not hold when this run began, not "
                      "attributed to this run: ") + ", ".join(text for text, _own in named))
-    gone = sorted(rel for rel in before if rel not in after and not any(
-        rel.startswith(key) if key.endswith("/") else rel == key or rel.startswith(key + "/")
-        for key in blind))
+    gone = sorted(rel for rel in before if rel not in blind and rel not in after
+                  and not any(_unseen_below(rel, key) for key in unseen_now))
     if gone:
         said.append("entries present when this run began are gone: {}".format(", ".join(gone)))
     return said, ours
@@ -2411,9 +2436,11 @@ def _journal_unbound(jr_fd, held, after):
     """None when the closing listing observed the journal directory this run wrote to: the journal path
     still resolves to the identity (st_dev, st_ino) of the descriptor the run held, or it is absent and
     that held directory is unlinked (this run's cleanup removed it, empty). Else the clause saying the
-    binding changed, or could not be observed (the listing could not see the journal path or one of its
-    ancestors), in place of the claim: what the directory this run wrote to now holds is unobserved.
-    Called while the descriptor is still held, so its inode cannot be reused by a later directory."""
+    binding changed, or could not be observed (the listing could not state the journal path or one of its
+    ancestors; below an ancestor whose own entries it could not list it still stated the next component by
+    name, so a journal path absent there was observed absent), in place of the claim: what the directory
+    this run wrote to now holds is unobserved. Called while the descriptor is still held, so its inode
+    cannot be reused by a later directory."""
     if jr_fd is None or held is None:
         return None
     now = after.get(JOURNAL_REL)
@@ -2426,8 +2453,7 @@ def _journal_unbound(jr_fd, held, after):
         except OSError:
             pass
     if now is not None and now[0] == "unlisted" or now is None and any(
-            after.get(r, ("",))[0] == "unlisted" or after.get(r + "/", ("",))[0] == "unlisted"
-            for r in _journal_components()[:-1]):
+            after.get(r, ("",))[0] == "unlisted" for r in _journal_components()[:-1]):
         return ("the adoption journal path {} could not be observed, so whether it still resolves to the "
                 "journal directory this run wrote to (st_dev {}, st_ino {}), and what that directory holds, "
                 "is not known".format(JOURNAL_REL, held[0], held[1]))
@@ -9895,14 +9921,20 @@ def _self_test_checks():
               and "{}/ could not be listed".format(JOURNAL_REL) in (err or "")
               and "entries present when this run began are gone: {}".format(JOURNAL_REL) in (err or "")
               and "nothing written" not in (err or "") and not (root / JOURNAL_REL).exists())
-    # 6a12c: the same rule read directly, one level up (red against hiding `adopt` under its own key); and
+    # 6a12c: the same rule read directly, one level up (red against hiding `adopt` under its own key), beside
+    # a transaction directory the closing listing stated but could not list, whose frames.log is therefore
+    # never named gone (red against a `<dir>/` key read as that one key, which hides nothing below it); and
     # an entry literally named "*" whose stat fails is that entry alone, never its directory's contents
     # (red against a "contents not listed" key an entry name can take).
     adopt = JOURNAL_REL.rsplit("/", 1)[0]
     said, _ours = _observed({".aiqt": ("directory", 1, 1), adopt: ("directory", 1, 2),
                              adopt + "/": ("unlisted", "an injected fault")}, {".aiqt": ("directory", 1, 1)}, [], rid)
-    check("observed-unlisted-contents-dir-gone", ("entries present when this run began are gone: " + adopt) in said
-          and "{}/ could not be listed (an injected fault)".format(adopt) in said[0])
+    txn_rel = JOURNAL_REL + "/" + rid
+    kept, _ours = _observed({txn_rel: ("directory", 1, 3), txn_rel + "/frames.log": ("file", 1, 4)},
+                            {txn_rel: ("directory", 1, 3), txn_rel + "/": ("unlisted", "an injected fault")}, [], rid)
+    check("observed-unlisted-contents-dir-gone", said[1:] == ["entries present when this run began are gone: " + adopt]
+          and "{}/ could not be listed (an injected fault)".format(adopt) in said[0]
+          and len(kept) == 1 and "{}/ could not be listed".format(txn_rel) in kept[0], observed=(said, kept))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         jdir = Path(temp) / JOURNAL_REL
         os.makedirs(jdir)
@@ -9926,6 +9958,85 @@ def _self_test_checks():
         check("observed-star-entry-not-contents", second.get(JOURNAL_REL + "/*", ("",))[0] == "unlisted"
               and JOURNAL_REL + "/" not in second
               and ("entries present when this run began are gone: {}/x".format(JOURNAL_REL)) in said)
+    # 6a12d: what a closing listing could not see at a journal path ancestor never stands for the next
+    # component, which the listing states by name. One that could not list `adopt` still observed the
+    # journal and names its removed x gone, the removed stray beside the journal unnamed (red against an
+    # ancestor's `<dir>/` key hiding the journal beneath it); one that could not open `adopt` keys the
+    # journal unlisted and names nothing gone (red against a listing that leaves the journal unkeyed there).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        jdir = Path(temp) / JOURNAL_REL
+        os.makedirs(jdir)
+        (jdir / "x").write_bytes(b"")
+        (jdir.parent / "stray").write_bytes(b"")
+        adopt_st = os.stat(jdir.parent)
+        real_open, real_listdir = os.open, os.listdir
+
+        def adopt_unopenable(path, flags, *args, **kwargs):
+            if path == "adopt" and flags & os.O_DIRECTORY:
+                raise PermissionError(13, "an injected open fault")
+            return real_open(path, flags, *args, **kwargs)
+
+        def adopt_unlistable(target="."):
+            if isinstance(target, int) and (os.fstat(target).st_dev, os.fstat(target).st_ino) == (
+                    adopt_st.st_dev, adopt_st.st_ino):
+                raise PermissionError(13, "an injected listing fault")
+            return real_listdir(target)
+        ancestor_fd = store._open_dir_nofollow(Path(temp).resolve())
+        try:
+            first = _journal_listing(ancestor_fd)
+            os.unlink(jdir / "x")
+            os.unlink(jdir.parent / "stray")
+            with mock.patch.object(os, "listdir", adopt_unlistable):
+                unlistable = _journal_listing(ancestor_fd)
+            with mock.patch.object(os, "open", adopt_unopenable):
+                unopenable = _journal_listing(ancestor_fd)
+        finally:
+            os.close(ancestor_fd)
+        said, _ours = _observed(first, unlistable, [], rid)
+        check("observed-ancestor-marker-next-component-gone",
+              unlistable.get(adopt + "/", ("",))[0] == "unlisted" and unlistable.get(JOURNAL_REL) == first[JOURNAL_REL]
+              and said[1:] == ["entries present when this run began are gone: {}/x".format(JOURNAL_REL)],
+              observed=said)
+        said, _ours = _observed(first, unopenable, [], rid)
+        check("observed-unopened-ancestor-next-component-unlisted",
+              unopenable.get(JOURNAL_REL, ("",))[0] == "unlisted" and len(said) == 1
+              and "{} could not be listed ({} could not be opened".format(JOURNAL_REL, adopt) in said[0],
+              observed=said)
+    # 6a12e: what the opening listing could not see hides nothing it did see, and an entry present now is
+    # named only where that listing looked. It could not list `adopt` but stated the journal: the journal's
+    # removed x is named gone (red against an opening `<dir>/` key hiding an observed disappearance) and its
+    # new y is named, while the stray beside the journal, never seen, is not named new, nor is a lock in a
+    # journal the opening listing could not list (red against a new-entries list without the `<dir>/` rule).
+    said, _ours = _observed({".aiqt": ("directory", 1, 1), adopt: ("directory", 1, 2),
+                             adopt + "/": ("unlisted", "an injected fault"), JOURNAL_REL: ("directory", 1, 3),
+                             JOURNAL_REL + "/x": ("file", 1, 4)},
+                            {".aiqt": ("directory", 1, 1), adopt: ("directory", 1, 2),
+                             adopt + "/stray": ("file", 1, 5), JOURNAL_REL: ("directory", 1, 3),
+                             JOURNAL_REL + "/y": ("directory", 1, 6)}, [], rid)
+    unseen_lock, _ours = _observed({JOURNAL_REL: ("directory", 1, 3),
+                                    JOURNAL_REL + "/": ("unlisted", "an injected fault")},
+                                   {JOURNAL_REL: ("directory", 1, 3), JOURNAL_REL + "/lock": ("file", 1, 7)}, [], rid)
+    check("observed-opening-marker-hides-no-observed-gone",
+          said[-1] == "entries present when this run began are gone: {}/x".format(JOURNAL_REL), observed=said)
+    check("observed-new-entries-opening-marker-rule", len(said) == 3 and said[1] == (
+        "the adoption journal now holds entries it did not hold when this run began: {}/y (directory)".format(
+            JOURNAL_REL)) and len(unseen_lock) == 1, observed=(said, unseen_lock))
+    # 6a12f: a journal path the closing listing observed absent below an ancestor whose own entries it could
+    # not list no longer resolves, never "could not be observed" (red against reading that ancestor's
+    # `<dir>/` key as an unobserved journal path); a journal path keyed unlisted could not be observed.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        unbound_fd = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            ust = os.fstat(unbound_fd)
+            marked = {".aiqt": ("directory", 1, 1), adopt: ("directory", 1, 2),
+                      adopt + "/": ("unlisted", "an injected fault")}
+            absent_said = _journal_unbound(unbound_fd, (ust.st_dev, ust.st_ino), marked)
+            unlisted_said = _journal_unbound(unbound_fd, (ust.st_dev, ust.st_ino),
+                                             dict(marked, **{JOURNAL_REL: ("unlisted", "an injected fault")}))
+        finally:
+            os.close(unbound_fd)
+        check("journal-unbound-ancestor-marker-observed-absent", "no longer resolves" in (absent_said or "")
+              and "could not be observed" in (unlisted_said or ""), observed=(absent_said, unlisted_said))
     # 6a13: an ordinary exception inside acquire, after the lock file exists, is described as an error,
     # never as an interrupt (red against the interrupt wording for every exception).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -12556,7 +12667,7 @@ def _self_test_checks():
                 verdict = handler(row, context)
                 if verdict.status != VALID:
                     raise AdoptApplyError("plan op[{}] ({!r}) refused: {}".format(
-                        i, row.get("op"), "; ".join(verdict.findings)))
+                        i, row.get("op") if isinstance(row, dict) else None, "; ".join(verdict.findings)))
         return compose
 
     # the round trip, under a spawn denial (threat 6: the op writes configuration only and never runs,
@@ -12725,10 +12836,11 @@ def _self_test_checks():
               snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
 
     # the row-shape re-proof IN the handler: a malformed row handed straight to OP_HANDLERS (a field
-    # missing, or a path that is not a string) refuses attributed, never an uncaught KeyError or
-    # AttributeError, with the tree unchanged and no transaction opened. Removing the shape guard
-    # admits no write, but the uncaught exception then escapes to the harness, which fails closed
-    # to exit 2 in place of the attributed refusal (as for the absent-registration guard).
+    # missing, a path that is not a string, or a row that is not a table at all) refuses attributed, never
+    # an uncaught KeyError or AttributeError, with the tree unchanged and no transaction opened. Removing
+    # the shape guard, or either of its two checks, admits no write, but the row then fails closed on
+    # that uncaught exception in place of the attributed refusal: each row's refused check records it
+    # and fails (red against dropping the table check, or old_digest from the fields it requires).
     def hook_row_without(field):
         row = hook_row()
         del row[field]
@@ -12736,15 +12848,20 @@ def _self_test_checks():
 
     malformed = [("no-plugin-entry", hook_row_without("plugin_entry"), "string registration_path"),
                  ("non-string-path", dict(hook_row(), registration_path=None), "string registration_path"),
-                 ("no-new-digest", hook_row_without("new_digest"), "string registration_path")]
+                 ("no-new-digest", hook_row_without("new_digest"), "string registration_path"),
+                 ("no-old-digest", hook_row_without("old_digest"), "string registration_path"),
+                 ("non-table", list(hook_row().items()), "string registration_path")]
     for label, row, keyword in malformed:
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
             root = hook_fixture(temp)
             before = snapshot(root)
-            why = refusal(run_adopt_transaction, root, rid,
-                          compose_hook([row], handler=OP_HANDLERS["enable-hook"]))
+            try:
+                why, escaped = refusal(run_adopt_transaction, root, rid,
+                                       compose_hook([row], handler=OP_HANDLERS["enable-hook"])), None
+            except (KeyError, AttributeError, TypeError) as exc:
+                why, escaped = None, exc
             check("hook-malformed-row-{}-direct-handler-refused".format(label),
-                  why is not None and keyword in why)
+                  why is not None and keyword in why, observed="refusal={!r} escaped={!r}".format(why, escaped))
             check("hook-malformed-row-{}-direct-handler-writes-nothing".format(label),
                   snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
 
