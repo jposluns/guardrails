@@ -2488,10 +2488,18 @@ def _command_word(tokens):
 # own token) is never mistaken for the subcommand: '-C DIR', '-c NAME=VALUE', and the long forms below.
 # Their '--opt=value' inline shape carries the value in the same token (an '=' is present), consuming no
 # separate arg; that case is handled by the '=' test, so only the space-separated forms skip two tokens.
+# The set was checked against git(1) of git 2.53.0 and git 2.56.0 and by running every option-shaped string
+# of each git binary as a global option ('git OPT VALUE version'): on both, exactly -C, -c, --git-dir,
+# --work-tree, --namespace, --config-env, --attr-source and --shallow-file take the next word as their value.
+# --shallow-file is absent from git(1) yet consumes the next word ('git --shallow-file /dev/null version'
+# runs version; its '=' form is an unknown option), so without it 'git --shallow-file status push --force'
+# read 'status' as the subcommand. --exec-path and --super-prefix take no separate value (a bare --exec-path
+# prints the exec path and exits, and both versions reject --super-prefix as an unknown option), so the
+# word skipped after them is harmless: git runs no subcommand there.
 _GIT_ARG_OPTS = frozenset((
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix",
-    "--config-env", "--attr-source"))  # --attr-source (git 2.40+) consumes its value in separated form;
-    # git does NOT abbreviate top-level options, so exact membership is complete here (F-121)
+    "--config-env", "--attr-source", "--shallow-file"))  # --attr-source (git 2.40+) consumes its value in
+    # separated form; git does NOT abbreviate top-level options, so exact membership is complete here (F-121)
 
 
 def _git_subcommand_rest(tokens):
@@ -4744,10 +4752,15 @@ def _split_pre_post(args):
 
 
 # --- expbnd: explicit git target and enumerated scope -----------------------------------------------
+# history, refs and repack write refs, history or objects (observed on git 2.56.0): every git history
+# subcommand (drop, fixup, reword, split) rewrites commits and moves each descendant branch; git refs create,
+# delete, update and rename write refs, and migrate and optimize rewrite the ref store; git repack rewrites
+# packs, its -d deletes redundant ones and --drop-filtered deletes objects. Only git refs list, exists and
+# verify read, so _git_is_mutating exempts those; any other form is mutating (fail-safe).
 _GIT_MUTATING_VERBS = frozenset((
-    "add", "am", "apply", "branch", "checkout", "cherry-pick", "clean", "commit", "config", "init",
-    "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
-    "switch", "tag", "update-index", "update-ref", "worktree"))
+    "add", "am", "apply", "branch", "checkout", "cherry-pick", "clean", "commit", "config", "history", "init",
+    "merge", "mv", "notes", "pull", "push", "rebase", "refs", "repack", "reset", "restore", "revert", "rm",
+    "stash", "switch", "tag", "update-index", "update-ref", "worktree"))
 _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
 # branch/tag classification (GD-158 rounds 1-6, synthesis; flag behaviour pinned to git 2.53; the long
 # universe is a conservative SUPERSET of git 2.53's branch/tag option table, validated against git 2.53
@@ -4839,8 +4852,8 @@ _EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
 _RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
 _RAW_EXPBND_MUTATE_RE = _RawSequence(
     r"(?i)\bgit\b",
-    r"(?i)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
-    r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
+    r"(?i)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|history|init|merge|mv|notes|"
+    r"pull|push|rebase|refs|repack|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
 _RAW_EXPBND_PRUNING_FETCH_RE = _RawSequence(
     r"(?i)\bgit\b", r"(?i)\bfetch\b", r"(?i)--prune(?:-tags)?\b|(?<!\S)-[^\s]*p")
 # The whole-tree breadth probe is two sequences, git then add then an add breadth selector, or git then
@@ -5016,6 +5029,8 @@ def _git_is_mutating(sub, args):
         return not args or args[0] != "list"
     if sub == "notes":
         return not args or args[0] not in ("list", "show")
+    if sub == "refs":
+        return not args or args[0] not in ("list", "exists", "verify")
     return True
 
 

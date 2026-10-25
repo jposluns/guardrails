@@ -2440,8 +2440,9 @@ _RAW_SEQUENCE_REFERENCES = (
     (("_RAW_DIFF_PRODUCER_RE",),
      r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b"),
     (("_RAW_EXPBND_MUTATE_RE",),
-     r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
-     r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b"),
+     r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|history|init|merge|mv|"
+     r"notes|pull|push|rebase|refs|repack|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|"
+     r"worktree)\b"),
     (("_RAW_EXPBND_PRUNING_FETCH_RE",), r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)"),
     (("_RAW_EXPBND_ADD_BREADTH_RE", "_RAW_EXPBND_COMMIT_BREADTH_RE"),
      r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
@@ -2463,7 +2464,7 @@ _RAW_SEQUENCE_WORDS = (
     "merge", "pull", "rebase", "add", "fetch", "diff", "show", "ſhow", "log", "range-diff", "worKtree",
     "-A", "-a", "-xA", "-xa", "a-a", "--all", "--allx", "--prune", "--prune-tags", "--prunex", "-p", "-xp", "-P",
     "p-p", ".", "..", ":/", ":/x", "./", "x", "-", "'", '"', "$(", ")", "stash", "stashx", "checkout", "switch",
-    "branch")
+    "branch", "history", "refs", "repack")
 _RAW_SEQUENCE_JOINERS = (" ", "  ", "\n", "\t", ";", "", "/", "=", "-")
 # Half the corpus is drawn from the words the three-step probes need, so their orderings are well covered.
 _RAW_SEQUENCE_FOCUS = ("git", "Git", "xgit", "fetch", "add", "commit", "push", "-p", "-xp", "-A", "-a", "-xa",
@@ -9266,6 +9267,25 @@ def _main_isolated(monitor):
             failures.append("(g423-p4-other) a -C stash removal must preserve NO new stash ref in S")
         _g423_unchanged("(g423-p4-other-state)", g423_S, g423_S_pre, "S")
 
+        # A separated --shallow-file is a value-taking global option, so git_discard reads the discard behind it
+        # exactly as behind --attr-source: the global-option branch snapshots the session repository, then
+        # decides. Before --shallow-file joined _GIT_ARG_OPTS its value read as an unrecognized subcommand and
+        # the two verdicts differed (deny against allow-note). The recovery ref is the safety property kept.
+        gsf_repo = _init_repo(tmp / "gsf-discard")
+        (gsf_repo / "file.txt").write_text("uncommitted\n", encoding="utf-8")
+        _gsf_ref_count = len(_recovery_refs(gsf_repo))
+        _gsf_attr = _decision(aiqt_hooks.git_discard, "git --attr-source HEAD reset --hard", cwd=str(gsf_repo))
+        _gsf_after_attr = len(_recovery_refs(gsf_repo))
+        _gsf_shallow = _decision(aiqt_hooks.git_discard, "git --shallow-file x reset --hard", cwd=str(gsf_repo))
+        if _gsf_shallow != _gsf_attr:
+            failures.append("(gsf-discard-parity) git_discard must judge 'git --shallow-file x reset --hard' as "
+                            "it judges 'git --attr-source HEAD reset --hard': got {} against {}"
+                            .format(_gsf_shallow, _gsf_attr))
+        if not (_gsf_after_attr > _gsf_ref_count and len(_recovery_refs(gsf_repo)) > _gsf_after_attr):
+            failures.append("(gsf-discard-snapshot) each global-option reset --hard on a dirty tree must write a "
+                            "recovery ref before deciding (counts {} -> {} -> {})".format(
+                                _gsf_ref_count, _gsf_after_attr, len(_recovery_refs(gsf_repo))))
+
         # === protected_line (prtbrn/artbr1): force-push to a protected ref + direct protected commit ===
         plg = aiqt_hooks.protected_line
 
@@ -11205,6 +11225,52 @@ def _main_isolated(monitor):
                 "git push -f --push-opt marker origin", "deny", cwd=plr)
         pexpect("(f117r9-e) a genuine separated --push-option value is still skipped (plain push allows)",
                 "git push --push-option marker origin main", "allow", cwd=plr)
+        # A separated --shallow-file global option consumes the next word as its value (git 2.53.0 and 2.56.0
+        # both run 'git --shallow-file /dev/null version'), so that word is never the subcommand. Each vector
+        # below read the value as the subcommand before --shallow-file joined _GIT_ARG_OPTS: the refspec-less
+        # and HEAD forms (no protected name for the raw backstop to pair) allowed, as did the parsed layer.
+        pexpect("(gsf-a) --shallow-file does not mask a refspec-less force-push from a protected HEAD",
+                "git --shallow-file status push --force origin", "deny", cwd=plr)
+        pexpect("(gsf-b) --shallow-file does not mask a forced HEAD refspec from a protected HEAD",
+                "git --shallow-file x push origin +HEAD", "deny", cwd=plr)
+        pexpect_layer("(gsf-c) with the backstop stood down the parsed classifier denies behind --shallow-file",
+                      "git --shallow-file status push --force origin main", "deny", cwd=plr,
+                      detail="force-pushes the protected branch 'main'")
+        # The other guards that read the git subcommand judge the command behind --shallow-file as they judge
+        # the bare form (each allowed, or lost its note, while the value was read as the subcommand).
+        for _gsf_label, _gsf_handler, _gsf_cmd, _gsf_want in (
+                ("gsf-d", aiqt_hooks.commit_identity,
+                 'git --shallow-file x commit --author="Claude <noreply@anthropic.com>" -m y', "deny"),
+                ("gsf-e", aiqt_hooks.gate_weakening, "git --shallow-file x commit --no-verify -m y", "deny"),
+                ("gsf-f", aiqt_hooks.gate_weakening, "git --shallow-file x push --no-verify origin feat", "deny"),
+                ("gsf-g", aiqt_hooks.diff_source_pretool, "git --shallow-file x diff", "deny"),
+                ("gsf-h", aiqt_hooks.git_explicit_binding, "cd /abs/repo && git --shallow-file x commit -m y",
+                 "allow-note"),
+                ("gsf-i", aiqt_hooks.git_stash_ref, "git --shallow-file x stash pop", "allow-note")):
+            _gsf_got = _decision(_gsf_handler, _gsf_cmd)
+            if _gsf_got != _gsf_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _gsf_label, _gsf_handler.__name__, _gsf_cmd, _gsf_want, _gsf_got))
+        # The parse at the option's edges, through both subcommand readers: the exact separated spelling skips
+        # its value (gsf-j, red on revert); the '=' form carries the value in its own word (gsf-k); an
+        # abbreviation is not the option (gsf-l: git rejects '--shallow-fil' as unknown and runs nothing); a
+        # trailing option with no value leaves no subcommand (gsf-m).
+        for _gsf_label, _gsf_tokens, _gsf_want in (
+                ("gsf-j", ["git", "--shallow-file", "status", "push", "--force"], ("push", ["--force"])),
+                ("gsf-k", ["git", "--shallow-file=status", "push", "--force"], ("push", ["--force"])),
+                ("gsf-l", ["git", "--shallow-fil", "status", "push"], ("status", ["push"])),
+                ("gsf-m", ["git", "--shallow-file"], (None, []))):
+            for _gsf_fn in (aiqt_hooks._git_subcommand_rest, aiqt_hooks._git_sub_and_args):
+                _gsf_got = _gsf_fn(_gsf_tokens)
+                if _gsf_got != _gsf_want:
+                    failures.append("({}) {}({!r}): expected {!r}, got {!r}".format(
+                        _gsf_label, _gsf_fn.__name__, _gsf_tokens, _gsf_want, _gsf_got))
+        # The commit-identity finder reads the subcommand word itself: behind --shallow-file it is 'commit'.
+        _gsf_toks = ["git", "--shallow-file", "x", "commit", "-m", "y"]
+        _gsf_idx = list(aiqt_hooks._cmtidn_git_commands(_gsf_toks))
+        if _gsf_idx != [3]:
+            failures.append("(gsf-n) _cmtidn_git_commands({!r}): expected [3] (the commit word), got {!r}"
+                            .format(_gsf_toks, _gsf_idx))
         # Re-expected from allow to deny: the wrapper-hidden fallback now also reads the
         # DE-QUOTED text, where -'f' is the -f bash passes, so this force-push to main is caught (a
         # closed residual, not an over-refusal). The raw-text backstop reads each segment
@@ -19116,6 +19182,57 @@ def _main_isolated(monitor):
             if _rc_got is not _rc_want:
                 failures.append("({}) _git_is_mutating({!r}, {!r}): expected {}, got {}"
                                 .format(_rc_label, _rc_sub, _rc_args, _rc_want, _rc_got))
+        # history, refs and repack write refs, history or objects (observed with git 2.56.0 on scratch
+        # fixtures: history drop moved every descendant branch and the worktree, refs create, update, rename
+        # and delete wrote refs, repack --drop-filtered deleted a local object), so they class as mutating and
+        # only refs list, exists and verify read. Every M row for those three verbs read False before they
+        # joined _GIT_MUTATING_VERBS; the R rows fail if the refs read exemption is dropped. add --resolved
+        # (gv-18) and branch --delete-merged (gv-19) were already mutating (add is a mutating verb, and an
+        # unknown branch option keeps the fail-safe default), so those two are regression locks.
+        for _gv_label, _gv_sub, _gv_args, _gv_want in (
+                ("gv-1", "history", ["drop", "HEAD~1"], _M),
+                ("gv-2", "history", ["fixup", "HEAD~1"], _M),
+                ("gv-3", "history", ["reword", "HEAD~1"], _M),
+                ("gv-4", "history", ["split", "HEAD~1"], _M),
+                ("gv-5", "history", ["drop", "--dry-run", "HEAD~1"], _M),  # still writes objects: fail-safe
+                ("gv-6", "refs", ["create", "refs/heads/x", "HEAD"], _M),
+                ("gv-7", "refs", ["delete", "refs/heads/main"], _M),
+                ("gv-8", "refs", ["update", "refs/heads/main", "HEAD~1"], _M),
+                ("gv-9", "refs", ["rename", "refs/heads/main", "refs/heads/old"], _M),
+                ("gv-10", "refs", ["migrate", "--ref-format=reftable"], _M),
+                ("gv-11", "refs", ["optimize", "--all"], _M),
+                ("gv-12", "refs", [], _M),
+                ("gv-13", "repack", ["-a", "-d", "--filter=blob:limit=1", "--drop-filtered"], _M),
+                ("gv-14", "repack", ["-a", "-d"], _M),
+                ("gv-15", "refs", ["list"], _R),
+                ("gv-16", "refs", ["exists", "refs/heads/main"], _R),
+                ("gv-17", "refs", ["verify"], _R),
+                ("gv-18", "add", ["--resolved"], _M),
+                ("gv-19", "branch", ["--delete-merged", "origin/main"], _M)):
+            _gv_got = aiqt_hooks._git_is_mutating(_gv_sub, _gv_args)
+            if _gv_got is not _gv_want:
+                failures.append("({}) _git_is_mutating({!r}, {!r}): expected {}, got {}"
+                                .format(_gv_label, _gv_sub, _gv_args, _gv_want, _gv_got))
+        # End to end: a cd feeding one of them without an explicit target now carries the binding note, through
+        # the parsed reading (gv-20 to gv-22) and through the unparseable-command raw fallback (gv-25 to gv-27);
+        # each was a silent allow before. A read-only refs list (gv-23) and an explicit -C target (gv-24) stay
+        # silent.
+        ebexpect("(gv-20) a cd feeding an untargeted git history rewrite allows with a note",
+                 "cd /abs/repo && git history drop HEAD~1", "allow-note")
+        ebexpect("(gv-21) a cd feeding an untargeted git refs delete allows with a note",
+                 "cd /abs/repo && git refs delete refs/heads/x", "allow-note")
+        ebexpect("(gv-22) a cd feeding an untargeted git repack --drop-filtered allows with a note",
+                 "cd /abs/repo && git repack -a -d --filter=blob:limit=1 --drop-filtered", "allow-note")
+        ebexpect("(gv-23) a cd feeding a read-only git refs list stays a silent allow",
+                 "cd /abs/repo && git refs list", "allow")
+        ebexpect("(gv-24) an explicit -C target credits the binding for git history",
+                 "cd /abs/repo && git -C /abs/repo history drop HEAD~1", "allow")
+        ebexpect("(gv-25) the unparseable-command fallback notes a cd feeding git history",
+                 'cd /abs/repo && git history reword HEAD~1 "open', "allow-note")
+        ebexpect("(gv-26) the unparseable-command fallback notes a cd feeding git refs",
+                 'cd /abs/repo && git refs create x HEAD "open', "allow-note")
+        ebexpect("(gv-27) the unparseable-command fallback notes a cd feeding git repack",
+                 'cd /abs/repo && git repack -a -d "open', "allow-note")
         for _eb_sub, _eb_args, _eb_want in (
                 ("commit", ["-am", "x"], True),
                 ("add", ["-A"], True),
