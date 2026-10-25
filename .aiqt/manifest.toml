@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c7566dd8e3fe784b64401dbd0099ae35e987548a54fd2d1e6641d21a5bca1238"
+tree-sha256 = "18c2a696a5a6a341e79289f123ab3664499b9e4350725f51ff9b0c1e1515e982"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2511,8 +2511,8 @@ sha256 = "d073f5e3e09a55c716ad6f71b24a68eb9ec1c7f5c36bae68f7d8f3dc0f21d4c5"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
-bytes = 26934
-sha256 = "024c6fd165af23dac55949e05f21d4f7811d9049dd05253c05611863af8ba6b7"
+bytes = 27465
+sha256 = "cd48ca45fc01a32cf5c134e8b3e12a2509f0195ab6a299d5a1bda1fe984eec2a"
 
 [[sources]]
 path = "opf/enforcement/precommit/pre-commit"
@@ -2996,8 +2996,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 321006
-sha256 = "101450adee58f565197a5b201f8bf82c96f8a2ffd2bda5297d01ce7d729c0bd6"
+bytes = 325000
+sha256 = "19f4585389fdf5c291f584dc1a2e8077d8cbb572c55fc34ba21aafe7d9d87728"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"
