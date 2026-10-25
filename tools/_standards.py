@@ -222,13 +222,23 @@ def _check_stem(path):
             "{}: manifest stem may not end in -tight/-broad (reserved fit suffix)".format(path.name))
 
 
+def _standards_present(std_dir):
+    """dir_or_absent for the standards dir, raising (OSError) where something is there that is not a
+    directory, so it is never read as no manifests; every caller already renders an OSError as exit 2."""
+    present, problem = dir_or_absent(std_dir)
+    if problem is not None:
+        raise NotADirectoryError("{} {} (cannot evaluate)".format(std_dir, problem))
+    return present
+
+
 def load_manifests(std_dir):
     """Return {map_key: Manifest} for every *.toml under std_dir, fully validated. Raise ManifestError
     on any malformed manifest or duplicate map-key. An absent/empty dir returns {} (transition-safe); an
-    existing dir that cannot be listed raises OSError (fail-closed), never a false-clean empty."""
+    existing dir that cannot be listed, or a std_dir that is there but is not a directory (a regular file
+    or a symlink), raises OSError (fail-closed), never a false-clean empty."""
     std_dir = Path(std_dir)
     out = {}
-    if not dir_present(std_dir):
+    if not _standards_present(std_dir):
         return out
     ensure_listable(std_dir)
     for path in sorted(std_dir.glob("*.toml")):
@@ -255,9 +265,9 @@ def map_keys(root):
     else. A bare `map-<stem>` (no fit) or a bad suffix (`map-<stem>-medium`) is therefore not a legal
     frontmatter key, rejected fail-closed by gen_rules._check_keys with no extra gate code. Cheap (no
     parse) so gen_rules can build MAP_KEYS at import; check_mappings does the full parse/validation via
-    load_manifests."""
+    load_manifests. A .aiqt/standards that is there but is not a directory raises, as load_manifests does."""
     std_dir = Path(root) / ".aiqt" / "standards"
-    if not dir_present(std_dir):
+    if not _standards_present(std_dir):
         return set()
     ensure_listable(std_dir)
     keys = set()

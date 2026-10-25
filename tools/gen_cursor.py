@@ -12,7 +12,8 @@ pack's own subtree and never an adopter's own Cursor rules beside it. Format per
 https://cursor.com/docs/rules (retrieved 2026-08-17).
   gen_cursor.py           regenerate .cursor/rules/aiqt-guardrails/{aiqt,security}/
   gen_cursor.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
-  gen_cursor.py --self-test  assert an invalid-UTF-8 generated .mdc target fails closed (exit 2)
+  gen_cursor.py --self-test  assert an invalid-UTF-8 generated .mdc target, and a source path that is not
+                             a directory, fail closed (exit 2)
 """
 import sys
 
@@ -33,7 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import dir_present  # noqa: E402
+from _standards import dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 # The reserved output subtree (relative parts, joined under repo root). Everything under it is
@@ -80,9 +81,14 @@ def run(root, check):
     out_dir = root.joinpath(*OUT_PARTS)
     desired = {}
     try:
-        # dir_present (not is_dir) inside the try: an unreadable .aiqt/ parent must fail closed as exit 2,
-        # not read as an absent corpus (which would delete every generated .mdc as an orphan below).
-        if dir_present(src_dir):
+        # dir_or_absent (not is_dir) inside the try: an unreadable .aiqt/ parent, or a source path that is
+        # there but is not a directory, must fail closed as exit 2, not read as an absent corpus (which
+        # would delete every generated .mdc as an orphan below).
+        present, problem = dir_or_absent(src_dir)
+        if problem is not None:
+            print("error: {} {} (cannot evaluate)".format(src_dir, problem))
+            return 2
+        if present:
             for src, _fm, rel in load_corpus(src_dir):
                 desired[cursor_rel(rel)] = render_rule(src)
     except (ValueError, OSError) as exc:
@@ -195,6 +201,17 @@ def self_test_main():
         target.write_bytes(b"\xff\xfe not utf-8")
         if run_quiet(tmp, check=True) != 2:
             failures.append("invalid-UTF-8 generated .mdc target expected exit 2 (fail-closed)")
+        # A source path that is there but is not a directory is exit 2 in write mode with the generated
+        # .mdc kept, never read as an absent corpus that prunes every generated .mdc as an orphan.
+        nondir = tmp / "nondir"
+        kept = nondir.joinpath(*OUT_PARTS) / _RULE_MDC_REL
+        kept.parent.mkdir(parents=True)
+        kept.write_text("kept\n", encoding="utf-8")
+        (nondir / ".aiqt" / "core").mkdir(parents=True)
+        (nondir / ".aiqt" / "core" / "rules").write_text("not a directory\n", encoding="utf-8")
+        if run_quiet(nondir, check=False) != 2 or not kept.exists():
+            failures.append("a source path that is a regular file expected exit 2 with the generated "
+                            ".mdc kept")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -204,7 +221,8 @@ def self_test_main():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: an invalid-UTF-8 generated .mdc target fails closed (exit 2), not a raw "
-          "UnicodeDecodeError traceback (guards the widened reconcile arm).")
+          "UnicodeDecodeError traceback (guards the widened reconcile arm); a source path that is a "
+          "regular file exits 2 with the generated .mdc kept.")
     return 0
 
 

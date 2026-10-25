@@ -25,7 +25,8 @@ name the characters in its own source without flagging itself; it writes them on
   check_no_dashes.py --self-test       fixture trees for the scan and the policy validator
   check_no_dashes.py --default-parity  this repository only: DEFAULT_POLICY equals .aiqt/char-policy.json
 
-Exit: 0 clean; 1 a finding; 2 cannot evaluate (an unreadable tree, a malformed policy, a bad argument). A file
+Exit: 0 clean; 1 a finding; 2 cannot evaluate (an unreadable tree, a scoped tree that is there but is not a
+directory, a malformed policy, a bad argument). A file
 that is not valid UTF-8 is reported as SKIP and not scanned. --default-parity exits 0 when the two are equal,
 and also, saying SKIP, when the file is absent; 1 when they differ; 2 when the file cannot be used. An adopter's
 own policy differs from this repository's by design, so only this repository's check roster runs that mode;
@@ -58,7 +59,7 @@ import json as _stdlib_json  # noqa: E402,F401
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
-from _standards import dir_present  # noqa: E402  fail-closed absence probe (raises on an unreadable parent)
+from _standards import dir_or_absent  # noqa: E402  fail-closed absence probe (raises on an unreadable parent)
 
 POLICY_PATH = ".aiqt/char-policy.json"
 _SKIP = [".git", "node_modules", "__pycache__"]
@@ -273,7 +274,8 @@ def load_policy(root):
 def scope_paths(root, policy):
     """The files the policy scopes under root, in scope-entry order, each entry's files sorted, a path listed
     by an earlier entry kept there only. Raises OSError on a tree that cannot be walked or a file entry that
-    cannot be examined (fail-closed); an absent tree or file is skipped."""
+    cannot be examined, or a tree that is there but is not a directory (fail-closed); an absent tree or file
+    is skipped."""
     root = Path(root)
     paths, seen = [], set()
     for entry in policy["scope"]:
@@ -289,9 +291,14 @@ def scope_paths(root, policy):
         else:
             tree = entry["tree"]
             base = root if tree == "." else root.joinpath(*tree.split("/"))
-            # dir_present raises on an unreadable parent and walk_files on an unlistable subtree (exit 2).
-            if tree != "." and not dir_present(base):
-                continue
+            # dir_or_absent raises on an unreadable parent and walk_files on an unlistable subtree (exit 2); a
+            # tree that is there but is not a directory (a regular file or a symlink) is exit 2, never skipped.
+            if tree != ".":
+                present, problem = dir_or_absent(base)
+                if problem is not None:
+                    raise NotADirectoryError(f"the scoped tree {tree} {problem}")
+                if not present:
+                    continue
             found = sorted(walk_files(base, frozenset(entry.get("skip", ())), suffixes=set(entry["suffixes"])))
         for path in found:
             if path not in seen:
@@ -600,6 +607,10 @@ def _self_test():
         if done.returncode != 2 or "unknown key(s) ['metadata']" not in done.stderr:
             failures.append(f"G15 shadowing json.py: want exit 2 and the unknown key, got {done.returncode}: "
                             f"{(done.stdout + done.stderr).strip()[:200]!r}")
+        # G16 a scoped tree that is there but is not a directory is exit 2, never skipped as absent.
+        expect("G16 tree entry that is a regular file", tree({"t": em}, policy(
+            chars={em: "em dash"}, scope=[{"tree": "t", "suffixes": [".md"]}])), 2,
+            "the scoped tree t is not a directory")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     for failure in failures:

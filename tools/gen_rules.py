@@ -7,8 +7,9 @@ coded CIA+P). The updater's write root is `.aiqt/core/`; CI runs this in --check
 silently drift (including orphaned generated files with no source). Vendored `external/` trees are untouched.
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
-  gen_rules.py --self-test  assert an invalid-UTF-8 generated target fails closed (exit 2), and the
-                            MAP_KEYS read refusal exits 2 with empty stdout under each stderr condition
+  gen_rules.py --self-test  assert an invalid-UTF-8 generated target and a source path that is not a
+                            directory fail closed (exit 2), and the MAP_KEYS read refusal exits 2 with
+                            empty stdout under each stderr condition
 """
 import sys
 
@@ -30,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import dir_present, map_keys  # noqa: E402
+from _standards import dir_or_absent, dir_present, map_keys  # noqa: E402
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
@@ -246,9 +247,14 @@ def run(root, check):
     out_dir = root / ".claude" / "rules"
     desired = {}
     try:
-        # dir_present (not is_dir) inside the try: an unreadable .aiqt/ parent must fail closed as exit 2,
-        # not read as an absent corpus (which would delete every generated file as an orphan below).
-        if dir_present(src_dir):
+        # dir_or_absent (not is_dir) inside the try: an unreadable .aiqt/ parent, or a source path that is
+        # there but is not a directory, must fail closed as exit 2, not read as an absent corpus (which
+        # would delete every generated file as an orphan below).
+        present, problem = dir_or_absent(src_dir)
+        if problem is not None:
+            print("error: {} {} (cannot evaluate)".format(src_dir, problem))
+            return 2
+        if present:
             for src, _fm, rel in load_corpus(src_dir):
                 desired[rel] = src.read_text(encoding="utf-8")
     except (ValueError, OSError) as exc:
@@ -405,6 +411,17 @@ def self_test_main():
         target.write_bytes(b"\xff\xfe not utf-8")
         if run_quiet(tmp, check=True) != 2:
             failures.append("invalid-UTF-8 generated target expected exit 2 (fail-closed)")
+        # A source path that is there but is not a directory is exit 2 in write mode with the generated
+        # target kept, never read as an absent corpus that prunes every generated file as an orphan.
+        nondir = tmp / "nondir"
+        kept = nondir / ".claude" / "rules" / _RULE_REL
+        kept.parent.mkdir(parents=True)
+        kept.write_text(_RULE_SRC, encoding="utf-8")
+        (nondir / ".aiqt" / "core").mkdir(parents=True)
+        (nondir / ".aiqt" / "core" / "rules").write_text("not a directory\n", encoding="utf-8")
+        if run_quiet(nondir, check=False) != 2 or not kept.exists():
+            failures.append("a source path that is a regular file expected exit 2 with the generated "
+                            "target kept")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     failures.extend(_map_keys_refusal_failures())
@@ -415,7 +432,8 @@ def self_test_main():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: an invalid-UTF-8 generated target fails closed (exit 2), not a raw "
-          "UnicodeDecodeError traceback (guards the widened reconcile arm); the MAP_KEYS read refusal "
+          "UnicodeDecodeError traceback (guards the widened reconcile arm); a source path that is a regular "
+          "file exits 2 with the generated target kept; the MAP_KEYS read refusal "
           "exits 2 with empty stdout under {} stderr conditions ({}).".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS)))
     return 0

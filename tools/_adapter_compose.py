@@ -133,7 +133,7 @@ except ModuleNotFoundError:
             pass
     os._exit(2)
 
-from _standards import dir_present  # noqa: E402
+from _standards import dir_or_absent, dir_present  # noqa: E402
 
 REGISTRY_REL = ".aiqt/core/adapter-blocks.toml"
 RULES_PARTS = (".aiqt", "core", "rules")
@@ -772,10 +772,14 @@ def run(root, check, targets, regen, corpus_bodies):
     try:
         registry = load_registry(root)
         # dir_present (not is_dir): an unreadable .aiqt/ parent fails closed as exit 2, like an absent one.
+        # dir_or_absent only words the refusal: a path that is there but is not a directory is named as
+        # that (a regular file, or a dangling symlink), not as absent.
         src_dir = root.joinpath(*RULES_PARTS)
         if not dir_present(src_dir):
-            print("error: the rule corpus {}/ is absent; nothing was written or deleted (restore the corpus; "
-                  "to retire an adapter, review it and delete it by hand)".format("/".join(RULES_PARTS)))
+            _present, problem = dir_or_absent(src_dir)
+            print("error: the rule corpus {}/ {}; nothing was written or deleted (restore the corpus; "
+                  "to retire an adapter, review it and delete it by hand)".format(
+                      "/".join(RULES_PARTS), problem or "is absent"))
             return 2
         bodies = corpus_bodies(src_dir)
         plans = []

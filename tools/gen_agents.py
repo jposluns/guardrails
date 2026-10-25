@@ -131,6 +131,7 @@ def main():
 #   T15 two targets in one run (the gen_adapters pair) with either one refused: the other is not written.
 #   T16 no rule corpus: exit 2 in both modes and nothing deleted, whether the target is composed, legacy,
 #       legacy holding a pasted block, the gen_adapters pair, or absent (nothing is created either).
+#   T16b a rule corpus path that is a regular file: exit 2 in both modes, named as not a directory.
 #   T17 a rule corpus path that exists but cannot be stat'ed (a symlink loop): exit 2, nothing deleted.
 #   T18 a rule body holding a marker-like line, composed target: exit 2.
 #   T19 a target that is a symlink (to a file outside the tree, or dangling), a target under a symlinked
@@ -803,6 +804,16 @@ def self_test_main(nested_run=False):
                     failures.append("T16 no corpus, {}: no refusal message: {}".format(label, out.strip()))
             if read(root / AGENTS_REL) != agents:
                 failures.append("T16 no corpus, {}: AGENTS.md was not kept as it was".format(label))
+        # T16b. A corpus path that is a regular file is refused the same way, named as not a directory,
+        #       never as absent.
+        root = tree(ac.registry_text(), blocks=())
+        shutil.rmtree(root / ".aiqt" / "core" / "rules")
+        (root / ".aiqt" / "core" / "rules").write_text("not a directory\n", encoding="utf-8")
+        for check in (True, False):
+            out = expect("T16b corpus is a regular file", root, check, 2)
+            if "rules/ is not a directory; nothing was written or deleted" not in out or "is absent" in out:
+                failures.append("T16b corpus is a regular file: not named as not a directory: {}".format(
+                    out.strip()))
 
         # T17. A corpus path that exists but cannot be stat'ed (a symlink loop) is exit 2, never an absent
         #      corpus that deletes the adapters (Path.is_dir() reads it as absent).

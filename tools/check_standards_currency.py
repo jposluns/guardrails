@@ -178,7 +178,8 @@ def _not_run(failures, case, cause):
 
 
 _RUN_LEVEL_CASES = ("the run()-level exit-contract cases (current, stale, stale under --warn-only, "
-                    "malformed, malformed under --warn-only, absent dir, over-long integer literal, "
+                    "malformed, malformed under --warn-only, absent dir, a regular file as the dir, over-long "
+                    "integer literal, "
                     "injected parser overflow)")
 
 
@@ -333,6 +334,16 @@ def self_test_main(_mkdtemp=None, _vectors=True):
                 failures.append("run() malformed under --warn-only MUST stay exit 2 (never masked)")
             if _run_quiet(tmp / "does-not-exist") != 2:
                 failures.append("run() with an absent standards dir expected fail-closed exit 2")
+            # A standards path that is a regular file is load_manifests' own refusal (exit 2, named), never
+            # read as no manifests.
+            std_file = tmp / "standards-file"
+            std_file.write_text("not a directory\n", encoding="utf-8")
+            file_err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(file_err):
+                rc_file = run(std_file, today)
+            if rc_file != 2 or "is not a directory (cannot evaluate)" not in file_err.getvalue():
+                failures.append("run() with a standards path that is a regular file expected exit 2 naming it, "
+                                "got {}: {!r}".format(rc_file, file_err.getvalue()))
             # F-TOML-BARE-VALUEERROR-CLASS: an integer literal past CPython's 4300-digit int-string limit
             # makes tomllib raise a BARE ValueError (not TOMLDecodeError). _standards.load_manifests must
             # still raise ManifestError, so run() fails closed at exit 2 rather than escaping a traceback.

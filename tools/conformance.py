@@ -65,7 +65,7 @@ import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cu
 import gen_hooks            # noqa: E402  build_desired, PLUGIN_ROOT_PARTS, HOOKS_SUBTREE_PARTS (hooks plugin)
 import gen_skill            # noqa: E402  build_outputs, RESERVED_PARTS (the generated chat-skill surface)
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
-from _standards import dir_present, load_manifests, map_keys, validate_mappings, ManifestError  # noqa: E402
+from _standards import dir_or_absent, load_manifests, map_keys, validate_mappings, ManifestError  # noqa: E402
 
 
 # Status constants for a single check's outcome.
@@ -108,12 +108,16 @@ def _reachable(path):
     (True/False, None) when the path is reachable (present dir / genuinely absent), or (None, msg) when
     it EXISTS but cannot be read (an unreadable dir or an unreadable .aiqt/.claude/ parent). is_dir()
     swallows EACCES and returns False, so an unreadable input would read as absent -> NOT APPLICABLE (a
-    false-clean); dir_present raises on EACCES so the caller can render it as MALFORMED (exit 2) in its
-    own Result/tuple shape."""
+    false-clean); dir_or_absent raises on EACCES so the caller can render it as MALFORMED (exit 2) in its
+    own Result/tuple shape. Something there that is not a directory (a regular file, or a symlink,
+    dangling or not) is (None, msg) too, never read as absent."""
     try:
-        return (dir_present(path), None)
+        present, problem = dir_or_absent(path)
     except OSError as exc:
         return (None, "cannot read {}: {}".format(path, exc))
+    if problem is not None:
+        return (None, "{} {} (cannot evaluate)".format(path, problem))
+    return (present, None)
 
 
 def _rebind_map_keys(root):
@@ -181,7 +185,12 @@ def _claude_drift(root, corpus):
                 drift.append(rel)
         for family in ("aiqt", "security"):
             fam_dir = claude_dir / family
-            if dir_present(fam_dir):  # not is_dir: an unreadable .claude parent must fail closed (MALFORMED), not skip the orphan scan
+            # not is_dir or dir_present: an unreadable .claude parent, or a family path that is there but is
+            # not a directory, must fail closed (MALFORMED), not skip the orphan scan.
+            present, err = _reachable(fam_dir)
+            if err:
+                return (MALFORMED, err)
+            if present:
                 # os.walk(onerror=raise), not rglob: rglob silently skips an unreadable dir at ANY depth
                 # (concealing an orphan); os.walk surfaces the read error, caught below as MALFORMED.
                 for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_walk_raise):
@@ -1352,7 +1361,7 @@ def self_test_main():
         os.chmod(gen_fam, 0o755)  # restore so cleanup can remove it
 
         # 12. An unreadable .aiqt/ PARENT (not the standards/core dirs themselves) must fail closed:
-        #     dir_present() stats THROUGH it and raises EACCES, so the run fails as exit 2 rather than
+        #     dir_or_absent() stats THROUGH it and raises EACCES, so the run fails as exit 2 rather than
         #     reading the children as absent -> NOT APPLICABLE (the F-35 fail-open, where is_dir()
         #     swallows EACCES). Here map_keys()'s rebind trips first. Same root-vs-nonroot guard.
         badparent = tmp / "badparent"
@@ -1482,6 +1491,22 @@ def self_test_main():
                 failures.append("unreadable plugin hooks/ expected C5 MALFORMED:\n{}".format(out))
         os.chmod(hooks_surface, 0o755)  # restore so cleanup can remove it
 
+        # 17. An input that is there but is not a directory fails closed (exit 2, MALFORMED), never read
+        #     as absent -> NOT APPLICABLE: (a) a regular file at .aiqt/core/rules (C1), (b) at .claude/rules
+        #     (C3), (c) at a generated family .claude/rules/security, which the C2 orphan scan would skip.
+        for label, rel, cid in (("17a core rules", (".aiqt", "core", "rules"), "C1"),
+                                ("17b .claude/rules", (".claude", "rules"), "C3"),
+                                ("17c generated family", (".claude", "rules", "security"), "C2")):
+            nondir = tmp / ("nondir-" + label.split()[0])
+            nondir.mkdir()
+            _build_conformant(nondir)
+            shutil.rmtree(nondir.joinpath(*rel))
+            nondir.joinpath(*rel).write_text("not a directory\n", encoding="utf-8")
+            code, out = run_capture(nondir)
+            if code != 2 or status_of(out, cid) != MALFORMED:
+                failures.append("{} that is a regular file expected exit 2 + {} MALFORMED, got {}:\n{}".format(
+                    label, cid, code, out))
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:
@@ -1513,7 +1538,8 @@ def self_test_main():
           "orphan, or an orphaned surface with no source; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
           "(standards, core rules, generated families, the .aiqt/.claude/.github parents, and the plugin "
-          "hooks subtree), and a bad --root fail closed" + skip_note)
+          "hooks subtree), a regular file at the core rules, .claude/rules or a generated family, and a "
+          "bad --root fail closed" + skip_note)
     return 0
 
 

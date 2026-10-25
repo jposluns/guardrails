@@ -81,7 +81,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
-from _standards import dir_present  # noqa: E402
+from _standards import dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 # The nested plugin surface, as repo-root-relative forward-slash paths. hooks/ under the plugin root is
@@ -581,9 +581,14 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
     src_dir = root / ".aiqt" / "core" / "hooks"
     desired = {}
     try:
-        # dir_present (not is_dir) inside the try: an unreadable .aiqt/ parent must fail closed as
-        # exit 2, not read as an absent manifest (which would prune the whole surface as orphans).
-        if dir_present(src_dir):
+        # dir_or_absent (not is_dir) inside the try: an unreadable .aiqt/ parent, or a source path that
+        # is there but is not a directory, must fail closed as exit 2, not read as an absent manifest
+        # (which would prune the whole surface as orphans).
+        present, problem = dir_or_absent(src_dir)
+        if problem is not None:
+            print("error: {} {} (cannot evaluate)".format(src_dir, problem))
+            return 2
+        if present:
             desired = build_desired(root, src_dir)
             if project_ids and authoring_tree(root):
                 _plugin, hooks = load_manifest(src_dir / "manifest.toml")
@@ -655,6 +660,7 @@ def main():
 #   3. an unknown corpus-id in the manifest fails closed (exit 2),
 #   4. an empty residue fails closed (exit 2),
 #   5. an unreadable .aiqt/core/hooks/ fails closed (exit 2), never an all-absent clean,
+#  5b. a .aiqt/core/hooks that is not a directory fails closed (exit 2), the generated surface kept,
 #   6. a bad/unknown event fails closed (exit 2),
 #   7. an uncompilable matcher regex fails closed (exit 2),
 #   8. a named handler not defined in the source script fails closed (exit 2),
@@ -1493,6 +1499,19 @@ def self_test_main(_nested=False):
             if run_quiet(unread, check=True) != 2:
                 failures.append("unreadable .aiqt/core/hooks/ expected exit 2 (fail-closed)")
         os.chmod(hooks_src, 0o755)  # restore so cleanup can remove it
+
+        # 5b. A .aiqt/core/hooks that is there but is not a directory fails closed (exit 2) in write mode
+        #     with the generated surface kept, never read as an absent manifest that prunes it as orphans.
+        nondir = tmp / "nondir"
+        nondir.mkdir()
+        _build_tree(nondir)
+        run_quiet(nondir, check=False)
+        nondir_src = nondir / ".aiqt" / "core" / "hooks"
+        shutil.rmtree(nondir_src)
+        nondir_src.write_text("not a directory\n", encoding="utf-8")
+        if run_quiet(nondir, check=False) != 2 or not (nondir / HOOKS_JSON_REL).is_file():
+            failures.append("a .aiqt/core/hooks that is a regular file expected exit 2 with the generated "
+                            "surface kept")
 
         # 6. A bad/unknown hook event fails closed (the event whitelist).
         badevent = tmp / "badevent"
@@ -3787,7 +3806,7 @@ def self_test_main(_nested=False):
     print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; every rendered "
           "launcher runs isolated (args[0] == '-I'); hooks.json "
           "drift and a plugin hooks/ orphan fail the check; an unknown corpus-id, an empty residue, "
-          "an unreadable source tree, a bad/unknown event, an uncompilable matcher, a handler not in "
+          "an unreadable source tree, a source path that is not a directory, a bad/unknown event, an uncompilable matcher, a handler not in "
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
           "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
           "every non-warn event, accepted on every WARN_EVENTS event, plus warn+stage=bake on "
