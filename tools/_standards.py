@@ -174,8 +174,13 @@ _lstat = os.lstat
 # attribute (a self-test may wrap os.open); _adapter_compose binds its _DIR_FD_REQUIRES the same way.
 _DIR_FD_OK = os.open in os.supports_dir_fd and os.lstat in os.supports_dir_fd
 
+# The search-only open flag for a search_only walk, bound at import for the same reason: O_PATH where
+# the platform has it (a directory opened for search needs no read permission), else 0, so the walk
+# opens for reading as the default probe does.
+_SEARCH = getattr(os, "O_PATH", 0)
 
-def dir_present(path, *, root):
+
+def dir_present(path, *, root, search_only=False):
     """Fail-closed three-way directory probe. Return True only when every inspected component is a
     real directory by lstat (never following a link). Return False only on GENUINE absence: no
     directory entry at an inspected component (FileNotFoundError; a dangling symlink is a present
@@ -202,7 +207,13 @@ def dir_present(path, *, root):
     A path that is not beneath root (or that climbs with '..') raises OSError (EINVAL), so the
     callers' handlers refuse it too. The probe judges the tree only while it runs: a later read of
     the same path by name is not bound to it. Pairs with ensure_listable: dir_present catches an
-    unreachable or wrong-type entry, ensure_listable catches a reachable-but-unlistable directory."""
+    unreachable or wrong-type entry, ensure_listable catches a reachable-but-unlistable directory.
+
+    search_only opens root and every directory the walk passes through for search only (O_PATH where
+    the platform has it), so a traversable but unreadable directory on the way does not raise; the
+    default opens them for reading, so such a directory raises EACCES. Every judgement is the same
+    either way: each component is judged by lstat, and O_PATH with O_DIRECTORY|O_NOFOLLOW refuses a
+    symlink as O_RDONLY does."""
     path = Path(path)
     base = Path(root)
     try:
@@ -215,11 +226,12 @@ def dir_present(path, *, root):
         raise OSError(
             errno.ENOSYS, "directory probing bound beneath a descriptor (os.open and os.lstat "
             "with dir_fd) is unavailable on this platform", str(path))
+    search = _SEARCH if search_only else 0
     walked = base
     fds = []
     try:
         try:
-            fds.append(os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC))
+            fds.append(os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | search))
             for i, name in enumerate(parts):
                 walked = walked / name
                 st = _lstat(name, dir_fd=fds[-1])
@@ -232,14 +244,77 @@ def dir_present(path, *, root):
                     # refuses even a symlink swapped in between the lstat above and this open. The
                     # final component needs no descriptor: its lstat is the whole judgement.
                     fds.append(os.open(name,
-                                       os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                                       dir_fd=fds[-1]))
+                                       os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+                                       | search, dir_fd=fds[-1]))
         except FileNotFoundError:
             return False
         return True
     finally:
         for fd in reversed(fds):
             os.close(fd)
+
+
+def std_root(std):
+    """Return (root, std_dir) for an explicit --std DIR, after probing DIR from the filesystem root
+    down. A --std directory is its own root, and the loader opens its root as named, following a
+    symlink; so DIR is first walked by dir_present beneath its anchor, and a DIR that is itself a
+    symlink, live or dangling, or that has a symlink or a non-directory at ANY component below the
+    filesystem root raises NotADirectoryError naming that component, never followed. An absent DIR
+    reads as absent here, and the loader then finds no manifests, which its callers refuse. A
+    relative DIR is taken beneath os.getcwd(), which names no symlink, and a DIR that climbs with
+    '..' raises OSError (EINVAL), as dir_present refuses any '..'. The walk is search_only, so a
+    real DIR beneath a traversable but unreadable directory still works where the platform has
+    O_PATH, and raises EACCES (fail-closed) where it does not. The walk judges the tree only while it
+    runs: a component swapped for a symlink between this walk and the loader's open is not caught."""
+    std = Path(std)
+    named = std if std.is_absolute() else Path(os.getcwd()) / std
+    dir_present(named, root=Path(named.anchor), search_only=True)
+    return named, named
+
+
+def _std_root_vectors(launch, base, today, failures):
+    """Self-test vectors for a tool's explicit --std, shared by check_standards_currency.py and
+    check_standards_urls_live.py so both hold the same contract. launch(argv) runs the tool's main
+    and returns (exit code, stderr text); base is a fresh writable directory; today dates the fixture
+    manifest (a current, url-free manifest, so no vector reaches the network). A real --std exits 0,
+    also beneath a traversable but unreadable directory where the platform has O_PATH; a --std that
+    is a live or dangling symlink, or that sits beneath a symlinked ancestor, exits 2 naming the
+    symlink. Each failure is appended to failures as one line."""
+    base = Path(base).resolve()   # the fixture's own ancestors must hold no symlink
+    body = ('map-key = "map-cur"\nname = "Self-test cur"\npublisher = "AIQT self-test"\n'
+            'edition = "2026"\nkind = "control"\nstatus = "stable"\ncitation-unit = "control"\n'
+            'id-pattern = "ST[0-9]{{2}}"\nsource-artefact = "self-test fixture"\nretrieved = "{}"\n'
+            'catalogue = "full"\n[[id]]\ncode = "ST01"\ntitle = "one"\n').format(today.isoformat())
+    real = base / "std-real"
+    opaque = base / "std-opaque"
+    for directory in (real, opaque / "standards", base / "std-ancestor-real" / "standards"):
+        directory.mkdir(parents=True)
+        (directory / "cur.toml").write_text(body, encoding="utf-8")
+    try:
+        (base / "std-link").symlink_to(real)
+        (base / "std-dangling").symlink_to(base / "no-such-target")
+        (base / "std-ancestor-link").symlink_to(base / "std-ancestor-real")
+    except OSError as exc:
+        failures.append("NOT RUN: the --std symlink vectors: cannot create a symlink ({})".format(exc))
+        return
+    opaque.chmod(0o711)
+    try:
+        # (vector, --std, expected exit, the path the refusal must name)
+        for vector, std, want, named in (
+                ("real --std directory", real, 0, None),
+                ("real --std beneath a traversable but unreadable directory", opaque / "standards",
+                 0 if _SEARCH else 2, None),
+                ("--std that is a live symlink", base / "std-link", 2, base / "std-link"),
+                ("--std that is a dangling symlink", base / "std-dangling", 2, base / "std-dangling"),
+                ("--std beneath a symlinked ancestor", base / "std-ancestor-link" / "standards", 2,
+                 base / "std-ancestor-link")):
+            code, err = launch(["--std", str(std)])
+            if code != want or (named is not None and "a symlink where a directory is required: "
+                                "'{}'".format(named) not in err):
+                failures.append("{}: expected exit {}{}, got exit {} ({!r})".format(
+                    vector, want, "" if named is None else " naming " + str(named), code, err))
+    finally:
+        opaque.chmod(0o755)
 
 
 def ensure_listable(directory):

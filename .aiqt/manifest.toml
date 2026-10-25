@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "60b71b4afcdfc96fa2be82cd4e4d81c37494ba8ce5f44eb00b99da1b63c04314"
+tree-sha256 = "14b97cf6b5ccce01160350b0fd524ae44d09087832effb35263e8fa8f5d31849"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "7b80611053d0372b268cdf516922d6f8f4309cd17b62e4f6e5cfb14c7ae1ea3d"
+sha256 = "6dd2dd4774b7848eae3129f3b5928c0ddf0c694de3d19222651c6ff7577089cc"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3291,8 +3291,8 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_standards.py"
-bytes = 21766
-sha256 = "975f0c3cb116e9212289e2146490a85ad3e5941577e659efa21d9d48e49f6e05"
+bytes = 26763
+sha256 = "5c6b3b7a38ef891d35055ec374d0ab3da683c79a2c3960508b5c5fde0392ec41"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -3561,13 +3561,13 @@ sha256 = "df2a9de523bf1ea7c1ba1bdd4aa53050d5a67bffae362df6b52573f437b648cd"
 
 [[sources]]
 path = "tools/check_standards_currency.py"
-bytes = 22275
-sha256 = "e1cf329405d65ea168260bb23719790d890b55595ebfd5e7d0870522b868d762"
+bytes = 23741
+sha256 = "eaf3ec71cc7f020ce5d2832eac881774a2bbfc3183b4841cca0bbe1d5ceff929"
 
 [[sources]]
 path = "tools/check_standards_urls_live.py"
-bytes = 5828
-sha256 = "958a477e372a117db4c99474973c491aeb285742d707bac49e8dd899202ae073"
+bytes = 8027
+sha256 = "120a15610df1fb09041893d512ffbad36734433a0cbe03790f63d676f01e694c"
 
 [[sources]]
 path = "tools/check_version_monotonicity.py"

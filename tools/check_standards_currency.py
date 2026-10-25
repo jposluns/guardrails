@@ -40,7 +40,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _standards import Manifest, load_manifests, ManifestError  # noqa: E402
+from _standards import Manifest, load_manifests, ManifestError, std_root, _std_root_vectors  # noqa: E402
 
 try:
     from gen_rules import repo_root  # noqa: E402  reuse the repo's own root finder
@@ -116,8 +116,9 @@ def audit(manifests, today):
 
 def run(std_dir, today, warn_only=False, *, root):
     """Audit the manifests under std_dir as of `today`; print a report; return the exit code. std_dir is
-    probed beneath root (the repository root for the default dir; a --std directory is its own root), so a
-    symlinked or dangling .aiqt or standards fails closed (exit 2)."""
+    probed beneath root (the repository root for the default dir; a --std directory is its own root, which
+    main first probes from the filesystem root down with _standards.std_root), so a symlinked or dangling
+    .aiqt or standards, or a --std that is a symlink or has one at any component, fails closed (exit 2)."""
     try:
         manifests = load_manifests(std_dir, root=root)
     except (ManifestError, OSError) as exc:
@@ -165,10 +166,12 @@ def run(std_dir, today, warn_only=False, *, root):
 
 
 # --- self-test --------------------------------------------------------------------------------------
-# Deterministic against a fixed reference date (no wall clock). It drives classify() with crafted
+# Deterministic against a fixed reference date (no wall clock, except that the --std vectors date their
+# fixture one day before it, since main audits as of the wall clock). It drives classify() with crafted
 # (status, retrieved) pairs across every threshold boundary, checks audit()'s precedence, and exercises
 # run() itself over synthetic manifest files written to a private tempdir (current->0, stale->1,
-# stale+--warn-only->0, malformed->2, malformed+--warn-only->2, absent->2). The run()-level cases need a
+# stale+--warn-only->0, malformed->2, malformed+--warn-only->2, absent->2), and an explicit --std through
+# main (a real directory->0, a symlink at it or at an ancestor->2). The run()-level cases need a
 # writable tempdir; where none exists they are a NAMED NOT RUN failure (never a skip beside a PASS); CI
 # always has one. This is the only part of the tool wired into the PR gate.
 
@@ -181,7 +184,7 @@ def _not_run(failures, case, cause):
 
 _RUN_LEVEL_CASES = ("the run()-level exit-contract cases (current, stale, stale under --warn-only, "
                     "malformed, malformed under --warn-only, absent dir, over-long integer literal, "
-                    "injected parser overflow)")
+                    "injected parser overflow, explicit --std real or symlinked)")
 
 
 def _not_run_vector(failures):
@@ -378,6 +381,20 @@ def self_test_main(_mkdtemp=None, _vectors=True):
                             big_label, big_err.getvalue()))
             finally:
                 tomllib.loads, tomllib.load = real_loads, real_load
+
+            # An explicit --std, launched through main: a real directory exits 0, and a --std that is a
+            # symlink, live or dangling, or sits beneath a symlinked ancestor exits 2 naming it, never
+            # followed. main audits as of the wall clock, so the fixture is dated one day before it.
+            def _launch(argv):
+                err = io.StringIO()
+                with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                    code = main(argv)
+                return code, err.getvalue()
+
+            vectors = tmp / "std-vectors"
+            vectors.mkdir()
+            _std_root_vectors(_launch, vectors, date.fromordinal(
+                datetime.now(timezone.utc).date().toordinal() - 1), failures)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -391,7 +408,8 @@ def self_test_main(_mkdtemp=None, _vectors=True):
         return 1
     print("SELF-TEST PASS: per-status thresholds, warn-immediately, unparseable/future/unknown "
           "fail-closed, audit precedence (MALFORMED > FAIL > OK), url validation (https-with-host "
-          "required, malformed fails closed, absent -> None), and the run()-level exit contract all "
+          "required, malformed fails closed, absent -> None), the run()-level exit contract, and an "
+          "explicit --std (a real directory exits 0; a symlink at it or at any ancestor exits 2) all "
           "hold; an unavailable temp directory is a NOT RUN failure (nonzero exit), never a silent PASS")
     return 0
 
@@ -418,15 +436,22 @@ def _parse_args(argv):
     return (std, warn_only, self_test)
 
 
-def main():
-    parsed = _parse_args(sys.argv[1:])
+def main(argv=None):
+    parsed = _parse_args(sys.argv[1:] if argv is None else argv)
     if parsed is None:
         return 2
     std, warn_only, self_test = parsed
     if self_test:
         return self_test_main()
-    root = std if std is not None else repo_root()
-    std_dir = std if std is not None else (root / ".aiqt" / "standards")
+    if std is None:
+        root = repo_root()
+        std_dir = root / ".aiqt" / "standards"
+    else:
+        try:
+            root, std_dir = std_root(std)
+        except OSError as exc:
+            print("MALFORMED: --std {}: {}".format(std, exc), file=sys.stderr)
+            return 2
     # UTC, not date.today(): the `retrieved` dates and every project record are UTC, and a local-tz
     # "today" could shift a boundary-day age by a day on a differently-zoned runner. Deterministic in UTC.
     today = datetime.now(timezone.utc).date()
