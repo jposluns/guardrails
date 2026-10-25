@@ -55,22 +55,25 @@ under the repository root (code, Markdown, site HTML, generated outputs that are
 own source alike), decoded as UTF-8, and also runs inside the scoped scan above (so an untracked scoped
 surface is still covered). The only exemption is the internal-allow marker, which exempts the ONE line that
 carries it; this gate's own self-test vectors carry that marker on each line that holds the word, and no
-file is exempt by name. A tracked file that is not valid UTF-8 is skipped only when it is in a binary format
-the repository tracks, listed in TRACKED_BINARY_SIGNATURES and recognised by its suffix, its leading
-content signature AND by OPENING as a ZIP archive, the one listed format today (the committed skill .zip
-archives; the standard-library zipfile module parses a bounded read of the file, extracting nothing). A
-file that carries the signature but does not open as an archive within the read bound CANNOT BE EVALUATED
-and fails closed at exit 2 with its own named report; any other non-UTF-8
-tracked file whatever its suffix (a malformed .csv, say), a tracked path absent from the working tree, or a
-tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2, the way an
-unreadable input does. A .gitattributes `binary` attribute is NOT a skip: a binary-attributed file that
-decodes as UTF-8 is scanned. When git cannot list the tracked set (no git, not a repository, a failed or
-empty listing) the rule cannot run and the gate exits 2.
+file is exempt by name. Every tracked file whose suffix is TRACKED_ARCHIVE_SUFFIX (.zip, the format of the
+committed skill archives) first goes through the leak gate's archive rule, whether or not its bytes decode
+as UTF-8: check_leaks.verify_archive, the predicate built from the same functions the leak gate's scan
+applies (the archive-size bound on a read that stops one byte past it, the parsed records covering the
+file exactly, and every member read in full under zipfile's CRC and header checks; nothing is extracted to
+disk). A .zip that fails it CANNOT BE EVALUATED and fails closed at exit 2, named with the leak gate's
+reason. A .zip that passes is scanned when it decodes as UTF-8 and is otherwise skipped as binary, the only
+non-UTF-8 tracked file the role rule skips. Any other non-UTF-8 tracked file whatever its suffix (a
+malformed .csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working
+tree, or a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2,
+the way an unreadable input does. A .gitattributes `binary` attribute is NOT a skip: a binary-attributed
+file that decodes as UTF-8 is scanned. When git cannot list the tracked set (no git, not a repository, a
+failed or empty listing) the rule cannot run and the gate exits 2.
 WHAT THE ROLE RULE CANNOT SEE: an untracked or git-ignored file (outside the scoped scan), a generated
 output that is not committed and is not handed to it as a tracked file (a built release archive, a rendered
-site that is not checked in), the contents of a tracked binary file it skips (a ZIP archive), a staged
-change that differs from the working-tree copy (it reads the working tree), and the word split or encoded
-(an HTML entity, a zero-width character) so the plain pattern does not match.
+site that is not checked in), the content of a tracked .zip's members, which the archive rule reads in
+memory to verify the archive but this rule never scans (the leak gate scans them), a staged change that
+differs from the working-tree copy (it reads the working tree), and the word split or encoded (an HTML
+entity, a zero-width character) so the plain pattern does not match.
 
 REVIEW-ROUND LABEL RULE, WHOLE TRACKED TREE. The review-round label patterns (_REVIEW_LABELS: a reviewer
 family name followed by a QA round number, and a QA round number followed by a severity grade or a finding
@@ -90,17 +93,20 @@ tracked file outside SCOPE_RELPATHS, and a maintainer-decision id of each shape 
 passes clean generic content, so removing a
 layer makes a case fail. It also runs the real scan over a planted fixture repository to prove the tree-wide
 decision-id layer is wired in and fails closed on an unreadable file, an unlistable directory, a FIFO and a
-vanished file, and over fixture repositories to prove the role rule skips a non-UTF-8 tracked file only in a
-tracked binary format (a real ZIP archive passes, at and one byte inside the read bound too; a malformed
-.csv, an unsigned .zip, a .csv carrying the ZIP signature and a .zip matching only a prefix of the signature
-each exit 2 as not valid UTF-8; a signature-prefixed .zip that does not open as an archive, and the archive
-one byte over the read bound, each exit 2 named as not opening). The self-test exits 0 only when
+vanished file, and over fixture repositories to prove the role rule skips a non-UTF-8 tracked file only when
+it is a .zip the leak gate's archive rule accepts (a real ZIP archive passes, with the archive-size bound at
+its exact size and one byte above too, and an accepted archive that decodes as UTF-8 is scanned; a malformed
+.csv and a .csv carrying the ZIP signature each exit 2 as not valid UTF-8; a .zip without the signature, a
+signature-prefixed .zip that is not an archive, valid UTF-8 or not, a .zip with one member failing its CRC, a
+.zip of bytes ahead of an empty archive's end record, the archive with the bound one byte under its size,
+and the archive followed by bytes past the bound each exit 2 named with the leak gate's reason, and the
+archive deleted from the working tree exits 2 as absent). The self-test exits 0 only when
 every case ran and passed; 1 when any case failed (it also prints the cases it did not run); otherwise, when
 it skipped a case, 3. It never exits 0 after a skip. Skip reasons it prints include, as examples rather than
 a complete set:
   "case 11 (a dangling symlink could not be created)"
   "case 12 (a dangling symlink could not be created)"
-  "case 19 at the {} path (a FIFO could not be created)" ({} is hash-file or scoped-file)
+  "case 19 at the {} path (a FIFO could not be created)" ({} is hash-file, scoped-file or tracked-zip)
   "case 19 (os.mkfifo is unavailable)"
   "cases 19 to 23 and 25 (the child sentinel matched the parent pid)"
   "case 23 (the inherited-probe sentinel matched the parent pid)"
@@ -120,7 +126,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
-import io
 import os
 import re
 import stat
@@ -141,18 +146,12 @@ import check_leaks  # noqa: E402  reuse the leak gate's normalization + structur
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 SKIP_NAMES = {"internal-name-hashes.txt", "check_internal_names.py", "check_leaks.py", "leak-hashes.txt"}
 TEXT_SUFFIXES = check_leaks.TEXT_SUFFIXES
-# The binary formats the repository tracks, the only non-UTF-8 tracked files the role rule skips: each suffix
-# with the content signature a file under it must start with, so a suffix alone never makes a file binary.
-# Today that is the ZIP archive alone (the committed skill archives under site/downloads/, each starting with
-# a ZIP local file header). A tracked file in any other binary format cannot be evaluated until it is listed.
-# The suffix and signature only SELECT the format: the skip is granted only when the file also OPENS as a ZIP
-# archive (_tracked_binary), so a signature prefix glued onto other bytes never reads as binary.
-TRACKED_BINARY_SIGNATURES = {".zip": b"PK\x03\x04"}
-# The most bytes _tracked_binary reads to verify that a signature-matched file opens as a ZIP archive, reused
-# from the leak gate so the two gates agree on what a readable archive is. A signature-matched file over this
-# bound cannot be evaluated (fail closed), never skipped unverified. The self-test proves both ends of the
-# bound by patching this value around a real archive's exact size.
-_BINARY_READ_MAX = check_leaks.MAX_ARCHIVE_FILE_SIZE
+# The suffix of the one binary format the repository tracks, the ZIP archive (the committed skill archives
+# under site/downloads/). Every tracked file under it goes through the leak gate's archive rule
+# (check_leaks.verify_archive) whether or not its bytes decode as UTF-8, so the suffix only selects the rule:
+# a file the rule refuses cannot be evaluated, and only a file it accepts can be skipped as binary. A
+# tracked file in any other binary format cannot be evaluated until a rule for it is added here.
+TRACKED_ARCHIVE_SUFFIX = ".zip"
 HASHES_RELPATH = ("tools", "internal-name-hashes.txt")
 
 # The QA-suite shipped surfaces this gate is responsible for keeping genericized. Files are scanned
@@ -220,24 +219,33 @@ STRUCTURAL = list(check_leaks.STRUCTURAL) + _PROVENANCE + _TRACKED_RULES
 DECISION_ID = (re.compile(r'\bD-(?:[0-9]+|[A-Z][A-Z0-9]+)(?:-[A-Z0-9]+)+\b'), "internal maintainer-decision id")
 
 
-def _read_present_text(path):
-    """Read `path` as UTF-8 text, failing closed on a present-but-unreadable input WITHOUT blocking. Presence
-    is classified with an S_ISREG check BEFORE any open (mirroring the QA adapter's _classify_presence), so a
-    NON-REGULAR file (a FIFO above all, whose open() would BLOCK waiting for a writer, but also a device,
-    socket, or directory) is a fail-closed OSError rather than a hanging open, and a BROKEN SYMLINK (a present
-    dentry whose target is missing) re-raises fail-closed. A genuinely ABSENT path (no dentry at all) returns
-    None so a caller for whom absence is intended (the denylist) can treat it as empty; every PRESENT dentry
-    that is not a readable regular file raises OSError to the fail-closed caller (exit 2). path.stat() FOLLOWS
-    a symlink, so a dangling link raises FileNotFoundError exactly as an absent path, and path.is_symlink()
-    (lstat) is what tells a present-but-dangling dentry from a truly missing one."""
+def _present(path):
+    """True when `path` is a present regular file, False when it is genuinely ABSENT (no dentry at all).
+    Presence is classified with an S_ISREG check BEFORE any open (mirroring the QA adapter's
+    _classify_presence), so a NON-REGULAR file (a FIFO above all, whose open() would BLOCK waiting for a
+    writer, but also a device, socket, or directory) is a fail-closed OSError rather than a hanging open, and a
+    BROKEN SYMLINK (a present dentry whose target is missing) re-raises fail-closed: every PRESENT dentry that
+    is not a regular file raises OSError to the fail-closed caller (exit 2). path.stat() FOLLOWS a symlink, so
+    a dangling link raises FileNotFoundError exactly as an absent path, and path.is_symlink() (lstat) is what
+    tells a present-but-dangling dentry from a truly missing one."""
     try:
         st = path.stat()
     except FileNotFoundError:
         if path.is_symlink():
             raise
-        return None
+        return False
     if not stat.S_ISREG(st.st_mode):
         raise OSError("{} is present but not a regular file; fail closed".format(path))
+    return True
+
+
+def _read_present_text(path):
+    """Read `path` as UTF-8 text, failing closed on a present-but-unreadable input WITHOUT blocking: _present
+    classifies the path before any open. A genuinely ABSENT path returns None so a caller for whom absence is
+    intended (the denylist) can treat it as empty; every PRESENT dentry that is not a readable regular file
+    raises OSError to the fail-closed caller (exit 2)."""
+    if not _present(path):
+        return None
     return path.read_text(encoding="utf-8")
 
 
@@ -408,60 +416,39 @@ def scan_role_text(text):
     return found
 
 
-def _tracked_binary(path):
-    """Classify the regular file at `path` for the role rule's binary exemption. "binary": the file is in a
-    binary format the repository tracks (its suffix is listed in TRACKED_BINARY_SIGNATURES, its content
-    starts with that format's signature, AND it opens as a ZIP archive, the one listed format today: the
-    standard-library zipfile module parses at most _BINARY_READ_MAX bytes, read through one descriptor and
-    held in memory; no member is extracted or scanned). "unverified": the suffix and signature match but the
-    file does not open as a ZIP archive within the read bound; the caller fails closed (exit 2) naming the
-    file, so a signature prefix alone never buys the skip. "text": an unlisted suffix or a missing
-    signature; the file is not a tracked binary and the caller reports it as not valid UTF-8."""
-    signature = TRACKED_BINARY_SIGNATURES.get(path.suffix)
-    if signature is None:
-        return "text"
-    with open(path, "rb") as handle:
-        head = handle.read(len(signature))
-        if head != signature:
-            return "text"
-        data = head + handle.read(_BINARY_READ_MAX - len(head) + 1)
-    if len(data) > _BINARY_READ_MAX:
-        return "unverified"
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)):
-            return "binary"
-    except Exception:  # zipfile reports corruption as BadZipFile, ValueError, EOFError and others
-        return "unverified"
-
-
 def scan_tracked_roles(root, relpaths):
     """Return (findings, unevaluable) for the role rule (the role name and the review-round labels) over the
-    tracked `relpaths`, independent of SCOPE_RELPATHS and SKIP_NAMES. A file that is not valid UTF-8 is
-    skipped only when it is in a binary format the repository tracks (_tracked_binary: a listed suffix, that
-    format's content signature, and the file opening as a ZIP archive within the read bound); a file that
-    carries the signature but does not open as an archive is unevaluable with its own named report, and any
-    other non-UTF-8 file, whatever its suffix, or a tracked path absent from the working tree, is
-    unevaluable too. A tracked path that is present but not a readable regular file raises OSError (exit 2)
-    through _read_present_text."""
+    tracked `relpaths`, independent of SCOPE_RELPATHS and SKIP_NAMES. A file whose suffix is
+    TRACKED_ARCHIVE_SUFFIX goes through check_leaks.verify_archive, the leak gate's archive rule, whether or
+    not its bytes decode as UTF-8: one the rule refuses is unevaluable, named with the leak gate's reason (and
+    the member, when one member is the cause); one it accepts is scanned when its bytes decode as UTF-8 and is
+    otherwise skipped as binary. Any other file that is not valid UTF-8, whatever its suffix, and a tracked
+    path absent from the working tree are unevaluable too. A tracked path that is present but not a regular
+    file raises OSError (exit 2) through _present, before any open, and so does a read error."""
     findings, unevaluable = [], []
+    cannot = "; the role-name and review-round label rule cannot evaluate it"
     for rel in relpaths:
+        path = root / rel
         try:
-            text = _read_present_text(root / rel)
-        except UnicodeDecodeError:
-            verdict = _tracked_binary(root / rel)
-            if verdict == "binary":
-                continue
-            if verdict == "unverified":
-                unevaluable.append("{}: tracked file starts with the ZIP signature but does not open as a "
-                                   "ZIP archive within the read bound; the role-name and review-round label "
-                                   "rule cannot evaluate it".format(rel))
+            if path.suffix != TRACKED_ARCHIVE_SUFFIX:
+                text = _read_present_text(path)
+            elif _present(path):
+                data = check_leaks.verify_archive(path)
+                try:
+                    text = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue  # an archive the leak gate reads in full, in binary form: skipped
             else:
-                unevaluable.append("{}: tracked file is not valid UTF-8; the role-name and review-round label "
-                                   "rule cannot evaluate it".format(rel))
+                text = None
+        except UnicodeDecodeError:
+            unevaluable.append("{}: tracked file is not valid UTF-8{}".format(rel, cannot))
+            continue
+        except check_leaks.CannotEvaluate as exc:
+            unevaluable.append("{}: tracked .zip fails the leak gate's archive rule ({}{}){}".format(
+                rel, "" if exc.member is None else "member " + exc.member + ": ", exc, cannot))
             continue
         if text is None:
-            unevaluable.append("{}: tracked file is absent from the working tree; the role-name and "
-                               "review-round label rule cannot evaluate it".format(rel))
+            unevaluable.append("{}: tracked file is absent from the working tree{}".format(rel, cannot))
             continue
         for number, label in scan_role_text(text):
             findings.append("{}:{}: {}".format(rel, number, label))
@@ -903,7 +890,7 @@ def _self_test(caller_env=None):
         (repo / "data.bin").write_text("binary-attributed but UTF-8: Architect\n", encoding="utf-8")  # internal-allow
         (repo / ".gitattributes").write_text("data.bin binary\nblob.zip binary\n", encoding="utf-8")
         with zipfile.ZipFile(repo / "blob.zip", "w", zipfile.ZIP_STORED) as blob:
-            blob.writestr("note.bin", b"\xff\xfe Architect \xff\n")  # internal-allow
+            blob.writestr("note.bin", b"\x80 Architect \xff\n")  # internal-allow
         (repo / "clean.md").write_text("An architectural note on the Architecture section.\n", encoding="utf-8")
         (repo / "untracked.md").write_text("the Architect, never added\n", encoding="utf-8")  # internal-allow
         init = subprocess.run(["git", "-C", str(repo), "init", "-q"], capture_output=True, text=True,
@@ -941,8 +928,8 @@ def _self_test(caller_env=None):
             if "notes.txt:2: " + role not in report or "notes.txt:1: " + role in report:
                 failures.append("internal-allow expected to exempt notes.txt line 1 only, got {!r}".format(report))
             # 16. DISCRIMINATING (binary and non-UTF-8 files follow the stated rule): a .gitattributes
-            #     binary file that decodes as UTF-8 is scanned (data.bin is caught); a non-UTF-8 file in a
-            #     tracked binary format is skipped (blob.zip, a real ZIP archive built with zipfile, is
+            #     binary file that decodes as UTF-8 is scanned (data.bin is caught); a non-UTF-8 .zip the leak
+            #     gate's archive rule accepts is skipped (blob.zip, a real ZIP archive built with zipfile, is
             #     neither caught nor unevaluable; case 28 covers the inputs that are not skipped); and
             #     an untracked file is out of the role rule's reach (untracked.md, a disclosed limit).
             if "data.bin:1: " + role not in report:
@@ -1003,33 +990,74 @@ def _self_test(caller_env=None):
         if rc != 2:
             failures.append("a root that is not a git repository expected exit 2, got rc={} {!r}".format(rc, report))
 
-        # 28. DISCRIMINATING (a non-UTF-8 tracked file is skipped only in a tracked binary format, recognised by
-        #     suffix AND content signature AND by opening as a ZIP archive): a real ZIP archive with non-UTF-8
-        #     bytes, tracked beside a clean file, passes (exit 0). Each of the following, tracked in turn,
-        #     cannot be evaluated (exit 2) with the expected report: a malformed .csv holding a review-round
-        #     label, a .zip without the ZIP signature and a .csv that starts with the ZIP signature (each
-        #     reported as not valid UTF-8); a .zip that starts with the ZIP signature but does not open as an
-        #     archive (reported as not opening, never skipped on the signature alone); and a .zip whose first
-        #     bytes match only a PREFIX of the signature (reported as not valid UTF-8, so truncating the
-        #     stored signature to any prefix, or comparing fewer bytes than the signature holds, moves it to
-        #     the not-opening report and fails this case). Skipping by a suffix outside TEXT_SUFFIXES lets the
-        #     .csv read clean; skipping by suffix alone lets the unsigned .zip read clean; skipping by
-        #     signature alone lets the signed .csv read clean; skipping on the signature without opening the
-        #     archive lets the malformed .zip read clean; never skipping fails the archive; each fails this
-        #     case. The read bound is then proven at both ends by patching _BINARY_READ_MAX around the
-        #     archive's exact size: at the size and one byte above, the archive still passes; one byte below,
-        #     it cannot be evaluated, pinning the comparison's direction and inclusiveness.
+        # 28. DISCRIMINATING (every tracked .zip goes through the leak gate's archive rule,
+        #     check_leaks.verify_archive, whether or not its bytes decode as UTF-8, and only an archive the
+        #     rule accepts is skipped as binary): a real ZIP archive with non-UTF-8 bytes, tracked beside a
+        #     clean file, passes (exit 0). Each of the following, tracked in turn, cannot be evaluated (exit 2)
+        #     with the expected report: a malformed .csv holding a review-round label and a .csv that starts
+        #     with the ZIP signature (each reported as not valid UTF-8, since only the .zip suffix selects the
+        #     archive rule); and, each named with the leak gate's reason, a .zip without the signature, a
+        #     signature-prefixed .zip that is not an archive, a signature-prefixed .zip that is not an archive
+        #     and whose bytes are valid UTF-8, a real archive with one stored member byte changed (zipfile
+        #     opens it; its CRC fails when the member is read), and a review-round label in bytes ahead of an
+        #     empty archive's end record (zipfile opens it; the records do not cover its bytes). Skipping by a
+        #     suffix outside TEXT_SUFFIXES lets the .csv read clean; skipping on the signature, or on zipfile
+        #     opening the file, lets the non-archive, the CRC-failing and the prefixed .zip read clean; applying
+        #     the rule only to bytes that are not valid UTF-8 lets the valid UTF-8 one read clean; never
+        #     skipping fails the archive; each fails this case. An archive the rule accepts whose bytes are
+        #     all valid UTF-8 (one stored member holding a review-round label) is scanned and the label found
+        #     (exit 1): skipping every accepted archive drops the finding. The archive-size bound
+        #     (check_leaks.MAX_ARCHIVE_FILE_SIZE, patched around the archive's exact size) is then checked at
+        #     both ends: one byte above the size and at it, the archive passes; one byte below, it cannot be
+        #     evaluated, named with the size reason; and with the bound at the size, the same archive followed
+        #     by a review-round label past the bound cannot be evaluated either, named with the size reason.
+        #     Dropping the size check passes the archive one byte over the bound, and a read that stops at the
+        #     bound instead of one byte past it reads the whole archive and skips the label behind it. Last, the
+        #     tracked archive deleted from the working tree is reported as absent (exit 2).
         binrepo = tmp / "binary-repo"
         binrepo.mkdir()
         (binrepo / "clean.md").write_text("A clean note.\n", encoding="utf-8")
         with zipfile.ZipFile(binrepo / "archive.zip", "w", zipfile.ZIP_STORED) as archive:
             archive.writestr("member.bin", b"\xff\xfe stored bytes \xff\n")
         archive_bytes = (binrepo / "archive.zip").read_bytes()
-        try:
-            archive_bytes.decode("utf-8")
-            failures.append("the case 28 archive decodes as UTF-8, so the binary-skip vector would be vacuous")
-        except UnicodeDecodeError:
+        label_bytes = ("checked by codex " + qa + "932\n").encode("utf-8")
+        plain_zip = b"PK\x03\x04plain text in valid UTF-8\n"
+        stored_at = archive_bytes.index(b"stored bytes")
+        corrupt_zip = archive_bytes[:stored_at] + b"S" + archive_bytes[stored_at + 1:]
+        empty = io.BytesIO()
+        with zipfile.ZipFile(empty, "w"):
             pass
+        prefixed_zip = b"PK\x03\x04 \xff " + label_bytes + empty.getvalue()
+        # An accepted archive whose bytes are all valid UTF-8: one stored member with a fixed timestamp and a
+        # read-only mode whose bytes are ASCII (zipfile writes mode 0o600, a 0x80 byte, when none is set), its
+        # content ending in a counter raised until the CRC holds no byte that breaks the decode.
+        utf8_zip = None
+        for counter in range(4096):
+            built = io.BytesIO()
+            note = zipfile.ZipInfo("note.txt", (1980, 1, 1, 0, 0, 0))
+            note.external_attr = 0o444 << 16
+            with zipfile.ZipFile(built, "w") as archive:
+                archive.writestr(note, label_bytes + "counter {}\n".format(counter).encode("ascii"))
+            try:
+                built.getvalue().decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            utf8_zip = built.getvalue()
+            break
+        guarded = [("archive", archive_bytes, False), ("CRC-failing archive", corrupt_zip, False),
+                   ("label ahead of an empty archive", prefixed_zip, False),
+                   ("valid UTF-8 non-archive", plain_zip, True)]
+        if utf8_zip is not None:
+            guarded.append(("valid UTF-8 archive", utf8_zip, True))
+        for what, content, decodes in guarded:
+            try:
+                content.decode("utf-8")
+                valid = True
+            except UnicodeDecodeError:
+                valid = False
+            if valid != decodes:
+                failures.append("the case 28 {} expected {}to decode as UTF-8, so its vector would be "
+                                "vacuous".format(what, "" if decodes else "not "))
         init = subprocess.run(["git", "-C", str(binrepo), "init", "-q"], capture_output=True, text=True,
                               env=_git_fixture_env.git_fixture_env(), timeout=60)
         add = subprocess.run(["git", "-C", str(binrepo), "add", "--", "clean.md", "archive.zip"],
@@ -1042,43 +1070,88 @@ def _self_test(caller_env=None):
             if rc != 0 or "archive.zip" in report:
                 failures.append("a tracked ZIP archive expected to pass (exit 0), got rc={} {!r}".format(rc, report))
             not_utf8 = ": tracked file is not valid UTF-8"
-            not_open = ": tracked file starts with the ZIP signature but does not open as a ZIP archive"
+            rule = ": tracked .zip fails the leak gate's archive rule ("
+            not_archive = rule + "not a readable ZIP archive: "
             for name, content, expect in (
-                    ("review.csv", ("codex " + qa + "932\n").encode("utf-8") + b"\xff", not_utf8),
-                    ("unsigned.zip", b"\xff\xfe not an archive \xff\n", not_utf8),
+                    ("review.csv", label_bytes + b"\xff", not_utf8),
                     ("signed.csv", b"PK\x03\x04\xff\xfe not an archive \xff\n", not_utf8),
-                    ("malformed.zip", b"PK\x03\x04\xff\xfe not an archive \xff\n", not_open),
-                    ("nearsigned.zip", b"PK\x03\x05\xff\xfe not an archive \xff\n", not_utf8)):
+                    ("unsigned.zip", b"\xff\xfe not an archive \xff\n", not_archive),
+                    ("malformed.zip", b"PK\x03\x04\xff\xfe not an archive \xff\n", not_archive),
+                    ("plain.zip", plain_zip, not_archive),
+                    ("corrupt.zip", corrupt_zip, rule + "member member.bin: member cannot be read: BadZipFile"),
+                    ("prefixed.zip", prefixed_zip,
+                     rule + "the parsed records do not cover the archive's bytes exactly: {} byte(s) at offsets 0 "
+                     "to {} belong to no record".format(len(prefixed_zip) - 22, len(prefixed_zip) - 23))):
                 (binrepo / name).write_bytes(content)
                 add = subprocess.run(["git", "-C", str(binrepo), "add", "--", name], capture_output=True,
                                      text=True, env=_git_fixture_env.git_fixture_env(), timeout=60)
                 rc, report = gate(binrepo)
-                wrong = name + not_open if expect == not_utf8 else name + not_utf8
+                wrong = name + (rule if expect == not_utf8 else not_utf8)
                 if add.returncode != 0 or rc != 2 or name + expect not in report or wrong in report:
-                    failures.append("a tracked non-UTF-8 {} expected cannot-evaluate (exit 2) reported as {!r}, "
-                                    "got rc={} {!r}".format(name, expect, rc, report))
+                    failures.append("a tracked {} expected cannot-evaluate (exit 2) reported as {!r}, got rc={} "
+                                    "{!r}".format(name, expect, rc, report))
                 remove = subprocess.run(["git", "-C", str(binrepo), "rm", "-q", "-f", "--", name],
                                         capture_output=True, text=True, env=_git_fixture_env.git_fixture_env(),
                                         timeout=60)
                 if remove.returncode != 0:
                     failures.append("the case 28 file {} could not be removed: {!r}".format(name, remove.stderr))
-            # Both ends of the verification read bound, on the tracked real archive: at the archive's exact
-            # size and one byte above it, the archive verifies and the gate passes; one byte below, the
-            # archive is over the bound and cannot be evaluated (exit 2, named with the not-opening report),
-            # never skipped unverified. A bound comparison with the wrong direction or inclusiveness, or a
-            # skip that stops verifying, fails one of the three.
-            global _BINARY_READ_MAX
-            saved_bound = _BINARY_READ_MAX
+            if utf8_zip is None:
+                failures.append("no case 28 archive with bytes that are all valid UTF-8 was found in 4096 tries")
+            else:
+                (binrepo / "utf8.zip").write_bytes(utf8_zip)
+                add = subprocess.run(["git", "-C", str(binrepo), "add", "--", "utf8.zip"], capture_output=True,
+                                     text=True, env=_git_fixture_env.git_fixture_env(), timeout=60)
+                rc, report = gate(binrepo)
+                hit = any(line.strip().startswith("utf8.zip:") and line.strip().endswith(": " + review_label)
+                          for line in report.splitlines())
+                if add.returncode != 0 or rc != 1 or not hit or "utf8.zip" + rule in report:
+                    failures.append("an accepted archive whose bytes are valid UTF-8 expected to be scanned (exit 1, "
+                                    "its label found), got rc={} {!r}".format(rc, report))
+                remove = subprocess.run(["git", "-C", str(binrepo), "rm", "-q", "-f", "--", "utf8.zip"],
+                                        capture_output=True, text=True, env=_git_fixture_env.git_fixture_env(),
+                                        timeout=60)
+                if remove.returncode != 0:
+                    failures.append("the case 28 file utf8.zip could not be removed: {!r}".format(remove.stderr))
+            # Both ends of the archive-size bound, on the tracked real archive (the leak gate's
+            # MAX_ARCHIVE_FILE_SIZE, which the shared rule reads): one byte above the archive's exact size
+            # and at it, the archive passes; one byte below, the read stops one byte past the bound, holding
+            # the whole archive, and the archive cannot be evaluated, named with the size reason. Then, with
+            # the bound at the size, the archive followed by a label past the bound cannot be evaluated
+            # either. A bound comparison with the wrong direction or inclusiveness, a dropped size check, or
+            # a read that stops at the bound fails one of these.
+            size_reason = (rule + "a ZIP archive of more than MAX_ARCHIVE_FILE_SIZE ({}) bytes; the read stopped at "
+                           "{} bytes")
+            saved_bound = check_leaks.MAX_ARCHIVE_FILE_SIZE
             try:
-                for bound, want_rc in ((len(archive_bytes), 0), (len(archive_bytes) + 1, 0),
+                for bound, want_rc in ((len(archive_bytes) + 1, 0), (len(archive_bytes), 0),
                                        (len(archive_bytes) - 1, 2)):
-                    _BINARY_READ_MAX = bound
+                    check_leaks.MAX_ARCHIVE_FILE_SIZE = bound
                     rc, report = gate(binrepo)
-                    if rc != want_rc or (want_rc == 2) != ("archive.zip" + not_open in report):
-                        failures.append("with the binary read bound {} the archive ({} bytes) expected exit {}, "
+                    over = "archive.zip" + size_reason.format(bound, bound + 1)
+                    if rc != want_rc or (want_rc == 2) != (over in report):
+                        failures.append("with the archive-size bound {} the archive ({} bytes) expected exit {}, "
                                         "got rc={} {!r}".format(bound, len(archive_bytes), want_rc, rc, report))
+                (binrepo / "overrun.zip").write_bytes(archive_bytes + b"\xff " + label_bytes)
+                add = subprocess.run(["git", "-C", str(binrepo), "add", "--", "overrun.zip"], capture_output=True,
+                                     text=True, env=_git_fixture_env.git_fixture_env(), timeout=60)
+                bound = len(archive_bytes)
+                check_leaks.MAX_ARCHIVE_FILE_SIZE = bound
+                rc, report = gate(binrepo)
+                over = "overrun.zip" + size_reason.format(bound, bound + 1)
+                if add.returncode != 0 or rc != 2 or over not in report or "archive.zip" in report:
+                    failures.append("with the archive-size bound at the archive's size ({} bytes), the archive "
+                                    "followed by a label past the bound expected exit 2 named with the size "
+                                    "reason, got rc={} {!r}".format(bound, rc, report))
             finally:
-                _BINARY_READ_MAX = saved_bound
+                check_leaks.MAX_ARCHIVE_FILE_SIZE = saved_bound
+            # A tracked .zip absent from the working tree is unevaluable as absent, like any tracked file,
+            # classified before the archive read opens it (an archive read without that check is a read
+            # error instead).
+            (binrepo / "archive.zip").unlink()
+            rc, report = gate(binrepo)
+            if rc != 2 or "archive.zip: tracked file is absent from the working tree" not in report:
+                failures.append("a tracked .zip absent from the working tree expected cannot-evaluate (exit 2) "
+                                "reported as absent, got rc={} {!r}".format(rc, report))
 
         # 18. DISCRIMINATING (finding-3: an unknown option is a LOUD exit 2, never a silent default path): a
         #     subprocess given a misspelled --self-testx or a stray --bogus exits 2, never 0 by silently
@@ -1103,16 +1176,18 @@ def _self_test(caller_env=None):
             toolsdir = str(Path(__file__).resolve().parent)
 
             # 19. DISCRIMINATING (finding-1: a NON-REGULAR input FAILS CLOSED, never blocks on open): a FIFO
-            #     at the hash-file path and at a scoped path is classified non-regular BEFORE any open, so
-            #     load_hashes/scan_scope raise a fail-closed OSError PROMPTLY. Reverting the S_ISREG-before-open
-            #     guard (a bare read_text) blocks on open(FIFO) and the probe times out. Each probe imports
+            #     at the hash-file path, at a scoped path and at a tracked .zip path is classified non-regular
+            #     BEFORE any open, so load_hashes/scan_scope/scan_tracked_roles raise a fail-closed OSError
+            #     PROMPTLY. Reverting the S_ISREG-before-open guard (a bare read_text, or the archive read
+            #     without the _present check) blocks on open(FIFO) and the probe times out. Each probe imports
             #     this module in a child and calls the function on a FIFO under a short timeout; a hang is a
             #     recorded failure, never an unbounded wait. Needs os.mkfifo (POSIX); asserted where available.
             if hasattr(os, "mkfifo"):
                 for label, target_rel, call in (
                         ("hash-file", "tools/internal-name-hashes.txt", "cin.load_hashes(root)"),
                         ("scoped-file", "tools/subject.md",
-                         "cin.scan_scope(root, ('tools/subject.md',), set(), 3)")):
+                         "cin.scan_scope(root, ('tools/subject.md',), set(), 3)"),
+                        ("tracked-zip", "tools/skill.zip", "cin.scan_tracked_roles(root, ['tools/skill.zip'])")):
                     fifo_root = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-fifo-"))
                     (fifo_root / "tools").mkdir()
                     fifo_path = fifo_root / target_rel
@@ -1697,15 +1772,20 @@ def _self_test(caller_env=None):
           "one is exempt; the real gate run on a fixture git repository "
           "catches the role name in a tracked file outside SCOPE_RELPATHS and in a tracked file whose basename "
           "is in SKIP_NAMES, exempts only the one internal-allow line, scans a binary-attributed file that "
-          "decodes as UTF-8, skips a non-UTF-8 tracked ZIP archive and an untracked file, and exits 2 "
+          "decodes as UTF-8, skips a non-UTF-8 tracked ZIP archive the leak gate's archive rule accepts and an "
+          "untracked file, and exits 2 "
           "(cannot evaluate) on a tracked non-UTF-8 text file, a tracked file absent from the working tree and "
-          "a root that is not a git repository; a non-UTF-8 tracked file is skipped only in a tracked binary "
-          "format, recognised by its suffix, the ZIP signature and opening as a ZIP archive within the read "
-          "bound (a real tracked archive passes, with the bound at its exact size and one byte above too; a "
-          "malformed .csv, an unsigned .zip, a .csv carrying the ZIP signature and a .zip matching only a "
-          "prefix of the signature each exit 2 reported as not valid UTF-8; a signature-prefixed .zip that "
-          "does not open as an archive, and the archive with the bound one byte under its size, each exit 2 "
-          "reported as not opening within the read bound); a GIT_CONFIG_GLOBAL pointed at a malformed file does not "
+          "a root that is not a git repository; every tracked .zip goes through the leak gate's archive rule "
+          "(check_leaks.verify_archive) whether or not its bytes decode as UTF-8, and a non-UTF-8 tracked file "
+          "is skipped only when it is a .zip that rule accepts (a real tracked archive passes, with the "
+          "archive-size bound at its exact size and one byte above too, and an accepted archive whose bytes are "
+          "valid UTF-8 is scanned and its label found; a malformed .csv and a .csv carrying the ZIP signature "
+          "each exit 2 reported as not valid UTF-8; a .zip without the signature, a signature-prefixed .zip "
+          "that is not an archive, valid UTF-8 or not, a .zip with one member failing its CRC, a label ahead of "
+          "an empty archive's end record, the archive with the bound one byte under its size, and the archive "
+          "followed by a label past the bound with the bound at its size each exit 2 named with the leak "
+          "gate's reason, and the archive deleted from the working tree exits 2 reported as absent); a "
+          "GIT_CONFIG_GLOBAL pointed at a malformed file does not "
           "change the gate result (the gate's tracked-file read drops the GIT_* environment); a child "
           "self-test still passes (child line, exit 3) with a malformed .gitconfig under the caller's HOME, a "
           "malformed git/config "
@@ -1731,7 +1811,8 @@ def _self_test(caller_env=None):
           "live SCOPE_RELPATHS members, so a synthetic provenance id planted in each is caught (removing "
           "either from scope fails the case); an UNRECOGNIZED option (a misspelled --self-testx or a "
           "stray flag) is a loud exit 2, never a silent default scan that would let it masquerade as "
-          "--self-test; a NON-REGULAR input (a FIFO) at the hash-file path and at a scoped path fails closed "
+          "--self-test; a NON-REGULAR input (a FIFO) at the hash-file path, at a scoped path and at a tracked "
+          ".zip path fails closed "
           "PROMPTLY (classified non-regular before any open) rather than blocking on the open; and a hostile "
           "sibling json.py/hashlib.py beside the script does NOT shadow a stdlib import (the sibling modules "
           "are imported via sys.path.append, keeping stdlib precedence), so the copy still runs and passes its "
