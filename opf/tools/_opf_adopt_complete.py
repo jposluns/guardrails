@@ -43,8 +43,8 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     refuses by), it records the approval itself, each receipt file row names a plan source with its
     disposition and before_digest, the live preimages of the sources the plan leaves live and no other
     check owns (keep, and non-occupying migrate) still equal their plan digests, and every planned
-    destination apply has already written and no other check owns (init-store and non-CI install-pack
-    members, create-file and plant-governance paths, enable-hook registrations, and the registration
+    destination apply has already written and no other check owns (init-store members, non-CI create-file
+    and plant-governance paths, enable-hook registrations, and the registration
     chain's final manifest) holds exactly its planned bytes. The retire-disposed live files are check 6's,
     so an edited retire source flips check 6 only; the non-occupying move sources are check 3's; the
     rendered views, CI members and consumer repointings are check 4's; a move-file destination is written
@@ -247,8 +247,9 @@ def _planned_destinations(ev):
     wanted = {}
     for op in plan["ops"]:
         if op["op"] in ("create-file", "plant-governance"):
-            wanted[op["path"]] = op["content_digest"]
-        elif op["op"] in ("init-store", "install-pack"):
+            if op["path"] not in ci:
+                wanted[op["path"]] = op["content_digest"]
+        elif op["op"] == "init-store":
             member_root = op[schema._MEMBER_ROOTS[op["op"]]]
             for member in op["members"]:
                 dest = schema._compose(member_root, member["path"])
@@ -943,7 +944,7 @@ _EXTRA_ENTRIES = ()
 _EXTRA_EMPTY = ()
 _ENTRY_EDITS = ()
 # Extra (platform, path, bytes) enforcement members a vector appends after that platform's canonical members;
-# the fixture plants them and its plan records them (the install-pack op included), so they are digest-bound.
+# the fixture plants them and its plan records them (each by its plant row), so they are digest-bound.
 _EXTRA_MEMBERS = ()
 # A function a vector applies to the whole observation (its lists edited in place) before the fixture seals it.
 _OBSERVATION_EDIT = None
@@ -956,12 +957,14 @@ _RENDERED = b"rendered todo view\n"
 _MOVE_DEST = ".working/archive/moved/adopter/MOVE.md"
 _CONSUMER = "consumer/USES.md"
 _CONSUMER_OLD, _CONSUMER_NEW = b"old consumer\n", b"new consumer\n"
-# The enforcement members install-pack plants beside the CI floor: the pre-commit launchers and the tool entry
-# point both launcher rows bind under the opf/ mirror (_opf_adopt.canonical_plan_bindings), the deny hook and
-# the instruction files. Check 1's destination sweep owns each but the tool entry point, a CI member too.
+# The enforcement members the plant rows plant beside the CI floor: the pre-commit launchers and the tool entry
+# point both launcher rows bind under the opf/ mirror (_opf_adopt.canonical_plan_bindings), the registration
+# file and the deny hook it runs, and the instruction files. Check 1's destination sweep owns each but the
+# tool entry point, a CI member too.
 _PACK = {"opf/enforcement/precommit/pre-commit": b"#!/bin/sh\nexit 0\n",
          "opf/enforcement/precommit/install.sh": b"#!/bin/sh\nexit 0\n",
          "opf/tools/opf.py": b"tool entry point\n", ".claude/settings.json": b"{}\n",
+         schema.HOOK_MEMBER: b"deny hook\n",
          "AGENTS.md": b"agents instructions\n", "GEMINI.md": b"gemini instructions\n",
          ".cursor/rules/opf.mdc": b"cursor instructions\n"}
 _HOOK = "opf/enforcement/precommit/pre-commit"   # the pre-commit row's first member
@@ -1033,6 +1036,17 @@ def _sealed(doc, field):
     return dict(body, **dict([(field, _digest(_emit(body)))]))
 
 
+def _install_rows(enforcement):
+    """The rows planting every enforcement member (_opf_adopt.enforcement_install_ops). A vector that moves the
+    CI workflow off its destination (_CI_PATH patched) still plants it from the workflow template, a path the
+    plan leaves unconstrained, so the plan carries the moved path."""
+    canonical = schema.ENFORCEMENT_LAUNCHERS[0][2]
+    rows = schema.enforcement_install_ops([dict(row, members=[
+        dict(m, path=canonical if m["path"] == _CI_PATH else m["path"]) for m in row["members"]])
+        for row in enforcement])
+    return [dict(row, path=_CI_PATH) if row.get("path") == canonical else row for row in rows]
+
+
 def _fixture(root):
     """A post-apply product tree for one run: a retired non-occupying source frozen live, a migrate source
     frozen live, a non-occupying move source frozen live (its relocation waits for green, spec 14.2), an
@@ -1071,7 +1085,7 @@ def _fixture(root):
                  source_digest=_digest(_LIVE["adopter/MOVE.md"])),
             dict(op="repoint-consumer", path=_CONSUMER, old_digest=_digest(_CONSUMER_OLD),
                  new_digest=_digest(_CONSUMER_NEW)),
-            init, render, schema.enforcement_install_op(bindings["enforcement"])]
+            init, render] + _install_rows(bindings["enforcement"])
     # The entries as _inventory records them: each live file, the machine store a recorded exclusion the walk
     # of .working meets (recorded excluded, never read), every directory enumerated on the way to them, and
     # every other scope path outside the exclusions absent. The consumer's exclusion lies under no walked
