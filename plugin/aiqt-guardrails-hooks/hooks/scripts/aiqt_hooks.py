@@ -11099,7 +11099,10 @@ def _gate_terminator_index(sub, lits):
 # between the quotes, and its decoded interior is judged like a bare word; '!' is refused because
 # bash history expansion can rewrite it before git parses its options); the three harmless redirect
 # spellings (>/dev/null, 2>/dev/null, 2>&1), which bash removes from the argument list and which
-# write no file; and a segment end at ';', '&', '|', ')', a newline or the end of the text.
+# write no file; on a parsed command only, the git commit message form git commit -m "$(cat <<'EOF'
+# ... EOF)" as the value of a separated -m (_gate_heredoc_message: a single-quoted delimiter, so bash
+# reads the body as literal text, a substitution holding nothing but that cat, and a body with no '$'
+# or backquote); and a segment end at ';', '&', '|', ')', a newline or the end of the text.
 # EVERYTHING ELSE DENIES BY CONSTRUCTION on a flagged segment: an expansion, substitution or
 # backquote (inside double quotes too), a process substitution, a backslash (a line continuation
 # included, inside double quotes too), a double-quoted word that is glued, unterminated, spans a
@@ -11245,7 +11248,54 @@ def _gate_span_hides_roster_git(interior):
     return False
 
 
-def _gate_grammar_lex(command, start):
+# The one here-document shape the closed literal grammar accepts (_gate_heredoc_message): from the opening
+# double quote to the newline that ends the '<<' line, a '$(' holding cat and blanks, then '<<' and a
+# single-quoted delimiter of word characters; and, after the delimiter line, only blanks and blank lines
+# before the ')' that closes the substitution, with the closing double quote right after it.
+_GATE_HEREDOC_OPEN_RE = re.compile(r"\"\$\([ \t]*cat[ \t]+<<[ \t]*'([A-Za-z0-9_]+)'[ \t]*\n")
+_GATE_HEREDOC_CLOSE_RE = re.compile(r"[ \t\n]*\)\"")
+
+
+def _gate_heredoc_message(command, i):
+    """(end, value) when the double quote at command[i] opens the git commit message form
+    "$(cat <<'EOF'<newline>BODY<newline>EOF<newline>)": the substitution holds nothing but cat and one
+    here-document (_GATE_HEREDOC_OPEN_RE and _GATE_HEREDOC_CLOSE_RE); its delimiter is single-quoted, so bash
+    reads the body as literal text; the body ends at the first line that begins with the delimiter, which
+    must be exactly it (_subst_heredoc_end, the rule the lexer's body read uses); and the body holds no '$'
+    or backquote, so no further substitution or expansion stands in it. end is the index just past the
+    closing double quote; value is the word bash builds there, the body with its trailing newlines removed
+    (a command substitution strips them). None for any other shape: an unquoted, double-quoted, escaped or
+    <<- delimiter, another command before or after the here-document inside the substitution, a body that
+    does not end, or a '$' or backquote in the body. Linear in the length of the text it reads."""
+    opened = _GATE_HEREDOC_OPEN_RE.match(command, i)
+    if opened is None:
+        return None
+    delim = opened.group(1)
+    end = _subst_heredoc_end(command, opened.end(), len(command), ((delim, False),))
+    if end is None:
+        return None
+    body = command[opened.end():end - len(delim) - 1]  # the text before the delimiter line
+    if "$" in body or "`" in body:
+        return None
+    close = _GATE_HEREDOC_CLOSE_RE.match(command, end)
+    if close is None:
+        return None
+    return close.end(), body.rstrip("\n")
+
+
+def _gate_commit_message_next(words):
+    """True when the words of a flagged segment read so far (words[0] the git word) resolve the subcommand
+    commit and end with a -m that git reads as an option, so the next word is that -m's separated value:
+    not the value of an option before it and not past the option terminator. Read with the value tables of
+    _gate_terminator_index: a '--' in the -m's place is a real terminator exactly when the -m there is an
+    option."""
+    sub, args, resolved = _gate_grammar_sub(words)
+    if not resolved or sub != "commit" or not args or args[-1] != "-m":
+        return False
+    return _gate_terminator_index(sub, args[:-1] + ["--"]) == len(args) - 1
+
+
+def _gate_grammar_lex(command, start, heredoc_message=False):
     """Lex ONE flagged segment of the raw command under the closed literal grammar, starting at the
     'git' word at command[start]. Returns (words, end, bad, data_end): words is the ordered list of
     resolved literal word texts (a quoted word contributes its content; everything accepted is
@@ -11265,7 +11315,12 @@ def _gate_grammar_lex(command, start):
     first ambiguous quote, keeping the whole-command pass linear when many off-roster git words that
     each open an ambiguous quote share one line; a ROSTER verb's segment is still read to its end (its
     own flags may sit anywhere before the terminator), so a line packing many ambiguity-opening
-    roster-verb git words is still super-linear, bounded by the hook deadline (it fails closed)."""
+    roster-verb git words is still super-linear, bounded by the hook deadline (it fails closed).
+    heredoc_message (True on a parsed command only) also accepts ONE git commit message form per segment
+    (_gate_heredoc_message) where the segment's words so far end with a -m whose value it is
+    (_gate_commit_message_next): its value word is the literal body, so a bypass spelling after it is still
+    read, and the word always leaves the quote's pairing ambiguous (data_end stops at it), so a 'git' in
+    the body is re-judged as its own segment. A second such word on the segment denies like any other '$'."""
     words = []
     i = start
     n = len(command)
@@ -11356,6 +11411,16 @@ def _gate_grammar_lex(command, start):
             # single-quoted counterpart. An interior shell operator or single quote leaves the quote's
             # pairing ambiguous, so the span is not treated as consumed data (a 'git' inside it is
             # re-judged) while the word itself is still read for its own bypass spelling.
+            if heredoc_message and words and words[-1] == "-m":
+                message = _gate_heredoc_message(command, i)
+                if (message is not None and (message[0] >= n or command[message[0]] in _GATE_GRAMMAR_TOKEN_END)
+                        and _gate_commit_message_next(words)):
+                    heredoc_message = False  # one message word per segment, so the -m check stays linear
+                    if data_stop is None:
+                        data_stop = i
+                    words.append(message[1])
+                    i = message[0]
+                    continue
             j = command.find('"', i + 1)
             if j < 0:
                 return result(i, _gate_grammar_violation(command, i, i, n))
@@ -11433,7 +11498,7 @@ def _gate_grammar_sub(words):
     return None, [], False
 
 
-def _gate_closed_grammar_scan(command):
+def _gate_closed_grammar_scan(command, heredoc_message=False):
     """(kind, what, how) for the first raw 'git' occurrence whose segment the closed literal grammar
     refuses, or None. kind is 'bypass' when the resolved literal words already spell the hook bypass
     (what is the subcommand, how the matched spelling, via _no_verify_spelling, so the value-aware
@@ -11463,13 +11528,17 @@ def _gate_closed_grammar_scan(command):
     platform with SIGALRM/setitimer, the alarm unblocked, on the main thread) this is an availability
     cost, never a bypass; on a platform or call that runs with no deadline (see the module docstring:
     Windows, a blocked SIGALRM, an off-main-thread call) such a line is not time-bounded here, so the
-    super-linear cost is not fail-closed and the fallback to platform-level limits is all that remains."""
+    super-linear cost is not fail-closed and the fallback to platform-level limits is all that remains.
+    heredoc_message is True only where the shared lexer parsed the command (gate_weakening's parsed path and
+    the failed-main-reading floor after it): there the grammar also accepts the git commit message form
+    (_gate_heredoc_message, read by _gate_grammar_lex). The parse-error fallback and the doubt path keep
+    False, so on a command the lexer cannot parse that form still denies."""
     consumed = 0
     for m in _GATE_GIT_WORD_RE.finditer(command):
         p = m.start()
         if p < consumed:
             continue
-        words, end, bad, data_end = _gate_grammar_lex(command, p)
+        words, end, bad, data_end = _gate_grammar_lex(command, p, heredoc_message)
         sub, args, resolved = _gate_grammar_sub(words)
         if not resolved:
             if bad is not None:
@@ -12109,7 +12178,7 @@ def _gate_grammar_messages(kind, what, how, unparsed):
         "grammar (rule gatdis, fail-closed).".format(what[:40]))
 
 
-def _gate_weakening_fallback(command):
+def _gate_weakening_fallback(command, heredoc_message=False):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
@@ -12120,7 +12189,8 @@ def _gate_weakening_fallback(command):
     or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
     design, the documented posture of the sibling fallbacks (_diff_source_fallback,
     _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable. Which decision the
-    text earns is _gate_weakening_fallback_kind's."""
+    text earns is _gate_weakening_fallback_kind's. heredoc_message is passed to the grammar scan: True only
+    on the failed-main-reading floor, where the lexer did parse the command."""
     kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
@@ -12138,7 +12208,7 @@ def _gate_weakening_fallback(command):
             .format(_GATE_ALTS),
             "AIQT guardrail: denied an unparseable git commit/am that appears to carry -n (--no-verify) "
             "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
-    grammar_hit = _gate_closed_grammar_scan(command)
+    grammar_hit = _gate_closed_grammar_scan(command, heredoc_message)
     if grammar_hit is not None:
         grammar_kind, what, how = grammar_hit
         reason, banner = _gate_grammar_messages(grammar_kind, what, how, True)
@@ -12355,7 +12425,12 @@ def gate_weakening(data):
     process substitution, a backslash (a line continuation included, inside double quotes too), a
     double-quoted word that is glued, unterminated, spans a newline or holds an interior '!', a glob or
     brace character, a '#' comment or leading '~', a here-document, here-string or unlisted redirection,
-    an ANSI-C '$'...'' word, or a glued quote. A segment whose subcommand CANNOT be resolved (an
+    an ANSI-C '$'...'' word, or a glued quote. One here-document shape is accepted where the shared lexer
+    parsed the command (this parsed path and the failed-main-reading floor, never the parse-error fallback
+    or the doubt path): the git commit message form git commit -m "$(cat <<'EOF' ... EOF)" as a separated
+    -m's value, with a single-quoted delimiter, a substitution holding nothing but that cat and a body with
+    no '$' or backquote (_gate_heredoc_message); its body is that -m's value, and a git named in the body is
+    re-judged. A segment whose subcommand CANNOT be resolved (an
     expansion where the subcommand or a global option's value is expected: git $g commit, git -C $d)
     also DENIES: the verb bash will run cannot be known.
     Accepted literal words are then checked for the bypass spellings themselves (_no_verify_spelling on
@@ -12609,8 +12684,9 @@ def gate_weakening(data):
     # The deny tier is held until the loop ends, so a --no-verify deny anywhere in the command returns first
     # with its own message; the closed-grammar deny and a verification-sink deny then outrank (and
     # suppress) the broad-tier note. The sink check judges each reading of an uncertain '#' on its own and
-    # denies on the first reading that holds the shape.
-    grammar_hit = _gate_closed_grammar_scan(command)
+    # denies on the first reading that holds the shape. The lexer parsed this command, so the grammar also
+    # accepts the git commit message form (_gate_heredoc_message).
+    grammar_hit = _gate_closed_grammar_scan(command, heredoc_message=True)
     if grammar_hit is not None:
         kind, what, how = grammar_hit
         reason, banner = _gate_grammar_messages(kind, what, how, False)
@@ -12629,14 +12705,15 @@ def gate_weakening(data):
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
         if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
-            return _gate_weakening_fallback(command)
+            return _gate_weakening_fallback(command, heredoc_message=True)
     if pending_note is not None:
         return _allow_note(pending_note)
     flow_note = _gate_flow_note(records, command)
     if flow_note is not None:
         return _allow_note(flow_note)
     if floor:
-        return _gate_weakening_fallback(command)  # its note, or the allow, in place of this allow
+        # its note, or the allow, in place of this allow
+        return _gate_weakening_fallback(command, heredoc_message=True)
     return _allow()
 
 

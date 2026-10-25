@@ -79,7 +79,9 @@ grammar (bare literal words, one standalone single-quoted literal per word, one 
 double-quoted literal per word holding no $, backquote or backslash, literal global-option
 values, the >/dev/null, 2>/dev/null and 2>&1 redirections), so on a roster verb any expansion,
 substitution, process substitution, backslash, glob, brace, comment, here-document or
-other redirection denies fail-closed, as does a double-quoted word that is glued, unterminated or
+other redirection denies fail-closed (on a parsed command the one exception is the git commit message
+form git commit -m "$(cat <<'EOF' ... EOF)", a single-quoted delimiter, nothing but that cat in the
+substitution and no $ or backquote in the body), as does a double-quoted word that is glued, unterminated or
 spans a newline, and a git whose subcommand cannot be resolved, while an
 off-roster verb and data an accepted scan consumed stay allowed; a checker-shaped segment whose failure is swallowed
 (|| true, || :) or piped into an adjacent head or tail allows with a note, except that a narrow
@@ -11992,10 +11994,11 @@ def _main_isolated(monitor):
         # code that reads no body at all (where each such command takes the fallback), and fail only where a
         # change to the body reading flips those two guards or hides a later line; the other sixteen hd-guard
         # rows fail on that code.
-        # gate_weakening denies both shapes: the closed literal grammar refuses the "$(...)" substitution on a
-        # git commit segment (the disclosed over-deny of a dash-free substituted value), whatever the body holds.
+        # gate_weakening allows both shapes, as on main: on a parsed command the closed literal grammar accepts
+        # the git commit message form as -m's value (_gate_heredoc_message), so these two rows fail on code
+        # whose grammar refuses every "$(...)" on a git commit segment.
         for _hdn, _hdc in (("apostrophe", _hd_m1), ("five-headings", _hd_h5)):
-            for _hdg, _hdwant in ((aiqt_hooks.gate_weakening, "deny"), (aiqt_hooks.diff_source_pretool, "allow"),
+            for _hdg, _hdwant in ((aiqt_hooks.gate_weakening, "allow"), (aiqt_hooks.diff_source_pretool, "allow"),
                                   (aiqt_hooks.git_explicit_binding, "allow"), (aiqt_hooks.commit_identity, "allow"),
                                   (aiqt_hooks.bash_absolute_paths, "allow"), (aiqt_hooks.branch_root, "allow"),
                                   (aiqt_hooks.git_discard, "allow"), (aiqt_hooks.git_stash_ref, "allow"),
@@ -12064,24 +12067,29 @@ def _main_isolated(monitor):
 
         def _hd_want(handler, command, recorded):
             """The decision a recorded row expects of handler on command: gate_weakening denies wherever the
-            closed literal grammar refuses the raw text (_gate_closed_grammar_scan: an expansion, substitution,
-            here-document, comment or redirection on a roster-verb git segment, or a roster git named inside
-            quoted data, its disclosed over-deny), which outranks the allow main recorded before that grammar;
-            every other guard and command keeps the recorded decision."""
-            if handler is aiqt_hooks.gate_weakening and aiqt_hooks._gate_closed_grammar_scan(command) is not None:
+            closed literal grammar refuses the raw text as it reads a parsed command (_gate_closed_grammar_scan
+            with heredoc_message: an expansion, substitution, here-document, comment or redirection on a
+            roster-verb git segment, or a roster git named inside quoted data, its disclosed over-deny, but not
+            the git commit message form it accepts there), which outranks the allow main recorded before that
+            grammar; every other guard and command keeps the recorded decision."""
+            if handler is aiqt_hooks.gate_weakening and aiqt_hooks._gate_closed_grammar_scan(
+                    command, heredoc_message=True) is not None:
                 return "deny"
             return recorded
 
-        def _hd_main_check(tag, command, main_decisions, over=()):
+        def _hd_main_check(tag, command, main_decisions, over=(), exact=False):
             """Each guard in _hd_floor_guards decides command exactly as main does (main_decisions: main's
             recorded decisions in that order, as a tuple or as a string of A, N and D), and each guard named in
             over at least as strictly; gate_weakening denies where the closed literal grammar refuses the
-            command (_hd_want)."""
+            command (_hd_want), except on a row marked exact, which keeps main's recorded decisions with no
+            grammar reading (so a grammar that refuses the row's command fails it)."""
             if len(main_decisions) != len(_hd_floor_guards):
                 failures.append("({}) records {} decisions for {} guards".format(
                     tag, len(main_decisions), len(_hd_floor_guards)))
             for _hdg, _hdm in zip(_hd_floor_guards, main_decisions):
-                _hdm = _hd_want(_hdg, command, _hd_letter.get(_hdm, _hdm))
+                _hdm = _hd_letter.get(_hdm, _hdm)
+                if not exact:
+                    _hdm = _hd_want(_hdg, command, _hdm)
                 _hdgot = _decision(_hdg, command)
                 if _hdg.__name__ in over:
                     if _hd_rank.get(_hdgot, -1) < _hd_rank[_hdm]:
@@ -12102,8 +12110,12 @@ def _main_isolated(monitor):
              _hd_main_then, _hd_retry_over),
             ("top-level-assignment", "x=$(cat <<'EOF'\nEOF); " + _hd_nv + "\nEOF\n)", ("allow",) * 10, ()),
         ]
+        # The two commit message shapes keep main's decisions exactly: the closed literal grammar accepts the
+        # form on a parsed command, so gate_weakening allows them as main does, and both rows fail on code whose
+        # grammar refuses every "$(...)" on a git commit segment.
         for _hdn, _hdc, _hdmain, _hdover in _hd_floor:
-            _hd_main_check("hd-main-floor-" + _hdn, _hdc, _hdmain, _hdover)
+            _hd_main_check("hd-main-floor-" + _hdn, _hdc, _hdmain, _hdover,
+                           exact=_hdn in ("apostrophe", "five-headings"))
         # MAIN'S DECISION AS A FLOOR (the comment above _MainHashReading). Main's lex fails on the commit
         # message form whose body holds an apostrophe, and its guards then take their failed-lex path, whose raw
         # scans read the whole text, a command inside a string included; reading that body made the lex clean,
@@ -12155,11 +12167,12 @@ def _main_isolated(monitor):
             _hd_main_check("hd-floor-guard-" + _hdn, _hdc, _hdmain)
         # Where main's skip ends the substitution at the same ')' (no unpaired quote or ')' in the body), main
         # lexed the form as the clean lex does, and no floor applies: a message without an apostrophe that names
-        # --no-verify allowed in gate_weakening on main. The closed literal grammar now denies it before any
-        # floor is read (the "$(...)" substitution on a git commit segment), so gate_weakening denies it.
+        # --no-verify allows in gate_weakening, as on main (the closed literal grammar accepts the git commit
+        # message form on a parsed command, and the body is -m's value). It fails on code whose grammar refuses
+        # every "$(...)" on a git commit segment, and on code that applies a floor to every body read.
         texpect("(hd-floor-same-reading) a body main reads to the same ')' takes no floor",
                 _decision(aiqt_hooks.gate_weakening, "git commit -m \"$(cat <<'EOF'\nDocument the --no-verify bypass\n"
-                                                    "EOF\n)\""), "deny")
+                                                    "EOF\n)\""), "allow")
         # The floor's own raw-probe deny (_gate_weakening_fallback_kind in _GATE_FALLBACK_DENIES) on a command
         # the closed literal grammar accepts: the body main fails to read sits in an echo, the only git is an
         # off-roster git log, and the raw short -n probe reads its '-n' beside a later 'commit' word, so the
@@ -14373,43 +14386,55 @@ def _main_isolated(monitor):
         #   and re-walked a '-C git' chain from each, both quadratic. It now reads each git word's
         #   subcommand from tables filled once from the end, so both are linear. A list of many ROSTER-verb
         #   git words still reads each one's arguments and stays super-linear, as its docstring states.
+        # Each timed scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
+        # gives each shape at every size: none of them names a refused segment or a bypass), so a scan made
+        # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
         import time as _time_lin
 
         def _gw_scan_once(cmd, scan):
+            # (seconds, decision) for one scan of cmd
             _t0 = _time_lin.perf_counter()
-            scan(cmd)
-            return _time_lin.perf_counter() - _t0
+            decision = scan(cmd)
+            return _time_lin.perf_counter() - _t0, decision
 
         def _gw_scan_ratio(unit, prefix, suffix, scan):
             # Double n (from 4000, at most 6 times) until t_n clears the 0.02s floor, then compare
-            # t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n), or (None, t_n, None, length) when the floor
-            # was never cleared in the bound, so the caller fails 'linearity not evaluated'. The input is
-            # a command string for the whole-command scan or a word list for the dequoted-word scan.
+            # t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions), or (None, t_n, None, length,
+            # decisions) when the floor was never cleared in the bound, so the caller fails 'linearity not
+            # evaluated'; decisions lists every timed scan's decision, in order. The input is a command string
+            # for the whole-command scan or a word list for the dequoted-word scan.
             reps = 4000
+            decisions = []
             for _ in range(6):
-                t_n = _gw_scan_once(prefix + unit * reps + suffix, scan)
+                t_n, decision = _gw_scan_once(prefix + unit * reps + suffix, scan)
+                decisions.append(decision)
                 if t_n > 0.02:
                     cmd_2n = prefix + unit * (reps * 2) + suffix
-                    t_2n = _gw_scan_once(cmd_2n, scan)
-                    return t_2n / t_n, t_n, t_2n, len(cmd_2n)
+                    t_2n, decision = _gw_scan_once(cmd_2n, scan)
+                    decisions.append(decision)
+                    return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions
                 reps *= 2
-            return None, t_n, None, len(prefix + unit * reps + suffix)
+            return None, t_n, None, len(prefix + unit * reps + suffix), decisions
 
         _gw_cmd_scan = aiqt_hooks._gate_closed_grammar_scan
         _gw_dq_scan = aiqt_hooks._gate_novrf_dequoted_bypass
         _gw_lin_cases = (
-            ("gw-dq-lin-sq", "git -C 'a;' log ", "", "", _gw_cmd_scan),
-            ("gw-dq-lin-dq", 'git log "a;" ', "", "", _gw_cmd_scan),
-            ("gw-lin-opts", "-C 'a;' ", "git ", "", _gw_cmd_scan),
-            ("gw-lin-span-roster", "git x ", "git commit -m '", "'", _gw_cmd_scan),
-            ("gw-lin-span-off", "git log ", "git log '", "'", _gw_cmd_scan),
-            ("gw-lin-span-optgit", "-git ", "git log '", "log'", _gw_cmd_scan),
-            ("gw-lin-span-chain", " -C git", "git commit -m 'git", " x'", _gw_cmd_scan),
-            ("gw-lin-dq-off", ["git", "log"], ["sudo"], [], _gw_dq_scan),
-            ("gw-lin-dq-chain", ["-C", "git"], ["sudo", "git"], ["log"], _gw_dq_scan),
+            ("gw-dq-lin-sq", "git -C 'a;' log ", "", "", _gw_cmd_scan, None),
+            ("gw-dq-lin-dq", 'git log "a;" ', "", "", _gw_cmd_scan, None),
+            ("gw-lin-opts", "-C 'a;' ", "git ", "", _gw_cmd_scan, None),
+            ("gw-lin-span-roster", "git x ", "git commit -m '", "'", _gw_cmd_scan, None),
+            ("gw-lin-span-off", "git log ", "git log '", "'", _gw_cmd_scan, None),
+            ("gw-lin-span-optgit", "-git ", "git log '", "log'", _gw_cmd_scan, None),
+            ("gw-lin-span-chain", " -C git", "git commit -m 'git", " x'", _gw_cmd_scan, None),
+            ("gw-lin-dq-off", ["git", "log"], ["sudo"], [], _gw_dq_scan, None),
+            ("gw-lin-dq-chain", ["-C", "git"], ["sudo", "git"], ["log"], _gw_dq_scan, None),
         )
-        for _gw_lbl, _gw_unit, _gw_pre, _gw_suf, _gw_scan in _gw_lin_cases:
-            _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n = _gw_scan_ratio(_gw_unit, _gw_pre, _gw_suf, _gw_scan)
+        for _gw_lbl, _gw_unit, _gw_pre, _gw_suf, _gw_scan, _gw_want in _gw_lin_cases:
+            _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n, _gw_got = _gw_scan_ratio(_gw_unit, _gw_pre, _gw_suf, _gw_scan)
+            _gw_wrong = [got for got in _gw_got if got != _gw_want]
+            if _gw_wrong:
+                failures.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
+                                .format(_gw_lbl, _gw_wrong[0], len(_gw_wrong), len(_gw_got), _gw_want))
             if _gw_ratio is None:
                 failures.append("({}) linearity not evaluated: t_n stayed under the 0.02s floor through "
                                 "6 doublings (last {:.4f}s)".format(_gw_lbl, _gw_tn))
@@ -14872,17 +14897,49 @@ def _main_isolated(monitor):
         gexpect("(gw-fb-herestring) outside the doubt path, a here-string parse error with a '-name' "
                 "operand in another segment still allows",
                 "git commit -m x && find . -name z <<<y", "allow")
-        # These three deny through the closed literal grammar, which refuses a process substitution and a
-        # "$(...)" substitution on a git commit segment, not through a widened spelling probe.
+        # This one denies through the closed literal grammar, which refuses a process substitution on a git
+        # commit segment, not through a widened spelling probe.
         gexpect("(gw-fb-procsub) a process-substitution parse error passing '-Dname' through denies by the "
                 "closed grammar",
                 "git commit -F <(echo \"pass -Dname through\")", "deny")
+        # The closed literal grammar accepts the git commit message form on a parsed command
+        # (_gate_heredoc_message), so these two allow, as on main; the floor's raw probes find no bypass.
         gexpect("(gw-fb-heredocfloor) on the failed-main-reading floor, a heredoc commit message carrying "
-                "'-Dname' denies by the closed grammar",
-                "git commit -m \"$(cat <<'EOF'\nPass -Dname through; don't drop it\nEOF\n)\"", "deny")
-        gexpect("(gw-fb-heredocno) the same floor with '--no' inside the quoted message body denies by the "
-                "closed grammar",
-                "git commit -m \"$(cat <<'EOF'\nKeep --no in; don't drop it\nEOF\n)\"", "deny")
+                "'-Dname' still allows",
+                "git commit -m \"$(cat <<'EOF'\nPass -Dname through; don't drop it\nEOF\n)\"", "allow")
+        gexpect("(gw-fb-heredocno) the same floor with '--no' inside the quoted message body still allows",
+                "git commit -m \"$(cat <<'EOF'\nKeep --no in; don't drop it\nEOF\n)\"", "allow")
+        # The grammar accepts that form ONLY as -m's value, with a single-quoted delimiter (so bash reads the
+        # body as literal text), a substitution holding nothing but that cat, and a body with no '$' or
+        # backquote. Every other shape keeps the grammar's deny. gw-hd-plain allows only with the acceptance;
+        # each deny row is a REGRESSION GUARD: it passes on the code before the acceptance (which denies
+        # every here-document) and fails where the acceptance is widened past its narrowing.
+        _gw_hd = "git commit -m \"$(cat <<'EOF'\nSubject\n\nBody text.\nEOF\n)\""
+        gexpect("(gw-hd-plain) the git commit message form with a single-quoted delimiter allows", _gw_hd, "allow")
+        for _gw_hdn, _gw_hdc in (
+                ("unquoted-delim", "git commit -m \"$(cat <<EOF\nSubject\nEOF\n)\""),
+                ("dq-delim", "git commit -m \"$(cat <<\"EOF\"\nSubject\nEOF\n)\""),
+                ("body-subst", "git commit -m \"$(cat <<'EOF'\nSubject $(date)\nEOF\n)\""),
+                ("body-backquote", "git commit -m \"$(cat <<'EOF'\nSubject `date`\nEOF\n)\""),
+                ("body-param", "git commit -m \"$(cat <<'EOF'\nCosts ${x}\nEOF\n)\""),
+                ("cmd-after", "git commit -m \"$(cat <<'EOF'\nSubject\nEOF\necho more\n)\""),
+                ("cmd-before", "git commit -m \"$(echo x; cat <<'EOF'\nSubject\nEOF\n)\""),
+                ("pipe-on-op-line", "git commit -m \"$(cat <<'EOF' | tr a b\nSubject\nEOF\n)\""),
+                ("not-cat", "git commit -m \"$(/bin/cat <<'EOF'\nSubject\nEOF\n)\""),
+                ("delim-prefix-line", "git commit -m \"$(cat <<'EOF'\nSubject\nEOFX\nEOF\n)\""),
+                ("no-delim-line", "git commit -m \"$(cat <<'EOF'\nSubject\n)\""),
+                ("glued-close", "git commit -m \"$(cat <<'EOF'\nSubject\nEOF\n)\"x"),
+                ("bypass-value-word", "git commit \"$(cat <<'EOF'\n-n\nEOF\n)\""),
+                ("pathspec-word", "git commit -m x \"$(cat <<'EOF'\nfile\nEOF\n)\""),
+                ("m-as-value", "git commit -m -m \"$(cat <<'EOF'\nfile\nEOF\n)\""),
+                ("m-after-terminator", "git commit -- -m \"$(cat <<'EOF'\nfile\nEOF\n)\""),
+                ("merge", "git merge -m \"$(cat <<'EOF'\nSubject\nEOF\n)\" topic"),
+                ("second-message", _gw_hd + " -m \"$(cat <<'EOF'\nMore\nEOF\n)\""),
+                ("bypass-after", _gw_hd + " -n"),
+                ("body-names-bypass", "git commit -m \"$(cat <<'EOF'\nthen git commit -n\nEOF\n)\""),
+                ("parse-error", _gw_hd + " && find . -name z <<<y")):
+            gexpect("(gw-hd-{}) the commit message form's {} shape keeps its deny".format(_gw_hdn, _gw_hdn),
+                    _gw_hdc, "deny")
 
         # NO WEAKER THAN THE BASE COMMIT: every cannot-evaluate sink, bypass and checker-note shape above,
         # the combinations, and the off-list controls, beside the decision the base commit ac813196 gave
