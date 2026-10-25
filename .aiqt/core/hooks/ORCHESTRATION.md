@@ -65,10 +65,15 @@ the doctor and the resume audit report and arm from it):
   skips here-document bodies opened at the outer quoting level, while no parenthesis, `${...}` or
   backquote substitution is open, and arithmetic, which the in-scope
   deny still reads as code (a `<<` met inside a double-quoted command or backquote substitution, the
-  commit-message form, draws the note at the operator itself, whatever the body holds: bash reads
+  commit-message form, draws the note at the operator itself, whatever the body holds, but only
+  while no nested double-quoted string precedes the operator in that substitution: bash reads
   such a body under its own here-document rules, while reading it as double-quoted text let a stray
   body quote shift the scan's quote state onto a later real `&`, a silent miss confirmed against
-  bash), and passes over a redirect
+  bash; the scan reads every unescaped double quote inside such a substitution as the end of the
+  outer string, so two known shapes still miss a real `&` silently: a `<<` after a nested
+  double-quoted string, as in `: "$(cat "-" <<'EOF'` or `"$(x="a"; cat <<'EOF'`, whose body is
+  then read as double-quoted text again, and a double quote inside a single-quoted span there, as
+  in `echo "$(echo 'x"y')" & job # '`), and passes over a redirect
   operator and its target without losing the command position (a here-string `<<<`, the noclobber
   `>|`, a named descriptor such as `{fd}>`, a redirect between `setsid` and its wait option, and a
   `${...}` parameter expansion that is the whole redirect target, read as one word when it is

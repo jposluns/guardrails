@@ -15505,11 +15505,13 @@ def _orch_note_scan(command, bash_word_starts):
     pattern's, so after a `case` a closed substitution stays counted open
     and a later here-document in the same command draws the note, an over-note; and a `<<` met inside a
     double-quoted command or backquote substitution (the commit-message form) returns "unreadable" at
-    the operator itself: bash reads such a body under its own here-document rules, while this scan read
+    the operator itself, but only while no nested double-quoted string precedes the operator in that
+    substitution (after one, the scan no longer reads the `<<` as inside a substitution: the known
+    misses below): bash reads such a body under its own here-document rules, while this scan read
     it as double-quoted text whose quote state each body quote toggles, so a stray quote in the body
     once shifted that state onto a later real bare `&` outside the substitution, which read as quoted
     text and was silently allowed; the note replaces that reading (a `<<<` here-string there, and a
-    body of pure data, draw the same note, an over-note, never a miss), and a `#` in such a
+    body of pure data, draw the same note, an over-note), and a `#` in such a
     substitution that is not right after a word character (Fixes #12) still notes as the double-quoted
     comment rule above. An arithmetic expansion $(( ... )) or
     arithmetic command (( ... )) is skipped, so a bitwise `&` in it does not note; it counts as arithmetic
@@ -15552,15 +15554,23 @@ def _orch_note_scan(command, bash_word_starts):
     expansion drops the pending command position; a bash 5.3 `${ cmd; }` or `${| cmd; }` command
     substitution outside a redirect target (`echo ${ setsid -f job; }`) is read char by char, so an `&`
     in it notes but a detacher word in it is not read in command position, and one in an unquoted
-    here-document body is skipped with the body. A setsid whose wait option sits behind a redirect
-    target that is not a plain word (an expansion or a quoted word) reads the redirect as the end of
+    here-document body is skipped with the body. Inside a double-quoted command or backquote
+    substitution this scan reads every unescaped double quote as the end of the outer string, while
+    bash reads one there as opening a nested string, or as data inside a single-quoted span, so the
+    scan's quote state shifts from that point in two known shapes: after a nested double-quoted string
+    (`: "$(cat "-" <<'EOF'`, or `"$(x="a"; cat <<'EOF'`) a later `<<` in the substitution is not
+    seen as inside one, its body is read as double-quoted text again, and a stray quote in it can
+    carry a real bare `&` after the substitution into quoted text; and a double quote inside a
+    single-quoted span there (`echo "$(echo 'x"y')" & job # '`) shifts the state the same way. In
+    both shapes the `&` stays silent while bash backgrounds the job. A setsid whose wait option sits
+    behind a redirect target that is not a plain word (an expansion or a quoted word) reads the redirect as the end of
     the options, so that setsid is still noted: an over-note of a setsid that in fact waits, never a
     miss.
 
     Returns "detach" when it meets a bare `&` control operator, "unreadable" the moment it meets a
     backslash-newline line continuation outside a single-quoted span, a span it
     would skip but cannot read with certainty (the here-document and `${...}` redirect-target cases above,
-    a `<<` inside a double-quoted substitution included)
+    a `<<` inside a double-quoted substitution included while no nested double-quoted string precedes it)
     or a `#` whose comment reading depends on context (everything past that point is unknown, so the note
     is emitted unconditionally), else the first such
     command word it met (setsid, nohup or disown), else None. A scan that ends inside an open quote
@@ -15929,9 +15939,9 @@ def _orch_foreground_note_kind(command):
     comment rule (_orch_note_scan) meets a bare `&`, else the first kind either rule met ("unreadable"
     for a skipped span it could not read with certainty, a backslash-newline line continuation outside
     a single-quoted span, a `#` whose comment reading depends on context, a scan that ends inside an
-    open quote or with an opened construct still open, or a `<<` inside a double-quoted substitution,
-    or a setsid, nohup or disown command word), else None. Any non-None kind draws the note; none of them
-    ever blocks."""
+    open quote or with an opened construct still open, or a `<<` inside a double-quoted substitution
+    that no nested double-quoted string precedes there, or a setsid, nohup or disown command word),
+    else None. Any non-None kind draws the note; none of them ever blocks."""
     kinds = (_orch_note_scan(command, False), _orch_note_scan(command, True))
     if "detach" in kinds:
         return "detach"
@@ -16500,7 +16510,8 @@ def orch_truncation_guard(data):
     a span it would skip but cannot read with certainty (a here-document delimiter that is not a whole
     word of letters, digits and `_ . + -`, a here-document opened while a parenthesis, `${...}` or
     backquote substitution is open or not provably closed, a here-document opened inside a double-quoted
-    command substitution, a body holding a backslash-newline up to its
+    command substitution while no nested double-quoted string precedes its `<<` there (the disclosed
+    misses in _orch_note_scan), a body holding a backslash-newline up to its
     closing line, a `${...}` redirect target left unclosed, not opened by a name or holding anything
     beyond literal characters, or a further `${` in a redirect target), or a backslash-newline line
     continuation anywhere outside a single-quoted span, or whose scan ends inside an

@@ -10161,8 +10161,9 @@ def _main_isolated(report_path=None):
                  _fg("function f { setsid -f long_job; }\nf"), "warn"),
                 ("trunc/oos-subst-then-word-argument-allows", _fg("echo $(true) nohup"), "allow"),
                 # A `<<` met inside a double-quoted command or backquote substitution (the
-                # commit-message form) draws the note at the operator itself, whatever the body holds:
-                # the earlier reading of such a body as double-quoted text let a stray body quote flip
+                # commit-message form) draws the note at the operator itself, whatever the body holds,
+                # while no nested double-quoted string precedes it there (the miss rows below): the
+                # earlier reading of such a body as double-quoted text let a stray body quote flip
                 # the scan's quote state so that a later REAL bare `&` outside the substitution read as
                 # quoted text and was silently allowed (bash 5.3 backgrounds the job: the shifted-amp
                 # row's command sets `$!`). The balanced-body row is the disclosed over-note (nothing
@@ -10185,6 +10186,25 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-dq-literal-heredoc-chars-allows", _fg("echo \"a << b\""), "allow"),
                 ("trunc/oos-dq-subst-single-quoted-lt-allows",
                  _fg("echo \"$(echo '<<')\""), "allow"),
+                # Disclosed SILENT misses (the manifest residue): the scan reads every unescaped double
+                # quote inside a double-quoted substitution as the end of the outer string, while bash
+                # reads one there as opening a nested string or as data in a single-quoted span. After
+                # a nested double-quoted string the `<<` is not read as inside a substitution, so its
+                # body is read as double-quoted text and its stray quote carries the real `&` into
+                # quoted text; a double quote in a single-quoted span there shifts the state the same
+                # way. bash 5.3.9 backgrounds the job in each (`$!` is set). These rows record the
+                # current outcome (no note), so a scanner change that alters it shows here.
+                ("trunc/oos-dq-subst-nested-dq-heredoc-miss-allows",
+                 _fg(": \"$(cat \"-\" <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+                 "allow"),
+                ("trunc/oos-dq-subst-assign-dq-heredoc-miss-allows",
+                 _fg(": \"$(x=\"a\"; cat <<'EOF'\nSupport 5\" screens\nEOF\n)\" & long_job # 5\" screens"),
+                 "allow"),
+                ("trunc/oos-dq-subst-printf-dq-heredoc-miss-allows",
+                 _fg("git_commit_stub -m \"$(printf '%s\\n' \"Title\"; cat <<'EOF'\nSupport 5\" screens\n"
+                     "EOF\n)\" & long_job # 5\" screens"), "allow"),
+                ("trunc/oos-dq-subst-sq-dq-amp-miss-allows",
+                 _fg("echo \"$(echo 'x\"y')\" & job # '"), "allow"),
                 # A backslash inside a single-quoted span within a double-quoted substitution is
                 # literal data to bash (bash prints the pair as written), so a backslash-newline
                 # there stays silent; outside that span, inside the same substitution, it is a live
@@ -10207,6 +10227,9 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-unclosed-cmdsubst-notes", _fg("echo $("), "warn"),
                 ("trunc/oos-unclosed-param-expansion-end-notes", _fg("echo ${x"), "warn"),
                 ("trunc/oos-unclosed-backquote-notes", _fg("echo `true"), "warn"),
+                # The closing backquote pops the `(` from the nesting stack but not from the saved
+                # groups, so only the groups term of the end rule sees this parenthesis still open.
+                ("trunc/oos-unclosed-paren-in-backquote-notes", _fg("echo `(true`"), "warn"),
                 ("trunc/oos-trailing-escape-notes", _fg("echo a\\"), "warn"),
                 ("trunc/oos-plain-allows", _fg("python3 build.py"), "allow"),
                 ("trunc/oos-unbalanced-quote-notes", _fg("echo 'oops & bg"), "warn"),
