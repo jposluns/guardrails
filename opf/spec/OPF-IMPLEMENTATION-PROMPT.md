@@ -58,7 +58,7 @@ stop and report it. Do not work from memory or from a summary, this one included
 
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
-```text
+```
 https://raw.githubusercontent.com/jposluns/guardrails/ff9c505dccd9c8ac2e20747f86b6ffa6017c58df/<path>
 ```
 

@@ -10,13 +10,21 @@ commits, so it fails in the same change that edits a pinned source, and it runs 
 and in the isolated opf/ copy of the standalone-closure gate.
 
 Checks, each a named guard:
-  prompt-read     the prompt is a readable regular file within the size bound (else CANNOT-EVALUATE)
+  prompt-read     the prompt is a readable regular file within the size bound (else
+                  CANNOT-EVALUATE); every file whose text a check reads (the prompt, each pinned
+                  source, and pack.toml for the pack facts) is decoded as strict UTF-8, and one
+                  that is not valid UTF-8 is CANNOT-EVALUATE under prompt-decode,
+                  pinned-source-decode or pack-manifest-decode, naming the file, never read with
+                  its invalid bytes replaced or escaped
   pin-shape       the prompt names at least three 40-lowercase-hex commits, in its raw text and
                   in the visible text of its rendered output alike, and every spelling either way
                   is identical, so a spelling assembled only by rendering (a character reference)
                   and a spelling hidden from rendering (an HTML comment) must both agree with the
-                  pin; a commit-shaped spelling in the pin section that is not all lowercase is
-                  refused rather than skipped
+                  pin; image alt text counts as visible text in that whole-prompt count although
+                  HTML shows it only as an attribute, which can only add spellings that must agree
+                  with the pin, never credit a location (the pin section refuses images); a
+                  commit-shaped spelling in the pin section that is not all lowercase is refused
+                  rather than skipped
   pin-section     the prompt carries the pin section between its two fixed headings, each judged
                   on the vendored CommonMark parse as the level-two ATX heading node, a direct
                   child of the document, whose raw source line is byte-for-byte the fixed text,
@@ -29,12 +37,13 @@ Checks, each a named guard:
                   the vendored parser starts one) is refused by name, the way step 8 refuses it,
                   and so is every other node whose source carries text a reader never sees (a
                   link reference definition, a link or an image, whose destination, title and
-                  alt text render only as attributes or not at all, a fenced code block whose
-                  info string is more than one bare word, and any node kind that
+                  alt text render only as attributes or not at all, a fenced code block that
+                  carries any info string at all, and any node kind that
                   _pin_section_text_kinds does not name), so every later reading of the section
                   (the location, table and pack-facts reads) sees only text a reader sees; this
-                  deliberately over-refuses: an adopter cannot keep an HTML comment, a link or an
-                  image in the pin section, even one that hides nothing
+                  deliberately over-refuses: an adopter cannot keep an HTML comment, a link, an
+                  image or a fenced code block info string (even one bare language name such as
+                  text or python) in the pin section, even one that hides nothing
   pin-location    the pin sentence, the raw-URL template and the example URL each name the pinned
                   commit exactly once, so a movable name (a branch) in one of those places cannot
                   hide behind the spelling count elsewhere, and none can sit where a reader never
@@ -51,7 +60,15 @@ Checks, each a named guard:
                   own answer that there is no repository, skips this leg (the byte comparison above
                   still binds the table), and any other git failure is CANNOT-EVALUATE, never a
                   silent skip
-  pack-facts      the format and version the prompt states match opf/prompt-pack/pack.toml
+  pack-facts      the format and version the prompt states match opf/prompt-pack/pack.toml: the
+                  pin section states each exactly once in the code-span form the gate reads
+                  (`format = "..."`, `version = "..."`), and its raw text and its rendered text
+                  alike carry exactly one assignment-shaped spelling of each key (the key,
+                  case-insensitively and not preceded by a letter, digit or underscore, then
+                  optional whitespace, `=`, optional whitespace and a single or double quote), so
+                  a second, conflicting spelling in prose, behind an escaped backtick, in a code
+                  block, built from a character reference or spelled across a setext underline
+                  is refused; a fact stated in other words (version 9.9.9) is not read
   quotation       every double-quoted span of MIN_QUOTE_CHARS or more normalized characters whose
                   nearby context (same paragraph, within _QUOTE_CONTEXT_CHARS before the opening
                   quote) attributes it to a pinned source appears word for word,
@@ -116,7 +133,9 @@ Checks, each a named guard:
                                              check turns green when exactly that check is disabled,
                                              and that each journal-grading fixture that removes or
                                              adds one clause turns green when exactly that clause
-                                             is dropped
+                                             is dropped, and that each fixture another rule of
+                                             the same guard would also refuse carries the
+                                             intended rule's refusal wording
   check_opf_prompt_pin.py --list-quotations  re-runnable probe: print every attributed quotation
                                              with its line and status (MATCH, EXEMPT with the
                                              exemption's name, or NO-MATCH) and any unpaired-quote
@@ -340,13 +359,28 @@ def _read_regular(path, what):
     return data
 
 
+def _read_text(path, what):
+    """The text of a regular file read through _read_regular, decoded as strict UTF-8: a file that
+    is not valid UTF-8 is CANNOT-EVALUATE under the guard what plus "-decode" (prompt-decode for
+    the prompt), naming the file, never read with its invalid bytes replaced or escaped, so bytes
+    no UTF-8 reader can decode never reach a check as escaped text it then passes."""
+    data = _read_regular(path, what)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _Refusal(CANNOT_EVALUATE, what + "-decode",
+                       "{} {!s} is not valid UTF-8: {}".format(what, path, exc))
+
+
 def _check_pin_shape(raw_commits, visible_commits):
     """At least MIN_PIN_OCCURRENCES 40-hex commit spellings in the raw prompt text and in the
     visible text of its rendered output alike, and every spelling either way identical: a spelling
     assembled only by rendering (a character reference the raw scan cannot see) and a spelling
     hidden from rendering (an HTML comment the visible scan cannot see) must both agree with the
     pin, and a prompt whose rendered output shows fewer than the three structural spellings is
-    refused even where its raw bytes still carry them."""
+    refused even where its raw bytes still carry them. The visible spellings include image alt
+    text, which HTML shows only as an attribute: counting it can only add spellings that must
+    agree with the pin, and no location can sit there, because the pin section refuses images."""
     for form, commits in (("raw", raw_commits), ("rendered", visible_commits)):
         _require(len(commits) >= MIN_PIN_OCCURRENCES, "pin-shape",
                  "the prompt's {} text names the pinned commit {} time(s); expected at least "
@@ -397,12 +431,6 @@ def _pin_section(marko, document, prompt_text):
     return prompt_text[raw_start:raw_end], children[head_index:tail_index]
 
 
-# A fenced code block's info string renders only as a class attribute (its first word) or not at
-# all (the rest), so the pin section allows at most one bare word there, a language name, which
-# cannot spell a URL, a table row or a pack fact.
-_FENCE_INFO_WORD_RE = re.compile(r"[A-Za-z0-9_+-]*")
-
-
 def _pin_section_text_kinds(marko):
     """The node kinds of the vendored parse whose source carries no text beyond markup that the
     rendered output does not show: headings, paragraphs, blank lines, lists and their items,
@@ -425,13 +453,16 @@ def _check_pin_section_markup(marko, section_nodes):
     output drops or transforms raw HTML, and a browser shows nothing inside a comment, a script or
     a style element. Every other node whose kind _pin_section_text_kinds does not name is refused
     too (a link reference definition, a link or an image, whose destination, title and alt text
-    render only as attributes or not at all), and so is a fenced code block whose info string is
-    more than one bare word. The location, table and pack-facts reads take the section's raw text,
-    so once this holds every byte they can credit is text a reader sees. This over-refuses by
-    design: an HTML comment, a link or an image that hides nothing is refused as well, so an
-    adopter cannot keep one in the pin section. A lookalike the vendored parser reads as text (an
-    opener inside a code span or after a backslash escape, or a bare comment closer in prose)
-    renders as text and is not refused."""
+    render only as attributes or not at all), and so is a fenced code block that carries any info
+    string at all: an info string renders only as a class attribute (its first word) or not at
+    all (the rest), and the vendored parser leaves the block's lang and extra both empty exactly
+    where the info string is empty (an opener followed only by whitespace has none). The
+    location, table and pack-facts reads take the section's raw text, so once this holds every
+    byte they can credit is text a reader sees. This over-refuses by design: an HTML comment, a
+    link, an image or an info string that hides nothing (a bare language name such as text or
+    python) is refused as well, so an adopter cannot keep one in the pin section. A lookalike the
+    vendored parser reads as text (an opener inside a code span or after a backslash escape, or a
+    bare comment closer in prose) renders as text and is not refused."""
     text_kinds = _pin_section_text_kinds(marko)
     for node in _md_walk(section_nodes):
         _require(not isinstance(node, (marko.block.HTMLBlock, marko.inline.InlineHTML)),
@@ -445,12 +476,12 @@ def _check_pin_section_markup(marko, section_nodes):
                  "title, alt text or definition), while the pin checks read the section's raw "
                  "text".format(type(node).__name__))
         if isinstance(node, marko.block.FencedCode):
-            _require(_FENCE_INFO_WORD_RE.fullmatch(node.lang) is not None and not node.extra,
-                     "pin-section",
-                     "the pin section carries a fenced code block whose info string is more "
-                     "than one bare word ({!r}): an info string renders only as an attribute, "
-                     "never as text a reader sees".format(
-                         (node.lang + " " + node.extra).strip()))
+            _require(not node.lang and not node.extra, "pin-section",
+                     "the pin section carries a fenced code block with the info string {!r}: a "
+                     "fenced code block in the pin section may carry no info string at all, "
+                     "because an info string renders only as an attribute or not at all, never "
+                     "as text a reader sees, while the pin checks read the section's raw "
+                     "text".format((node.lang + " " + node.extra).strip()))
 
 
 def _check_pin_locations(section, pin):
@@ -518,7 +549,7 @@ def _check_drift(root, table):
 
 
 def _git(root, args, env):
-    # F-367: no detached auto-gc or auto-maintenance may outlive a call and churn .git while a
+    # No detached auto-gc or auto-maintenance may outlive a call and churn .git while a
     # later read or a fixture teardown traverses it. --no-replace-objects: a replace ref would
     # resolve the pinned commit or its blobs to substituted objects, so every read here resolves
     # the real objects only.
@@ -572,17 +603,39 @@ def _check_history(root, pin, table):
         raise _Refusal(CANNOT_EVALUATE, "pin-history", "git could not be run: {}".format(exc))
 
 
-def _check_pack_facts(root, section):
+# An assignment-shaped spelling of a pack fact, in any form a reader could take for one: the key,
+# case-insensitively and not preceded by a letter, digit or underscore (so `spec_version` is not
+# the pack version), then optional whitespace, `=`, optional whitespace and a single or double
+# quote. The code-span statement the gate reads is one such spelling.
+_PACK_FACT_SPELLING_RES = tuple(
+    (key, re.compile(r"(?i)(?<![A-Za-z0-9_])" + key + r"\s*=\s*[\"']"))
+    for key in ("format", "version"))
+
+
+def _check_pack_facts(root, section, section_visible):
     """The format and version the pin section states match opf/prompt-pack/pack.toml, read from
-    the section's raw text after _check_pin_section_markup."""
+    the section's raw text after _check_pin_section_markup. The section must state each exactly
+    once in the code-span form read here, and its raw text and its rendered text must each carry
+    exactly one assignment-shaped spelling of each key (_PACK_FACT_SPELLING_RES), so a second,
+    conflicting spelling outside that form (in prose, behind an escaped backtick, in a code
+    block, built from a character reference only the rendered text decodes, or spelled across a
+    setext underline only the raw text keeps) is refused rather than read past. A fact stated in
+    other words (version 9.9.9) is not read."""
     stated_fmt = re.findall(r"`format = \"([^\"`]+)\"`", section)
     stated_ver = re.findall(r"`version = \"([^\"`]+)\"`", section)
     _require(len(stated_fmt) == 1 and len(stated_ver) == 1, "pack-facts",
              "the pin section must state the pack format and version exactly once each; found "
              "{} format and {} version statement(s)".format(len(stated_fmt), len(stated_ver)))
-    raw = _read_regular(root / "opf" / PACK_REL, "pack-manifest")
+    for key, spelling_re in _PACK_FACT_SPELLING_RES:
+        for form, text in (("raw", section), ("rendered", section_visible)):
+            spelled = len(spelling_re.findall(text))
+            _require(spelled == 1, "pack-facts",
+                     "the pin section's {} text spells the pack {} as an assignment {} time(s); "
+                     "expected exactly one, the code-span statement this gate reads, so a "
+                     "second spelling cannot state another value".format(form, key, spelled))
+    text = _read_text(root / "opf" / PACK_REL, "pack-manifest")
     try:
-        doc = tomllib.loads(raw.decode("utf-8"))
+        doc = tomllib.loads(text)
     except (ValueError, RecursionError, MemoryError) as exc:
         raise _Refusal(CANNOT_EVALUATE, "pack-manifest-parse",
                        "pack.toml does not parse: {}".format(exc))
@@ -627,13 +680,19 @@ def _strip_comment_leaders(text):
     return "\n".join(re.sub(r"^\s*#+\s?", "", line) for line in text.splitlines())
 
 
-def _sources_norm(root):
+def _source_texts(root):
+    """Each pinned file's text, keyed by its path, read once through _read_text: the quotation
+    corpus and the specification text the required-rule leg reads come from one strict decode of
+    the same bytes."""
+    return {rel: _read_text(root / rel, "pinned-source") for rel in TABLE_PATHS}
+
+
+def _sources_norm(source_texts):
     """The normalized quotation corpus: each pinned file, plus a comment-leader-stripped copy."""
-    source_texts = [_read_regular(root / rel, "pinned-source").decode(
-        "utf-8", errors="backslashreplace") for rel in TABLE_PATHS]
+    texts = [source_texts[rel] for rel in TABLE_PATHS]
     return "\n".join(
-        [_normalize(text) for text in source_texts]
-        + [_normalize(_strip_comment_leaders(text)) for text in source_texts])
+        [_normalize(text) for text in texts]
+        + [_normalize(_strip_comment_leaders(text)) for text in texts])
 
 
 def _check_quotations(prompt_text, sources_norm):
@@ -953,8 +1012,7 @@ def _validate(root):
     before any spelling count or table read, so every later reading of the section's raw text
     sees only text a reader sees."""
     root = Path(root)
-    prompt_text = _read_regular(root / "opf" / PROMPT_REL, "prompt").decode(
-        "utf-8", errors="backslashreplace")
+    prompt_text = _read_text(root / "opf" / PROMPT_REL, "prompt")
     marko, document = _journal_markdown(prompt_text)
     section, section_nodes = _pin_section(marko, document, prompt_text)
     _check_pin_section_markup(marko, section_nodes)
@@ -968,10 +1026,10 @@ def _validate(root):
     table = _parse_table(section)
     _check_drift(root, table)
     history = _check_history(root, pin, table) if pin else "history: skipped (no pin found)"
-    _check_pack_facts(root, section)
-    sources_norm = _sources_norm(root)
-    spec_norm = _normalize(_read_regular(root / SPEC_TABLE_PATH, "pinned-source").decode(
-        "utf-8", errors="backslashreplace"))
+    _check_pack_facts(root, section, section_visible)
+    source_texts = _source_texts(root)
+    sources_norm = _sources_norm(source_texts)
+    spec_norm = _normalize(source_texts[SPEC_TABLE_PATH])
     _check_quotations(prompt_text, sources_norm)
     _check_required_rules(spec_norm, _normalize(prompt_text))
     _check_journal_grading(marko, document, prompt_text)
@@ -993,9 +1051,8 @@ def list_quotations(root=DEFAULT_ROOT):
     paragraph, 2 an input cannot be read."""
     try:
         root = Path(root)
-        prompt_text = _read_regular(root / "opf" / PROMPT_REL, "prompt").decode(
-            "utf-8", errors="backslashreplace")
-        sources = _sources_norm(root)
+        prompt_text = _read_text(root / "opf" / PROMPT_REL, "prompt")
+        sources = _sources_norm(_source_texts(root))
     except _Refusal as refusal:
         print("check_opf_prompt_pin: {} [{}] {}".format(
             refusal.status, refusal.guard, refusal), file=sys.stderr)
@@ -1089,7 +1146,7 @@ def _fixture_prompt(root, pin=_FIXTURE_PIN,
             rules.append('The specification says "{}"'.format(sentence))
     return (_PIN_SECTION_HEAD + "\n\nRead these files at the pinned commit `" + pin +
             "` of the repository.\n\n" + _TABLE_HEADER + "\n|---|---|---|\n" +
-            table + "\n\nEach raw URL names the commit:\n\n```text\nhttps://example.invalid/" + pin +
+            table + "\n\nEach raw URL names the commit:\n\n```\nhttps://example.invalid/" + pin +
             "/<path>\n```\n\nFor example, https://example.invalid/" + pin + "/opf/spec/OPF-SPEC.md.\n\n" +
             'The pack manifest (`format = "opf.prompt-pack/v1"`, `version = "' + pack_version +
             '"`) lists no members.\n\n' + _PIN_SECTION_TAIL + "\n\n" +
@@ -1506,9 +1563,9 @@ def _vectors():
         # The given control character joining a note to the step 9 heading, mirroring the CR
         # fixture: CommonMark renders one paragraph, so the gate's parse keeps the item in step
         # 8, while a reading that breaks lines on the character (Python's splitlines does for
-        # the vertical tab, the C0 information separators, U+0085, U+2028 and U+2029) sees a
-        # step 9 heading there, and for NUL the U+FFFD substitution makes rendered text disagree
-        # with the raw bytes. Refused by presence, not by effect.
+        # the vertical tab, the C0 file, group and record separators (U+001C to U+001E), U+0085,
+        # U+2028 and U+2029) sees a step 9 heading there, and for NUL the U+FFFD substitution
+        # makes rendered text disagree with the raw bytes. Refused by presence, not by effect.
         def build(base):
             root = _build_tree(base)
             _edit_prompt(root, _FIXTURE_JOURNAL_ITEM + "\n\n" + _FIXTURE_STEP9_HEAD,
@@ -1562,9 +1619,9 @@ def _vectors():
         return build
 
     def denied_in_code_block(base):
-        # The denied clause inside a fenced code block of step 8: it is absent from the
-        # rendered-text scan (code earns no clause credit), so only the raw-source scan of the
-        # denied clause refuses it.
+        # The denied clause inside a fenced code block of step 8: code earns no required-clause
+        # credit, but the denied-clause scan reads code-block content in the step's visible
+        # text, and the step's raw source carries the clause too, so each scan refuses it.
         root = _build_tree(base)
         _edit_prompt(root, "\n\n" + _FIXTURE_STEP9_HEAD,
                      "\n\n```text\nIn short, in a homes-1 origin store a journal entry is a "
@@ -1739,12 +1796,14 @@ def _vectors():
 
     def pack_facts_in_fence_info(base):
         # The pack facts moved into a tilde fence's info string, which renders nothing of them,
-        # while the visible sentence states another version: the raw pack-facts read would still
-        # find exactly one format and one version statement, so only the pin section's markup
-        # rule refuses it.
+        # while the visible sentence states another version, each `=` written as a character
+        # reference: the raw text then carries one assignment-shaped spelling of each key (the
+        # hidden one) and the rendered text one (the visible one), so the raw pack-facts read
+        # and both spelling counts would still pass, and only the pin section's markup rule
+        # refuses it.
         root = _build_tree(base)
         _edit_prompt(root, '(`format = "opf.prompt-pack/v1"`, `version = "0.5.1"`)',
-                     "(format opf.prompt-pack/v1, version 0.6.0)")
+                     '(format &#61; "opf.prompt-pack/v1", version &#61; "0.6.0")')
         _edit_prompt(root, "\n\nThe pack manifest",
                      '\n\n~~~text `format = "opf.prompt-pack/v1"` `version = "0.5.1"`\nx\n~~~'
                      "\n\nThe pack manifest")
@@ -1782,6 +1841,36 @@ def _vectors():
         # so it passes; a reading that ended the comment at the inner ">" (the generic tag rule)
         # would expose the spelling, so this fixture discriminates the comment rule's span.
         _build_tree(base, extra_text="Older notes <!-- note > &#100;" + "d" * 39 + " --> end.")
+
+    def stale_in_image_alt_outside_section(base):
+        # An entity-built stale spelling in image alt text outside the pin section: HTML shows alt
+        # text only as an attribute, but the whole-prompt rendered count reads it, so the rendered
+        # side of the spelling comparison refuses it; a count that left alt text out would pass
+        # it.
+        _build_tree(base, extra_text="![Older notes name &#100;" + "d" * 39 + "](x.png)")
+
+    def fence_in_section(opener):
+        # A fenced code block opened by the given line, holding a line that hides nothing, inside
+        # the pin section before the pack-facts sentence; the closer is the opener's fence run.
+        return stale_in_section(opener + "\nA plain line.\n" + opener[:3])
+
+    def prompt_invalid_utf8(base):
+        # A line carrying the byte 0xff, which is not valid UTF-8, appended after step 9 of an
+        # otherwise valid prompt: read with that byte escaped, every pin, quotation and journal
+        # check still passes, so only the strict decode refuses it.
+        prompt = _build_tree(base) / "opf" / PROMPT_REL
+        prompt.write_bytes(prompt.read_bytes() + b"\nA note \xff here.\n")
+
+    def source_invalid_utf8(rel):
+        # A comment line carrying the byte 0xff appended to the given pinned file, with the prompt
+        # rewritten afterwards so its table pins the new bytes: read with that byte escaped, the
+        # file still passes every check that reads it, so only the strict decode refuses it.
+        def build(base):
+            root = _build_tree(base)
+            path = root / rel
+            path.write_bytes(path.read_bytes() + b"# A note \xff here.\n")
+            (root / "opf" / PROMPT_REL).write_text(_fixture_prompt(root), encoding="utf-8")
+        return build
 
     return [
         ("valid-tree", VALID, None, None, valid),
@@ -2003,6 +2092,43 @@ def _vectors():
         ("pin-example-url-autolink", VALID, None, None,
          example_replaced("For example, <" + example_url + ">.")),
         ("pin-html-lookalikes-render-as-text", VALID, None, None, html_lookalikes_render_as_text),
+        ("prompt-invalid-utf8", CANNOT_EVALUATE, "prompt-decode", None, prompt_invalid_utf8),
+        ("pinned-source-invalid-utf8", CANNOT_EVALUATE, "pinned-source-decode", None,
+         source_invalid_utf8("opf/spec/OPF-QUICKSTART.md")),
+        ("pinned-spec-invalid-utf8", CANNOT_EVALUATE, "pinned-source-decode", None,
+         source_invalid_utf8(SPEC_TABLE_PATH)),
+        ("pack-manifest-invalid-utf8", CANNOT_EVALUATE, "pack-manifest-decode", None,
+         source_invalid_utf8("opf/" + PACK_REL)),
+        ("pin-fence-info-empty", VALID, None, None, fence_in_section("~~~")),
+        ("pin-fence-info-whitespace-only", VALID, None, None, fence_in_section("```   ")),
+        ("pin-fence-info-one-character", INVALID, "pin-section", "_check_pin_section_markup",
+         fence_in_section("```x")),
+        ("pin-fence-info-python", INVALID, "pin-section", "_check_pin_section_markup",
+         fence_in_section("```python")),
+        ("pin-fence-info-c-sharp", INVALID, "pin-section", "_check_pin_section_markup",
+         fence_in_section("```c#")),
+        ("pin-fence-info-commit", INVALID, "pin-section", "_check_pin_section_markup",
+         fence_in_section("~~~" + _FIXTURE_PIN)),
+        ("pin-stale-commit-entity-in-image-alt-outside-section", INVALID, "pin-shape",
+         "_check_pin_shape", stale_in_image_alt_outside_section),
+        ("pin-pack-version-second-spelling-prose", INVALID, "pack-facts", "_check_pack_facts",
+         stale_in_section('Older notes say version = "9.9.9" here.')),
+        ("pin-pack-version-second-spelling-escaped-backticks", INVALID, "pack-facts",
+         "_check_pack_facts", stale_in_section('Older notes say \\`version = "9.9.9"\\` here.')),
+        ("pin-pack-version-second-spelling-entity", INVALID, "pack-facts", "_check_pack_facts",
+         stale_in_section('Older notes say version &#61; "9.9.9" here.')),
+        ("pin-pack-version-second-spelling-single-quoted", INVALID, "pack-facts",
+         "_check_pack_facts", stale_in_section("Older notes say `version = '9.9.9'` here.")),
+        ("pin-pack-format-second-spelling-prose", INVALID, "pack-facts", "_check_pack_facts",
+         stale_in_section('Older notes say format = "x/v2" here.')),
+        # A setext underline turns the `=` into heading markup, so the rendered text shows no
+        # assignment while the raw source still spells one across lines: only the raw count
+        # refuses it.
+        ("pin-pack-version-second-spelling-setext-underline", INVALID, "pack-facts",
+         "_check_pack_facts", stale_in_section('Older notes name the version\n=\n\n"9.9.9" was '
+                                               "its value.")),
+        ("pin-pack-spec-version-spelling", VALID, None, None,
+         stale_in_section('The store declares `spec_version = "1.3.0"` here.')),
     ]
 
 
@@ -2029,6 +2155,17 @@ _JOURNAL_CLAUSE_VECTORS = (
     ("journal-denied-clause-named-entity", "unqualified-conclusion"),
     ("journal-denied-clause-code-span-word", "unqualified-conclusion"),
     ("journal-denied-clause-code-span-words", "unqualified-conclusion"),
+)
+
+# Each red fixture that a second rule of the same guard would also refuse, with a phrase only the
+# intended rule's refusal carries: with the intended rule removed the status and guard stay the
+# same, so the fixture's refusal must carry that phrase. The raw-HTML refusal names raw HTML,
+# which the node-kind rule, refusing the same nodes by kind, never does; the fence rule says a
+# fence may carry no info string at all, which a one-word rule would not say.
+_REFUSAL_WORDING_VECTORS = (
+    ("pin-section-comment-harmless", "carries raw HTML"),
+    ("pin-table-in-html-comment", "carries raw HTML"),
+    ("pin-fence-info-c-sharp", "may carry no info string at all"),
 )
 
 
@@ -2071,6 +2208,48 @@ def _journal_clause_mutants(tmp, check):
             restore()
         ran += 1
         check(vector + "-without-" + clause, dropped, (VALID, None))
+    return ran
+
+
+def _refusal_wording_checks(tmp, check):
+    builders = {name: build for name, _, _, _, build in _vectors()}
+    ran = 0
+    for vector, phrase in _REFUSAL_WORDING_VECTORS:
+        base = Path(tmp) / ("wording-" + vector)
+        base.mkdir()
+        builders[vector](base)
+        got = validate_tree(base)
+        ran += 1
+        check(vector + "-wording",
+              ("worded", None) if phrase in got[2]
+              else ("unworded", None, "wanted {!r} in {!r}".format(phrase, got[2])),
+              ("worded", None))
+    return ran
+
+
+def _list_quotations_probe(tmp, check):
+    """The --list-quotations probe reads the prompt and the pinned sources through the same strict
+    decode as the gate: a file that is not valid UTF-8 must exit 2 under its decode guard, never
+    list the quotations of text read with the invalid byte escaped."""
+    import contextlib
+    import io
+    builders = {name: build for name, _, _, _, build in _vectors()}
+    statuses = {code: name for name, code in EXIT_CODES.items()}
+    ran = 0
+    for vector, guard in (("prompt-invalid-utf8", "prompt-decode"),
+                          ("pinned-source-invalid-utf8", "pinned-source-decode")):
+        base = Path(tmp) / ("list-quotations-" + vector)
+        base.mkdir()
+        builders[vector](base)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = list_quotations(base)
+        ran += 1
+        check("list-quotations-" + vector,
+              (statuses.get(rc, "exit {!r}".format(rc)),
+               guard if "[{}]".format(guard) in err.getvalue() else None,
+               "exit {!r}; stderr {!r}".format(rc, err.getvalue())),
+              (CANNOT_EVALUATE, guard))
     return ran
 
 
@@ -2267,6 +2446,8 @@ def _self_test_isolated():
                     check(name + "-disabled-" + covering, disabled, (VALID, None))
             count += _history_vectors(tmp, check)
             count += _journal_clause_mutants(tmp, check)
+            count += _refusal_wording_checks(tmp, check)
+            count += _list_quotations_probe(tmp, check)
             count += _journal_parse_probe(tmp, check)
             count += 1
             check("direct-entry-harness-error", _direct_entry_harness_error(),
