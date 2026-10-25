@@ -255,9 +255,11 @@ _REVISION_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 # destination beneath the store's Move archive excepted, is a member of some row, so a named decoy cannot
 # leave the file that runs uninspected;
 # a launcher filed in that archive, and a source's preservation copy (no op row's write), go uninspected.
-# A moved file is never a row member (a member is installed by one of the three ops, which would write its
-# path twice), so the planner refuses a declared move destination under a launcher's file name outside that
-# archive before it freezes the plan (_in_move_archive). Like every launch check, that clause runs only when
+# A move destination under a launcher's file name outside that archive is refused by the frozen plan whether
+# or not a row names it: named in no row, by that clause; named in a row, as a member no op installs, or, where
+# one of the three ops installs it, as a path written twice unless a launch check refuses the installed
+# launcher first; so the planner refuses such a declared destination before it freezes the plan
+# (_in_move_archive). Like every launch check, that clause runs only when
 # every op row is VALID, and it also waits for well-formed member lists whose every path one of the three
 # ops places (each defect is an INVALID finding of its own); a plan with any other defect as well can report
 # that clause's CANNOT-EVALUATE ahead of its INVALID findings. A launcher in a row of a platform with no

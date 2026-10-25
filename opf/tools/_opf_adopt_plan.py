@@ -39,7 +39,8 @@ destination whose file name is an enforcement launcher's (opf.yml, opf-ci.sh, pr
 or install.sh, compared case-insensitively) refuses unless it lies beneath that Move
 archive, because the frozen plan refuses it whether or not an enforcement row names it
 (_opf_adopt._enforcement_launch_refusal). Named in no row, it is an uninspected launcher
-(cannot-evaluate, exit 2, once every row's member list is well formed and installed).
+(cannot-evaluate, exit 2, once every op row is valid and every row's member list is well
+formed and installed).
 Named in a row, it is a member no install op installs (invalid, exit 1); where an install
 op does install that path, the move and the install write it twice (invalid, exit 1),
 unless a launch check refuses the installed launcher first (cannot-evaluate, exit 2). Every move
@@ -1442,8 +1443,10 @@ def self_test():
                     self.assertTrue(result.findings[0].startswith(
                         "move destination {!r} of {!r} has an enforcement launcher's file name".format(
                             destination, source)), result.findings)
-                    self.assertIn("omit the destination to take the default, or choose another "
-                                  "file name", result.findings[0])
+                    self.assertIn("file name (opf.yml, opf-ci.sh, pre-commit or install.sh, in any case) "
+                                  "outside .working/archive/moved/, and the frozen plan refuses one there "
+                                  "whether or not an enforcement row names it; omit the destination to "
+                                  "take the default, or choose another file name", result.findings[0])
             for destination in (None, moved, "legacy/hooks/pre-commit.old"):
                 with self.subTest(destination=destination):
                     decision = dict(path=".opf/hooks/pre-commit", disposition="move", actor="fixture")

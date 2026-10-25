@@ -200,8 +200,9 @@ frozen plan marks each source `occupying = true` or `occupying = false`.
   destination is a collision, never an overwrite. A named destination whose file name is
   `opf.yml`, `opf-ci.sh`, `pre-commit` or `install.sh`, in any mix of upper and lower case,
   refuses with exit 2 when you plan, unless it lies beneath `.working/archive/moved/`. Those
-  are the enforcement launcher names, and a moved file is never checked as an enforcement
-  member. Take the default destination, or give the file another name such as
+  are the enforcement launcher names, and the frozen plan refuses a file moved under one of them
+  outside that archive whether or not an enforcement row names it (the enforcement notes below
+  give each case). Take the default destination, or give the file another name such as
   `pre-commit.old`.
 
 The reserved store control area (`.working/archive`, `imported`, `staging`, `journals`) is never
@@ -478,10 +479,16 @@ How to fill it:
   archive, `.working/archive/moved/`, where a `move` decision files an old hook away: moving the
   former `.opf/hooks/pre-commit` there is accepted. A file moved there is not checked, so do not
   run it from there. A `move` destination under one of the four names anywhere else is refused
-  before the plan is built (exit 2), because no row can name a moved file: a member must be
-  installed by an `install-pack`, `plant-governance` or `enable-hook` operation, which would then
-  write that path a second time. The copy the plan keeps of a retired, migrated or occupying
-  source is not an operation's write and is not checked by this rule either. The planner applies
+  before the plan is built (cannot-evaluate, exit 2), because the frozen plan refuses such a
+  destination whether or not a row names it. Named in no row, it is a file the plan writes under
+  one of the four names that no row names (cannot-evaluate, exit 2, as above). Named in a row
+  but installed by no `install-pack`, `plant-governance` or `enable-hook` operation, it is a
+  member that no operation installs (invalid, exit 1). Named in a row and installed by one of
+  those operations, the move and the install write that path twice (invalid, exit 1), unless a
+  launch check above refuses the installed file first (cannot-evaluate, exit 2), as it does when
+  the path that file runs is not one the plan creates in `opf/`. The copy the plan keeps of a
+  retired, migrated or occupying source is not an operation's write and is not checked by this
+  rule either. The planner applies
   this check, like every other exit-2 check in this paragraph, only when every operation row is
   well formed; this check also needs every row's member list to be well formed, with an
   `install-pack`, `plant-governance` or `enable-hook` operation installing each member path,
