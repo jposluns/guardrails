@@ -7900,9 +7900,10 @@ def _main_isolated(monitor):
                             "got {}".format(probe_as))
 
         # (blank-probe) a zero-exit status answer holding only blank lines is MALFORMED (porcelain prints one
-        # 'XY PATH' record per line), so _tree_is_clean reads it as None (cannot evaluate), never clean; a
-        # change line still wins (False). Only the non -z porcelain call (the clean probe) is injected; every
-        # other git call, the snapshot's own -z probe included, runs for real.
+        # 'XY PATH' record per line), and so is one holding '!!' lines (porcelain prints '!!' only under
+        # --ignored, which the probe never passes), so _tree_is_clean reads either as None (cannot evaluate),
+        # never clean; a change line still wins (False). Only the non -z porcelain call (the clean probe) is
+        # injected; every other git call, the snapshot's own -z probe included, runs for real.
         rec_bp = _init_repo(tmp / "rec-blank-probe")
         _orig_run_bp = aiqt_hooks.subprocess.run
         _bp_reads = []
@@ -7919,7 +7920,11 @@ def _main_isolated(monitor):
                                       ("crlf-blank", "\r\n", None), ("ignored-blank", "!! build/\n\n", None),
                                       ("blank-then-change", "\n M file.txt\n", False),
                                       ("change-then-blank", " M file.txt\n\n", False),
-                                      ("ignored-only", "!! build/\n", True), ("empty", "", True)):
+                                      ("ignored-only", "!! build/\n", None),
+                                      ("ignored-bare", "!!\n!!x\n", None),
+                                      ("change-then-ignored", " M file.txt\n!! build/\n", False),
+                                      ("ignored-then-change", "!! build/\n?? new.txt\n", False),
+                                      ("empty", "", True)):
             _bp_reads.clear()
             aiqt_hooks.subprocess.run = _bp_run(_stdout)
             try:
@@ -7930,14 +7935,16 @@ def _main_isolated(monitor):
                 failures.append("(blank-probe-{}) a zero-exit status answer {!r} must read as {}, got {} "
                                 "(injection reached {} time(s))".format(_case, _stdout, _want, _got,
                                                                          len(_bp_reads)))
-        for _verb in ("reset --hard", "checkout -- file.txt", "clean -fd"):
-            _bp_tag = _verb.split()[0]
+        for _verb, _bp_tag, _bp_out in (("reset --hard", "reset", "\n"),
+                                        ("checkout -- file.txt", "checkout", "\n"),
+                                        ("clean -fd", "clean", "\n"),
+                                        ("reset --hard", "ignored-reset", "!! build/\n")):
             _bp_repo = _init_repo(tmp / "rec-blank-probe-{}".format(_bp_tag))
             _bp_reads.clear()
-            aiqt_hooks.subprocess.run = _bp_run("\n")
+            aiqt_hooks.subprocess.run = _bp_run(_bp_out)
             try:
-                expect("(blank-probe-handler-{}) a blank-only status answer on a clean tree snapshots then "
-                       "allows git {}, never a silent allow".format(_bp_tag, _verb), "git " + _verb,
+                expect("(blank-probe-handler-{}) a malformed status answer {!r} on a clean tree snapshots then "
+                       "allows git {}, never a silent allow".format(_bp_tag, _bp_out, _verb), "git " + _verb,
                        "allow-note", cwd=str(_bp_repo))
             finally:
                 aiqt_hooks.subprocess.run = _orig_run_bp

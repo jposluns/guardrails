@@ -127,7 +127,7 @@ metacharacter-free 'git <verb> <plain args>'
 reaches the probe, where PROVABLY CLEAN means the read-only, config-forced porcelain probe (git -c
 status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a repo-local
 status.showUntrackedFiles=no cannot hide an untracked file) reports NO tracked change AND NO untracked ('??')
-entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree clobber (reset --hard,
+entry (a '!!' line, never printed without --ignored, reads as malformed, never clean). A pristine bare whole-tree clobber (reset --hard,
 checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
 No recognized lossy verb that would discard WORKING-TREE CONTENT is silently ALLOWED except a pristine bare
 'git <verb>' whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even
@@ -5443,22 +5443,24 @@ def _tree_is_clean(repo):
     read-only porcelain probe reports NOTHING that a lossy verb could destroy: no uncommitted tracked change
     (any staged or unstaged modification, in EITHER porcelain column) AND no untracked ('??') entry. False
     when it reports either, None when the probe could not run (a subprocess error, a non-zero return, an
-    unreadable repo) or answered MALFORMED: a zero-exit answer holding a blank line and no change line is not
-    well-formed porcelain (one 'XY PATH' record per line), so a blank-only answer (a broken or substituted
-    git) reads as cannot-evaluate, never as clean. A change line still WINS (False): a raw U+2028/U+0085 path,
-    which a repo-local core.quotePath=false leaves unquoted, is cut by str.splitlines() into its record plus a
-    blank fragment, and False is the stricter answer at the clobber gate (DENY, where None snapshots then
-    allows). Untracked files are uncommitted work a force-checkout, a 'git clean', or a 'git reset --hard' can
+    unreadable repo) or answered MALFORMED: a zero-exit answer holding a blank line or an ignored '!!' line,
+    and no change line, is not well-formed output for this call (one 'XY PATH' record per line, and porcelain
+    prints '!!' only under --ignored, which this probe never passes), so such an answer (a broken or
+    substituted git) reads as cannot-evaluate, never as clean. A change line still WINS (False): a raw
+    U+2028/U+0085 path, which a repo-local core.quotePath=false leaves unquoted, is cut by str.splitlines()
+    into its record plus a blank fragment, and False is the stricter answer at the clobber gate (DENY, where
+    None snapshots then allows). Untracked files are uncommitted work a force-checkout, a 'git clean', or a 'git reset --hard' can
     destroy, so an untracked-only-dirty tree is NOT provably clean.
 
     The probe FORCES untracked reporting - 'git -c status.showUntrackedFiles=all status --porcelain
     --untracked-files=all' - so a repo-local 'status.showUntrackedFiles=no' config cannot hide an untracked
     file from the guard and thereby win a silent allow for reset --hard / checkout -f / clean -f. The '-c'
     override and the explicit '--untracked-files=all' both defeat the config; either alone would suffice, and
-    carrying both keeps the intent legible. An ignored '!!' entry is treated as clean (porcelain does not emit
-    '!!' without --ignored anyway). A forced checkout or 'clean -x' CAN overwrite/remove an ignored file, but
-    probing --ignored would ASK on every repo carrying build artifacts, so ignored-file loss on those forms is
-    a DISCLOSED residual the recovery layer backstops (every non-dry-run clean already ASKS regardless).
+    carrying both keeps the intent legible. The probe never asks for ignored files, so an ignored file is
+    invisible to it, and a '!!' line in its answer is malformed (above), never clean. A forced checkout or
+    'clean -x' CAN overwrite/remove an ignored file, but probing --ignored would ASK on every repo carrying
+    build artifacts, so ignored-file loss on those forms is a DISCLOSED residual the recovery layer backstops
+    (every non-dry-run clean already ASKS regardless).
     Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
     Offline, read-only, 5s timeout; the guard never mutates the repo. GIT_OPTIONAL_LOCKS=0 keeps this probe
     from refreshing/writing the real `.git/index`, and EVERY ambient GIT_*-prefixed var is scrubbed via
@@ -5474,15 +5476,15 @@ def _tree_is_clean(repo):
             capture_output=True, text=True, timeout=5, env=env)
         if result.returncode != 0:
             return None
-        blank = False
+        malformed = False
         for line in result.stdout.splitlines():
-            if not line:
-                blank = True  # not a porcelain record: malformed on its own, but a change line still wins
+            if not line or line[:2] == "!!":
+                # a blank line is not a porcelain record, and '!!' is never printed without --ignored, which
+                # this probe does not pass: malformed on its own, but a change line still wins
+                malformed = True
                 continue
-            if line[:2] == "!!":
-                continue  # only an ignored entry is treated as clean
             return False  # a tracked change (staged or unstaged) OR an untracked file: not provably clean
-        return None if blank else True  # blank-only (or blank plus ignored-only): cannot evaluate, never clean
+        return None if malformed else True  # blank or '!!' lines only: cannot evaluate, never clean
     except Exception:
         return None
 
