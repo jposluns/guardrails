@@ -72,6 +72,8 @@ run_gate "portability-selftest" python3 -I -B tools/check_portability.py --self-
 run_gate "portability" python3 -I -B tools/check_portability.py
 run_gate "derived-command-parameters-selftest" python3 -I -B tools/check_derived_command_parameters.py --self-test
 run_gate "derived-command-parameters" python3 -I -B tools/check_derived_command_parameters.py
+run_gate "relied-exit-pipes-selftest" python3 -I -B tools/check_relied_exit_pipes.py --self-test
+run_gate "relied-exit-pipes" python3 -I -B tools/check_relied_exit_pipes.py
 run_gate "dashes"    python3 -I -B tools/check_no_dashes.py
 run_gate "dashes-selftest" python3 -I -B tools/check_no_dashes.py --self-test
 run_gate "dashes-default-parity" python3 -I -B tools/check_no_dashes.py --default-parity
@@ -110,7 +112,9 @@ run_gate "opf-upgrade" python3 -I -B opf/tools/check_opf_upgrade.py
 run_gate "opf-record-selftest" python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
+run_gate "opf-adopt-state-selftest" python3 -I -B opf/tools/_opf_adopt_state.py --self-test
 run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
+run_gate "opf-adopt-complete-selftest" python3 -I -B opf/tools/_opf_adopt_complete.py --self-test
 run_gate "opf-import-batch-selftest" python3 -I -B opf/tools/_opf_import_batch.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
@@ -164,6 +168,8 @@ run_gate "agents-selftest" python3 -I -B tools/gen_agents.py --self-test
 run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
 run_gate "first-pin-demo-selftest" python3 -I -B tools/gen_first_pin_demo.py --self-test
 run_gate "first-pin-demo-drift"    python3 -I -B tools/gen_first_pin_demo.py --check
+run_gate "must-deliver-selftest" python3 -I -B tools/check_must_deliver.py --self-test
+run_gate "must-deliver"          python3 -I -B tools/check_must_deliver.py
 run_gate "mappings-page-drift" python3 -I -B tools/gen_mappings.py --check
 run_gate "reference-roster-selftest" python3 -I -B tools/gen_reference_facts.py --self-test
 run_gate "reference-roster-drift" python3 -I -B tools/gen_reference_facts.py --check
@@ -212,6 +218,7 @@ run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test
 run_gate "mistakes-register-selftest" python3 -I -B tools/check_mistakes_register.py --self-test
 run_gate "mistakes-register"          python3 -I -B tools/check_mistakes_register.py
+run_gate "mistakes-register-append-selftest" python3 -I -B tools/orch_register.py --self-test
 run_gate "aei-enumerator-selftest" python3 -I -B tools/aei_backlog_md.py --self-test
 run_gate "skill-selftest"  python3 -I -B tools/gen_skill.py --self-test
 run_gate "skill-drift"     python3 -I -B tools/gen_skill.py --check
@@ -245,6 +252,7 @@ run_gate "manifest"              python3 -I -B tools/check_manifest.py
 run_gate "byte-canon-selftest"   python3 -I -B tools/check_byte_canon.py --self-test
 run_gate "byte-canon"            python3 -I -B tools/check_byte_canon.py
 run_gate "clauses-manifest-sources" python3 -I -B tools/check_clauses.py --genesis --with-manifest
+run_gate "placement-selftest" python3 -I -B tools/check_selftest_execution.py --suite rule-placement-selftest
 run_gate "placement"      python3 -I -B tools/check_rule_placement.py
 run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
 run_gate "applies"         python3 -I -B tools/check_applies.py
@@ -275,6 +283,12 @@ run_gate "ci-parity"          python3 -I -B tools/check_ci_parity.py
 # and an independently maintained role catalog, failing on membership or write-role drift.
 run_gate "git-option-table-selftest" python3 -I -B tools/check_git_option_table.py --self-test
 run_gate "git-option-table" python3 -I -B tools/check_git_option_table.py
+
+# Dangerous-API AST lint (plan item 6): unsafe deserialization, disabled TLS verification, and
+# shell or code execution sinks in the repo's own Python, with a reviewed in-gate allowlist; an
+# unreadable or unparseable file is cannot-evaluate.
+run_gate "dangerous-api-selftest" python3 -I -B tools/check_dangerous_api.py --self-test
+run_gate "dangerous-api" python3 -I -B tools/check_dangerous_api.py
 
 # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit that
 # proves the harness end to end, and the internal-name leak gate. Their self-tests are gating (a broken
