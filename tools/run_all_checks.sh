@@ -134,7 +134,16 @@ run_gate "opf-init-builders-selftest" python3 -I -B opf/tools/_opf_init.py --sel
 run_gate "opf-init-operation-selftest" python3 -I -B opf/tools/_opf_init_operation.py --self-test
 run_gate "opf-init-p0-selftest" python3 -I -B opf/tools/check_opf_init_p0.py --self-test --red-on-revert
 run_gate "opf-init-observe-selftest" python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
-run_gate "opf-standalone-closure" python3 -I -B tools/check_opf_standalone_closure.py
+run_gate "opf-standalone-closure-selftest-a" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-a
+run_gate "opf-standalone-closure-selftest-b" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-b
+run_gate "opf-standalone-closure-selftest-c" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-c
+run_gate "opf-standalone-closure-selftest-d" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-d
+run_gate "opf-standalone-closure-selftest-e" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-e
+run_gate "opf-standalone-closure-a" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-a
+run_gate "opf-standalone-closure-b" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-b
+run_gate "opf-standalone-closure-c" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-c
+run_gate "opf-standalone-closure-d" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-d
+run_gate "opf-standalone-closure-e" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-e
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
