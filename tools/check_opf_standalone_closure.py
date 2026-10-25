@@ -929,11 +929,16 @@ def _lane_budget_faults(bounds, deadlines, members):
 
 
 # The workflow reader below is a STRICT ALLOWLIST of the YAML forms .github/workflows/quality.yml
-# itself uses, each held to its exact YAML 1.2 grammar; it never parses YAML in general, and a line it
-# cannot place under one of these forms makes the job-limit read cannot evaluate. Whitespace is
-# YAML's: indentation is ASCII spaces only, and tokens are separated by spaces or tabs; no other
-# character (a no-break space, U+3000 or any other Unicode space) is ever stripped as whitespace, so
-# it stays part of the text it sits in, as it does for a YAML loader. The forms:
+# itself uses; it never parses YAML in general, and a line it cannot place under one of these forms
+# makes the job-limit read cannot evaluate. What it checks is each line's form, by the rules below
+# (a subset of YAML 1.2's), and the indentation of every block mapping and sequence: every key of a
+# mapping sits at its first key's indentation, every entry of a sequence at its first entry's, and a
+# nested value's first line sits deeper than its key (a sequence may also start at the key's own
+# column). It does not check YAML 1.2's whole grammar: what it never reads (comment text and
+# block-scalar content, see the end of this comment) is not checked at all. Whitespace is YAML's:
+# indentation is ASCII spaces only, and tokens are separated by spaces or tabs; no other character (a
+# no-break space, U+3000 or any other Unicode space) is ever stripped as whitespace, so it stays part
+# of the text it sits in, as it does for a YAML loader. The forms:
 #   * a blank line (spaces and tabs only), or a comment line (`#` after any spaces and tabs);
 #   * a plain-key line, `KEY:` (KEY starts with a letter or `_` and holds letters, digits, `_`, `.`
 #     and `-`; the colon follows it directly, then whitespace or the line end), optionally after ONE
@@ -954,9 +959,12 @@ def _lane_budget_faults(bounds, deadlines, members):
 # Everything else is refused BY NAME: a double-quoted scalar (quality.yml uses none, so no escape in
 # that style is ever read), a block-scalar header with an indicator (`|-`, `|2`, `>`) or a malformed
 # one (`|++`, `|0`), a sequence entry not written `- ` then content, an alias, anchor, tag or flow
-# mapping, and a value holding a character YAML does not print (a control character).
+# mapping, a value holding a character YAML does not print (a control character), and a key or
+# entry at no indentation an open mapping or sequence gives (over- or under-indented).
 # A comment's text, like a comment line's and block-scalar content, is data: it is never read for
-# structure, so its characters are not checked.
+# structure, so its characters are not checked (a control character in a comment is not refused),
+# and a block scalar's lines are only required to sit deeper than its key (YAML 1.2 also requires
+# each to reach its first content line's indentation; one that does not is not refused).
 _CI_QUOTED_CHAR = "[\t\x20-\x26\x28-\x7e\xa0-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]"
 _CI_NON_SPACE = "[\x21-\x7e\xa0-\ud7ff\ue000-\ufefe\uff00-\ufffd\U00010000-\U0010ffff]"
 _CI_TRAILER = "(?:[ \t]+(?:#.*)?)?"
@@ -1018,12 +1026,17 @@ def _ci_job_header(lines, job):
     plain scalar continued, or no structure at all), a tab before a line's content, a sequence at
     column 0, a line indented before any top-level key, a second top-level jobs: key, a jobs: value
     that is not a mapping, a line inside jobs: that is neither one of its keys nor nested inside one,
-    a job header with a value on its line, no top-level jobs: key, and the job absent or repeated."""
+    a job header with a value on its line, a sequence as the job's value, a key or entry at no
+    indentation an open mapping or sequence gives (deeper than its siblings but not deeper than a
+    key that opens a nested value, or at no sibling's indentation), no top-level jobs: key, and the
+    job absent or repeated."""
     top = None           # the top-level key the scan is under
     jobs_line = None     # the index of the top-level jobs: key line
     jobs_indent = None   # the indentation of the jobs mapping's own keys, from its first key line
     block_column = None  # the key column of an open block scalar; deeper lines are its content
     value_column = None  # the column of a single-line value's key or item; a deeper line continues it
+    columns = [(0, False)]  # the open block collections, outermost first: (indentation, a sequence?)
+    opener = None        # (key column, the job's header?) of a key whose value is the lines below it
     found = []
     placed = []
     for index, line in enumerate(lines):
@@ -1045,7 +1058,7 @@ def _ci_job_header(lines, job):
                           "job".format(job))
         value_column = None
         item, dashes = body, 0
-        if body.startswith("- ") and body[2:3] not in ("", " ", "\t"):
+        if body.startswith("- "):
             item, dashes = body[2:], 1
         if dashes and indent == 0:
             return None, refusal + "opens a sequence at column 0; cannot place the {} job".format(job)
@@ -1074,6 +1087,7 @@ def _ci_job_header(lines, job):
             value_column = indent
         elif form != "nested":
             value_column = indent + 2 * dashes
+        heads_job = False
         if indent == 0:
             top = key
             if key == "jobs":
@@ -1084,19 +1098,39 @@ def _ci_job_header(lines, job):
                     return None, (refusal + "gives jobs: a value that is not a mapping; cannot place "
                                   "the {} job".format(job))
                 jobs_line = index
-            continue
-        if top != "jobs":
-            continue
-        if jobs_indent is None:
-            jobs_indent = indent
-        if indent < jobs_indent or (dashes and indent == jobs_indent):
-            return None, (refusal + "is neither a key of the jobs: mapping nor nested inside one; "
-                          "cannot place the {} job".format(job))
-        if indent == jobs_indent and key == job:
-            if form != "nested":
-                return None, (refusal + "gives the {} job a value that is not a mapping (cannot "
+        elif top == "jobs":
+            if jobs_indent is None:
+                jobs_indent = indent
+            if indent < jobs_indent or (dashes and indent == jobs_indent):
+                return None, (refusal + "is neither a key of the jobs: mapping nor nested inside one; "
+                              "cannot place the {} job".format(job))
+            if indent == jobs_indent and key == job:
+                if form != "nested":
+                    return None, (refusal + "gives the {} job a value that is not a mapping (cannot "
+                                  "evaluate)".format(job))
+                found.append(index)
+                heads_job = True
+        # Block structure: a line deeper than a key whose value is the lines below it (or an entry at
+        # that key's own column, an indentless sequence) opens that value's mapping or sequence, never
+        # a sequence under the job's header; any other line closes every collection deeper than it
+        # and must then be a key at an open mapping's indentation or an entry at an open sequence's,
+        # so a mapping's keys all sit at its first key's indentation, a sequence's entries at its
+        # first entry's.
+        if opener is not None and (indent > opener[0] or (dashes and indent == opener[0])):
+            if dashes and opener[1]:
+                return None, (refusal + "gives the {} job a sequence, not a mapping (cannot "
                               "evaluate)".format(job))
-            found.append(index)
+            columns.append((indent, bool(dashes)))
+        else:
+            while columns[-1][0] > indent or (columns[-1] == (indent, True) and not dashes):
+                columns.pop()  # a key at an indentless sequence's own column also ends it
+            if columns[-1] != (indent, bool(dashes)):
+                return None, (refusal + "is at no indentation an open mapping or sequence gives (an "
+                              "over- or under-indented key or entry); cannot place the {} "
+                              "job".format(job))
+        if dashes and key is not None:
+            columns.append((indent + 2, False))  # the mapping a `- KEY:` entry opens
+        opener = (indent + 2 * dashes, heads_job) if form == "nested" else None
     if jobs_line is None:
         return None, "the workflow has no top-level jobs: key; cannot place the {} job".format(job)
     if len(found) != 1:
@@ -1126,7 +1160,9 @@ def _ci_job_limit_s(workflow_text, job):
     job header is placed structurally (_ci_job_header): one that is absent or duplicated as a direct
     key of the top-level jobs: mapping, or that only reads like one inside a block scalar, under
     another top-level key or deeper inside jobs:, refuses by name, as does a workflow holding a line
-    break this parser and a YAML loader need not agree on (_CI_OTHER_LINE_BREAKS)."""
+    break this parser and a YAML loader need not agree on (_CI_OTHER_LINE_BREAKS), a key or entry
+    at no indentation an open mapping or sequence gives, and a job whose value is not a mapping (a
+    value on the header's line, a sequence, or no keys at all)."""
     breaks = sorted(set(workflow_text) & _CI_OTHER_LINE_BREAKS)
     if breaks:
         return None, ("the workflow holds {} (a line break str.splitlines and a YAML loader need not "
@@ -1138,7 +1174,7 @@ def _ci_job_limit_s(workflow_text, job):
     start, jobs_indent, entries = placed
     minutes = [_CI_DEFAULT_JOB_MINUTES]
     job_indent = None    # the indentation of the job mapping's own keys, from its first key line
-    for index, indent, dashes, key, form, value in entries:
+    for index, indent, dashes, key, _form, value in entries:
         if index <= start:
             continue
         if indent <= jobs_indent:
@@ -1148,12 +1184,17 @@ def _ci_job_limit_s(workflow_text, job):
         if job_indent is None and dashes == 0:
             job_indent = indent
         if key == "timeout-minutes":
-            if form != "plain" or not re.fullmatch(r"0|[1-9][0-9]*", value):
+            # Only a plain scalar can match: every other form's value is empty or keeps its
+            # indicator (|, the quotes, the brackets).
+            if not re.fullmatch(r"0|[1-9][0-9]*", value):
                 return None, ("timeout-minutes value {!r} in the {} job is not a plain decimal "
                               "integer without a leading zero (cannot evaluate)".format(
                                   value, job))
             if dashes == 0 and indent == job_indent:
                 minutes.append(int(value))
+    if job_indent is None:
+        return None, ("the {} job has no keys (an empty value, not a mapping; cannot "
+                      "evaluate)".format(job))
     return 60 * min(minutes), None
 
 
@@ -2363,7 +2404,12 @@ def _bounds_self_test(root):
     # workflow text, the text its refusal must name). With that refusal removed the input reads a
     # limit or reaches another refusal, so each entry fails without it. Whitespace is YAML's: only
     # spaces indent and only spaces and tabs separate, so a no-break or ideographic space next to a
-    # job header is part of the line's text, and the line is no key.
+    # job header is part of the line's text, and the line is no key. A job is a mapping: a sequence
+    # (of mappings or of plain items) or no keys at all as its value is refused. Every key of a
+    # mapping and every entry of a sequence sits at its first one's indentation: a job key over- or
+    # under-indented against its siblings, a step key under-indented against the step's first key,
+    # and a sequence entry under-indented against the first entry are each refused (each of these
+    # read the default limit, or the job's own timeout, before).
     minimal = "jobs:\n  {}:\n    runs-on: ubuntu-latest\n".format(_CI_JOBS[0])
     for check, placed_text, want_named in (
             ("ci-tab-before-content-read", "jobs:\n  {}:\n\t  timeout-minutes: 30\n".format(_CI_JOBS[0]),
@@ -2392,28 +2438,55 @@ def _bounds_self_test(root):
              "jobs:\n  {}:\xa0\n    timeout-minutes: 30\n".format(_CI_JOBS[0]),
              "is not a form this parser places"),
             ("ci-unicode-space-line-read-as-blank", minimal + "\xa0\n",
-             "is not a form this parser places")):
+             "is not a form this parser places"),
+            ("ci-sequence-as-the-job-value-read",
+             "jobs:\n  {}:\n    - timeout-minutes: 30\n      runs-on: ubuntu-latest\n".format(
+                 _CI_JOBS[0]),
+             "gives the {} job a sequence, not a mapping".format(_CI_JOBS[0])),
+            ("ci-sequence-as-the-job-value-read", "jobs:\n  {}:\n    - lint\n".format(_CI_JOBS[0]),
+             "gives the {} job a sequence, not a mapping".format(_CI_JOBS[0])),
+            ("ci-empty-job-value-read",
+             "jobs:\n  {}:\n  other:\n    runs-on: ubuntu-latest\n".format(_CI_JOBS[0]),
+             "the {} job has no keys".format(_CI_JOBS[0])),
+            ("ci-empty-job-value-read", "jobs:\n  {}:\n".format(_CI_JOBS[0]),
+             "the {} job has no keys".format(_CI_JOBS[0])),
+            ("ci-over-indented-key-read", minimal + "    env:\n      A: x\n     timeout-minutes: 30\n",
+             "is at no indentation an open mapping or sequence gives"),
+            ("ci-under-indented-key-read",
+             "jobs:\n  {}:\n      runs-on: ubuntu-latest\n    timeout-minutes: 30\n".format(
+                 _CI_JOBS[0]),
+             "is at no indentation an open mapping or sequence gives"),
+            ("ci-under-indented-key-read",
+             minimal + "    steps:\n      - run: echo ok\n       name: x\n    timeout-minutes: 30\n",
+             "is at no indentation an open mapping or sequence gives"),
+            ("ci-under-indented-entry-read", minimal + "    needs:\n      - lint\n     - test\n",
+             "is at no indentation an open mapping or sequence gives")):
         got_limit, got_reason = ci_limit(check, placed_text, _CI_JOBS[0])
         if got_limit is not None or want_named not in (got_reason or ""):
             raise _CheckFailure("closure/{}: {!r}".format(check, (got_limit, got_reason)))
     print("RED a tab before a line's content, a sequence at column 0, a line indented before any "
           "top-level key, a second top-level jobs: key, a value of jobs: or of the {} job that is not "
-          "a mapping, the {} header twice, a sequence entry in the jobs mapping, a no-break or "
-          "ideographic space before or after the header, and a line holding only a no-break space "
-          "-> each refused by its own name".format(
-              _CI_JOBS[0], _CI_JOBS[0]))
+          "a mapping (a value on its line, a sequence, no keys), the {} header twice, a sequence "
+          "entry in the jobs mapping, a no-break or ideographic space before or after the header, a "
+          "line holding only a no-break space, and a key over- or under-indented against its "
+          "siblings or an entry under-indented against its first -> each refused by its own "
+          "name".format(_CI_JOBS[0], _CI_JOBS[0]))
     # Value forms, on a minimal job: each entry is (check, job body, the limit it must read, or None
     # with the text its refusal must name). A timeout-minutes value is validated before any
     # block-scalar skip; a value that opens structure this parser does not read (an alias, a flow
     # collection) is refused by name; a comment begins only at whitespace then `#`; a leading zero is
     # refused; a quoted list item is not a plain-scalar item, an unquoted one is; and an indentless
-    # step sequence (its `- ` at the job keys' own column) keeps a step's timeout off the job budget.
+    # step sequence (its `- ` at the job keys' own column) keeps a step's timeout off the job budget,
+    # and a job key after it ends it and is read.
     # The allowlist holds each form to its own grammar: a double-quoted scalar (quality.yml uses none,
     # so `\q`, which YAML defines no meaning for, is never read as an escape), a malformed block-scalar
-    # header (`|++`, `|0`), one with an indicator (`|-`, `>`), a control character in a plain scalar,
+    # header (`|++`, `|0`), one with an indicator (`|-`, `>`), a control character in a plain or
+    # single-quoted scalar,
     # a sequence entry not written `- ` then content (`-  key`, `- - item`), a flow sequence with an
-    # empty item, and a no-break space before a key, after its colon or after a `|` header are each
-    # refused by name; a bare `|` with a comment, the `''` escape of a single-quoted
+    # empty item, a no-break space before a key, after its colon or after a `|` header, and a
+    # no-break or ideographic space ending a value or right after the space that follows its colon
+    # (only spaces and tabs are stripped from a value, so the space stays in it) are each refused
+    # by name; a bare `|` with a comment, the `''` escape of a single-quoted
     # scalar, a tab separating a value and its comment, and a one-line flow sequence of plain items
     # are read.
     for check, body, want_limit, want_named in (
@@ -2431,6 +2504,8 @@ def _bounds_self_test(root):
              None, "carries the value '>'"),
             ("ci-control-character-value-read", "    steps:\n      - run: echo \x01\n", None,
              "carries the value " + repr("echo \x01")),
+            ("ci-control-character-value-read", "    steps:\n      - run: 'echo \x01'\n", None,
+             "carries the value " + repr("'echo \x01'")),
             ("ci-sequence-entry-spacing-read", "    steps:\n      -  run: echo ok\n", None,
              "is not a form this parser places"),
             ("ci-nested-sequence-entry-read", "    needs:\n      - - lint\n", None,
@@ -2444,6 +2519,14 @@ def _bounds_self_test(root):
              "is not a form this parser places"),
             ("ci-unicode-space-after-a-colon-read", "    timeout-minutes:\xa030\n", None,
              "is not a form this parser places"),
+            ("ci-unicode-space-ending-a-value-read", "    timeout-minutes: 30\xa0\n", None,
+             "timeout-minutes value " + repr("30\xa0")),
+            ("ci-unicode-space-ending-a-value-read", "    timeout-minutes: 30\u3000\n", None,
+             "timeout-minutes value " + repr("30\u3000")),
+            ("ci-unicode-space-after-the-separating-space-read", "    timeout-minutes: \xa030\n",
+             None, "timeout-minutes value " + repr("\xa030")),
+            ("ci-unicode-space-after-the-separating-space-read", "    timeout-minutes: \u300030\n",
+             None, "timeout-minutes value " + repr("\u300030")),
             ("ci-bare-block-header-not-read", "    steps:\n      - run: | # script\n          echo ok\n",
              default_s, None),
             ("ci-single-quote-escape-not-read", "    steps:\n      - run: 'it''s'\n", default_s, None),
@@ -2462,7 +2545,9 @@ def _bounds_self_test(root):
             ("ci-spaced-comment-misread", "    timeout-minutes: 30 # half an hour\n", 1800, None),
             ("ci-plain-list-item-refused", "    needs:\n      - lint\n", default_s, None),
             ("ci-indentless-step-timeout-capped-the-job-budget",
-             "    steps:\n    - timeout-minutes: 1\n      run: echo ok\n", default_s, None)):
+             "    steps:\n    - timeout-minutes: 1\n      run: echo ok\n", default_s, None),
+            ("ci-key-after-an-indentless-sequence-refused",
+             "    steps:\n    - run: echo ok\n    timeout-minutes: 30\n", 1800, None)):
         got_limit, got_reason = ci_limit(
             check, "jobs:\n  {}:\n    runs-on: ubuntu-latest\n{}".format(_CI_JOBS[0], body),
             _CI_JOBS[0])
@@ -2474,10 +2559,13 @@ def _bounds_self_test(root):
     print("RED ci-job-30-minutes -> does not fit; ci-job-absent, a non-integer value, a quoted key, an "
           "escaped key, an alias step, a block-scalar timeout-minutes, an alias or flow steps value, "
           "timeout-minutes 30#x and 030, a quoted list item, a double-quoted scalar (a `\\q` escape "
-          "included), a block-scalar header |++, |0, |- or >, a control character in a plain scalar, "
-          "a sequence entry `-  key` or `- - item`, a flow sequence [lint,,test], and a no-break "
-          "space before a key, after its colon or after a | header -> each refused by name; a step's "
-          "own timeout-minutes: 1 (first key or not, and in an indentless step sequence) -> parsed, the job budget stays {}s; `30 # comment` and a tab-separated "
+          "included), a block-scalar header |++, |0, |- or >, a control character in a plain or "
+          "single-quoted scalar, "
+          "a sequence entry `-  key` or `- - item`, a flow sequence [lint,,test], a no-break space "
+          "before a key, after its colon or after a | header, and a no-break or ideographic space "
+          "ending a value or after the space that follows its colon -> each refused by name; a step's "
+          "own timeout-minutes: 1 (first key or not, and in an indentless step sequence) -> parsed, the job budget stays {}s; a job key after an indentless step "
+          "sequence -> read; `30 # comment` and a tab-separated "
           "`30<TAB># comment` -> 30 minutes; an unquoted list item, a bare | with a comment, a "
           "single-quoted '' escape and a one-line flow sequence -> accepted; quoted text inside a "
           "block scalar -> content, not a key".format(default_s))
