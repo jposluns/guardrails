@@ -2,6 +2,7 @@
 """opf: the OPFiles (OPF) reference-tooling dispatcher (OPF core-tooling, skeleton from U1).
 
   opf.py --self-test                run every registered OPF helper self-test (Linux CI leg)
+  opf.py --self-test-group NAME     run one named group of them (SELF_TEST_GROUPS; the CI shards)
   opf.py <verb> [--root DIR] ...    a store verb (default --root: the cwd product repository root)
 
 This is the dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side helper
@@ -945,6 +946,57 @@ def _self_test_floor_probe(registry, directory, elsewhere):
     return misses
 
 
+def _self_test_group_probe(registry):
+    """Flip the group partition and the selector. Each synthetic grouping of the live registry must yield its
+    fault; over a synthetic registry of recording callables, a group runs exactly its own labels in registry
+    order and forwards the worst outcome, a broken partition and an unknown name return 2 having run nothing,
+    and main() hands `--self-test-group NAME` to the selector. Returns a list of the discrepancies."""
+    from unittest.mock import patch
+    misses = []
+    groups = SELF_TEST_GROUPS
+    first, last = groups[0], groups[-1]
+    cases = (
+        ("a leg left out", registry, groups[:-1] + ((last[0], last[1][1:]),),
+         last[1][0] + " is in no group (left out)"),
+        ("a leg doubled", registry, ((first[0], first[1] + last[1][:1]),) + groups[1:],
+         last[1][0] + " is grouped 2 times (doubled)"),
+        ("an unregistered label", registry, ((first[0], first[1] + ("synthetic-stale",)),) + groups[1:],
+         "synthetic-stale is grouped, but no registry entry has that label"),
+        ("an empty group", registry, groups + (("synthetic-empty", ()),), "group synthetic-empty is empty"),
+        ("a group named twice", registry, groups + ((first[0], ()),), "group {} is named 2 times".format(first[0])),
+        ("a label registered twice", registry + registry[:1], groups,
+         "{} is registered 2 times".format(registry[0][0])),
+    )
+    for label, table, grouping, want in cases:
+        if want not in _self_test_group_faults(table, grouping):
+            misses.append("group case {!r} not named".format(label))
+    ran = []
+
+    def leg(label, code):
+        def run():
+            ran.append(label)
+            return code
+        return run
+
+    table = (("one", leg("one", 0)), ("two", leg("two", 1)), ("three", leg("three", 0)))
+    split = (("odd", ("three", "one")), ("even", ("two",)))
+    for name, grouping, want in (("odd", split, (0, ["one", "three"])), ("even", split, (1, ["two"])),
+                                 ("synthetic-unknown", split, (2, [])),
+                                 ("odd", (("odd", ("one", "three")),), (2, [])),
+                                 ("odd", split + (("again", ("one",)),), (2, []))):
+        del ran[:]
+        got = (run_self_test_group(name, grouping, table), list(ran))
+        if got != want:
+            misses.append("group selector over {!r} with {!r}: got {!r}, expected {!r}".format(
+                name, grouping, got, want))
+    handed = []
+    with patch.object(sys.modules[__name__], "run_self_test_group", lambda name: handed.append(name) or 0):
+        got = (main(["--self-test-group", "synthetic-name"]), handed)
+    if got != (EXIT_OK, ["synthetic-name"]):
+        misses.append("main() does not hand --self-test-group NAME to the selector: got {!r}".format(got))
+    return misses
+
+
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
     OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
@@ -955,7 +1007,9 @@ def _aggregator_self_test():
     module in this directory that binds self_test must carry the canonical `--self-test` entry; the floor
     (_self_test_floor) requires every module whose self_test is registered below and fails on an empty
     registry, an empty scan, or a registered callable that is not its module's self_test and not exempt; and
-    the synthetic modules and registries prove each red case is named, for its reason, and no clean one is."""
+    the synthetic modules and registries prove each red case is named, for its reason, and no clean one is. It
+    holds SELF_TEST_GROUPS to a partition of the registry (_self_test_group_faults) and flips the partition, the
+    group selector and its main() wiring (_self_test_group_probe)."""
     import tempfile
     if _bootstrap() != EXIT_OK:
         return EXIT_MALFORMED
@@ -963,13 +1017,16 @@ def _aggregator_self_test():
     registry = _self_tests()
     required, faults = _self_test_floor(registry, here, _ENTRY_FLOOR_EXEMPT)
     gaps, exposers = _self_test_entry_gaps(here, required)
+    group_faults = _self_test_group_faults(registry, SELF_TEST_GROUPS)
     with tempfile.TemporaryDirectory(prefix="opf-entry-scan-") as tmp:
-        missed = _self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
-    if gaps or faults or missed:
+        missed = (_self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
+                  + _self_test_group_probe(registry))
+    if gaps or faults or missed or group_faults:
         print("opf aggregator self-test: FAIL (self_test modules without the canonical `--self-test` entry: {}; "
-              "registry floor faults: {}; synthetic probe discrepancies: {})".format(
+              "registry floor faults: {}; self-test group faults: {}; synthetic probe discrepancies: {})".format(
                   "; ".join("{} ({})".format(k, v) for k, v in sorted(gaps.items())) or "none",
-                  "; ".join(faults) or "none", "; ".join(missed) or "none"), file=sys.stderr)
+                  "; ".join(faults) or "none", "; ".join(group_faults) or "none", "; ".join(missed) or "none"),
+              file=sys.stderr)
         return EXIT_FINDING
     ok = True
     # A helper returning False (bool, == 0) must NOT aggregate to clean.
@@ -989,8 +1046,9 @@ def _aggregator_self_test():
               file=sys.stderr)
         return EXIT_FINDING
     print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns; each of the "
-          "{} self_test modules carries the canonical --self-test entry, {} of them required by the registry)".format(
-              len(exposers), len(required)))
+          "{} self_test modules carries the canonical --self-test entry, {} of them required by the registry; the {} "
+          "named groups hold the {} registered self-tests exactly once)".format(
+              len(exposers), len(required), len(SELF_TEST_GROUPS), len(registry)))
     return EXIT_OK
 
 
@@ -23437,6 +23495,65 @@ def _self_tests():
     ("opf-cli", _cli_self_test),
 )
 
+
+# The named groups of the registry above, each run alone by `opf.py --self-test-group NAME`, so CI can run the
+# self-test as parallel shards. Every registered label sits in exactly one group, and a group runs its labels in
+# registry order. _self_test_group_faults names a label left out, doubled or unknown, and the selector runs
+# nothing while it names one, so a shard can never silently drop a leg. The selector is its own flag, not an
+# argument after --self-test: a command carrying --self-test is a registered self-test that the git-fixture-env
+# config lanes rerun, and the whole run stays registered (the host-patch CI job and opf/tools/run_all_checks.sh
+# still run it), so those lanes run each leg once and no group command a second time.
+SELF_TEST_GROUPS = (
+    ("core", ("opf-store", "opf-schema", "opf-release", "opf-worklog", "opf-changelog", "opf-emit", "opf-views",
+              "opf-observe", "opf-absorb", "opf-record", "opf-write-guard", "opf-fuzz", "opf-check", "opf-journal",
+              "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli")),
+    ("adopt", ("opf-adopt-apply", "opf-adopt-state")),
+    ("watchdog", ("opf-watchdog-isolation", "opf-watchdog-regressions")),
+)
+
+
+def _self_test_group_faults(registry, groups):
+    """Return the faults of `groups` as a partition of the labels of `registry`, (label, callable) pairs: a
+    group name given twice, an empty group, a label registered twice, a registered label in no group (left
+    out), a label named more than once across the groups (doubled), and a grouped label with no registry
+    entry. No fault means every registered self-test is in exactly one group."""
+    labels = [label for label, _fn in registry]
+    names = [name for name, _members in groups]
+    grouped = [label for _name, members in groups for label in members]
+    faults = ["group {} is named {} times".format(name, names.count(name))
+              for name in sorted(set(names)) if names.count(name) > 1]
+    faults += ["group {} is empty".format(name) for name, members in groups if not members]
+    faults += ["{} is registered {} times".format(label, labels.count(label))
+               for label in sorted(set(labels)) if labels.count(label) > 1]
+    for label in sorted(set(labels)):
+        if not grouped.count(label):
+            faults.append("{} is in no group (left out)".format(label))
+        elif grouped.count(label) > 1:
+            faults.append("{} is grouped {} times (doubled)".format(label, grouped.count(label)))
+    faults += ["{} is grouped, but no registry entry has that label".format(label)
+               for label in sorted(set(grouped) - set(labels))]
+    return faults
+
+
+def run_self_test_group(name, groups=None, tests=None):
+    """Run the one group of SELF_TEST_GROUPS named `name` through run_self_tests: its registered self-tests, in
+    registry order, with the aggregate's worst-outcome exit. Returns 2 (cannot evaluate) and runs nothing when the
+    groups are not a partition of the registry (_self_test_group_faults) or no group has that name."""
+    groups = SELF_TEST_GROUPS if groups is None else groups
+    tests = _self_tests() if tests is None else tests
+    faults = _self_test_group_faults(tests, groups)
+    if faults:
+        print("opf self-test group: the groups do not hold every registered self-test exactly once, so no group "
+              "runs (cannot evaluate): {}".format("; ".join(faults)), file=sys.stderr)
+        return EXIT_MALFORMED
+    members = dict(groups).get(name)
+    if members is None:
+        print("opf self-test group: no group is named {}; the groups are {} (cannot evaluate)".format(
+            _init_inert(name), ", ".join(group for group, _members in groups)), file=sys.stderr)
+        return EXIT_MALFORMED
+    return run_self_tests(tuple((label, fn) for label, fn in tests if label in members))
+
+
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
 KNOWN_VERBS = ("init", "adopt", "import", "doctor", "render", "migrate", "sync", "upgrade", "absorb",
                "record")
@@ -23520,6 +23637,8 @@ def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--self-test"]:
         return run_self_tests()
+    if len(args) == 2 and args[0] == "--self-test-group":
+        return run_self_test_group(args[1])
     if not args or args[0] in ("-h", "--help"):
         print(__doc__, file=sys.stderr)
         return EXIT_MALFORMED
