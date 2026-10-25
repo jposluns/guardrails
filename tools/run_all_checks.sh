@@ -95,7 +95,12 @@ run_gate "site-versions" python3 -I -B tools/check_site_versions.py
 run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
 run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-test
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
-run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
+# The OPF tooling self-test runs as its named groups, as the CI shards run it; opf.py runs a group only
+# while the groups hold every registered self-test exactly once. The whole run stays in the host-patch
+# CI job (a ci-parity exception) and in opf/tools/run_all_checks.sh.
+run_gate "opf-tooling-selftest-core" python3 -I -B opf/tools/opf.py --self-test-group core
+run_gate "opf-tooling-selftest-adopt" python3 -I -B opf/tools/opf.py --self-test-group adopt
+run_gate "opf-tooling-selftest-watchdog" python3 -I -B opf/tools/opf.py --self-test-group watchdog
 run_gate "opf-journal-direct-selftest" python3 -I -B opf/tools/_journal.py --self-test
 run_gate "opf-observe-direct-selftest" python3 -I -B opf/tools/_opf_observe.py --self-test
 run_gate "opf-drift-selftest" python3 -I -B opf/tools/check_opf_drift.py --self-test
