@@ -100,7 +100,8 @@ def _ending_kind(exc):
 
 
 # The child that loads the validator. Capability removal comes first, before any loaded code runs: the
-# subinterpreter modules (_interpreters and concurrent.interpreters) are made unimportable (a thread
+# subinterpreter modules (_interpreters, concurrent.interpreters and the test modules that create one) are
+# made unimportable (a thread
 # started inside a subinterpreter is invisible to this interpreter's census and live count, so the
 # capability is removed rather than tracked; an accidental import is an ImportError the load refuses),
 # and faulthandler.dump_traceback_later is wrapped so arming its C-level watchdog thread is recorded and
@@ -115,7 +116,10 @@ def _ending_kind(exc):
 # until threading's census shows no other thread AND no started low-level worker remains (its start flag,
 # set synchronously at the start call, covers the brief bootstrap window the runtime count misses) AND the
 # runtime's live count of workers (_thread._count) is zero (which covers a low-level worker whose callback
-# already returned while its return value's or arguments' destructors still run), then the child runs the
+# already returned while its return value's or arguments' destructors still run) AND the OS's own list of
+# the child's threads shows no other (Linux; it still shows a worker while the runtime clears its thread
+# state, where its thread-local and context values' destructors run after the live count dropped it; an
+# unreadable list, or none off Linux, is live, so the child then refuses), then the child runs the
 # atexit callbacks the loaded code registered and collects garbage. An atexit callback or a collected destructor can itself start a worker, which the
 # settle (taken before those cleanup phases) never saw: every thread-start entry is wrapped from BEFORE
 # the load (threading.Thread.start, the low-level _thread entry points, and every alias of those entry
@@ -136,8 +140,8 @@ _LOADED_CHILD = """import atexit, faulthandler, gc, json, os, runpy, sys, thread
 validator, out, settle = sys.argv[1], sys.argv[2], float(sys.argv[3])
 views = sys.argv[4:]
 end = os._exit
-sys.modules["_interpreters"] = None
-sys.modules["concurrent.interpreters"] = None
+for blocked in ("_interpreters", "concurrent.interpreters", "_testinternalcapi", "_testcapi"):
+    sys.modules[blocked] = None
 faults = []
 previous_unraisable, previous_thread = sys.unraisablehook, threading.excepthook
 def record_unraisable(args):
@@ -164,6 +168,14 @@ def live_lowlevel():
     # or arguments' destructors still run, which the start flag misses, is still pending). Termination is
     # counted from the runtime itself, never from callback exit alone.
     return any(state[0] for state in workers) or _thread._count() != 0
+def threads_live():
+    # The OS's own list of this process's threads (Linux): it still shows a worker while the runtime clears
+    # its thread state, where its thread-local and context values' destructors run after the runtime live
+    # count already dropped it. An unreadable list, or none off Linux, is live (fail-closed).
+    try:
+        return len(os.listdir("/proc/self/task")) != 1
+    except OSError:
+        return True
 def record_starts(original):
     def record(*args, **kwargs):
         if in_cleanup:
@@ -217,11 +229,12 @@ if type(live) is not tuple:
 else:
     payload = {"missing": [view for view in views if (".working/" + view) not in live]}
 del ns, live
+cancel_watchdog()
 current = threading.current_thread()
 deadline = time.monotonic() + settle
 while True:
     running = [worker for worker in threading.enumerate() if worker is not current and worker.is_alive()]
-    pending = live_lowlevel()
+    pending = live_lowlevel() or threads_live()
     if (not running and not pending) or time.monotonic() >= deadline:
         break
     if running:
@@ -233,7 +246,12 @@ atexit._run_exitfuncs()
 gc.collect()
 cancel_watchdog()
 late = [worker for worker in threading.enumerate() if worker is not current and worker.is_alive()]
-late_pending = live_lowlevel()
+# A thread that was just joined can stay on the OS list for a moment after its join returns, so the late
+# look waits (bounded) for that list to settle before it is read.
+late_deadline = time.monotonic() + settle
+while threads_live() and time.monotonic() < late_deadline:
+    time.sleep(0.01)
+late_pending = live_lowlevel() or threads_live()
 if faults or running or pending or started or late or late_pending:
     sys.stderr.write("LOADED-CODE-FAULT: the validator child recorded a fault, a running thread or "
                      "worker, a pending watchdog, or a worker started by cleanup\\n")
@@ -406,8 +424,12 @@ def _validator_missing(path, views):
             _cant(_REFUSED_OUTSIDE_CONTRACT if began else _REFUSED_BEFORE_LOAD)
         try:
             raw = out.read_bytes()
-        except OSError:
+        except FileNotFoundError:
             _cant(_REFUSED_NO_RESULT if began else _REFUSED_BEFORE_LOAD)
+        except OSError:
+            # A result that exists but cannot be read (a directory, say) is malformed, never the credited
+            # no-result refusal.
+            _cant(_CANT_MALFORMED)
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -733,6 +755,11 @@ def _self_test_loaded_exit():
     _expect(not _child_contract_kept(0, b"", b"x"), "child contract: stderr output is refused")
     valid = '_RESERVED = (".working/a.md",)\n'
     repr_exits = "class R:\n    def __repr__(self):\n        raise SystemExit(0)\n    __str__ = __repr__\n"
+    local_teardown = ("import _thread, threading, time\nentered = threading.Event()\nstore = threading.local()\n"
+                      "class Held:\n    def __del__(self):\n        entered.set()\n        time.sleep(0.3)\n"
+                      "        raise RuntimeError('loaded')\n"
+                      "def worker():\n    store.value = Held()\n"
+                      "{start}\nentered.wait()\n")
     cases = (
         ("load SystemExit(0)", "raise SystemExit(0)\n"),
         ("load SystemExit(None)", "raise SystemExit\n"),
@@ -849,6 +876,18 @@ def _self_test_loaded_exit():
          valid + "from concurrent import interpreters\ninterpreters.create()\n"),
         ("faulthandler watchdog armed at load",
          valid + "import faulthandler\nfaulthandler.dump_traceback_later(600)\n"),
+        ("_testinternalcapi import at load", valid + "import _testinternalcapi\n"),
+        ("low-level worker thread-local value destroyed at thread teardown, destructor fault",
+         valid + local_teardown.format(start="_thread.start_new_thread(worker, ())")),
+        ("threading worker thread-local value destroyed at thread teardown, destructor fault",
+         valid + local_teardown.format(start="threading.Thread(target=worker).start()")),
+        ("low-level worker context value destroyed at thread teardown, destructor fault",
+         valid + "import _thread, contextvars, threading, time\nentered = threading.Event()\n"
+         "held = contextvars.ContextVar('held')\n"
+         "class Held:\n    def __del__(self):\n        entered.set()\n        time.sleep(0.3)\n"
+         "        raise RuntimeError('loaded')\n"
+         "def worker():\n    held.set(Held())\n"
+         "_thread.start_new_thread(worker, ())\nentered.wait()\n"),
     )
     clean_cases = (
         ("clean with the view present", '_RESERVED = (".working/a.md",)\n', []),
@@ -895,9 +934,11 @@ def _self_test_loaded_exit():
               "atexit.register(cleanup)\n")
     _expect(_child_outcome(record_off, joined) == "ACCEPTED",
             "leg control: the joined cleanup worker is refused by the start record alone")
-    count_off = _LOADED_CHILD.replace("or _thread._count() != 0", "or False")
+    tasks_off = _LOADED_CHILD.replace('return len(os.listdir("/proc/self/task")) != 1', "return False")
+    _expect(tasks_off != _LOADED_CHILD, "leg control: the OS thread-list term is present to disable")
+    count_off = tasks_off.replace("or _thread._count() != 0", "or False")
     _expect(count_off != _LOADED_CHILD, "leg control: the runtime live-count term is present to disable")
-    track_off = _LOADED_CHILD.replace("workers.append(state)", "pass")
+    track_off = tasks_off.replace("workers.append(state)", "pass")
     _expect(track_off != _LOADED_CHILD, "leg control: the low-level start-flag line is present to disable")
     track_count_off = track_off.replace("or _thread._count() != 0", "or False")
     _expect(track_count_off != track_off, "leg control: both low-level liveness terms are present to disable")
@@ -907,6 +948,7 @@ def _self_test_loaded_exit():
     # never-ending cleanup worker is refused by the census ALONE, and with the census also disabled it is
     # accepted, so the census demonstrably carries the verdict weight.
     census_only = (record_off
+                   .replace('return len(os.listdir("/proc/self/task")) != 1', "return False")
                    .replace("workers.append(state)", "pass")
                    .replace("or _thread._count() != 0", "or False"))
     _expect(census_only != record_off, "leg control: the low-level liveness terms are present to disable")
@@ -944,7 +986,13 @@ def _self_test_loaded_exit():
             "leg control: the lingering destructor is refused in production by the runtime live count")
     _expect(_child_outcome(count_off, low_linger) == "ACCEPTED",
             "leg control: the destructor still running after its callback returned is refused by the "
-            "runtime live count alone")
+            "runtime live count alone (with the OS thread list also off)")
+    # The OS thread list ALONE carries the thread-state teardown window: a worker's thread-local value is
+    # destroyed after the runtime live count already dropped it, so with only that term off the teardown
+    # destructor fault is accepted (production refuses it: the cases above).
+    _expect(_child_outcome(tasks_off, valid + local_teardown.format(
+        start="_thread.start_new_thread(worker, ())")) == "ACCEPTED",
+            "leg control: the thread-local teardown destructor fault is refused by the OS thread list alone")
     fault_off = _LOADED_CHILD.replace('faults.append("lowlevel-worker")', "pass")
     _expect(fault_off != _LOADED_CHILD, "leg control: the low-level fault line is present to disable")
     low_exit = (valid + "import _thread, threading\ndone = threading.Event()\n"
@@ -952,33 +1000,46 @@ def _self_test_loaded_exit():
                 "_thread.start_new_thread(worker, ())\ndone.wait()\n")
     _expect(_child_outcome(fault_off, low_exit) == "ACCEPTED",
             "leg control: the low-level unsuccessful ending is refused by the lifetime fault record alone")
-    alias_off = _LOADED_CHILD.replace("setattr(threading, alias, replacement)", "pass")
-    _expect(alias_off != _LOADED_CHILD, "leg control: the alias rebinding line is present to disable")
+    record_only = (tasks_off
+                   .replace("or _thread._count() != 0", "or False")
+                   .replace("workers.append(state)", "pass"))
+    _expect(record_only != tasks_off, "leg control: the low-level liveness terms are present to disable")
+    alias_off = record_only.replace("setattr(threading, alias, replacement)", "pass")
+    _expect(alias_off != record_only, "leg control: the alias rebinding line is present to disable")
     alias_worker = (valid + "import atexit, threading\n"
                     "atexit.register(lambda: threading._start_joinable_thread(threading.Event().wait))\n")
+    _expect(_child_outcome(record_only, alias_worker) == "REFUSED",
+            "leg control: with every liveness term off the start record still refuses the cleanup worker "
+            "through threading's saved alias")
     _expect(_child_outcome(alias_off, alias_worker) == "ACCEPTED",
             "leg control: the cleanup worker through threading's saved alias is refused by the rebinding "
             "alone")
-    entry_off = _LOADED_CHILD.replace('("start_new_thread", "start_new", "start_joinable_thread")',
-                                      '("start_new_thread",)')
-    _expect(entry_off != _LOADED_CHILD, "leg control: the low-level entry tuple is present to narrow")
+    entry_off = record_only.replace('("start_new_thread", "start_new", "start_joinable_thread")',
+                                    '("start_new_thread",)')
+    _expect(entry_off != record_only, "leg control: the low-level entry tuple is present to narrow")
     via_start_new = (valid + "import atexit, _thread, threading\n"
                      "atexit.register(lambda: _thread.start_new(threading.Event().wait, ()))\n")
+    _expect(_child_outcome(record_only, via_start_new) == "REFUSED",
+            "leg control: with every liveness term off the start record still refuses the cleanup worker "
+            "through _thread.start_new")
     _expect(_child_outcome(entry_off, via_start_new) == "ACCEPTED",
             "leg control: the cleanup worker through _thread.start_new is refused by its wrap alone")
     via_joinable = (valid + "import atexit, _thread, threading\n"
                     "atexit.register(lambda: _thread.start_joinable_thread(threading.Event().wait))\n")
+    _expect(_child_outcome(record_only, via_joinable) == "REFUSED",
+            "leg control: with every liveness term off the start record still refuses the cleanup worker "
+            "through _thread.start_joinable_thread")
     _expect(_child_outcome(entry_off, via_joinable) == "ACCEPTED",
             "leg control: the cleanup worker through _thread.start_joinable_thread is refused by its "
             "wrap alone")
     # Capability-removal legs: re-enable the subinterpreter import, or drop only the watchdog arming
     # record (the cancel stays), and the corresponding vector must be accepted.
-    interp_on = (_LOADED_CHILD
-                 .replace('sys.modules["_interpreters"] = None', "pass")
-                 .replace('sys.modules["concurrent.interpreters"] = None', "pass"))
+    interp_on = _LOADED_CHILD.replace("    sys.modules[blocked] = None", "    pass")
     _expect(interp_on != _LOADED_CHILD, "leg control: the subinterpreter block lines are present to disable")
     _expect(_child_outcome(interp_on, valid + "import _interpreters\n_interpreters.create()\n") == "ACCEPTED",
             "leg control: the subinterpreter import is refused by the module block alone")
+    _expect(_child_outcome(interp_on, valid + "import _testinternalcapi\n") == "ACCEPTED",
+            "leg control: the _testinternalcapi import is refused by the module block alone")
     watchdog_off = _LOADED_CHILD.replace('started.append("faulthandler-watchdog")', "pass")
     _expect(watchdog_off != _LOADED_CHILD, "leg control: the watchdog record line is present to disable")
     _expect(_child_outcome(watchdog_off,
@@ -1038,6 +1099,11 @@ def _self_test_loaded_exit():
         _expect(no_result != _LOADED_CHILD, "oracle control: the result-write block is present to remove")
         _expect(_oracle_with("_LOADED_CHILD", no_result, "oracle missing output") is None,
                 "oracle control: a completed child that wrote no result is the credited no-result refusal")
+        dir_result = _LOADED_CHILD.replace('with open(out, "w", encoding="utf-8") as handle:\n'
+                                           "    json.dump(payload, handle)", "os.mkdir(out)")
+        _expect(dir_result != _LOADED_CHILD, "oracle control: the result-write block is present to replace")
+        _expect(_oracle_with("_LOADED_CHILD", dir_result, "oracle unreadable result") is not None,
+                "oracle control: a result that exists but cannot be read must be this test's failure")
 
 
 # The loaded-exit vectors run in a child of the self-test that must end 0 with exactly this file's
@@ -1111,19 +1177,28 @@ def _self_test():
 # a passing verdict the settle waits (_SETTLE_SECONDS in all) for every other thread still running,
 # threading's census and the runtime's live count of low-level _thread workers together, so a worker's
 # later fault is recorded instead of killed silently by the exit, and a thread or low-level worker still
-# running at the bound fails the verdict closed (exit 2). The verdict then ends the process with os._exit, so an
+# running at the bound fails the verdict closed (exit 2). On Linux the settle also waits on the OS's own
+# thread list for this process (_os_threads_pending), which still shows a worker while the runtime clears
+# its thread state (its thread-local and context values' destructors run there, after the runtime's live
+# count and threading's census already dropped it), a faulthandler watchdog and a thread a C extension
+# starts. The verdict then ends the process with os._exit, so an
 # atexit callback registered by loaded code can never run after it (that channel is unreachable, not
 # merely disclosed). Only a SystemExit with code None or 0 ending a worker thread is the interpreter's
 # normal SUCCESSFUL thread exit (default-hook parity) and is not recorded; any other code is an
 # unsuccessful exit a worker reported, so it is recorded.
 # A low-level _thread worker's SystemExit never reaches any hook (the interpreter drops it), so the
 # start entries and threading's saved module aliases of them are wrapped from before the gate's work and
-# a non-zero code ending such a worker is recorded as a fault there. A thread outside the Python runtime,
-# one a C extension starts say, stays invisible to the census and the live count: a disclosed residual,
-# not closed.
+# a non-zero code ending such a worker is recorded as a fault there. The subinterpreter modules are made
+# unimportable before the gate's work, because a thread inside a subinterpreter reports its faults to
+# that interpreter's own hooks, never these recorders. Stated residuals, not closed: where the platform
+# has no per-process thread list (outside Linux) a thread outside the Python runtime stays invisible to
+# the census and the live count; and a process the loaded code starts is not followed, so one still
+# running after this gate ends is outside its verdict.
 # Each recorder chains to the hook it wrapped, so the usual traceback still reaches stderr after the
-# marker line. The settle re-checks the record after the exit flushes, so a fault recorded while a
-# flush was blocked on a full pipe still fails the verdict.
+# marker line. After the exit flushes the settle stops the collector, blocks every signal, runs any
+# handler already tripped, and re-reads the record and every liveness term, so a fault recorded or a
+# worker a signal handler started while a flush was blocked on a full pipe still fails the verdict, and
+# no loaded code can run between that last read and the exit.
 # Paths that end outside _gate_exit (a propagating KeyboardInterrupt, an escaping exception) already end
 # non-zero, and an ACCIDENTAL fault in an atexit callback cannot turn that non-zero end into exit 0, so
 # no background fault reads as a pass there. Residual: loaded code replacing these hooks, this record or
@@ -1141,6 +1216,11 @@ def _install_fault_hooks():
     # A local alias: opf.py's close-lifecycle census reads an attribute store through the bare module name
     # as shadowing that module.
     import threading as _threads
+
+    # The modules that create a subinterpreter are made unimportable (an import is an ImportError the
+    # gate's work fails on): a thread inside one reports its faults to that interpreter's own hooks.
+    for _name in ("_interpreters", "concurrent.interpreters", "_testinternalcapi", "_testcapi"):
+        sys.modules[_name] = None
 
     previous_unraisable = sys.unraisablehook
     previous_thread = _threads.excepthook
@@ -1238,6 +1318,29 @@ def _install_fault_hooks():
                 setattr(_threads, _alias, _replacement)
 
 
+# The OS's own list of this process's threads (Linux): it still shows a worker while the runtime clears
+# its thread state, a faulthandler watchdog and a thread a C extension starts. None where the platform has
+# no such list; the runtime's own counts then carry the settle alone (a stated residual).
+_TASK_DIR = "/proc/self/task" if sys.platform.startswith("linux") else None
+
+
+def _os_threads_pending():
+    """True while the OS lists a thread of this process besides the calling one, and when that list
+    exists but cannot be read (fail-closed); False where the platform has no such list."""
+    import os
+    if _TASK_DIR is None:
+        return False
+    try:
+        return len(os.listdir(_TASK_DIR)) != 1
+    except OSError:
+        return True
+
+
+def _drain_pending_signals():
+    """A Python-level call: the interpreter runs any signal handler already tripped on entry here."""
+    return None
+
+
 _SETTLE_SECONDS = 60.0
 
 
@@ -1246,11 +1349,14 @@ def _gate_exit(code):
     other thread still running, so a fault it raises later is recorded, never killed silently by the exit,
     and fail closed (exit 2) if one still runs at the bound (the census covers threading's threads and,
     through the runtime's live count, workers started through the low-level _thread entry points, so a
-    low-level worker still running at the bound also fails closed; a thread outside the Python runtime,
-    one a C extension starts say, is invisible to both: a disclosed residual, not closed); force a recorded background fault to exit 2
-    over a passing verdict, flush both streams, re-check the record AFTER the flushes (a fault recorded
-    while a flush was blocked, on a full pipe say, must still fail the verdict; its late marker is written
-    straight to fd 2, past the buffers), then os._exit, so no atexit callback registered by loaded code
+    low-level worker still running at the bound also fails closed, and on Linux the OS's own thread list
+    covers a worker still clearing its thread state, a watchdog and a C extension's thread; elsewhere a
+    thread outside the Python runtime is invisible: a stated residual); force a recorded background fault
+    to exit 2 over a passing verdict, flush both streams, then stop the collector, block every signal, run
+    any handler already tripped and re-read the record and every liveness term AFTER the flushes (a fault
+    recorded or a worker started while a flush was blocked, on a full pipe say, must still fail the
+    verdict; its late marker is written straight to fd 2, past the buffers), then os._exit, so no atexit
+    callback registered by loaded code
     runs after the verdict (the gate's own cleanup runs inside its work; this gate registers no atexit work
     of its own)."""
     import os
@@ -1283,7 +1389,8 @@ def _gate_exit(code):
         while True:
             running = [worker for worker in _threads.enumerate()
                        if worker is not current and worker.is_alive()]
-            pending = _lowlevel._count() or any(_state[0] for _state in _LOADED_WORKERS)
+            pending = (_lowlevel._count() or any(_state[0] for _state in _LOADED_WORKERS)
+                       or _os_threads_pending())
             remaining = deadline - time.monotonic()
             if (not running and not pending) or remaining <= 0:
                 break
@@ -1305,13 +1412,28 @@ def _gate_exit(code):
     except Exception:
         if code == 0:
             code = 2
-    if code == 0 and (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False)):
+    if code == 0:
+        # The verdict stands only once no loaded code can run before the exit: the collector is stopped,
+        # every signal is blocked (no other thread is left to take one), a handler already tripped runs
+        # now, and the record and every liveness term are read afresh, so a fault or a worker a handler
+        # started while a flush was blocked fails the verdict.
+        import gc as _gc
+        import signal as _signals
         try:
-            os.write(2, ("{}: a background fault was recorded during the exit flush; "
-                         "fail-closed\n".format(_FAULT_MARKER)).encode("utf-8"))
-        except OSError:
-            pass
-        code = 2
+            _gc.disable()
+            _signals.pthread_sigmask(_signals.SIG_BLOCK, _signals.valid_signals())
+            _drain_pending_signals()
+        except BaseException:  # noqa: BLE001  a handler's own escape fails the verdict, never the exit
+            code = 2
+        if (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False) or _lowlevel._count()
+                or any(_state[0] for _state in _LOADED_WORKERS) or _os_threads_pending()):
+            code = 2
+        if code != 0:
+            try:
+                os.write(2, ("{}: a background fault or a worker was recorded during the exit flush; "
+                             "fail-closed\n".format(_FAULT_MARKER)).encode("utf-8"))
+            except OSError:
+                pass
     os._exit(code)
 
 
@@ -1413,6 +1535,107 @@ _FAULT_CHANNEL_CASES = (
      "_thread.start_new_thread(time.sleep, (0.3,))\n", 0, False, None),
     ("lowlevel-unfinished", "import _thread, threading\n"
      "_thread.start_new_thread(threading.Event().wait, ())\n", 2, True, None),
+    # A handled failed low-level start leaves no pending worker: red when the start flag is recorded
+    # before the start call (the flag then stays set and the settle fails closed at the bound).
+    ("lowlevel-failed-start", "import _thread\n"
+     "try:\n"
+     "    _thread.start_new_thread(print)\n"
+     "except TypeError:\n"
+     "    pass\n", 0, False, None),
+    # Thread-state teardown: a worker's thread-local and context-variable values are destroyed while the
+    # runtime clears its thread state, after its live count and threading's census already dropped it;
+    # the OS thread list still shows the worker, so the settle waits and records the fault (red without
+    # that term: each ends 0).
+    ("lowlevel-local-destructor", "import _thread, threading, time\n"
+     "entered = threading.Event()\n"
+     "store = threading.local()\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-local-destructor')\n"
+     "def worker():\n"
+     "    store.value = Held()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 2, True, None),
+    ("thread-local-destructor", "import threading, time\n"
+     "entered = threading.Event()\n"
+     "store = threading.local()\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-thread-local-destructor')\n"
+     "def worker():\n"
+     "    store.value = Held()\n"
+     "threading.Thread(target=worker).start()\n"
+     "entered.wait()\n", 2, True, None),
+    ("contextvar-destructor", "import _thread, contextvars, threading, time\n"
+     "entered = threading.Event()\n"
+     "held = contextvars.ContextVar('held')\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-contextvar-destructor')\n"
+     "def worker():\n"
+     "    held.set(Held())\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 2, True, None),
+    # The runtime's live count, the term that carries the settle where the platform has no thread list:
+    # the fixture switches the OS list off in the probe's gate, and a low-level worker whose return value's
+    # destructor still runs after its callback returned must still be waited out and recorded (red
+    # without the live count: it ends 0).
+    ("runtime-count-return-destructor", "import _thread, sys, threading, time\n"
+     "sys.modules['__main__'].gate._TASK_DIR = None\n"
+     "entered = threading.Event()\n"
+     "class Result:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-return-destructor')\n"
+     "def worker():\n"
+     "    return Result()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 2, True, None),
+    # The settle's own reads of those two terms: a teardown destructor or a return value's destructor
+    # that finishes without a fault is waited out and passes (red without the settle-position read: the
+    # re-read after the flushes then still sees the worker and fails the clean run closed).
+    ("lowlevel-local-finishing", "import _thread, threading, time\n"
+     "entered = threading.Event()\n"
+     "store = threading.local()\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.3)\n"
+     "def worker():\n"
+     "    store.value = Held()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 0, False, None),
+    ("runtime-count-return-finishing", "import _thread, sys, threading, time\n"
+     "sys.modules['__main__'].gate._TASK_DIR = None\n"
+     "entered = threading.Event()\n"
+     "class Result:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.3)\n"
+     "def worker():\n"
+     "    return Result()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 0, False, None),
+    # Capability removal: every subinterpreter module is unimportable (red when any one is left
+    # importable: the fixture then ends 3).
+    ("subinterpreter-modules", "import importlib\n"
+     "for name in ('_interpreters', 'concurrent.interpreters', '_testinternalcapi', '_testcapi'):\n"
+     "    try:\n"
+     "        importlib.import_module(name)\n"
+     "    except ImportError:\n"
+     "        continue\n"
+     "    raise SystemExit(3)\n", 0, False, None),
+    # An armed faulthandler watchdog is a C-level thread only the OS thread list shows; still armed at
+    # the bound it fails the verdict closed (red without that term: it ends 0).
+    ("watchdog-armed", "import faulthandler\n"
+     "faulthandler.dump_traceback_later(600)\n", 2, True, None),
     # Exit-status range: os._exit truncates its status to the low 8 bits, so a non-zero SystemExit
     # code that is a multiple of 256 would end the child with status 0, a silent pass; the gate maps
     # it to 2. The neighbouring codes pass through (257 reaches the parent as its low byte, 1).
@@ -1460,9 +1683,25 @@ signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGALRM])
 signal.setitimer(signal.ITIMER_REAL, 1.0)
 """
 
+# The same window with a start instead of a fault: the handler starts a low-level worker that never ends
+# while the exit flush is blocked, then reports on fd 2, and the parent drains stdout only after that
+# line. Exit 2 with the marker is required. Red when only the record is read after the flushes: the
+# child then ends 0 with the worker still running.
+_FLUSH_WINDOW_START_FIXTURE = """import _thread, fcntl, os, signal, sys, threading
+os.write(1, b"x" * fcntl.fcntl(1, fcntl.F_GETPIPE_SZ))
+sys.stdout.write("y")
+def start(signum, frame):
+    _thread.start_new_thread(threading.Event().wait, ())
+    os.write(2, b"FAULT-FIXTURE-FLUSH-START\\n")
+signal.signal(signal.SIGALRM, start)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGALRM])
+signal.setitimer(signal.ITIMER_REAL, 1.0)
+"""
+
 
 def _flush_window_failures():
-    """One failure string per flush-window requirement the child missed (see _FLUSH_WINDOW_FIXTURE)."""
+    """One failure string per flush-window requirement a child missed (see _FLUSH_WINDOW_FIXTURE and
+    _FLUSH_WINDOW_START_FIXTURE)."""
     import subprocess
     import tempfile
     import threading
@@ -1471,33 +1710,37 @@ def _flush_window_failures():
     with tempfile.TemporaryDirectory(prefix="opf-init-contract-flush-window-") as tmp:
         probe = Path(tmp) / "probe.py"
         probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
-        case = Path(tmp) / "flush_window.py"
-        case.write_text(_FLUSH_WINDOW_FIXTURE, encoding="utf-8")
-        try:
-            child = subprocess.Popen([sys.executable, "-I", "-B", str(probe), tool, str(case)],
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except (OSError, subprocess.SubprocessError) as exc:
-            return ["fault-channel/flush-window: probe did not run ({})".format(type(exc).__name__)]
-        with child:
-            killer = threading.Timer(120, child.kill)
-            killer.start()
+        for label, fixture, ready in (
+                ("flush-window", _FLUSH_WINDOW_FIXTURE, _FAULT_MARKER + ":"),
+                ("flush-window-start", _FLUSH_WINDOW_START_FIXTURE, "FAULT-FIXTURE-FLUSH-START")):
+            case = Path(tmp) / (label + ".py")
+            case.write_text(fixture, encoding="utf-8")
             try:
-                header = b""
-                while (_FAULT_MARKER + ":").encode("ascii") not in header:
-                    line = child.stderr.readline()
-                    if not line:
-                        break
-                    header += line
-                child.stdout.read()
-                trailer = child.stderr.read()
-                code = child.wait()
-            finally:
-                killer.cancel()
-        stderr_text = (header + trailer).decode("utf-8", "replace")
-        if code != 2:
-            failures.append("fault-channel/flush-window: expected exit 2, got {}".format(code))
-        elif (_FAULT_MARKER + ":") not in stderr_text:
-            failures.append("fault-channel/flush-window: fault marker absent")
+                child = subprocess.Popen([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("fault-channel/{}: probe did not run ({})".format(label, type(exc).__name__))
+                continue
+            with child:
+                killer = threading.Timer(120, child.kill)
+                killer.start()
+                try:
+                    header = b""
+                    while ready.encode("ascii") not in header:
+                        line = child.stderr.readline()
+                        if not line:
+                            break
+                        header += line
+                    child.stdout.read()
+                    trailer = child.stderr.read()
+                    code = child.wait()
+                finally:
+                    killer.cancel()
+            stderr_text = (header + trailer).decode("utf-8", "replace")
+            if code != 2:
+                failures.append("fault-channel/{}: expected exit 2, got {}".format(label, code))
+            elif (_FAULT_MARKER + ":") not in stderr_text:
+                failures.append("fault-channel/{}: fault marker absent".format(label))
     return failures
 
 
