@@ -11579,12 +11579,14 @@ def _self_test_checks():
         sheet["sources"] = sorted(d["path"] for d in decisions)
         sheet["decisions"] = decisions
         if hook_op is not None:
-            # the hook row installs the claude-code enforcement member (its new_digest), so install-pack
-            # plants the other platforms' members only (the planner's rule).
+            # the hook row installs the claude-code row's registration (its new_digest), so install-pack
+            # plants every other enforcement member, the deny program and sanctioned writer that row binds
+            # beside it (schema.ENFORCEMENT_DENY_MEMBERS) included (the planner's rule).
             for row in sheet["bindings"]["enforcement"]:
                 if row["platform"] == "claude-code":
-                    row["members"] = [dict(path=hook_op["registration_path"], digest=hook_op["new_digest"])]
-            others = [row for row in sheet["bindings"]["enforcement"] if row["platform"] != "claude-code"]
+                    row["members"][0] = dict(path=hook_op["registration_path"], digest=hook_op["new_digest"])
+            others = [dict(row, members=row["members"][1:]) if row["platform"] == "claude-code" else row
+                      for row in sheet["bindings"]["enforcement"]]
             sheet["ops"] = sheet["ops"][:2] + [schema.enforcement_install_op(others), hook_op]
         obs = planner.investigate(root, sources=sheet["sources"], targets=sheet["targets"])
         sheet["expected_observation_digest"] = (
