@@ -13869,7 +13869,7 @@ def _main_isolated(monitor):
         gexpect("(gw-ak) an -m value naming the no-verify word allows when single-quoted",
                 "git commit -m 'fix the no-verify flag'", "allow")
         gexpect("(gw-ak2) the double-quoted form allows too (the closed literal grammar accepts a "
-                "standalone double-quoted literal with no $, backquote or backslash inside, and the "
+                "standalone double-quoted literal with no $, backquote, backslash or '!' inside, and the "
                 "decoded word is an -m value, not an option)",
                 'git commit -m "fix the no-verify flag"', "allow")
         gexpect("(gw-al) --no-verify-signatures on commit is not the bypass",
@@ -13961,8 +13961,10 @@ def _main_isolated(monitor):
                 "git am ${x}-n <<<x", "deny")
         # The grammar's deliberate over-denials, each disclosed in the gate docstring and the enforcement
         # ledger: ANY live expansion on a roster-verb git segment denies, even as a safe value or operand
-        # and inside double quotes too; a plain double-quoted literal with no $, backquote or backslash
-        # inside is accepted like a bare word, so the re-issue is a literal or standalone quoted word.
+        # and inside double quotes too, outside the one accepted here-document message form (a separated -m
+        # value "$(cat <<'EOF' ... EOF)" on a command the lexer parses); a plain double-quoted literal with
+        # no $, backquote, backslash or '!' inside is accepted like a bare word, so the re-issue is a literal
+        # or standalone quoted word.
         gexpect("(gw-eo-l) -m \"$msg\" is a double-quoted expansion on a roster verb, denies (disclosed "
                 "over-deny; the single-quoted control gw-eo-o allows)",
                 'git commit -m "$msg"', "deny")
@@ -14343,6 +14345,132 @@ def _main_isolated(monitor):
                 "allows", "GIT_AUTHOR_NAME='A B' git commit -m 'fix -n'", "allow")
         gexpect("(gw-bh-ctl-gitdir) --git-dir=/srv/r.git is no git word, git commit -m 'fix -n' allows",
                 "git --git-dir=/srv/r.git commit -m 'fix -n'", "allow")
+        # BASH-MODEL READING VECTORS: each allowed before the bash-model readings (_gate_bash_readings) and the
+        # any-word walk (_gate_any_word_bypass), and bash runs a hook-skipping git commit or push for each. An
+        # ANSI-C quote is cut at its first NUL escape as bash cuts it ($'gi\0zz't is git), and decoded with
+        # bash's own escapes (\x{..}, an octal code past 377 keeping its low byte, \c with the first byte of a
+        # multibyte character).
+        for _gw_lbl, _gw_cmd in (
+                ("gw-rd-nul-env", "env $'g\\x69t\\0' commit -nv"),
+                ("gw-rd-nul-ionice", "ionice $'gi\\0zz't commit -nv"),
+                ("gw-rd-nul-bare", "$'gi\\0zz't commit -nv"),
+                ("gw-rd-nul-c-at", "ionice $'gi\\c@zz't commit -nv"),
+                ("gw-rd-nul-nice", "nice $'gi\\0zz't commit -nv"),
+                ("gw-rd-nul-sudo", "sudo $'gi\\0zz't commit -nv"),
+                ("gw-rd-nul-env-word", "env $'gi\\0zz't commit -nv"),
+                ("gw-rd-xbrace", "ionice $'g\\x{69}t' commit -nv"),
+                ("gw-rd-octal-byte", "ionice $'gi\\400zz't commit -nv"),
+                ("gw-rd-xbrace-empty", "ionice $'gi\\x{}zz't commit -nv"),
+                ("gw-rd-c-space", "ionice $'gi\\c zz't commit -nv"),
+                ("gw-rd-c-backquote", "ionice $'gi\\c`zz't commit -nv"),
+                ("gw-rd-c-multibyte", "ionice $'gi\\cࠁzz't commit -nv"),
+                # A quoted span that splits into a '--', a value-taking option or a global option's value no
+                # longer swallows the real -n after it, and a vertical tab is no blank to bash.
+                ("gw-rd-split-dashdash", "ionice g'i't commit 'x --' -n"),
+                ("gw-rd-split-m", "ionice g'i't commit 'x -m' -n"),
+                ("gw-rd-split-c-dq", "ionice g'i't commit \"x -C\" -n"),
+                ("gw-rd-split-herestr", "ionice g'i't commit 'x --' -n <<<x"),
+                ("gw-rd-split-after-herestr", "cat <<<x; ionice g'i't commit 'x -m' -n"),
+                ("gw-rd-vt-ansic", "ionice g'i't commit x$'\\v'-m -n"),
+                ("gw-rd-vt-raw", "ionice g'i't commit x\x0b-m -n"),
+                ("gw-rd-global-c", "ionice g'i't -c 'x.y=1 -C' commit -n"),
+                # env -S reads a quoted \_ as a separator.
+                ("gw-rd-env-s-us", "env -S 'g\"i\"t\\_commit\\_-nv'"),
+                ("gw-rd-env-s-us-att", "env -S'g\"i\"t\\_commit\\_-nv'"),
+                ("gw-rd-env-split-us", "env --split-string='g\"i\"t\\_commit\\_-nv'"),
+                # A git glued to a shell operator character, a process substitution's opener, a command
+                # substitution's opener or a backquote.
+                ("gw-rd-procsub-in", "cat <(g'i't commit -nv)"),
+                ("gw-rd-procsub-redir", "cat < <(g'i't commit -nv)"),
+                ("gw-rd-procsub-tee", "tee >(g'i't commit -nv)"),
+                ("gw-rd-procsub-out", "cat >(g'i't commit -nv)"),
+                ("gw-rd-sh-semi", "sh -c 'true;g\"i\"t commit -nv'"),
+                ("gw-rd-sh-and", "sh -c 'true&&g\"i\"t commit -nv'"),
+                ("gw-rd-sh-or", "sh -c 'true||g\"i\"t commit -nv'"),
+                ("gw-rd-sh-pipe", "sh -c 'true|g\"i\"t commit -nv'"),
+                ("gw-rd-sh-paren", "sh -c '(g\"i\"t commit -nv)'"),
+                ("gw-rd-sh-cd", "sh -c 'cd /x&&g\"i\"t commit -nv'"),
+                ("gw-rd-bash-dq", "bash -c \"true;g'i't commit -nv\""),
+                ("gw-rd-ionice-sh", "ionice sh -c 'true;g\"i\"t commit -nv'"),
+                ("gw-rd-eval", "eval 'true;g\"i\"t commit -nv'"),
+                ("gw-rd-subst-semi", "echo \"$(true;g'i't commit -nv)\""),
+                ("gw-rd-subst", "echo \"$(g'i't commit -nv)\""),
+                ("gw-rd-backquote", "echo `g'i't commit -nv`"),
+                ("gw-rd-pe-paren", "cat <<<x; (g'i't commit -nv)"),
+                ("gw-rd-pe-paren-glued", "cat <<<x;(g'i't commit -nv)"),
+                ("gw-rd-pe-paren-push", "cat <<<x; (g'i't push --no-verify)"),
+                ("gw-rd-pe-case", "cat <<<x; case a in a)g'i't commit -nv;; esac"),
+                ("gw-rd-pe-heredoc", "cat <<EOF\nhi\nEOF\n(g'i't commit -nv)"),
+                # The text's own quoting level read as bash reads it (a '$' that ends a single-quoted span opens
+                # no ANSI-C quote), the next level in (a script handed to bash -c), and every ANSI-C quote the
+                # raw match finds, at any depth.
+                ("gw-rd-mispair-ansic", "flock 'x$' $'g\\x69t' commit -nv"),
+                ("gw-rd-nested-nul", "bash -c \"\\$'gi\\\\0zz't commit -nv\""),
+                ("gw-rd-nested-mispair", "bash -c \"env 'A=x\\$' \\$'g\\\\x69t' commit -nv\""),
+                ("gw-rd-raw-fragment", "echo \"$(echo \"it's\"; $'gi\\0zz't commit -nv)\"")):
+            gexpect("({}) a git bypass the bash-model readings see denies".format(_gw_lbl), _gw_cmd, "deny")
+        # The disclosed safe-direction over-denies of those readings, pinned so a change to them is a deliberate
+        # one: a single-dash word holding an n counts after the verb even as an attached value, any later roster
+        # verb word counts as the verb, a git, a roster verb and an n word named in a message on a git line
+        # count, and a \_ is read as a separator wherever it stands.
+        gexpect("(gw-rd-overdeny-uno) ionice + git commit -uno denies (disclosed over-deny)",
+                "ionice git commit -uno -m x", "deny")
+        gexpect("(gw-rd-overdeny-later-verb) a later roster verb word counts (disclosed over-deny)",
+                "ionice git log --grep commit -n 3", "deny")
+        gexpect("(gw-rd-overdeny-msg) a message naming git, a roster verb and -n denies (disclosed over-deny)",
+                "git commit -m 'see git log; then commit -n'", "deny")
+        gexpect("(gw-rd-overdeny-us) an unquoted \\_ is read as a separator too (disclosed over-deny)",
+                "env -S g\"i\"t\\_commit\\_-nv", "deny")
+        # Controls: an option value holding no n, push's -n (--dry-run) behind a wrapper, a quoted message with
+        # operators on the segment's own git, and a wrapper option holding an n before the git word allow.
+        gexpect("(gw-rd-ctl-ionice-n7) ionice -n7 before git commit -m x allows", "ionice -c2 -n7 git commit -m x",
+                "allow")
+        gexpect("(gw-rd-ctl-sudo-msg) sudo + git commit -m 'new feature' allows",
+                "sudo git commit -m 'new feature'", "allow")
+        gexpect("(gw-rd-ctl-ops-msg) a quoted message holding operators on the own git allows",
+                "git commit -m \"a; b | c\"", "allow")
+        gexpect("(gw-rd-ctl-procsub-log) a git log -n3 in a process substitution allows", "cat <(g'i't log -n3)",
+                "allow")
+        gexpect("(gw-rd-ctl-sh-pushn) a git push -n (dry run) inside sh -c allows",
+                "sh -c 'true;g\"i\"t push -n origin main'", "allow")
+        # Direct unit cases for the bash-model pieces: the ANSI-C body decoder (the NUL cut, the octal and \x{}
+        # low byte just inside, at and just past 0xFF, \c's pair and DEL, an unknown escape kept, a multibyte
+        # \c), the word split, and the any-word walk.
+        _gw_act = getattr(aiqt_hooks, "_gate_ansi_c_text", None)
+        _gw_rwd = getattr(aiqt_hooks, "_gate_reading_words", None)
+        _gw_awb = getattr(aiqt_hooks, "_gate_any_word_bypass", None)
+
+        def rdexpect(label, func, arg, want):
+            got = func(arg) if func is not None else "missing helper"
+            if got != want:
+                failures.append("{}: {!r} -> {!r}, expected {!r}".format(label, arg, got, want))
+
+        rdexpect("(gw-rd-act-nul) \\0 cuts the body", _gw_act, "gi\\0zz", "gi")
+        rdexpect("(gw-rd-act-u0) \\u0000 cuts the body", _gw_act, "a\\u0000b", "a")
+        rdexpect("(gw-rd-act-c-at) \\c@ cuts the body", _gw_act, "a\\c@b", "a")
+        rdexpect("(gw-rd-act-oct377) \\377 keeps 0xff", _gw_act, "a\\377b", "a\xffb")
+        rdexpect("(gw-rd-act-oct400) \\400 keeps its low byte, a NUL", _gw_act, "a\\400b", "a")
+        rdexpect("(gw-rd-act-oct401) \\401 keeps its low byte", _gw_act, "a\\401b", "a\x01b")
+        rdexpect("(gw-rd-act-xb-ff) \\x{ff} keeps 0xff", _gw_act, "a\\x{ff}b", "a\xffb")
+        rdexpect("(gw-rd-act-xb-100) \\x{100} keeps its low byte, a NUL", _gw_act, "a\\x{100}b", "a")
+        rdexpect("(gw-rd-act-xb-169) \\x{169} keeps its low byte", _gw_act, "a\\x{169}b", "aib")
+        rdexpect("(gw-rd-act-c-pair) \\c\\\\ takes both backslashes", _gw_act, "a\\c\\\\x69b", "a\x1cx69b")
+        rdexpect("(gw-rd-act-c-del) \\c? is DEL", _gw_act, "a\\c?b", "a\x7fb")
+        rdexpect("(gw-rd-act-unknown) an unknown escape keeps its backslash", _gw_act, "a\\_b", "a\\_b")
+        rdexpect("(gw-rd-act-c-mb-nul) \\c before U+0801 reads its first byte, a NUL", _gw_act, "a\\cࠁb", "a")
+        rdexpect("(gw-rd-act-u10ffff) \\U0010FFFF decodes", _gw_act, "a\\U0010FFFFb", "a\U0010ffffb")
+        rdexpect("(gw-rd-act-u110000) \\U00110000 is past Unicode and reads as nothing", _gw_act,
+                 "a\\U00110000b", "ab")
+        rdexpect("(gw-rd-words-vt) a vertical tab does not split", _gw_rwd, "a\x0bb c", ["a\x0bb", "c"])
+        rdexpect("(gw-rd-words-ops) operator characters and a backquote split", _gw_rwd, "a;b(c`d<e",
+                 ["a", "b", "c", "d", "e"])
+        rdexpect("(gw-rd-words-us) a \\_ splits", _gw_rwd, "x\\_y", ["x", "y"])
+        rdexpect("(gw-rd-walk-dashdash) a '--' does not end the reading", _gw_awb, ["git", "commit", "--", "-n"],
+                 ("commit", "the short -n (--no-verify) in '-n'"))
+        rdexpect("(gw-rd-walk-value) a value option does not take the -n", _gw_awb, ["git", "commit", "-m", "-n"],
+                 ("commit", "the short -n (--no-verify) in '-n'"))
+        rdexpect("(gw-rd-walk-pushn) push's -n is no bypass", _gw_awb, ["git", "push", "-n"], None)
+        rdexpect("(gw-rd-walk-before-git) a verb before git does not count", _gw_awb, ["commit", "-n", "git"], None)
         # Direct unit cases for _gate_dequoted_words: the ANSI-C decoding (each escape form, and the \U code
         # just inside, at and just past the last Unicode code point) and the attached-value git word (a
         # single-dash word of four characters, the boundary, and five and six).
@@ -14394,7 +14522,11 @@ def _main_isolated(monitor):
         for _gw_rlbl, _gw_needle in (
                 ("gw-res-runout-url", "so a quoted URL or path ending in .git on any git line denies too"),
                 ("gw-res-behind-overdeny", "so sudo git commit -m \"fix -n\" denies"),
-                ("gw-res-behind-residual", "it cannot see a git word built at run time")):
+                ("gw-res-behind-residual", "it cannot see a git word built at run time"),
+                ("gw-res-anyword-overdeny", "any later roster-verb word counts as the verb"),
+                ("gw-res-value-overdeny", "an option value holding an n counts after the verb"),
+                ("gw-res-us-overdeny", "a \\_ is read as a separator wherever it stands"),
+                ("gw-res-ansic-residual", "an ANSI-C dollar-quoted span that the two level readings do not decode")):
             if _gw_needle not in _gw_residue:
                 failures.append("({}) the gate-weakening-guard residue must carry {!r}"
                                 .format(_gw_rlbl, _gw_needle))
@@ -21010,9 +21142,14 @@ def _main_isolated(monitor):
           "beyond >/dev/null, 2>/dev/null and 2>&1) or whose subcommand cannot be resolved; it also PEELS "
           "the command-running wrappers (env, exec -a, nice, nohup, command, time, timeout) to judge the "
           "git behind one, and FAILS CLOSED through the dequoted-word scan on a wrapper option it cannot "
-          "resolve (env -uX, nice -n5) or an unlisted wrapper (sudo, xargs, setsid, stdbuf), so a quote-"
-          "concatenated git spelling the raw scan cannot see still denies (a disclosed over-deny of text "
-          "that merely names such a command); and it denies a known "
+          "resolve (env -uX, nice -n5) or an unlisted wrapper (sudo, xargs, setsid, stdbuf); behind ANY "
+          "other word of a segment, with no wrapper list, it reads that segment's de-quoted text (the "
+          "blank-split reading, and bash-model readings that decode ANSI-C quotes as bash does, cutting at "
+          "a NUL, and split at blanks, operator characters, backquotes and env -S's \\_) and denies a git "
+          "followed by any roster verb and then any hook-skip word, with no '--' or option value read, and "
+          "on a parse error it reads every recovered segment, the in-progress one, and the unread text the "
+          "same way, so a quote-concatenated or escape-coded git spelling the raw scan cannot see still "
+          "denies (a disclosed over-deny of text that merely names such a command); and it denies a known "
           "verification run whose output reaches "
           "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
           "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and "
