@@ -240,7 +240,7 @@ def _entry_present(dir_fd, path):
     return True
 
 
-def _scan_family(family, item, family_fd, rules, report):
+def _scan_family(family, item, family_fd, rules, report, checked):
     """Check one family directory, held open at family_fd, as _scan_tree does."""
     if family == "external":
         for entry in _listing(family_fd):
@@ -248,6 +248,7 @@ def _scan_family(family, item, family_fd, rules, report):
             _refuse_link(entry, sub)
             if not entry.is_dir(follow_symlinks=False):
                 continue
+            checked(sub)
             sub_fd = _open_at(family_fd, sub, _DIR_FLAGS)
             try:
                 present = [_entry_present(sub_fd, sub / name) for name in ("PROVENANCE.md", "LICENSE")]
@@ -269,6 +270,7 @@ def _scan_family(family, item, family_fd, rules, report):
             continue
         if path.suffix != ".md":
             continue
+        checked(path)
         nc = check_name(family, entry.name)
         if nc:
             report(path, nc[0], nc[1])
@@ -278,15 +280,16 @@ def _scan_family(family, item, family_fd, rules, report):
             report(path, drift[0], drift[1])
 
 
-def _scan_tree(rules, rules_fd, report):
+def _scan_tree(rules, rules_fd, report, checked=lambda path: None):
     """Check the rules tree held open at rules_fd (the directory open_dir judged at rules), calling
-    report(path, code, detail) for each violation. Every listing is made through a held descriptor, and
-    every directory it descends into is opened, and every rule file read, beneath its parent's
-    descriptor with O_NOFOLLOW, so the tree read is the one the probe judged, whatever later happens to
-    its names. A symlink at any entry the walk inspects (an entry of the tree root, of a family
-    directory or of external/, or a vendored source's PROVENANCE.md or LICENSE) raises OSError naming
-    it, never followed, as does a rule file that is not a regular file. Dot-named entries of the tree
-    root and of a flat family are skipped unread, and nothing else inside a vendored source is
+    report(path, code, detail) for each violation, and checked(path) once for each rule file and
+    vendored source it evaluates (conformance C3 counts them). Every listing is made through a held
+    descriptor, and every directory it descends into is opened, and every rule file read, beneath its
+    parent's descriptor with O_NOFOLLOW, so the tree read is the one the probe judged, whatever later
+    happens to its names. A symlink at any entry the walk inspects (an entry of the tree root, of a
+    family directory or of external/, or a vendored source's PROVENANCE.md or LICENSE) raises OSError
+    naming it, never followed, as does a rule file that is not a regular file. Dot-named entries of the
+    tree root and of a flat family are skipped unread, and nothing else inside a vendored source is
     inspected."""
     for entry in _listing(rules_fd):
         if entry.name.startswith("."):
@@ -303,7 +306,7 @@ def _scan_tree(rules, rules_fd, report):
             continue
         family_fd = _open_at(rules_fd, item, _DIR_FLAGS)
         try:
-            _scan_family(family, item, family_fd, rules, report)
+            _scan_family(family, item, family_fd, rules, report, checked)
         finally:
             os.close(family_fd)
 

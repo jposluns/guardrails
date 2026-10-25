@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "fb0baf22f5908cc2bc5e1f761784a3189ebc5f22ed0c991f1832d40d5b75ac23"
+tree-sha256 = "74be042e51e5afce155e37a9a393796d57c699a7bebfcbdb4224535fbe7e2923"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3531,8 +3531,8 @@ sha256 = "8432b91994571a4d2e8a41007d84d32b24990b15c772a134449a7b3cd57440a3"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
-bytes = 60321
-sha256 = "0abf44529d934e0889784b361cb4ba2bfa91274d74b4153ffb1a38f7fc680da9"
+bytes = 60522
+sha256 = "b456ded1e852147e9dcb868a98ffd0c677cd9e467f4575a0609d5ca8dadb3b14"
 
 [[sources]]
 path = "tools/check_secrets.py"
@@ -3586,8 +3586,8 @@ sha256 = "d5e68bcbdfc7f4910676d047b73f8ede82a3602b027b23e442f58fee2bba453d"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 77388
-sha256 = "8e1860b0cd6f596bbf0583b5582331c588a1cecda8a27a04766eafc6af2d4c3b"
+bytes = 79362
+sha256 = "4f4c305844bb68199dbac8f29fe7565ea397e8f94c3a31bee4c291f6ec4cf9af"
 
 [[sources]]
 path = "tools/doctor.py"
