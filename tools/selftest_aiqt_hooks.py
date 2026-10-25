@@ -14232,6 +14232,63 @@ def _main_isolated(monitor):
                 "(fallback, unresolved)", "env -uX g'i't commit -nv\necho '", "deny")
         gexpect("(gw-wr-fallback2) sudo + g'i't commit -nv on an unparseable line denies "
                 "(fallback, unlisted)", "sudo g'i't commit -nv\necho '", "deny")
+        # IN-PROGRESS-SEGMENT VECTORS: a here-string or process substitution stops the full lex INSIDE the git
+        # segment, and the raw-text scans cannot see the quote-concatenated g'i't. The segment the lexer was
+        # still inside is judged exactly as a complete one over the words read before the construct, so each
+        # denies with the parsed path's own bypass message ("this git <verb> carries"). Each allowed while
+        # that segment was dropped; each keeps denying, with the de-quoted reading's message instead, under a
+        # mutant that drops only the in-progress judgement, so the needle pins that judgement.
+        gdeny_names("(gw-pe-sudo) sudo + g'i't commit -nv before a here-string denies (in-progress segment)",
+                    "sudo g'i't commit -nv <<<x", "this git commit carries")
+        gdeny_names("(gw-pe-envux) env -uX + g'i't commit -nv before a here-string denies",
+                    "env -uX g'i't commit -nv <<<x", "this git commit carries")
+        gdeny_names("(gw-pe-nice) nice -n5 + g'i't commit -nv before a here-string denies",
+                    "nice -n5 g'i't commit -nv <<<x", "this git commit carries")
+        gdeny_names("(gw-pe-env) env + g'i't commit -nv before a here-string denies (resolved peel)",
+                    "env g'i't commit -nv <<<x", "this git commit carries")
+        gdeny_names("(gw-pe-bare) a bare g'i't commit -nv before a here-string denies",
+                    "g'i't commit -nv <<<x", "this git commit carries")
+        gdeny_names("(gw-pe-push) g'i't push --no-verify before a here-string denies",
+                    "g'i't push --no-verify <<<x", "this git push carries")
+        gdeny_names("(gw-pe-procsub) sudo + g'i't commit -nv before a process substitution denies",
+                    "sudo g'i't commit -nv <(true)", "this git commit carries")
+        # PAST-THE-FAILURE VECTORS: the lex stops BEFORE the git word (or the bypass word), so no recovered
+        # segment holds it. The text from the start of the in-progress segment onward (the whole command when
+        # no segment was in progress: gw-pe-noopen, gw-pe-fdvar) is split at its unquoted separators and read
+        # de-quoted by the same fail-closed dequoted-word scan (_gate_unread_bypass). Each allowed before that
+        # reading and allows again under a mutant that drops it.
+        gdeny_names("(gw-pe-after-semi) sudo + g'i't commit -nv after a here-string segment denies",
+                    "cat <<<x; sudo g'i't commit -nv", "names a git commit carrying")
+        gdeny_names("(gw-pe-after-and) g'i't commit -nv after '&&' past a here-string denies",
+                    "cat <<<x && g'i't commit -nv", "names a git commit carrying")
+        gdeny_names("(gw-pe-after-nl) env -uX + g'i't commit -nv on the line after a process substitution "
+                    "denies", "diff <(true) <(true)\nenv -uX g'i't commit -nv", "names a git commit carrying")
+        gdeny_names("(gw-pe-after-push) g'i't push --no-verify after a here-string segment denies",
+                    "cat <<<x; g'i't push --no-verify", "names a git push carrying")
+        gdeny_names("(gw-pe-tail) a -n past the here-string inside the git segment itself denies",
+                    "sudo g'i't commit -m x <<<y -n", "names a git commit carrying")
+        gdeny_names("(gw-pe-noopen) a here-string opening the segment before g'i't commit -nv denies "
+                    "(no segment in progress)", "true; <<<x g'i't commit -nv", "names a git commit carrying")
+        gdeny_names("(gw-pe-fdvar) an {fd} redirect opening the segment before g'i't commit -nv denies",
+                    "true; {fd}>/dev/null g'i't commit -nv", "names a git commit carrying")
+        # The disclosed over-deny of that reading: a quoted word holding a blank is split into words, so a
+        # message naming '-n' on such a line denies; pinned so a change to it is a deliberate one.
+        gexpect("(gw-pe-overdeny) a quoted message holding ' -n' on that line denies (disclosed over-deny)",
+                "g'i't commit -m 'fix -n' <<<x", "deny")
+        # Controls: the new judgements read no wider than the dequoted-word scan, so an off-roster verb, push's
+        # -n (--dry-run), a plain message, a git named off-roster in quoted text and an unrelated -n word stay
+        # allowed on the same unparseable lines.
+        gexpect("(gw-pe-ctl-log) g'i't log -n3 before a here-string allows", "g'i't log -n3 <<<x", "allow")
+        gexpect("(gw-pe-ctl-pushn) g'i't push -n (dry run) before a here-string allows",
+                "g'i't push -n <<<x", "allow")
+        gexpect("(gw-pe-ctl-msg) g'i't commit -m x before a here-string allows", "g'i't commit -m x <<<y",
+                "allow")
+        gexpect("(gw-pe-ctl-after-log) g'i't log -n3 after a here-string segment allows",
+                "cat <<<x; g'i't log -n3", "allow")
+        gexpect("(gw-pe-ctl-after-echo) an echoed off-roster git after a here-string segment allows",
+                "cat <<<x; echo 'see git log -n 3'", "allow")
+        gexpect("(gw-pe-ctl-find) find -name before a here-string and a later ls -n allow",
+                "find . -name z <<<y; ls -n", "allow")
         # The run-out over-deny reaches a quoted URL or path ending in '.git' on ANY git line, roster verb or
         # not (the 'git' after the dot is a word-boundary match whose walk runs off the span end); the
         # gate-weakening residue discloses it. Pinned so a change to it updates that disclosure; the

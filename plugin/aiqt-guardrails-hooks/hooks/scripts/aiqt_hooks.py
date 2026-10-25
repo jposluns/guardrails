@@ -12378,9 +12378,11 @@ def _gate_weakening_fallback_kind(command):
     return None
 
 
-def _gate_recovered_segments(command, doubt=None):
-    """The complete segments a partial lex of command recovers: the in-progress segment the lexer was inside
-    is dropped, since its unseen tokens could change it; a construct that begins a new segment leaves every
+def _gate_partial_segments(command, doubt=None):
+    """(complete, open_segment) from a partial lex of command: complete is the list of complete segments it
+    recovers, and open_segment is the in-progress segment the lexer was inside when it stopped (its words
+    and redirects read before the construct, and its raw slice, which runs from that segment's start to the
+    end of command), or None where a construct that begins a new segment stopped it, leaving every
     recovered segment complete. doubt, when given, is the _UncertainHashError the caller's own full lex of
     command just raised: where a partial lex of the same command would raise it too, the partial lex resumes
     from the fork it carries (_lex_resume_partial) instead of lexing the text before the command's first
@@ -12393,8 +12395,42 @@ def _gate_recovered_segments(command, doubt=None):
     else:
         recovered, _complete, in_progress = _lex_command(command, partial=True)
     if in_progress:
-        recovered = recovered[:-1]
-    return recovered
+        return recovered[:-1], recovered[-1]
+    return recovered, None
+
+
+def _gate_recovered_segments(command, doubt=None):
+    """The complete segments a partial lex of command recovers (_gate_partial_segments): the in-progress
+    segment the lexer was inside is dropped, since its unseen tokens could change it, so a sink check reads
+    only segments whose every token was seen."""
+    return _gate_partial_segments(command, doubt)[0]
+
+
+def _gate_unread_bypass(text):
+    """(sub, spelling) when text, the part of a command a partial lex could not read, names a roster git
+    carrying a no-verify bypass, else None. text is split into raw command segments at the ;, &, | and newline
+    separators outside any quoting _skip_quoting can prove (_raw_push_segments, the bounded split the push
+    backstop reads), and each segment's de-quoted copy (_dequoted_text: continuations joined, quote characters
+    and backslashes removed), split at blanks, is judged by the fail-closed dequoted-word scan
+    (_gate_novrf_dequoted_bypass), so a quote-concatenated git (g'i't) past a here-string or process
+    substitution the lexer stops at is still read. A raw-text reading only, read beside the partial lex and the
+    raw fallback, so it can only add a deny, never prove a command safe. Disclosed safe-direction over-deny: a
+    quoted word holding a blank is split into several words here (g'i't commit -m 'fix -n' <<<x reads a -n),
+    and any word whose basename is git starts the walk, so text that merely names such a command denies too.
+    Only a word that can spell a bypass (a '--' word naming a prefix of no-verify, _has_long_prefix, or a
+    single-dash word holding an 'n') lets that walk find one, so a segment holding no such word is passed
+    over unwalked, which changes no decision: linear in the length of text then, and while the git words
+    resolve off-roster subcommands; a segment that packs many roster-verb git words beside such a word keeps
+    the roster-verb bound _gate_novrf_dequoted_bypass states (super-linear, bounded by the hook deadline)."""
+    for segment in _raw_push_segments(text):
+        words = _dequoted_text(segment).split()
+        if not any(_has_long_prefix((w,), "no-verify") or (w[:1] == "-" and w[1:2] != "-" and "n" in w)
+                   for w in words):
+            continue
+        bypass = _gate_novrf_dequoted_bypass(words)
+        if bypass is not None:
+            return bypass
+    return None
 
 
 def _gate_recovered_sink(command, doubt=None):
@@ -12480,8 +12516,12 @@ def gate_weakening(data):
     stdbuf) and a wrapper option the peel cannot resolve now FAIL CLOSED through the dequoted-word scan
     (_gate_novrf_segment_bypass), over-denying text that merely names git with a roster verb and a
     no-verify spelling behind one. A verb off the roster is untouched (git log ${x}-n, git log
-    --format="$f"). The unparseable fallback applies the same scan over the raw text. The checker-output
-    check has TWO TIERS. DENY tier, held to one canonical shape whose two
+    --format="$f"). On a parse error the same judgement reads every segment the partial lex recovers, the
+    in-progress segment the lexer stopped in included, and outside the doubt path the text from that
+    segment onward (the whole command where none was in progress) is read by the bounded de-quoted reading
+    (_gate_unread_bypass), so a bypass before or past a here-string or process substitution denies (sudo
+    g'i't commit -nv <<<x, cat <<<x; g'i't commit -nv); the failed-main-reading floor keeps its own probes.
+    The checker-output check has TWO TIERS. DENY tier, held to one canonical shape whose two
     ends are ALLOW-LISTS (_verification_sink): the first simple command of a pipeline is a KNOWN VERIFICATION
     INVOCATION (_is_verification_run: a run form in _GATE_VERIFY_RUNS, or a python script form) and pipes
     through pass-through stages (_gate_plain_filter: cat, tee, tr, uniq) into a sink on the sink allow-list
@@ -12550,14 +12590,19 @@ def gate_weakening(data):
     except ValueError as exc:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
         # the unparseable construct are judged first for a verification run piped into a truncating sink;
-        # otherwise the raw fallback stands. Only the in-progress segment the lexer was inside is dropped,
-        # since its unseen tokens could change it; a construct that begins a new segment (a lone quote after
-        # 'pytest | head;') leaves every recovered segment complete, so none is dropped.
-        recovered = _gate_recovered_segments(command, exc if isinstance(exc, _UncertainHashError) else None)
-        for seg in recovered:
+        # otherwise the raw fallback stands. The sink check drops the in-progress segment the lexer was
+        # inside, since its unseen tokens could change it; a construct that begins a new segment (a lone quote
+        # after 'pytest | head;') leaves every recovered segment complete, so none is dropped.
+        recovered, open_seg = _gate_partial_segments(
+            command, exc if isinstance(exc, _UncertainHashError) else None)
+        for seg in recovered + ([open_seg] if open_seg is not None else []):
             # the same fail-closed wrapper judgement as the parsed path, over each recovered segment's
             # dequoted argv, so a git bypass hidden behind an unresolved or unlisted wrapper on an
-            # otherwise-unparseable line (env -uX git commit -nv ...) still denies
+            # otherwise-unparseable line (env -uX git commit -nv ...) still denies. The in-progress segment
+            # is judged too, exactly as a complete one, over the words read before the construct the lexer
+            # stopped at (sudo g'i't commit -nv <<<x): a later or glued token cannot turn an option read
+            # there back into a value or an operand, at most make git refuse the command (a safe-direction
+            # over-deny).
             bypass = _gate_novrf_segment_bypass(seg.argv)
             if bypass is not None:
                 sub, spelling = bypass
@@ -12572,6 +12617,26 @@ def gate_weakening(data):
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
         if not isinstance(exc, _UncertainHashError):
+            # The text the partial lex could not read, from the start of the in-progress segment (its raw
+            # slice runs to the end of command) or the whole command where no segment was in progress, is
+            # read by the bounded de-quoted reading (_gate_unread_bypass), so a git bypass past the construct
+            # the lexer stopped at (cat <<<x; g'i't commit -nv) denies. A '#' the lexer could not judge takes
+            # the doubt tests below instead, whose bypass test reads the de-quoted text more broadly.
+            unread = command
+            if open_seg is not None and command.endswith(open_seg.raw):
+                unread = open_seg.raw
+            bypass = _gate_unread_bypass(unread)
+            if bypass is not None:
+                sub, spelling = bypass
+                return _deny(
+                    "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
+                    "(a here-string, a process substitution, an unquoted here-document or an unbalanced quote) "
+                    "and its text from the segment the lexer stopped in onward, with quotes and backslashes removed, "
+                    "names a git {} carrying {}, a deliberate bypass of the verification hooks that gate it; "
+                    "it is denied fail-closed. Never weaken a gate to obtain a pass; fix the artefact instead. "
+                    "{}".format(sub, spelling, _GATE_ALTS),
+                    "AIQT guardrail: denied an unparseable command whose de-quoted text names a git "
+                    "verification-hook bypass (--no-verify family) (rule gatdis, fail-closed).")
             return _gate_weakening_fallback(command)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
