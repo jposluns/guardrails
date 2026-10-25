@@ -24,8 +24,8 @@ mechanisms = ["hook:abs-paths", "hook:abs-paths-bash"]
 
 [[rule]]
 corpus-id = "actbef"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["gate:release-cut"]
 
 [[rule]]
 corpus-id = "aitreg"
@@ -195,7 +195,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "gatdis"
 status = "enforced"
-mechanisms = ["gate:ci-parity", "hook:gate-weakening-guard"]
+mechanisms = ["gate:ci-parity", "gate:relied-exit-pipes", "hook:gate-weakening-guard"]
 
 [[rule]]
 corpus-id = "gensrc"

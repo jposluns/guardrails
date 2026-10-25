@@ -23,9 +23,8 @@ Before delivering, re-open each cited range at its stated lines and confirm that
 on lines that carry the cited content, not on a blank line, a comment banner, or a closing delimiter.
 
 This rule narrows the reference-capture rule (refcap) to the reviewed commit: refcap requires the
-specific reference to be captured at the moment the claim is made, never reconstructed later from
-memory, and the obligations above scope that capture to a file opened this session at the commit
-under review.
+specific reference captured when the claim is made, never reconstructed from memory, and the
+obligations above scope that capture to a file opened this session at the commit under review.
 
 ## Claims about the work rest on observation
 
@@ -90,12 +89,12 @@ silently re-deriving a different one; where no such basis is available, the stat
 figure cannot be reconciled and is re-measured under the same predicate rather than carried forward as
 though it were.
 
-This is the companion of the measured-and-estimated-figures-stay-separate rule, on an orthogonal axis:
-that rule keeps a figure's grade, whether it was measured or estimated, attached to it, while this one
-keeps a figure's definition, the predicate that selected it, attached to it, and a sound figure carries
-both. It is distinct from the completeness-claim-enumerates-its-set rule, which governs completion-class
-quantifiers over a whole set and already holds that a count the assistant holds is not that set's
-authoritative index; this rule governs any reported count, whether or not it claims completeness.
+This complements the measured-and-estimated-figures-stay-separate rule on an orthogonal axis:
+that rule attaches a figure's grade, measured or estimated; this one attaches its definition, the
+predicate that selected it; a sound figure carries both. It differs from the
+completeness-claim-enumerates-its-set rule, which governs completion-class quantifiers over a whole
+set and already holds that the assistant's count is not that set's authoritative index; this rule governs any
+reported count, claiming completeness or not.
 
 ## Disclose a guard's residual coverage
 
@@ -219,10 +218,10 @@ zero sits in a total as though it were measured. Any figure derived from an esti
 percentage, or a total that an estimated input feeds, is itself an estimate and is labelled as one.
 
 This does not forbid estimates, forecasts, or a combined figure whose composition is stated, such as a
-measured 40 plus an estimated 25 reported as roughly 65. What it forbids is the unlabelled blend: an estimate
-folded into a measured total and the whole presented as if it were measured. The label is the release. A
-figure that carries its grade honestly is sound however uncertain it is; a figure that hides its grade
-misreports precision it does not have.
+measured 40 plus an estimated 25 reported as roughly 65. It forbids the unlabelled blend: an estimate
+folded into a measured total, the whole presented as measured. The label is the release. A figure that
+carries its grade honestly is sound however uncertain; one that hides it misreports precision it does
+not have.
 
 ## No fabrication
 
@@ -246,12 +245,12 @@ prose asserting such a status, free to diverge from what the system now does, is
 confident assertion of unobserved behaviour is not made.
 
 A claim that a shared or external resource has failed, or that you are blocked because it has, is a
-behavioural claim about that resource's live state, and a symptom seen only in your own dependent work, a
-killed worker or a rejected payload, is not that observation and cannot tell a resource-wide failure from a
-self-caused local condition such as your own footprint or a malformed request. You read the resource's own
-state, the host's available capacity, and your own footprint directly before asserting such a failure or
-reporting it onward, and absent that reading the condition resolves to a local error to investigate while
-work continues, never a stop or a resource-wide alarm.
+behavioural claim about the resource's live state; a symptom seen only in your own dependent work, a killed
+worker or a rejected payload, is not that observation and cannot tell a resource-wide failure from a
+self-caused local condition such as your own footprint or a malformed request. You read the
+resource's own state, the host's available capacity, and your own footprint directly before asserting
+such a failure or reporting it onward; absent that reading the condition resolves to a local error to
+investigate while work continues, never a stop or a resource-wide alarm.
 
 ## A partial read is not the whole
 
@@ -305,7 +304,7 @@ Applying a fix on disk is not the same as landing it. Before recording or claimi
 
 The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs. The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires a target or context parameter to be derived from or validated against its authoritative source at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate. The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit. The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing. This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content. The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality catches a declared path absent from the commit and a committed change absent from the declaration, but it cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below. The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass. The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read. A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make. Uncommitted work outside the declared review set does not block the dispatch.
 
-This reconciliation answers only what the declaration and the repository can answer. It does not catch a declaration whose author omitted a path the change semantically needs, the under-scoped-declaration residual the equality check cannot reach because a planned-but-uncommitted path is absent from both the commit and the declaration and so leaves no divergence to surface, an undeclared context file, a submodule whose own working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than the review intends, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to that revision. Base derivation reads the commit's raw parent headers with replacement-ref and graft resolution disabled, so a replacement ref, a grafts entry, or a commit-graph cache cannot rewrite the parent the base is taken against; in a shallow or partial clone where a parent object the derivation needs is absent, the reconciliation is a cannot-evaluate rather than a review against a wrong or empty base. These bounds are disclosed here rather than implied covered.
+This reconciliation answers only what the declaration and the repository can answer. It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual: a planned-but-uncommitted path, absent from both the commit and the declaration, leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it. Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, so no replacement ref, grafts entry, or commit-graph cache can rewrite the parent the base is taken against; in a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base. These bounds are disclosed here, not implied covered.
 
 ## Anything wrong is fixed first
 
@@ -455,6 +454,9 @@ before anything is read from its outcome.
 
 A derived or generated artefact is never hand-edited; it changes only by changing its source and
 regenerating. Source and derivative land in the same change, so the two cannot drift apart.
+Deriving an artefact leaves its source originals byte-for-byte unchanged and writes separate outputs;
+in-place derivation uses copies in an area excluding the originals and refuses any path or alias
+writing outside it or back to an original.
 
 ## Verify licence compatibility before introducing third-party material
 

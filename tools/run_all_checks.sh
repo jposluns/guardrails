@@ -72,6 +72,8 @@ run_gate "portability-selftest" python3 -I -B tools/check_portability.py --self-
 run_gate "portability" python3 -I -B tools/check_portability.py
 run_gate "derived-command-parameters-selftest" python3 -I -B tools/check_derived_command_parameters.py --self-test
 run_gate "derived-command-parameters" python3 -I -B tools/check_derived_command_parameters.py
+run_gate "relied-exit-pipes-selftest" python3 -I -B tools/check_relied_exit_pipes.py --self-test
+run_gate "relied-exit-pipes" python3 -I -B tools/check_relied_exit_pipes.py
 run_gate "dashes"    python3 -I -B tools/check_no_dashes.py
 run_gate "dashes-selftest" python3 -I -B tools/check_no_dashes.py --self-test
 run_gate "dashes-default-parity" python3 -I -B tools/check_no_dashes.py --default-parity
@@ -166,6 +168,8 @@ run_gate "agents-selftest" python3 -I -B tools/gen_agents.py --self-test
 run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
 run_gate "first-pin-demo-selftest" python3 -I -B tools/gen_first_pin_demo.py --self-test
 run_gate "first-pin-demo-drift"    python3 -I -B tools/gen_first_pin_demo.py --check
+run_gate "must-deliver-selftest" python3 -I -B tools/check_must_deliver.py --self-test
+run_gate "must-deliver"          python3 -I -B tools/check_must_deliver.py
 run_gate "mappings-page-drift" python3 -I -B tools/gen_mappings.py --check
 run_gate "reference-roster-selftest" python3 -I -B tools/gen_reference_facts.py --self-test
 run_gate "reference-roster-drift" python3 -I -B tools/gen_reference_facts.py --check
@@ -248,6 +252,7 @@ run_gate "manifest"              python3 -I -B tools/check_manifest.py
 run_gate "byte-canon-selftest"   python3 -I -B tools/check_byte_canon.py --self-test
 run_gate "byte-canon"            python3 -I -B tools/check_byte_canon.py
 run_gate "clauses-manifest-sources" python3 -I -B tools/check_clauses.py --genesis --with-manifest
+run_gate "placement-selftest" python3 -I -B tools/check_selftest_execution.py --suite rule-placement-selftest
 run_gate "placement"      python3 -I -B tools/check_rule_placement.py
 run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
 run_gate "applies"         python3 -I -B tools/check_applies.py

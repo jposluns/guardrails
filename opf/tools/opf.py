@@ -39,8 +39,9 @@ modes, `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --revie
 removed: the verb refuses every argument list on every root, a NOT-ADOPTED one included, at exit 2 with a
 pointer to adoption and the prompt pack, parsing no argument, reading no input file and writing nothing.
 
-`init` HAS landed: `opf init [--root DIR]` creates validated store sources, a pointer, and a starter
-`CHANGELOG.md` when none exists, without git writes or rendering.
+`init` HAS landed: `opf init [--root DIR] [--recover]` creates validated store sources, a pointer, and a
+starter `CHANGELOG.md` under the shared init operation mutex and the spec 5.7 lease, without rendering or
+git writes beyond the operation-lock home, refusing an existing root `CHANGELOG.md` or `VERSION`.
 `absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
 prints a changelog draft or freeze digest without writing files.
 `record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, and `worklog-append`
@@ -16890,69 +16891,17 @@ def _init_untracked(git, repo, root, paths):
 
 
 def _init_unignored(git, repo, root, paths):
-    """Refuse a planned destination git would ignore: an ignored store cannot be staged or discovered.
-
-    check-ignore reports at least one ignored path with rc 0, none ignored with rc 1, and an error
-    with rc >= 128. The rc drives the three-way decision; the output is only for the diagnostic. Paths
-    are passed as arguments (git check-ignore accepts neither -z without --stdin, which the run helper has
-    no channel for, nor --literal-pathspecs, which it rejects as unsupported magic). Each scoped path is
-    given a literal "./" prefix so a leading colon or other pathspec-magic sigil in an adopter-supplied
-    --root prefix is read as a path, not as magic: without it a ":name/..." prefix has its colon consumed
-    as an empty magic signature and the check silently bypasses (rc 1, the store looks unignored), while a
-    recognized short-magic letter over-refuses (rc >= 128). The prefix is a plain string because Path
-    would normalize "./x" back to "x". The output is then one path per line over the controlled,
-    newline-free internal destinations.
-
-    OPF-D2B: the probe runs under _opf_observe._run_git_config_discovery, which lets git DISCOVER the
-    adopter's real global and system configuration through its default locations (unlike the default scrubbed
-    observer environment, which neutralizes it), so a store ignored ONLY by the adopter's global or system
-    core.excludesFile is caught here, matching what the adopter's own `git add` would honour
-    (guard-input-soundness). Env-based config overrides are dropped and trace/fsmonitor are forced off, so no
-    reachable configuration can turn the read-only probe into a write or a launched process. Lazy fetching is
-    forced off so a missing indexed ignore blob cannot trigger a promisor fetch that would reach
-    core.sshCommand. DISCLOSED RESIDUAL (disclose-guard-residuals): this rc-only check reads ignore rules
-    exactly as git add does when git add can read them too. For an ignore input git cannot READ (a
-    permission-denied core.excludesFile, ~/.config/git/ignore, or .git/info/exclude), git add is equally unable
-    to read it and stages the destination, so reading not-ignored here matches git add and the store is never
-    silently ignored. The one input where that parity BREAKS is a skip-worktree (or otherwise unmaterialized)
-    .gitignore whose blob is absent in a partial clone: this probe forces lazy fetch off and reads no-rule, but
-    the adopter's own git add fetches the blob and can then ignore the store. That case is NOT left as a
-    residual: after an rc-1 result the availability of every applicable indexed .gitignore blob is checked
-    (_opf_observe.indexed_ignore_availability), and an unavailable one is a cannot-evaluate that REFUSES rather
-    than passing (guard-input-soundness). A fail-closed treatment of the unreadable-FILE arms above is
-    deliberately not attempted, because git and the caller resolve config paths differently and refusing there
-    would over-refuse a case git add itself skips. Called directly
-    (not via _init_git, which raises on rc != 0) because rc 1 is the success case here; a timeout, launch
-    failure, or unexpected rc fails closed and refuses. Matching `git add`, a benign git diagnostic on an
-    rc-1 (not-ignored) result is not itself a refusal.
-    """
-    prefix = root.relative_to(repo)
-    scoped = sorted("./" + str(prefix / path) for path in paths)
-    result = _opf_observe._run_git_config_discovery(
-        git, repo, ["check-ignore", "--"] + scoped)
-    if not result.completed:
-        raise RuntimeError(
-            "git preflight: could not evaluate ignore status for planned destinations ({})".format(
-                result.err))
-    if result.rc == 0:
-        ignored = [p for p in os.fsdecode(result.out).splitlines() if p]
-        raise RuntimeError("planned destination is git-ignored: {!r}".format(ignored))
-    if result.rc != 1:
-        raise RuntimeError("git preflight: check-ignore failed (rc={}): {}".format(
-            result.rc, result.err))
-    # rc 1 (not ignored) is sound only when every applicable .gitignore is answerable WITHOUT a promisor
-    # fetch. In a partial clone a skip-worktree (or otherwise unmaterialized) .gitignore whose blob is absent
-    # reads as no-rule here (lazy fetch is forced off), yet the adopter's own `git add` fetches that blob and
-    # can then silently ignore the store; an available blob is read identically by both (parity) and a
-    # checked-out .gitignore is read from disk by both. So a missing indexed ignore blob is a cannot-evaluate
-    # we refuse, not a clean pass (guard-input-soundness).
-    unavailable = _opf_observe.indexed_ignore_availability(
-        git, repo, _opf_write_guard._ignore_file_candidates(root.relative_to(repo), paths))
-    if unavailable:
-        raise RuntimeError(
-            "git preflight: an indexed .gitignore blob is unavailable in this partial clone, so ignore "
-            "status cannot be determined; `git add` would fetch it and could silently ignore the store "
-            "({}). Check out or fetch the blob and retry.".format(sorted(unavailable)))
+    """Refuse a planned destination git would ignore: an ignored store cannot be staged or discovered
+    (OPF spec 5.1). The decision is _opf_write_guard.init_ignore_refusal, the ONE shared ignore preflight
+    (moved there, not copied), which the init operation (run_init_operation, composed by adoption's
+    init-store) calls too. This adapter raises its message unchanged as the RuntimeError _cmd_init has
+    always reported, so the plain command's refusals keep their wording. An ignored destination and a
+    check that cannot evaluate (git could not run, an unexpected check-ignore rc, an unavailable indexed
+    .gitignore blob in a partial clone) both refuse; a cannot-evaluate never reads as not ignored. The
+    probe contract and its disclosed residual are stated on init_ignore_refusal."""
+    refusal = _opf_write_guard.init_ignore_refusal(git, repo, root.relative_to(repo), paths)
+    if refusal is not None:
+        raise RuntimeError(refusal[1])
 
 
 def _init_glob_escape(text):
@@ -18253,12 +18202,29 @@ def _init_observed(root_fd, directories, payloads):
 
 
 def _init_main(rest):
-    """Create validated store sources and a pointer, without git writes or rendering.
+    """Create validated store sources and a pointer under the init mutex and lease, without rendering.
 
-    Preflight is read-only. Publication is create-only and deliberately not transactional: a
-    later failure reports observed planned paths and leaves them for review. Enumeration, root
-    identity checks, and final rereads do not serialize concurrent writers or directory renames.
-    No lock, lease, rollback, adoption policy, or whole-store success verdict is supplied here.
+    Preflight is read-only. Only once it passes does init take the shared init operation mutex
+    (_opf_oplock.acquire_init_operation: the anchor the coupled init and adoption take for this
+    root, spec 9), whose operation-lock home is the one place init writes under the git directory,
+    and re-run the absence checks under it with the preflight's wording: the root deliverables,
+    every planned destination, the local pointer, the index, the ignore check and the history
+    scan. The store directories are then created, the spec 5.7 lease (.working/toml/lease.toml
+    beside its active record) is attached, the payloads are published, and the lease is detached
+    before the final observation, which runs with the mutex still held; the mutex is released
+    before the success report. --recover passes explicit recovery to the acquisition, which
+    clears a dead run's leftover records only once their holder is confirmed dead. Publication is
+    create-only and deliberately not transactional: a later failure reports observed planned
+    paths and leaves them for review. A failure releases whatever is still held in a finally
+    inside the handled try, so before either handler below prints; a release failure there prints
+    its own rendered line ahead of the failure report and never replaces it, while an interrupt
+    landing in that release replaces the failure being unwound, which the handlers then report
+    instead. The mutex excludes cooperating OPF writers only: enumeration, root identity checks,
+    and final rereads do not serialize other writers or directory renames. A product root nested
+    in a repository whose git toplevel grants search but not read permission passes the preflight
+    and is refused at the mutex, which lists that toplevel to bind the nested path (the residual
+    _opf_oplock._bind_repository_view discloses). No rollback, adoption policy, or whole-store
+    success verdict is supplied here.
     Every failure path prints rendered text through the two handlers below; the second catches
     BaseException, so a non-Exception raised while the try body runs (an interrupt or SystemExit after
     publication started) still reports the partial-publication disclosure before returning rendered (QA
@@ -18288,6 +18254,7 @@ def _init_main(rest):
     QUICKSTART.
     """
     root = None
+    recover = False
     i = 0
     while i < len(rest):
         # Each token is read as its exact str before it is compared or gated (QA
@@ -18314,6 +18281,12 @@ def _init_main(rest):
                 return EXIT_MALFORMED
             root = val
             i += 2
+        elif tok == "--recover":
+            if recover:
+                _init_echo("opf init: --recover given more than once", err=True)
+                return EXIT_MALFORMED
+            recover = True
+            i += 1
         else:
             _init_echo("opf init: unrecognized argument, inert-escaped: {}".format(
                 _init_inert(tok)), err=True)
@@ -18322,10 +18295,13 @@ def _init_main(rest):
     root_fd = None
     directories = []
     payloads = {}
+    holder = cap = back = None
     publishing = False
     stage = "preflight"
     try:
+        import uuid
         import _opf_init
+        import _opf_oplock
 
         journal = _opf_store._journal
         journal.require_containment()
@@ -18363,6 +18339,25 @@ def _init_main(rest):
             # The resolver also refuses an existing, empty .working directory. Do not reinterpret a
             # CANNOT-EVALUATE result as permission to initialize a partial store.
             raise RuntimeError("store resolution refused: {}".format(res.detail))
+        # A pre-existing root deliverable is undispositioned content plain init never keeps (spec
+        # 14.2): the declared CHANGELOG.md, and the product-root VERSION spec 14 names beside the
+        # declared destinations. lstat, so a symlink there is refused, never followed. Both run
+        # after the store checks (an initialized root still names its existing pointer first) and
+        # before the history scan (a deleted store whose CHANGELOG.md stayed is refused here). The
+        # same table is read again under the init operation mutex below.
+        deliverables = (
+            ("CHANGELOG.md", "an existing CHANGELOG.md sits at the declared deliverable "
+                             "destination; plain opf init never keeps undispositioned content "
+                             "(spec 14.2); give it a disposition with opf adopt, or move it "
+                             "aside and retry"),
+            ("VERSION", "an existing VERSION sits at the product-root VERSION deliverable "
+                        "path (spec 14); plain opf init never keeps undispositioned "
+                        "content (spec 14.2); give it a disposition with opf adopt, or "
+                        "move it aside and retry"),
+        )
+        for name, refusal in deliverables:
+            if journal._lstat_at(root_fd, name) is not None:
+                raise RuntimeError(refusal)
 
         stage = "building-and-validating-source-payloads"
         working = _opf_store.WORKING_DIRNAME
@@ -18381,8 +18376,7 @@ def _init_main(rest):
         }
         payloads[_opf_store.POINTER_REL] = _opf_emit.emit_checked(
             {"store": {"target": "dir:."}}).encode("utf-8")
-        if journal._lstat_at(root_fd, "CHANGELOG.md") is None:
-            payloads["CHANGELOG.md"] = b"# Changelog\n"
+        payloads["CHANGELOG.md"] = b"# Changelog\n"
         directories = [working, machine]
 
         stage = "checking-the-destination-inventory"
@@ -18395,7 +18389,7 @@ def _init_main(rest):
         index_paths = set(payloads) | {working, _opf_store.LOCAL_POINTER_REL}
         _init_untracked(git, repo, root, index_paths)
         # The ignore check is scoped to the destinations init actually CREATES (store dirs plus the
-        # committed pointer, the machine sources, and the optional CHANGELOG); the local pointer that
+        # committed pointer, the machine sources, and the fresh CHANGELOG); the local pointer that
         # index_paths carries for _init_untracked's prior-state detection is a path init never creates
         # and adopters legitimately gitignore, so it must not make init refuse.
         _init_unignored(git, repo, root, set(directories) | set(payloads))
@@ -18403,41 +18397,98 @@ def _init_main(rest):
         _init_no_prior_store(git, repo, root)
         _init_same_root(root, root_fd)
 
-        publishing = True
-        for relpath in directories:
-            stage = "creating-directory-" + relpath
-            pfd, name = journal._open_parent(root_fd, relpath)
-            try:
-                os.mkdir(name, 0o755, dir_fd=pfd)
-                os.fsync(pfd)
-            finally:
-                _opf_store._close_fd_exc_safe(pfd)
-        for relpath, data in payloads.items():
-            stage = "creating-" + relpath
+        # The shared init operation mutex (spec 9: one global store lock serializes writers) is
+        # taken only now, so every preflight refusal above keeps its wording and writes nothing
+        # under the git directory. Its anchor is the one the coupled init and adoption take for
+        # this root, so the absence checks run again under it in the preflight's words: whatever a
+        # cooperating writer published between the preflight and the acquisition is refused here,
+        # never overwritten. VERSION is no payload, so the deliverable table re-reads it beside
+        # CHANGELOG.md. The acquisition sits inside the try, so the unwind below covers every line
+        # after it.
+        try:
+            stage = "taking-the-init-operation-mutex"
+            holder = _opf_oplock.acquire_init_operation(str(root), "opf-init-plain", recover=recover)
+            stage = "re-checking-the-destinations-under-the-mutex"
+            for name, refusal in deliverables:
+                if journal._lstat_at(root_fd, name) is not None:
+                    raise RuntimeError(refusal)
+            for relpath in directories + list(payloads):
+                if journal._lstat_contained(root_fd, relpath) is not None:
+                    raise RuntimeError("destination already exists: {!r}".format(relpath))
+            if journal._lstat_at(root_fd, _opf_store.LOCAL_POINTER_REL) is not None:
+                raise RuntimeError("existing pointer: " + _opf_store.LOCAL_POINTER_REL)
+            _init_untracked(git, repo, root, index_paths)
+            _init_unignored(git, repo, root, set(directories) | set(payloads))
+            stage = "checking-git-history-for-a-prior-store"
+            _init_no_prior_store(git, repo, root)
             _init_same_root(root, root_fd)
-            _init_create(root_fd, relpath, data)
 
-        stage = "observing-published-source-paths"
-        observed = _init_observed(root_fd, directories, payloads)
-        if any(row["state"] != (
-                "directory" if row["path"] in directories else "matches-payload")
-               for row in observed):
-            raise RuntimeError("published paths do not match the validated payloads")
-        final_inventory = _init_inventory(root_fd)
-        expected_working = {machine} | {
-            path for path in payloads if path.startswith(working + "/")
-        }
-        if (not final_inventory["complete"]
-                or {row["path"] for row in final_inventory["entries"]} != expected_working):
-            _init_echo(json.dumps(_init_inert_json(dict(final_inventory,
-                                                        event="post-publish-inventory",
-                                                        root=str(root))),
-                                  sort_keys=True))
-            raise RuntimeError("working inventory changed during publication")
-        if journal._lstat_at(root_fd, _opf_store.LOCAL_POINTER_REL) is not None:
-            raise RuntimeError("local pointer appeared during publication")
-        _init_same_root(root, root_fd)
-        _init_untracked(git, repo, root, index_paths)
+            publishing = True
+            for relpath in directories:
+                stage = "creating-directory-" + relpath
+                pfd, name = journal._open_parent(root_fd, relpath)
+                try:
+                    os.mkdir(name, 0o755, dir_fd=pfd)
+                    os.fsync(pfd)
+                finally:
+                    _opf_store._close_fd_exc_safe(pfd)
+            # Spec 5.7: the lease is held while the store is mutated. It lives in the machine
+            # store, so it is attached once that directory exists, before the first source.
+            stage = "attaching-the-init-lease"
+            cap = _opf_oplock.attach_init_lease(holder, str(uuid.uuid4()))
+            for relpath, data in payloads.items():
+                stage = "creating-" + relpath
+                _init_same_root(root, root_fd)
+                _init_create(root_fd, relpath, data)
+            # The lease and its active record are removed with the mutex kept, so the final
+            # observation still excludes cooperating writers and finds no lease.toml beside the
+            # published sources.
+            stage = "detaching-the-init-lease"
+            back = _opf_oplock.detach_init_lease(cap)
+
+            stage = "observing-published-source-paths"
+            observed = _init_observed(root_fd, directories, payloads)
+            if any(row["state"] != (
+                    "directory" if row["path"] in directories else "matches-payload")
+                   for row in observed):
+                raise RuntimeError("published paths do not match the validated payloads")
+            final_inventory = _init_inventory(root_fd)
+            expected_working = {machine} | {
+                path for path in payloads if path.startswith(working + "/")
+            }
+            if (not final_inventory["complete"]
+                    or {row["path"] for row in final_inventory["entries"]} != expected_working):
+                _init_echo(json.dumps(_init_inert_json(dict(final_inventory,
+                                                            event="post-publish-inventory",
+                                                            root=str(root))),
+                                      sort_keys=True))
+                raise RuntimeError("working inventory changed during publication")
+            if journal._lstat_at(root_fd, _opf_store.LOCAL_POINTER_REL) is not None:
+                raise RuntimeError("local pointer appeared during publication")
+            _init_same_root(root, root_fd)
+            _init_untracked(git, repo, root, index_paths)
+            stage = "releasing-the-init-operation-mutex"
+            _opf_oplock.release_init_holder(back)
+        finally:
+            # The unwind releases what a failure left held, the capability before the holders
+            # (the coupled init's order). Each release failure is reported on its own rendered
+            # line, never in place of the failure being unwound. A success leaves nothing here:
+            # the detach spent the capability and the holder it returned is released above.
+            unwind = []
+            if cap is not None and not cap._released:
+                try:
+                    _opf_oplock.release_operation(cap)
+                except _opf_oplock.OpLockError as release_exc:
+                    unwind.append(release_exc)
+            for held in (back, holder):
+                if held is not None and not held._released and not held._spent:
+                    try:
+                        _opf_oplock.release_init_holder(held)
+                    except _opf_oplock.OpLockError as release_exc:
+                        unwind.append(release_exc)
+            for release_exc in unwind:
+                _init_echo("opf init: releasing the operation lock failed while this failure "
+                           "unwound: {}".format(_init_inert(str(release_exc))), err=True)
 
         _init_echo("opf init: store SOURCES created and {} pointer written.".format(
             _init_inert(_opf_store.POINTER_REL)))
@@ -22244,8 +22295,12 @@ def _cli_self_test():
 
         # The same fixture vectors drive this in-process dispatcher and the dedicated gate's
         # isolated child. A refusal must name its reason and preserve the fixture, not merely return 2.
+        # The in-process init and the lease fixtures take the shared init operation mutex, whose
+        # rev-parse strips every GIT_* variable; the OPF git lifecycle's PATH wrapper reasserts the
+        # system-config pins there, so these vectors never read the host's system configuration.
         import check_opf_init
-        init_rc = check_opf_init._suite(main)
+        import _opf_oplock
+        init_rc = _opf_oplock._st_with_git_lifecycle(lambda: check_opf_init._suite(main))
         if init_rc == EXIT_MALFORMED:
             return EXIT_MALFORMED
         if init_rc != EXIT_OK:
@@ -22489,6 +22544,7 @@ def _retained_close_offpath_self_test():
     import check_opf_prompt_pack
     import check_opf_upgrade
     import _opf_adopt_observe
+    import _opf_oplock
     this = sys.modules[__name__]
     tools = os.path.dirname(os.path.abspath(__file__))
     real_open, real_dup, real_pipe, real_close, real_fstat = os.open, os.dup, os.pipe, os.close, os.fstat
@@ -22812,17 +22868,30 @@ def _retained_close_offpath_self_test():
         expect("offpath-opf-init-repo", lambda: _init_repo(repo))
         fresh = base / "init-cmd"
         fresh.mkdir()
+        # A real worktree, because init takes the shared init operation mutex, which binds to git;
+        # its descriptor closes join the sweep, and only init's own git preflight stays stubbed.
+        made = _opf_observe._run_git(
+            git, fresh, ["-c", "init.templateDir=", "-c", "init.defaultBranch=main", "init", "-q"])
+        if not made.completed or made.rc != 0:
+            raise RuntimeError("the init fixture worktree could not be initialized ({})".format(made.err))
 
         def cmd_init():
+            # Every run starts from the same tree: an injected close failure in the lease detach
+            # keeps the active record (with the lease) for a later recover=True, by design, and a
+            # kept record would refuse every later run at the mutex, so it is reset here too.
             shutil.rmtree(str(fresh / _opf_store.WORKING_DIRNAME), ignore_errors=True)
-            for name in (_opf_store.POINTER_REL, "CHANGELOG.md"):
+            for name in (_opf_store.POINTER_REL, "CHANGELOG.md", ".git/opf-oplock/active.toml"):
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(str(fresh / name))
             with mock.patch.object(this, "_init_repo", lambda root: ("git", root)), \
                     mock.patch.object(this, "_init_untracked", lambda *args: None), \
                     mock.patch.object(this, "_init_unignored", lambda *args: None), \
                     mock.patch.object(this, "_init_no_prior_store", lambda *args: None):
-                return _cmd_init(["--root", str(fresh)])
+                # The OPF git lifecycle's PATH wrapper reasserts the system-config pins after the
+                # init operation mutex's rev-parse strips every GIT_* variable, so this in-process
+                # init never reads the host's system configuration.
+                return _opf_oplock._st_with_git_lifecycle(
+                    lambda: _cmd_init(["--root", str(fresh)]))
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             if cmd_init() != EXIT_OK:
