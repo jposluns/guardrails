@@ -1229,7 +1229,8 @@ def _run_checks():
         # is unmet (exit 1, naming the missing workflow file) in one-shot and --wait mode alike.
         # Report-once refuses on its single snapshot; --wait keeps polling through
         # the settle window first (a qualifying run can be registered late on this same head; a
-        # reopen schedules one), so the refusal comes only once the run set has been stable for
+        # re-applying the merge-train label schedules one), so the refusal comes only once the run
+        # set has been stable for
         # five observations and still holds no qualifying run.
         missing_quality = ("no completed successful run of the workflow file "
                            + quality_path)
@@ -1379,7 +1380,8 @@ def _run_checks():
 
         # A required-workflow run REGISTERED LATE must not
         # end the wait at once: the first poll holds only the conforming msg-leaks run, the
-        # qualifying Quality run appears from the second poll on (the shape a reopen produces
+        # qualifying Quality run appears from the second poll on (the shape re-applying the
+        # merge-train label produces
         # on the SAME head), and the wait settles green instead of refusing on poll one.
         polls = [[page([pr_leaks])]] + [[page([pr_leaks, pr_quality])]] * 5
         rc, _output, calls = fixture.invoke(polls, wait=True, extra_args=require)

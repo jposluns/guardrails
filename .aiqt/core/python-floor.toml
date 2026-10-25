@@ -112,6 +112,7 @@ guarded-surfaces = [
     "tools/check_footer.py",
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",
+    "tools/check_gitleaks_pin.py",
     "tools/check_hooks_preview.py",
     "tools/check_install_page.py",
     "tools/check_instruction_budget.py",

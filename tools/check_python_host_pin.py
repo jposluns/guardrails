@@ -23,10 +23,12 @@ Legs, in order:
                convert.
   jobs         .github/workflows/quality.yml carries each HOST_JOBS job, and its top level and each such
                job are whole (JOB_RULES):
-                 workflow-keys  the workflow carries no top-level key but name, on, permissions and jobs
-                                (TOP_KEYS): a top-level defaults: or env: changes how every run step of
-                                every job executes (defaults: run: shell: true {0} makes each step exit 0
-                                without running its command);
+                 workflow-keys  the workflow carries no top-level key but name, on, concurrency,
+                                permissions and jobs (TOP_KEYS): a top-level defaults: or env: changes how
+                                every run step of every job executes (defaults: run: shell: true {0} makes
+                                each step exit 0 without running its command); a concurrency: block can
+                                only cancel a run, which Quality gates reads as not success, and
+                                tools/check_ci_parity.py pins its content;
                  job-keys       the job carries no key but name, runs-on and steps (an if:,
                                 continue-on-error:, env:, defaults:, container: or strategy: can skip, mask,
                                 move or change what it runs);
@@ -432,8 +434,9 @@ GATE_RUN = "python3 -I -B " + GATE_PATH
 # would fail the jobs once it moves to an image the host patch has no build for.
 RUNNER = "ubuntu-24.04"
 # The top-level keys the workflow may carry: a defaults: or env: block changes how every run step of every
-# job executes.
-TOP_KEYS = ("name", "on", "permissions", "jobs")
+# job executes. A concurrency: block can only cancel a run, never pass one, and check_ci_parity.py pins its
+# content; a job-level concurrency: on a host-patch job stays a job-keys finding (JOB_KEYS).
+TOP_KEYS = ("name", "on", "concurrency", "permissions", "jobs")
 JOB_KEYS = {"name", "runs-on", "steps"}
 # The first step of each host-patch job, as written: another ref, repository or path can put another tree
 # under the gate and the suite.
@@ -2124,6 +2127,9 @@ def _job_cases():
          GFE + " carries continue-on-error:", "job-keys"),
         ("jobs/job-container-finding", ((OPF, runs, "    container: python:3.14.8\n" + runs),), (),
          "opf-host-patch carries container:", "job-keys"),
+        # The top-level concurrency: key is admitted (TOP_KEYS); a job-level one on a host-patch job is not.
+        ("jobs/job-concurrency-finding", ((OPF, runs, "    concurrency: x\n" + runs),), (),
+         "opf-host-patch carries concurrency:", "job-keys"),
         ("jobs/runs-on-latest-finding", ((OPF, runs + RUNNER, runs + "ubuntu-latest"),), (),
          "runs on 'ubuntu-latest', not 'ubuntu-24.04'", "runner"),
         ("jobs/runs-on-newer-image-finding", ((GFE, runs + RUNNER, runs + "ubuntu-26.04"),), (),
@@ -2446,6 +2452,11 @@ def _self_test_cases(base):
     check("jobs/extra-step-after-gate-passes", evaluate(_fixture(base, workflow=_workflow(((
         OPF, GATE_STEP, GATE_STEP + "      - name: Python host pin self-test\n        run: " + GATE_RUN
         + " --self-test\n\n"),))), HOST)[0], 0)
+    # The top-level concurrency: block quality.yml carries (check_ci_parity.py pins its content): red with
+    # concurrency dropped from TOP_KEYS, where it is a workflow-keys finding.
+    check("jobs/workflow-concurrency-passes", evaluate(_fixture(base, workflow=_workflow(((
+        None, "jobs:\n", "concurrency:\n  group: quality-${{ github.head_ref || github.run_id }}\n"
+        "  cancel-in-progress: true\n\njobs:\n"),))), HOST)[0], 0)
     check("jobs/comment-line-passes", evaluate(_fixture(base, workflow=_workflow(((
         GFE, "    steps:\n", "    # the steps\n    steps:\n"),))), HOST)[0], 0)
     check("pins/other-job-pin-ignored-passes", evaluate(_fixture(base, workflow=_workflow().replace(

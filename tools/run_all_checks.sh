@@ -59,12 +59,17 @@ if command -v gitleaks >/dev/null 2>&1; then
     echo "GATE FAILED: secrets (gitleaks) (exit ${gitleaks_rc})"
   fi
 else
-  echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"
-  echo "  in THIS run only, not in the pipeline. Install it to close the gap:"
+  echo "NOT RUN: gitleaks is not on PATH locally, so its scan did not run here, and the"
+  echo "  gitleaks-pin gate below fails this run. Install the pinned version to close the gap:"
   echo "  see the pinned version and checksum in .github/workflows/quality.yml"
   notrun=1
 fi
 echo
+# The pinned gitleaks is required locally: Quality runs only on the merge-train head, so this run is a
+# member head's evidence. The gate fails the run when no gitleaks is on PATH (after the ~/.local/bin
+# fallback above) or the one on PATH reports another version than quality.yml pins.
+run_gate "gitleaks-pin-selftest" python3 -I -B tools/check_gitleaks_pin.py --self-test
+run_gate "gitleaks-pin" python3 -I -B tools/check_gitleaks_pin.py
 run_gate "leaks"     python3 -I -B tools/check_leaks.py
 run_gate "leaks-selftest" python3 -I -B tools/check_leaks.py --self-test
 run_gate "msg-leaks-selftest" python3 -I -B tools/check_msg_leaks.py --self-test  # real scan needs CI event context

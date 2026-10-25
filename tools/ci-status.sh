@@ -357,17 +357,18 @@ SETTLE_OBSERVATIONS=5
 # another file stand in; absent such a run the result is unmet (exit 1, naming the missing
 # workflow file): report-once refuses on its single snapshot, and --wait keeps polling within
 # the settle window first, because a qualifying run can still be registered late on this head
-# (a reopen schedules one). A run recorded against another
+# (re-applying the merge-train label schedules one). A run recorded against another
 # base (a pre-retarget run), a run of another event (a push run), and a run whose base cannot be
 # established (an empty pull_requests array, or an entry naming no base branch, which GitHub also
 # leaves for a run created before its PR) are each reported by name and end the check with exit 1,
 # in one-shot and --wait mode alike: a run's recorded base never changes, so no amount of waiting
 # turns that read green. RECOVERY: when a nonconforming run (a pre-retarget run) is RETAINED
-# on this head, a reopen does add a conforming run on the same head, but the retained run still fails the
+# on this head, re-applying the merge-train label does add a conforming run on the same head, but the
+# retained run still fails the
 # every-run rule, so only a refresh push, which moves the head SHA this script pins, earns a
 # run set this option trusts; a MISSING run of the required workflow file beside an otherwise
-# conforming set needs no new head: a qualifying run on this same head (which a reopen
-# schedules) satisfies it. A record of this commit that under this option lacks a usable
+# conforming set needs no new head: a qualifying run on this same head (which re-applying the
+# merge-train label schedules) satisfies it. A record of this commit that under this option lacks a usable
 # event, pull_requests or path field entirely is a malformed run record (exit 2, API error),
 # in one-shot and --wait mode alike:
 # malformed evidence is a property of the stored record, which polling re-reads unchanged, not a
@@ -640,7 +641,8 @@ report() {
 }
 
 # THE PULL-REQUEST PROBE (--wait only). quality.yml runs on pull requests into main only, for the
-# opened, synchronize and reopened types, so only an open pull request into main gets a Quality run,
+# labeled type alone (the merge lane applies the merge-train label after each push to a train pull
+# request), so only an open, labelled pull request into main gets a Quality run,
 # and GitHub's Actions documentation states that a pull_request workflow does not run while the pull
 # request has a merge conflict (not verified live here). So under --wait, before EVERY poll, not only
 # the first, the probe lists the repository's open pull requests and keeps those whose head SHA is
@@ -1110,6 +1112,8 @@ while :; do
     esac
   done <<<"$lines"
 
+  # A run cancelled by the workflow's concurrency group is a completed non-success run: it fails this
+  # head for good, and only a refresh push escapes it.
   if [ "${#failure_names[@]}" -ne 0 ]; then
     echo "RESULT: CI concluded with non-success workflow runs:"
     for ((i = 0; i < ${#failure_names[@]}; i++)); do
@@ -1121,7 +1125,7 @@ while :; do
   # THE BASE-BRANCH REQUIREMENT (see above): an unmet run is refused by name with exit 1 in both
   # modes, because a run's recorded base never changes: this RETAINED nonconforming run fails the
   # every-run rule on this head forever, so only a refresh push, under a NEW head SHA, escapes it
-  # (a reopen adds runs on the same head but cannot remove this one).
+  # (re-applying the merge-train label adds runs on the same head but cannot remove this one).
   if [ "${#base_unmet[@]}" -ne 0 ]; then
     echo "RESULT: run(s) do not satisfy --require-base ${REQUIRE_BASE} (a run counts only when its event is pull_request and the pull request recorded on the run names ${REQUIRE_BASE} as its base):"
     for item in "${base_unmet[@]}"; do
@@ -1169,7 +1173,8 @@ while :; do
     # THE BASE-BRANCH REQUIREMENT (see above): a conforming run set without a completed successful
     # run of the required workflow file is unmet (exit 1), but the two modes refuse at different
     # times. Report-once refuses on its single snapshot. Under --wait a qualifying run can still
-    # be REGISTERED LATE on this same head (a reopen schedules one, and registration also lags
+    # be REGISTERED LATE on this same head (re-applying the merge-train label schedules one, and
+    # registration also lags
     # the event), so the poll keeps watching and refuses only once the run set has been stable
     # for the whole settle window and still holds no qualifying run. Only a RETAINED
     # nonconforming run (the base_unmet refusal above) needs a NEW head SHA to recover.
@@ -1177,7 +1182,7 @@ while :; do
     if [ -n "$REQUIRE_BASE" ] && [ "$require_workflow_met" -ne 1 ]; then
       missing_required=1
     fi
-    missing_message="RESULT: no completed successful run of the workflow file ${REQUIRE_WORKFLOW} satisfies --require-base ${REQUIRE_BASE}; a conforming run of that workflow file on this head is required for a green verdict (a reopen schedules one on the same head; a refresh push under a new head SHA also earns one)."
+    missing_message="RESULT: no completed successful run of the workflow file ${REQUIRE_WORKFLOW} satisfies --require-base ${REQUIRE_BASE}; a conforming run of that workflow file on this head is required for a green verdict (re-applying the merge-train label schedules one on the same head; a refresh push under a new head SHA earns one once the label is applied again)."
     if [ "$WAIT" != "--wait" ]; then
       if [ "$missing_required" -eq 1 ]; then
         echo "$missing_message"

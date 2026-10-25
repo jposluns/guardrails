@@ -87,7 +87,8 @@ from GitHub's custom-shell syntax, not observed on Actions). A run: step
 without the line is a required-status finding (exit 1); a second shell: line
 in one step and a shell: line on a step with no run: key are cannot-evaluate.
 A top-level defaults: key stays outside TOP_LEVEL_KEYS (cannot-evaluate) and a
-job-level one stays a result-masking finding.
+job-level one stays a result-masking finding. concurrency is the one top-level
+key beside name, on, permissions and jobs; CONCURRENCY below pins its content.
 The line closes the defaults.run.shell route only. It does not close
 defaults.run.working-directory at workflow or job level: a step shell does not
 override it, and every gate is invoked by a relative path (python3 -I -B
@@ -171,6 +172,25 @@ listed event from scheduling the workflow or a job: branches:,
 branches-ignore:, paths:, paths-ignore:, and a job- or step-level if:. Any of
 them can stop the scan workflow on an edited event; reachability is outside
 token-parity scope (the reachability residual below).
+CONCURRENCY. quality.yml may carry one top-level concurrency: block, and it
+must match CONCURRENCY_BLOCK line for line (blank and whole-line comment
+lines aside): the group is the pull request's head branch, falling back to
+the run id, with cancel-in-progress on, so a newer run on a pull-request
+head branch cancels the older one, while each push to main has a group of
+its own and is never cancelled or replaced, so it keeps its check of every
+first-parent transition in the pushed range. Every departure (a changed
+group or cancel value; an added, missing, re-indented or commented line; a
+flow or one-line value) is a concurrency finding (exit 1), and so is the
+key in any other CI_WORKFLOWS file. A workflow with no block is not a
+finding: without one no run is cancelled. A cancellation can only end a
+run cancelled, which Quality gates and ci-status.sh read as not success.
+A spelling the top-level reader refuses stays refused (exit 2): a key with
+whitespace before its colon or a quoted key (unknown-top-key), a repeated
+block (duplicate-key), an anchor, alias or tag (yaml-feature) and a tab
+(yaml-tab). NOT READ (disclosed): GitHub's evaluation of the group
+expression (that github.head_ref and github.run_id resolve in a
+workflow-level group) and of cancel-in-progress, which this gate does not
+observe.
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
@@ -500,6 +520,16 @@ REQUIRED_STATUS_JOB = (
     '          echo "Quality gates: PASS, every needed job concluded success"',
 )
 
+# The one top-level concurrency: block quality.yml may carry, pinned line for line
+# (module docstring, CONCURRENCY). A pull-request run groups on its head branch, so
+# a newer head cancels the older run; a push run has no head_ref and groups on its
+# own run id, so no main run is ever cancelled or replaced.
+CONCURRENCY_BLOCK = (
+    "concurrency:",
+    "  group: quality-${{ github.head_ref || github.run_id }}",
+    "  cancel-in-progress: true",
+)
+
 MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
 # The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan and that
 # scan's self-test. Any other member there is a relocation finding, because that workflow's status
@@ -579,6 +609,16 @@ ALLOWLIST = (
     },
     {
         "side": "local-only",
+        "identity": "tools/check_gitleaks_pin.py",
+        "reason": (
+            "The local run requires the gitleaks version quality.yml pins on PATH; "
+            "the CI secrets job downloads that pinned binary and verifies its "
+            "checksum before it scans, so only the gate's self-test runs in CI."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "local-only",
         "identity": "tools/check_branch_root.py --max-lag 200",
         "reason": (
             "The bare staleness leg is the only branch-root form that runs "
@@ -624,7 +664,9 @@ EXPECTED_RUN_GATE_BODY = (
 # cannot-evaluate rather than silently ignored (honouring the fail-closed guarantee).
 # Deeper nested non-gate YAML (under on:, env:, with:, strategy:) is not exhaustively
 # schema-validated; the shadow scan still prevents any tools/* gate from hiding there.
-TOP_LEVEL_KEYS = frozenset({"name", "on", "permissions", "jobs"})
+# concurrency is admitted only because _concurrency_findings pins its whole content
+# (CONCURRENCY_BLOCK); defaults and env stay outside, so either is cannot-evaluate.
+TOP_LEVEL_KEYS = frozenset({"name", "on", "concurrency", "permissions", "jobs"})
 JOB_PROPERTY_KEYS = frozenset({
     "name", "runs-on", "steps", "strategy", "needs", "env", "permissions",
     "if", "timeout-minutes", "continue-on-error", "defaults", "outputs",
@@ -1189,8 +1231,8 @@ RUNNER_SCAFFOLD_LINES = frozenset({
     "echo",
     'echo "--- secrets (gitleaks) ---"',
     'echo "PASS: gitleaks found no leaks"',
-    'echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"',
-    'echo "  in THIS run only, not in the pipeline. Install it to close the gap:"',
+    'echo "NOT RUN: gitleaks is not on PATH locally, so its scan did not run here, and the"',
+    'echo "  gitleaks-pin gate below fails this run. Install the pinned version to close the gap:"',
     'echo "  see the pinned version and checksum in .github/workflows/quality.yml"',
     'echo "RESULT: FAIL"',
     'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
@@ -2494,6 +2536,60 @@ def _relocation_findings(members, source):
     ) for identity in sorted(members - MSG_LEAKS_WORKFLOW_MEMBERS)]
 
 
+def _concurrency_findings(lines, source):
+    """Hold each top-level concurrency: block to CONCURRENCY_BLOCK (module
+    docstring, CONCURRENCY). Only quality.yml may carry one; there, the key
+    line and every line up to the next top-level line, blank and whole-line
+    comment lines skipped, must match the pin exactly. No block is no
+    finding."""
+    findings = []
+    for index, raw in enumerate(lines):
+        code = _strip_comment(raw)
+        if code[:1] in ("", " "):
+            continue
+        stripped = code.strip()
+        if stripped.split(":", 1)[0] != "concurrency":
+            continue
+        if source != CI_SOURCE:
+            findings.append(Finding(
+                "concurrency",
+                source,
+                "{} carries a top-level concurrency: block at line {}; only "
+                "{} may carry one, pinned as CONCURRENCY_BLOCK, because a "
+                "concurrency group can cancel a required run".format(
+                    source, index + 1, CI_SOURCE),
+            ))
+            continue
+        body = [(index + 1, raw)]
+        for later in range(index + 1, len(lines)):
+            text = lines[later]
+            if not text.strip() or text.strip().startswith("#"):
+                continue
+            if text[:1] not in (" ", "\t"):
+                break
+            body.append((later + 1, text))
+        for position in range(max(len(body), len(CONCURRENCY_BLOCK))):
+            got = body[position] if position < len(body) else None
+            want = (CONCURRENCY_BLOCK[position]
+                    if position < len(CONCURRENCY_BLOCK) else None)
+            if got is None or got[1] != want:
+                findings.append(Finding(
+                    "concurrency",
+                    source,
+                    "the top-level concurrency: block of {} departs from the "
+                    "pinned CONCURRENCY_BLOCK at {}: got {!r}, expected {!r}; "
+                    "only the pinned group cancels nothing but an older run "
+                    "on the same pull-request head branch".format(
+                        source,
+                        "the end of the block" if got is None
+                        else "line {}".format(got[0]),
+                        None if got is None else got[1],
+                        want),
+                ))
+                break
+    return findings
+
+
 def extract_ci(text, source=CI_SOURCE):
     """Extract normalized members from one CI_WORKFLOWS file in the supported
     workflow subset; source labels its diagnostics and findings."""
@@ -3017,6 +3113,7 @@ def extract_ci(text, source=CI_SOURCE):
         job_ids, job_fields, lines, source, diagnostics)
     findings.extend(_trigger_findings(lines, members, source, diagnostics))
     findings.extend(_relocation_findings(members, source))
+    findings.extend(_concurrency_findings(lines, source))
     findings.extend(_step_shell_findings(steps))
     diagnostics.extend(_shadow_check(text, source, origins))
     return Extraction(
@@ -6920,6 +7017,89 @@ def self_test():
         failures.append(
             "38 equals-form glob literal: unexpected diagnostics: "
             "{!r}".format(glob_literal.diagnostics))
+
+    # 39 CONCURRENCY (module docstring, CONCURRENCY): the one top-level
+    # concurrency: block of quality.yml is pinned line for line. The pinned
+    # block is spelled out here rather than built from CONCURRENCY_BLOCK, so
+    # weakening the pin (cancel off, a per-ref group) turns 39a red too.
+    pinned_concurrency = (
+        "concurrency:\n"
+        "  group: quality-${{ github.head_ref || github.run_id }}\n"
+        "  cancel-in-progress: true\n")
+
+    def with_concurrency(text, block):
+        return text.replace("jobs:\n", block + "jobs:\n", 1)
+
+    def concurrency_case(name, block, want_code, kinds=(), diagnostic=None):
+        nonlocal count
+        report = evaluate(
+            local_msg, with_concurrency(quality_side, block), msg_waiver,
+            msg_side)
+        case(name, report, want_code, kinds)
+        if diagnostic is not None:
+            count += 1
+            if not any(item.code == diagnostic
+                       for item in report.diagnostics):
+                failures.append("{}: no {} diagnostic: {!r}".format(
+                    name, diagnostic, report.diagnostics))
+
+    concurrency_case("39a the pinned concurrency block passes",
+                     pinned_concurrency, 0)
+    concurrency_case(
+        "39a control: blank and comment lines inside the block pass",
+        "concurrency:\n  # one group per head\n\n"
+        "  group: quality-${{ github.head_ref || github.run_id }}\n"
+        "# cancel the older run\n  cancel-in-progress: true\n", 0)
+    concurrency_case(
+        "39o control: a workflow with no concurrency block passes", "", 0)
+    for label, block in (
+            ("39b cancel-in-progress false",
+             pinned_concurrency.replace(": true", ": false")),
+            ("39c a per-ref group, which cancels earlier main runs",
+             pinned_concurrency.replace(
+                 "${{ github.head_ref || github.run_id }}",
+                 "${{ github.ref }}")),
+            ("39d an added third line",
+             pinned_concurrency + "  queue: max\n"),
+            ("39e a missing line",
+             "concurrency:\n"
+             "  group: quality-${{ github.head_ref || github.run_id }}\n"),
+            ("39f a trailing comment on a pinned line",
+             pinned_concurrency.replace(": true", ": true  # on")),
+            ("39g a one-line flow mapping",
+             "concurrency: {group: quality, cancel-in-progress: true}\n"),
+            ("39h a one-line string value", "concurrency: quality\n"),
+            ("39i the block's lines at indent 4",
+             pinned_concurrency.replace("\n  ", "\n    "))):
+        concurrency_case(label + " is a concurrency finding", block, 1,
+                         ("concurrency",))
+    case("39j the pinned block in msg-leaks.yml is a concurrency finding",
+         evaluate(local_msg, quality_side, msg_waiver,
+                  ((MSG_LEAKS_CI_SOURCE, with_concurrency(
+                      with_on(scan_text, edited), pinned_concurrency)),)),
+         1, ("concurrency",))
+    for label, block, diagnostic in (
+            ("39k defaults: beside the pinned block",
+             pinned_concurrency + "defaults:\n  run:\n    shell: bash\n",
+             "unknown-top-key"),
+            ("39k env: beside the pinned block",
+             pinned_concurrency + "env:\n  X: y\n", "unknown-top-key"),
+            ("39l whitespace before the colon",
+             pinned_concurrency.replace("concurrency:", "concurrency :"),
+             "unknown-top-key"),
+            ("39l a quoted key",
+             pinned_concurrency.replace("concurrency:", '"concurrency":'),
+             "unknown-top-key"),
+            ("39m a repeated block", pinned_concurrency + pinned_concurrency,
+             "duplicate-key"),
+            ("39n an anchored group",
+             pinned_concurrency.replace("group: ", "group: &g "),
+             "yaml-feature"),
+            ("39n a tab in the block",
+             pinned_concurrency.replace("  cancel", "\tcancel"),
+             "yaml-tab")):
+        concurrency_case(label + " is cannot-evaluate", block, 2,
+                         diagnostic=diagnostic)
 
     if failures:
         print("SELF-TEST FAIL:")

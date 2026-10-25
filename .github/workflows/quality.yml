@@ -3,21 +3,40 @@ name: Quality
 on:
   pull_request:
     branches: [main]
+    # Quality runs once per merge train, on the train head: only the labeled type schedules it, and
+    # the merge lane applies the merge-train label after each push it makes to the train pull
+    # request. A member push, an open, a reopen, a retarget and a title/body edit schedule nothing
+    # here; before each member push its author runs run_all_checks.sh, the member head's evidence.
+    # ANY label added to a pull request into main starts a full run (CI time, never a pass). A head
+    # with no run has no Quality gates status, which reads as missing, never as passing.
     # no `edited`: it fires on a PR title/body edit AND on a base-branch retarget, and would re-run
     # every job here. The title/body side matters only to the message/metadata leak scan
-    # (check_msg_leaks), which runs in msg-leaks.yml, triggered on `edited`. A retarget alone
-    # therefore schedules no fresh Quality run; ci-status.sh --require-base closes that gap. That
+    # (check_msg_leaks), which runs in msg-leaks.yml on every pull request into main, triggered on
+    # `edited` too. A retarget alone therefore schedules no fresh Quality run; ci-status.sh
+    # --require-base closes that gap. That
     # invocation is the merge lane's own tooling: no production caller in this repository passes
     # the option (its behaviour self-test exercises it). It refuses a run whose recorded
     # pull_request base is not the merge target AND requires a conforming run of this workflow
     # FILE (matched by the run's recorded path, never its display name), so a pre-retarget run is
-    # never trusted and a lone msg-leaks run cannot stand in. Recovery: only a RETAINED
-    # pre-retarget run forces a refresh push (a NEW head SHA); a merely missing Quality run is
-    # satisfied by a qualifying run on this same head, which a reopen schedules, and under --wait
-    # the check keeps polling for one within its settle window before refusing.
-    types: [opened, synchronize, reopened]
+    # never trusted and a lone msg-leaks run cannot stand in. Recovery: a RETAINED pre-retarget
+    # or cancelled run forces a refresh push (a NEW head SHA), after which the label must be
+    # applied again; a merely missing Quality run is satisfied by a qualifying run on this same
+    # head, which re-applying the merge-train label (remove it, then add it) schedules, and under
+    # --wait the check keeps polling for one within its settle window before refusing.
+    types: [labeled]
   push:
     branches: [main]
+
+# One Quality run per pull-request head branch: a newer run on the same head branch (a later train
+# push, labelled again) cancels the older one, which then concludes cancelled, never success. Each
+# push to main has a group of its own (its run id), so no main run is ever cancelled or replaced and
+# each keeps its check of every first-parent transition in the pushed range. A second label event on
+# a head whose run is still in flight cancels that run, and ci-status.sh reads a cancelled run as a
+# failure of that head for good: only a refresh push, labelled again, recovers. check_ci_parity.py
+# pins this block line for line.
+concurrency:
+  group: quality-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -78,6 +97,12 @@ jobs:
           echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
           tar -xzf gitleaks.tar.gz gitleaks
           ./gitleaks dir . --no-banner --redact --exit-code 1
+
+      # The local runner requires this same gitleaks version on PATH (its live leg is local-only:
+      # the step above installs and verifies the pinned binary here); CI runs the gate's vectors.
+      - name: Gitleaks pin self-test
+        shell: bash
+        run: python3 -I -B tools/check_gitleaks_pin.py --self-test
 
       - name: Leak denylist self-test
         shell: bash
@@ -818,8 +843,8 @@ jobs:
   # newer patch release most often breaks on the exact patch release the maintainer host runs, which
   # .aiqt/python-host.toml names, so a passing local suite predicts a required CI leg, and a failure on the
   # '3.14' legs alone is diagnostic evidence of a patch-release difference, not proof that the change is
-  # innocent. tools/check_python_host_pin.py holds this workflow's top-level keys (name, on, permissions,
-  # jobs) and each job whole: runs-on ubuntu-24.04 (on 2026-10-12 the Python versions manifest listed Linux
+  # innocent. tools/check_python_host_pin.py holds this workflow's top-level keys (name, on, concurrency,
+  # permissions, jobs) and each job whole: runs-on ubuntu-24.04 (on 2026-10-12 the Python versions manifest listed Linux
   # x64 builds of 3.14.4 for Ubuntu 22.04 and 24.04 only, so ubuntu-latest would fail these jobs on an image
   # without one), this checkout step as written, no env: on the job or any step, one Python setup step
   # pinning that release, the gate itself as the next step (it fails when the job does not run that

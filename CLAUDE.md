@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.10** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.11** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -70,6 +70,23 @@ to need the same (not verified live); see the script's header), never `gh pr che
 the Checks API) and never `commits/<sha>/status` (which always reads pending). The gate roster grows
 toward the full pack roster (portability, dogfood and adapter parity, version monotonicity).
 
+Quality runs once per merge train, on the train head. `quality.yml` triggers on the `labeled`
+pull-request type alone, and the merge lane applies the `merge-train` label after each push it makes to
+the train pull request; a member push, open, reopen, retarget or title/body edit schedules no Quality
+run. Run `tools/run_all_checks.sh` before every member push: that local run is the member head's
+evidence, and it fails when gitleaks is not on PATH or reports another version than `quality.yml` pins
+(`tools/check_gitleaks_pin.py`). Any label added to a pull request into main starts a full run. A
+workflow-level concurrency group lets a newer run cancel the older one on the same pull-request head
+branch; each push to main has a group of its own and is never cancelled, and `tools/check_ci_parity.py`
+pins the block. `msg-leaks.yml` still runs on every pull request into main. A head with no Quality run has
+no `Quality gates` status, which reads as missing, never as passing; a second label event while a head's
+run is in flight cancels that run, which `tools/ci-status.sh` reads as a failure of that head, so only a
+refresh push, labelled again, recovers. The maintainer explicitly authorized (2026-10-25) what member
+heads no longer get from CI, each still run once on the train head: the CI-only pull-request legs
+(branch-root and version monotonicity against the base), the hostile `core.autocrlf` byte-canon legs on
+ubuntu and macOS, setup-python's resolution of `3.14` on the runner, evaluation of the merge ref against
+current main in a clean clone, and CI evidence for each intermediate member commit.
+
 CI runs two Python legs. Two required jobs in `.github/workflows/quality.yml`, `opf-host-patch` and
 `git-fixture-env-host-patch`, run the OPF tooling self-test and the four git-fixture-env suites on
 the exact patch release the maintainer host runs, named in `.aiqt/python-host.toml`, on
@@ -84,7 +101,8 @@ failed only in CI on a newer patch release). The runner image is pinned beside t
 setup-python versions manifest listed Linux x64 builds of 3.14.4 for Ubuntu 22.04 and 24.04 only, so
 `ubuntu-latest` moving to an image without one would fail both host jobs, and moving them off ubuntu-24.04
 (or its retirement) needs a host patch with a build for the new image. `tools/check_python_host_pin.py`
-holds the workflow's top-level keys (only `name`, `on`, `permissions` and `jobs`) and each host job whole
+holds the workflow's top-level keys (only `name`, `on`, `concurrency`, `permissions` and `jobs`) and each
+host job whole
 (that runner, the checkout step as written, one setup-python pin, the gate itself as the next step, the
 job's suite) and fails when the running interpreter is another release, so `tools/run_all_checks.sh` FAILS
 on any patch release other than the one the file names. When the host interpreter changes, update
