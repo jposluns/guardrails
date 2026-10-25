@@ -43,7 +43,15 @@ Checks, each a named guard:
                   (the location, table and pack-facts reads) sees only text a reader sees; this
                   deliberately over-refuses: an adopter cannot keep an HTML comment, a link, an
                   image or a fenced code block info string (even one bare language name such as
-                  text or python) in the pin section, even one that hides nothing
+                  text or python) in the pin section, even one that hides nothing; and the
+                  section's raw text and its rendered text, each after NFKC normalization, carry
+                  no Unicode format character (general category Cf: a zero-width space, a soft
+                  hyphen, a joiner, a bidirectional control, a byte order mark), refused by
+                  presence and named, because one renders as nothing and can split a key, a value
+                  or a commit spelling that a reader reads whole while every scan here reads past
+                  it; this over-refuses a format character that hides nothing, and an invisible
+                  or near-invisible character outside category Cf (a combining grapheme joiner, a
+                  variation selector, a filler letter) is not refused
   pin-location    the pin sentence, the raw-URL template and the example URL each name the pinned
                   commit exactly once, so a movable name (a branch) in one of those places cannot
                   hide behind the spelling count elsewhere, and none can sit where a reader never
@@ -62,13 +70,20 @@ Checks, each a named guard:
                   silent skip
   pack-facts      the format and version the prompt states match opf/prompt-pack/pack.toml: the
                   pin section states each exactly once in the code-span form the gate reads
-                  (`format = "..."`, `version = "..."`), and its raw text and its rendered text
-                  alike carry exactly one assignment-shaped spelling of each key (the key,
-                  case-insensitively and not preceded by a letter, digit or underscore, then
-                  optional whitespace, `=`, optional whitespace and a single or double quote), so
-                  a second, conflicting spelling in prose, behind an escaped backtick, in a code
-                  block, built from a character reference or spelled across a setext underline
-                  is refused; a fact stated in other words (version 9.9.9) is not read
+                  (`format = "..."`, `version = "..."`), and its raw text and its rendered text,
+                  each after NFKC normalization, alike carry exactly one assignment-shaped
+                  spelling of each key (the key, case-insensitively and not preceded by a letter,
+                  digit or underscore, then optional whitespace, an ASCII `=`, optional
+                  whitespace and an ASCII single or double quote), so a second spelling of that
+                  shape in prose, behind an escaped backtick, in a code block, built from a
+                  character reference, spelled across a setext underline or written in fullwidth
+                  forms that NFKC folds to that shape is refused; that count is the only read of
+                  a second spelling, so a second, conflicting value is not read, and the gate
+                  stays VALID, where no ASCII quote follows the equals sign (unquoted, as in
+                  version = 9.9.9, curly-quoted or backticked), where another separator (a colon)
+                  stands for it, where a character that is neither a format character nor folded
+                  by NFKC splits the key, or where the fact is stated in other words (version
+                  9.9.9)
   quotation       every double-quoted span of MIN_QUOTE_CHARS or more normalized characters whose
                   nearby context (same paragraph, within _QUOTE_CONTEXT_CHARS before the opening
                   quote) attributes it to a pinned source appears word for word,
@@ -174,6 +189,7 @@ import stat
 import subprocess
 import tempfile
 import tomllib
+import unicodedata
 from pathlib import Path
 
 # Required for direct execution under python3 -I, including an opf-only copy.
@@ -484,6 +500,26 @@ def _check_pin_section_markup(marko, section_nodes):
                      "text".format((node.lang + " " + node.extra).strip()))
 
 
+def _check_pin_format_chars(section, section_visible):
+    """The pin section's raw text and its rendered text, each after NFKC normalization, carry no
+    Unicode format character (general category Cf: a zero-width space, a soft hyphen, a joiner, a
+    bidirectional control, a byte order mark), refused by presence and named: one renders as
+    nothing, so it can split a pack-fact key or value, or a commit spelling, that a reader reads
+    whole while every scan of the section reads past it. A character reference that renders one
+    is caught on the rendered side. This over-refuses a format character that hides nothing, and
+    an invisible or near-invisible character outside category Cf (a combining grapheme joiner, a
+    variation selector, a filler letter) is not refused."""
+    for form, text in (("raw", section), ("rendered", section_visible)):
+        found = next((char for char in unicodedata.normalize("NFKC", text)
+                      if unicodedata.category(char) == "Cf"), None)
+        if found is not None:
+            raise _Refusal(INVALID, "pin-section",
+                           "the pin section's {} text carries the format character U+{:04X} "
+                           "({}): a format character renders as nothing, so the pin section "
+                           "may carry none at all".format(
+                               form, ord(found), unicodedata.name(found, "unnamed")))
+
+
 def _check_pin_locations(section, pin):
     """The three places that must each name the pinned commit: the pin sentence, the raw-URL
     template and the example URL. Counting identical spellings alone is not enough: one of these
@@ -603,10 +639,15 @@ def _check_history(root, pin, table):
         raise _Refusal(CANNOT_EVALUATE, "pin-history", "git could not be run: {}".format(exc))
 
 
-# An assignment-shaped spelling of a pack fact, in any form a reader could take for one: the key,
-# case-insensitively and not preceded by a letter, digit or underscore (so `spec_version` is not
-# the pack version), then optional whitespace, `=`, optional whitespace and a single or double
-# quote. The code-span statement the gate reads is one such spelling.
+# The one shape of a pack-fact spelling the gate counts, read in the pin section's raw text and in
+# its rendered text, each after NFKC normalization (so a fullwidth equals sign or quotation mark
+# reads as its ASCII form): the key, case-insensitively and not preceded by a letter, digit or
+# underscore (so `spec_version` is not the pack version), then optional whitespace, an ASCII `=`,
+# optional whitespace and an ASCII single or double quote. The code-span statement the gate reads
+# is one such spelling. No other shape is read: a value with no ASCII quote straight after the
+# equals sign (unquoted, curly-quoted or backticked), another separator (a colon), or a fact
+# stated in other words is not counted, so a second, conflicting value in one of those forms is
+# not refused.
 _PACK_FACT_SPELLING_RES = tuple(
     (key, re.compile(r"(?i)(?<![A-Za-z0-9_])" + key + r"\s*=\s*[\"']"))
     for key in ("format", "version"))
@@ -615,12 +656,14 @@ _PACK_FACT_SPELLING_RES = tuple(
 def _check_pack_facts(root, section, section_visible):
     """The format and version the pin section states match opf/prompt-pack/pack.toml, read from
     the section's raw text after _check_pin_section_markup. The section must state each exactly
-    once in the code-span form read here, and its raw text and its rendered text must each carry
-    exactly one assignment-shaped spelling of each key (_PACK_FACT_SPELLING_RES), so a second,
-    conflicting spelling outside that form (in prose, behind an escaped backtick, in a code
-    block, built from a character reference only the rendered text decodes, or spelled across a
-    setext underline only the raw text keeps) is refused rather than read past. A fact stated in
-    other words (version 9.9.9) is not read."""
+    once in the code-span form read here, and its raw text and its rendered text, each after NFKC
+    normalization, must each carry exactly one assignment-shaped spelling of each key
+    (_PACK_FACT_SPELLING_RES), so a second spelling of that shape outside the code-span form (in
+    prose, behind an escaped backtick, in a code block, built from a character reference only the
+    rendered text decodes, spelled across a setext underline only the raw text keeps, or written
+    in fullwidth forms NFKC folds to it) is refused rather than read past. A second value in any
+    other form (unquoted, curly-quoted or backticked after the equals sign, after a colon, or
+    stated in other words such as version 9.9.9) is not read, so it is not refused."""
     stated_fmt = re.findall(r"`format = \"([^\"`]+)\"`", section)
     stated_ver = re.findall(r"`version = \"([^\"`]+)\"`", section)
     _require(len(stated_fmt) == 1 and len(stated_ver) == 1, "pack-facts",
@@ -628,7 +671,7 @@ def _check_pack_facts(root, section, section_visible):
              "{} format and {} version statement(s)".format(len(stated_fmt), len(stated_ver)))
     for key, spelling_re in _PACK_FACT_SPELLING_RES:
         for form, text in (("raw", section), ("rendered", section_visible)):
-            spelled = len(spelling_re.findall(text))
+            spelled = len(spelling_re.findall(unicodedata.normalize("NFKC", text)))
             _require(spelled == 1, "pack-facts",
                      "the pin section's {} text spells the pack {} as an assignment {} time(s); "
                      "expected exactly one, the code-span statement this gate reads, so a "
@@ -1010,7 +1053,8 @@ def _validate(root):
     every refused character except a CRLF pair, and a prompt whose parse does not cover its text
     is CANNOT-EVALUATE at journal-parse, never mis-sliced. The pin section's markup rule runs
     before any spelling count or table read, so every later reading of the section's raw text
-    sees only text a reader sees."""
+    sees only text a reader sees, and its format-character rule runs before the section's own
+    spelling, location, table and pack-facts reads."""
     root = Path(root)
     prompt_text = _read_text(root / "opf" / PROMPT_REL, "prompt")
     marko, document = _journal_markdown(prompt_text)
@@ -1021,6 +1065,7 @@ def _validate(root):
     _check_pin_shape(raw_commits, visible_commits)
     pin = raw_commits[0] if raw_commits else None
     section_visible = "\n".join(_rendered_text(marko, node) for node in section_nodes)
+    _check_pin_format_chars(section, section_visible)
     _check_pin_spelling(section, section_visible)
     _check_pin_locations(section, pin)
     table = _parse_table(section)
@@ -1849,6 +1894,11 @@ def _vectors():
         # it.
         _build_tree(base, extra_text="![Older notes name &#100;" + "d" * 39 + "](x.png)")
 
+    def format_char_outside_section(base):
+        # A word joiner (U+2060) just outside the pin section: the format-character rule binds
+        # the pin section alone.
+        _build_tree(base, extra_text="A plain" + chr(0x2060) + " note sits here.")
+
     def fence_in_section(opener):
         # A fenced code block opened by the given line, holding a line that hides nothing, inside
         # the pin section before the pack-facts sentence; the closer is the opener's fence run.
@@ -2129,6 +2179,31 @@ def _vectors():
                                                "its value.")),
         ("pin-pack-spec-version-spelling", VALID, None, None,
          stale_in_section('The store declares `spec_version = "1.3.0"` here.')),
+        # A fullwidth equals sign (U+FF1D): NFKC folds it to `=`, so the assignment count reads
+        # the second spelling; read without the fold, nothing counts it.
+        ("pin-pack-version-second-spelling-fullwidth-equals", INVALID, "pack-facts",
+         "_check_pack_facts",
+         stale_in_section("Older notes say version " + chr(0xFF1D) + ' "9.9.9" here.')),
+        # A zero-width space (U+200B, category Cf) between the key and the equals sign: no
+        # pattern reads the key across it, so only the format-character rule refuses it.
+        ("pin-pack-version-second-spelling-zero-width-space", INVALID, "pin-section",
+         "_check_pin_format_chars",
+         stale_in_section("Older notes say version" + chr(0x200B) + ' = "9.9.9" here.')),
+        # A soft hyphen built from a character reference inside the key: the raw text carries
+        # no format character, so only the rendered side of that rule refuses it.
+        ("pin-pack-version-second-spelling-soft-hyphen-entity", INVALID, "pin-section",
+         "_check_pin_format_chars",
+         stale_in_section('Older notes say ver&shy;sion = "9.9.9" here.')),
+        # A word joiner (U+2060) that splits nothing a scan reads: refused by presence, so this
+        # fixture holds the rule's over-refusal.
+        ("pin-format-char-harmless", INVALID, "pin-section", "_check_pin_format_chars",
+         stale_in_section("A plain" + chr(0x2060) + " note sits here.")),
+        ("pin-format-char-outside-section", VALID, None, None, format_char_outside_section),
+        # An unquoted second value: the assignment count needs an ASCII quote after the equals
+        # sign, so this conflicting version is not read and the tree stays VALID, as the
+        # pack-facts residual states.
+        ("pin-pack-version-second-value-unquoted-not-read", VALID, None, None,
+         stale_in_section("Older notes say version = 9.9.9 here.")),
     ]
 
 
