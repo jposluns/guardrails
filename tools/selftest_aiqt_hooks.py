@@ -2441,7 +2441,7 @@ _RAW_SEQUENCE_REFERENCES = (
      r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b"),
     (("_RAW_EXPBND_MUTATE_RE",),
      r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|history|init|merge|mv|"
-     r"notes|pull|push|rebase|refs|repack|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|"
+     r"notes|pull|push|rebase|refs(?!/)|repack|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|"
      r"worktree)\b"),
     (("_RAW_EXPBND_PRUNING_FETCH_RE",), r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)"),
     (("_RAW_EXPBND_ADD_BREADTH_RE", "_RAW_EXPBND_COMMIT_BREADTH_RE"),
@@ -11271,6 +11271,76 @@ def _main_isolated(monitor):
         if _gsf_idx != [3]:
             failures.append("(gsf-n) _cmtidn_git_commands({!r}): expected [3] (the commit word), got {!r}"
                             .format(_gsf_toks, _gsf_idx))
+        # A git alias the command defines (_git_local_alias: a -c or --config-env alias, include or includeIf
+        # key, or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> assignment naming one) runs a subcommand the
+        # readers cannot see, so each treats it as unknown and possibly mutating. The handler vectors gla-a to
+        # gla-o each read the alias name as the subcommand and allowed before that reading (gla-g read the
+        # command as outside the commit grammar): the refspec-less force-push from a protected HEAD names no
+        # push and no protected branch, so neither the raw backstop nor the push classifier saw it. gla-p (a
+        # non-alias -c control) and gla-q (a -c alias the raw lossy-verb scan already denied) are regression
+        # locks, and gla-r to gla-za pin the definition forms the shared reading accepts and refuses.
+        pexpect("(gla-a) a -c alias hiding a refspec-less force-push from a protected HEAD denies",
+                "git -c alias.p=push p --force origin", "deny", cwd=plr, detail="defines a git alias for itself")
+        pexpect("(gla-b) an attached --config-env alias, whose value this guard cannot read, denies",
+                "git --config-env=alias.p=PUSHCMD p --force origin", "deny", cwd=plr)
+        pexpect("(gla-c) an alias passed by GIT_CONFIG_KEY_<n> assignments denies",
+                "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push git p --force origin",
+                "deny", cwd=plr)
+        pexpect("(gla-d) an include whose file can define the alias denies",
+                "git -c include.path=/abs/aliases.cfg p --force origin", "deny", cwd=plr)
+        pexpect("(gla-e) the alias denies on a feature HEAD too (its push or commit target is unknown)",
+                "git -c alias.p=push p --force origin", "deny", cwd=plf)
+        pexpect("(gla-f) GIT_CONFIG_PARAMETERS naming an alias denies",
+                "GIT_CONFIG_PARAMETERS=\"'alias.p'='push'\" git p --force origin", "deny", cwd=plr)
+        # The commit recognizer reads the same segment as an apparent commit, so every reading of the command
+        # (main's reading of a floor included) is unverifiable rather than outside the commit grammar.
+        _gla_syntax = aiqt_hooks._commit_command_syntax("git --config-env=alias.c=COMMITCMD c -m y").status
+        if _gla_syntax != "unverifiable":
+            failures.append("(gla-g) _commit_command_syntax must read a --config-env alias as an apparent commit "
+                            "(unverifiable), got {!r}".format(_gla_syntax))
+        _gla_discard = _init_repo(tmp / "gla-discard")
+        (_gla_discard / "file.txt").write_text("uncommitted\n", encoding="utf-8")
+        _gla_branch = _init_repo(tmp / "gla-branch")
+        for _gla_label, _gla_handler, _gla_cmd, _gla_cwd, _gla_want in (
+                ("gla-h", aiqt_hooks.gate_weakening, "git -c alias.c=commit c --no-verify -m y", None, "deny"),
+                ("gla-i", aiqt_hooks.gate_weakening, "git --config-env alias.c=COMMITCMD c -m y", None, "deny"),
+                ("gla-j", aiqt_hooks.git_discard, "git --config-env alias.r=RESETCMD r --hard", str(_gla_discard),
+                 "deny"),
+                ("gla-k", aiqt_hooks.git_discard, "git -c include.path=/abs/aliases.cfg r --hard",
+                 str(_gla_discard), "deny"),
+                ("gla-l", aiqt_hooks.branch_root, "git -c alias.co=checkout co -b gla-new", str(_gla_branch),
+                 "deny"),
+                ("gla-m", aiqt_hooks.commit_identity,
+                 'git -c alias.c=commit c --author="Claude <noreply@anthropic.com>" -m y', None, "deny"),
+                ("gla-n", aiqt_hooks.commit_identity,
+                 'env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.c GIT_CONFIG_VALUE_0=commit git c '
+                 '--author="Claude <noreply@anthropic.com>" -m y', None, "deny"),
+                ("gla-o", aiqt_hooks.commit_msg_subst, 'git -c alias.c=commit c -m "$(date)"', None, "deny"),
+                ("gla-p", aiqt_hooks.gate_weakening, "git -c core.editor=true commit -m y", None, "allow"),
+                ("gla-q", aiqt_hooks.git_discard, "git -c alias.r=reset r --hard", str(_gla_discard), "deny")):
+            _gla_got = _decision(_gla_handler, _gla_cmd, cwd=_gla_cwd)
+            if _gla_got != _gla_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _gla_label, _gla_handler.__name__, _gla_cmd, _gla_want, _gla_got))
+        # The definition forms at their edges (gla-p above is the non-alias -c control: it keeps the bare
+        # reading). The attached -c<key> form is no definition: git 2.53.0 rejects '-calias.x=y' as an unknown
+        # option and runs nothing. A value-taking global option consumes the word after it, and the walk stops
+        # at the subcommand, as _git_sub_and_args reads them.
+        for _gla_label, _gla_tokens, _gla_want in (
+                ("gla-r", ["git", "-c", "Alias.X=log", "x"], True),
+                ("gla-s", ["git", "--config-env", "alias.x=ENVVAR", "x"], True),
+                ("gla-t", ["git", "-c", "includeIf.gitdir:/abs/.path=/abs/x.cfg", "x"], True),
+                ("gla-u", ["GIT_CONFIG_KEY_3=ALIAS.x", "git", "x"], True),
+                ("gla-v", ["git", "-C", "/abs", "-c", "alias.x=log", "x"], True),
+                ("gla-w", ["git", "-c", "aliases.x=log", "x"], False),
+                ("gla-x", ["git", "-calias.x=log", "x"], False),
+                ("gla-y", ["GIT_CONFIG_KEY_0=remote.origin.mirror", "git", "push"], False),
+                ("gla-z", ["git", "log", "-c", "alias.x=y"], False),
+                ("gla-za", ["git", "--shallow-file", "-c", "alias.x=y"], False)):
+            _gla_got = aiqt_hooks._git_local_alias(_gla_tokens)
+            if _gla_got is not _gla_want:
+                failures.append("({}) _git_local_alias({!r}): expected {}, got {}".format(
+                    _gla_label, _gla_tokens, _gla_want, _gla_got))
         # Re-expected from allow to deny: the wrapper-hidden fallback now also reads the
         # DE-QUOTED text, where -'f' is the -f bash passes, so this force-push to main is caught (a
         # closed residual, not an over-refusal). The raw-text backstop reads each segment
@@ -13689,8 +13759,11 @@ def _main_isolated(monitor):
                 "disclosed residual, allows",
                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true "
                 "git push origin main", "allow", cwd=plf)
-        pexpect("(gd146-m35) an alias hiding the push (subcommand is 'p', not 'push') is a disclosed "
-                "residual, allows", "git -c alias.p='push --mirror' p origin", "allow", cwd=plf)
+        # Re-expected from allow to deny: a git alias the command defines makes the subcommand unknown, so
+        # protected_line denies it on any branch (the gla vectors); an alias from a configuration file stays the
+        # disclosed residual.
+        pexpect("(gd146-m35) an alias the command defines hides the push (subcommand is 'p', not 'push'), "
+                "so it denies", "git -c alias.p='push --mirror' p origin", "deny", cwd=plf)
         pexpect("(gd146-m36) a command-local remote.<name>.push refspec is a disclosed follow-on "
                 "residual, allows", "git -c remote.origin.push=:main push origin", "allow", cwd=plf)
         # (gd146-m37, round-2 QA BLOCKER) the raw fallback requires a CONTIGUOUS '.mirror', so a shell
@@ -19233,6 +19306,20 @@ def _main_isolated(monitor):
                  'cd /abs/repo && git refs create x HEAD "open', "allow-note")
         ebexpect("(gv-27) the unparseable-command fallback notes a cd feeding git repack",
                  'cd /abs/repo && git repack -a -d "open', "allow-note")
+        # A git alias the command defines runs an unknown subcommand: after a cd it notes like a mutation, and
+        # beside a breadth stage or a push it counts as the other half of the breadth-then-publish deny. Each
+        # read the alias name as a read-only subcommand and allowed silently before that reading.
+        # A ref name (refs/heads/main) in an unparseable read is not the refs subcommand: the raw fallback stays
+        # silent (gv-28, a note before refs followed by '/' was excluded), while the refs subcommand itself
+        # still notes there (gv-26).
+        ebexpect("(gv-28) the unparseable-command fallback does not read a refs/ ref name as git refs",
+                 'cd /abs/repo && git log --oneline refs/heads/main "open', "allow")
+        ebexpect("(gla-eb-a) a cd feeding an untargeted command-local alias allows with a note",
+                 "cd /abs/repo && git -c alias.c=commit c -m y", "allow-note")
+        ebexpect("(gla-eb-b) a breadth stage followed by a command-local alias, which may push, denies",
+                 "git add -A && git -c alias.p=push p origin feat", "deny")
+        ebexpect("(gla-eb-c) a command-local alias, which may stage the whole tree, followed by a push denies",
+                 "git --config-env=alias.a=ADDCMD a && git push origin feat", "deny")
         for _eb_sub, _eb_args, _eb_want in (
                 ("commit", ["-am", "x"], True),
                 ("add", ["-A"], True),
