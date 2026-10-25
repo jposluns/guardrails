@@ -6221,6 +6221,10 @@ def _main_isolated(monitor):
                "GIT_WORK_TREE=sub git reset --hard", "deny", cwd=rp)
         expect("(dir-h) GIT_DIR= env on a dirty target denies like the bare form (F-62.3/F-66.4)",
                "GIT_DIR=.git git reset --hard", "deny", cwd=rp)
+        # A plain leading assignment redirects nothing, yet it routes the command off the pristine bare path all
+        # the same; the whole-tree clobber on this dirty repo must still deny like the bare form.
+        expect("(dir-i) a plain leading assignment on a dirty target denies like the bare form",
+               "FOO=1 git reset --hard", "deny", cwd=rp)
 
         # === a git global option never changes the verdict on a discarding form ===========================
         # Every global option spelling (each value-taking member of _GIT_ARG_OPTS, separated and, for a long
@@ -8530,9 +8534,13 @@ def _main_isolated(monitor):
         # -C <other repo>. The two denies that read the redirect from the session directory stay as a floor
         # under git's answer (the '(gdc-keep-*)' vectors): a --git-dir that is not the session repository's
         # and a --work-tree outside the -C or session repository still DENY where git resolves one repository,
-        # with that repository snapshotted first when it is not provably clean. Each fixture is a clean session
-        # repository 'sess', a target repository 'tgt' (with a committed sub/ directory) and, where named, a
-        # third repository 'oth', all siblings, the hook running from sess. Each vector asserts the verdict,
+        # with that repository snapshotted first when it is not provably clean. The session directory such a
+        # --git-dir/GIT_DIR form was read from stays a floor too: it is snapshotted as well when it is not
+        # provably clean, and a failed snapshot there DENIES (the '(gdc-floor-*)' vectors). Each fixture is a
+        # session repository 'sess' (clean unless the vector names a sess_cause: uncommitted session work, whose
+        # snapshot fails through a lowered size cap or a temp dir inside sess), a target repository 'tgt' (with
+        # a committed sub/ directory) and, where named, a third repository 'oth', all siblings, the hook running
+        # from sess. Each vector asserts the verdict,
         # the recovery refs written in every fixture repository and, where named, the text the reason or note
         # carries, so each is red on revert of the fix ('(gdc-*-control)' vectors excepted: they pin unchanged
         # neighbours).
@@ -8552,9 +8560,15 @@ def _main_isolated(monitor):
                     _git(repos[role], "add", "file.txt")
             return base, repos
 
-        def gdc(label, template, want, tgt_state, refs_want, needle=None, oth_state=None, ambient=None):
+        def gdc(label, template, want, tgt_state, refs_want, needle=None, oth_state=None, ambient=None,
+                sess_cause=None):
             try:
                 base, repos = _gdc_fixture(label[1:label.index(")")], tgt_state, oth_state)
+                if sess_cause is not None:
+                    # 4 KiB of untracked session work: over the 1 KiB cap "sizecap" sets, while the target's
+                    # change (under 100 bytes) stays under it; "tmpdir" points the temp snapshot dir inside sess.
+                    (repos["sess"] / "session-work.txt").write_text("w" * 4095 + "\n", encoding="utf-8")
+                    (repos["sess"] / "tmpd").mkdir()
             except (OSError, subprocess.SubprocessError) as exc:
                 failures.append("{}: could not build the fixture: {}".format(label, exc))
                 return
@@ -8564,11 +8578,17 @@ def _main_isolated(monitor):
                     "tool_input": {"command": template.format(**fmt)}, "cwd": str(repos["sess"])}
             for _k, _v in (ambient or {}).items():
                 os.environ[_k] = _v
+            _orig_gdc_cap, _orig_gdc_tempdir = aiqt_hooks._RECOVERY_SIZE_CAP, tempfile.tempdir
+            if sess_cause == "sizecap":
+                aiqt_hooks._RECOVERY_SIZE_CAP = 1024
+            elif sess_cause == "tmpdir":
+                tempfile.tempdir = str(repos["sess"] / "tmpd")
             try:
                 code, stdout_obj, _stderr = handler(data)
             finally:
                 for _k in (ambient or {}):
                     os.environ.pop(_k, None)
+                aiqt_hooks._RECOVERY_SIZE_CAP, tempfile.tempdir = _orig_gdc_cap, _orig_gdc_tempdir
             got = _reduce_result(code, stdout_obj)
             text = ""
             if isinstance(stdout_obj, dict):
@@ -8711,6 +8731,11 @@ def _main_isolated(monitor):
         gdc("(gdc-other-env) another inline GIT_* assignment beside GIT_DIR= DENIES",
             "GIT_INDEX_FILE={B}/alt.index GIT_DIR=.git git -C {T} reset --hard", "deny", "dirty",
             {"tgt": 0, "sess": 0})
+        # The scoped form pins the verdict itself: no clobber deny stands behind it, so an oracle that ignored
+        # the other inline GIT_* would snapshot the target and allow.
+        gdc("(gdc-other-env-scoped) another inline GIT_* beside GIT_DIR= on a scoped discard DENIES",
+            "GIT_INDEX_FILE={B}/alt.index GIT_DIR=.git git -C {T} restore file.txt", "deny", "dirty",
+            {"tgt": 0, "sess": 0}, "git could not report, read-only")
         gdc("(gdc-bare) --bare after -C makes the -C directory the git dir, which git cannot open: DENIES",
             "git -C {T} --bare reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0})
         gdc("(gdc-ambient) a non-cosmetic ambient GIT_* beside --git-dir DENIES",
@@ -8721,6 +8746,66 @@ def _main_isolated(monitor):
             "git -C {T} --git-dir=.git reset --soft", "allow-note", "dirty", {"tgt": 0, "sess": 0})
         gdc("(gdc-compound-control) the compound form stays outside the closed grammar and DENIES",
             "git -C {T} --git-dir=.git reset --hard && true", "deny", "dirty", {"tgt": 0, "sess": 0})
+        # The session-directory floor: a --git-dir/GIT_DIR form beside -C was read from the session directory
+        # before git resolved it, and that directory is still probed and snapshotted when it is not provably
+        # clean. When that snapshot fails (the size cap, or a temp dir inside the session repository) the
+        # discard DENIES with that failure named, in each prefix order, on a clean target and on a dirty one
+        # (whose own snapshot is still taken and named); each is allowed with a target snapshot when the floor
+        # is removed. When the session snapshot succeeds, both repositories are snapshotted and it allows.
+        _gdc_floor = "but this guard also snapshots the session directory"
+        _gdc_cap = "exceeds the 0 MiB recovery snapshot size cap"
+        _gdc_tmp = "the temp snapshot dir resolved inside the repo"
+        gdc("(gdc-floor-cap-clean) -C <target> --git-dir=.git, session over the size cap, clean target: DENIES",
+            "git -C {T} --git-dir=.git reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-dirty) -C <target> --git-dir=.git, session over the size cap, dirty target: DENIES",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor, _gdc_cap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-rev-clean) --git-dir=.git -C <relative>, session over the size cap, clean: DENIES",
+            "git --git-dir=.git -C ../tgt restore --staged file.txt", "deny", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-rev-dirty) --git-dir=.git -C <relative>, session over the size cap, dirty: DENIES",
+            "git --git-dir=.git -C ../tgt reset", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor, _gdc_cap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-env-clean) GIT_DIR=.git with -C <target>, session over the size cap, clean: DENIES",
+            "GIT_DIR=.git git -C {T} clean -fd", "deny", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-env-dirty) GIT_DIR=.git with -C <target>, session over the size cap, dirty: DENIES",
+            "GIT_DIR=.git git -C {T} restore file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor, _gdc_cap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-tmp-clean) -C <target> --git-dir=.git, temp dir inside the session, clean: DENIES",
+            "git -C {T} --git-dir=.git restore file.txt", "deny", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_tmp), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-dirty) -C <target> --git-dir=.git, temp dir inside the session, dirty: DENIES",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor, _gdc_tmp, _gdc_saved), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-rev-clean) --git-dir=.git -C <relative>, temp dir inside the session, clean: DENIES",
+            "git --git-dir=.git -C ../tgt reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_tmp), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-rev-dirty) --git-dir=.git -C <relative>, temp dir inside the session, dirty: DENIES",
+            "git --git-dir=.git -C ../tgt clean -fd", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor, _gdc_tmp, _gdc_saved), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-env-clean) GIT_DIR=.git with -C <target>, temp dir inside the session, clean: DENIES",
+            "GIT_DIR=.git git -C {T} reset", "deny", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_tmp), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-env-staged) GIT_DIR=.git with -C <target>, temp dir inside the session, staged: DENIES",
+            "GIT_DIR=.git git -C {T} restore --staged file.txt", "deny", "staged", {"tgt": 1, "sess": 0},
+            (_gdc_floor, _gdc_tmp, _gdc_saved), sess_cause="tmpdir")
+        gdc("(gdc-floor-both) a dirty session whose snapshot succeeds is snapshotted beside the target; allows",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 1},
+            (_gdc_at, "The session directory, the directory this guard reads the redirect from without asking "
+                      "git, was snapshotted as well."), sess_cause="dirty")
+        # A leading GIT_DIR+= reaches the session-read --git-dir deny exactly as GIT_DIR= does; two GIT_DIR
+        # assignments joined by += build a value that read does not trust, so they DENY.
+        gdc("(gdc-env-gitdir-append-own) GIT_DIR+=<target>/.git with -C <target> on a clean target DENIES",
+            "GIT_DIR+={T}/.git git -C {T} reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
+        gdc("(gdc-env-gitdir-append-own-scoped) GIT_DIR+=<target>/.git with -C <target>, scoped discard DENIES",
+            "GIT_DIR+={T}/.git git -C {T} restore file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-env-gitdir-append-joined) two GIT_DIR+= assignments joined into one value DENY",
+            "GIT_DIR+=.gi GIT_DIR+=t git restore file.txt", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
         # A leading GIT_DIR+= on a stash drop/clear names the git dir just as GIT_DIR= does, so it DENIES
         # rather than preserve the -C repository's stash (here none, a silent allow on the unfixed guard)
         # while the command clears the stash of the repository GIT_DIR names.
@@ -20426,7 +20511,8 @@ def _main_isolated(monitor):
           "(except that a whole-tree clobber behind a git global option or a leading assignment DENIES on a "
           "dirty target, with its snapshot, exactly as the bare command does, and a destructive form "
           "carrying a --git-dir, --work-tree or --bare redirect is resolved by git itself, DENYING when git "
-          "splits the git dir and worktree across repositories or cannot resolve them read-only) "
+          "splits the git dir and worktree across repositories or cannot resolve them read-only, or when the "
+          "session directory a --git-dir beside -C was read from cannot be snapshotted) "
           "and ALLOWS on a clean one (nothing to snapshot); stash/branch are not snapshottable and "
           "allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
           "deletion, DENIES fail-safe a push it cannot prove misses the protected line (a "
