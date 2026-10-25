@@ -399,9 +399,9 @@ _RESIDUALS = (
 # Disclosed only on a homes-2 report, so a legacy report's residuals are unchanged.
 _HOMES2_RESIDUALS = (
     "Journal contents are not inspected by doctor, except that it lists the id reservation home of each "
-    "journal kind and reads each reservation file's bytes, for the reserved numbers alone; that read awaits "
-    "the homes-2 revision of spec section 4.2, which still says doctor excludes journals (a release "
-    "dependency). A staged plan does not prove recoverability. "
+    "journal kind and reads each reservation file's bytes, for the reserved numbers alone; that read is the "
+    "one exception spec section 4.2 makes to doctor excluding journals, read-only and for the section 8.2 "
+    "counter checks alone. A staged plan does not prove recoverability. "
     "Homes-2 evidence inventories establish local membership, not actor authenticity; losing a whole "
     "bundle, inventory and payload together, requires independent history to detect.",
     "A reserved number that no present record carries is treated as issued only where the prior committed "

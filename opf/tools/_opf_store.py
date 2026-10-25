@@ -152,7 +152,7 @@ MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (ma
                                        # store input is refused rather than read unboundedly (SECA)
 SUPPORTED_SPEC_VERSION = "1.2.0"       # the OPFiles base spec_version this tooling implements; a store
                                        # declaring an OLDER spec_version is fail-closed with a distinct
-                                       # finding stating that this tooling defines no store upgrade,
+                                       # finding stating that no store upgrade reaches 2.0.0,
                                        # naming the hand step that makes its tree foreign content (spec 9.2),
                                        # and one declaring a NEWER spec_version is fail-closed with an
                                        # upgrade-the-tooling finding, except only the reserved homes-2
@@ -2319,16 +2319,16 @@ def _validate_base(base, findings, manifest_rel=None):
             # the census in _opf_manifest_regressions pins the validator's reviewed emission-site set, and
             # a message selected above a shared censused append keeps each wording reviewable without
             # widening that set.
-            # The older refusal names the manifest path and the declared spec_version, states that this
-            # tooling defines no store upgrade and so does not operate on the store (spec 9.2 defines no
-            # upgrade into 2.0.0), and states the hand step spec 9.2 gives a tree under a refused older
+            # The older refusal names the manifest path and the declared spec_version, states that no
+            # store upgrade reaches spec_version 2.0.0 (spec 9.2 defines none, and the 1.0.0 and 1.1.0
+            # route to 1.2.0 is not one), and states the hand step spec 9.2 gives a tree under a refused older
             # manifest: the operator moves that manifest aside by hand (no OPF command writes it), after
             # which its files are ordinary foreign content for a first adoption.
             if spec_tuple < _parse(SUPPORTED_SPEC_VERSION):
                 where = "the store manifest" if manifest_rel is None else _safe_display(manifest_rel)
                 mismatch = ("{} declares [opf].spec_version {}, older than the {} this tooling "
-                            "implements; this tooling defines no store upgrade, so it does not operate "
-                            "on this store; to adopt this tree instead, first move {} aside by hand: "
+                            "implements; no store upgrade reaches spec_version 2.0.0, so the store is "
+                            "refused; to adopt this tree instead, first move {} aside by hand: "
                             "its files are then ordinary foreign content for a first adoption "
                             "(spec 9.2; fail-closed)".format(
                                 where, _safe_display(sv), SUPPORTED_SPEC_VERSION, where))
@@ -3082,23 +3082,23 @@ def self_test():
         check("wrong-typed-posture-named", any("posture must be a string" in f for f in aware.findings))
 
         # 10g: a store declaring a spec_version OLDER than SUPPORTED_SPEC_VERSION is fail-closed with a
-        # distinct finding stating that this tooling defines no store upgrade (not the confusing roster
+        # distinct finding stating that no store upgrade reaches 2.0.0 (not the confusing roster
         # cascade, and naming no upgrade command); a store at the current spec_version is clean.
         m_old = _t.loads(manifest_text(spec_version="1.0.0"))
         mv_old = validate_manifest(m_old)
         check("spec-version-floor-invalid", mv_old.status == INVALID)
         check("spec-version-floor-named",
-              any("older than the" in f and "defines no store upgrade" in f and "opf upgrade" not in f
-                  for f in mv_old.findings))
-        # The older refusal names the manifest path and the declared spec_version, states that this
-        # tooling defines no store upgrade and does not operate on the store, and states the hand step
+              any("older than the" in f and "no store upgrade reaches spec_version 2.0.0" in f
+                  and "opf upgrade" not in f for f in mv_old.findings))
+        # The older refusal names the manifest path and the declared spec_version, states that no
+        # store upgrade reaches 2.0.0 and that the store is refused, and states the hand step
         # (spec 9.2), pinned whole: rewording it, dropping the path or the hand step, or offering an
         # upgrade again, is red.
         floor_rel = ".working/toml/manifest.toml"
         floor_message = (
             "'.working/toml/manifest.toml' declares [opf].spec_version '1.0.0', older than the 1.2.0 "
-            "this tooling implements; this tooling defines no store upgrade, so it does not operate "
-            "on this store; to adopt this tree instead, first move '.working/toml/manifest.toml' "
+            "this tooling implements; no store upgrade reaches spec_version 2.0.0, so the store is "
+            "refused; to adopt this tree instead, first move '.working/toml/manifest.toml' "
             "aside by hand: its files are then ordinary foreign content for a first adoption "
             "(spec 9.2; fail-closed)")
         check("spec-version-floor-message-pinned",
@@ -3106,7 +3106,7 @@ def self_test():
               and floor_message in validate_manifest(m_old, manifest_rel=floor_rel).findings)
         check("spec-version-floor-message-unnamed-path",
               any(f.startswith("the store manifest declares [opf].spec_version '1.0.0',")
-                  and "defines no store upgrade, so it does not operate on this store" in f
+                  and "no store upgrade reaches spec_version 2.0.0, so the store is refused" in f
                   and "first move the store manifest aside by hand" in f for f in mv_old.findings))
         check("spec-version-current-ok",
               validate_manifest(_t.loads(manifest_text(spec_version=SUPPORTED_SPEC_VERSION))).status == VALID)

@@ -133,8 +133,9 @@ its lower numbers are still reported missing and the next run is held at the pos
 (conservative). A deletion already committed in HEAD is visible only to a doctor run before that commit:
 a published record whose number a reservation records and whose deletion is committed is then graded as
 an orphaned reservation's number and not reported missing, unlike homes 1, where the counters high-water
-keeps that deletion a C-NO-DELETION finding. The homes-2 revision of spec 4.2 must settle this before
-homes 2 is activated. This homes-2 path is reached only once activation sets
+keeps that deletion a C-NO-DELETION finding. Spec 8.2 settles this direction: the doctor treats a
+reserved number as issued wherever its checks would otherwise report it missing. This homes-2 path is
+reached only once activation sets
 _opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
 SUPPORTED_HOMES is 1, every subcommand refuses a store declaring homes 2 before any reconciliation or
 write (_probe_homes), so the shipped verb claims through homes 1 only. A legacy
@@ -615,15 +616,17 @@ class Context:
 
 def _load_manifest(ctx):
     """Read and validate the manifest (never an operand of this verb). It must be doctor-grade VALID at
-    the tooling spec_version, in the inline layout: an older store takes `opf upgrade` first."""
+    the tooling spec_version, in the inline layout. Validation already refuses an older store (spec 9.2),
+    so the version refusal below meets only a VALID store at another version, the reserved homes-2 pair,
+    which no upgrade carries back: such a store takes the tooling that implements its version."""
     manifest = _read_operand(ctx.root_fd, ctx.rel(_opf_store.MANIFEST_NAME)).model
     mv = _opf_store.validate_manifest(manifest, manifest_rel=ctx.rel(_opf_store.MANIFEST_NAME))
     if mv.status != _opf_store.VALID:
         raise RecordError("the store manifest is not VALID ({}); fail-closed".format("; ".join(mv.findings)))
     base = manifest.get(_opf_store.STANDARD_TOKEN)
     if base.get("spec_version") != _opf_store.SUPPORTED_SPEC_VERSION:
-        raise RecordError("the store declares spec_version {!r}, not the tooling's {}; run opf upgrade "
-                          "first (fail-closed)".format(base.get("spec_version"),
+        raise RecordError("the store declares spec_version {!r}, not the tooling's {}; use the tooling "
+                          "that implements it (fail-closed)".format(base.get("spec_version"),
                                                        _opf_store.SUPPORTED_SPEC_VERSION))
     if base.get("layout") != "inline":
         raise RecordError("layout {!r} is not supported by this build (inline only); fail-closed".format(
@@ -3611,6 +3614,25 @@ def _self_test_units(check):
     check("an older manifest refusal names the manifest path",
           old_refusal is not None
           and "'.working/toml/manifest.toml' declares [opf].spec_version '1.1.0'" in old_refusal)
+
+    # The one VALID manifest at another spec_version, the reserved homes-2 pair, reaches the version
+    # refusal, which is pinned whole: offering an upgrade, which never carries the pair back, is red.
+    import _opf_init
+    pair_model = tomllib.loads(_opf_init.build_manifest())
+    pair_model[_opf_store.STANDARD_TOKEN]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+    pair_model[_opf_store.STANDARD_TOKEN]["homes"] = 2
+    old_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, pair_model)
+    pair_refusal = None
+    try:
+        _load_manifest(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+    except RecordError as exc:
+        pair_refusal = str(exc)
+    finally:
+        old_globals["_read_operand"] = old_read
+    check("a VALID manifest at another spec_version is refused toward the tooling that implements it",
+          _opf_store.validate_manifest(pair_model).status == _opf_store.VALID
+          and pair_refusal == "the store declares spec_version '2.0.0', not the tooling's 1.2.0; use the "
+                              "tooling that implements it (fail-closed)")
 
 
 def _self_test_contexts(check, root_fd, now):

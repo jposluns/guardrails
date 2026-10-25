@@ -57,7 +57,7 @@ sentences are pinned the same way over tag-stripped text (_SURFACE), outside the
 and the self-test pins the registry's shape, so dropping a _SURFACE entry turns the self-test
 red; each sentence of the disclosure page's retired fresh-only item, the quickstart's retired
 conformance-class sentence, the record-indexes page's deleted importer-only legacy_fragment
-rows, and those three files' wording of the removed section 9.2 remedy adoption, is searched over
+rows and counts, and those three files' wording of the removed section 9.2 remedy adoption, is searched over
 its whole file's normalized text and is red wherever it lands (_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
 and beyond those registered retired sentences no retired-text check reads them, so any other
 deleted sentence restored there stays green.
@@ -1465,7 +1465,7 @@ _SURFACE = {
 }
 # Retired surface wording: the disclosure page's fresh-only item, the quickstart's
 # conformance-class sentence, retired with the implementation classes (spec 16.1), the
-# record-indexes page's deleted importer-only legacy_fragment rows, retired with the reserved
+# record-indexes page's deleted importer-only legacy_fragment rows and counts, retired with the reserved
 # unassigned LF namespace (spec 8.1), and the quickstart's, the disclosure page's and the
 # record-indexes page's wording of the removed section 9.2 remedy adoption, retired with it (spec
 # 9.2 defines no path for a manifest below 2.0.0). Each sentence present in its file's normalized
@@ -1490,6 +1490,8 @@ _SURFACE_RETIRED = {
     RECORD_INDEXES: (
         'Importer-only (no module toggle)',
         'legacy_fragment LF quarantined &#8594; resolved | ignored',
+        '+ 1 importer-only',
+        'one importer-only type, and two reserved names or namespaces',
         "a 1.2.0 store is one the standard's section 9.2 validation refuses, so an adoption over it is a first adoption under its section 14.1, never a re-adoption.",
     ),
 }
@@ -2855,6 +2857,10 @@ def boundary_self_test():
           and len(report.checks) == 29)
     check("doctor-dispatches-evidence", lambda: report.checks.get("C-EVIDENCE-ENUM") == "FINDING")
     check("doctor-homes2-residual", lambda: all(r in report.residuals for r in doctor._HOMES2_RESIDUALS))
+    # The reservation read is disclosed as the exception spec 4.2 makes, not as awaiting a revision.
+    check("doctor-homes2-residual-reservation-read", lambda: "that read is the one exception spec section "
+          "4.2 makes to doctor excluding journals" in doctor._HOMES2_RESIDUALS[0]
+          and not any("revision of spec" in r for r in doctor._HOMES2_RESIDUALS))
     # Homes 2 lists nothing under journals/ but the id reservation home of each kind (the read_bytes mock
     # refuses any journal byte read outside a reservation file), and a legacy store lists none of it.
     check("doctor-skips-journals", lambda: not contained(report, ".working/journals")
@@ -5394,7 +5400,7 @@ def _self_test_vectors():
           tuple(map(len, _SURFACE.values())) == (9, 6, 9, 5, 7, 4))
     # Each retired surface sentence is absent from its live file, and planting it back turns the
     # gate red with its own finding.
-    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (3, 9, 3) and
+    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (3, 9, 5) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])

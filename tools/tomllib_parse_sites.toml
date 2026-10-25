@@ -703,7 +703,7 @@ reason = "test-code"
 path = "opf/tools/_opf_record.py"
 function = "_self_test_units"
 form = "call"
-count = 1
+count = 2
 class = "EXEMPT"
 reason = "test-code"
 

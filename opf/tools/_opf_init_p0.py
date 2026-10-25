@@ -214,8 +214,8 @@ def _manifest(raw):
 def _compatibility(manifest, provenance):
     # The refusal is selected by the declared spec_version and always names the manifest path. Only
     # a parseable declaration below 2.0.0 is an older store, so only it gets the hand step spec 9.2
-    # gives a tree under a refused older manifest (moved aside by hand, never by OPF); this tooling
-    # defines no store upgrade (spec 9.2 defines none into 2.0.0), so that refusal offers none. A
+    # gives a tree under a refused older manifest (moved aside by hand, never by OPF); no store
+    # upgrade reaches spec_version 2.0.0 (spec 9.2 defines none), so that refusal offers none. A
     # declaration of 2.0.0 or above marks a store at a later version, never foreign content (spec
     # 9.2), and a missing or malformed declaration proves nothing about the store: neither is
     # offered the hand step.
@@ -243,8 +243,9 @@ def _compatibility(manifest, provenance):
                            MANIFEST_PATH, declared))
     _require(raw_version == "1.2.0",
              "VERSION", "manifest",
-             "{} declares spec_version {}; this bootstrap requires 1.2.0: this tooling defines no "
-             "store upgrade and does not operate on an older store; to adopt its tree instead, first "
+             "{} declares spec_version {}; this bootstrap requires 1.2.0: no store upgrade reaches "
+             "spec_version 2.0.0, and this bootstrap does not operate on a store at another version; "
+             "to adopt its tree instead, first "
              "move {} aside by hand: its files are then ordinary foreign content for a first "
              "adoption".format(MANIFEST_PATH, declared, MANIFEST_PATH))
     _require(store.SUPPORTED_HOMES == 1 and store.homes_generation(manifest) == 1,

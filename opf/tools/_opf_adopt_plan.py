@@ -1888,8 +1888,8 @@ def self_test():
 
         def test_refused_older_manifest_and_hand_step(self):
             # A resolved manifest declaring a below-supported spec_version refuses investigation
-            # with the finding that names the manifest's own path, states that this tooling
-            # defines no store upgrade, and states the operator hand step (spec 4.5/9.2); a
+            # with the finding that names the manifest's own path, states that no store upgrade
+            # reaches spec_version 2.0.0, and states the operator hand step (spec 4.5/9.2); a
             # refusal that falls back to "the store manifest" or offers an upgrade is red.
             import _opf_init
             (self.root / ".working/toml").mkdir(parents=True)
@@ -1903,7 +1903,7 @@ def self_test():
             self.assertEqual(list(refused.findings), [
                 "resolved manifest is not valid: '.working/toml/manifest.toml' declares "
                 "[opf].spec_version '1.1.0', older than the {0} this tooling implements; "
-                "this tooling defines no store upgrade, so it does not operate on this store; "
+                "no store upgrade reaches spec_version 2.0.0, so the store is refused; "
                 "to adopt this tree instead, first move '.working/toml/manifest.toml' "
                 "aside by hand: its files are then ordinary foreign content for a first "
                 "adoption (spec 9.2; fail-closed)".format(store.SUPPORTED_SPEC_VERSION)])

@@ -187,13 +187,14 @@ def vectors(f):
         lambda m: m.validate_compatibility(manifest, provenance=b"not toml"),
         "REFUSED", "COMPATIBILITY")
     def older_version_refused(m):
-        # The refusal names the manifest path and the declared spec_version, states that this
-        # tooling defines no store upgrade, and states the hand step (spec 9.2), pinned whole:
+        # The refusal names the manifest path and the declared spec_version, states that no store
+        # upgrade reaches spec_version 2.0.0, and states the hand step (spec 9.2), pinned whole:
         # rewording it, dropping any of them, or offering an upgrade again, is red.
         got = m.validate_compatibility(old[p0.MANIFEST_PATH])
         check([f[2] for f in got.findings] == [
-            "{0} declares spec_version '1.1.0'; this bootstrap requires 1.2.0: this tooling defines "
-            "no store upgrade and does not operate on an older store; to adopt its tree instead, "
+            "{0} declares spec_version '1.1.0'; this bootstrap requires 1.2.0: no store upgrade "
+            "reaches spec_version 2.0.0, and this bootstrap does not operate on a store at another "
+            "version; to adopt its tree instead, "
             "first move {0} aside by hand: its files are then ordinary foreign content for a first "
             "adoption".format(p0.MANIFEST_PATH)],
             "compat/older-version-refused/message")
@@ -219,8 +220,9 @@ def vectors(f):
                     "content; use the tooling that implements it (fail-closed)".format(
                         p0.MANIFEST_PATH))
     version_refusal("between-gets-hand-step", manifest.replace(b'"1.2.0"', b'"1.3.0"'),
-                    "{0} declares spec_version '1.3.0'; this bootstrap requires 1.2.0: this "
-                    "tooling defines no store upgrade and does not operate on an older store; to "
+                    "{0} declares spec_version '1.3.0'; this bootstrap requires 1.2.0: no store "
+                    "upgrade reaches spec_version 2.0.0, and this bootstrap does not operate on a "
+                    "store at another version; to "
                     "adopt its tree instead, first move {0} aside by hand: its files are then "
                     "ordinary foreign content for a first adoption".format(p0.MANIFEST_PATH))
     version_refusal("malformed-version", manifest.replace(b'"1.2.0"', b'"x.y"'),
