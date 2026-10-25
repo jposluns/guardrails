@@ -45,18 +45,21 @@ receipt stage is unlanded, apply refuses before anything is written. Every other
 refusing not-yet-executable verdict: pack installation (install-pack), the completion checks, the stage
 driver's retirement stage (it opens the RETIREMENT_PHASE transaction the file ops compose into only after
 a green completion check, and no adoption interface opens that transaction in this build), and the
-`complete` and `reconcile` CLI subcommands remain later slices, as does the driver's receipt stage; the
-read-only `opf adopt` subcommands plan and status shipped with K9a. Live outside the self-test fixtures
-today: `opf adopt status` opens and lists the evidence home in opf.py through the _journal containment
-primitives, then grades each listed bundle through this module's _verify_bundle_at (beneath the HELD home
-descriptor it is passed) and the journal through journal_state, with _open_product_root anchoring both
-reads to one product-root descriptor; plan, approve and apply refuse over a non-clean adoption journal
-(require_clean_journal); the transaction shell and the dispatch table are reachable from `opf adopt
-apply` only past the unlanded-op gate and the driver's mandatory receipt stage (unlanded in this build),
-which no plan passes, and reconcile() and compose_rows stay reachable only from the self-test and the
-crash children it starts in a fresh interpreter through the `--selftest-child` flag (the
-`_opf_init_operation` crash-child precedent), a self-test harness entry, never an adoption
-interface, which runs whatever spec it is handed without an approval.
+`complete` CLI subcommand remains a later slice, as does the driver's receipt stage; the read-only
+`opf adopt` subcommands plan and status shipped with K9a, and `opf adopt reconcile` runs the
+journal-only recovery (reconcile_report) under the journal lock and its own store leases (releasing a
+dead run's leftover lease lands with the lease join). Live
+outside the self-test fixtures today: `opf adopt status` opens and lists the evidence home in opf.py
+through the _journal containment primitives, then grades each listed bundle through this module's
+_verify_bundle_at (beneath the HELD home descriptor it is passed) and the journal through
+journal_state, with _open_product_root anchoring both reads to one product-root descriptor; plan,
+approve and apply refuse over a non-clean adoption journal (require_clean_journal); the transaction
+shell and the dispatch table are reachable from `opf adopt apply` only past the unlanded-op gate and
+the driver's mandatory receipt stage (unlanded in this build), which no plan passes; reconcile() is
+reachable from `opf adopt reconcile` through reconcile_report; and compose_rows stays reachable only
+from the self-test and the crash children it starts in a fresh interpreter through the
+`--selftest-child` flag (the `_opf_init_operation` crash-child precedent), a self-test harness entry,
+never an adoption interface, which runs whatever spec it is handed without an approval.
 
 Preserve-first (spec 14.2), enforced over the composed op list BEFORE any transaction opens: a live file
 is removed, OR OVERWRITTEN BY A `write` (which destroys the live bytes exactly as a removal does), ONLY
@@ -428,6 +431,29 @@ class AdoptCommittedLockError(AdoptApplyError):
         super().__init__("the adoption transaction {} COMMITTED: its product-tree changes LANDED and are not "
                          "rolled back; {}".format(txn, note))
         self.txn = txn
+
+
+# The named findings `opf adopt reconcile` prints beside its exit-2 refusal (ReconcileRefusal.finding).
+RECONCILE_LOCK_HELD = "journal-lock-held"                 # a possibly-live owner holds the journal lock
+RECONCILE_UNCLASSIFIABLE = "journal-unclassifiable"       # a lock, entry or transaction that cannot be read
+RECONCILE_STORE_LEASE_HELD = "store-lease-held"           # a store writer may be mid-write (spec 5.7)
+RECONCILE_REVERSAL_UNPROVEN = "init-store-reversal-unproven"   # it may remove what init-store did not create
+RECONCILE_PRELOCK_FAULT = "pre-lock-fault"                # a fault before the lock was held and recovery began
+RECONCILE_FAILED = "recovery-failed"                      # the recovery faulted after it began: may be partial
+RECONCILE_LEASE_RELEASE_FAILED = "store-lease-release-failed"  # a store lease this run took stays
+RECONCILE_FINDINGS = (RECONCILE_LOCK_HELD, RECONCILE_UNCLASSIFIABLE, RECONCILE_STORE_LEASE_HELD,
+                      RECONCILE_REVERSAL_UNPROVEN, RECONCILE_PRELOCK_FAULT, RECONCILE_FAILED,
+                      RECONCILE_LEASE_RELEASE_FAILED)
+
+
+class ReconcileRefusal(AdoptApplyError):
+    """reconcile()'s refusal, carrying `finding`, one of RECONCILE_FINDINGS, which `opf adopt reconcile`
+    names beside its exit-2 refusal. A subclass of AdoptApplyError, so every existing caller's handling and
+    the message text are unchanged."""
+
+    def __init__(self, finding, message):
+        super().__init__(message)
+        self.finding = finding
 
 
 def _sha256(data):
@@ -1532,15 +1558,18 @@ def journal_state(root_fd, journal_root):
 def journal_clean_or_refuse(root_fd, journal_root):
     """The reconcile-first discipline (`opf record` step 1): inspect the adoption journal READ-ONLY
     (journal_state) and REFUSE on a held lock (a possibly-live owner is never seized) or any open
-    transaction, directing the operator to the explicit reconcile() entry. An absent journal root is
-    clean; an unreadable or corrupt journal refuses. Nothing is written here, recovery included."""
+    transaction, directing the operator to the explicit reconcile() entry, which `opf adopt reconcile`
+    runs. An absent journal root is clean; an unreadable or corrupt journal refuses. Nothing is written
+    here, recovery included."""
     owner, opened = journal_state(root_fd, journal_root)
     if owner is not None:
-        raise AdoptApplyError("the adoption journal lock is held (pid {}); it is never seized. "
-                              "Reconcile once no adoption run is live (fail-closed)".format(owner.get("pid")))
+        raise AdoptApplyError("the adoption journal lock is held (pid {}); it is never seized. Run "
+                              "`opf adopt reconcile` once no adoption run is live (fail-closed)".format(
+                                  owner.get("pid")))
     if opened:
         raise AdoptApplyError("interrupted adoption transaction(s) {} must be reconciled before this run "
-                              "(run reconcile()); nothing was written (fail-closed)".format(", ".join(opened)))
+                              "(run `opf adopt reconcile`); nothing was written (fail-closed)".format(
+                                  ", ".join(opened)))
 
 
 def reconcile(product_root):
@@ -1555,70 +1584,351 @@ def reconcile(product_root):
     broken only through `_journal.reconcile_and_claim_stale`. Returns the (transaction, outcome) pairs;
     on the stale-lock path each outcome names what the break's own recovery DID (rolled-forward or
     rolled-back), never 'terminal' for work this call performed. The interrupted run itself stays
-    refused, so the operator inspects the reconciled tree first."""
+    refused, so the operator inspects the reconciled tree first. This is reconcile_report without its
+    stale-lock flag; every refusal is a ReconcileRefusal naming its finding."""
+    return reconcile_report(product_root)[0]
+
+
+def _reconcile_intent(jr_fd, txn_dir):
+    """(init_store, paths) from an open transaction's durable INTENT. init_store is True only when the
+    transaction's NAME carries the init-store phase AND its INTENT header says so (kind, phase and op), so a
+    directory merely named `*.initstore` never skips the store lease; paths is the set of op paths the
+    INTENT names. A JournalError or OSError reading the frames propagates (the caller's classification)."""
+    frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir)
+    intent = _journal._first(frames, _journal.F_INTENT)
+    intent = intent if isinstance(intent, dict) else {}
+    header = intent.get("header") if isinstance(intent.get("header"), dict) else {}
+    ops = intent.get("ops") if isinstance(intent.get("ops"), list) else []
+    init_store = (Path(txn_dir).name.endswith("." + INIT_STORE_PHASE) and header.get("kind") == KIND
+                  and header.get("phase") == INIT_STORE_PHASE and header.get("op") == "init-store")
+    return init_store, {op.get("path") for op in ops if isinstance(op, dict) and isinstance(op.get("path"), str)}
+
+
+def _reconcile_lease_targets(root_fd, shell, touched):
+    """The machine subdirectories whose single-writer lease (spec 5.7) reconcile takes before its first
+    recovery write when it reconciles an open transaction other than an init-store one (`shell` names
+    them; with none it takes no lease and observes nothing here). The targets are every immediate real
+    subdirectory of the product root's `.working/` that is not a reserved store control area
+    (store.RESERVED_MACHINE_SUBDIRS): the set store discovery scans (_opf_store._immediate_subdirs), so
+    every machine subdirectory a store at the product root can resolve to, the default `toml` and any
+    other alike. A store POINTER at the product root (.opf.local.toml or .opf.toml) can resolve a store
+    at another store root, whose lease this journal-only reconcile cannot take without resolving the
+    store (spec 14.2), so a present pointer REFUSES as RECONCILE_STORE_LEASE_HELD. A lease already
+    present in any listed subdirectory refuses the same way, whatever its payload. This observation runs
+    before anything is written, as an early refusal only: the exclusion is the atomic claim the caller
+    makes under the journal lock (_take_reconcile_leases). A subdirectory an open transaction's INTENT
+    names (the directory itself, or its lease name) is observed but not leased, since a lease there
+    would block or collide with that transaction's own recovery. Whatever cannot be observed refuses as
+    held. Every read is a contained, no-follow read beneath the product-root descriptor; the store is
+    never resolved. NOT BUILT (the lease leg, which lands with OPF-ADOPT-LEASE-JOIN): releasing a dead
+    run's leftover lease through _opf_write_guard.acquire_lease_for_recovery. Until then the operator
+    confirms that no opf run is live and releases a leftover lease as their own reconciliation step
+    (spec 5.7); reconcile never does."""
+    import _opf_check
+    if not shell:
+        return []
+    rel = None
+    targets = []
+    try:
+        for rel in (store.LOCAL_POINTER_REL, store.POINTER_REL):
+            if _journal._lstat_contained(root_fd, rel) is not None:
+                raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "the store pointer {} is present beside "
+                                       "the interrupted adoption transaction(s) {}: an opf writer may resolve "
+                                       "a store at another store root, whose single-writer lease this "
+                                       "journal-only reconcile cannot take without resolving the store "
+                                       "(spec 14.2), so it is treated as held (spec 5.7). Nothing was "
+                                       "written (fail-closed)".format(rel, ", ".join(shell)))
+        rel = store.WORKING_DIRNAME
+        for name in store._immediate_subdirs(root_fd, store.WORKING_DIRNAME) or []:
+            if name in store.RESERVED_MACHINE_SUBDIRS:
+                continue
+            machine_rel = "{}/{}".format(store.WORKING_DIRNAME, name)
+            rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
+            if _journal._lstat_contained(root_fd, rel) is not None:
+                raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "the store lease {} is present beside the "
+                                       "interrupted adoption transaction(s) {}: another opf run may be writing "
+                                       "the store, and a lease is never seized (spec 5.7). This reconcile "
+                                       "does not release a leftover lease yet: once no opf run is live, "
+                                       "release the leftover lease yourself, then reconcile again. Nothing "
+                                       "was written (fail-closed)".format(rel, ", ".join(shell)))
+            if machine_rel not in touched and rel not in touched:
+                targets.append(machine_rel)
+    except (_journal.JournalError, store.StoreError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
+        raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "cannot observe the store lease or pointer {} ({}); "
+                               "what cannot be observed is treated as held (spec 5.7), and nothing was "
+                               "written (fail-closed)".format(rel, exc))
+    return targets
+
+
+RECONCILE_LEASE_VERB = "adopt reconcile"    # the operation this run stamps on the store leases it takes
+
+
+def _take_reconcile_leases(root_fd, targets, taken):
+    """Claim the single-writer lease of each target machine subdirectory through the store writers' own
+    atomic claim (_opf_write_guard.acquire_lease: O_EXCL, never seized), appending (machine_rel, payload)
+    to `taken` as each is claimed, so the caller releases exactly the leases this run took and no other.
+    Called with the journal's exclusion already held (the adoption journal lock, or on the stale-lock path
+    the journal's arbitration lock over the retained dead-run lock) and before the first recovery write,
+    the order the adoption apply takes them: init-store takes the adoption journal lock, then its
+    substrate's operation mutex and store lease. A lease another writer holds, or one that cannot be
+    taken, refuses as RECONCILE_STORE_LEASE_HELD before any recovery write."""
+    import _opf_check
+    import _opf_write_guard
+    for machine_rel in targets:
+        try:
+            payload = _opf_write_guard.acquire_lease(root_fd, machine_rel, RECONCILE_LEASE_VERB)
+        except _opf_write_guard.LeaseHeldError as exc:
+            raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "{} This reconcile refused before any recovery "
+                                   "write, and releases every lock and lease it took (fail-closed)".format(exc))
+        except (_opf_write_guard.WriteGuardError, _journal.JournalError, OSError) as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
+            raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "cannot take the store lease {}/{} ({}); a "
+                                   "lease that cannot be taken is treated as held (spec 5.7). This reconcile "
+                                   "refused before any recovery write, and releases every lock and lease it "
+                                   "took (fail-closed)".format(machine_rel, _opf_check.LEASE_NAME, exc))
+        taken.append((machine_rel, payload))
+
+
+def _release_reconcile_leases(root_fd, taken):
+    """Release, last taken first, ONLY the store leases this run took (`taken`), each through the store
+    writers' ownership-verified release (_opf_write_guard.release_lease: a lease is removed only while it
+    still holds the exact bytes this run wrote, never one another writer holds). Returns one clause per
+    lease that could not be released (it stays, for the operator's own reconciliation, spec 5.7); an
+    ordinary failure is returned, never raised, so it never hides the outcome or refusal it accompanies."""
+    import _opf_check
+    import _opf_write_guard
+    failures = []
+    while taken:
+        machine_rel, payload = taken.pop()
+        try:
+            _opf_write_guard.release_lease(root_fd, machine_rel, payload, RECONCILE_LEASE_VERB)
+        except (_opf_write_guard.WriteGuardError, _journal.JournalError, OSError) as exc:
+            failures.append("{}/{} ({})".format(machine_rel, _opf_check.LEASE_NAME, exc))
+    return failures
+
+
+def reconcile_report(product_root):
+    """reconcile() and what it did: (outcomes, stale_lock_released, lock_taken). stale_lock_released is
+    True only when THIS call broke a confirmed-dead owner's journal lock through
+    `_journal.reconcile_and_claim_stale` (a lock a concurrent reconcile broke first is not this call's,
+    and neither is that reconcile's recovery), so a call that found no open transaction can still
+    report that it released a dead run's lock. lock_taken is True when this call took the adoption
+    journal lock, so a caller tells "found nothing and wrote nothing" from "took the lock and found every
+    transaction already terminal" (a concurrent reconcile recovered it first). With no journal, or a
+    journal holding no lock and no open transaction, it returns ([], False, False) and writes NOTHING (no
+    lock is taken).
+
+    Exclusion (spec 5.7): when an open transaction other than an init-store one is reconciled, this call
+    takes the single-writer store lease of every machine subdirectory a store at the product root can
+    resolve to (_reconcile_lease_targets) through the store writers' own atomic claim, BEFORE its first
+    recovery write, holds them until the journal lock is released, and releases only the leases it took.
+    The acquisition order is the adoption apply's: init-store takes the adoption journal lock, then its
+    substrate's operation mutex and lease (_init_store_run, _opf_init_operation.run_init_operation), so
+    reconcile takes the journal lock first and the store leases second; on the stale-lock path the leases
+    are taken under the journal's arbitration lock with the dead run's lock retained (the `claim` hook of
+    reconcile_and_claim_stale), before that break's own recovery. An open init-store transaction alone
+    takes no store lease: its own substrate's lease may be the one left at the default store, and the
+    init-store reversal clears it (_init_store_scrub). RESIDUAL (disclosed): a non-adoption writer that
+    resolved that half-scaffolded store is not excluded during the reversal; a machine subdirectory that
+    first appears after the targets are listed, and one an open transaction itself names, is not leased.
+
+    Every refusal is a ReconcileRefusal naming its finding. BEFORE ANY RECOVERY WRITE, leaving the
+    product files and every transaction as found: RECONCILE_UNCLASSIFIABLE (a journal, lock, entry or
+    transaction that cannot be read or classified), RECONCILE_LOCK_HELD (a possibly-live owner holds the
+    lock, or a run took it meanwhile; never seized), RECONCILE_STORE_LEASE_HELD (a pointer or a present
+    lease observed before the lock, or a lease another writer claimed, or that cannot be claimed, under
+    it), RECONCILE_REVERSAL_UNPROVEN (an init-store reversal not proven to remove only the operation's own
+    publication) and RECONCILE_PRELOCK_FAULT (any other fault before this call held the journal lock and
+    began recovering: the owner-liveness test, an init-store preverify or stale-state read that faults,
+    the stale-lock arbitration's own refusals, an acquire_lock OSError). A lock or lease this call took is
+    released, and the message names what stays: a lock acquire_lock created that could not be released
+    (_failed_lock_state), the stale-lock arbitration file lock.break this call created, a lease the claim
+    left. RECONCILE_FAILED: the recovery faulted AFTER it began, so it may be PARTIAL: what it already
+    restored or published stays as the journal records it, the transaction stays open, and a later
+    reconcile resumes it. RECONCILE_LEASE_RELEASE_FAILED: a store lease this call took could not be
+    released; it stays, named beside what the recovery did. A stray non-directory journal entry is
+    skipped here, as before, never read as a transaction."""
     root_fd = _open_product_root(product_root)
-    journal_root = _journal_root(product_root)
-    outcomes = []
+    taken = []      # (machine_rel, payload) of every store lease THIS call took: only these are released
+    broke = []      # non-empty once THIS call's stale-lock break claimed its leases; its recovery follows
     try:
         try:
-            _journal.require_containment()
-            st = _journal._lstat_contained(root_fd, JOURNAL_REL)
-            if st is None:
-                return outcomes
-            if not stat.S_ISDIR(st.st_mode):
-                raise AdoptApplyError("the adoption journal {} is not a directory; "
-                                      "fail-closed".format(JOURNAL_REL))
-            jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
-            try:
-                # beneath the HELD jr_fd (round 3, the journal_state posture): the journal path is
-                # never re-resolved after the contained open, so a concurrently swapped journal
-                # cannot hide the held lock or substitute a decoy's.
-                owner = _journal.read_lock_owner_at(jr_fd)
-                txns = _journal._journal_txn_dirs(jr_fd, journal_root)
-                opened = sorted(t.name for t in txns if _journal.classify_state(jr_fd, t) == "open")
-                if owner is None and not opened:
-                    return outcomes
-                if owner is not None and not _journal.owner_confirmed_dead(owner):
-                    raise AdoptApplyError("the adoption journal lock is held by a possibly-live owner "
-                                          "(pid {}); it is never seized (fail-closed)".format(owner.get("pid")))
-                # Before ANY rollback can run (the stale-lock break below reconciles every
-                # transaction itself), prove each open init-store transaction's reversal removes
-                # only the operation's own publication: a foreign file at a member path is
-                # preserved and the whole reconciliation refuses fail-closed
-                # (_init_store_reversal_preverify).
-                for t in txns:
-                    if t.name.endswith("." + INIT_STORE_PHASE) and t.name in opened:
-                        _init_store_reversal_preverify(root_fd, product_root, jr_fd, t)
-                stale = None
-                if owner is not None:
-                    # The stale-lock break reconciles every transaction ITSELF (under its arbitration
-                    # lock), so the idempotent recover() re-run below would read each one 'terminal'.
-                    # Record the pre-break states so the reported outcome names what that recovery DID.
-                    stale = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
-                    if _journal.reconcile_and_claim_stale(journal_root, jr_fd, root_fd,
-                                                          SESSION_ID) != "acquired":
-                        raise AdoptApplyError("the adoption journal lock became live during "
-                                              "reconciliation; it is never seized (fail-closed)")
-                else:
-                    _journal.acquire_lock(journal_root, SESSION_ID)
-                try:
-                    for txn in txns:
-                        outcome = _journal.recover(jr_fd, txn, root_fd)
-                        if stale is not None and stale.get(txn.name) == "open" and outcome == "terminal":
-                            outcome = ("rolled-forward"
-                                       if _journal.classify_state(jr_fd, txn) == "complete"
-                                       else "rolled-back")
-                        outcomes.append((txn.name, outcome))
-                finally:
-                    _journal.release_lock(journal_root)
-            finally:
-                _journal._close_fd_quietly(jr_fd)
-        except (_journal.JournalError, OSError) as exc:
-            raise AdoptApplyError("the adoption journal {} cannot be reconciled ({}); "
-                                  "fail-closed".format(JOURNAL_REL, exc))
+            outcomes, lock_taken = _reconcile_run(product_root, root_fd, taken, broke)
+        except BaseException as exc:
+            failures = _release_reconcile_leases(root_fd, taken)    # after the journal lock's release
+            if failures:
+                said = "; ".join(failures)
+                if isinstance(exc, ReconcileRefusal):
+                    raise ReconcileRefusal(exc.finding, "{}; additionally the store lease(s) this run took "
+                                           "could not be released and stay for the operator's own "
+                                           "reconciliation (spec 5.7): {}".format(exc, said)) from exc
+                exc.add_note("the store lease(s) this run took could not be released: {}".format(said))
+            raise
+        failures = _release_reconcile_leases(root_fd, taken)        # after the journal lock's release
+        if failures:
+            raise ReconcileRefusal(RECONCILE_LEASE_RELEASE_FAILED, "the recovery finished ({}), but the store "
+                                   "lease(s) this run took could not be released: {}. Each stays: once no opf "
+                                   "run is live, release it as your own reconciliation step (spec 5.7)".format(
+                                       ", ".join("{} {}".format(t, o) for t, o in outcomes) or "nothing to "
+                                       "recover", "; ".join(failures)))
+        return outcomes, bool(broke), lock_taken
     finally:
         store._close_fd_exc_safe(root_fd)
-    return outcomes
+
+
+def _reconcile_run(product_root, root_fd, taken, broke):
+    """reconcile_report's body beneath its product-root descriptor; returns (outcomes, lock_taken). `taken`
+    and `broke` are the caller's, so the caller releases the store leases this run took after the journal
+    lock's release, whatever this raises. `stage` is what a JournalError or OSError maps to: classify
+    (RECONCILE_UNCLASSIFIABLE), prelock (RECONCILE_PRELOCK_FAULT) and recovering (RECONCILE_FAILED), the
+    last set only once the journal exclusion is held and the leases are taken, right before the first
+    recovery write."""
+    journal_root = _journal_root(product_root)
+    arb_rel = JOURNAL_REL + "/lock.break"
+    outcomes = []
+    stage = ["classify"]
+    held = []           # non-empty once THIS run holds the journal lock (released by the finally below)
+    arb_before = []     # whether lock.break was present as this run's stale-lock arbitration began
+
+    def arbitration_said():
+        if arb_before != [False]:
+            return ""
+        try:
+            if _journal._lstat_contained(root_fd, arb_rel) is None:
+                return ""
+        except (_journal.JournalError, OSError):
+            return "; whether this run's stale-lock arbitration left {} could not be observed".format(arb_rel)
+        return ("; this run's stale-lock arbitration created {}, which stays (the journal's arbitration "
+                "file, never removed)".format(arb_rel))
+
+    try:
+        _journal.require_containment()
+        st = _journal._lstat_contained(root_fd, JOURNAL_REL)
+        if st is None:
+            return outcomes, False
+        if not stat.S_ISDIR(st.st_mode):
+            raise ReconcileRefusal(RECONCILE_UNCLASSIFIABLE, "the adoption journal {} is not a "
+                                   "directory; nothing was written (fail-closed)".format(JOURNAL_REL))
+        jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+        try:
+            # beneath the HELD jr_fd (round 3, the journal_state posture): the journal path is
+            # never re-resolved after the contained open, so a concurrently swapped journal
+            # cannot hide the held lock or substitute a decoy's.
+            owner = _journal.read_lock_owner_at(jr_fd)
+            txns = _journal._journal_txn_dirs(jr_fd, journal_root)
+            opened = sorted(t.name for t in txns if _journal.classify_state(jr_fd, t) == "open")
+            if owner is None and not opened:
+                return outcomes, False
+            intents = {t.name: _reconcile_intent(jr_fd, t) for t in txns if t.name in opened}
+            stage[0] = "prelock"
+            if owner is not None and not _journal.owner_confirmed_dead(owner):
+                raise ReconcileRefusal(RECONCILE_LOCK_HELD, "the adoption journal lock is held by a "
+                                       "possibly-live owner (pid {}); it is never seized, and nothing "
+                                       "was written (fail-closed)".format(owner.get("pid")))
+            shell = [name for name in opened if not intents[name][0]]
+            touched = set()
+            for _init_store, paths in intents.values():
+                touched |= paths
+            targets = _reconcile_lease_targets(root_fd, shell, touched)
+            # Before ANY rollback can run (the stale-lock break below reconciles every
+            # transaction itself), prove each open init-store transaction's reversal removes
+            # only the operation's own publication: a foreign file at a member path is
+            # preserved and the whole reconciliation refuses fail-closed
+            # (_init_store_reversal_preverify). Named by its INTENT or by its name, either.
+            for t in txns:
+                if t.name in opened and (intents[t.name][0] or t.name.endswith("." + INIT_STORE_PHASE)):
+                    try:
+                        _init_store_reversal_preverify(root_fd, product_root, jr_fd, t)
+                    except AdoptApplyError as exc:
+                        raise ReconcileRefusal(RECONCILE_REVERSAL_UNPROVEN, str(exc)) from exc
+
+            def lock_fault(exc):
+                """An acquire_lock OSError: what it left, read and released by _failed_lock_state (only a
+                lock this run created, ownership-checked), named in the refusal."""
+                _state, clause, interrupt = _failed_lock_state(jr_fd, journal_root, exc)
+                finding = RECONCILE_FAILED if stage[0] == "recovering" else RECONCILE_PRELOCK_FAULT
+                refusal = ReconcileRefusal(finding, "the adoption journal {} cannot be reconciled: taking "
+                                           "its journal lock failed ({}); {}{}{} (fail-closed)".format(
+                                               JOURNAL_REL, exc, clause,
+                                               "" if finding == RECONCILE_FAILED else
+                                               ", and no recovery write was made", arbitration_said()))
+                if interrupt is not None:
+                    interrupt.add_note(str(refusal))
+                    raise interrupt
+                raise refusal from exc
+
+            stale = None
+            if owner is not None:
+                # The stale-lock break reconciles every transaction ITSELF (under its arbitration
+                # lock), so the idempotent recover() re-run below would read each one 'terminal'.
+                # Record the pre-break states so the reported outcome names what that recovery DID.
+                stale = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
+
+                def claim():
+                    _take_reconcile_leases(root_fd, targets, taken)
+                    broke.append(True)
+                    stage[0] = "recovering"
+                arb_before.append(_journal._lstat_contained(root_fd, arb_rel) is not None)
+                try:
+                    claimed = _journal.reconcile_and_claim_stale(journal_root, jr_fd, root_fd, SESSION_ID,
+                                                                 claim=claim)
+                except OSError as exc:
+                    if getattr(exc, "lock_created", False):
+                        lock_fault(exc)
+                    raise
+                if claimed != "acquired":
+                    raise ReconcileRefusal(RECONCILE_LOCK_HELD, "the adoption journal lock became live "
+                                           "during reconciliation; it is never seized, and no recovery "
+                                           "write was made (fail-closed)")
+            else:
+                try:
+                    _journal.acquire_lock(journal_root, SESSION_ID)
+                except _journal.JournalError as exc:
+                    raise ReconcileRefusal(RECONCILE_LOCK_HELD, "another run took the adoption journal "
+                                           "lock during reconciliation ({}); it is never seized, and "
+                                           "nothing was written (fail-closed)".format(exc))
+                except OSError as exc:
+                    lock_fault(exc)
+            held.append(True)
+            try:
+                if not broke:
+                    _take_reconcile_leases(root_fd, targets, taken)
+                stage[0] = "recovering"
+                for txn in txns:
+                    outcome = _journal.recover(jr_fd, txn, root_fd)
+                    if broke and stale.get(txn.name) == "open" and outcome == "terminal":
+                        outcome = ("rolled-forward"
+                                   if _journal.classify_state(jr_fd, txn) == "complete"
+                                   else "rolled-back")
+                    outcomes.append((txn.name, outcome))
+            finally:
+                _journal.release_lock(journal_root)
+        finally:
+            _journal._close_fd_quietly(jr_fd)
+    except ReconcileRefusal as exc:
+        said = arbitration_said()
+        if said and said not in str(exc):
+            raise ReconcileRefusal(exc.finding, "{}{}".format(exc, said)) from exc
+        raise
+    except (_journal.JournalError, OSError) as exc:
+        if stage[0] == "classify":
+            raise ReconcileRefusal(RECONCILE_UNCLASSIFIABLE, "the adoption journal {} holds a lock, entry or "
+                                   "transaction that cannot be read or classified ({}); nothing was written "
+                                   "(fail-closed)".format(JOURNAL_REL, exc))
+        if stage[0] == "prelock":
+            raise ReconcileRefusal(RECONCILE_PRELOCK_FAULT, "the adoption journal {} cannot be reconciled: a "
+                                   "fault before this run held the journal lock and began recovering ({}); no "
+                                   "recovery write was made, and every transaction is as found{} "
+                                   "(fail-closed)".format(JOURNAL_REL, exc, arbitration_said()))
+        raise ReconcileRefusal(RECONCILE_FAILED, "the adoption journal {} recovery faulted after it began ({}): "
+                               "the recovery may be PARTIAL (what it already restored or published stays as "
+                               "the journal records it, and the transaction stays open); {}; a later `opf adopt "
+                               "reconcile` resumes it from the journal (fail-closed)".format(
+                                   JOURNAL_REL, exc, "the journal lock this run took is released" if held
+                                   else "the dead run's journal lock is kept, so a later reconcile breaks it "
+                                   "again"))
+    return outcomes, bool(held)
 
 
 def _default_store_present_without_manifest(product_root):
@@ -4140,7 +4450,7 @@ def _init_store_run(op_row, context):
         _owner, opened = journal_state(root_fd, journal_root)
         if opened:
             raise AdoptApplyError("interrupted adoption transaction(s) {} must be reconciled before "
-                                  "this run (run reconcile()); nothing written (fail-closed)".format(
+                                  "this run (run `opf adopt reconcile`); nothing written (fail-closed)".format(
                                       ", ".join(opened)))
         state = "nothing-opened"
         try:
@@ -10468,6 +10778,17 @@ def _self_test_checks():
               dead is not None and txn_state(root, rid) == "rolled-back"
               and (rid, "rolled-back") in outcomes and snapshot(root) == before and lock_free(root))
 
+    def finding_of(fn, *args):
+        """The named finding of a reconcile refusal (ReconcileRefusal.finding, which `opf adopt reconcile`
+        prints), "unnamed" for any other refusal, None when fn did not refuse."""
+        try:
+            fn(*args)
+        except ReconcileRefusal as exc:
+            return exc.finding
+        except AdoptApplyError:
+            return "unnamed"
+        return None
+
     # 8: a held journal lock refuses a transaction and a reconcile (never seized).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)
@@ -10482,6 +10803,7 @@ def _self_test_checks():
               (refusal(run_adopt_transaction, root, rid, compose_full(files)) or ""))
         check("held-lock-refuses-reconcile",
               "possibly-live owner" in (refusal(reconcile, root) or ""))
+        check("held-lock-reconcile-finding-named", finding_of(reconcile, root) == RECONCILE_LOCK_HELD)
         _journal.release_lock(journal_root)
 
     # 8b (round 3): reconcile reads the journal lock beneath the HELD contained journal-root fd (the
@@ -10515,6 +10837,316 @@ def _self_test_checks():
             _res, why = attempt(reconcile, root)
         check("reconcile-lock-read-beneath-held-jr-fd",
               _jr_swap_fired != [] and why is not None and "possibly-live owner" in why)
+
+    # 8c (OPF-ADOPT-RECONCILE-CLI): a store lease beside an open shell transaction refuses, named, with the
+    # tree unchanged and the transaction still open, and the rollback runs once the lease is gone; an
+    # invalid frame sequence refuses as unclassifiable, nothing written; a dead run's lock beside a
+    # completed transaction is released and REPORTED (reconcile_report), the product files unchanged; and
+    # with nothing to recover reconcile_report writes nothing at all, the journal included.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        man = ".working/toml/manifest.toml"
+        mid = interrupt_when(lambda: (root / archive_rel(rid, man)).exists() and (root / man).exists())
+        with mock.patch.object(_journal, "_kill_point", mid):
+            try:
+                run_adopt_transaction(root, rid, compose_full(files))
+            except (_Interrupt, AdoptApplyError):
+                pass
+        lease = root / store.WORKING_DIRNAME / store.DEFAULT_MACHINE_SUBDIR / "lease.toml"
+        lease.write_bytes(b"held\n")
+        was = tree_state(root)
+        check("reconcile-store-lease-beside-open-txn-refused-named",
+              finding_of(reconcile, root) == RECONCILE_STORE_LEASE_HELD and tree_state(root) == was
+              and txn_state(root, rid) == "open" and lock_free(root))
+        lease.unlink()
+        check("reconcile-lease-gone-rolls-back", (rid, "rolled-back") in (attempt(reconcile, root)[0] or []))
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        txn, _why = attempt(run_adopt_transaction, root, rid, compose_full(files))
+        # the committed frame log written twice over: two INTENTs, never an accepted frame sequence
+        frames = _journal_root(root) / rid / "frames.log"
+        frames.write_bytes(frames.read_bytes() * 2)
+        was = tree_state(root)
+        check("reconcile-unclassifiable-transaction-refused-named",
+              txn == rid and finding_of(reconcile, root) == RECONCILE_UNCLASSIFIABLE and tree_state(root) == was)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        txn, _why = attempt(run_adopt_transaction, root, rid, compose_full(files))
+        dead = dead_pid()
+        owner_row = dict(uid=os.getuid(), pid=dead or 1, session="opf-adopt-selftest-dead",
+                         utc="2026-09-17T12:00:00Z")
+        owner_row["pid-start"] = ""
+        product_files = snapshot(root)
+        (_journal_root(root) / "lock").write_text(json.dumps(owner_row), encoding="utf-8")
+        report, _why = attempt(reconcile_report, root)
+        check("reconcile-report-names-released-dead-lock",
+              dead is not None and txn == rid and report is not None and report[1] is True
+              and (rid, "terminal") in report[0] and lock_free(root) and snapshot(root) == product_files)
+        was = tree_state(root)
+        report, _why = attempt(reconcile_report, root)
+        check("reconcile-nothing-to-recover-writes-nothing", report == ([], False, False) and tree_state(root) == was)
+
+    # 8d (FIX-527-R1): reconcile EXCLUDES store writers across its recovery, never only observes them. It
+    # takes the adoption journal lock, then (the init-store order) the single-writer lease of every machine
+    # subdirectory under .working/ through the writers' own O_EXCL claim, before its first recovery write,
+    # holds them until the journal lock is released, and releases only its own. The build before this one
+    # only observed the default lease before the lock (codex MAJOR, claude MEDIUM 4), named pre-lock faults
+    # recovery-failed (claude MEDIUM 3), left an acquire_lock fault's lock (claude MINOR 1), misreported a
+    # lost race (claude MINOR 2) and skipped the lease by a transaction's name (claude MINOR 4); the
+    # recovery-failed vector pins the partial state the journal records, which that build left too.
+    import _opf_write_guard
+    lease_rel = "{}/{}/lease.toml".format(store.WORKING_DIRNAME, store.DEFAULT_MACHINE_SUBDIR)
+    real_acquire_lock = _journal.acquire_lock
+    real_claim_stale = _journal.reconcile_and_claim_stale
+
+    def interrupted_mid(temp):
+        root, files = fixture(temp)
+        before = snapshot(root)
+        man = ".working/toml/manifest.toml"
+        mid = interrupt_when(lambda: (root / archive_rel(rid, man)).exists() and (root / man).exists())
+        with mock.patch.object(_journal, "_kill_point", mid):
+            try:
+                run_adopt_transaction(root, rid, compose_full(files))
+            except (_Interrupt, AdoptApplyError):
+                pass
+        return root, before
+
+    def writer_lease(root, machine_rel):
+        """Another opf writer's claim, through the writers' own acquire: the exact bytes it wrote."""
+        fd = _open_product_root(root)
+        try:
+            return _opf_write_guard.acquire_lease(fd, machine_rel, "record")
+        finally:
+            store._close_fd_exc_safe(fd)
+
+    def stale_lock_bytes():
+        dead = dead_pid()
+        row = dict(uid=os.getuid(), pid=dead or 1, session="opf-adopt-selftest-dead", utc="2026-09-17T12:00:00Z")
+        row["pid-start"] = ""
+        return dead, json.dumps(row).encode("utf-8")
+
+    def without(state, rel):
+        return {k: v for k, v in state.items() if k != rel}
+
+    # codex's interleaving: a writer claims the lease AFTER the pre-lock observation, before the journal lock.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        was = snapshot(root)
+        writer = []
+
+        def writer_after_check(journal_root, session_id):
+            writer.append(writer_lease(root, ".working/toml"))
+            return real_acquire_lock(journal_root, session_id)
+        with mock.patch.object(_journal, "acquire_lock", writer_after_check):
+            got = finding_of(reconcile, root)
+        check("reconcile-writer-lease-after-check-excluded-named",
+              writer != [] and got == RECONCILE_STORE_LEASE_HELD and txn_state(root, rid) == "open"
+              and lock_free(root) and (root / lease_rel).read_bytes() == writer[0]
+              and without(snapshot(root), lease_rel) == was, got)
+
+    # the order and the span: the journal lock is held when each lease is claimed, the lease is held at every
+    # recovery checkpoint and when the journal lock is released, and it is gone (released) afterwards.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, before = interrupted_mid(temp)
+        lock_path = _journal_root(root) / "lock"
+        lease_path = root / lease_rel
+        seen = []
+        real_acquire_lease = _opf_write_guard.acquire_lease
+        real_release_lock = _journal.release_lock
+
+        def acquire_lease_seen(root_fd, machine_rel, verb):
+            seen.append(("lease", machine_rel, lock_path.exists()))
+            return real_acquire_lease(root_fd, machine_rel, verb)
+
+        def release_lock_seen(journal_root):
+            seen.append(("unlock", lease_path.exists()))
+            return real_release_lock(journal_root)
+
+        def restore_seen(name):
+            if name.startswith("after-restore-"):
+                seen.append(("restore", lease_path.exists()))
+        with mock.patch.object(_opf_write_guard, "acquire_lease", acquire_lease_seen), \
+                mock.patch.object(_journal, "release_lock", release_lock_seen), \
+                mock.patch.object(_journal, "_kill_point", restore_seen):
+            report, _why = attempt(reconcile_report, root)
+        leases = [e for e in seen if e[0] == "lease"]
+        restores = [e for e in seen if e[0] == "restore"]
+        check("reconcile-holds-store-lease-journal-lock-first-until-unlock",
+              report is not None and (rid, "rolled-back") in report[0] and report[2] is True
+              and ("lease", ".working/toml", True) in leases and all(e[2] for e in leases)
+              and seen.index(leases[0]) < seen.index(restores[0]) if leases and restores else False, seen)
+        check("reconcile-lease-released-after-journal-lock",
+              restores != [] and all(e[1] for e in restores) and seen[-1:] == [("unlock", True)]
+              and not lease_path.exists() and lock_free(root) and snapshot(root) == before, seen)
+
+    # the stale-lock path: the leases are claimed under the arbitration lock, before that break's recovery.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        dead, stale = stale_lock_bytes()
+        (_journal_root(root) / "lock").write_bytes(stale)
+        was = snapshot(root)
+        writer = []
+
+        def writer_before_break(*args, **kwargs):
+            writer.append(writer_lease(root, ".working/toml"))
+            return real_claim_stale(*args, **kwargs)
+        with mock.patch.object(_journal, "reconcile_and_claim_stale", writer_before_break):
+            got = finding_of(reconcile, root)
+        check("reconcile-stale-break-writer-lease-excluded-named",
+              dead is not None and writer != [] and got == RECONCILE_STORE_LEASE_HELD
+              and txn_state(root, rid) == "open" and (_journal_root(root) / "lock").read_bytes() == stale
+              and (root / lease_rel).read_bytes() == writer[0] and without(snapshot(root), lease_rel) == was, got)
+
+    # every machine subdirectory, not only the default: a claim and a present lease at .working/data.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        (root / ".working/data").mkdir()
+        (root / ".working/data/manifest.toml").write_bytes(b"[opf]\nstandard = \"opf\"\n")
+        other = root / ".working/data/lease.toml"
+        writer = []
+
+        def writer_other_subdir(journal_root, session_id):
+            writer.append(writer_lease(root, ".working/data"))
+            return real_acquire_lock(journal_root, session_id)
+        with mock.patch.object(_journal, "acquire_lock", writer_other_subdir):
+            claimed = finding_of(reconcile, root)
+        present = finding_of(reconcile, root)
+        check("reconcile-lease-at-every-machine-subdirectory-named",
+              writer != [] and claimed == RECONCILE_STORE_LEASE_HELD and present == RECONCILE_STORE_LEASE_HELD
+              and txn_state(root, rid) == "open" and lock_free(root) and other.read_bytes() == writer[0]
+              and not (root / lease_rel).exists(), (claimed, present))
+
+    # a store pointer can resolve a store elsewhere, whose lease a journal-only reconcile cannot take.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        (root / store.POINTER_REL).write_bytes(b"[store]\ntarget = \"dir:../elsewhere\"\n")
+        was = tree_state(root)
+        check("reconcile-store-pointer-beside-open-txn-refused-named",
+              finding_of(reconcile, root) == RECONCILE_STORE_LEASE_HELD and tree_state(root) == was
+              and txn_state(root, rid) == "open")
+
+    # recovery-failed after recovery began: PARTIAL as the journal records it (the archive copy already
+    # discarded, the transaction still open), the journal lock and this run's lease released; a later
+    # reconcile resumes it to the byte-identical prestate.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, before = interrupted_mid(temp)
+        discarded = root / archive_rel(rid, ".working/toml/manifest.toml")
+        fault_at = []
+
+        def restore_fault(name):
+            if name.startswith("after-restore-") and not discarded.exists() and not fault_at:
+                fault_at.append(name)
+                raise OSError(5, "injected EIO at " + name)
+        with mock.patch.object(_journal, "_kill_point", restore_fault):
+            got = finding_of(reconcile, root)
+        left_partial = (fault_at != [] and got == RECONCILE_FAILED and txn_state(root, rid) == "open"
+                        and not discarded.exists() and lock_free(root) and not (root / lease_rel).exists()
+                        and snapshot(root) != before)
+        outcomes, _why = attempt(reconcile, root)
+        check("reconcile-recovery-failed-partial-then-resumed",
+              left_partial and outcomes is not None and (rid, "rolled-back") in outcomes
+              and snapshot(root) == before, (fault_at, got, outcomes))
+
+    # pre-lock faults are their own finding, not recovery-failed, and leave no lock this run created.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        was = tree_state(root)
+
+        def eacces(journal_root, session_id):
+            raise PermissionError(13, "injected EACCES at the lock create")
+
+        def fsync_fault(path):
+            raise OSError(5, "injected EIO after the lock create")
+        with mock.patch.object(_journal, "acquire_lock", eacces):
+            no_create = finding_of(reconcile, root)
+        with mock.patch.object(_journal, "_fsync_path_dir", fsync_fault):
+            created = finding_of(reconcile, root)
+        check("reconcile-pre-lock-faults-named-no-lock-left",
+              no_create == RECONCILE_PRELOCK_FAULT and created == RECONCILE_PRELOCK_FAULT and lock_free(root)
+              and txn_state(root, rid) == "open" and tree_state(root) == was, (no_create, created))
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        dead, stale = stale_lock_bytes()
+        (_journal_root(root) / "lock").write_bytes(stale)
+        arb = _journal_root(root) / "lock.break"
+        arb.write_bytes(b"")
+        os.link(arb, root / "arbitration-second-name")
+        was = tree_state(root)
+        got = finding_of(reconcile, root)
+        check("reconcile-stale-arbitration-refusal-named-pre-lock",
+              dead is not None and got == RECONCILE_PRELOCK_FAULT and tree_state(root) == was
+              and txn_state(root, rid) == "open", got)
+
+    # a lost race is reported as what it was: a second reconcile that takes the lock after the first
+    # recovered reports every transaction terminal with the lock taken, and a stale lock a peer broke first
+    # is not this run's release.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        nested = []
+
+        def second_after_first(journal_root, session_id):
+            if not nested:
+                with mock.patch.object(_journal, "acquire_lock", real_acquire_lock):
+                    nested.append(reconcile_report(root))
+            return real_acquire_lock(journal_root, session_id)
+        with mock.patch.object(_journal, "acquire_lock", second_after_first):
+            report, _why = attempt(reconcile_report, root)
+        check("reconcile-race-second-run-reports-lock-taken-nothing-recovered",
+              nested != [] and (rid, "rolled-back") in nested[0][0]
+              and report == ([(rid, "terminal")], False, True) and lock_free(root), (nested, report))
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        dead, stale = stale_lock_bytes()
+        (_journal_root(root) / "lock").write_bytes(stale)
+        nested = []
+
+        def peer_breaks_first(*args, **kwargs):
+            if not nested:
+                with mock.patch.object(_journal, "reconcile_and_claim_stale", real_claim_stale):
+                    nested.append(reconcile_report(root))
+            return real_claim_stale(*args, **kwargs)
+        with mock.patch.object(_journal, "reconcile_and_claim_stale", peer_breaks_first):
+            report, _why = attempt(reconcile_report, root)
+        check("reconcile-race-peer-broke-stale-lock-not-claimed",
+              dead is not None and nested != [] and nested[0][1] is True
+              and report == ([(rid, "terminal")], False, True) and lock_free(root), (nested, report))
+
+    # a transaction directory merely NAMED *.initstore whose INTENT is not init-store's keeps the lease rule.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        os.rename(_journal_root(root) / rid, _journal_root(root) / (rid + "." + INIT_STORE_PHASE))
+        (root / lease_rel).write_bytes(b"held\n")
+        was = tree_state(root)
+        got = finding_of(reconcile, root)
+        check("reconcile-initstore-name-alone-keeps-lease-rule",
+              got == RECONCILE_STORE_LEASE_HELD and tree_state(root) == was, got)
+
+    # a lease this run took that cannot be released is named beside the finished recovery, never hidden.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+
+        def release_fails(root_fd, machine_rel, payload, verb):
+            raise _opf_write_guard.WriteGuardError("injected release failure")
+        with mock.patch.object(_opf_write_guard, "release_lease", release_fails):
+            got = finding_of(reconcile, root)
+        check("reconcile-own-lease-release-failure-named",
+              got == RECONCILE_LEASE_RELEASE_FAILED and txn_state(root, rid) == "rolled-back"
+              and (root / lease_rel).exists() and lock_free(root), got)
+
+    # only this run's own lease is released: a peer's lease that replaced it mid-recovery stays, byte-identical.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        peer = []
+
+        def peer_replaces(name):
+            if name.startswith("after-restore-") and not peer and (root / lease_rel).exists():
+                (root / lease_rel).unlink()
+                peer.append(writer_lease(root, ".working/toml"))
+        with mock.patch.object(_journal, "_kill_point", peer_replaces):
+            got = finding_of(reconcile, root)
+        check("reconcile-releases-only-its-own-lease",
+              peer != [] and got == RECONCILE_LEASE_RELEASE_FAILED and (root / lease_rel).read_bytes() == peer[0]
+              and lock_free(root), got)
 
     # 9: live re-observation over a throwaway fixture.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -15603,14 +16235,16 @@ def _init_store_git_checks(check, ctx, refused):
             check("init-store-foreign-{}-preserved-not-reversed".format(target),
                   refused(res, "foreign") and foreign_kept()
                   and txn_state(root, run) == "open")
-            rec_err = None
+            rec_err = rec_finding = None
             try:
                 reconcile(root)
             except AdoptApplyError as exc:
-                rec_err = str(exc)
+                rec_err, rec_finding = str(exc), getattr(exc, "finding", None)
             check("init-store-reconcile-preserves-foreign-{}".format(target),
                   rec_err is not None and "preserved" in rec_err and foreign_kept()
                   and txn_state(root, run) == "open")
+            check("init-store-reconcile-foreign-{}-finding-named".format(target),
+                  rec_finding == RECONCILE_REVERSAL_UNPROVEN)
 
         # THE FOREIGN-VIEW BINDING (codex round 3, finding 1): a row that binds the deferred
         # TODO.md view digest to FOREIGN bytes never authorizes their removal -- the reversal
