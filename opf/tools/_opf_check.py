@@ -2105,7 +2105,10 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
     released, so no store predates the firewall): a record whose `actor.kind` is exactly `importer`, and
     an imported-series row, neither owes a receipt nor confers one, so an importer-authored done never
     satisfies a non-importer backlog_item's receipt and an importer-authored ratified backlog_item is
-    owed none. Only the exact kind is exempt; an unreadable kind (None) joins, fail-closed. A
+    owed none. Only the exact kind is exempt; an unreadable kind (None) joins, fail-closed. The exemption
+    is from owing and conferring only: a non-importer done's receipt_of resolves among every clean
+    backlog_item, importer-authored ones included, so a clean receipt naming an importer-authored item
+    not ratified at `done` is a finding, as for a receipt naming any other unratified item. A
     non-importer item whose every receipt is importer-authored is not reported here: the driver runs
     _check_importer_receipts beside this join on every store, and that arm reports it, or accepts in its
     place the remedy spec 8.6 defines (a maintainer-authored `corrects` decision), so the one defect is
@@ -2121,6 +2124,12 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
         return
     joined = [r for r in recs if r.location != "imported" and r.actor_kind != "importer"]
     bi_state = {r.id: (r.state, r.qual) for r in joined if r.rtype == "backlog_item" and isinstance(r.id, str)}
+    # The receipt targets: every clean backlog_item, importer-authored ones included. Where an
+    # importer-authored record shares a non-importer item's id, the non-importer item's state stands, so
+    # an importer-authored duplicate never makes a clean item read as ratified.
+    target_state = {r.id: (r.state, r.qual) for r in recs
+                    if r.location != "imported" and r.rtype == "backlog_item" and isinstance(r.id, str)}
+    target_state.update(bi_state)
     # The items _check_importer_receipts grades: every receipt_of naming them comes from an importer-authored
     # done, read exactly as that arm reads its receipts.
     receipt_kinds = {}
@@ -2149,7 +2158,7 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
                             "(spec 8.5)".format(bid, n))
     for did, targets in done_targets.items():
         for tid in targets:
-            st = bi_state.get(tid)
+            st = target_state.get(tid)
             if st is None:
                 tgt = by_id.get(tid)
                 if tgt is not None and tgt.rtype != "backlog_item":
@@ -8654,6 +8663,20 @@ def self_test():
         del _r1_impo["prior"]["held"]["DN"]
         check("r1-importer-authored-backlog-item-owes-no-receipt",
               run(f, obs=_r1_impo).status == VALID)
+        # ... yet the exemption is from owing and conferring only: a clean receipt naming an open
+        # importer-authored backlog_item is the C-RECEIPTS finding a receipt naming an open clean item is
+        # (red when the receipt targets are read among the non-importer items alone).
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([bi(1, "done"), dict(bi(2, "open"), actor={"kind": "importer"})])
+        f["done.index.toml"] = idx([dn(1, "BI-1"), dn(2, "BI-2")])
+        f["counters.toml"] = counters(DN=2)
+        _r1_tgt = run(f)
+        check("r1-clean-receipt-of-unratified-importer-item-finding",
+              _r1_tgt is not None and _r1_tgt.status == INVALID
+              and {c for c, v in _r1_tgt.checks.items() if v != "PASS"} == {"C-RECEIPTS"}
+              and _r1_tgt.by_check.get("C-RECEIPTS")
+              == ["C-RECEIPTS: done 'DN-2' receipt_of -> backlog_item 'BI-2' which is not ratified at 'done' "
+                  "(state 'open'; spec 8.5)"])
         # An importer-authored decided pending_decision confers no resolution: a chain whose only
         # non-superseded decided member is importer-authored has zero current effective resolutions
         # (red when the chain derivation reads the importer record as the resolution).
@@ -8743,6 +8766,31 @@ def self_test():
         check("r1-receipt-handoff-only-where-the-arm-grades",
               _r1_hrep.findings == ["C-RECEIPTS: ratified backlog_item 'BI-1' (at 'done') has no done receipt "
                                     "(the receipt is one-to-one; spec 8.5)"])
+        # A clean receipt's target is read among every clean backlog_item: one naming a proposed
+        # importer-authored item is the finding, one naming a ratified importer-authored item is not, and an
+        # importer-authored record sharing a clean item's id never makes that item read as ratified (red
+        # when the targets are read among the non-importer items alone, or when the duplicate's state wins).
+        # The importer-authored receipts stay exempt beside it: two of them on an importer-authored item,
+        # and one naming an open clean item, raise nothing.
+        def _r1_target_findings(*rows):
+            _trecs = [_make_rec(r, r["type"], "active") for r in rows]
+            _trep = _Report()
+            _trep.ran("C-RECEIPTS")
+            _check_receipts(_trecs, {r.id: r for r in _trecs}, _trep)
+            _check_importer_receipts(_trecs, _trep, "C-RECEIPTS")
+            return _trep.findings
+        check("r1-receipt-targets-include-importer-authored-items",
+              _r1_target_findings(_with_kind(bi(1, "done/proposed"), "importer"), dn(1, "BI-1"))
+              == ["C-RECEIPTS: done 'DN-1' receipt_of -> backlog_item 'BI-1' which is not ratified at 'done' "
+                  "(state 'done'; spec 8.5)"]
+              and _r1_target_findings(_with_kind(bi(1, "done"), "importer"), dn(1, "BI-1")) == []
+              and _r1_target_findings(bi(1, "open"), _with_kind(bi(1, "done"), "importer"), dn(1, "BI-1"))
+              == ["C-RECEIPTS: done 'DN-1' receipt_of -> backlog_item 'BI-1' which is not ratified at 'done' "
+                  "(state 'open'; spec 8.5)"]
+              and _r1_target_findings(_with_kind(bi(1, "done"), "importer"),
+                                      _with_kind(dn(1, "BI-1"), "importer"),
+                                      _with_kind(dn(2, "BI-1"), "importer")) == []
+              and _r1_target_findings(bi(1, "open"), _with_kind(dn(1, "BI-1"), "importer")) == [])
         _r3_srecs = [_make_rec(pd(1), "pending_decision", "active"),
                      _make_rec(pd(2, status="withdrawn", supersedes="PD-1"), "pending_decision", "active"),
                      _make_rec(pd(3, supersedes="PD-2"), "pending_decision", "imported")]
