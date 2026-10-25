@@ -81,9 +81,12 @@ Checks, each a named guard:
                   a second spelling, so a second, conflicting value is not read, and the gate
                   stays VALID, where no ASCII quote follows the equals sign (unquoted, as in
                   version = 9.9.9, curly-quoted or backticked), where another separator (a colon)
-                  stands for it, where a character that is neither a format character nor folded
-                  by NFKC splits the key, or where the fact is stated in other words (version
-                  9.9.9)
+                  stands for it, where an invisible or near-invisible character outside category
+                  Cf splits the key (a combining grapheme joiner, or a filler letter, which NFKC
+                  at most maps to another filler), where a letter of the key is a look-alike from
+                  another script that NFKC does not fold (a Cyrillic ie for the e of version, a
+                  Greek omicron for the o of format), or where the fact is stated in other words
+                  (version 9.9.9)
   quotation       every double-quoted span of MIN_QUOTE_CHARS or more normalized characters whose
                   nearby context (same paragraph, within _QUOTE_CONTEXT_CHARS before the opening
                   quote) attributes it to a pinned source appears word for word,
@@ -645,9 +648,12 @@ def _check_history(root, pin, table):
 # underscore (so `spec_version` is not the pack version), then optional whitespace, an ASCII `=`,
 # optional whitespace and an ASCII single or double quote. The code-span statement the gate reads
 # is one such spelling. No other shape is read: a value with no ASCII quote straight after the
-# equals sign (unquoted, curly-quoted or backticked), another separator (a colon), or a fact
-# stated in other words is not counted, so a second, conflicting value in one of those forms is
-# not refused.
+# equals sign (unquoted, curly-quoted or backticked), another separator (a colon), a key split by
+# an invisible or near-invisible character outside category Cf (a combining grapheme joiner, or a
+# filler letter, which NFKC at most maps to another filler), a key with a look-alike letter from
+# another script that NFKC does not fold (a Cyrillic ie for the e of version, a Greek omicron for
+# the o of format), or a fact stated in other words is not counted, so a second, conflicting value
+# in one of those forms is not refused.
 _PACK_FACT_SPELLING_RES = tuple(
     (key, re.compile(r"(?i)(?<![A-Za-z0-9_])" + key + r"\s*=\s*[\"']"))
     for key in ("format", "version"))
@@ -662,8 +668,11 @@ def _check_pack_facts(root, section, section_visible):
     prose, behind an escaped backtick, in a code block, built from a character reference only the
     rendered text decodes, spelled across a setext underline only the raw text keeps, or written
     in fullwidth forms NFKC folds to it) is refused rather than read past. A second value in any
-    other form (unquoted, curly-quoted or backticked after the equals sign, after a colon, or
-    stated in other words such as version 9.9.9) is not read, so it is not refused."""
+    other form (unquoted, curly-quoted or backticked after the equals sign, after a colon, under a
+    key split by an invisible or near-invisible character outside category Cf such as a combining
+    grapheme joiner or a filler letter, under a key with a look-alike letter from another script
+    that NFKC does not fold such as a Cyrillic ie for the e of version, or stated in other words
+    such as version 9.9.9) is not read, so it is not refused."""
     stated_fmt = re.findall(r"`format = \"([^\"`]+)\"`", section)
     stated_ver = re.findall(r"`version = \"([^\"`]+)\"`", section)
     _require(len(stated_fmt) == 1 and len(stated_ver) == 1, "pack-facts",
@@ -2204,6 +2213,11 @@ def _vectors():
         # pack-facts residual states.
         ("pin-pack-version-second-value-unquoted-not-read", VALID, None, None,
          stale_in_section("Older notes say version = 9.9.9 here.")),
+        # A second value under a key whose e is a Cyrillic ie (U+0435): NFKC does not fold a
+        # look-alike letter from another script, so the assignment count does not read this
+        # conflicting version and the tree stays VALID, as the pack-facts residual states.
+        ("pin-pack-version-second-value-look-alike-key-not-read", VALID, None, None,
+         stale_in_section("Older notes say v" + chr(0x0435) + 'rsion = "9.9.9" here.')),
     ]
 
 
