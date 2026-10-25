@@ -2098,24 +2098,28 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
 # --- the cross-record checks -------------------------------------------------------------------------
 
 def _check_receipts(recs, by_id, rep, unread=frozenset()):
-    """C-RECEIPTS (R1): the done<->backlog_item receipt is one-to-one in BOTH directions (OPF-SPEC 8.5).
-    Every ratified backlog_item (unqualified `done`) has exactly one done receipt; every done's receipt_of
-    target resolves to a backlog_item ratified at `done`. The section 8.6 firewall applies here as in
-    every current-state join, keyed on provenance alone (the maintainer ruling: OPF has never been
-    released, so no store predates the firewall): a record whose `actor.kind` is exactly `importer`, and
-    an imported-series row, neither owes a receipt nor confers one, so an importer-authored done never
-    satisfies a non-importer backlog_item's receipt and an importer-authored ratified backlog_item is
-    owed none. Only the exact kind is exempt; an unreadable kind (None) joins, fail-closed. The exemption
-    is from owing and conferring only: a non-importer done's receipt_of resolves among every clean
-    backlog_item, importer-authored ones included, so a clean receipt naming an importer-authored item
-    not ratified at `done` is a finding, as for a receipt naming any other unratified item. A
-    non-importer item whose every receipt is importer-authored is not reported here: the driver runs
-    _check_importer_receipts beside this join on every store, and that arm reports it, or accepts in its
-    place the remedy spec 8.6 defines (a maintainer-authored `corrects` decision), so the one defect is
-    reported once and the remedy is never refused. When the backlog_item or done records could not all
-    be read, or a seated one's status or links could not be interpreted (`unread` from the collectors,
-    widened by _make_rec's `unparsed`), the join is CANNOT-EVALUATE and is not run: a missing or
-    unreadable receipt or target could hide a defect or report a false one."""
+    """C-RECEIPTS (R1): the done<->backlog_item receipt is one-to-one (OPF-SPEC 8.5). The section 8.6
+    firewall applies here as in every current-state join, keyed on provenance alone (the maintainer
+    ruling: OPF has never been released, so no store predates the firewall): a record whose `actor.kind`
+    is exactly `importer`, and an imported-series row, neither owes a receipt nor confers one. Only the
+    exact kind is exempt; an unreadable kind (None) joins, fail-closed. The clean receipts are therefore
+    the clean dones not authored by an importer, and the join grades three rules over them. At most one:
+    every clean backlog_item ratified at unqualified `done`, importer-authored ones included, has at most
+    one clean receipt, so two clean receipts naming one ratified importer-authored item are a finding; an
+    importer-authored done is never counted, so two of them on an importer-authored item, or one beside a
+    clean receipt, raise no count finding. At least one: every non-importer backlog_item ratified at
+    unqualified `done` has a clean receipt; an importer-authored ratified item is owed none, and an
+    importer-authored done never satisfies a non-importer item. The target: a clean receipt's receipt_of
+    resolves among every clean backlog_item, importer-authored ones included, to one ratified at `done`,
+    so a clean receipt naming an importer-authored item not ratified at `done` is a finding, as for a
+    receipt naming any other unratified item. A non-importer item whose every receipt is importer-authored
+    is not reported here: the driver runs _check_importer_receipts beside this join on every store, and
+    that arm reports it, or accepts in its place the remedy spec 8.6 defines (a maintainer-authored
+    `corrects` decision), so the one defect is reported once and the remedy is never refused. When the
+    backlog_item or done records could not all be read, or a seated one's status or links could not be
+    interpreted (`unread` from the collectors, widened by _make_rec's `unparsed`), the join is
+    CANNOT-EVALUATE and is not run: a missing or unreadable receipt or target could hide a defect or report
+    a false one."""
     unread = unread | {r.rtype for r in recs if r.location != "imported" and r.unparsed}
     if unread & {"backlog_item", "done"}:
         rep.cant("C-RECEIPTS: the backlog_item and done records could not all be read or interpreted (see "
@@ -2147,10 +2151,12 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
     for did, targets in done_targets.items():
         for tid in targets:
             bi_to_dones.setdefault(tid, []).append(did)
-    for bid, (state, qual) in bi_state.items():
+    # The at-most-one limit counts the clean non-importer receipts naming every ratified target,
+    # importer-authored items included; only a non-importer item is owed a receipt.
+    for bid, (state, qual) in target_state.items():
         if state == "done" and qual is None:
             n = len(bi_to_dones.get(bid, ()))
-            if n == 0 and bid not in arm_graded:
+            if n == 0 and bid in bi_state and bid not in arm_graded:
                 rep.finding("C-RECEIPTS: ratified backlog_item {!r} (at 'done') has no done receipt (the "
                             "receipt is one-to-one; spec 8.5)".format(bid))
             elif n > 1:
@@ -8677,6 +8683,20 @@ def self_test():
               and _r1_tgt.by_check.get("C-RECEIPTS")
               == ["C-RECEIPTS: done 'DN-2' receipt_of -> backlog_item 'BI-2' which is not ratified at 'done' "
                   "(state 'open'; spec 8.5)"])
+        # ... and the one-to-one limit on clean receipts covers every clean target: two maintainer dones
+        # naming one ratified importer-authored backlog_item are the C-RECEIPTS finding two naming a
+        # ratified clean item are (red when the count runs over the non-importer items alone).
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([dict(bi(1, "done"), actor={"kind": "importer"}), bi(2, "open")])
+        f["done.index.toml"] = idx([dn(1, "BI-1"), dn(2, "BI-1")])
+        f["counters.toml"] = counters(DN=2)
+        _r1_two = run(f)
+        check("r1-two-clean-receipts-of-importer-authored-item-finding",
+              _r1_two is not None and _r1_two.status == INVALID
+              and {c for c, v in _r1_two.checks.items() if v != "PASS"} == {"C-RECEIPTS"}
+              and _r1_two.by_check.get("C-RECEIPTS")
+              == ["C-RECEIPTS: backlog_item 'BI-1' has 2 done receipts; the receipt is one-to-one "
+                  "(spec 8.5)"])
         # An importer-authored decided pending_decision confers no resolution: a chain whose only
         # non-superseded decided member is importer-authored has zero current effective resolutions
         # (red when the chain derivation reads the importer record as the resolution).
@@ -8791,6 +8811,17 @@ def self_test():
                                       _with_kind(dn(1, "BI-1"), "importer"),
                                       _with_kind(dn(2, "BI-1"), "importer")) == []
               and _r1_target_findings(bi(1, "open"), _with_kind(dn(1, "BI-1"), "importer")) == [])
+        # The one-to-one count reads a done whose actor kind cannot be read as a clean receipt, fail-closed:
+        # beside a maintainer done on a ratified importer-authored item it is a second receipt, while an
+        # importer-authored done in its place is not counted (red when the count runs over the non-importer
+        # items alone, drops a done of unreadable kind, or counts an importer-authored done).
+        check("r1-unreadable-kind-receipt-counts-toward-one-to-one",
+              _r1_target_findings(_with_kind(bi(1, "done"), "importer"), _with_kind(dn(1, "BI-1"), None),
+                                  dn(2, "BI-1"))
+              == ["C-RECEIPTS: backlog_item 'BI-1' has 2 done receipts; the receipt is one-to-one "
+                  "(spec 8.5)"]
+              and _r1_target_findings(_with_kind(bi(1, "done"), "importer"),
+                                      _with_kind(dn(1, "BI-1"), "importer"), dn(2, "BI-1")) == [])
         _r3_srecs = [_make_rec(pd(1), "pending_decision", "active"),
                      _make_rec(pd(2, status="withdrawn", supersedes="PD-1"), "pending_decision", "active"),
                      _make_rec(pd(3, supersedes="PD-2"), "pending_decision", "imported")]
