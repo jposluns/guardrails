@@ -72,7 +72,14 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
    (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory and an existing root
    `CHANGELOG.md` or `VERSION`): keep it, migrate it for a later post-adoption import, move it, or
-   retire it; nothing is absorbed or overwritten silently. `opf init` also refuses when the git
+   retire it; nothing is absorbed or overwritten silently. `opf init` writes the store under the
+   shared init operation lock (in the git directory's `opf-oplock/`, the lock adoption takes too),
+   holding the specification section 5.7 lease (`.working/toml/lease.toml`) while it writes, and
+   removes the lease and releases the lock before it reports success; while another OPF run holds
+   the lock, `opf init` refuses. A run that stopped partway can leave a partial `.working/` and
+   its lock record behind: once that `.working/` is moved aside, `opf init --recover` clears a
+   record whose holder is confirmed dead, and refuses a record whose holder may still be live.
+   `opf init` also refuses when the git
    history of HEAD's first-parent line shows a prior store (specification section 8.2: counters
    never restart, so record ids are never reissued). That scan follows the first-parent line only: a store that never reached a tree on
    HEAD's first-parent line (for example one created and deleted on a side branch, merged or not)
