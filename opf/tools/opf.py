@@ -21766,10 +21766,11 @@ def _cli_self_test():
                 # The stage driver end to end over a decision-complete fixture (a retire source and a
                 # kept file at a NOT-ADOPTED root), planned through the wired `plan`: approve -> 0 with
                 # the approval binding the plan's two digests on stdout, writing nothing; apply -> 2
-                # naming the unlanded ops (the fixture plan's init-store, install-pack, register-unmanaged
-                # and retire-file ops, and the driver's receipt stage, are not landed in this build),
-                # writing nothing, no journal and no bundle (the wiring discriminator: an unwired apply
-                # refuses with the not-yet-available message instead). Flips: an approval for a fresh plan
+                # naming what is unlanded (every plan op of the fixture, its plant-governance enforcement
+                # rows among them, has landed; the driver's mandatory receipt stage has not, so apply names
+                # that stage and no plan op), writing nothing, no journal and no bundle (the wiring
+                # discriminator: an unwired apply refuses with the not-yet-available message instead).
+                # Flips: an approval for a fresh plan
                 # of the same tree -> apply 2 on the binding; a source edited after planning -> approve 2
                 # into a fresh plan; an open adoption-journal transaction -> plan 2 directing to reconcile
                 # (the planner itself never reads that journal, so without the gate it reports the
@@ -21794,8 +21795,8 @@ def _cli_self_test():
                 bindings = _opf_adopt.canonical_plan_bindings()   # its revision is the fixture's HEAD, below
                 manifest = _opf_init.build_manifest()
                 views = sorted(v["target"] for v in tomllib.loads(manifest)["views"].values())
-                # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry
-                # point) lies outside every walked root, so its absence is a declared target.
+                # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool entry
+                # point and the deny hook) lies outside every walked root, so its absence is a declared target.
                 sheet = dict(schema=1, product="opf", sources=["keep.md", "legacy.md"],
                              targets=[_opf_adopt.PACK_MIRROR_ROOT],
                              decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),
@@ -21803,8 +21804,8 @@ def _cli_self_test():
                              ops=[dict(op="init-store", store_root=".", members=[dict(
                                       path=".working/toml/manifest.toml", digest=sha(manifest.encode("utf-8")))]),
                                   dict(op="render-views", store_root=".",
-                                       members=[dict(path=v, digest=sha(v.encode("utf-8"))) for v in views]),
-                                  _opf_adopt.enforcement_install_op(bindings["enforcement"])],
+                                       members=[dict(path=v, digest=sha(v.encode("utf-8"))) for v in views])]
+                             + _opf_adopt.enforcement_install_ops(bindings["enforcement"]),
                              bindings=bindings)
                 sheet_path, plan_path, plan2_path, approval_path = (
                     os.path.join(abase, name) for name in ("adopt-sheet.toml", "adopt-plan.toml",
@@ -21857,6 +21858,12 @@ def _cli_self_test():
                     if rc != EXIT_MALFORMED or "not yet executable" not in err:
                         failures.append("adopt apply with unlanded ops: rc={!r} (expected 2 + the unlanded-op "
                                         "refusal; {})".format(rc, err.strip()))
+                    # the plan's plant-governance rows dispatch to their landed handler, so the refusal names
+                    # the receipt stage alone and no plan op
+                    if (rc != EXIT_MALFORMED or "receipt stage" not in err or "plan op(s)" in err
+                            or "plant-governance" not in [row["op"] for row in plan_doc["ops"]]):
+                        failures.append("adopt apply over the routed enforcement rows: rc={!r} (expected 2 + "
+                                        "the receipt-stage refusal naming no plan op; {})".format(rc, err.strip()))
                     rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan2_path,
                                                "--approval", approval_path, "--root", adoptee])
                     if rc != EXIT_MALFORMED or "does not bind" not in err:

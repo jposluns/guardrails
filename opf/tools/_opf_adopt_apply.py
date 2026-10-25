@@ -9,7 +9,7 @@ retained bytes it lists (spec 4.2), a base `inventory.toml` then one `inventory-
 phase, never rewritten; the homes-1 bundle verification the completion checks carry themselves while
 C-EVIDENCE-ENUM is inactive (spec 14.1), which RE-READS the inventories and payload digests from disk;
 the preserve-first composition of spec 14.2; live re-observation of every operand; one journaled
-transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed eleven-op
+transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed ten-op
 ADOPT_OPS vocabulary. Slice 2 makes the three pure file ops executable (EXECUTABLE_OPS: create-file,
 move-file, retire-file), staged as spec 14.1 and 14.2 order them: the run's base transaction is the APPLY
 stage, which creates a planned file, takes a non-occupying retire source's retirement preimage while the
@@ -41,9 +41,9 @@ binding its plan_digest and inventory_digest, writing nothing; `opf adopt apply`
 pair, persists both in the run's evidence bundle within the run's one base transaction, and dispatches
 every plan op through the dispatch table and then the driver's mandatory receipt stage (which mints the
 record-adoption row and assembles the receipt core), so while any plan op or the driver's mandatory
-receipt stage is unlanded, apply refuses before anything is written. Every other op returns a
-refusing not-yet-executable verdict: pack installation (install-pack), the completion checks, the stage
-driver's retirement stage (it opens the RETIREMENT_PHASE transaction the file ops compose into only after
+receipt stage is unlanded, apply refuses before anything is written. Every op of the vocabulary has a
+landed handler (the enforcement pack is planted by plant-governance rows and its hook registered by
+enable-hook); the completion checks, the stage driver's retirement stage (it opens the RETIREMENT_PHASE transaction the file ops compose into only after
 a green completion check, and no adoption interface opens that transaction in this build), and the
 `complete` and `reconcile` CLI subcommands remain later slices, as does the driver's receipt stage; the
 read-only `opf adopt` subcommands plan and status shipped with K9a. Live outside the self-test fixtures
@@ -300,10 +300,10 @@ file is a verified no-op that composes nothing. The op writes configuration only
 activates the hook. Disclosed residuals of slice 2: the shell's store-posture gate admits only a first
 adoption (no lease join yet), so a re-adoption's enable-hook refuses with it; the registration target is
 bound to the merge core's closed v1 path allowlist (_opf_adopt_hook.REGISTRATION_PATHS) and plugin_entry
-to the plan-row pack-member grammar (_opf_adopt._is_hook_entry, one shell word, never arbitrary command
-text), while checking the entry against a digest-verified installed pack is the trust gate's
-(a later slice); binding the rows to the one approved plan is the stage driver's; and a platform that
-already loaded a merged registration is not un-executed by restoring the file.
+to exactly the fixed deny-hook command (_opf_adopt._is_hook_entry, _opf_adopt.HOOK_COMMAND, never other
+command text), while the plan validator binds that command's target to the hook file the same plan plants
+from its digest-verified pack member; binding the rows to the one approved plan is the stage driver's;
+and a platform that already loaded a merged registration is not un-executed by restoring the file.
 
 Registration ops (slice 4): each rewrites ONE existing file whole, never by text substitution, under the
 record writer's byte-reproduction discipline: the bytes it rewrites (live, or the previous link of a
@@ -4558,8 +4558,8 @@ def _compose_enable_hook(op_row, ops):
     the threat model). The registration path must name a supported v1 registration target (the merge
     core's closed REGISTRATION_PATHS allowlist: PATH identity selects the platform, decided BEFORE any
     read, so an unsupported platform or a non-settings file refuses with nothing read and nothing
-    written, however settings-shaped its content). The plugin_entry must match the pack-member grammar
-    dispatch already validated, re-proved here because OP_HANDLERS is a public table and a direct
+    written, however settings-shaped its content). The plugin_entry must be exactly the fixed deny-hook
+    command dispatch already validated, re-proved here because OP_HANDLERS is a public table and a direct
     caller skips dispatch; for the same reason a row that is not a table carrying string
     registration_path, plugin_entry, old_digest and new_digest refuses first, never an uncaught
     KeyError or AttributeError. The registration file must then be present, regular,
@@ -4590,8 +4590,8 @@ def _compose_enable_hook(op_row, ops):
                               "one (fail-closed)".format(path, hook.REGISTRATION_FAMILY,
                                                          ", ".join(hook.REGISTRATION_PATHS)))
     if not schema._is_hook_entry(op_row["plugin_entry"]):
-        raise AdoptApplyError("enable-hook plugin_entry is not one word of the pack-member grammar "
-                              "(_opf_adopt._is_hook_entry), re-proved here so a caller of the handler "
+        raise AdoptApplyError("enable-hook plugin_entry is not the fixed deny-hook command "
+                              "(_opf_adopt.HOOK_COMMAND), re-proved here so a caller of the handler "
                               "table that skips dispatch still cannot register it; nothing read or "
                               "written (fail-closed)")
     if path in ops.staged:
@@ -4744,7 +4744,10 @@ def _plant_governance(op_row, context=None):
     which removes the planted file. Every refusal is CANNOT-EVALUATE and precedes any filesystem
     publication; one raised inside ApplyOps.create (a path component that is not a directory) can leave
     context["ops"] partly composed, so the compose callable MUST raise on any refusing verdict, discarding
-    the whole transaction before it opens (run_adopt_transaction then writes nothing)."""
+    the whole transaction before it opens (run_adopt_transaction then writes nothing). A path beneath the
+    opf/ mirror or at an enforcement destination is planted only from its own pack source
+    (_opf_adopt.pack_source), the binding the plan validator holds, re-proved here because OP_HANDLERS is
+    a public table and a direct caller skips dispatch."""
     try:
         ops = _composing_ops(op_row, context)
         path = op_row["path"]
@@ -4756,6 +4759,10 @@ def _plant_governance(op_row, context=None):
             raise AdoptApplyError("{!r} is the product-root VERSION deliverable, a render-managed "
                                   "destination (spec 14.2), where no governance adapter is planted "
                                   "(fail-closed)".format(path))
+        want = schema.pack_source(path)
+        if want is not None and op_row["source_member"] != want:
+            raise AdoptApplyError("source_member {!r} is not {!r}, the only pack source planted at {!r} "
+                                  "(fail-closed)".format(op_row["source_member"], want, path))
         data, digest = verify_pack_member(_context_plan(context), context.get("pack"), op_row["source_member"])
         if "sha256:" + digest != op_row["content_digest"]:
             raise AdoptApplyError("the verified member {!r} is not the content_digest the row "
@@ -5022,7 +5029,7 @@ def _record_adoption(op_row, context=None):
     return schema._ok()
 
 
-# --- the dispatch table: every op but the landed ops (the three file ops, init-store, the registration ops, enable-hook and the three finish ops) refuses not-yet-executable --
+# --- the dispatch table: every op has landed (the three file ops, init-store, the registration ops, enable-hook and the three finish ops); a stand-in refuses not-yet-executable --
 
 def _not_yet_executable(op_row, context=None):
     """The refusing not-yet-executable verdict behind every dispatch entry no slice has landed yet. Each
@@ -5219,7 +5226,6 @@ def _execute_file_op(op_row, context=None):
 # Keyed by the closed ADOPT_OPS vocabulary; the self-test reconciles this table against
 # ADOPT_OPS_BY_NAME in BOTH directions so it can neither drop nor invent an op.
 OP_HANDLERS = {
-    "install-pack": _not_yet_executable,
     "init-store": _init_store,
     "create-file": _execute_file_op,
     "plant-governance": _plant_governance,
@@ -11087,10 +11093,10 @@ def _self_test_checks():
         rows = [dict(op="init-store", store_root=".", members=[dict(
                     path=".working/toml/manifest.toml", digest=_digest(manifest.encode("utf-8")))]),
                 dict(op="render-views", store_root=".",
-                     members=[dict(path=v, digest=_digest(v.encode("utf-8"))) for v in views]),
-                schema.enforcement_install_op(bindings["enforcement"])]
-        # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry point)
-        # lies outside every walked root, so its absence is a declared target.
+                     members=[dict(path=v, digest=_digest(v.encode("utf-8"))) for v in views])]
+        rows += schema.enforcement_install_ops(bindings["enforcement"])
+        # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool entry point and
+        # the deny hook) lies outside every walked root, so its absence is a declared target.
         sheet = dict(sources=["keep.md", "legacy.md"], targets=[schema.PACK_MIRROR_ROOT], product="opf",
                      decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),
                                 dict(path="legacy.md", disposition="retire", actor="fixture")],
@@ -11569,8 +11575,8 @@ def _self_test_checks():
     # 11b: the driver's typed contexts and its one preservation pass (B2, B3), over a planner-frozen fixture
     # with a kept file (register-unmanaged), a non-occupying retire source (retire-file), a non-occupying
     # migrate source (no op row) and an adopter registration its enable-hook row merges. The rows whose
-    # handlers this build cannot run under the driver (init-store, which _DRIVER_UNSUPPLIED names;
-    # render-views and install-pack) and the receipt stage are stand-ins; the retire-file, register-unmanaged
+    # handlers this build cannot run under the driver (init-store, render-views and plant-governance, which
+    # _DRIVER_UNSUPPLIED names) and the receipt stage are stand-ins; the retire-file, register-unmanaged
     # and enable-hook rows run their REAL handlers, the first two spied at their per-op composers, which a
     # handler reaches only through its typed context. Each check names the mutant it is red against, or
     # says it is a fixture PRECONDITION or a GREEN-ON-REVERT GUARD (green against the pre-B2/B3 driver too).
@@ -11579,13 +11585,14 @@ def _self_test_checks():
         sheet["sources"] = sorted(d["path"] for d in decisions)
         sheet["decisions"] = decisions
         if hook_op is not None:
-            # the hook row installs the claude-code enforcement member (its new_digest), so install-pack
-            # plants the other platforms' members only (the planner's rule).
+            # the hook row merges the observed registration into the claude-code registration member (its
+            # new_digest), and plant rows plant every other member, the deny hook it runs among them.
             for row in sheet["bindings"]["enforcement"]:
                 if row["platform"] == "claude-code":
-                    row["members"] = [dict(path=hook_op["registration_path"], digest=hook_op["new_digest"])]
-            others = [row for row in sheet["bindings"]["enforcement"] if row["platform"] != "claude-code"]
-            sheet["ops"] = sheet["ops"][:2] + [schema.enforcement_install_op(others), hook_op]
+                    row["members"] = [dict(m, digest=hook_op["new_digest"])
+                                      if m["path"] == hook_op["registration_path"] else m for m in row["members"]]
+            sheet["ops"] = sheet["ops"][:2] + schema.enforcement_install_ops(sheet["bindings"]["enforcement"],
+                                                                            hook_op["old_digest"])
         obs = planner.investigate(root, sources=sheet["sources"], targets=sheet["targets"])
         sheet["expected_observation_digest"] = (
             tomllib.loads(obs.observation.decode("utf-8"))["observation_digest"] if obs.observation else "")
@@ -11598,11 +11605,11 @@ def _self_test_checks():
             (root / rel).write_bytes(payload)
         hook_rel = ".claude/settings.json"
         hook_old = hook._emit(hook.canonical_registration())
-        hook_new = hook.merge_registration(hook_old, "opf-governance").new_bytes
+        hook_new = hook.merge_registration(hook_old, schema.HOOK_COMMAND).new_bytes
         (root / hook_rel).parent.mkdir()
         (root / hook_rel).write_bytes(hook_old)
         head = _selftest_git_commit(root)
-        hook_op = dict(op="enable-hook", registration_path=hook_rel, plugin_entry="opf-governance",
+        hook_op = dict(op="enable-hook", registration_path=hook_rel, plugin_entry=schema.HOOK_COMMAND,
                        old_digest=plan_digest(hook_old), new_digest=plan_digest(hook_new))
         sheet = _sheet_with(root, head, [dict(path="keep.md", disposition="keep", actor="fixture"),
                                          dict(path="legacy.md", disposition="retire", actor="fixture"),
@@ -11615,13 +11622,15 @@ def _self_test_checks():
         typed_ops = [row["op"] for row in typed_doc["ops"]]
         # PRECONDITION: the fixture froze and was approved, carrying the rows the checks below drive.
         check("driver-typed-fixture-frozen-and-approved", bool(typed_plan) and bool(typed_approval)
-              and {"retire-file", "register-unmanaged", "enable-hook", "init-store"} <= set(typed_ops)
-              and "move-file" not in typed_ops)
+              and {"retire-file", "register-unmanaged", "enable-hook", "init-store",
+                   "plant-governance"} <= set(typed_ops)
+              and "move-file" not in typed_ops
+              and [row for row in typed_doc["ops"] if row["op"] == "enable-hook"] == [hook_op])
         manifest_rel = schema.store_manifest(typed_doc["store"])
         manifest_bytes = _opf_init.build_manifest().encode("utf-8")
         reached = []
         composed_creates = []
-        stand_in_names = ("init-store", "render-views", "install-pack")
+        stand_in_names = ("init-store", "render-views", "plant-governance")
 
         def scaffold(op_row, context):
             # init-store's stand-in: the scaffolded manifest the registration chain starts from, staged
@@ -11666,15 +11675,26 @@ def _self_test_checks():
         # each refusal still refuses before anything is written: render-views keeps its REAL handler, which
         # reads observations this driver does not gather, so apply names that value and writes nothing (red
         # against a run_apply without its _unsupplied gate, which composes the row over an absent value).
-        with typed_driver({"init-store": scaffold, "install-pack": benign}):
+        with typed_driver({"init-store": scaffold, "plant-governance": benign}):
             err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
         check("driver-apply-unsupplied-observations-refused", "render-views" in (err or "")
               and "needs context observations" in (err or "") and "before anything is written" in (err or "")
               and not reached and _snapshot(root) == before, observed=err)
+        # plant-governance keeps its REAL handler: the plan's enforcement plant rows need the pack (the
+        # release manifest, root.txt and member bytes), which this driver cannot supply, so apply names
+        # that value for the plant rows alone and writes nothing (red against a _DRIVER_UNSUPPLIED without
+        # the plant-governance entry, where the real handler composes against an absent pack).
+        with typed_driver({"init-store": scaffold, "render-views": benign}):
+            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+        check("driver-apply-unsupplied-pack-refused",
+              "('plant-governance') needs context pack" in (err or "")
+              and "('render-views')" not in (err or "") and "('init-store')" not in (err or "")
+              and "before anything is written" in (err or "") and not reached and _snapshot(root) == before,
+              observed=err)
         # init-store keeps its REAL handler: apply names its unsequenced substrate run before anything is
         # written (red against a _DRIVER_UNSUPPLIED without the init-store entry, where the real handler
         # dispatches and refuses at its member-set precondition instead, the substrate run unnamed).
-        with typed_driver({"render-views": benign, "install-pack": benign}):
+        with typed_driver({"render-views": benign, "plant-governance": benign}):
             err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
         check("driver-apply-init-store-named-refused",
               "('init-store') needs its own journaled substrate run" in (err or "")
@@ -11747,8 +11767,9 @@ def _self_test_checks():
         # whose fallback is a typed context, and never vacuous: every stand-in row was reached in both the
         # preflight and the transaction, each with the table.
         took = sorted((name, kind) for name, kind in reached if name in stand_in_names)
-        check("driver-other-rows-take-the-context-table",
-              took == sorted([(name, "dict") for name in stand_in_names] * 2), observed=took)
+        check("driver-other-rows-take-the-context-table", set(name for name, _ in took) == set(stand_in_names)
+              and took == sorted([(row["op"], "dict") for row in typed_doc["ops"]
+                                  if row["op"] in stand_in_names] * 2), observed=took)
         retire_copy_rel, migrate_copy_rel = archive_rel(trid, "legacy.md"), archive_rel(trid, "old.md")
         # red against a pass that also archives a retire-file row's source (the second create refuses, so no
         # pass reaches the receipt stage) and against a driver that skips the pass (no migrate copy).
@@ -11832,7 +11853,7 @@ def _self_test_checks():
             stack = contextlib.ExitStack()
             stack.enter_context(mock.patch.dict(OP_HANDLERS, dict([
                 ("init-store", move_scaffold), ("render-views", move_benign),
-                ("install-pack", move_benign)])))
+                ("plant-governance", move_benign)])))
             stack.enter_context(mock.patch.dict(DRIVER_STAGES, dict([(RECEIPT_STAGE, move_receipt)])))
             if move is not None:
                 stack.enter_context(mock.patch.dict(_FILE_OPS, dict([("move-file", move)])))
@@ -11902,7 +11923,7 @@ def _self_test_checks():
     # new_digest is the merge core's own output over the planned bytes, so apply is held to publishing
     # exactly the post-merge registration the approval bound. Each refusal vector names its rule's keyword
     # and leaves the tree byte-identical with no transaction opened.
-    reg_rel, entry = ".claude/settings.json", "opf-governance"
+    reg_rel, entry = ".claude/settings.json", schema.HOOK_COMMAND
     reg_old = hook._emit(hook.canonical_registration())
     reg_new = hook.merge_registration(reg_old, entry).new_bytes
 
@@ -12001,19 +12022,20 @@ def _self_test_checks():
           and foreign_merge.new_bytes is None)
     empty = b"{}"
     empty_new = hook.merge_registration(empty, entry).new_bytes
-    # A candidate that is NOT one shell word: the pure merge core accepts any token (its disclosed
-    # trust boundary), so this row's digests are built from the core's own output over it, and
-    # ONLY the plan-row pack-member grammar (_opf_adopt._is_hook_entry) refuses the row: through
+    # A candidate that is NOT the fixed deny-hook command: the pure merge core accepts any token (its
+    # disclosed trust boundary), so this row's digests are built from the core's own output over it,
+    # and ONLY the plan-row command rule (_opf_adopt._is_hook_entry) refuses the row: through
     # dispatch (validate_op), and again inside the handler, which a direct OP_HANDLERS caller
     # reaches without dispatch. Handed straight to the handler with its re-proof removed, the
     # merge agrees with the row's digests and the write LANDS, so BOTH checks of that vector go
-    # red: a behavioural flip, not a diagnostic one.
+    # red: a behavioural flip, not a diagnostic one. The one-word entry the former grammar admitted
+    # is refused the same way.
     multiword = "pkg-tool a.cfg;b"
-    multiword_new = hook.merge_registration(reg_old, multiword).new_bytes
 
-    def multiword_row():
-        return dict(op="enable-hook", registration_path=reg_rel, plugin_entry=multiword,
-                    old_digest=plan_digest(reg_old), new_digest=plan_digest(multiword_new))
+    def multiword_row(candidate=multiword):
+        return dict(op="enable-hook", registration_path=reg_rel, plugin_entry=candidate,
+                    old_digest=plan_digest(reg_old),
+                    new_digest=plan_digest(hook.merge_registration(reg_old, candidate).new_bytes))
 
     # Guard accounting (QA rounds 1 and 2): each vector names the rule that refuses it and what
     # removing that rule ALONE actually does, as observed under single-guard mutants of this
@@ -12080,17 +12102,19 @@ def _self_test_checks():
                   and all((root / rel).read_bytes() == data
                           for rel, data in (extra or dict()).items()))
 
-    # the grammar re-proof IN the handler: the multiword row handed straight to OP_HANDLERS, skipping
-    # dispatch, refuses with the tree unchanged and no transaction opened.
-    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
-        root = hook_fixture(temp)
-        before = snapshot(root)
-        why = refusal(run_adopt_transaction, root, rid,
-                      compose_hook([multiword_row()], handler=OP_HANDLERS["enable-hook"]))
-        check("hook-multiword-entry-direct-handler-refused",
-              why is not None and "pack-member grammar" in why)
-        check("hook-multiword-entry-direct-handler-writes-nothing",
-              snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
+    # the command re-proof IN the handler: the multiword row, and a row carrying the one-word entry the
+    # former grammar admitted, handed straight to OP_HANDLERS, skipping dispatch, each refuse with the tree
+    # unchanged and no transaction opened.
+    for label, candidate in (("multiword", multiword), ("one-word", "opf-governance")):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root = hook_fixture(temp)
+            before = snapshot(root)
+            why = refusal(run_adopt_transaction, root, rid,
+                          compose_hook([multiword_row(candidate)], handler=OP_HANDLERS["enable-hook"]))
+            check("hook-{}-entry-direct-handler-refused".format(label),
+                  why is not None and "not the fixed deny-hook command" in why)
+            check("hook-{}-entry-direct-handler-writes-nothing".format(label),
+                  snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
 
     # the row-shape re-proof IN the handler: a malformed row handed straight to OP_HANDLERS (a field
     # missing, or a path that is not a string) refuses attributed, never an uncaught KeyError or
@@ -12948,8 +12972,11 @@ def _self_test_checks():
               wrong is None and late is not None and "runs no file op" in late
               and untouched_save_journal_dirs(before, root) and lock_free(root))
         before = tree_state(root)
-        unlanded = refusal(run_adopt_transaction, root, other_run,
-                           compose_rows([schema.canonical_op("install-pack")]))
+        # every op has landed in this build, so an unlanded op is a create-file row pinned back to the
+        # refusing handler for this vector
+        with mock.patch.dict(OP_HANDLERS, {"create-file": _not_yet_executable}):
+            unlanded = refusal(run_adopt_transaction, root, other_run,
+                               compose_rows([schema.canonical_op("create-file")]))
         check("compose-rows-unlanded-op-refuses-whole-transaction-untouched-save-journal-dirs",
               unlanded is not None and "not yet executable" in unlanded
               and not (root / JOURNAL_REL / other_run).exists()
@@ -16260,7 +16287,7 @@ def _finish_ops_self_test(check):
     # The release: one governance member, its frozen pack inventory (a manifest in the shipped grammar whose
     # TREE recomputes from its source rows) and the agreed ROOT the plan binds and root.txt reports.
     member = b"# Governance adapter\nRecords are written through opf record, never by hand.\n"
-    source = "governance/AGENTS.md"
+    source = schema.pack_source("AGENTS.md")
 
     def manifest_bytes(data, tree=None):
         rows = [dict(path=source, bytes=len(data), sha256=_sha256(data))]
@@ -16438,7 +16465,38 @@ def _finish_ops_self_test(check):
     refuses_untouched("plant-unbound-content-digest-refused",
                       [dict(plant, content_digest="sha256:" + "7" * 64)], "not the content_digest")
     refuses_untouched("plant-unknown-source-member-refused",
-                      [dict(plant, source_member="governance/OTHER.md")], "not a source row")
+                      [dict(plant, path="docs/AGENTS.md", source_member="governance/OTHER.md")], "not a source row")
+    # the pack-source binding re-proved IN the handler (OP_HANDLERS is public, and dispatch checks one row,
+    # never the plan's bindings): over a release that also lists another member, a row planting that member's
+    # verified bytes at AGENTS.md, whose only pack source is the codex instructions, refuses with nothing
+    # written; without the re-check the trust gate passes and the foreign member lands at AGENTS.md.
+    foreign_rel, foreign = schema.HOOK_MEMBER, b"# not the codex instructions\n"
+
+    def two_member_manifest():
+        rows, q = sorted([(source, member), (foreign_rel, foreign)]), chr(34)
+        tree = pack_manifest.compute_tree([dict(path=p, bytes=len(d), sha256=_sha256(d)) for p, d in rows])
+        lines = ["format-version = 1", "release-version = " + q + "1.3.0" + q, "genesis = true",
+                 "tree-sha256 = " + q + tree + q]
+        for p, d in rows:
+            lines += ["", "[[sources]]", "path = " + q + p + q, "bytes = " + str(len(d)),
+                      "sha256 = " + q + _sha256(d) + q]
+        for p, d in rows:
+            lines += ["", "[[artifacts]]", "artifact-id = " + q + "file:" + p + q, "path = " + q + p + q,
+                      "kind = " + q + "file" + q, "sha256 = " + q + _sha256(d) + q]
+        return ("\n".join(lines) + "\n").encode("utf-8")
+    two = two_member_manifest()
+    plan_two, pack_two = release(two)
+    pack_two["members"] = dict([(source, member), (foreign_rel, foreign)])
+    check("finish-fixture-two-member-manifest-valid", pack_manifest.parse_manifest(two)[1].status == valid)
+    refuses_untouched("op-plant-governance-pack-source-refused",
+                      [dict(plant, source_member=foreign_rel, content_digest="sha256:" + _sha256(foreign))],
+                      "the only pack source planted at 'AGENTS.md'", plan=plan_two, pack=pack_two)
+    # counter-vector: the same release plants the destination's own source there
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-finish-") as temp:
+        root = Path(temp).resolve()
+        txn, why = run(root, [plant], **dict(ctx, plan=plan_two, pack=pack_two))
+        check("plant-governance-own-pack-source-commits", txn == rid and why is None
+              and snapshot(root).get("AGENTS.md") == member)
     refuses_untouched("plant-store-tree-path-refused", [dict(plant, path=".working/AGENTS.md")], "store tree")
     # the approved release identity reconciles with the digest-agreed pack manifest: a plan naming
     # another version over the same agreed bytes is contradictory and refuses, nothing written.
