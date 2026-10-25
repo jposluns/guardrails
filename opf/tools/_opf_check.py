@@ -194,10 +194,11 @@ _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
 HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # The four imported-series checks spec 8.3 names, which activation MUST add to the doctor roster (spec
 # 4.2). They join the roster only for a store whose imported series is ACTIVE (imported_series_active
-# below), appended after its homes roster, so an inactive store's roster, and so its report, is
-# unchanged. C-IMPORTED-SCHEMA is graded here; until the other three land, result()'s roster
-# reconciliation routes each of them to CANNOT-EVALUATE on an active store (a check that never runs is
-# never a pass), so no active store certifies VALID on a partial imported roster. While this roster is
+# below), appended after its homes roster, so an inactive store's roster is unchanged (its report can
+# still gain the section 8.6 firewall residuals, which are keyed on provenance, not on activation; see
+# _FIREWALL_RESIDUALS). All four are graded here on an active store; result()'s roster reconciliation still routes
+# any of them that does not run to CANNOT-EVALUATE (a check that never runs is never a pass), so no
+# active store certifies VALID on a partial imported roster. While this roster is
 # non-empty the activation tripwire in _check_containment stays disarmed, and the self-test asserts
 # imported_content_checks_landed below: once SUPPORTED_SPEC_VERSION reaches IMPORTED_SPEC_VERSION this
 # roster must be non-empty, NEW ids in the exact imported-check grammar (_IMPORTED_ID_RE below),
@@ -237,8 +238,8 @@ def imported_series_active(manifest_data):
     store never activates it, whatever spec_version it declares, and raising either tooling constant
     alone activates nothing. False for every store this tooling validates today (SUPPORTED_HOMES is
     1). Every imported-series reader takes this ONE flag: the doctor driver derives it once for the
-    required-check roster, C-IMPORTED-SCHEMA, C-COUNTERS, C-ID-SPACE, C-NO-DELETION, C-CONTIGUITY and
-    the across-time checks; classify_containment derives it internally from the manifest for the
+    required-check roster, the four imported checks, C-COUNTERS, C-ID-SPACE, C-NO-DELETION, C-CONTIGUITY
+    and the across-time checks; classify_containment derives it internally from the manifest for the
     C-CONTAINMENT registration and every consumer of the classification (the write guard,
     _opf_write_guard.plan_write_scope, included), with _check_containment reading it again only for
     its emptied-roster tripwire; and the observer's prior imported baseline (_opf_observe._reconstruct_prior,
@@ -416,6 +417,52 @@ _HOMES2_RESIDUALS = (
     "release cut reads no reservation and refuses the unreleased tail while such a number stands below the "
     "highest worklog entry, so a VALID doctor result does not mean the unreleased tail can be cut.",
 )
+# The section 8.6 authority firewall is keyed on provenance (an importer actor.kind), never on whether the
+# imported series is active, so these are disclosed on the report of every store that holds an
+# importer-authored clean record or an active imported series; a store with neither holds no record the
+# firewall governs, and its residuals are unchanged. The firewall arms this engine grades (the receipt
+# firewall and the pending_decision chain arm, _check_importer_receipts and _check_importer_chains, and
+# C-HANDOFF's importer exclusion) are part of section 8.6 only, so their PASS must never read as full
+# section 8.6 coverage: the section 8.6 obligations this engine is known to leave ungraded are named here,
+# beside the one acceptance it cannot judge beyond its shape. The self-test pins these entries, so
+# changing or dropping one fails it.
+_FIREWALL_RESIDUALS = (
+    "Section 8.6 firewall obligations no check of this engine grades, so a pass of the firewall arms it "
+    "grades (the receipt firewall, the pending_decision chain arm and the at-most-one-current handoff "
+    "exclusion) is not full section 8.6 coverage: importer-authored blocks granting a current stop, "
+    "importer-authored open or active backlog items joining actionability, and the decision register "
+    "listing an importer-authored decision as an effective resolution are not graded, since this engine "
+    "has no actionability or decision-register join of its own and C-VIEW-DRIFT compares committed views "
+    "only against the views planner, which does not filter importer-authored records there; an "
+    "importer-authored record discharging a required supersession outside a pending_decision chain is not "
+    "graded, nor is a required supersession that no record discharges at all; and an importer-authored "
+    "record satisfying a current approval obligation is not interpreted by any check.",
+    "The section 8.6 current-state joins over the module-tier types (an active waiver, a held "
+    "session_lease, an active mode) and field-borne authority (a gate_run verdict, a tier_assessment "
+    "outcome, an artifact's promoted state, a release's published state, a maintainer_action's done) are "
+    "not graded, because no record schema for those types ships in the baseline validator: a store holding "
+    "such a clean record is CANNOT-EVALUATE under the module-tier schema deferral, and an imported one is a "
+    "C-IMPORTED-SCHEMA finding, so neither certifies VALID until those schemas ship. No check of this "
+    "engine joins preference_pattern records into current state: C-RECORDS grades their records and C-LINKS "
+    "resolves links to them, but nothing reads a ratified active status as current authority, and C-VIEW-DRIFT "
+    "compares the decisions view only against the views planner, which lists an importer-authored active "
+    "pattern as active, so the firewall obligation on an importer-authored active preference_pattern binds "
+    "the readers of those records.",
+    "The section 8.6 receipt remedy is accepted on its machine-checkable shape alone: a maintainer-"
+    "authored clean maintainer_decision whose `corrects` link targets the ratified done item. Whether its "
+    "decision text records that the item's completion stands is prose the specification gives no "
+    "machine-checkable test for, so no validator grades it. A later record that links back to overturn "
+    "that decision is not read either, since the specification names no link relation that overturns a "
+    "maintainer_decision, so an overturned remedy is still accepted.",
+)
+# Disclosed only on a report whose imported series is active, so an inactive report's residuals are
+# unchanged: the imported-series part of section 8.6 that no check grades. The self-test pins it too.
+_IMPORTED_RESIDUALS = (
+    "Section 8.6 bars the imported series from supplying current authority through a link, an extension, "
+    "or an adoption approval. The link part is graded (C-IMPORTED-SCHEMA refuses an imported-to-clean "
+    "link); authority carried by an extension field or an adoption approval on an imported record is not "
+    "interpreted by any check of this engine.",
+)
 # Disclosed only on a report of a homes-1 store that has adopted (its adoption home exists), so a legacy
 # report residuals are unchanged.
 _ADOPTING_RESIDUALS = (
@@ -514,6 +561,15 @@ class _Report:
         self.required = required_checks(homes, imported)
         if homes >= 2:
             self.residuals.extend(_HOMES2_RESIDUALS)
+        if imported:
+            self.disclose_firewall()
+            self.residuals.extend(_IMPORTED_RESIDUALS)
+
+    def disclose_firewall(self):
+        # The section 8.6 firewall residuals, once per report: on an active imported series, and on any
+        # store whose clean records include an importer-authored one (the firewall is keyed on provenance).
+        if _FIREWALL_RESIDUALS[0] not in self.residuals:
+            self.residuals.extend(_FIREWALL_RESIDUALS)
 
     def ran(self, check_id):
         # Register a required check as executed and make it the attribution target. A second ran() for the
@@ -1904,8 +1960,15 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
 def _check_receipts(recs, by_id, rep):
     """C-RECEIPTS (R1): the done<->backlog_item receipt is one-to-one in BOTH directions (OPF-SPEC 8.5).
     Every ratified backlog_item (unqualified `done`) has exactly one done receipt; every done's receipt_of
-    target resolves to a backlog_item ratified at `done`."""
-    bi_state = {r.id: (r.state, r.qual) for r in recs if r.rtype == "backlog_item" and isinstance(r.id, str)}
+    target resolves to a backlog_item ratified at `done`. The count covers every clean done receipt,
+    whoever authored it: it grades the receipt link structure, not a current-state join (spec 8.6), since a
+    done receipt is a created-terminal record whose `recorded` status confers no current authority, and a
+    legacy importer-authored receipt keeps its bytes and its place in the clean series. So an importer
+    receipt beside a non-importer one is a second receipt and a finding, never discounted to make the item
+    pass. The writer never mints that store (done-with-receipt refuses an item that already has a
+    receipt); the remedy spec 8.6 defines for an item whose only receipt is importer-authored is a
+    maintainer-authored `corrects` decision, which _check_importer_receipts accepts."""
+    bi_state ={r.id: (r.state, r.qual) for r in recs if r.rtype == "backlog_item" and isinstance(r.id, str)}
     done_targets = {}
     for r in recs:
         if r.rtype == "done" and isinstance(r.id, str):
@@ -2104,6 +2167,26 @@ class _PrefixedReport:
 
     def cant(self, msg):
         self._rep.cant(self._prefix + msg)
+
+
+class _TeeReport:
+    """Forwards a finding or CANNOT-EVALUATE to the report unchanged, under whichever check is current, and
+    keeps a copy in `emitted`, so a second check that the spec gives the same obligation (C-IMPORTED-IDS
+    over the imported series' own id grading, spec 8.2/8.3) replays exactly what the ONE grading emitted
+    rather than grading it again."""
+    __slots__ = ("_rep", "emitted")
+
+    def __init__(self, rep):
+        self._rep = rep
+        self.emitted = []
+
+    def finding(self, msg):
+        self._rep.finding(msg)
+        self.emitted.append(("finding", msg))
+
+    def cant(self, msg):
+        self._rep.cant(msg)
+        self.emitted.append(("cant", msg))
 
 
 def _reserved_numbers(root_fd, rep):
@@ -2340,7 +2423,7 @@ def _imported_counter_namespaces(enabled_types):
     return frozenset(ns for ns in enabled_types.values() if ns in IMPORTED_NAMESPACES)
 
 
-def _gather_imported_rows(root_fd, machine_rel, enabled_types, rep):
+def _gather_imported_rows(root_fd, machine_rel, enabled_types, rep, strays=None):
     """Read the imported-series leaves for the per-series id checks (spec 8.2/8.3). Each enabled type except
     legacy_fragment keeps its imported rows inline in the machine store in either layout (spec 4.2): the
     [[record]] rows of <type>.imported.index.toml, and the [[entry]] rows of worklog.imported.toml.
@@ -2351,7 +2434,8 @@ def _gather_imported_rows(root_fd, machine_rel, enabled_types, rep):
     reads an unread leaf as an empty one. An ABSENT leaf contributes no rows, and every id its counter
     allocated is still owed (C-NO-DELETION). A row outside its leaf series (a clean id, another namespace,
     a non-string or malformed id) is a finding here, the series grammar; the rest of the imported envelope
-    is C-IMPORTED-SCHEMA work, never graded here."""
+    is C-IMPORTED-SCHEMA work, never graded here. `strays`, when supplied, collects (label, row) for each
+    such row, so C-IMPORTED-PROVENANCE still re-verifies the original a row outside its series names."""
     rows, unread = [], set()
     for tname in sorted(enabled_types):
         ns = enabled_types[tname]
@@ -2380,6 +2464,8 @@ def _gather_imported_rows(root_fd, machine_rel, enabled_types, rep):
             if shape is None or shape[0] != key:
                 rep.finding("C-ID-SPACE: {} {}[{}] id {} is not an {}-<n> id; an imported leaf holds only "
                             "its own type series (spec 8.2)".format(rel, member, i, _safe_display(rid), key))
+                if strays is not None:
+                    strays.append(("{} {}[{}]".format(rel, member, i), row))
                 continue
             rows.append((key, rid, row))
     return rows, unread
@@ -2486,6 +2572,214 @@ def _check_imported_append_only(prior_imported, rows, unread, rep):
             rep.finding("C-HISTORY-APPEND-ONLY: imported record {!r} changed since the prior committed snapshot "
                         "(imported records and their worklog entries are immutable after publication; a "
                         "correction is a fresh import run, spec 8.3)".format(rid))
+
+
+def _check_imported_ids(emitted, counters_data, cst, namespaces, rep):
+    """C-IMPORTED-IDS (spec 8.3: it "checks the series grammar, counters and no-deletion"). The imported
+    series' own id grading runs ONCE, per series as spec 8.2 requires, inside C-ID-SPACE (the series
+    grammar through _gather_imported_rows, uniqueness, and each id within its own "imported:<NS>"
+    high-water) and C-NO-DELETION (_check_imported_no_deletion); `emitted` is what that one grading
+    emitted, captured by _TeeReport, and is replayed here under this check's id, so the two attributions
+    cannot disagree. A leaf that grading could not read is replayed as its CANNOT-EVALUATE. The imported
+    counter rows are graded here from the one counters.toml read C-COUNTERS made (`counters_data`,
+    `cst`), through validate_counters over the quoted "imported:<NS>" rows alone: one per enabled type
+    except legacy_fragment (`namespaces`), each a genuine high-water (spec 8.2). An absent counters.toml
+    owes every row (a finding); an unreadable one, or one whose [counters] is not a table under the
+    supported schema, is CANNOT-EVALUATE, never graded under assumptions it does not declare."""
+    for kind, msg in emitted:
+        if kind == "cant":
+            rep.cant("C-IMPORTED-IDS: " + msg)
+        else:
+            rep.finding("C-IMPORTED-IDS: " + msg)
+    if cst == "error":
+        rep.cant("C-IMPORTED-IDS: {} could not be read; the imported counter rows (spec 8.2) are not "
+                 "evaluated".format(COUNTERS_NAME))
+        return
+    if cst == "absent":
+        rep.finding("C-IMPORTED-IDS: {} is absent; the imported series requires a counter row for each of "
+                    "{} (spec 8.2)".format(COUNTERS_NAME, ", ".join(sorted(IMPORTED_PREFIX + ns
+                                                                          for ns in namespaces))))
+        return
+    counters = counters_data.get("counters", {}) if isinstance(counters_data, dict) else None
+    schema = counters_data.get("schema") if isinstance(counters_data, dict) else None
+    if not isinstance(counters, dict) or type(schema) is not int or schema != SUPPORTED_SCHEMA:
+        rep.cant("C-IMPORTED-IDS: {} carries no [counters] table under the supported schema {}, so the "
+                 "imported counter rows (spec 8.2) are not evaluated (see C-COUNTERS)".format(
+                     COUNTERS_NAME, SUPPORTED_SCHEMA))
+        return
+    rows = {k: v for k, v in counters.items() if isinstance(k, str) and k.startswith(IMPORTED_PREFIX)}
+    _high, findings = validate_counters({"schema": SUPPORTED_SCHEMA, "counters": rows},
+                                        known_namespaces=frozenset(), imported_namespaces=namespaces)
+    for f in findings:
+        rep.finding("C-IMPORTED-IDS: {}: {}".format(COUNTERS_NAME, f))
+
+
+def _is_preserved_original(source, run):
+    """Whether `source` names a preserved original of the import run `run`: a canonical store-relative
+    file path (_opf_store._home_file: no empty, `.` or `..` component, no absolute, drive or backslash
+    form, no control character) under .working/imported/import/<run>/originals/ (spec 8.3, 8.8). The
+    same binding validate_imported_record grades as a finding; C-IMPORTED-PROVENANCE reads only a path
+    that passes it, so no other store file is ever read as an original."""
+    if type(source) is not str or not _is_import_run_id(run):
+        return False
+    try:
+        _opf_store._home_file(source)
+    except ValueError:
+        return False
+    return source.startswith(_opf_store.evidence_run("import", run) + "/originals/")
+
+
+def _check_imported_provenance(root_fd, rows, strays, unread, rep):
+    """C-IMPORTED-PROVENANCE (spec 8.3: it "re-reads each preserved original and verifies
+    `source_sha256`", and "Missing or unreadable evidence MUST fail closed"). Every imported row the
+    per-series reader returned (_gather_imported_rows: `rows` in its own leaf series, `strays` outside
+    it) names its preserved original in import.source (_is_preserved_original). Each original is read
+    once, through the contained no-follow byte reader, and its SHA-256 is compared with the recorded
+    import.source_sha256 of every row naming it: a mismatch is a finding, and so is an absent original,
+    as a missing listed evidence file is under C-EVIDENCE-ENUM (spec 4.2). An unread leaf, a row that is
+    not a table, a row whose provenance names no preserved original of its own run or carries no
+    64-hex source_sha256 (the C-IMPORTED-SCHEMA finding), and an original the reader refuses (a
+    non-regular entry, a symlink, an over-cap file) are each CANNOT-EVALUATE, never a pass over evidence
+    nothing read."""
+    prefix = "C-IMPORTED-PROVENANCE: "
+    for key in sorted(unread):
+        rep.cant(prefix + "the {} imported leaf could not be read; the preserved originals its records "
+                 "name are not re-verified (spec 8.3)".format(key))
+    read = {}
+    for label, row in [("{!r}".format(rid), row) for _key, rid, row in rows] + list(strays):
+        if not isinstance(row, dict):
+            rep.cant(prefix + "imported row {} is not a table, so the original it names is not re-verified "
+                     "(spec 8.3)".format(label))
+            continue
+        imp = row.get("import")
+        imp = imp if isinstance(imp, dict) else {}
+        source, digest = imp.get("source"), imp.get("source_sha256")
+        if not (_is_preserved_original(source, imp.get("run"))
+                and isinstance(digest, str) and _HEX64_RE.fullmatch(digest)):
+            rep.cant(prefix + "imported record {} names no preserved original of its own import run with a "
+                     "64-hex source_sha256 (see C-IMPORTED-SCHEMA), so its provenance is not verified "
+                     "(spec 8.3/8.8)".format(label))
+            continue
+        if source not in read:
+            raw, st = _read_bytes(root_fd, source, _PrefixedReport(rep, prefix))
+            read[source] = (st, hashlib.sha256(raw).hexdigest() if st == "ok" else None)
+        st, actual = read[source]
+        if st == "absent":
+            rep.finding(prefix + "imported record {} names the preserved original {}, which is absent "
+                        "(missing evidence fails closed; spec 8.3)".format(label, _safe_display(source)))
+        elif st == "ok" and actual != digest:
+            rep.finding(prefix + "imported record {}: the preserved original {} does not hash to its "
+                        "import.source_sha256 {} (spec 8.3)".format(label, _safe_display(source), digest))
+
+
+# The relations a clean record may use to an imported record (spec 8.6: "Clean-to-imported links MUST be
+# limited to `relates`, `derives_from`, `follows`, and same-type `supersedes`").
+_CLEAN_TO_IMPORTED_RELS = frozenset({"relates", "derives_from", "follows", "supersedes"})
+
+
+def _check_imported_segregation(recs, by_id, unevaluated, rep):
+    """C-IMPORTED-SEGREGATION (spec 8.3: it "enforces section 8.6"; spec 8.6: it "enforces this firewall
+    over importer-authored records in both series"), graded on a store whose imported series is active.
+    It grades the section 8.6 rules a parse-only doctor decides from the clean record set `recs` (active,
+    archived, and worklog entries) alone:
+      - clean-to-imported links: a clean record's link to an imported:<NS>-<n> id uses `relates`,
+        `derives_from`, `follows`, or `supersedes` to the same type. Namespaces map one-to-one to types
+        within each series (spec 8.2), so the type is judged by namespace and the target need not resolve
+        here; resolution over the union of both series (spec 8.6: "a dangling cross-series link MUST be a
+        finding") is C-LINKS work. A clean `done` record's `receipt_of` to an imported id falls
+        outside the permitted set, so it is refused here too ("A clean `done` record's `receipt_of` MUST
+        target a clean backlog item"). The targets of these links exist only in the imported leaves, so
+        this arm runs only with the imported series active;
+      - the receipt firewall (_check_importer_receipts) and the decision-chain arm
+        (_check_importer_chains), keyed on provenance. The firewall covers every importer-authored record,
+        whether or not the imported series is active (spec 8.6), so on a store whose series is inactive,
+        where this check is not on the roster (spec 4.2), the driver grades those two arms under C-RECEIPTS
+        and C-DECISION-CHAINS, the joins they guard, exactly as C-HANDOFF's join excludes importer-authored
+        handoffs on every store.
+    The imported-to-clean link refusal is per-record (validate_imported_record, under
+    C-IMPORTED-SCHEMA), and an imported row never joins `recs`, so no imported record enters a clean
+    join here. The section 8.6 obligations this engine is known not to grade (blocks granting a stop,
+    actionability, supersession discharge outside a pending_decision chain, the module-tier current-state
+    joins, field-borne authority, approval, and extension or adoption-approval authority) are named in
+    _FIREWALL_RESIDUALS and _IMPORTED_RESIDUALS, so a PASS never reads as full section 8.6 coverage.
+    `unevaluated` names the clean-record checks that did not evaluate: the firewall is then
+    CANNOT-EVALUATE over the records they could not seat, never a pass."""
+    if unevaluated:
+        rep.cant("C-IMPORTED-SEGREGATION: {} did not evaluate, so the authority firewall (spec 8.6) is not "
+                 "evaluated over the clean records it could not seat".format(", ".join(unevaluated)))
+    for r in recs:
+        own_ns = _ROSTER_NAMESPACES.get(r.rtype)
+        for rel, tid in r.links:
+            shape = parse_series_id(tid)
+            if shape is None or shape[0] == shape[1]:
+                continue                  # a clean or malformed target: C-RECORDS and C-LINKS grade it
+            if rel not in _CLEAN_TO_IMPORTED_RELS:
+                rep.finding("C-IMPORTED-SEGREGATION: clean record {} links {} -> {!r}; a clean-to-imported "
+                            "link is limited to relates, derives_from, follows and same-type supersedes "
+                            "(spec 8.6)".format(_safe_display(r.id), _safe_display(rel), tid))
+            elif rel == "supersedes" and shape[1] != own_ns:
+                rep.finding("C-IMPORTED-SEGREGATION: clean record {} (type {!r}) supersedes -> {!r} of "
+                            "another type; a clean-to-imported supersedes is same-type only (spec "
+                            "8.6)".format(_safe_display(r.id), r.rtype, tid))
+    _check_importer_receipts(recs, rep, "C-IMPORTED-SEGREGATION")
+    _check_importer_chains(recs, by_id, rep, "C-IMPORTED-SEGREGATION")
+
+
+def _check_importer_receipts(recs, rep, cid):
+    """The section 8.6 receipt firewall over the clean record set `recs`, keyed on provenance and reported
+    under `cid` (C-IMPORTED-SEGREGATION with the imported series active, C-RECEIPTS otherwise): "a clean
+    backlog item reaching ratified `done` MUST hold a clean receipt authored by a non-importer actor". A
+    non-importer item at unqualified `done` whose every receipt is importer-authored is a finding; one with
+    no receipt at all is the C-RECEIPTS finding and is not repeated. An importer-authored item is not
+    graded here, since spec 8.6 lets its legacy receipt satisfy it as recorded history. The one exception
+    spec 8.6 defines is accepted: "a maintainer-authored clean `maintainer_decision` that links `corrects`
+    to that item and records that its completion stands MUST satisfy the item's receipt obligation in
+    place of the withdrawn receipt ... doctor and the upgrade MUST accept it". Its machine-checkable shape
+    is the maintainer-authored (never importer-authored) clean maintainer_decision whose `corrects` link
+    targets the item; whether its text records that the completion stands, and whether a later record
+    overturns it, are not machine-checkable from the spec, so any such decision satisfies
+    (_FIREWALL_RESIDUALS discloses both)."""
+    receipts = {}
+    remedied = set()
+    for r in recs:
+        if r.rtype == "done":
+            for rel, tid in r.links:
+                if rel == "receipt_of" and isinstance(tid, str):
+                    receipts.setdefault(tid, []).append(r)
+        elif r.rtype == "maintainer_decision" and r.actor_kind == "maintainer":
+            # The spec 8.6 remedy shape: a maintainer-authored (importer-authored confers nothing) clean
+            # maintainer_decision linking `corrects` to the item whose only receipt is importer-authored.
+            for rel, tid in r.links:
+                if rel == "corrects" and isinstance(tid, str):
+                    remedied.add(tid)
+    for r in recs:
+        if (r.rtype != "backlog_item" or not isinstance(r.id, str) or r.state != "done" or r.qual is not None
+                or r.actor_kind == "importer"):
+            continue
+        mine = receipts.get(r.id, ())
+        if mine and r.id not in remedied and all(d.actor_kind == "importer" for d in mine):
+            rep.finding("{}: ratified backlog_item {!r} is authored by a non-importer actor but its only "
+                        "receipt(s) {} are importer-authored; it MUST hold a clean receipt authored by a "
+                        "non-importer actor, or a maintainer-authored maintainer_decision correcting it "
+                        "(spec 8.6)".format(cid, r.id, ", ".join(sorted(_safe_display(d.id) for d in mine))))
+
+
+def _check_importer_chains(recs, by_id, rep, cid):
+    """The section 8.6 decision-chain arm over the clean record set `recs`, keyed on provenance and
+    reported under `cid` (C-IMPORTED-SEGREGATION with the imported series active, C-DECISION-CHAINS
+    otherwise): "An importer-authored decision MUST NOT be treated as the current effective resolution of a
+    clean `pending_decision` chain; resolving such a chain now MUST take a new clean decision linking
+    back." A chain whose current effective resolution (decision_chains, the one derivation
+    C-DECISION-CHAINS shares) is an importer-authored pending_decision is a finding, whoever authored the
+    rest of the chain: a state-bearing status on an importer-authored record confers nothing now (spec
+    8.6), so the join never seats it as current. A resolution by any other actor is not graded here."""
+    for _members, current in decision_chains(recs, by_id):
+        for pid in current:
+            cur = by_id.get(pid)
+            if cur is not None and cur.actor_kind == "importer":
+                rep.finding("{}: importer-authored pending_decision {!r} is the current effective resolution "
+                            "of a clean pending_decision chain; resolving it now takes a new clean decision "
+                            "linking back (spec 8.6)".format(cid, pid))
 
 
 def _verify_immutable_body(rid, cur, prior_digests, rep):
@@ -3706,8 +4000,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     homes = _opf_store.homes_generation(manifest_data)
     # The imported-series activation flag, derived ONCE here (imported_series_active: the graded homes-2
     # declaration and this tooling's imported-series support, so every store graded today is inactive)
-    # for the roster, C-IMPORTED-SCHEMA, C-COUNTERS, C-ID-SPACE, C-NO-DELETION, C-CONTIGUITY and the
-    # across-time checks, so the content grading and the per-series id grading cannot disagree about
+    # for the roster, the four imported checks, C-COUNTERS, C-ID-SPACE, C-NO-DELETION, C-CONTIGUITY and
+    # the across-time checks, so the content grading and the per-series id grading cannot disagree about
     # which stores carry the series; C-CONTAINMENT's classification derives its own activation inside
     # classify_containment from the SAME predicate, so the leaf registration cannot diverge from them
     # either.
@@ -3874,23 +4168,38 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.finding("C-ID-SPACE: {}".format(f))
     # The imported series is graded on its OWN number lines (spec 8.2: each series independently): read from
     # the imported leaves only, unique within the series, and each id within its own "imported:<NS>"
-    # high-water, never the clean one. The clean union above never holds an imported id.
-    imported_rows, imported_unread = [], set()
+    # high-water, never the clean one. The clean union above never holds an imported id. The imported
+    # grading here and under C-NO-DELETION reports through one _TeeReport, so C-IMPORTED-IDS replays exactly
+    # what it emitted (spec 8.3 gives that check the same series grammar, counters and no-deletion).
+    imported_rows, imported_unread, imported_strays = [], set(), []
+    imported_tee = _TeeReport(rep)
     if imported:
-        imported_rows, imported_unread = _gather_imported_rows(root_fd, machine_rel, enabled_types, rep)
+        imported_rows, imported_unread = _gather_imported_rows(root_fd, machine_rel, enabled_types,
+                                                               imported_tee, imported_strays)
         imported_ids = [rid for _key, rid, _row in imported_rows]
         for f in check_unique_ids(imported_ids, imported_series=True):
-            rep.finding("C-ID-SPACE: imported series: {}".format(f))
+            imported_tee.finding("C-ID-SPACE: imported series: {}".format(f))
         for f in check_ids_within_counters(imported_ids, high, imported_series=True):
-            rep.finding("C-ID-SPACE: imported series: {}".format(f))
+            imported_tee.finding("C-ID-SPACE: imported series: {}".format(f))
 
     # --- the cross-record checks ----------------------------------------------------------------------
+    # The section 8.6 firewall is keyed on provenance, never on activation (spec 8.6: it covers every
+    # importer-authored record). With the imported series active C-IMPORTED-SEGREGATION grades its receipt
+    # and decision-chain arms below; otherwise that check is off the roster (spec 4.2), so the two arms
+    # report under C-RECEIPTS and C-DECISION-CHAINS, the joins they guard. A store holding an
+    # importer-authored clean record discloses the firewall residuals either way.
+    if any(r.actor_kind == "importer" for r in recs):
+        rep.disclose_firewall()
     rep.ran("C-RECEIPTS")
     _check_receipts(recs, by_id, rep)
+    if not imported:
+        _check_importer_receipts(recs, rep, "C-RECEIPTS")
     rep.ran("C-HANDOFF")
     _check_handoff(recs, rep)
     rep.ran("C-DECISION-CHAINS")
     _check_decision_chains(recs, by_id, rep)
+    if not imported:
+        _check_importer_chains(recs, by_id, rep, "C-DECISION-CHAINS")
     rep.ran("C-LINKS")
     # C-LINKS reads the rows C-IMPORTED-SCHEMA read, and resolves a target only among those the per-series
     # id grading above reads as series members, keyed by (series key, id) so a same-id row in another leaf
@@ -3899,6 +4208,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     imported_targets = [r for r in imported_recs if isinstance(r.id, str)
                         and (IMPORTED_PREFIX + str(enabled_types.get(r.rtype)), r.id) in imported_members]
     _check_links(recs, by_id, all_ids, rep, imported_recs, imported_targets)
+    # --- C-IMPORTED-SEGREGATION (an active imported series only): the section 8.6 authority firewall over
+    # the clean record set the cross-record checks above read, fail-closed on any clean-record reader that
+    # did not evaluate (spec 8.3/8.6); its provenance-keyed arms run on an inactive store too (above) ------
+    if imported:
+        unseated = [cid for cid in ("C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM")
+                    if rep.checks.get(cid) == "CANNOT-EVALUATE"]
+        rep.ran("C-IMPORTED-SEGREGATION")
+        _check_imported_segregation(recs, by_id, unseated, rep)
 
     # --- the frozen-span / no-deletion / partition / contiguity checks (active + archive together) ----
     rep.ran("C-FROZEN-COVERAGE")
@@ -4011,7 +4328,17 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     if imported:
         _check_imported_no_deletion(imported_rows, imported_unread, high, floor,
                                     _imported_counter_namespaces(enabled_types), reserved,
-                                    imp_holdings, imp_no_holdings, rep)
+                                    imp_holdings, imp_no_holdings, imported_tee)
+
+    # --- C-IMPORTED-IDS and C-IMPORTED-PROVENANCE (an active imported series only): the per-series id
+    # grading above replayed with the imported counter rows, then every preserved original the imported
+    # rows name re-read against its source_sha256 (spec 8.3) -------------------------------------------
+    if imported:
+        rep.ran("C-IMPORTED-IDS")
+        _check_imported_ids(imported_tee.emitted, counters_data, cst,
+                            _imported_counter_namespaces(enabled_types), rep)
+        rep.ran("C-IMPORTED-PROVENANCE")
+        _check_imported_provenance(root_fd, imported_rows, imported_strays, imported_unread, rep)
 
     rep.ran("C-PARTITION")
     for f in check_ids_partition(active_wl_ids, archive_wl_ids):
@@ -5380,14 +5707,32 @@ def self_test():
 
         # Imported rows in the closed imported envelope (spec 8.3), each VALID under
         # validate_imported_record as built: a backlog item, and a worklog entry whose omitted `detail`
-        # carries its missingness row. `over` replaces or adds fields.
+        # carries its missingness row. `over` replaces or adds fields. Every row names the one preserved
+        # original IMP_SOURCE at its real digest; imp_evidence() plants that original and the
+        # inventory.toml claiming it, so C-IMPORTED-PROVENANCE re-reads real bytes and C-EVIDENCE-ENUM
+        # reconciles the bundle (spec 4.2/8.3). `original` replaces the planted bytes only, leaving the
+        # inventory consistent with them, so a changed original is the provenance finding alone.
         IMP_RUN = "imp-20260601T000000Z-0123456789abcdef"
+        IMP_SOURCE = ".working/imported/import/{}/originals/TODO.md".format(IMP_RUN)
+        IMP_ORIGINAL = "- [ ] an imported backlog item\n"
+        IMP_SHA256 = hashlib.sha256(IMP_ORIGINAL.encode("utf-8")).hexdigest()
+
+        def imp_evidence(original=IMP_ORIGINAL):
+            raw = original.encode("utf-8")
+            bundle = _opf_store.evidence_run("import", IMP_RUN)[len(WORKING_DIRNAME) + 1:]
+            return {IMP_SOURCE[len(WORKING_DIRNAME) + 1:]: original,
+                    bundle + "/inventory.toml": {"format": EVIDENCE_FORMAT, "file": [
+                        {"path": IMP_SOURCE, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}]}}
+
+        def act_run(machine, obs=None, working=None):
+            return run(machine, working=dict(imp_evidence(), **(working or {})),
+                       obs=_is2_prior() if obs is None else obs)
 
         def imp_row(rid, rtype, status, **over):
             r = {"id": rid, "type": rtype, "status": status, "title": "t",
                  "actor": {"kind": "importer", "id": "import-assistant"},
-                 "import": {"source": ".working/imported/import/{}/originals/TODO.md".format(IMP_RUN),
-                            "source_sha256": "0123456789abcdef" * 4, "run": IMP_RUN, "imported_at": TS}}
+                 "import": {"source": IMP_SOURCE, "source_sha256": IMP_SHA256, "run": IMP_RUN,
+                            "imported_at": TS}}
             r.update(over)
             return r
 
@@ -5403,11 +5748,12 @@ def self_test():
             r.update(over)
             return r
 
-        # The imported checks this release grades (C-IMPORTED-SCHEMA); every OTHER id of IMPORTED_CHECKS
-        # never runs yet, so on an active store result()'s roster reconciliation routes each to
-        # CANNOT-EVALUATE. pending_only(res) holds when those reconciliation cants are the ONLY cants:
-        # an active store never certifies on a partial imported roster, and nothing else is uncertain.
-        _imp_landed = ("C-IMPORTED-SCHEMA",)
+        # The imported checks this release grades (all four of spec 8.3); any OTHER id of IMPORTED_CHECKS
+        # would never run, so on an active store result()'s roster reconciliation would route it to
+        # CANNOT-EVALUATE. pending_only(res) holds when those reconciliation cants are the ONLY cants
+        # (with every check landed, when there is no cant at all): an active store never certifies on a
+        # partial imported roster, and nothing else is uncertain.
+        _imp_landed = ("C-IMPORTED-SCHEMA", "C-IMPORTED-IDS", "C-IMPORTED-PROVENANCE", "C-IMPORTED-SEGREGATION")
         _imp_pending = tuple(cid for cid in IMPORTED_CHECKS if cid not in _imp_landed)
 
         def pending_only(res):
@@ -5430,14 +5776,14 @@ def self_test():
             # unregistered-stray finding (red when the derivation inside classify_containment is
             # removed or weakened, because the leaves then grade as unregistered strays).
             # C-IMPORTED-SCHEMA reads the empty leaves and passes, and the only cants are the
-            # reconciliation's for the imported checks not yet landed, so the activated store is
-            # never VALID on a partial imported roster. The prior carries the empty imported
-            # baseline the across-time checks require once active.
+            # reconciliation's for any imported check not landed, so the activated store is never
+            # VALID on a partial imported roster and is VALID once all four land. The prior carries
+            # the empty imported baseline the across-time checks require once active.
             _is2_act = act_machine()
             _is2_act_run = run(copy.deepcopy(_is2_act), obs=_is2_prior())
             check("containment-imported-leaf-registered-when-activated",
                   _is2_act_run is not None and not _is2_act_run.findings
-                  and _is2_act_run.status == CANNOT_EVALUATE
+                  and _is2_act_run.status == (CANNOT_EVALUATE if _imp_pending else VALID)
                   and _is2_act_run.checks.get("C-IMPORTED-SCHEMA") == "PASS"
                   and pending_only(_is2_act_run))
             # The roster of an activated 2.0.0 store is the homes-2 roster plus the four imported
@@ -5458,8 +5804,8 @@ def self_test():
             # section-8.1 roster: a disabled module type (release is not enabled here) gets no leaf,
             # so its imported index stays an unregistered stray even while activated (red if the
             # imported_leaf_names call is ever fed the full roster instead of enabled_types). The
-            # pending imported checks' cants dominate the finding, so the status is asserted as
-            # not-VALID, and the discriminating assertion is the unregistered finding itself.
+            # unregistered finding itself makes the status not-VALID and is also the discriminating
+            # assertion.
             _is2_act["release.imported.index.toml"] = idx([])
             _is2_dis_run = run(_is2_act, obs=_is2_prior())
             check("containment-disabled-type-imported-leaf-stray-when-activated",
@@ -5538,27 +5884,22 @@ def self_test():
                           for m in _is2_tw_run.by_check.get("C-CONTAINMENT", [])))
 
             # --- OPF-IMPORTED-SERIES IS-3a: C-IMPORTED-SCHEMA over the imported leaves (spec 8.3) ------
-            # A conforming imported row reaches VALID: C-IMPORTED-SCHEMA passes and adds no cant of its
-            # own, never the _SCHEMA_DEFERRAL seam (spec 8.3), the full roster's only cants are the
-            # pending imported checks, and with the roster patched to the checks landed so far the
-            # SAME store is VALID end to end (red when imported rows are routed to the deferral,
-            # which reads CANNOT-EVALUATE).
+            # A conforming imported row reaches VALID end to end: C-IMPORTED-SCHEMA passes and adds no
+            # cant of its own, never the _SCHEMA_DEFERRAL seam (spec 8.3), and with every imported
+            # check landed the activated store carries the full roster with no cant at all, so the
+            # store is VALID (red when imported rows are routed to the deferral, which reads
+            # CANNOT-EVALUATE).
             _v = act_machine()
             _v["backlog_item.imported.index.toml"] = idx([imp_bi(1)])
             _v["worklog.imported.toml"] = {"schema": 1, "entry": [imp_wl(1)]}
             _v["counters.toml"]["counters"].update({"imported:BI": 1, "imported:WL": 1})
-            _v_run = run(copy.deepcopy(_v), obs=_is2_prior())
-            _is3_g["IMPORTED_CHECKS"] = _imp_landed
-            try:
-                _v_landed = run(_v, obs=_is2_prior())
-            finally:
-                _is3_g["IMPORTED_CHECKS"] = _is3_prev_roster
+            _v_run = act_run(_v)
             check("imported-valid-row-reaches-valid",
                   _v_run is not None and not _v_run.findings
                   and _v_run.checks.get("C-IMPORTED-SCHEMA") == "PASS" and pending_only(_v_run)
                   and not any(_SCHEMA_DEFERRAL in m for m in _v_run.cannot_evaluate)
-                  and _v_landed is not None and _v_landed.status == VALID
-                  and tuple(_v_landed.checks) == _h2_roster + _imp_landed)
+                  and _v_run.status == VALID
+                  and tuple(_v_run.checks) == _h2_roster + IMPORTED_CHECKS)
             # An omitted non-exempt field with no missingness row is an INVALID finding naming the
             # leaf, the row and the field (red when rows are deferred, which reads CANNOT-EVALUATE,
             # or not validated, which reads PASS).
@@ -5678,6 +6019,26 @@ def self_test():
                   and any(f.startswith(".working/toml/artifact.imported.index.toml#1: ")
                           and "'artifact' is not a supported record type" in f for f in imp_msgs(_mt_run))
                   and not any(_SCHEMA_DEFERRAL in m for m in imp_msgs(_mt_run)))
+            # The section 8.6 tripwire for the module-tier current-state joins: a clean importer-authored
+            # waiver at `active` on an active store never certifies, because its type's schema is deferred
+            # (red when the inline deferral cant is removed, which seats the waiver ungraded and VALID).
+            # When the module schemas ship, this vector fails until their joins carry the firewall filter.
+            _wv = act_machine()
+            _wv["manifest.toml"]["modules"] = {"delivery_assurance": True}
+            _wv["counters.toml"]["counters"].update(
+                {"AR": 0, "GR": 0, "RL": 0, "WV": 1,
+                 "imported:AR": 0, "imported:GR": 0, "imported:RL": 0, "imported:WV": 0})
+            for _t, _ns in _mt_types.items():
+                _wv["manifest.toml"]["types"][_t] = {"namespace": _ns}
+                _wv[_t + ".index.toml"] = idx([])
+            for _leaf in _opf_store.imported_leaf_names(_mt_types):
+                _wv[_leaf] = idx([])
+            _wv["waiver.index.toml"] = idx([envelope("WV-1", "waiver", "active", actor={"kind": "importer"})])
+            _wv_run = run(_wv, obs=_is2_prior())
+            check("imported-active-importer-waiver-not-valid",
+                  _wv_run is not None and _wv_run.status != VALID
+                  and any(m.startswith(".working/toml/waiver.index.toml: 1 schema-deferred record(s) of type "
+                                       "'waiver'") and _SCHEMA_DEFERRAL in m for m in _wv_run.cannot_evaluate))
             # Each row is validated against its LEAF's type: a finding row planted in the backlog-item
             # leaf is refused (red when the leaf type is not passed as the expected type); a row that
             # is not a table is CANNOT-EVALUATE naming it (red when that verdict is dropped); and a
@@ -5702,7 +6063,7 @@ def self_test():
             _vd["manifest.toml"]["vendors"] = {"registered": ["x-acme"]}
             _vd["backlog_item.imported.index.toml"] = idx([imp_bi(1, **{"x-acme": {"lane": "history"}})])
             _vd["counters.toml"]["counters"]["imported:BI"] = 1
-            _vd_run = run(_vd, obs=_is2_prior())
+            _vd_run = act_run(_vd)
             check("imported-row-registered-vendor-accepted",
                   _vd_run is not None and not _vd_run.findings
                   and _vd_run.checks.get("C-IMPORTED-SCHEMA") == "PASS" and pending_only(_vd_run))
@@ -5725,10 +6086,11 @@ def self_test():
                 return m
 
             # Each fixture runs against the empty imported baseline the across-time checks need on an
-            # active store, so the imported counters above and that baseline leave the link under test
-            # as the only defect the per-series id grading could see.
+            # active store, with the imp_evidence bundle holding the original every imported row names,
+            # so the imported counters above, that baseline and that bundle leave the link under test as
+            # the only defect the per-series id grading or C-IMPORTED-PROVENANCE could see.
             def xs_run(m):
-                return run(m, obs=_is2_prior())
+                return act_run(m)
 
             def xs_resolved(res):
                 return (res is not None and not res.findings and res.checks.get("C-LINKS") == "PASS"
@@ -5746,7 +6108,9 @@ def self_test():
                 check("clean-to-imported-{}-resolves".format(_rel),
                       xs_resolved(xs_run(xs_machine({"rel": _rel, "id": "imported:BI-1"}))))
             # Every other relation is refused per record while its target resolves, so the refusal is
-            # the schema's and never a dangling-link side effect (red when the relation limit is dropped).
+            # the schema's and never a dangling-link side effect; C-IMPORTED-SEGREGATION refuses the
+            # same link under the section 8.6 firewall, and those two are the only findings (red when
+            # the relation limit is dropped).
             for _rel, _tid in (("resolves", "imported:BI-1"), ("remediates", "imported:BI-1"),
                                ("receipt_of", "imported:BI-1"), ("corrects", "imported:BI-1"),
                                ("exemplifies", "imported:PP-1")):
@@ -5754,16 +6118,24 @@ def self_test():
                 check("clean-to-imported-{}-refused".format(_rel),
                       _xs_run is not None and _xs_run.status != VALID
                       and _xs_run.checks.get("C-LINKS") == "PASS"
-                      and len(_xs_run.findings) == 1 and _xs_refused in _xs_run.findings[0])
+                      and len(_xs_run.findings) == 2 and _xs_refused in _xs_run.findings[0]
+                      and _xs_run.findings[1]
+                      == ("C-IMPORTED-SEGREGATION: clean record 'BI-3' links {!r} -> {!r}; a clean-to-imported "
+                          "link is limited to relates, derives_from, follows and same-type supersedes (spec "
+                          "8.6)".format(_rel, _tid)))
             # A supersedes of another type is refused per record, and C-LINKS, resolving the imported
-            # target, names the same-type rule as well (red when the per-record same-type limit is
-            # dropped, or when C-LINKS never reaches the imported target's type).
+            # target, names the same-type rule as well, beside the C-IMPORTED-SEGREGATION same-type
+            # refusal (red when the per-record same-type limit is dropped, or when C-LINKS never
+            # reaches the imported target's type).
             _xs_run = xs_run(xs_machine({"rel": "supersedes", "id": "imported:WL-1"}))
             check("clean-to-imported-cross-type-supersedes-refused",
-                  _xs_run is not None and _xs_run.status != VALID and len(_xs_run.findings) == 2
+                  _xs_run is not None and _xs_run.status != VALID and len(_xs_run.findings) == 3
                   and any(_xs_refused in f for f in _xs_run.findings)
                   and "C-LINKS: BI-3 (type 'backlog_item') supersedes -> 'imported:WL-1' of type 'worklog'; "
-                      "supersession links the same type (spec 8.6)" in _xs_run.findings)
+                      "supersession links the same type (spec 8.6)" in _xs_run.findings
+                  and "C-IMPORTED-SEGREGATION: clean record 'BI-3' (type 'backlog_item') supersedes -> "
+                      "'imported:WL-1' of another type; a clean-to-imported supersedes is same-type only "
+                      "(spec 8.6)" in _xs_run.findings)
             # A permitted link to an imported id that resolves in neither series is a C-LINKS finding
             # (red when C-LINKS skips an unresolved imported target).
             _xs_run = xs_run(xs_machine({"rel": "relates", "id": "imported:BI-9"}))
@@ -6255,13 +6627,14 @@ def self_test():
         # homes = 2 declaration and this tooling's imported-series support. BOTH tooling gates are patched
         # inside the block (the check_opf_homes per-vector idiom), SUPPORTED_HOMES to 2 and
         # SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION, so the driver derives the flag True end to end;
-        # both are restored in finally. Containment then registers the imported leaves, C-IMPORTED-SCHEMA
-        # reads their rows, and the three imported checks not yet landed are CANNOT-EVALUATE by the roster
+        # both are restored in finally. Containment then registers the imported leaves, the four imported
+        # checks grade them, and any imported check not landed would be CANNOT-EVALUATE by the roster
         # reconciliation on every active store: the vectors judge the per-check verdicts, and each clean
-        # control asserts that those pending reconciliation cants are its ONLY non-passing verdicts. The
+        # control asserts that any such pending reconciliation cants are its ONLY non-passing verdicts. The
         # fixtures build on act_machine (every imported leaf present and empty, every imported counter at
-        # its zero high-water) and the imp_row/imp_bi/imp_wl envelope rows, so the per-series id vectors
-        # and the imported-content grading read the SAME stores.
+        # its zero high-water), the imp_row/imp_bi/imp_wl envelope rows and the imp_evidence bundle holding
+        # the original those rows name, so the per-series id vectors and the imported-content grading read
+        # the SAME stores.
         _i3_ns = sorted(set(BASELINE_TYPES.values()))
 
         def _i3_machine(imp=None, drop=(), leaves=None):
@@ -6281,8 +6654,12 @@ def self_test():
             o["prior"]["counters_high"].update(high or {})
             return o
 
-        def _i3_run(machine, obs=None):
-            return run(machine, obs=_i3_obs() if obs is None else obs)
+        def _i3_run(machine, obs=None, working=None, evidence=True):
+            # The planted evidence bundle (imp_evidence) holds the original every imp_row names; a vector
+            # adds to it with `working`, or drops it with evidence=False.
+            planted = dict(imp_evidence()) if evidence else {}
+            planted.update(working or {})
+            return run(machine, working=planted, obs=_i3_obs() if obs is None else obs)
 
         def _i3_bad(r):
             return {c for c, v in r.checks.items() if v != "PASS"} if r is not None else None
@@ -6291,14 +6668,15 @@ def self_test():
             return r.by_check.get(cid, []) if r is not None else []
 
         def _i3_pending(r):
-            # The imported checks not yet landed are CANNOT-EVALUATE by the roster reconciliation on
-            # every active store, beside whatever the vector's own check asserts.
+            # Any imported check not landed is CANNOT-EVALUATE by the roster reconciliation on every
+            # active store, beside whatever the vector's own check asserts (vacuous once all four land).
             return (r is not None
                     and all(r.checks.get(cid) == "CANNOT-EVALUATE" for cid in _imp_pending))
 
         def _i3_clean_active(r):
             # The clean active store: no findings, C-IMPORTED-SCHEMA passes, and the ONLY cants are
-            # the pending imported checks' reconciliation cants.
+            # any pending imported checks' reconciliation cants (none once all four land, so every
+            # check then passes and the store is VALID).
             return (r is not None and not r.findings
                     and r.checks.get("C-IMPORTED-SCHEMA") == "PASS"
                     and pending_only(r) and _i3_bad(r) == set(_imp_pending))
@@ -6318,29 +6696,37 @@ def self_test():
             _opf_store.SUPPORTED_HOMES = 2
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
             # The clean active store with a zero row for every imported counter (spec 8.2) passes every
-            # check but the pending imported checks' reconciliation cants (red when the flag stays
-            # False: the imported rows are then C-COUNTERS findings).
+            # check and is VALID (red when the flag stays False: the imported rows are then C-COUNTERS
+            # findings).
             _i3_clean = _i3_run(_i3_machine())
             check("imported-active-clean-only-tripwire", _i3_clean_active(_i3_clean))
             # C-COUNTERS requires the imported rows on an active store (red when imported_namespaces is not
             # passed: the missing row is then no finding, and with every row dropped only the pending
             # cants are left). As for a missing clean row, the overall status is dominated by the
             # correlated C-HISTORY-COUNTERS cant (the current counters did not evaluate), so
-            # discriminate on the per-check verdict.
+            # discriminate on the per-check verdict. C-IMPORTED-IDS grades the same imported row
+            # (spec 8.3: it checks the counters) with the same message under its own id.
             _i3_miss = _i3_run(_i3_machine(drop=("imported:BI",)))
             check("imported-counter-row-missing-finding",
                   _i3_miss is not None and _i3_miss.checks.get("C-COUNTERS") == "FINDING"
-                  and [f for f in _i3_miss.findings if "imported" in f]
+                  and [f for f in _i3_msgs(_i3_miss, "C-COUNTERS") if "imported" in f]
                   == ["counters.toml: [counters] is missing a high-water for imported namespace "
-                      "'imported:BI' (spec 8.2)"])
+                      "'imported:BI' (spec 8.2)"]
+                  and _i3_miss.checks.get("C-IMPORTED-IDS") == "FINDING"
+                  and _i3_msgs(_i3_miss, "C-IMPORTED-IDS")
+                  == ["C-IMPORTED-IDS: counters.toml: [counters] is missing a high-water for imported "
+                      "namespace 'imported:BI' (spec 8.2)"])
             _i3_none = _i3_run(_i3_machine(drop=tuple("imported:" + ns for ns in _i3_ns)))
             check("imported-counter-rows-all-missing-finding",
                   _i3_none is not None and _i3_none.status == CANNOT_EVALUATE
-                  and _i3_bad(_i3_none) == {"C-COUNTERS", "C-HISTORY-COUNTERS"} | set(_imp_pending)
+                  and _i3_bad(_i3_none)
+                  == {"C-COUNTERS", "C-HISTORY-COUNTERS", "C-IMPORTED-IDS"} | set(_imp_pending)
                   and _i3_pending(_i3_none)
                   and _i3_none.checks.get("C-COUNTERS") == "FINDING"
-                  and sum("missing a high-water for imported namespace" in f for f in _i3_none.findings)
-                  == len(_i3_ns) == 12)
+                  and sum("missing a high-water for imported namespace" in f
+                          for f in _i3_msgs(_i3_none, "C-COUNTERS")) == len(_i3_ns) == 12
+                  and sum("missing a high-water for imported namespace" in f
+                          for f in _i3_msgs(_i3_none, "C-IMPORTED-IDS")) == len(_i3_ns))
             # legacy_fragment has no imported counter row: its LF counter stays required as a clean row and
             # no imported:LF row is asked for, while a present imported:LF row is refused (spec 8.2).
             _i3_lf = _i3_machine()
@@ -6397,7 +6783,8 @@ def self_test():
             _i3_gone = _i3_run(_i3_gone_m)
             check("imported-deleted-leaf-finding",
                   _i3_gone is not None
-                  and _i3_bad(_i3_gone) == {"C-NO-DELETION", "C-IMPORTED-SCHEMA"} | set(_imp_pending)
+                  and _i3_bad(_i3_gone)
+                  == {"C-NO-DELETION", "C-IMPORTED-SCHEMA", "C-IMPORTED-IDS"} | set(_imp_pending)
                   and _i3_pending(_i3_gone)
                   and _i3_gone.checks.get("C-IMPORTED-SCHEMA") == "FINDING"
                   and any("2 allocated imported:BI-<n> id(s) above imported:BI-0" in f
@@ -6448,8 +6835,8 @@ def self_test():
                         _i3_jr.reservation_payload("import", rid, "op-{}".format(n), claims).decode("utf-8"))
 
             def _i3_rrun(machine, numbers, obs=None, key="imported:BI"):
-                return run(machine, working=dict(_i3_rsv(i + 1, {key: n}) for i, n in enumerate(numbers)),
-                           obs=_i3_obs() if obs is None else obs)
+                return _i3_run(machine, working=dict(_i3_rsv(i + 1, {key: n}) for i, n in enumerate(numbers)),
+                               obs=obs)
 
             def _i3_ovm():
                 # imported:BI-1 and imported:BI-2 present under imported:BI = 4: 3 and 4 are allocated
@@ -6631,8 +7018,8 @@ def self_test():
             # use: each enabled BASELINE namespace and a module-tier one (governance's MA, enabled inside
             # the fixture) takes the same five vectors end to end, per namespace and per check verdict.
             # The positive leaf (rows within the high-water) passes every per-series check, tolerates
-            # only C-IMPORTED-SCHEMA row findings on its own leaf, and carries no cant beside the
-            # pending reconciliation ones; an id above its own imported high-water is the exact
+            # only C-IMPORTED-SCHEMA row findings on its own leaf, and carries no cant; an id above
+            # its own imported high-water is the exact
             # C-ID-SPACE finding; a duplicated id is the C-ID-SPACE duplicate finding; an allocated id
             # absent from the leaf is the C-NO-DELETION overhang finding with its exact count; and a
             # committed row that changed or vanished since the prior snapshot is each a
@@ -6644,15 +7031,16 @@ def self_test():
             _i3_type_of = {ns: t for t, ns in BASELINE_TYPES.items()}
             _i3_type_of["MA"] = "maintainer_action"
             _i3_series_checks = ("C-COUNTERS", "C-ID-SPACE", "C-NO-DELETION", "C-CONTIGUITY",
-                                 "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-CONTAINMENT")
+                                 "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-CONTAINMENT",
+                                 "C-IMPORTED-IDS", "C-IMPORTED-PROVENANCE")
 
             def _i3_series_pass(r, leaf):
                 # Beside the per-series checks passing, the ONLY tolerated findings are
                 # C-IMPORTED-SCHEMA row findings on the vector's OWN leaf (the generic rows do not
                 # carry every type's full field roster, and a module-tier row is refused by that
-                # check by design), and the pending imported checks' reconciliation cants are the
-                # only cants: a false finding from any OTHER check on a populated imported leaf,
-                # or against any other path, reds the control.
+                # check by design), and with every imported check landed no cant is tolerated: a
+                # false finding from any OTHER check on a populated imported leaf, or against any
+                # other path, reds the control.
                 return (r is not None and pending_only(r)
                         and _i3_bad(r) <= {"C-IMPORTED-SCHEMA"} | set(_imp_pending)
                         and all(r.checks.get(c) == "PASS" for c in _i3_series_checks)
@@ -6725,6 +7113,400 @@ def self_test():
                   len(_i3_del2) == len(_i3_every_ns) and all(_i3_del2))
             check("imported-history-changed-and-vanished-every-namespace",
                   len(_i3_his) == len(_i3_every_ns) and all(_i3_his))
+
+            # --- C-IMPORTED-IDS, C-IMPORTED-PROVENANCE and C-IMPORTED-SEGREGATION (spec 8.3/8.6) ---------
+            # Each check carries a positive finding vector and a flip: the SAME vector with that check's
+            # grading function replaced by a no-op in this module (restored in finally), under which the
+            # check reads PASS with no message of its own, so the finding is that check's and no other
+            # path's (red when a vector would only find the defect elsewhere, or the check grades
+            # nothing). Its fail-closed vectors grade an unread or malformed input CANNOT-EVALUATE, never
+            # a pass. The clean controls are the leaf control above: every imported check passes there
+            # and the activated store is VALID.
+            def _i3_flip(fn_name, machine, **kw):
+                g = globals()
+                prev = g[fn_name]
+                g[fn_name] = lambda *_a, **_k: None
+                try:
+                    return _i3_run(machine, **kw)
+                finally:
+                    g[fn_name] = prev
+
+            def _i3_off(r, cid):
+                return r is not None and r.checks.get(cid) == "PASS" and not _i3_msgs(r, cid)
+
+            check("imported-checks-clean-leaf-control-valid",
+                  _i3_ok is not None and _i3_ok.status == VALID
+                  and all(_i3_ok.checks.get(cid) == "PASS" for cid in IMPORTED_CHECKS))
+            # C-IMPORTED-IDS replays the one per-series grading message for message: an id above its own
+            # imported high-water (C-ID-SPACE), a row outside its leaf series (the series grammar), and
+            # an allocated id absent from its leaf (C-NO-DELETION).
+            _i3_idv = _i3_machine(imp={"imported:BI": 1}, leaves=_i3_bi2)
+            _i3_idr = _i3_run(copy.deepcopy(_i3_idv))
+            check("imported-ids-above-high-water-finding",
+                  _i3_idr is not None and _i3_idr.checks.get("C-IMPORTED-IDS") == "FINDING"
+                  and _i3_msgs(_i3_idr, "C-IMPORTED-IDS")
+                  == ["C-IMPORTED-IDS: " + m for m in _i3_msgs(_i3_idr, "C-ID-SPACE")]
+                  and any("'imported:BI-2' exceeds the imported:BI high-water 1" in m
+                          for m in _i3_msgs(_i3_idr, "C-IMPORTED-IDS")))
+            _i3_idf = _i3_flip("_check_imported_ids", copy.deepcopy(_i3_idv))
+            check("imported-ids-flip-disabled-passes",
+                  _i3_off(_i3_idf, "C-IMPORTED-IDS") and _i3_idf.checks.get("C-ID-SPACE") == "FINDING")
+            check("imported-ids-series-grammar-finding",
+                  _i3_for is not None and _i3_for.checks.get("C-IMPORTED-IDS") == "FINDING"
+                  and len([m for m in _i3_msgs(_i3_for, "C-IMPORTED-IDS")
+                           if "is not an imported:BI-<n> id" in m]) == 2)
+            check("imported-ids-no-deletion-finding",
+                  _i3_del is not None and _i3_del.checks.get("C-IMPORTED-IDS") == "FINDING"
+                  and any(m.startswith("C-IMPORTED-IDS: C-NO-DELETION: 1 allocated imported:BI-<n> id(s) "
+                                       "above imported:BI-1") for m in _i3_msgs(_i3_del, "C-IMPORTED-IDS")))
+            # The imported counter rows, fail-closed: an absent counters.toml owes every row (a finding);
+            # an unparseable one, and one under an unsupported schema, are CANNOT-EVALUATE (red when
+            # either is graded as an empty or a version-1 table).
+            _i3_ca = _i3_machine()
+            del _i3_ca["counters.toml"]
+            _i3_car = _i3_run(_i3_ca)
+            _i3_cu = _i3_machine()
+            _i3_cu["counters.toml"] = "counters = [ not toml"
+            _i3_cur = _i3_run(_i3_cu)
+            _i3_cs = _i3_machine()
+            _i3_cs["counters.toml"]["schema"] = 2
+            _i3_csr = _i3_run(_i3_cs)
+            check("imported-ids-counters-absent-finding",
+                  _i3_car is not None and _i3_car.checks.get("C-IMPORTED-IDS") == "FINDING"
+                  and any("counters.toml is absent; the imported series requires a counter row" in m
+                          for m in _i3_msgs(_i3_car, "C-IMPORTED-IDS")))
+            check("imported-ids-counters-unread-or-unsupported-cannot-evaluate",
+                  _i3_cur is not None and _i3_cur.checks.get("C-IMPORTED-IDS") == "CANNOT-EVALUATE"
+                  and any("could not be read" in m for m in _i3_msgs(_i3_cur, "C-IMPORTED-IDS"))
+                  and _i3_csr is not None and _i3_csr.checks.get("C-IMPORTED-IDS") == "CANNOT-EVALUATE"
+                  and any("under the supported schema 1" in m for m in _i3_msgs(_i3_csr, "C-IMPORTED-IDS")))
+            # An unreadable imported leaf, or one with no [[record]] array: C-IMPORTED-IDS replays the
+            # reader's CANNOT-EVALUATE and C-IMPORTED-PROVENANCE names the series it could not re-verify
+            # (red when either reads the unread leaf as an empty one and passes).
+            _i3_ul = []
+            for _i3_text in ("record = [ not toml", "schema = 1\nrecord = 1\n"):
+                _i3_ulr = _i3_run(_i3_machine(imp={"imported:BI": 2}, leaves={
+                    "backlog_item.imported.index.toml": _i3_text}))
+                _i3_ul.append(
+                    _i3_ulr is not None and _i3_ulr.checks.get("C-IMPORTED-IDS") == "CANNOT-EVALUATE"
+                    and any("backlog_item.imported.index.toml" in m for m in _i3_msgs(_i3_ulr, "C-IMPORTED-IDS"))
+                    and _i3_ulr.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                    and any("the imported:BI imported leaf could not be read" in m
+                            for m in _i3_msgs(_i3_ulr, "C-IMPORTED-PROVENANCE")))
+            check("imported-ids-and-provenance-unread-leaf-cannot-evaluate", _i3_ul == [True, True])
+            # C-IMPORTED-PROVENANCE: the planted original changed after import (its inventory still
+            # consistent, so C-EVIDENCE-ENUM passes) no longer hashes to either row's source_sha256, the
+            # provenance finding alone; with the check disabled the SAME store certifies VALID.
+            _i3_pv = _i3_machine(imp={"imported:BI": 2}, leaves=_i3_bi2)
+            _i3_tamper = imp_evidence("- [x] an original edited after import\n")
+            _i3_pvr = _i3_run(copy.deepcopy(_i3_pv), working=_i3_tamper)
+            check("imported-provenance-changed-original-finding",
+                  _i3_pvr is not None and _i3_pvr.checks.get("C-IMPORTED-PROVENANCE") == "FINDING"
+                  and len([m for m in _i3_msgs(_i3_pvr, "C-IMPORTED-PROVENANCE")
+                           if "does not hash to its import.source_sha256" in m]) == 2
+                  and _i3_bad(_i3_pvr) == {"C-IMPORTED-PROVENANCE"} | set(_imp_pending))
+            _i3_pvf = _i3_flip("_check_imported_provenance", copy.deepcopy(_i3_pv), working=_i3_tamper)
+            check("imported-provenance-flip-disabled-passes",
+                  _i3_off(_i3_pvf, "C-IMPORTED-PROVENANCE") and _i3_clean_active(_i3_pvf))
+            # Missing evidence fails closed (spec 8.3): an absent original is a finding for each row
+            # naming it, and an original the contained reader refuses (a directory planted at its path)
+            # is CANNOT-EVALUATE naming it.
+            _i3_pab = _i3_run(copy.deepcopy(_i3_pv), evidence=False)
+            check("imported-provenance-absent-original-finding",
+                  _i3_pab is not None and _i3_pab.checks.get("C-IMPORTED-PROVENANCE") == "FINDING"
+                  and len([m for m in _i3_msgs(_i3_pab, "C-IMPORTED-PROVENANCE") if "which is absent" in m]) == 2)
+            _i3_pdr = _i3_run(copy.deepcopy(_i3_pv), evidence=False,
+                              working={IMP_SOURCE[len(WORKING_DIRNAME) + 1:] + "/nested.md": "x"})
+            check("imported-provenance-unreadable-original-cannot-evaluate",
+                  _i3_pdr is not None and _i3_pdr.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                  and any(m.startswith("C-IMPORTED-PROVENANCE: cannot read " + IMP_SOURCE)
+                          for m in _i3_msgs(_i3_pdr, "C-IMPORTED-PROVENANCE")))
+            # A row whose provenance names no preserved original of its own run (a store control file),
+            # or carries no 64-hex digest, is never read: CANNOT-EVALUATE beside the C-IMPORTED-SCHEMA
+            # finding (red when such a source is read as an original and graded).
+            _i3_pm = []
+            for _i3_bad_imp in ({"source": ".working/toml/counters.toml"}, {"source_sha256": "NOT-HEX"}):
+                _i3_mrow = _i3_row("imported:BI-1")
+                _i3_mrow["import"] = dict(_i3_mrow["import"], **_i3_bad_imp)
+                _i3_pmr = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves={
+                    "backlog_item.imported.index.toml": idx([_i3_mrow])}))
+                _i3_pm.append(
+                    _i3_pmr is not None and _i3_pmr.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                    and any("names no preserved original of its own import run" in m
+                            for m in _i3_msgs(_i3_pmr, "C-IMPORTED-PROVENANCE"))
+                    and _i3_pmr.checks.get("C-IMPORTED-SCHEMA") == "FINDING")
+            check("imported-provenance-malformed-provenance-cannot-evaluate", _i3_pm == [True, True])
+            # A row outside its leaf series is still re-verified: its wrong digest is a provenance
+            # finding naming the row by its leaf position (red when only in-series rows are read).
+            _i3_srw = _i3_row("BI-2")
+            _i3_srw["import"] = dict(_i3_srw["import"], source_sha256="0" * 64)
+            _i3_sr = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves={
+                "backlog_item.imported.index.toml": idx([_i3_row("imported:BI-1"), _i3_srw])}))
+            check("imported-provenance-stray-row-still-verified",
+                  _i3_sr is not None and _i3_sr.checks.get("C-IMPORTED-PROVENANCE") == "FINDING"
+                  and [m for m in _i3_msgs(_i3_sr, "C-IMPORTED-PROVENANCE") if "does not hash" in m] == [
+                      m for m in _i3_msgs(_i3_sr, "C-IMPORTED-PROVENANCE")
+                      if "backlog_item.imported.index.toml record[1]" in m and "0" * 64 in m])
+            # C-IMPORTED-SEGREGATION, the receipt firewall: a maintainer-authored backlog item ratified at
+            # done whose only receipt is importer-authored is the firewall finding alone (C-RECEIPTS
+            # counts the receipt and passes); with the check disabled the SAME store certifies VALID. An
+            # importer-authored item with that receipt is history the firewall does not grade.
+            _i3_idn = dn(1, "BI-1")
+            _i3_idn["actor"] = {"kind": "importer"}
+            _i3_sg = _i3_machine()
+            _i3_sg["done.index.toml"] = idx([_i3_idn])
+            _i3_sg_obs = _i3_obs()
+            _i3_sg_obs["prior"]["digests"]["DN-1"] = _record_digest(_i3_idn)
+            _i3_sgr = _i3_run(copy.deepcopy(_i3_sg), obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-importer-receipt-finding",
+                  _i3_sgr is not None and _i3_sgr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and len(_i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")) == 1
+                  and "'BI-1'" in _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[0]
+                  and "importer-authored" in _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[0]
+                  and _i3_sgr.checks.get("C-RECEIPTS") == "PASS"
+                  and _i3_bad(_i3_sgr) == {"C-IMPORTED-SEGREGATION"} | set(_imp_pending))
+            _i3_sgf = _i3_flip("_check_imported_segregation", copy.deepcopy(_i3_sg), obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-flip-disabled-passes",
+                  _i3_off(_i3_sgf, "C-IMPORTED-SEGREGATION") and _i3_clean_active(_i3_sgf))
+            _i3_sgl = copy.deepcopy(_i3_sg)
+            _i3_sgl["backlog_item.index.toml"] = idx([dict(bi(1, "done"), actor={"kind": "importer"}),
+                                                       bi(2, "open")])
+            _i3_sglr = _i3_run(_i3_sgl, obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-importer-item-not-graded",
+                  _i3_sglr is not None and _i3_sglr.checks.get("C-IMPORTED-SEGREGATION") == "PASS")
+            # Clean-to-imported links (spec 8.6): relates, derives_from, follows and same-type supersedes
+            # pass this check; any other relation, and supersedes to another type, is its finding (red
+            # when the relation set widens or the same-type arm is dropped). C-RECORDS and C-LINKS also
+            # grade such a link (the clean validator refuses the same relations to an imported id, and
+            # C-LINKS resolves an imported target over the union of both series, so a target absent from
+            # the imported leaves is its dangling-link finding), so this check is judged on its own
+            # verdict; the flip disables it on the refused relation.
+            def _i3_link(rel, tid):
+                m = _i3_machine()
+                m["backlog_item.index.toml"] = idx([bi(1, "done"),
+                                                    dict(bi(2, "open"), links=[{"rel": rel, "id": tid}])])
+                return m
+
+            _i3_refused = (("remediates", "imported:BI-1"), ("receipt_of", "imported:BI-1"),
+                           ("supersedes", "imported:FN-1"))
+            _i3_allowed = (("relates", "imported:BI-1"), ("derives_from", "imported:FN-1"),
+                           ("follows", "imported:WL-1"), ("supersedes", "imported:BI-1"))
+            _i3_lkr = [_i3_run(_i3_link(rel, tid)) for rel, tid in _i3_refused]
+            _i3_lka = [_i3_run(_i3_link(rel, tid)) for rel, tid in _i3_allowed]
+            check("imported-segregation-clean-to-imported-link-finding",
+                  all(r is not None and r.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                      and len(_i3_msgs(r, "C-IMPORTED-SEGREGATION")) == 1
+                      and tid in _i3_msgs(r, "C-IMPORTED-SEGREGATION")[0]
+                      for r, (_lrel, tid) in zip(_i3_lkr, _i3_refused))
+                  and all(r is not None and r.checks.get("C-IMPORTED-SEGREGATION") == "PASS" for r in _i3_lka))
+            check("imported-segregation-link-flip-disabled-passes",
+                  _i3_off(_i3_flip("_check_imported_segregation", _i3_link(*_i3_refused[0])),
+                          "C-IMPORTED-SEGREGATION"))
+            # Fail-closed: a clean index nothing could read leaves its records unseated, so the firewall
+            # is CANNOT-EVALUATE naming the reader that did not evaluate, never a pass over them.
+            _i3_sgu = _i3_machine()
+            _i3_sgu["done.index.toml"] = "record = [ not toml"
+            _i3_sgur = _i3_run(_i3_sgu)
+            check("imported-segregation-unread-clean-records-cannot-evaluate",
+                  _i3_sgur is not None and _i3_sgur.checks.get("C-IMPORTED-SEGREGATION") == "CANNOT-EVALUATE"
+                  and any("C-RECORDS did not evaluate" in m for m in _i3_msgs(_i3_sgur, "C-IMPORTED-SEGREGATION")))
+            # The other two fail-closed arms, each on its own store: an archive bucket whose
+            # archive.toml cannot be read makes C-ARCHIVE-ENUM CANNOT-EVALUATE, and a per-record
+            # registry row that is not a table makes C-PERRECORD-RECONCILE CANNOT-EVALUATE; the
+            # firewall then names the one reader whose records it could not seat, never a pass over
+            # them (red when either arm leaves the unseated list).
+            _i3_sga = _i3_machine()
+            _i3_sga["archive/2026/archive.toml"] = "moved = [ not toml"
+            _i3_sgar = _i3_run(_i3_sga)
+            check("imported-segregation-unread-archive-cannot-evaluate",
+                  _i3_sgar is not None and _i3_sgar.checks.get("C-ARCHIVE-ENUM") == "CANNOT-EVALUATE"
+                  and _i3_sgar.checks.get("C-IMPORTED-SEGREGATION") == "CANNOT-EVALUATE"
+                  and any("C-ARCHIVE-ENUM did not evaluate" in m
+                          for m in _i3_msgs(_i3_sgar, "C-IMPORTED-SEGREGATION")))
+
+            def _i3_pr_machine():
+                # The activated store in the per-record layout: each non-empty clean index becomes the
+                # registry and its rows the record files; the ledgers and the imported leaves are
+                # unchanged (the first imported-series release keeps them inline in either layout).
+                m = _i3_machine()
+                m["manifest.toml"]["opf"]["layout"] = "per-record"
+                for _t, _rows in (("backlog_item", [bi(1, "done"), bi(2, "open")]),
+                                  ("done", [dn(1, "BI-1")]), ("handoff", [ho(1)])):
+                    m[_t + ".index.toml"] = {"schema": 1, "record": [
+                        {"id": r["id"], "state": r["status"], "path": "{}/{}.toml".format(_t, r["id"]),
+                         "digest": _record_digest(r)} for r in _rows]}
+                    for r in _rows:
+                        m["{}/{}.toml".format(_t, r["id"])] = r
+                return m
+
+            _i3_prc = _i3_run(_i3_pr_machine())
+            _i3_prm = _i3_pr_machine()
+            _i3_prm["finding.index.toml"] = "schema = 1\nrecord = [ 7 ]\n"
+            _i3_prr = _i3_run(_i3_prm)
+            check("imported-segregation-unread-perrecord-cannot-evaluate",
+                  _i3_prc is not None and _i3_prc.checks.get("C-PERRECORD-RECONCILE") == "PASS"
+                  and _i3_prc.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
+                  and _i3_prr is not None
+                  and _i3_prr.checks.get("C-PERRECORD-RECONCILE") == "CANNOT-EVALUATE"
+                  and _i3_prr.checks.get("C-IMPORTED-SEGREGATION") == "CANNOT-EVALUATE"
+                  and any("C-PERRECORD-RECONCILE did not evaluate" in m
+                          for m in _i3_msgs(_i3_prr, "C-IMPORTED-SEGREGATION")))
+            # The spec 8.6 receipt remedy: a maintainer-authored clean maintainer_decision linking
+            # `corrects` to the ratified done item satisfies the receipt obligation in place of the
+            # withdrawn importer-authored receipt, so the finding store above with the remedy added
+            # draws no segregation finding and certifies VALID (red when the remedy is not accepted).
+            # Whether its text records that the completion stands is prose no validator grades, so any
+            # maintainer-authored corrects decision is accepted (a disclosed residual). A remedy
+            # authored by an importer, or correcting another id, confers nothing: the finding stays.
+            def _i3_remedy(actor_kind="maintainer", target="BI-1"):
+                m = copy.deepcopy(_i3_sg)
+                m["maintainer_decision.index.toml"] = idx([md(1, decision="BI-1 completion stands",
+                                                              actor={"kind": actor_kind},
+                                                              links=[{"rel": "corrects", "id": target}])])
+                m["counters.toml"]["counters"]["MD"] = 1
+                return m
+
+            _i3_rmr = _i3_run(_i3_remedy(), obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-corrects-remedy-accepted",
+                  _i3_rmr is not None and _i3_rmr.status == VALID
+                  and _i3_rmr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
+                  and not _i3_msgs(_i3_rmr, "C-IMPORTED-SEGREGATION"))
+            _i3_rmi = _i3_run(_i3_remedy(actor_kind="importer"), obs=copy.deepcopy(_i3_sg_obs))
+            _i3_rmo = _i3_run(_i3_remedy(target="BI-2"), obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-importer-remedy-confers-nothing",
+                  _i3_rmi is not None and _i3_rmi.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and any("'BI-1'" in m for m in _i3_msgs(_i3_rmi, "C-IMPORTED-SEGREGATION"))
+                  and _i3_rmo is not None and _i3_rmo.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and any("'BI-1'" in m for m in _i3_msgs(_i3_rmo, "C-IMPORTED-SEGREGATION")))
+            # The receipt firewall's edges: an item holding one importer and one maintainer receipt
+            # holds a clean receipt, so the firewall passes while C-RECEIPTS reports the one-to-one
+            # finding, since that count covers importer-authored receipts too (see _check_receipts; red
+            # when its all() weakens to any()); a proposed done item is not ratified, so
+            # it is not graded (red when the qualifier guard is dropped).
+            _i3_mx = _i3_machine()
+            _i3_mx["done.index.toml"] = idx([copy.deepcopy(_i3_idn), dn(2, "BI-1")])
+            _i3_mx["counters.toml"]["counters"]["DN"] = 2
+            _i3_mxr = _i3_run(_i3_mx, obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-mixed-receipts-pass",
+                  _i3_mxr is not None and _i3_mxr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
+                  and not _i3_msgs(_i3_mxr, "C-IMPORTED-SEGREGATION")
+                  and _i3_mxr.checks.get("C-RECEIPTS") == "FINDING"
+                  and any("has 2 done receipts" in m for m in _i3_msgs(_i3_mxr, "C-RECEIPTS")))
+            _i3_ql = _i3_machine()
+            _i3_ql["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open"),
+                                                     dict(bi(3, "done/proposed"),
+                                                          actor={"kind": "assistant"})])
+            _i3_qdn = dn(2, "BI-3")
+            _i3_qdn["actor"] = {"kind": "importer"}
+            _i3_ql["done.index.toml"] = idx([dn(1, "BI-1"), _i3_qdn])
+            _i3_ql["counters.toml"]["counters"].update({"BI": 3, "DN": 2})
+            _i3_qlr = _i3_run(_i3_ql)
+            check("imported-segregation-proposed-done-not-graded",
+                  _i3_qlr is not None and _i3_qlr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
+                  and not _i3_msgs(_i3_qlr, "C-IMPORTED-SEGREGATION"))
+            # The decision-chain firewall (spec 8.6): "An importer-authored decision MUST NOT be
+            # treated as the current effective resolution of a clean pending_decision chain". A
+            # maintainer PD-1 decided plus an importer-authored PD-2 that supersedes it leaves the
+            # importer decision as the chain's only current resolution, which C-DECISION-CHAINS counts
+            # as the one required resolution and passes, so the finding is this check's alone and the
+            # store must not certify (red when the chain arm is dropped). The same chain resolved by a
+            # maintainer PD-2, and an importer-authored PD-1 a maintainer PD-2 supersedes (history
+            # below a clean resolution), each certify.
+            def _i3_chain(cur_actor=None, old_actor=None):
+                m = _i3_machine()
+                p1, p2 = pd(1), pd(2, supersedes="PD-1")
+                if old_actor is not None:
+                    p1["actor"] = {"kind": old_actor}
+                if cur_actor is not None:
+                    p2["actor"] = {"kind": cur_actor}
+                m["pending_decision.index.toml"] = idx([p1, p2])
+                m["counters.toml"]["counters"]["PD"] = 2
+                return m
+
+            _i3_dcr = _i3_run(_i3_chain(cur_actor="importer"))
+            check("imported-segregation-importer-current-resolution-finding",
+                  _i3_dcr is not None and _i3_dcr.status != VALID
+                  and _i3_dcr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and _i3_dcr.checks.get("C-DECISION-CHAINS") == "PASS"
+                  and _i3_msgs(_i3_dcr, "C-IMPORTED-SEGREGATION")
+                  == ["C-IMPORTED-SEGREGATION: importer-authored pending_decision 'PD-2' is the current "
+                      "effective resolution of a clean pending_decision chain; resolving it now takes "
+                      "a new clean decision linking back (spec 8.6)"]
+                  and _i3_bad(_i3_dcr) == {"C-IMPORTED-SEGREGATION"})
+            check("imported-segregation-clean-resolution-passes",
+                  _i3_clean_active(_i3_run(_i3_chain()))
+                  and _i3_clean_active(_i3_run(_i3_chain(old_actor="importer"))))
+            check("imported-segregation-chain-flip-disabled-passes",
+                  _i3_off(_i3_flip("_check_imported_segregation", _i3_chain(cur_actor="importer")),
+                          "C-IMPORTED-SEGREGATION"))
+            # The chain arm grades importer authorship only: a chain whose current resolution an assistant
+            # or automation actor authored (ratified, so unqualified) certifies (red when the arm widens
+            # to every non-maintainer actor). A maintainer decision that links the item by any relation
+            # but `corrects` is no remedy (red when the remedy accepts any relation).
+            check("imported-segregation-non-importer-resolution-passes",
+                  _i3_clean_active(_i3_run(_i3_chain(cur_actor="assistant")))
+                  and _i3_clean_active(_i3_run(_i3_chain(cur_actor="automation"))))
+            _i3_rmx = _i3_remedy()
+            _i3_rmx["maintainer_decision.index.toml"]["record"][0]["links"] = [{"rel": "relates", "id": "BI-1"}]
+            _i3_rmxr = _i3_run(_i3_rmx, obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-non-corrects-remedy-confers-nothing",
+                  _i3_rmxr is not None and _i3_rmxr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and any("'BI-1'" in m for m in _i3_msgs(_i3_rmxr, "C-IMPORTED-SEGREGATION")))
+            # The section 8.6 residuals: an active store discloses the firewall entries and the
+            # imported-series entry, and the inactive clean store, which holds no importer-authored record,
+            # discloses neither (red when either disclosure is dropped or widened); the firewall-inactive
+            # checks cover an inactive store that holds one. The pins are independent
+            # of the live constants: sha256 over each tuple's entries joined by a newline, UTF-8, so a
+            # changed, dropped, added or reordered entry fails here until the pin is renewed with it.
+            check("imported-residuals-disclosed-active-not-clean",
+                  _i3_ok is not None
+                  and all(x in _i3_ok.residuals for x in _FIREWALL_RESIDUALS + _IMPORTED_RESIDUALS)
+                  and clean is not None
+                  and not any(x in clean.residuals for x in _FIREWALL_RESIDUALS + _IMPORTED_RESIDUALS))
+            check("imported-residuals-pinned",
+                  len(_FIREWALL_RESIDUALS) == 3
+                  and hashlib.sha256("\n".join(_FIREWALL_RESIDUALS).encode("utf-8")).hexdigest()
+                  == "55680668b6b21cd3d7ac0ee3c4870e92032695d7efdc6f9b24f1ad3010d4d4c8"
+                  and len(_IMPORTED_RESIDUALS) == 1
+                  and hashlib.sha256("\n".join(_IMPORTED_RESIDUALS).encode("utf-8")).hexdigest()
+                  == "15be7339b7047adcc7f4831e29a52a00c87b93eca3cfbe58ea8a65045176dfbf")
+            # A leaf row that is not a table: C-IMPORTED-PROVENANCE is CANNOT-EVALUATE naming it,
+            # never a pass over evidence nothing read (the series grammar flags the row under
+            # C-ID-SPACE; red when such a row is silently skipped).
+            _i3_nt = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves={
+                "backlog_item.imported.index.toml": "schema = 1\nrecord = [ 7 ]\n"}))
+            check("imported-provenance-non-table-row-cannot-evaluate",
+                  _i3_nt is not None and _i3_nt.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                  and any("is not a table, so the original it names is not re-verified" in m
+                          for m in _i3_msgs(_i3_nt, "C-IMPORTED-PROVENANCE")))
+            # A row whose import.source names ANOTHER run's preserved original: not an original of its
+            # own run, so provenance is CANNOT-EVALUATE even though the named path exists and hashes
+            # to the recorded digest (red when _is_preserved_original accepts another run's originals:
+            # the row then re-verifies against the planted bytes and passes).
+            _i3_other = "imp-20260601T000000Z-fedcba9876543210"
+            _i3_osrc = ".working/imported/import/{}/originals/TODO.md".format(_i3_other)
+            _i3_orow = _i3_row("imported:BI-1")
+            _i3_orow["import"] = dict(_i3_orow["import"], source=_i3_osrc)
+            _i3_or = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves={
+                "backlog_item.imported.index.toml": idx([_i3_orow])}),
+                working={_i3_osrc[len(WORKING_DIRNAME) + 1:]: IMP_ORIGINAL})
+            check("imported-provenance-other-run-original-cannot-evaluate",
+                  _i3_or is not None and _i3_or.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                  and any("names no preserved original of its own import run" in m
+                          for m in _i3_msgs(_i3_or, "C-IMPORTED-PROVENANCE")))
+            # A source that dot-dot-escapes below its run's originals/ prefix: refused by the
+            # canonical store-path rule, so the row is the same CANNOT-EVALUATE and the escaping path
+            # is never read (red when the _home_file canonicality check is removed: the prefix test
+            # alone then accepts the path and the row is read or graded).
+            _i3_erow = _i3_row("imported:BI-1")
+            _i3_erow["import"] = dict(_i3_erow["import"],
+                                      source=IMP_SOURCE + "/../../../../toml/counters.toml")
+            _i3_er = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves={
+                "backlog_item.imported.index.toml": idx([_i3_erow])}))
+            check("imported-provenance-dotdot-original-cannot-evaluate",
+                  _i3_er is not None and _i3_er.checks.get("C-IMPORTED-PROVENANCE") == "CANNOT-EVALUATE"
+                  and any("names no preserved original of its own import run" in m
+                          for m in _i3_msgs(_i3_er, "C-IMPORTED-PROVENANCE")))
             # Homes 2 supported WITHOUT imported-series support (SUPPORTED_SPEC_VERSION back at its shipped
             # value). The 2.0.0 / homes = 2 store grades generation 2, but the flag is False, so an imported
             # counter row stays the former C-COUNTERS finding and the leaves are never graded (red when the
@@ -6938,6 +7720,72 @@ def self_test():
         _r2_imp = run(f)
         check("r2-importer-current-handoff-excluded",
               _r2_imp.status == VALID and not any("C-HANDOFF" in x for x in _r2_imp.findings))
+        # The section 8.6 firewall is keyed on provenance, so it applies on this inactive store too, where
+        # C-IMPORTED-SEGREGATION is off the roster: the receipt arm reports under C-RECEIPTS and the
+        # decision-chain arm under C-DECISION-CHAINS (each red when the driver runs them only with the
+        # imported series active, which leaves these stores VALID). A store holding an importer-authored
+        # clean record discloses the firewall residuals, never the imported-series one.
+        def _fw_run(machine, extra_digests=None):
+            o = clean_prior()
+            o["prior"]["digests"].update(extra_digests or {})
+            return run(machine, obs=o)
+
+        def _fw_disclosed(r):
+            return (r is not None and all(x in r.residuals for x in _FIREWALL_RESIDUALS)
+                    and not any(x in r.residuals for x in _IMPORTED_RESIDUALS))
+
+        _fw_idn = dict(dn(1, "BI-1"), actor={"kind": "importer"})
+        _fw_dig = {"DN-1": _record_digest(_fw_idn)}
+
+        def _fw_receipt(*mds):
+            m = clean_machine()
+            m["done.index.toml"] = idx([copy.deepcopy(_fw_idn)])
+            if mds:
+                m["maintainer_decision.index.toml"] = idx(list(mds))
+                m["counters.toml"] = counters(MD=len(mds))
+            return m
+
+        _fw_rc = _fw_run(_fw_receipt(), _fw_dig)
+        check("firewall-inactive-importer-receipt-finding",
+              _fw_rc is not None and _fw_rc.status == INVALID
+              and {c for c, v in _fw_rc.checks.items() if v != "PASS"} == {"C-RECEIPTS"}
+              and _fw_rc.by_check.get("C-RECEIPTS")
+              == ["C-RECEIPTS: ratified backlog_item 'BI-1' is authored by a non-importer actor but its only "
+                  "receipt(s) 'DN-1' are importer-authored; it MUST hold a clean receipt authored by a "
+                  "non-importer actor, or a maintainer-authored maintainer_decision correcting it (spec 8.6)"]
+              and _fw_disclosed(_fw_rc))
+        # The spec 8.6 remedy is accepted on this store too; a maintainer decision that links the item by
+        # any relation but `corrects` is no remedy (red when the remedy accepts any relation).
+        _fw_rm = _fw_run(_fw_receipt(md(1, links=[{"rel": "corrects", "id": "BI-1"}])), _fw_dig)
+        _fw_rl = _fw_run(_fw_receipt(md(1, links=[{"rel": "relates", "id": "BI-1"}])), _fw_dig)
+        check("firewall-inactive-corrects-remedy-accepted",
+              _fw_rm is not None and _fw_rm.status == VALID and _fw_disclosed(_fw_rm))
+        check("firewall-inactive-non-corrects-remedy-confers-nothing",
+              _fw_rl is not None and _fw_rl.checks.get("C-RECEIPTS") == "FINDING"
+              and any("'BI-1'" in m and "importer-authored" in m for m in _fw_rl.by_check.get("C-RECEIPTS", [])))
+        f = clean_machine()
+        f["pending_decision.index.toml"] = idx([pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})])
+        f["counters.toml"] = counters(PD=2)
+        _fw_ch = run(f)
+        check("firewall-inactive-importer-current-resolution-finding",
+              _fw_ch is not None and _fw_ch.status == INVALID
+              and {c for c, v in _fw_ch.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and _fw_ch.by_check.get("C-DECISION-CHAINS")
+              == ["C-DECISION-CHAINS: importer-authored pending_decision 'PD-2' is the current effective "
+                  "resolution of a clean pending_decision chain; resolving it now takes a new clean decision "
+                  "linking back (spec 8.6)"]
+              and _fw_disclosed(_fw_ch))
+        # Legacy importer-authored clean history the firewall leaves alone: an importer-authored item ratified
+        # at done with its importer-authored receipt, and an importer-authored decision a maintainer decision
+        # supersedes, certify VALID (red when either arm grades importer-authored history it must not).
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([dict(bi(1, "done"), actor={"kind": "importer"}), bi(2, "open")])
+        f["done.index.toml"] = idx([copy.deepcopy(_fw_idn)])
+        f["pending_decision.index.toml"] = idx([dict(pd(1), actor={"kind": "importer"}), pd(2, supersedes="PD-1")])
+        f["counters.toml"] = counters(PD=2)
+        _fw_hist = _fw_run(f, _fw_dig)
+        check("firewall-inactive-legacy-history-valid",
+              _fw_hist is not None and _fw_hist.status == VALID and _fw_disclosed(_fw_hist))
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1), pd(2, supersedes="PD-1"), pd(3, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=3)
@@ -7695,6 +8543,22 @@ def self_test():
               mmr is not None and any("U2M" in m for m in mmr.cannot_evaluate))
         check("f4-module-record-not-false-invalid",
               mmr is not None and not any("not a supported record type" in f for f in mmr.findings))
+        # The section 8.6 tripwire behind the module-tier residual: every module type the firewall names
+        # (current-state joins and field-borne authority) is schema-deferred, so no store holding one of
+        # its records certifies VALID before its schema ships (red when the deferral stops covering one).
+        # The same clean importer-authored waiver at `active` on this inactive store never certifies either.
+        check("imported-firewall-module-types-schema-deferred",
+              all(_schema_deferred(t) for t in ("waiver", "session_lease", "mode", "gate_run",
+                                                "tier_assessment", "artifact", "release", "maintainer_action")))
+        mw = copy.deepcopy(mm)
+        mw["artifact.index.toml"] = idx([])
+        mw["counters.toml"] = counters(AR=0, GR=0, RL=0, WV=1)
+        mw["waiver.index.toml"] = idx([envelope("WV-1", "waiver", "active", actor={"kind": "importer"})])
+        mwr = run(mw)
+        check("importer-waiver-inactive-not-valid",
+              mwr is not None and mwr.status != VALID
+              and any(m.startswith(".working/toml/waiver.index.toml: 1 schema-deferred record(s) of type "
+                                   "'waiver'") and _SCHEMA_DEFERRAL in m for m in mwr.cannot_evaluate))
 
         # ===== draft-2 discriminating vectors ========================================================
         # F4/codex-9: a malformed prior record id is a MALFORMED observation (cant), never store INVALID.
