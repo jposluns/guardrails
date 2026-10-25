@@ -170,6 +170,7 @@ run_gate "first-pin-demo-selftest" python3 -I -B tools/gen_first_pin_demo.py --s
 run_gate "first-pin-demo-drift"    python3 -I -B tools/gen_first_pin_demo.py --check
 run_gate "must-deliver-selftest" python3 -I -B tools/check_must_deliver.py --self-test
 run_gate "must-deliver"          python3 -I -B tools/check_must_deliver.py
+run_gate "mappings-page-selftest" python3 -I -B tools/gen_mappings.py --self-test
 run_gate "mappings-page-drift" python3 -I -B tools/gen_mappings.py --check
 run_gate "reference-roster-selftest" python3 -I -B tools/gen_reference_facts.py --self-test
 run_gate "reference-roster-drift" python3 -I -B tools/gen_reference_facts.py --check
@@ -187,6 +188,7 @@ run_gate "instruction-budget-selftest" python3 -I -B tools/check_instruction_bud
 run_gate "instruction-budget" python3 -I -B tools/check_instruction_budget.py
 run_gate "brief-capability-selftest" python3 -I -B tools/check_brief_capability.py --self-test  # no brief in the repository to lint
 run_gate "notice-drift"    python3 -I -B tools/gen_notice.py --check
+run_gate "claude-selftest" python3 -I -B tools/gen_claude.py --self-test
 run_gate "claude-drift"    python3 -I -B tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 -I -B tools/gen_adapters.py --check
 run_gate "cursor-selftest"  python3 -I -B tools/gen_cursor.py --self-test
@@ -194,6 +196,7 @@ run_gate "cursor-drift"  python3 -I -B tools/gen_cursor.py --check
 run_gate "worker-pack-selftest" python3 -I -B tools/gen_worker_pack.py --self-test
 run_gate "worker-pack-drift" python3 -I -B tools/gen_worker_pack.py --check
 run_gate "hooks-selftest" python3 -I -B tools/gen_hooks.py --self-test
+run_gate "secret-patterns-selftest" python3 -I -B tools/gen_secret_patterns.py --self-test
 run_gate "secret-patterns-drift" python3 -I -B tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
 run_gate "hooks-behaviour-selftest" python3 -I -B tools/selftest_aiqt_hooks.py
