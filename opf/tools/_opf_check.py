@@ -7806,6 +7806,30 @@ def self_test():
                 "DN-2", "reference", "recorded", refs=[{"kind": "doc", "locator": "x", "note": "n"}])])}, DN=2)))
         check("r1-moved-row-mislabelled-destination-absent-cannot-evaluate", _receipts_unread(_moved_rows_run(
             [{"id": "DN-2", "type": "reference", "destination": "archive/2026/reference.index.toml"}], DN=2)))
+        # A moved row whose declared type is a roster type that is not enabled, with an id in that type's
+        # own namespace, names no enabled type, so a wrong or an unconfirmed destination leaves every
+        # enabled type's population incomplete and every join that reads it CANNOT-EVALUATE. Each branch
+        # has its own vector (red when that branch alone records only the declared type unread).
+        def _all_joins_unread(res):
+            return (res is not None
+                    and {cid: res.checks.get(cid) for cid in
+                         ("C-RECEIPTS", "C-HANDOFF", "C-DECISION-CHAINS", "C-LINKS")}
+                    == {"C-RECEIPTS": "CANNOT-EVALUATE", "C-HANDOFF": "CANNOT-EVALUATE",
+                        "C-DECISION-CHAINS": "CANNOT-EVALUATE", "C-LINKS": "CANNOT-EVALUATE"})
+        for _mtype, _mid in (("maintainer_action", "MA-1"), ("legacy_fragment", "LF-1")):
+            _mname = _mtype.replace("_", "-")
+            _mv_wrong = _moved_rows_run(
+                [{"id": _mid, "type": _mtype, "destination": "archive/2026/handoff.index.toml"}])
+            check("moved-row-{}-disabled-wrong-destination-cannot-evaluate".format(_mname),
+                  _all_joins_unread(_mv_wrong)
+                  and any("is not this bucket's type index" in f_ for f_ in _mv_wrong.findings)
+                  and not any("absent from its destination" in f_ for f_ in _mv_wrong.findings))
+            _mv_unconf = _moved_rows_run(
+                [{"id": _mid, "type": _mtype, "destination": "archive/2026/{}.index.toml".format(_mtype)}])
+            check("moved-row-{}-disabled-destination-unconfirmed-cannot-evaluate".format(_mname),
+                  _all_joins_unread(_mv_unconf)
+                  and any("absent from its destination" in f_ for f_ in _mv_unconf.findings)
+                  and not any("is not this bucket's type index" in f_ for f_ in _mv_unconf.findings))
         # The section 8.6 firewall on the sibling joins (the maintainer ruling: keyed on provenance, on
         # every store): an importer-authored done confers no receipt on a non-importer ratified
         # backlog_item (red when the receipt join reads importer-authored records).
@@ -8014,7 +8038,7 @@ def self_test():
             "worklog_moved": [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]}
         f["archive/2026/reference.index.toml"] = idx([])
         _f5a_run = run(f)
-        check("f5-enumerated-id-absent-from-dest-fails-closed",
+        check("enumerated-id-absent-from-dest-fails-closed",
               _f5a_run is not None and _f5a_run.status == CANNOT_EVALUATE
               and any("absent from its destination" in f_ for f_ in _f5a_run.findings))
         f = clean_machine()
@@ -8026,7 +8050,7 @@ def self_test():
         f["archive/2026/handoff.index.toml"] = idx([])
         f["counters.toml"] = counters(RF=9)
         _f12_run = run(f)
-        check("f12-moved-type-mismatch-fails-closed",
+        check("moved-type-mismatch-fails-closed",
               _f12_run is not None and _f12_run.status == CANNOT_EVALUATE
               and any("but the id namespace is" in f_ for f_ in _f12_run.findings))
         f = clean_machine()
@@ -8242,7 +8266,7 @@ def self_test():
             "moved": [{"id": "BI-1", "type": "backlog_item", "destination": "backlog_item.index.toml"}],
             "worklog_moved": [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]}
         _m2a_run = run(m2a)
-        check("m2-moved-dest-outside-bucket-fails-closed",
+        check("moved-dest-outside-bucket-fails-closed",
               _m2a_run is not None and _m2a_run.status == CANNOT_EVALUATE
               and any("is not this bucket's type index" in f_ for f_ in _m2a_run.findings))
         m2b = clean_machine()
