@@ -1567,8 +1567,8 @@ def _launcher_of(path):
 def _in_move_archive(path, root):
     """Whether `path` lies strictly beneath the Move archive of the store at `root`, where a move disposition
     files an old file away. _launcher_writes leaves a move-file destination there out, and the planner
-    refuses a declared move destination under a launcher's file name anywhere else, since no enforcement row
-    can name a moved file."""
+    refuses a declared move destination under a launcher's file name anywhere else, since the frozen plan
+    refuses one there whether or not an enforcement row names it."""
     return path.startswith(_compose(root, ARCHIVE_REL + "/moved") + "/")
 
 
@@ -3003,6 +3003,24 @@ def self_test():
     result = _validated(lambda p: _moved_in(p, [(".opf/hooks/pre-commit", "legacy/hooks/pre-commit")]))
     check("launch-unnamed-launcher-by-move-file-outside-archive", result.status == CANNOT_EVALUATE
           and "plan move-file row places 'legacy/hooks/pre-commit' " + _unrowed in result.findings[0])
+    # naming such a destination in an enforcement row does not admit it: no install op installs the member
+    # (INVALID); an install op that does writes the path a second time (INVALID); and a launch check refuses
+    # an installed launcher whose target the mirror does not hold before that collision (CANNOT-EVALUATE)
+    for label, destination, installed, want, reason in (
+            ("uninstalled", "legacy/hooks/pre-commit", False, INVALID,
+             "member 'legacy/hooks/pre-commit' is installed by no "),
+            ("installed-collision", "opf/enforcement/other/pre-commit", True, INVALID,
+             "plan effects claim 'opf/enforcement/other/pre-commit' twice"),
+            ("installed-unrunnable", "legacy/hooks/pre-commit", True, CANNOT_EVALUATE,
+             "member 'legacy/hooks/pre-commit' launches '../../tools/opf.py'")):
+        def _named_move(p, destination=destination, installed=installed):
+            _moved_in(p, [(".opf/hooks/pre-commit", destination)])
+            p["enforcement"][2]["members"].append({"path": destination, "digest": _D9})
+            if installed:
+                p["ops"][3]["members"].append({"path": destination, "digest": _D9})
+        result = _validated(_named_move)
+        check("launch-named-move-destination-" + label, result.status == want
+              and any(reason in finding for finding in result.findings))
     check("launch-move-archive-predicate", _in_move_archive(ARCHIVE_REL + "/moved/x/pre-commit", ".")
           and not _in_move_archive(ARCHIVE_REL + "/moved", ".")
           and not _in_move_archive(ARCHIVE_REL + "/moved2/x/pre-commit", ".")
