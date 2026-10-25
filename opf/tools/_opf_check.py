@@ -2921,7 +2921,7 @@ def _check_imported_provenance(root_fd, rows, strays, unread, rep):
 _CLEAN_TO_IMPORTED_RELS = frozenset({"relates", "derives_from", "follows", "supersedes"})
 
 
-def _check_imported_segregation(recs, by_id, unevaluated, rep):
+def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset()):
     """C-IMPORTED-SEGREGATION (spec 8.3: it "enforces section 8.6"; spec 8.6: it "enforces this firewall
     over importer-authored records in both series"), graded on a store whose imported series is active.
     It grades the section 8.6 rules a parse-only doctor decides from the clean record set `recs` (active,
@@ -2946,11 +2946,30 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep):
     actionability, supersession discharge outside a pending_decision chain, the module-tier current-state
     joins, field-borne authority, approval, and extension or adoption-approval authority) are named in
     _FIREWALL_RESIDUALS and _IMPORTED_RESIDUALS, so a PASS never reads as full section 8.6 coverage.
-    `unevaluated` names the clean-record checks that did not evaluate: the firewall is then
-    CANNOT-EVALUATE over the records they could not seat, never a pass."""
+    The check never passes over a partial population (spec 8.6: missing or unreadable evidence fails
+    closed); each of these causes is a CANNOT-EVALUATE naming it:
+      - `unevaluated` names the clean-record readers (C-RECORDS, C-PERRECORD-RECONCILE, C-ARCHIVE-ENUM)
+        that did not evaluate; the records they could not seat are not graded, and the rules still run
+        over the records in `recs` unless the next cause stops one;
+      - `unread` names the record types the collectors could not read in full, including where a reader
+        reports only a finding (a record left unseated, a moved row its destination does not confirm),
+        and _make_rec's `unparsed` names the records whose status, links or scopes could not be
+        interpreted. The link rule reads every clean record's links, so any unread type, or any record
+        whose links could not be interpreted, makes it CANNOT-EVALUATE; it still grades the links it
+        read, since each such finding is that record's own. The receipt firewall reads the backlog_item,
+        done and maintainer_decision records, and the decision-chain arm the pending_decision records:
+        when one of an arm's types is unread, or a record of one has a status or links value that could
+        not be interpreted, that arm is CANNOT-EVALUATE and is not run, since a receipt, remedy or chain
+        member not read or not interpreted could hide a finding or raise a false one."""
     if unevaluated:
         rep.cant("C-IMPORTED-SEGREGATION: {} did not evaluate, so the authority firewall (spec 8.6) is not "
                  "evaluated over the clean records it could not seat".format(", ".join(unevaluated)))
+    clean = [r for r in recs if r.location != "imported"]
+    links_uninterpreted = {r.rtype for r in clean if "links" in r.unparsed}
+    if unread or links_uninterpreted:
+        rep.cant("C-IMPORTED-SEGREGATION: {} (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the "
+                 "clean-to-imported link rule (spec 8.6) is not evaluated over the records not read or not "
+                 "interpreted".format(_partial_causes(unread, links_uninterpreted, "links")))
     for r in recs:
         own_ns = _ROSTER_NAMESPACES.get(r.rtype)
         for rel, tid in r.links:
@@ -2965,8 +2984,34 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep):
                 rep.finding("C-IMPORTED-SEGREGATION: clean record {} (type {!r}) supersedes -> {!r} of "
                             "another type; a clean-to-imported supersedes is same-type only (spec "
                             "8.6)".format(_safe_display(r.id), r.rtype, tid))
-    _check_importer_receipts(recs, rep, "C-IMPORTED-SEGREGATION")
-    _check_importer_chains(recs, by_id, rep, "C-IMPORTED-SEGREGATION")
+    uninterpreted = {r.rtype for r in clean if r.unparsed}
+    receipt_types = {"backlog_item", "done", "maintainer_decision"}
+    if (unread | uninterpreted) & receipt_types:
+        rep.cant("C-IMPORTED-SEGREGATION: {} (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the "
+                 "receipt firewall (spec 8.6) is not evaluated over a partial set".format(
+                     _partial_causes(unread & receipt_types, uninterpreted & receipt_types, "status or links")))
+    else:
+        _check_importer_receipts(recs, rep, "C-IMPORTED-SEGREGATION")
+    chain_types = {"pending_decision"}
+    if (unread | uninterpreted) & chain_types:
+        rep.cant("C-IMPORTED-SEGREGATION: {} (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the "
+                 "decision-chain firewall (spec 8.6) is not evaluated over a partial set".format(
+                     _partial_causes(unread & chain_types, uninterpreted & chain_types, "status or links")))
+    else:
+        _check_importer_chains(recs, by_id, rep, "C-IMPORTED-SEGREGATION")
+
+
+def _partial_causes(unread, uninterpreted, fields):
+    # The causes a fail-closed firewall rule names, in the C-LINKS wording: the types whose records were
+    # not all read, then the types whose records carry a `fields` value that could not be interpreted.
+    causes = []
+    if unread:
+        causes.append("the records of {} could not all be read".format(
+            ", ".join(repr(t) for t in sorted(unread))))
+    if uninterpreted:
+        causes.append("the {} of {} records could not be interpreted".format(
+            fields, ", ".join(repr(t) for t in sorted(uninterpreted))))
+    return "; ".join(causes)
 
 
 def _check_importer_receipts(recs, rep, cid):
@@ -4468,12 +4513,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                  imported_complete and not imported_unread)
     # --- C-IMPORTED-SEGREGATION (an active imported series only): the section 8.6 authority firewall over
     # the clean record set the cross-record checks above read, fail-closed on any clean-record reader that
-    # did not evaluate (spec 8.3/8.6); its provenance-keyed arms run on an inactive store too (above) ------
+    # did not evaluate and on the collectors' `unread` set, which the firewall widens by _make_rec's
+    # `unparsed` as the joins do (spec 8.3/8.6); its provenance-keyed arms run on an inactive store too
+    # (above) ------
     if imported:
         unseated = [cid for cid in ("C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM")
                     if rep.checks.get(cid) == "CANNOT-EVALUATE"]
         rep.ran("C-IMPORTED-SEGREGATION")
-        _check_imported_segregation(recs, by_id, unseated, rep)
+        _check_imported_segregation(recs, by_id, unseated, rep, unread)
 
     # --- the frozen-span / no-deletion / partition / contiguity checks (active + archive together) ----
     rep.ran("C-FROZEN-COVERAGE")
@@ -7804,6 +7851,99 @@ def self_test():
             check("imported-segregation-non-corrects-remedy-confers-nothing",
                   _i3_rmxr is not None and _i3_rmxr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
                   and any("'BI-1'" in m for m in _i3_msgs(_i3_rmxr, "C-IMPORTED-SEGREGATION")))
+            # Fail-closed over a partial population while every clean reader still evaluates (spec 8.6:
+            # missing or unreadable evidence fails closed). On the receipt store above, the importer-authored
+            # receipt's links read as a string (a C-RECORDS finding), or that receipt enumerated as rotated
+            # to a destination that does not hold it (a C-ARCHIVE-ENUM finding), leaves BI-1 with no receipt
+            # the firewall can read; on the chain store above, the importer-authored resolution's status
+            # does not parse (a C-RECORDS finding), so the chain reads as resolved by the maintainer. Each
+            # is CANNOT-EVALUATE naming the cause and the rule not run, with no finding of that rule, never
+            # a pass over the records that were read (red when the firewall ignores the collectors' unread
+            # set or _make_rec's unparsed fields).
+            def _i3_seg_cant(r, cause, rule):
+                return (r is not None and r.checks.get("C-IMPORTED-SEGREGATION") == "CANNOT-EVALUATE"
+                        and any(cause in m and rule in m for m in _i3_msgs(r, "C-IMPORTED-SEGREGATION")))
+
+            def _i3_seg_quiet(r):
+                return r is not None and not any(m.startswith("C-IMPORTED-SEGREGATION") for m in r.findings)
+
+            _i3_ulk = copy.deepcopy(_i3_sg)
+            _i3_ulk_dn = dict(copy.deepcopy(_i3_idn), links="receipt_of BI-1")
+            _i3_ulk["done.index.toml"] = idx([_i3_ulk_dn])
+            _i3_ulk_obs = copy.deepcopy(_i3_sg_obs)
+            _i3_ulk_obs["prior"]["digests"]["DN-1"] = _record_digest(_i3_ulk_dn)
+            _i3_ulkr = _i3_run(_i3_ulk, obs=_i3_ulk_obs)
+            check("imported-segregation-uninterpreted-receipt-cannot-evaluate",
+                  _i3_ulkr is not None and _i3_ulkr.checks.get("C-RECORDS") == "FINDING"
+                  and _i3_ulkr.checks.get("C-ARCHIVE-ENUM") == "PASS" and _i3_seg_quiet(_i3_ulkr)
+                  and _i3_seg_cant(_i3_ulkr, "the status or links of 'done' records could not be interpreted",
+                                   "the receipt firewall"))
+            _i3_umv = copy.deepcopy(_i3_sg)
+            _i3_umv["done.index.toml"] = idx([])
+            _i3_umv["archive/2026/archive.toml"]["moved"] = [
+                {"id": "DN-1", "type": "done", "destination": "archive/2026/done.index.toml"}]
+            _i3_umv["archive/2026/done.index.toml"] = idx([])
+            _i3_umvr = _i3_run(_i3_umv, obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-unconfirmed-moved-receipt-cannot-evaluate",
+                  _i3_umvr is not None and _i3_umvr.checks.get("C-RECORDS") == "PASS"
+                  and _i3_umvr.checks.get("C-ARCHIVE-ENUM") == "FINDING" and _i3_seg_quiet(_i3_umvr)
+                  and _i3_seg_cant(_i3_umvr, "the records of 'done' could not all be read", "the receipt firewall"))
+            _i3_ust = _i3_chain(cur_actor="importer")
+            _i3_ust["pending_decision.index.toml"]["record"][1]["status"] = "settled"
+            _i3_ustr = _i3_run(_i3_ust)
+            check("imported-segregation-uninterpreted-chain-member-cannot-evaluate",
+                  _i3_ustr is not None and _i3_ustr.checks.get("C-RECORDS") == "FINDING"
+                  and _i3_ustr.checks.get("C-ARCHIVE-ENUM") == "PASS" and _i3_seg_quiet(_i3_ustr)
+                  and _i3_seg_cant(_i3_ustr,
+                                   "the status or links of 'pending_decision' records could not be interpreted",
+                                   "the decision-chain firewall"))
+            # The receipt firewall's other two types: the ratified item's status does not parse on the
+            # receipt store above, so the arm cannot tell it is ratified, and the remedy decision's status
+            # does not parse on the remedy store above. Each is the arm's CANNOT-EVALUATE, never the pass
+            # either store reads as over the records it could interpret (red when the arm's type set
+            # drops backlog_item or maintainer_decision).
+            _i3_ubi = copy.deepcopy(_i3_sg)
+            _i3_ubi["backlog_item.index.toml"] = idx([bi(1, "finished"), bi(2, "open")])
+            _i3_ubir = _i3_run(_i3_ubi, obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-uninterpreted-item-cannot-evaluate",
+                  _i3_ubir is not None and _i3_ubir.checks.get("C-RECORDS") == "FINDING"
+                  and _i3_seg_cant(_i3_ubir,
+                                   "the status or links of 'backlog_item' records could not be interpreted",
+                                   "the receipt firewall"))
+            _i3_umd = _i3_remedy()
+            _i3_umd["maintainer_decision.index.toml"]["record"][0]["status"] = "noted"
+            _i3_umdr = _i3_run(_i3_umd, obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-uninterpreted-remedy-cannot-evaluate",
+                  _i3_umdr is not None and _i3_umdr.checks.get("C-RECORDS") == "FINDING"
+                  and _i3_seg_cant(_i3_umdr,
+                                   "the status or links of 'maintainer_decision' records could not be "
+                                   "interpreted", "the receipt firewall"))
+            # The link rule reads every clean record's links, so a record of any other type whose links do
+            # not parse (here the store's handoff, beside a C-RECORDS finding), or a type whose records
+            # were not all read (here a rotated reference its destination does not hold, beside a
+            # C-ARCHIVE-ENUM finding), is CANNOT-EVALUATE naming the cause, while the receipt and chain
+            # rules, whose types were read in full, still run and stay quiet (red when the link rule
+            # ignores either).
+            _i3_hlk = _i3_machine()
+            _i3_hlk["handoff.index.toml"] = idx([dict(ho(1), links="remediates imported:BI-1")])
+            _i3_hlkr = _i3_run(_i3_hlk)
+            check("imported-segregation-uninterpreted-links-other-type-cannot-evaluate",
+                  _i3_hlkr is not None and _i3_hlkr.checks.get("C-RECORDS") == "FINDING"
+                  and _i3_seg_cant(_i3_hlkr, "the links of 'handoff' records could not be interpreted",
+                                   "the clean-to-imported link rule")
+                  and len(_i3_msgs(_i3_hlkr, "C-IMPORTED-SEGREGATION")) == 1)
+            _i3_rmv = _i3_machine()
+            _i3_rmv["archive/2026/archive.toml"]["moved"] = [
+                {"id": "RF-9", "type": "reference", "destination": "archive/2026/reference.index.toml"}]
+            _i3_rmv["archive/2026/reference.index.toml"] = idx([])
+            _i3_rmv["counters.toml"]["counters"]["RF"] = 9
+            _i3_rmvr = _i3_run(_i3_rmv)
+            check("imported-segregation-unread-other-type-cannot-evaluate",
+                  _i3_rmvr is not None and _i3_rmvr.checks.get("C-RECORDS") == "PASS"
+                  and _i3_rmvr.checks.get("C-ARCHIVE-ENUM") == "FINDING"
+                  and _i3_seg_cant(_i3_rmvr, "the records of 'reference' could not all be read",
+                                   "the clean-to-imported link rule")
+                  and len(_i3_msgs(_i3_rmvr, "C-IMPORTED-SEGREGATION")) == 1)
             # The section 8.6 residuals: an active store discloses the firewall entries and the
             # imported-series entry, and the inactive clean store, which holds no importer-authored record,
             # discloses neither (red when either disclosure is dropped or widened); the firewall-inactive
