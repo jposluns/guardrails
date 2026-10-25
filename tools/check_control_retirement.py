@@ -31,11 +31,12 @@ stale row is the repair, which the append-only check allows for a control live a
 
 Base binding. On a pull request (GITHUB_EVENT_NAME=pull_request or GITHUB_BASE_REF set) the base is the
 unique merge base of HEAD and refs/remotes/origin/<GITHUB_BASE_REF>, and --base is refused. On a GitHub
-Actions push the base is the event payload's before commit (GITHUB_EVENT_PATH), and --base is refused; any
-other Actions event is refused. Locally the base is the unique merge base of HEAD and refs/heads/main, or
-the commit --base names. A shallow repository, an unresolvable or ambiguous base, a missing or malformed
-input at either end, or a missing head record cannot be evaluated (exit 2), never a pass. The base record
-may be absent (an empty record).
+Actions push the base is the event payload's before commit (GITHUB_EVENT_PATH), and --base is refused; the
+before binds only as a full object id of this repository, so one git would read as a ref name or an
+abbreviation (the other hash width, or a prefix) is refused. Any other Actions event is refused. Locally
+the base is the unique merge base of HEAD and refs/heads/main, or the commit --base names. A shallow
+repository, an unresolvable or ambiguous base, a missing or malformed input at either end, or a missing head
+record cannot be evaluated (exit 2), never a pass. The base record may be absent (an empty record).
 
 Git configuration. Every git call the gate makes, and every fixture git call of its self-test, runs under
 the hermetic git environment of tools/_git_fixture_env.py (git_fixture_env): every GIT_-prefixed variable
@@ -222,6 +223,15 @@ def _commit(root, env, revision):
     return value
 
 
+def _object_id(root, env, revision):
+    """The id of the object revision names, as git reads the name, or CannotEvaluate."""
+    try:
+        raw = _rev_parse(root, env, "--verify", "--quiet", "--end-of-options", revision + "^{object}")
+    except CannotEvaluate as exc:
+        raise type(exc)("{} does not name an object ({})".format(revision, exc))
+    return raw.decode("ascii", "replace").strip()
+
+
 def _merge_base_of(root, env, target):
     """The unique merge base of HEAD and target, or CannotEvaluate."""
     head, tip = _commit(root, env, "HEAD"), _commit(root, env, target)
@@ -267,7 +277,14 @@ def resolve_base(root, base_arg, environ):
             raise CannotEvaluate("unsupported GitHub Actions event {!r}".format(event))
         if base_arg is not None:
             raise CannotEvaluate("a push derives its base from the event payload; --base is refused")
-        return "push before commit", _commit(root, env, _push_before(environ))
+        before = _push_before(environ)
+        # git reads a before of the other hash width as a ref name, and a shorter one as an abbreviation, so
+        # either can name an object other than the one the payload names. The before binds only when git
+        # reads it as a full object id of this repository: the object it names then has the before as its id.
+        if _object_id(root, env, before) != before:
+            raise CannotEvaluate("push event payload before {} is not an object id of this repository".format(
+                before))
+        return "push before commit", _commit(root, env, before)
     if base_arg is not None:
         return "--base " + base_arg, _commit(root, env, base_arg)
     return "merge base of HEAD and " + LOCAL_TARGET, _merge_base_of(root, env, LOCAL_TARGET)
@@ -917,17 +934,36 @@ def _fixtures(base_dir):
     add("ci/push-zero-before", base, _snapshot(), 2, ("no usable before commit",), env=push,
         prepare=payload("0" * 40))
 
-    def zero_named_ref(root, run_env):
-        # An all-zero before of the other hash width is not a full object id in this repository, so git looks
-        # it up as a ref name: with a branch of that name, a reverted zero check would bind the base to it and
-        # pass.
-        width = 64 if len(_commit(root, _git_env(), "HEAD")) == 40 else 40
-        subprocess.run(["git", "-C", str(root), "update-ref", "refs/heads/" + "0" * width, "HEAD"],
-                       check=True, capture_output=True, timeout=TIMEOUT, env=git_fixture_env())
-        payload("0" * width)(root, run_env)
+    def named_ref(digit):
+        def prepare(root, run_env):
+            # A before of the other hash width is not a full object id in this repository, so git looks it up
+            # as a ref name: with a branch of that name, a reverted object-id check would bind the base to it
+            # and pass. The all-zero value is refused by the zero check first.
+            width = 64 if len(_commit(root, _git_env(), "HEAD")) == 40 else 40
+            subprocess.run(["git", "-C", str(root), "update-ref", "refs/heads/" + digit * width, "HEAD"],
+                           check=True, capture_output=True, timeout=TIMEOUT, env=git_fixture_env())
+            payload(digit * width)(root, run_env)
+        return prepare
 
     add("ci/push-zero-before-named-ref", base, _snapshot(), 2, ("no usable before commit",), env=push,
-        prepare=zero_named_ref)
+        prepare=named_ref("0"))
+    add("ci/push-other-width-named-ref", base, _snapshot(), 2, ("is not an object id of this repository",),
+        env=push, prepare=named_ref("1"))
+
+    def abbreviated(root, run_env):
+        # In a SHA-256 repository git reads a 40-digit before as an abbreviation of a longer object id, so a
+        # reverted object-id check would bind the base to the commit it abbreviates and pass; the SHA-256
+        # repository replaces the root.
+        sha256 = root.with_name(root.name + "-sha256")
+        subprocess.run(["git", "init", "-q", "-b", "main", "--object-format=sha256", str(sha256)], check=True,
+                       capture_output=True, timeout=TIMEOUT, env=git_fixture_env())
+        _write(sha256, _snapshot())
+        _fixture_commit(sha256)
+        payload(_commit(sha256, _git_env(), "HEAD")[:40])(sha256, run_env)
+        return sha256
+
+    add("ci/push-abbreviated-before", base, _snapshot(), 2, ("is not an object id of this repository",),
+        env=push, prepare=abbreviated)
     add("ci/push-no-payload", base, _snapshot(), 2, ("without GITHUB_EVENT_PATH",), env=push)
     add("ci/push-base-arg-refused", base, _snapshot(), 2, ("--base is refused",), env=push, base_arg="HEAD",
         prepare=payload(None))
@@ -1055,7 +1091,8 @@ ENFORCEMENT_MUTANTS = (
      "    if rows is None:\n        return set()\n        raise CannotEvaluate(\"{}: schema-invalid",
      "head/schema-invalid-registry-all-recorded"),
     ("option-revision", 'if not revision or revision.startswith("-"):', "if not revision:", "local/base-arg-dash-tag"),
-    ("push-before-zero", 'or not before.strip("0"):', ":", "ci/push-zero-before-named-ref"),
+    ("push-before-object-id", "        if _object_id(root, env, before) != before:\n", "        if False:\n",
+     "ci/push-other-width-named-ref"),
 )
 DIAGNOSTIC_MUTANTS = (
     # Narrows the gate and hook id grammar a row's control is read by: a row the narrowed grammar rejects
@@ -1091,6 +1128,10 @@ DIAGNOSTIC_MUTANTS = (
     # Changes a refusal message: an empty event path still fails to open, as an unreadable payload.
     ("push-payload", '    if not path:\n        raise CannotEvaluate("push event without GITHUB_EVENT_PATH")\n', "",
      "ci/push-no-payload", 2, ("push event payload unreadable",)),
+    # Changes a refusal message: an all-zero before names no object at this repository's width and is not
+    # read as an object id at the other, so the object-id check refuses it.
+    ("push-before-zero", 'or not before.strip("0"):', ":", "ci/push-zero-before-named-ref", 2,
+     ("is not an object id of this repository",)),
     # Re-tightens the stale-row repair: it only adds a finding (the repair is refused again), never removes one.
     ("base-row-repair",
      "        if isinstance(base_control, str) and base_control in base_live and base_control not in head_live:\n",
@@ -1306,6 +1347,8 @@ def _self_test_isolated(executed, real_git):
                 ("vector/ci-push-drop-no-row", "ci/push-drop-no-row"),
                 ("vector/ci-push-zero-before", "ci/push-zero-before"),
                 ("vector/ci-push-zero-before-named-ref", "ci/push-zero-before-named-ref"),
+                ("vector/ci-push-other-width-named-ref", "ci/push-other-width-named-ref"),
+                ("vector/ci-push-abbreviated-before", "ci/push-abbreviated-before"),
                 ("vector/ci-push-no-payload", "ci/push-no-payload"),
                 ("vector/ci-push-base-arg-refused", "ci/push-base-arg-refused"),
                 ("vector/ci-unsupported-event", "ci/unsupported-event"),

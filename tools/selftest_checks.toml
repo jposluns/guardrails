@@ -2693,6 +2693,8 @@ expected-check-ids = [
   "vector/ci-push-drop-no-row",
   "vector/ci-push-zero-before",
   "vector/ci-push-zero-before-named-ref",
+  "vector/ci-push-other-width-named-ref",
+  "vector/ci-push-abbreviated-before",
   "vector/ci-push-no-payload",
   "vector/ci-push-base-arg-refused",
   "vector/ci-unsupported-event",

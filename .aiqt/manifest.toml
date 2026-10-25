@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "dd1fc58709ee37caa43e149c7173bd3f50dc0ebd206ba5ebe999d233c3b4bf44"
+tree-sha256 = "e83c1a3c2b0344c16932713387840fc09b5a56a8ce9a8814a3dba1e7b87f66f4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3356,8 +3356,8 @@ sha256 = "1e2a372431a7ae2e44fd5e3542be2c38c9bf6c4b966cfec9f446a24c76e0c9bb"
 
 [[sources]]
 path = "tools/check_control_retirement.py"
-bytes = 94409
-sha256 = "e013ff00c84f09123babf8a0e4262f8ee4ce756d703897c6d98c439a7377ef7c"
+bytes = 97205
+sha256 = "9edf14a496f16fdb36024d125886f3216c2e70769cfe257409f40876fd3c8624"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
@@ -3796,8 +3796,8 @@ sha256 = "12394b5f41c65e553f2cf3786f2ef7919deeec6c03eedc3ebb51c20b0d1676ea"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 111918
-sha256 = "f465fb2a7d57685c90df13ccaad4eb206533ea834348386764fdfdf40fa15197"
+bytes = 111999
+sha256 = "cd85d738e7f62f7e6ff96d99192d57bda987acc5e1fc0de0db2add9c937f7fde"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
