@@ -68,7 +68,7 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 from _standards import dir_or_absent, LINK_OUTSIDE_ROOT  # noqa: E402
 from gen_rules import load_corpus, CID_RE  # noqa: E402
 import gen_agents  # noqa: E402  the AGENTS.md ordering and body transform (sort_key, body_of, HEADER)
@@ -272,7 +272,9 @@ def main():
 #      delivered in the legacy layout is pushed past the cap and no longer delivered; an after-rules block
 #      is not read as rule text (the build passes; spans move only by the AIQT-RULES BEGIN line);
 #   8. a rule corpus symlinked to a directory inside the root is read, while one symlinked outside the root
-#      fails closed (exit 2) with nothing written.
+#      fails closed (exit 2) with nothing written;
+#   9. .aiqt/release/ symlinked outside the root fails closed (exit 2) in --check and write mode with the
+#      demonstration there untouched, while one symlinked inside the root is followed and the file rewritten.
 
 _APEX = "---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
 _RULE = "---\ncorpus-id: {cid}\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: ACCUR\nslug: {slug}\n---\n"
@@ -601,6 +603,12 @@ def self_test_main():
                 failures.append("a rule corpus that is a symlink {}: expected exit {} with the demonstration {}, "
                                 "got {}\n{}".format(where, want, "written" if want == 0 else "not written", code,
                                                     out))
+
+        # 9. .aiqt/release/ above the demonstration symlinked outside the root fails closed (exit 2) in --check and
+        #    write mode with the demonstration there untouched; symlinked inside the root, it is read and rewritten.
+        failures.extend(linked_dir_failures(
+            tmp / "linked", "release", lambda base: _write_tree(base, [("prjint1", True, 0), ("ruleaa", False, 10)]),
+            run, ".aiqt/release", DEMO_REL))
     finally:
         for dirpath, _dirnames, filenames in os.walk(tmp):
             for fn in filenames:
@@ -623,7 +631,8 @@ def self_test_main():
           "non-regular, non-UTF-8 or hand-edited AGENTS.md fails closed (exit 2); a before-rules block moves "
           "every span by exactly the bytes it adds and can push a rule past the cap, and an after-rules block "
           "is never read as rule text; a rule corpus symlinked inside the root is read, and one symlinked "
-          "outside the root fails closed (exit 2) with nothing written.")
+          "outside the root fails closed (exit 2) with nothing written; an .aiqt/release/ symlinked outside the "
+          "root fails closed (exit 2) with the demonstration there untouched, and one inside the root is followed.")
     return 0
 
 

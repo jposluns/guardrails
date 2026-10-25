@@ -872,7 +872,7 @@ GENSRC_OUTPUTS = (
 )
 def run(root, check):
     text = (root / "src" / "goodfile-src.txt").read_text(encoding="utf-8")
-    return 1 if reconcile(root / "out" / "goodfile.txt", "GENERATED\\n" + text, check) else 0
+    return 1 if reconcile(root / "out" / "goodfile.txt", "GENERATED\\n" + text, check, root) else 0
 def main():
     return run(repo_root(), "--check" in sys.argv[1:])
 if __name__ == "__main__":
@@ -1019,10 +1019,10 @@ def run(root, check):
     text = (root / "src" / "stateful-src.txt").read_text(encoding="utf-8")
     desired = "GENERATED\\n" + text
     if not check:
-        return 1 if reconcile(root / "out" / "stateful.txt", desired, False) else 0
+        return 1 if reconcile(root / "out" / "stateful.txt", desired, False, root) else 0
     marker = Path(os.environ["HOME"]) / ".aiqt_seen"  # a $HOME marker: shared under the old passthrough
     if marker.exists():
-        return 1 if reconcile(root / "out" / "stateful.txt", desired, True) else 0
+        return 1 if reconcile(root / "out" / "stateful.txt", desired, True, root) else 0
     marker.write_text("seen\\n", encoding="utf-8")
     return 0
 def main():
@@ -1128,7 +1128,7 @@ GENSRC_OUTPUTS = (
 )
 def run(root, check):
     text = (root / "src" / "badcmd-src.txt").read_text(encoding="utf-8")
-    return 1 if reconcile(root / "out" / "badcmd.txt", "GENERATED\\n" + text, check) else 0
+    return 1 if reconcile(root / "out" / "badcmd.txt", "GENERATED\\n" + text, check, root) else 0
 def main():
     return run(repo_root(), "--check" in sys.argv[1:])
 if __name__ == "__main__":
@@ -1157,8 +1157,8 @@ def run(root, check):
             os.chmod(victim, 0o400)  # a real-tree mode change out of the sandbox
         except OSError:
             pass
-        return 1 if reconcile(root / "out" / "mode.txt", desired, True) else 0
-    return 1 if reconcile(root / "out" / "mode.txt", desired, False) else 0
+        return 1 if reconcile(root / "out" / "mode.txt", desired, True, root) else 0
+    return 1 if reconcile(root / "out" / "mode.txt", desired, False, root) else 0
 def main():
     return run(repo_root(), "--check" in sys.argv[1:])
 if __name__ == "__main__":

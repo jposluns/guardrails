@@ -18,15 +18,15 @@ what the hand-written mains did per target. Building every target fully before r
 this replaced) would instead let a later target's build failure suppress an earlier target's drift line and
 write, a behaviour change this ordering avoids.
 
-Stdlib only; the low-level primitives (repo_root, load_toml, reconcile, replace_block) live in
-_gen_common. This module carries no GENSRC_OUTPUTS and is not a tools/gen_*.py, so the generated-source
+Stdlib only; the low-level primitives (repo_root, load_toml, reconcile, replace_block, target_dir_present)
+live in _gen_common. This module carries no GENSRC_OUTPUTS and is not a tools/gen_*.py, so the generated-source
 registry never treats it as a generator.
 """
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile, replace_block  # noqa: E402
+from _gen_common import repo_root, load_toml, reconcile, replace_block, target_dir_present  # noqa: E402
 
 
 class TargetError(Exception):
@@ -80,8 +80,11 @@ class BlockTarget:
     def materialize(self, root, payload):
         """Splice the rendered inner text into the page's marker block, preserving the rest. Raises
         TargetError (exit 2) when the page is missing or its markers are absent, matching the
-        page-specific messages the hand-written main printed."""
+        page-specific messages the hand-written main printed. The directory holding the page is judged
+        first by the probe reconcile runs (target_dir_present), so a directory that is there but cannot be
+        read as one inside the repository exits 2 before the page is examined or read through it."""
         target = root / self.path
+        target_dir_present(target, root)
         if not target.exists():
             raise TargetError("error: {} not found (expected generated target)".format(self.path))
         try:

@@ -72,7 +72,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile, target_dir_present  # noqa: E402
 import check_versions  # noqa: E402  the ONE shared ASCII SemVer validator the release gates use
 
 # Static content-bearing inputs shared by manifest.toml/root.txt/announce-snippet.txt (VERSION ->
@@ -786,6 +786,11 @@ def compute_all(root, write_mode):
 
 
 def run(root, check):
+    # The directory probe reconcile runs (target_dir_present), for every output before anything is read: an
+    # .aiqt/ or .aiqt/release/ that is there but cannot be read as a directory inside the repository exits 2
+    # here, so .aiqt/frozen.json (hashed as a source in check mode) is never read through it.
+    for rel in GENERATED_OUTPUTS_REL:
+        target_dir_present(root / rel, root)
     try:
         texts = compute_all(root, write_mode=not check)
     except GateError as exc:
@@ -1079,6 +1084,7 @@ def _self_test_main_isolated():
     import shutil
     import tempfile
     from contextlib import redirect_stdout, redirect_stderr
+    from _standards import LINK_OUTSIDE_ROOT
 
     if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
         print("SELF-TEST ERROR: git is unavailable; fail-closed", file=sys.stderr)
@@ -1151,6 +1157,25 @@ def _self_test_main_isolated():
             if got != "raised SystemExit(2)" or made:
                 failures.append(".aiqt/ symlinked outside the root without release/ expected exit 2 with release/ "
                                 "not made there, got {} and release/ made {}".format(got, made))
+        # .aiqt/ symlinked outside the root with frozen.json there not valid UTF-8: --check, which hashes that
+        # file as a source, exits 2 with the link refusal, so it is never read through the link.
+        unread = _build_fixture(tmp / "unread-aiqt")
+        if unread is not None and run_quiet(unread, check=False) == 0:
+            held = tmp / "unread-aiqt-held"
+            shutil.move(str(unread / ".aiqt"), str(held))
+            (held / "frozen.json").write_bytes(b"\xff\n")
+            (unread / ".aiqt").symlink_to(held)
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                try:
+                    got = run(unread, True)
+                except SystemExit as exc:
+                    got = "raised SystemExit({!r})".format(exc.code)
+            if got != "raised SystemExit(2)" or LINK_OUTSIDE_ROOT not in err.getvalue():
+                failures.append(".aiqt/ symlinked outside the root with frozen.json there unreadable expected "
+                                "--check to exit 2 with the link refusal, got {} and {!r}".format(got, err.getvalue()))
+        elif unread is not None:
+            failures.append("the tree for the unread .aiqt/ link vector did not generate")
 
         # (b) SOURCES carve-outs and the managed-block artifact.
         if '[[sources]]\npath = ".aiqt/manifest.toml"' in manifest_text:
@@ -1500,12 +1525,14 @@ def _self_test_main_isolated():
                                             "both" if kept is None else kept + " alone", 2 if link else 0, rc))
         # A roster path under a symlinked directory exits 2 naming that directory, although lstat of the path alone
         # follows the directory symlink and finds a regular file: the directory above each roster path (.claude, and
-        # .aiqt with the ownership map and the outputs) moved beside the fixture and replaced by a symlink to it.
-        # The base roster fixture above is the same tree with real directories and exits 0.
+        # .aiqt with the ownership map and the outputs) moved and replaced by a symlink to it. .claude moves beside the
+        # fixture; .aiqt moves inside it, since moved outside, the probe of the outputs' directory refuses it first
+        # (the unread .aiqt/ vector above), before this check is reached. The base roster fixture above is the same
+        # tree with real directories and exits 0.
         for i, (rel, parent) in enumerate(((".claude/settings.json", ".claude"), (".aiqt/authoring.toml", ".aiqt"))):
             fx = _roster_fixture(tmp / "roster-parent{}".format(i), _LOCAL_OUT_CLASS + _EXCL_SETTINGS + _EXCL_MARKER)
             if fx is not None:
-                moved = tmp / "roster-parent{}-moved".format(i)
+                moved = (fx / "held-aiqt") if parent == ".aiqt" else tmp / "roster-parent{}-moved".format(i)
                 try:
                     os.rename(fx / parent, moved)
                     os.symlink(moved, fx / parent)

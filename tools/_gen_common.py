@@ -173,7 +173,7 @@ def reconcile(path, new_text, check, root=None, make_parents=False):
 _PAST_NS = 10 ** 9  # a fixed modification time a write always moves
 
 
-def linked_dir_failures(tmp, label, build, run, link_rel, target_rel, drift=None):
+def linked_dir_failures(tmp, label, build, run, link_rel, target_rel, drift=None, unread=None):
     """Self-test vectors shared by the generators that write target_rel through reconcile (and
     target_dir_present). For each of two trees, build(base) makes one that run(base, False) generates; then the
     directory link_rel above target_rel is moved, replaced by a symbolic link to it, the target edited by
@@ -181,25 +181,31 @@ def linked_dir_failures(tmp, label, build, run, link_rel, target_rel, drift=None
     to a fixed past value. Moved outside the tree, run(base, True) and run(base, False) must each exit 2
     (returned, or raised as SystemExit) with the target untouched there, never read through, reported drifted
     or clean, or written out of the repository; moved elsewhere inside the tree, run(base, False) must exit 0
-    having rewritten the target there and run(base, True) then exit 0. Returns one failure line per case that
+    having rewritten the target there and run(base, True) then exit 0. unread(path), when given, rewrites the
+    target moved outside so that reading it fails on its own (a page without its markers, say), and each
+    outside run must then print the link refusal (LINK_OUTSIDE_ROOT), so a generator that reads the target
+    before the probe fails with its own error instead and goes red. Returns one failure line per case that
     does not hold, so a revert of the probe goes red in the caller's self-test."""
     import io
     import shutil
     from contextlib import redirect_stderr, redirect_stdout
+    from _standards import LINK_OUTSIDE_ROOT
 
     def quiet(base, check):
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
             try:
-                return run(base, check)
+                code = run(base, check)
             except SystemExit as exc:
-                return exc.code
+                code = exc.code
+        return code, out.getvalue()
 
     failures = []
     for where in ("outside", "in-root"):
         base = Path(tmp) / "{}-linked-{}".format(label, where)
         base.mkdir(parents=True)
         build(base)
-        first = quiet(base, False)
+        first = quiet(base, False)[0]
         if first != 0:
             failures.append("{}: the tree for the {} {} link did not generate (exit {})".format(
                 label, where, link_rel, first))
@@ -212,16 +218,23 @@ def linked_dir_failures(tmp, label, build, run, link_rel, target_rel, drift=None
         target = held / Path(target_rel).relative_to(link_rel)
         if drift is not None:
             drift(target)
+        if unread is not None and where == "outside":
+            unread(target)
         os.utime(target, ns=(_PAST_NS, _PAST_NS))
         if where == "outside":
-            got, want = (quiet(base, True), quiet(base, False)), (2, 2)
+            runs = (quiet(base, True), quiet(base, False))
+            got, want = tuple(code for code, _out in runs), (2, 2)
             moved = os.stat(target).st_mtime_ns != _PAST_NS
             if got != want or moved:
                 failures.append("{}: {} symlinked outside the root expected --check and write exit {} with {} "
                                 "not written there, got exit {}, written {}".format(label, link_rel, want,
                                                                                      target_rel, got, moved))
+            elif unread is not None and not all(LINK_OUTSIDE_ROOT in out for _code, out in runs):
+                failures.append("{}: {} symlinked outside the root with {} there unreadable expected --check and "
+                                "write to print the link refusal, so the target is never read through it, got "
+                                "{!r}".format(label, link_rel, target_rel, [out for _code, out in runs]))
         else:
-            got, want = (quiet(base, False), quiet(base, True)), (0, 0)
+            got, want = (quiet(base, False)[0], quiet(base, True)[0]), (0, 0)
             moved = os.stat(target).st_mtime_ns != _PAST_NS
             if got != want or not moved:
                 failures.append("{}: {} symlinked inside the root expected write and --check exit {} with {} "

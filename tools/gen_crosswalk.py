@@ -885,6 +885,14 @@ def self_test():
         quiet(run_repo, good, False)
         if (good / SCHEMA_REL).read_text(encoding="utf-8") != first:
             failures.append("REPO mode is not deterministic")
+        # (a2) A tree with no .aiqt/ yet: write mode makes the schema's directories (make_parents, after the
+        #      directory probe) and writes it, exit 0.
+        fresh = tmp / "fresh"
+        fresh.mkdir()
+        got = quiet(run_repo, fresh, False)
+        if got != 0 or not (fresh / SCHEMA_REL).is_file():
+            failures.append("REPO generate in a tree without .aiqt/ expected exit 0 with the schema written there "
+                            "(its directories made after the probe), got exit {}".format(got))
 
         # (b) mutated schema -> exit 1.
         (good / SCHEMA_REL).write_text(first + "# tamper\n", encoding="utf-8")
