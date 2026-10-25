@@ -4765,12 +4765,15 @@ def _git_sub_and_args(tokens):
 # expanded here with certainty: a --config-env value lives in the environment and an include in a file, a value
 # starting with '!' runs a shell command, an alias may name another alias, and git splits the value by its own
 # quoting rules. So a git command that defines one runs an unknown subcommand, possibly a mutating one, and each
-# reader of the subcommand treats it that way (_git_local_alias). A definition outside the git command's own
-# segment, through a git configuration variable the command's text names or the hook's environment carries, is
-# read below (_git_alias_named, _git_alias_inherited). Outside this lexical
-# reading: an alias in a configuration file git reads anyway (the repository, global or system file, or one an
-# assignment such as GIT_CONFIG_GLOBAL or HOME points git at), the value of an assignment before the command word
-# built at run time, and git behind a wrapper.
+# reader of the subcommand treats it that way (_git_local_alias), wherever the git word stands in its segment: the
+# command word, or a word behind a reserved word, a '{', '!', time or a wrapper (on git 2.53.0 with bash 5.3 'if
+# true; then git -c alias.p=log p; fi', '{ git -c alias.p=log p; }' and 'time git -c alias.p=log p' each ran the
+# alias). A definition outside the git command's own segment, through a git configuration variable the command's
+# text names or the hook's environment carries, is read below (_git_alias_named, _git_alias_outside). Outside this
+# lexical reading: an alias in a configuration file git reads anyway (the repository, global or system file, or one
+# an assignment such as GIT_CONFIG_GLOBAL or HOME points git at), the value of an assignment before the command word
+# built at run time, a definition or git word built at run time, and a definition inside the text of another word
+# (an sh -c, bash -c or eval body), which is one word here.
 _GIT_ALIAS_KEY_RE = re.compile(r"(?i)(?:alias|include|includeif)\.")
 _GIT_CONFIG_ENV_ASSIGN_RE = re.compile(r"GIT_CONFIG_(?:PARAMETERS|KEY_[0-9]+)\+?=")
 
@@ -4790,18 +4793,27 @@ def _git_alias_defined_at(tokens, i):
 
 
 def _git_local_alias(tokens):
-    """Whether a git segment defines a git alias for its own command (_git_alias_defined_at): a definition among
-    the assignments before the command word, or among the git global options before the subcommand, walked as
-    _git_sub_and_args walks them. The segment's subcommand is then unknown and possibly mutating."""
+    """Whether a segment defines a git alias for a git command of its own (_git_alias_defined_at): a word that
+    names git as a word (_GIT_WORD_RE) and is no option, wherever that word stands (the command word, or a word
+    behind a reserved word, a '{', '!', time or any wrapper), with a definition among the assignments before the
+    command word or among the git global options after that git word, walked as _git_sub_and_args walks them.
+    That git command's subcommand is then unknown and possibly mutating. One pass: a git word inside the options
+    an earlier git word's walk has read is the value of one of them, so its own walk would read the same options."""
     start = _command_word_index(tokens)
-    if any(_git_alias_defined_at(tokens, j) for j in range(start)):
-        return True
-    i = start + 1
+    assigned = any(_git_alias_defined_at(tokens, j) for j in range(start))
     n = len(tokens)
-    while i < n and tokens[i].startswith("-"):
-        if _git_alias_defined_at(tokens, i):
+    end = 0
+    for k in range(start, n):
+        if k < end or tokens[k].startswith("-") or not _GIT_WORD_RE.search(tokens[k]):
+            continue
+        if assigned:
             return True
-        i += 2 if "=" not in tokens[i] and tokens[i] in _GIT_ARG_OPTS else 1
+        i = k + 1
+        while i < n and tokens[i].startswith("-"):
+            if _git_alias_defined_at(tokens, i):
+                return True
+            i += 2 if "=" not in tokens[i] and tokens[i] in _GIT_ARG_OPTS else 1
+        end = i
     return False
 
 
@@ -4828,7 +4840,10 @@ def _git_local_alias(tokens):
 # The hook's own environment counts as well (_git_alias_inherited): the shell the Bash tool runs a command in
 # inherits the session's environment, as this hook does (the premise _ambient_repo_view_override reads it on), so
 # a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> there whose value names an alias, include or includeIf key defines
-# that alias for every segment whose command word is git. That value is set before the command runs and is
+# that alias for every git command the command runs. It counts exactly as a text naming one of the variables does
+# (_git_alias_outside): every segment naming git as a word, and git named as a word anywhere in the text, wherever
+# the word stands, so no reading of shell forms is needed here either (on git 2.53.0 with bash 5.3 the alias ran
+# behind 'if true; then', inside '{ ...; }' and after time). Its value is set before the command runs and is
 # visible here, so it is read as an assignment before the command word is, and an environment carrying only
 # unrelated configuration (gc.auto) is not refused.
 _GIT_CONFIG_ENV_NAME_RE = re.compile(r"GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_)")
@@ -4855,36 +4870,49 @@ def _names_git(tokens):
     return _git_word_index(tokens) < len(tokens)
 
 
+def _git_alias_outside(command):
+    """Whether every git command of command runs under a git alias defined outside its own segment: the text of
+    command names a git configuration variable (_git_config_env_named), or the hook's environment carries one
+    naming an alias (_git_alias_inherited), which counts the same way (see _GIT_CONFIG_ENV_NAME_RE)."""
+    return _git_config_env_named(command) or _git_alias_inherited()
+
+
 def _git_alias_named(command):
-    """Whether the text of command names a git configuration variable (_git_config_env_named) and git as a word
-    (_GIT_WORD_RE): every git command it runs then counts as running under a git alias it defines (see
-    _GIT_CONFIG_ENV_NAME_RE), on a parsed and an unparseable command alike."""
-    return _git_config_env_named(command) and bool(_GIT_WORD_RE.search(command))
+    """Whether every git command of command runs under a git alias defined outside its own segment
+    (_git_alias_outside) and its text names git as a word (_GIT_WORD_RE): every git command it runs then counts
+    as running under that alias (see _GIT_CONFIG_ENV_NAME_RE), on a parsed and an unparseable command alike."""
+    return _git_alias_outside(command) and bool(_GIT_WORD_RE.search(command))
+
+
+def _git_alias_segment(tokens, outside):
+    """Whether a segment runs git under a git alias: it names git as a word (_names_git) while outside says the
+    command's git commands run under one defined outside their segment (_git_alias_outside), or it defines one for
+    a git command of its own (_git_local_alias). Either way the git word may stand anywhere in the segment."""
+    return (outside and _names_git(tokens)) or _git_local_alias(tokens)
 
 
 def _git_alias_inherited():
     """Whether the hook's environment carries a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> whose value names an
     alias, include or includeIf key (read as _git_alias_defined_at reads an assignment), which defines that alias
-    for every segment whose command word is git (see _GIT_CONFIG_ENV_NAME_RE)."""
+    for every git command the command runs (see _GIT_CONFIG_ENV_NAME_RE)."""
     inherited = ["{}={}".format(name, value) for name, value in os.environ.items()
                  if name.startswith("GIT_CONFIG_")]
     return any(_git_alias_defined_at(inherited, j) for j in range(len(inherited)))
 
 
 def _git_alias_recovered(command):
-    """Whether an unparseable command runs git under a git alias the command defines: its text names a git
-    configuration variable and git (_git_alias_named), or a git segment that a partial lex recovers defines one for
-    itself (_git_local_alias) or runs under one the hook's environment carries (_git_alias_inherited). The segment
-    the lexer was still inside is kept: the words of it already read stand whatever follows, and this reading only
-    ever denies."""
+    """Whether an unparseable command runs git under a git alias the command defines: its text names git while its
+    git commands run under one defined outside their segment (_git_alias_named), or a segment that a partial lex
+    recovers runs git under one (_git_alias_segment). The segment the lexer was still inside is kept: the words of
+    it already read stand whatever follows, and this reading only ever denies."""
     if _git_alias_named(command):
         return True
     try:
         recovered = [seg.argv for seg in _lex_command(command, partial=True)[0]]
     except ValueError:
         return False
-    inherited = _git_alias_inherited()
-    return any(_command_word(tokens) == "git" and (inherited or _git_local_alias(tokens)) for tokens in recovered)
+    outside = _git_alias_outside(command)
+    return any(_git_alias_segment(tokens, outside) for tokens in recovered)
 
 
 # The option-parsing boundary tokens: after either, every remaining token is an operand (a pathspec or
@@ -5281,10 +5309,11 @@ def _expbnd_fallback_kind(command):
     """The decision _expbnd_fallback gives command, by its raw probes: "target" (a cd and a mutation or a
     pruning fetch) notes, "publish" (a breadth stage and a push, with no such cd pair) denies, and None allows.
     git_explicit_binding reads it for its floor (MAIN'S DECISION AS A FLOOR, above _MainHashReading). In a
-    command whose text names a git configuration variable (_git_config_env_named) every git command counts as a
-    mutation, a breadth stage and a publish, as on a parsed command, so two git words (_GIT_WORD_RE), as many as a
-    breadth stage and a later publish need, deny first, and one git word beside a cd notes."""
-    named = _git_config_env_named(command)
+    command whose text names a git configuration variable, or that runs under a git alias the hook's environment
+    carries (_git_alias_outside), every git command counts as a mutation, a breadth stage and a publish, as on a
+    parsed command, so two git words (_GIT_WORD_RE), as many as a breadth stage and a later publish need, deny
+    first, and one git word beside a cd notes."""
+    named = _git_alias_outside(command)
     if named and len(_GIT_WORD_RE.findall(command)) > 1:
         return "publish"
     if (_RAW_EXPBND_CD_RE.search(command) and
@@ -5361,17 +5390,16 @@ def git_explicit_binding(data):
     # cd/pushd between them. This runs BEFORE the dir-change/target logic below so a preceding cd (which would
     # otherwise short-circuit to the relocate allow-note) cannot mask the breadth+publish hazard. A push
     # BEFORE the breadth stage publishes only the pre-breadth state and does not fire. A git alias the command
-    # defines may be either, so it counts as both a publish and a breadth stage: one a git segment defines for
-    # itself (_git_local_alias) or runs under from the hook's environment (_git_alias_inherited), and, in a
-    # command whose text names a git configuration variable (_git_config_env_named), every segment naming git
-    # (_names_git), whatever its command word.
-    named = _git_config_env_named(command)
-    inherited = _git_alias_inherited()
+    # defines may be either, so it counts as both a publish and a breadth stage: one a segment defines for a git
+    # command of its own (_git_local_alias) and, in a command whose text names a git configuration variable or
+    # that runs under an alias the hook's environment carries (_git_alias_outside), every segment naming git
+    # (_names_git), whatever its command word (_git_alias_segment).
+    named = _git_alias_outside(command)
     breadth_before_push = None
     for tokens, _sep in segments:
         eff = _expbnd_effective_tokens(tokens)
         s, a = _git_sub_and_args(eff) if _command_word(eff) == "git" else (None, [])
-        aliased = (named and _names_git(tokens)) or (s is not None and (inherited or _git_local_alias(eff)))
+        aliased = _git_alias_segment(tokens, named)
         if s is None and not aliased:
             continue
         if (s == "push" or aliased) and breadth_before_push is not None:
@@ -5400,7 +5428,7 @@ def git_explicit_binding(data):
             continue
         sub, args = _git_sub_and_args(eff) if word == "git" else (None, [])
         # its subcommand is unknown, so possibly mutating (the pre-scan above names the aliased segments)
-        aliased = (named and _names_git(tokens)) or (sub is not None and (inherited or _git_local_alias(eff)))
+        aliased = _git_alias_segment(tokens, named)
         if sub is None and not aliased:
             continue
         verb = sub or _expbnd_git_verb(tokens)
@@ -8337,12 +8365,12 @@ def git_discard(data):
                  or _raw_has_lossy_git(_dequoted_text(command)))
     # A git alias the command defines runs a subcommand this guard cannot resolve, whether or not the text names a
     # work-losing verb (a --config-env value, a configuration variable's value or an included file names none), so
-    # it cannot be classified or snapshotted and denies, on a clean tree as on a dirty one: one a git segment
-    # defines for itself (_git_local_alias) or runs under from the hook's environment (_git_alias_inherited), and
-    # every git command of a command whose text names a git configuration variable (_git_alias_named).
-    inherited = _git_alias_inherited()
-    if _git_alias_named(command) or any(_command_word(tokens) == "git" and (inherited or _git_local_alias(tokens))
-                                        for tokens, _sep in segments):
+    # it cannot be classified or snapshotted and denies, on a clean tree as on a dirty one: one a segment defines
+    # for a git command of its own (_git_local_alias), and every git command of a command whose text names a git
+    # configuration variable or that runs under an alias the hook's environment carries (_git_alias_named,
+    # _git_alias_segment), wherever its git word stands.
+    outside = _git_alias_outside(command)
+    if _git_alias_named(command) or any(_git_alias_segment(tokens, outside) for tokens, _sep in segments):
         return _git_discard_alias_deny()
     if not lossy and not raw_lossy:
         return _allow()  # boundary: no git + work-losing verb anywhere
@@ -9152,26 +9180,26 @@ def _commit_syntax_step(seg):
     return _CommitStep(kind, target, branch, seg)
 
 
-def _commit_apparent_segment(seg, inherited=False, named=False):
+def _commit_apparent_segment(seg, named=False):
     """Conservative detection for an UNCLASSIFIED segment only.
 
     Decoded words expose ordinary quote/backslash fragmentation. Raw text additionally
     exposes apparent commands inside opaque syntax. Neither scan is applied to data
     in an already admitted literal commit/printf segment.
 
-    A git alias the segment defines for itself (_git_local_alias) runs a subcommand
-    this reading cannot see, possibly a commit, so that segment is apparent too, and
-    so is every git segment when inherited says the hook's environment carries one
-    (_git_alias_inherited), and every segment naming git (_names_git) when named says
-    the command's text names a git configuration variable (_git_config_env_named).
+    A git alias the segment defines for a git command of its own (_git_local_alias)
+    runs a subcommand this reading cannot see, possibly a commit, so that segment is
+    apparent too, and so is every segment naming git (_names_git) when named says the
+    command's text names a git configuration variable or the hook's environment
+    carries one naming an alias (_git_alias_outside, _git_alias_segment).
 
     This does not discover every renamed executable, alias, function, opaque script,
     or unparseable fragmentation. Detection is not a Bash interpreter.
     """
     sub, _args = _git_sub_and_args(seg.argv)
-    if _command_word(seg.argv) == "git" and (sub == "commit" or inherited or _git_local_alias(seg.argv)):
+    if _command_word(seg.argv) == "git" and sub == "commit":
         return True
-    if named and _names_git(seg.argv):
+    if _git_alias_segment(seg.argv, named):
         return True
     return bool(_RAW_COMMIT_RE.search(" ".join(seg.argv))
                 or _RAW_COMMIT_RE.search(seg.raw))
@@ -9223,11 +9251,12 @@ def _commit_command_syntax(command):
         scan = _hash_doubt_scan(command) if doubt else command
         apparent = bool(_RAW_COMMIT_RE.search(scan)) or (doubt and _hash_doubt_opaque(command))
         apparent = apparent or not _commit_quote_bytes_known(command)
-        # Every git command of a command whose text names a git configuration variable is apparent, the ones
-        # the partial lex does not recover included (_git_alias_named).
+        # Every git command of a command whose text names a git configuration variable, or that runs under an
+        # alias the hook's environment carries, is apparent, the ones the partial lex does not recover included
+        # (_git_alias_named).
         apparent = apparent or _git_alias_named(command)
-        inherited = _git_alias_inherited()
-        apparent = apparent or any(_commit_apparent_segment(seg, inherited) for seg in partial)
+        named = _git_alias_outside(command)
+        apparent = apparent or any(_commit_apparent_segment(seg, named) for seg in partial)
         status = "unverifiable" if apparent else "outside"
         return _CommitSyntax(status, tuple(partial), (), (), "incomplete shell parse")
     if len(records) > _COMMIT_MAX_SEGMENTS:
@@ -9239,9 +9268,8 @@ def _commit_command_syntax(command):
                              "ANSI-C or locale quoting has unknown execution-time bytes")
     commits = tuple(i for i, step in enumerate(steps)
                     if step is not None and step.kind == "commit")
-    inherited = _git_alias_inherited()
-    named = _git_config_env_named(command)
-    hidden = any(_commit_apparent_segment(seg, inherited, named)
+    named = _git_alias_outside(command)
+    hidden = any(_commit_apparent_segment(seg, named)
                  for seg, step in zip(records, steps) if step is None)
     if not commits and not hidden:
         return _CommitSyntax("outside", records, steps, (), "no apparent direct commit")
@@ -10335,14 +10363,13 @@ def protected_line(data):
             failed = _commit_command_syntax(command)
     # A git alias the command defines runs a subcommand neither reading below can see: it may commit on the
     # protected line or force-push to it (git -c alias.p=push p --force origin names no push), so it denies on any
-    # branch, as a commit outside the admitted grammar does: one a git segment defines for itself
-    # (_git_local_alias) or runs under from the hook's environment (_git_alias_inherited), and every git command of
-    # a command whose text names a git configuration variable (_git_alias_named), parsed or not. The commit
-    # recognizer reads the same segments as apparent commits (_commit_apparent_segment), which covers main's
-    # reading of the floor.
-    inherited = _git_alias_inherited()
-    if _git_alias_named(command) or any(_command_word(seg.argv) == "git" and (inherited or _git_local_alias(seg.argv))
-                                        for seg in syntax.records):
+    # branch, as a commit outside the admitted grammar does: one a segment defines for a git command of its own
+    # (_git_local_alias), and every git command of a command whose text names a git configuration variable or that
+    # runs under an alias the hook's environment carries (_git_alias_named, _git_alias_segment), parsed or not,
+    # wherever its git word stands. The commit recognizer reads the same segments as apparent commits
+    # (_commit_apparent_segment), which covers main's reading of the floor.
+    outside = _git_alias_outside(command)
+    if _git_alias_named(command) or any(_git_alias_segment(seg.argv, outside) for seg in syntax.records):
         return _deny(
             "AIQT rules prtbrn (protected-branch-integrity) and artbr1 (branch-and-merge-on-green): this command "
             "defines a git alias for itself, or runs git under one (a -c or --config-env alias.<name>, include.path "
@@ -10976,14 +11003,20 @@ def branch_root(data):
     # correct action (an explicit start point, a plain command from the target repo, or restoring
     # origin/HEAD). A confirmed orphan returns immediately; a cannot-prove deny's (reason, banner) is held in
     # pending_deny so a confirmed orphan elsewhere wins first. Every git command of a command whose text names a
-    # git configuration variable runs under a git alias the command may define (_git_alias_named), a subcommand
-    # this guard cannot read, so that command holds a form this guard cannot classify from the start.
+    # git configuration variable, or that runs under an alias the hook's environment carries, runs under a git
+    # alias (_git_alias_named), a subcommand this guard cannot read, so that command holds a form this guard cannot
+    # classify from the start.
     pending_deny = _BRNROT_UNCLASSIFIED if named else None
     pending_note = None
     saw_dir_change = False
-    inherited = _git_alias_inherited()
+    outside = _git_alias_outside(command)
     for tokens, _sep in segments:
         word = _command_word(tokens)
+        # A git command behind a reserved word, a '{', '!', time or a wrapper that runs under a git alias, or
+        # defines one for itself (_git_alias_segment), runs a subcommand this guard cannot read, as one whose
+        # command word is git does below.
+        if word != "git" and pending_deny is None and _git_alias_segment(tokens, outside):
+            pending_deny = _BRNROT_UNCLASSIFIED
         if word in _CD_BUILTINS or word == "popd":
             # a cd/pushd/popd BEFORE the git segment moves the target out of the session cwd; popd lands on
             # an unknowable stack-top directory, so it too routes the following creation to a fail-safe deny.
@@ -10992,10 +11025,9 @@ def branch_root(data):
         if word != "git" or _has_info_flag(tokens):
             continue
         sub, args = _git_sub_and_args(tokens)
-        # A git alias the segment defines for itself (_git_local_alias) or runs under from the hook's environment
-        # (_git_alias_inherited) runs a subcommand this guard cannot read, possibly a branch creation, so it is a
-        # form this guard cannot classify.
-        start = _ASK_START if inherited or _git_local_alias(tokens) else _branch_creation_start(sub, args)
+        # A git alias the segment runs under or defines for itself (_git_alias_segment) runs a subcommand this
+        # guard cannot read, possibly a branch creation, so it is a form this guard cannot classify.
+        start = _ASK_START if _git_alias_segment(tokens, outside) else _branch_creation_start(sub, args)
         if start is None:
             continue
         if start is _ASK_START:
@@ -12153,20 +12185,22 @@ def gate_weakening(data):
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
     # A git alias the command defines runs a subcommand, and options in its value, that this guard cannot read, so
     # a hook bypass cannot be ruled out: it denies like one. Every git command of a command whose text names a git
-    # configuration variable runs under one (_git_alias_named), whatever segment holds it; so does a git segment
-    # that defines one for itself (_git_local_alias) or runs under one from the hook's environment
-    # (_git_alias_inherited).
+    # configuration variable, or that runs under an alias the hook's environment carries, runs under one
+    # (_git_alias_named), whatever segment holds it; so does a git command that a segment defines one for
+    # (_git_local_alias), wherever its git word stands (_git_alias_segment), a git command word carrying an info
+    # flag aside.
     if _git_alias_named(command):
         return _gate_alias_deny()
-    inherited = _git_alias_inherited()
+    outside = _git_alias_outside(command)
     for index, seg in enumerate(records):
         tokens = seg.argv
         if not tokens:
             continue  # no command word, so neither git nor a checker (a run of separators reads nothing here)
         sep_after = seg.sep_after
-        if _command_word(tokens) == "git" and not _has_info_flag(tokens):
-            if inherited or _git_local_alias(tokens):
-                return _gate_alias_deny()
+        git_word = _command_word(tokens) == "git"
+        if (not git_word or not _has_info_flag(tokens)) and _git_alias_segment(tokens, outside):
+            return _gate_alias_deny()
+        if git_word and not _has_info_flag(tokens):
             sub, args = _git_sub_and_args(tokens)
             if sub in _NOVERIFY_VERBS:
                 spelling = _no_verify_spelling(sub, args)
@@ -12298,19 +12332,20 @@ def _commit_msg_command_index(tokens):
     return i
 
 
-def _commit_msg_subst_hit(seg, inherited=False, named=False):
+def _commit_msg_subst_hit(seg, named=False):
     """Return (argument, marker) for the first post-subcommand hit in a recognized git commit segment.
 
     Every token after commit is inspected without Git option binding: Bash performs substitution before Git
     parses options or an end-of-options token, so neither an option value nor `--` makes a marker safe.
-    inherited is True when the hook's environment carries a git alias (_git_alias_inherited), which every git
-    segment may then run. named is True when the command's text names a git configuration variable
-    (_git_config_env_named): every segment naming git (_names_git) then runs git under an alias the command may
-    define, whatever its command word, so every token from its first word naming git on (_git_word_index) is read
-    as a commit's argument (that word too, which may be the text of an sh -c or eval word).
+    named is True when the command's text names a git configuration variable or the hook's environment carries
+    one naming an alias (_git_alias_outside): every segment naming git (_names_git) then runs git under an alias,
+    whatever its command word, and so does a segment that defines one for a git command of its own
+    (_git_local_alias, wherever its git word stands), so every token from its first word naming git on
+    (_git_word_index) is read as a commit's argument (that word too, which may be the text of an sh -c or eval
+    word).
     """
     tokens = seg.argv
-    if named:
+    if _git_alias_segment(tokens, named):
         for index in range(_git_word_index(tokens), len(tokens)):
             marker = _commit_msg_subst_marker(tokens[index], seg.argv_opaque[index], index, seg)
             if marker is not None:
@@ -12320,10 +12355,9 @@ def _commit_msg_subst_hit(seg, inherited=False, named=False):
             or tokens[command_index].rsplit("/", 1)[-1] != "git"):
         return None
     sub, args = _git_sub_and_args(tokens[command_index:])
-    # A git alias the command defines (_git_local_alias, or an assignment before the command word) or the hook's
-    # environment carries (inherited) may run git commit, so its arguments are read as a commit's.
-    aliased = (inherited or any(_git_alias_defined_at(tokens, j) for j in range(command_index))
-               or _git_local_alias(tokens[command_index:]))
+    # A git alias an assignment before the command word defines (env NAME=VALUE words included) may run git
+    # commit, so its arguments are read as a commit's.
+    aliased = any(_git_alias_defined_at(tokens, j) for j in range(command_index))
     if sub != "commit" and not (sub is not None and aliased):
         return None
     offset = len(tokens) - len(args)
@@ -12401,10 +12435,9 @@ def commit_msg_subst(data):
         return _commit_msg_subst_fallback(_hash_doubt_scan(command))
     except ValueError:
         return _commit_msg_subst_fallback(command)
-    inherited = _git_alias_inherited()
-    named = _git_config_env_named(command)
+    named = _git_alias_outside(command)
     for seg in segments:
-        hit = _commit_msg_subst_hit(seg, inherited, named)
+        hit = _commit_msg_subst_hit(seg, named)
         if hit is None:
             continue
         argument, marker = hit

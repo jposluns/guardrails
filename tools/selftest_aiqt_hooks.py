@@ -11461,6 +11461,148 @@ def _main_isolated(monitor):
                     os.environ.pop(_glx_name, None)
                 else:
                     os.environ[_glx_name] = _glx_value
+        # git behind a reserved word, a '{' group, time, '!' or a wrapper word runs a git alias as a git command word
+        # does (on git 2.53.0 with bash 5.3 a 'log' alias ran behind each). An alias the hook's environment carries
+        # counts as a text naming a git configuration variable, so every git word of the command runs under it
+        # (glx-we-<guard>-<form>), and a definition among the git global options after any git word of a segment
+        # defines one for that git command (glx-wl-<guard>-<form>). Before this reading each allowed, except the
+        # commit_msg_subst time, '!' and env forms, which its own modifier reading already denied (kept as locks).
+        # The local protected_line and git_discard forms use --config-env, so no push or work-losing verb is named.
+        _glw_forms = (("if", "if true; then {c}; fi"), ("brace", "{{ {c}; }}"), ("time", "time {c}"),
+                      ("bang", "! {c}"), ("while", "while {c}; do break; done"), ("env", "env {c}"))
+        _glw_saved = {_glx_name: os.environ.get(_glx_name) for _glx_name in _glx_names}
+        try:
+            for _glx_name in _glx_names:
+                os.environ.pop(_glx_name, None)
+            for _glw_kind, _glw_env, _glw_handler, _glw_cmd, _glw_cwd in (
+                    ("we", "'alias.p'='push'", aiqt_hooks.protected_line, "git p --force origin", plr),
+                    ("we", "'alias.c'='commit'", aiqt_hooks.gate_weakening, "git c --no-verify -m y", None),
+                    ("we", "'alias.co'='checkout'", aiqt_hooks.branch_root, "git co -b glx-new", str(_glx_branch)),
+                    ("we", "'alias.r'='reset'", aiqt_hooks.git_discard, "git r --hard", str(_glx_dirty)),
+                    ("we", "'alias.c'='commit'", aiqt_hooks.commit_msg_subst, 'git c -m "$(date)"', None),
+                    ("wl", None, aiqt_hooks.protected_line, "git --config-env alias.p=PCMD p --force origin", plr),
+                    ("wl", None, aiqt_hooks.gate_weakening, "git -c alias.c=commit c --no-verify -m y", None),
+                    ("wl", None, aiqt_hooks.branch_root, "git -c alias.co=checkout co -b glx-new", str(_glx_branch)),
+                    ("wl", None, aiqt_hooks.git_discard, "git --config-env alias.r=RCMD r --hard", str(_glx_dirty)),
+                    ("wl", None, aiqt_hooks.commit_msg_subst, 'git -c alias.c=commit c -m "$(date)"', None)):
+                if _glw_env is None:
+                    os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+                else:
+                    os.environ["GIT_CONFIG_PARAMETERS"] = _glw_env
+                for _glw_form, _glw_template in _glw_forms:
+                    _glw_full = _glw_template.format(c=_glw_cmd)
+                    _glw_got = _decision(_glw_handler, _glw_full, cwd=_glw_cwd)
+                    if _glw_got != "deny":
+                        failures.append("(glx-{}-{}-{}) {} on {!r} with {!r} in the environment: expected deny, got {}"
+                                        .format(_glw_kind, _glw_handler.__name__, _glw_form, _glw_handler.__name__,
+                                                _glw_full, _glw_env, _glw_got))
+            # glx-wx-1 to glx-wx-4: git_explicit_binding reads an aliased git command behind a reserved word, a group
+            # or time as a breadth stage and a publish (each allowed before). glx-wx-5 to glx-wx-7: the commit
+            # recognizer reads a git word behind 'then' under an environment alias, with a --config-env alias, or in a
+            # command whose text names a git configuration variable as an apparent commit, so the command is
+            # unverifiable rather than outside the commit grammar (glx-wx-5 was outside before; glx-wx-6 and glx-wx-7
+            # pin the segment reading the guards' own text-rule denies stand in front of). glx-wc-1 to glx-wc-3 keep
+            # a verdict: the same wrapped forms with no alias, or with
+            # only unrelated configuration in the environment, and a -c after the subcommand, which defines nothing.
+            # glx-wc-4 is the disclosed over-refusal (a git word with an alias definition after it in an echo) and
+            # glx-wc-5 the disclosed residual (a definition inside an sh -c body, one word here).
+            for _glw_label, _glw_env, _glw_full in (
+                    ("glx-wx-1", "'alias.p'='push'", "if true; then git add -A; git p; fi"),
+                    ("glx-wx-2", "'alias.p'='push'", "{ git add -A; }; time git p"),
+                    ("glx-wx-3", None, "if true; then git -c alias.a=add a -A; git -c alias.p=push p; fi"),
+                    ("glx-wx-4", None, "{ git -c alias.a=add a -A; }; time git -c alias.p=push p")):
+                if _glw_env is None:
+                    os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+                else:
+                    os.environ["GIT_CONFIG_PARAMETERS"] = _glw_env
+                _glw_got = _decision(aiqt_hooks.git_explicit_binding, _glw_full, cwd=plr)
+                if _glw_got != "deny":
+                    failures.append("({}) git_explicit_binding on {!r} with {!r} in the environment: expected deny, "
+                                    "got {}".format(_glw_label, _glw_full, _glw_env, _glw_got))
+            for _glw_label, _glw_env, _glw_full in (
+                    ("glx-wx-5", "'alias.c'='commit'", "if true; then git c -m y; fi"),
+                    ("glx-wx-6", None, "if true; then git --config-env alias.c=CCMD c -m y; fi"),
+                    ("glx-wx-7", None, "export GIT_CONFIG_PARAMETERS=x; if true; then git c -m y; fi")):
+                if _glw_env is None:
+                    os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+                else:
+                    os.environ["GIT_CONFIG_PARAMETERS"] = _glw_env
+                _glw_status = aiqt_hooks._commit_command_syntax(_glw_full).status
+                if _glw_status != "unverifiable":
+                    failures.append("({}) _commit_command_syntax({!r}) with {!r} in the environment: expected "
+                                    "unverifiable, got {!r}".format(_glw_label, _glw_full, _glw_env, _glw_status))
+            for _glw_label, _glw_env, _glw_handler, _glw_full, _glw_cwd, _glw_want in (
+                    ("glx-wc-1", {}, aiqt_hooks.protected_line, "if true; then git p --force origin; fi", plr, "allow"),
+                    ("glx-wc-2", {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0"},
+                     aiqt_hooks.gate_weakening, "{ git c --no-verify -m y; }", None, "allow"),
+                    ("glx-wc-3", {}, aiqt_hooks.gate_weakening, "time git log -c alias.x=y", None, "allow"),
+                    ("glx-wc-4", {}, aiqt_hooks.gate_weakening, "echo git -c alias.x=y", None, "deny"),
+                    ("glx-wc-5", {}, aiqt_hooks.gate_weakening, "sh -c 'git -c alias.c=commit c --no-verify -m y'", None,
+                     "allow")):
+                for _glx_name in _glx_names:
+                    os.environ.pop(_glx_name, None)
+                os.environ.update(_glw_env)
+                _glw_got = _decision(_glw_handler, _glw_full, cwd=_glw_cwd)
+                if _glw_got != _glw_want:
+                    failures.append("({}) {} on {!r} with {!r} in the environment: expected {}, got {}".format(
+                        _glw_label, _glw_handler.__name__, _glw_full, _glw_env, _glw_want, _glw_got))
+        finally:
+            for _glx_name, _glx_value in _glw_saved.items():
+                if _glx_value is None:
+                    os.environ.pop(_glx_name, None)
+                else:
+                    os.environ[_glx_name] = _glx_value
+        # The shared local-alias reading at its edges (_git_local_alias): a definition after a git word behind a
+        # reserved word, a group, time or a wrapper carrying an assignment counts (glw-a to glw-d), as does an
+        # assignment before the command word when a later word of the segment is git (glw-g) and a definition after
+        # a git word that is another git word's option value (glw-i); a -c after the subcommand (glw-e), an
+        # assignment with no git word in its segment (glw-f), a definition inside another word's text (glw-h, the
+        # disclosed residual) and a -c that is the value of -C (glw-j: git 2.53.0 takes it as the directory) do
+        # not. Each of glw-a to glw-d was False before, when only the command word was read, and glw-f was True, read
+        # by callers only behind a git command word.
+        for _glw_label, _glw_tokens, _glw_want in (
+                ("glw-a", ["then", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-b", ["{", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-c", ["time", "git", "--config-env", "alias.x=E", "x"], True),
+                ("glw-d", ["env", "FOO=1", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-e", ["then", "git", "log", "-c", "alias.x=y"], False),
+                ("glw-f", ["GIT_CONFIG_KEY_0=alias.x"], False),
+                ("glw-g", ["GIT_CONFIG_KEY_0=alias.x", "env", "git", "x"], True),
+                ("glw-h", ["sh", "-c", "git -c alias.x=log x"], False),
+                ("glw-i", ["git", "-C", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-j", ["then", "git", "-C", "-c", "alias.x=log", "x"], False)):
+            _glw_got = aiqt_hooks._git_local_alias(_glw_tokens)
+            if _glw_got is not _glw_want:
+                failures.append("({}) _git_local_alias({!r}): expected {}, got {}".format(
+                    _glw_label, _glw_tokens, _glw_want, _glw_got))
+        # branch_root's last fallback, reached when even the partial lex fails (forced here by a lexer that always
+        # raises): a git command under a git alias the command's text or the hook's environment may define denies
+        # (glx-lf-1, glx-lf-2), and one under none keeps the open-grammar allow (glx-lf-3).
+        def _glx_lex_fail(*_args, **_kwargs):
+            raise ValueError("forced lex failure")
+
+        _glx_lex = aiqt_hooks._lex_command
+        _glw_saved = {_glx_name: os.environ.get(_glx_name) for _glx_name in _glx_names}
+        aiqt_hooks._lex_command = _glx_lex_fail
+        try:
+            for _glw_label, _glw_env, _glw_full, _glw_want in (
+                    ("glx-lf-1", {}, "export GIT_CONFIG_PARAMETERS=x; git co -b glx-new", "deny"),
+                    ("glx-lf-2", {"GIT_CONFIG_PARAMETERS": "'alias.co'='checkout'"}, "git co -b glx-new", "deny"),
+                    ("glx-lf-3", {}, "git co -b glx-new", "allow")):
+                for _glx_name in _glx_names:
+                    os.environ.pop(_glx_name, None)
+                os.environ.update(_glw_env)
+                _glw_got = _decision(aiqt_hooks.branch_root, _glw_full, cwd=str(_glx_branch))
+                if _glw_got != _glw_want:
+                    failures.append("({}) branch_root on {!r} with {!r} in the environment and a failing lexer: "
+                                    "expected {}, got {}".format(_glw_label, _glw_full, _glw_env, _glw_want, _glw_got))
+        finally:
+            aiqt_hooks._lex_command = _glx_lex
+            for _glx_name, _glx_value in _glw_saved.items():
+                if _glx_value is None:
+                    os.environ.pop(_glx_name, None)
+                else:
+                    os.environ[_glx_name] = _glx_value
         # The text rule at its edges (_git_config_env_named): the name in a word (glx-t1), in quotes (glx-t2), in a
         # here-string (glx-t3), split across lines by a continuation (glx-t4) or on a line before the git command
         # (glx-t5), escaped (glx-t6), in an unparseable command (glx-t7), and a git command inside an eval word
