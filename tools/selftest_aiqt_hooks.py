@@ -11603,6 +11603,57 @@ def _main_isolated(monitor):
                     os.environ.pop(_glx_name, None)
                 else:
                     os.environ[_glx_name] = _glx_value
+        # An info flag (-h, --help) exempts a git command from gate_weakening's and branch_root's reading of its
+        # subcommand only when it runs under no git alias: git runs an alias with the flag passed on to it (on git
+        # 2.53.0 a shell alias ran under 'c -h', 'c x -h' and 'c x --help', one of them committing past a refusing
+        # pre-commit hook). glx-h1 to glx-h8 each allowed before: an alias the git command defines for itself with -c,
+        # --config-env or include.path, the flag after the alias name or after an operand. glx-h9 to glx-h12 keep their
+        # deny: the same command behind 'then' or time, and an alias the hook's environment carries. glx-h13 to
+        # glx-h20 keep the allow of a help invocation under no alias, with a -c that defines none, an environment
+        # carrying only unrelated configuration, or a --no-verify after the flag (git 2.53.0 printed the usage and
+        # committed nothing) too.
+        _glh_gate = "git -c 'alias.c=!git commit --no-verify -m y #' c"
+        _glh_branch = "git -c 'alias.co=!git checkout -b glx-new #' co"
+        _glh_unrelated = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0"}
+        _glh_saved = {_glx_name: os.environ.get(_glx_name) for _glx_name in _glx_names}
+        try:
+            for _glh_label, _glh_env, _glh_handler, _glh_full, _glh_want in (
+                    ("glx-h1", {}, aiqt_hooks.gate_weakening, _glh_gate + " -h", "deny"),
+                    ("glx-h2", {}, aiqt_hooks.gate_weakening, _glh_gate + " x --help", "deny"),
+                    ("glx-h3", {}, aiqt_hooks.gate_weakening, _glh_gate + " x -h", "deny"),
+                    ("glx-h4", {}, aiqt_hooks.gate_weakening, "git --config-env alias.c=CCMD c -h", "deny"),
+                    ("glx-h5", {}, aiqt_hooks.gate_weakening, "git -c include.path=/abs/aliases.cfg c -h", "deny"),
+                    ("glx-h6", {}, aiqt_hooks.branch_root, _glh_branch + " -h", "deny"),
+                    ("glx-h7", {}, aiqt_hooks.branch_root, "git --config-env alias.co=CCMD co -h", "deny"),
+                    ("glx-h8", {}, aiqt_hooks.branch_root, "git --config-env=alias.co=CCMD co x --help", "deny"),
+                    ("glx-h9", {}, aiqt_hooks.gate_weakening, "if true; then " + _glh_gate + " -h; fi", "deny"),
+                    ("glx-h10", {}, aiqt_hooks.branch_root, "time " + _glh_branch + " -h", "deny"),
+                    ("glx-h11", {"GIT_CONFIG_PARAMETERS": "'alias.c'='commit'"}, aiqt_hooks.gate_weakening, "git c -h",
+                     "deny"),
+                    ("glx-h12", {"GIT_CONFIG_PARAMETERS": "'alias.co'='checkout'"}, aiqt_hooks.branch_root, "git co -h",
+                     "deny"),
+                    ("glx-h13", {}, aiqt_hooks.gate_weakening, "git commit -h", "allow"),
+                    ("glx-h14", {}, aiqt_hooks.gate_weakening, "git commit --help", "allow"),
+                    ("glx-h15", {}, aiqt_hooks.gate_weakening, "git -c user.name=x commit -h", "allow"),
+                    ("glx-h16", _glh_unrelated, aiqt_hooks.gate_weakening, "git commit -h", "allow"),
+                    ("glx-h17", {}, aiqt_hooks.branch_root, "git checkout -b glx-new -h", "allow"),
+                    ("glx-h18", {}, aiqt_hooks.branch_root, "git switch --help", "allow"),
+                    ("glx-h19", {}, aiqt_hooks.branch_root, "git -c user.name=x checkout -h", "allow"),
+                    ("glx-h20", {}, aiqt_hooks.gate_weakening, "git commit -h --no-verify -m y", "allow")):
+                for _glx_name in _glx_names:
+                    os.environ.pop(_glx_name, None)
+                os.environ.update(_glh_env)
+                _glh_cwd = str(_glx_branch) if _glh_handler is aiqt_hooks.branch_root else None
+                _glh_got = _decision(_glh_handler, _glh_full, cwd=_glh_cwd)
+                if _glh_got != _glh_want:
+                    failures.append("({}) {} on {!r} with {!r} in the environment: expected {}, got {}".format(
+                        _glh_label, _glh_handler.__name__, _glh_full, _glh_env, _glh_want, _glh_got))
+        finally:
+            for _glx_name, _glx_value in _glh_saved.items():
+                if _glx_value is None:
+                    os.environ.pop(_glx_name, None)
+                else:
+                    os.environ[_glx_name] = _glx_value
         # The text rule at its edges (_git_config_env_named): the name in a word (glx-t1), in quotes (glx-t2), in a
         # here-string (glx-t3), split across lines by a continuation (glx-t4) or on a line before the git command
         # (glx-t5), escaped (glx-t6), in an unparseable command (glx-t7), and a git command inside an eval word

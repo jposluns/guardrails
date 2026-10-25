@@ -3003,7 +3003,15 @@ def _has_info_flag(tokens):
     safe-direction residual is an over-ask/over-deny on ANY complete option placed immediately before help
     (a valueless flag, git commit --amend --help, or an attached-value flag, git commit -mfoo --help / git
     push -ofoo --help --force), where git shows help but the preceding '-' token makes this treat the
-    segment as live; recoverable, re-issue as 'git <subcommand> --help'."""
+    segment as live; recoverable, re-issue as 'git <subcommand> --help'.
+    A git alias is the exception: git runs a shell alias (a value starting with '!') with the flag passed on to it
+    (on git 2.53.0 'git -c alias.c=!VALUE c -h', 'git -c alias.c=!VALUE c x -h' and 'git -c alias.c=!VALUE c x
+    --help' each ran the alias, a commit past a refusing pre-commit hook included, and so did 'git c -h' under such
+    an alias in GIT_CONFIG_PARAMETERS), and the value of an alias cannot be read with certainty here (see
+    _GIT_ALIAS_KEY_RE). So a guard that reads a git alias (_git_alias_segment) tests it whatever this returns:
+    the flag never exempts a segment that defines one for its git command or runs under one the command's text or
+    the hook's environment defines. The alias name followed directly by --help ('git -c alias.c=!VALUE c --help')
+    printed only the alias on git 2.53.0 and ran nothing; it is refused all the same, a disclosed over-refusal."""
     end = len(tokens)
     for j, tok in enumerate(tokens):
         if tok == "--" or tok == "--end-of-options":  # git's two end-of-options spellings (F-117)
@@ -11022,7 +11030,9 @@ def branch_root(data):
             # an unknowable stack-top directory, so it too routes the following creation to a fail-safe deny.
             saw_dir_change = True
             continue
-        if word != "git" or _has_info_flag(tokens):
+        # An info flag exempts a git command only when it runs under no git alias: git runs an alias with the flag
+        # passed on to it (_has_info_flag), so a segment with one reaches the alias test below, flag or no flag.
+        if word != "git" or (_has_info_flag(tokens) and not _git_alias_segment(tokens, outside)):
             continue
         sub, args = _git_sub_and_args(tokens)
         # A git alias the segment runs under or defines for itself (_git_alias_segment) runs a subcommand this
@@ -12187,8 +12197,8 @@ def gate_weakening(data):
     # a hook bypass cannot be ruled out: it denies like one. Every git command of a command whose text names a git
     # configuration variable, or that runs under an alias the hook's environment carries, runs under one
     # (_git_alias_named), whatever segment holds it; so does a git command that a segment defines one for
-    # (_git_local_alias), wherever its git word stands (_git_alias_segment), a git command word carrying an info
-    # flag aside.
+    # (_git_local_alias), wherever its git word stands (_git_alias_segment), an info flag included: git runs an
+    # alias with the flag passed on to it (_has_info_flag), so the flag exempts only a git command under no alias.
     if _git_alias_named(command):
         return _gate_alias_deny()
     outside = _git_alias_outside(command)
@@ -12198,7 +12208,7 @@ def gate_weakening(data):
             continue  # no command word, so neither git nor a checker (a run of separators reads nothing here)
         sep_after = seg.sep_after
         git_word = _command_word(tokens) == "git"
-        if (not git_word or not _has_info_flag(tokens)) and _git_alias_segment(tokens, outside):
+        if _git_alias_segment(tokens, outside):
             return _gate_alias_deny()
         if git_word and not _has_info_flag(tokens):
             sub, args = _git_sub_and_args(tokens)
