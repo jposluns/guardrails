@@ -2001,11 +2001,20 @@ def _self_test_isolated():
 
             def _opf_verb(root, *args):
                 # One opf.py verb over root, launched isolated (-I -B) under the fixture env; its exit status.
-                try:
-                    proc = subprocess.run([sys.executable, "-I", "-B", str(tool)] + list(args)
+                # opf init takes the shared init operation mutex, whose rev-parse strips every GIT_* variable,
+                # the fixture env's system-config pins included. The launch therefore runs inside the OPF git
+                # lifecycle: _env() carries its PATH, whose git wrapper reasserts those pins in the child, so
+                # the verb does not read the host's system configuration.
+                import _opf_oplock
+
+                def launch():
+                    return subprocess.run([sys.executable, "-I", "-B", str(tool)] + list(args)
                                           + ["--root", str(root)], cwd=str(root), env=_env(),
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
-                except (OSError, subprocess.TimeoutExpired) as exc:
+
+                try:
+                    proc = _opf_oplock._st_with_git_lifecycle(launch)
+                except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                     raise OSError("could not run opf {} in {} ({})".format(args[0], root, exc))
                 return proc.returncode
 
