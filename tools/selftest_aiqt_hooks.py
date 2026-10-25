@@ -12825,19 +12825,81 @@ def _main_isolated(monitor):
         # scan cannot see g'i't and the peel returns the sudo-led argv, so only the dequoted scan denies.
         gexpect("(gw-wr-concat4) sudo with a quote-concatenated git commit -nv denies (unlisted wrapper)",
                 "sudo g'i't commit -nv", "deny")
-        # The span/global-option vectors both reviews named: a quoted global-option value between the real
-        # 'git' and its verb (git --namespace ' x' commit -nv) behind a wrapper the peel does not resolve
-        # or does not list. These ALLOWED at the pin (the span's option walk ran off its interior and the
-        # span was consumed as data); the hides-roster-git run-out rule now fails them closed. Each denies
-        # at the pin and allows under a mutant that reverts the run-out True (NOHIDE).
+        # The span/global-option vectors: a quoted global-option value between the real 'git' and its verb
+        # (git --namespace ' x' commit -nv) behind a wrapper the peel does not resolve or does not list.
+        # These allowed before the hides-roster-git run-out rule (the span's option walk ran off its
+        # interior and the span was consumed as data). They do NOT pin that rule: each still denies under a
+        # mutant that removes the run-out (the walk that exhausts the interior no longer fails closed),
+        # because the dequoted wrapper judgement catches span1 to span3 (nice -n10 is unresolved, stdbuf and
+        # sudo are unlisted) and the fallback's raw-text scan catches span4. The run-out rule is pinned by
+        # gw-wr-runout1/runout2 and the gw-span-* unit cases below.
         gexpect("(gw-wr-span1) nice -n10 env + git --namespace ' x' commit -nv denies (span run-out)",
                 "nice -n10 env 'A=git log ' git --namespace ' x' commit -nv -m ' fix'", "deny")
         gexpect("(gw-wr-span2) stdbuf (unlisted) + git --namespace ' x' commit -nv denies (span run-out)",
                 "stdbuf -oL env 'A=git log ' git --namespace ' x' commit -nv -m ' fix'", "deny")
         gexpect("(gw-wr-span3) sudo + git --namespace ' x' push --no-verify denies (span run-out)",
                 "sudo env 'A=git log ' git --namespace ' x' push --no-verify ' origin'", "deny")
-        gexpect("(gw-wr-span4) the unparseable span form denies on the fallback (dequoted + raw scan)",
+        gexpect("(gw-wr-span4) the unparseable span form denies on the fallback (raw-text scan)",
                 "nice -n10 env 'A=git log ' git --namespace ' x' commit -nv -m ' fix'\necho '", "deny")
+        # RUN-OUT-DISCRIMINATING VECTORS: no wrapper the dequoted judgement reads, so only the run-out rule
+        # re-judges the git whose verb falls off the end of a quoted span. Each denies here and allows under
+        # the run-out mutant above. runout2 is the helper docstring's own example, a disclosed over-deny.
+        gexpect("(gw-wr-runout1) echo + a span ending at git --namespace before commit -nv denies (run-out)",
+                "echo 'A=git log ' git --namespace ' x' commit -nv -m ' fix'", "deny")
+        gexpect("(gw-wr-runout2) a message ending at git --namespace denies (run-out, disclosed over-deny)",
+                "git commit -m 'look at git --namespace'", "deny")
+        # FALLBACK-DISCRIMINATING VECTORS: the trailing unterminated quote sends each line to the unparseable
+        # fallback, and the raw-text scan cannot see the quote-concatenated g'i't, so only the fallback's
+        # wrapper judgement over each recovered segment denies. Each allows under a mutant that drops that
+        # judgement (the fallback's bypass is never computed).
+        gexpect("(gw-wr-fallback1) env -uX + g'i't commit -nv on an unparseable line denies "
+                "(fallback, unresolved)", "env -uX g'i't commit -nv\necho '", "deny")
+        gexpect("(gw-wr-fallback2) sudo + g'i't commit -nv on an unparseable line denies "
+                "(fallback, unlisted)", "sudo g'i't commit -nv\necho '", "deny")
+        # The run-out over-deny reaches a quoted URL or path ending in '.git' on ANY git line, roster verb or
+        # not (the 'git' after the dot is a word-boundary match whose walk runs off the span end); the
+        # gate-weakening residue discloses it. Pinned so a change to it updates that disclosure; the
+        # unquoted control allows.
+        gexpect("(gw-wr-runout-url) a quoted URL ending in .git on git clone denies (disclosed over-deny)",
+                "git clone 'https://example.com/a/b.git' d", "deny")
+        gexpect("(gw-wr-runout-url-dq) the same URL double-quoted denies (disclosed over-deny)",
+                'git clone "https://example.com/a/b.git" d', "deny")
+        gexpect("(gw-wr-runout-url-bare) the same URL unquoted allows (control)",
+                "git clone https://example.com/a/b.git d", "allow")
+        # (gw-res) The gate-weakening residue must disclose that over-deny and the wrapper residual held
+        # open for a maintainer decision. Read from the manifest the generator renders into
+        # ENFORCEMENT.md, so reverting either disclosure fails here.
+        try:
+            _gw_hooks = load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]
+            _gw_residue = [h for h in _gw_hooks if h.get("id") == "gate-weakening-guard"][0]["residue"]
+        except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+            _gw_residue = ""
+            failures.append("(gw-res-read) could not read the gate-weakening-guard residue: {}".format(exc))
+        for _gw_rlbl, _gw_needle in (
+                ("gw-res-runout-url", "so a quoted URL or path ending in .git on any git line denies too"),
+                ("gw-res-wrapper",
+                 "still gets past behind command-running wrappers the change does not model")):
+            if _gw_needle not in _gw_residue:
+                failures.append("({}) the gate-weakening-guard residue must carry {!r}"
+                                .format(_gw_rlbl, _gw_needle))
+        # Direct unit cases for the run-out rule in _gate_span_hides_roster_git: the walk that ends at the
+        # interior end (a bare trailing git, or a valueless option after it) and the walk whose separated
+        # option value is missing both fail closed; an off-roster verb does not.
+
+        def spanexpect(label, interior, want):
+            got = aiqt_hooks._gate_span_hides_roster_git(interior)
+            if got is not want:
+                failures.append("{}: _gate_span_hides_roster_git({!r}) = {!r}, expected {!r}"
+                                .format(label, interior, got, want))
+
+        spanexpect("(gw-span-end) a trailing git runs out of the interior, fails closed", "use git", True)
+        spanexpect("(gw-span-opt-end) a valueless option after git runs out, fails closed",
+                   "see git --bare", True)
+        spanexpect("(gw-span-value-missing) an option whose value is missing runs out, fails closed",
+                   "look at git --namespace", True)
+        spanexpect("(gw-span-roster) git followed by a roster verb hides it", "then git commit", True)
+        spanexpect("(gw-span-off) git followed by an off-roster verb does not (control)",
+                   "see git log here", False)
         # The controls stay allowed: no roster bypass is hidden, so no over-deny beyond the disclosed scope.
         gexpect("(gw-wr-concat-off) env -uX with a quote-concatenated OFF-roster git log allows (control)",
                 "env -uX g'i't log --oneline", "allow")
@@ -12922,8 +12984,9 @@ def _main_isolated(monitor):
         gexpect("(gw-dq-q2) a single quote inside a double-quoted span marks the pairing ambiguous, so the "
                 "hidden git commit -nv is re-judged and denies (pins the double-quote branch's \"'\" "
                 "trigger)", "git log \"a'\" git commit -nv", "deny")
-        # Timing: the whole-command scan and the hides-roster-git helper are linear in the command length,
-        # so doubling the input should roughly double the time (ratio ~2); a quadratic re-walk quadruples it
+        # Timing: the whole-command scan, the hides-roster-git helper and the dequoted-word scan are linear in
+        # their input length on these shapes, so doubling the input should roughly double the time (ratio
+        # ~2); a quadratic re-walk quadruples it
         # (ratio ~4). The assertion is a RATIO, not a fixed wall-clock bound, so a threshold between 2x and
         # 4x discriminates regardless of host speed (a fixed bound passes a quadratic scan on a fast host).
         # Because a sub-millisecond t_n gives a noisy ratio, n is DOUBLED (bounded, at most 6 times) until
@@ -12938,42 +13001,58 @@ def _main_isolated(monitor):
         #   `git log `*n + `'`): one quoted span naming many inner git words. The former
         #   _gate_span_hides_roster_git re-split the suffix per 'git' match (quadratic); the one-pass token
         #   walk makes both linear. Both quadratic at the pin. (These are the three shapes both reviews named.)
+        # gw-lin-span-optgit (`git log '` + `-git `*n + `log'`) and gw-lin-span-chain (`git commit -m 'git` +
+        #   ` -C git`*n + ` x'`): every option word holds a 'git' match, or each '-C' consumes a git word as
+        #   its value, so an option walk per match crossed every later option word (quadratic). The helper
+        #   now reads each match's walk outcome from a table filled once from the end, so both are linear.
+        # gw-lin-dq-off (`sudo` + `git log`*n) and gw-lin-dq-chain (`sudo git` + `-C git`*n + `log`) time
+        #   _gate_novrf_dequoted_bypass over the word list itself: it copied the words after each git word
+        #   and re-walked a '-C git' chain from each, both quadratic. It now reads each git word's
+        #   subcommand from tables filled once from the end, so both are linear. A list of many ROSTER-verb
+        #   git words still reads each one's arguments and stays super-linear, as its docstring states.
         import time as _time_lin
 
-        def _gw_scan_once(cmd):
+        def _gw_scan_once(cmd, scan):
             _t0 = _time_lin.perf_counter()
-            aiqt_hooks._gate_closed_grammar_scan(cmd)
+            scan(cmd)
             return _time_lin.perf_counter() - _t0
 
-        def _gw_scan_ratio(unit, prefix="", suffix=""):
+        def _gw_scan_ratio(unit, prefix, suffix, scan):
             # Double n (from 4000, at most 6 times) until t_n clears the 0.02s floor, then compare
-            # t_2n/t_n. Returns (ratio, t_n, t_2n, bytes_2n), or (None, t_n, None, bytes) when the floor
-            # was never cleared in the bound, so the caller fails 'linearity not evaluated'.
+            # t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n), or (None, t_n, None, length) when the floor
+            # was never cleared in the bound, so the caller fails 'linearity not evaluated'. The input is
+            # a command string for the whole-command scan or a word list for the dequoted-word scan.
             reps = 4000
             for _ in range(6):
-                t_n = _gw_scan_once(prefix + unit * reps + suffix)
+                t_n = _gw_scan_once(prefix + unit * reps + suffix, scan)
                 if t_n > 0.02:
                     cmd_2n = prefix + unit * (reps * 2) + suffix
-                    t_2n = _gw_scan_once(cmd_2n)
+                    t_2n = _gw_scan_once(cmd_2n, scan)
                     return t_2n / t_n, t_n, t_2n, len(cmd_2n)
                 reps *= 2
             return None, t_n, None, len(prefix + unit * reps + suffix)
 
+        _gw_cmd_scan = aiqt_hooks._gate_closed_grammar_scan
+        _gw_dq_scan = aiqt_hooks._gate_novrf_dequoted_bypass
         _gw_lin_cases = (
-            ("gw-dq-lin-sq", "git -C 'a;' log ", "", ""),
-            ("gw-dq-lin-dq", 'git log "a;" ', "", ""),
-            ("gw-lin-opts", "-C 'a;' ", "git ", ""),
-            ("gw-lin-span-roster", "git x ", "git commit -m '", "'"),
-            ("gw-lin-span-off", "git log ", "git log '", "'"),
+            ("gw-dq-lin-sq", "git -C 'a;' log ", "", "", _gw_cmd_scan),
+            ("gw-dq-lin-dq", 'git log "a;" ', "", "", _gw_cmd_scan),
+            ("gw-lin-opts", "-C 'a;' ", "git ", "", _gw_cmd_scan),
+            ("gw-lin-span-roster", "git x ", "git commit -m '", "'", _gw_cmd_scan),
+            ("gw-lin-span-off", "git log ", "git log '", "'", _gw_cmd_scan),
+            ("gw-lin-span-optgit", "-git ", "git log '", "log'", _gw_cmd_scan),
+            ("gw-lin-span-chain", " -C git", "git commit -m 'git", " x'", _gw_cmd_scan),
+            ("gw-lin-dq-off", ["git", "log"], ["sudo"], [], _gw_dq_scan),
+            ("gw-lin-dq-chain", ["-C", "git"], ["sudo", "git"], ["log"], _gw_dq_scan),
         )
-        for _gw_lbl, _gw_unit, _gw_pre, _gw_suf in _gw_lin_cases:
-            _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n = _gw_scan_ratio(_gw_unit, _gw_pre, _gw_suf)
+        for _gw_lbl, _gw_unit, _gw_pre, _gw_suf, _gw_scan in _gw_lin_cases:
+            _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n = _gw_scan_ratio(_gw_unit, _gw_pre, _gw_suf, _gw_scan)
             if _gw_ratio is None:
                 failures.append("({}) linearity not evaluated: t_n stayed under the 0.02s floor through "
                                 "6 doublings (last {:.4f}s)".format(_gw_lbl, _gw_tn))
             elif _gw_ratio > 3.0:
                 failures.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
-                                "{:.3f}s then {:.3f}s for {} bytes"
+                                "{:.3f}s then {:.3f}s for an input of length {}"
                                 .format(_gw_lbl, _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n))
 
         # A glob character can match a filename that becomes an option word (a file named -n makes

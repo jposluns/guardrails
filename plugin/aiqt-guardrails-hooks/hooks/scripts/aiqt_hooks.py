@@ -9717,7 +9717,7 @@ _GATE_GRAMMAR_TOKEN_END = frozenset(" \t\n;&|)<>")
 _GATE_GRAMMAR_REDIR_WHY = "carries a redirection outside the accepted >/dev/null, 2>/dev/null and 2>&1 forms"
 _GATE_GIT_WORD_RE = re.compile(r"(?i)\bgit\b")
 # Whitespace-delimited tokens of a quoted span interior, tokenized ONCE so _gate_span_hides_roster_git
-# can walk token positions from each 'git' match instead of re-splitting the suffix per match.
+# can read each 'git' match's option-walk outcome by token position instead of re-splitting the suffix.
 _GATE_SPAN_TOKEN_RE = re.compile(r"\S+")
 # A shell operator or newline inside a quoted word makes the quote's pairing ambiguous: this gate
 # starts its scan at a 'git' word, so it cannot tell whether such a quote OPENS a word or CLOSES a
@@ -9807,25 +9807,28 @@ def _gate_span_hides_roster_git(interior):
     space: the hidden git is re-judged as its own segment. The global-option skip mirrors
     _gate_grammar_sub (a separated arg-consuming global option swallows the next word). A disclosed
     safe-direction over-deny: quoted text that merely names such a command is re-judged and denies.
-    Linear in the interior length: the interior is tokenized ONCE and each 'git' match walks token
-    positions from a forward-only base pointer, so the suffix is never re-split per match."""
+    Linear in the interior length: the interior is tokenized ONCE, the outcome of an option walk from
+    every token position is filled ONCE from the end (a walk from k ends where the walk from the
+    position after k's option, and its value, ends), and each 'git' match reads the outcome at its
+    forward-only base pointer, so no match re-walks the later tokens (a run of option words that each
+    hold a 'git' match, or a '-C git' chain whose values are git words, costs one pass, not one per match)."""
     toks = [(mt.start(), mt.group()) for mt in _GATE_SPAN_TOKEN_RE.finditer(interior)]
+    # hides[k]: True when an option walk starting at token k reaches a roster verb or runs out of interior
+    # before a non-option word (the two entries past the end: fail closed), False at an off-roster word.
+    hides = [True] * (len(toks) + 2)
+    for k in range(len(toks) - 1, -1, -1):
+        w = toks[k][1]
+        if w.startswith("-") and w != "-":
+            hides[k] = hides[k + (2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1)]
+        else:
+            hides[k] = w.lower() in _NOVERIFY_VERBS
     base = 0
     for gm in _GATE_GIT_WORD_RE.finditer(interior):
         gend = gm.end()
         while base < len(toks) and toks[base][0] < gend:
             base += 1
-        k = base
-        while k < len(toks):
-            w = toks[k][1]
-            if w.startswith("-") and w != "-":
-                k += 2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1
-                continue
-            if w.lower() in _NOVERIFY_VERBS:
-                return True
-            break
-        else:
-            return True  # the option walk ran out of interior before a non-option word: fail closed
+        if hides[base]:
+            return True
     return False
 
 
@@ -10825,15 +10828,32 @@ def _gate_novrf_dequoted_bypass(words):
     spelling is read from the dequoted argv bash would build, so a quote-concatenated git spelling the
     raw \\bgit\\b scan cannot see (g'i't) still denies. Any word whose basename is 'git' starts the
     roster/spelling walk, so text that merely names such a command is a disclosed safe-direction
-    over-deny. Purely lexical, bounded by the word count."""
+    over-deny. Purely lexical. The subcommand each git word resolves is read from two tables filled ONCE
+    from the end, the run of leading VAR=value words at each position (the _command_word_index skip) and
+    where a global-option walk from each position stops (the _git_sub_and_args walk), so no git word
+    copies or re-walks the words after it: linear in the word count while the git words resolve
+    OFF-roster subcommands. A ROSTER-verb subcommand's arguments are still read to its option terminator
+    (_no_verify_spelling), so a word list packing many roster-verb git words is super-linear in that
+    count, the same bound as _gate_closed_grammar_scan's roster-verb case."""
+    n = len(words)
+    assigns = [0] * (n + 1)  # assigns[p]: how many leading VAR=value words start at p
+    subs = [None] * (n + 2)  # subs[p]: index of the word a global-option walk from p stops at, or None
+    for p in range(n - 1, -1, -1):
+        w = words[p]
+        if _ENV_ASSIGN_RE.match(w):
+            assigns[p] = assigns[p + 1] + 1
+        if w.startswith("-"):
+            subs[p] = subs[p + (2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1)]
+        else:
+            subs[p] = p
     for idx, w in enumerate(words):
         if _gate_word(w) != "git":
             continue
-        sub, args = _git_sub_and_args(words[idx:])
-        if sub in _NOVERIFY_VERBS:
-            spelling = _no_verify_spelling(sub, args)
+        s = subs[idx + assigns[idx] + 1]  # skip the leading assignments and the command word itself
+        if s is not None and words[s] in _NOVERIFY_VERBS:
+            spelling = _no_verify_spelling(words[s], words[s + 1:])
             if spelling is not None:
-                return sub, spelling
+                return words[s], spelling
     return None
 
 
