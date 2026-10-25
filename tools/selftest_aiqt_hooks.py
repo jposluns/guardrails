@@ -6208,16 +6208,141 @@ def _main_isolated(monitor):
                "cd sub & git reset --hard", "deny", cwd=rp)
         expect("(dir-c) subshell cd misdirect DENIES (F-62.2; R8: a parenthesis is outside the grammar)",
                "( cd {} ) ; git reset --hard".format(str(clean_repo)), "deny", cwd=rp)
-        expect("(dir-d) -C global option not-certain allows with a note (F-66.2)", "git -C {} reset --hard".format(rp),
-               "allow-note", cwd=rp)
-        expect("(dir-e) --git-dir global option not-certain allows with a note (F-66.4)",
-               "git --git-dir={}/.git reset --hard".format(rp), "allow-note", cwd=rp)
-        expect("(dir-f) --work-tree global option not-certain allows with a note",
-               "git --work-tree={0} --git-dir={0}/.git reset --hard".format(rp), "allow-note", cwd=rp)
-        expect("(dir-g) GIT_WORK_TREE= env not-certain allows with a note (F-62.3)", "GIT_WORK_TREE=sub git reset --hard",
-               "allow-note", cwd=rp)
-        expect("(dir-h) GIT_DIR= env not-certain allows with a note (F-62.3/F-66.4)", "GIT_DIR=.git git reset --hard",
-               "allow-note", cwd=rp)
+        # FLIPPED (was "allow-note"): each redirect below resolves to this dirty repo, and a whole-tree clobber
+        # whose resolved target probes dirty now DENIES (with its snapshot) exactly like the bare (rs-a), so a
+        # global option or a leading assignment can no longer turn the bare deny into a snapshot-then-allow.
+        expect("(dir-d) -C global option on a dirty target denies like the bare form (F-66.2)",
+               "git -C {} reset --hard".format(rp), "deny", cwd=rp)
+        expect("(dir-e) --git-dir global option on a dirty target denies like the bare form (F-66.4)",
+               "git --git-dir={}/.git reset --hard".format(rp), "deny", cwd=rp)
+        expect("(dir-f) --work-tree global option on a dirty target denies like the bare form",
+               "git --work-tree={0} --git-dir={0}/.git reset --hard".format(rp), "deny", cwd=rp)
+        expect("(dir-g) GIT_WORK_TREE= env on a dirty target denies like the bare form (F-62.3)",
+               "GIT_WORK_TREE=sub git reset --hard", "deny", cwd=rp)
+        expect("(dir-h) GIT_DIR= env on a dirty target denies like the bare form (F-62.3/F-66.4)",
+               "GIT_DIR=.git git reset --hard", "deny", cwd=rp)
+
+        # === a git global option never changes the verdict on a discarding form ===========================
+        # Every global option spelling (each value-taking member of _GIT_ARG_OPTS, separated and, for a long
+        # one, '='-attached; the flag-only ones; and an option git does not know) in front of every discarding
+        # form gets the bare command's decision on the same dirty repo, and takes exactly the bare form's
+        # recovery snapshots (counted as new refs). A whole-tree clobber there used to snapshot-then-allow
+        # behind any global option while the bare form denied; reverting the clobber deny in the
+        # view-override branch turns every clobber row back to allow-note. The two pinned exceptions are
+        # stricter, never looser: a --git-dir stash drop/clear denies, since the stash it would clear cannot
+        # be preserved under a --git-dir redirect; and --bare before a form git_discard treats as destructive
+        # (a snapshottable verb in a non-allow form) denies with no snapshot, since git, asked read-only
+        # which git dir and worktree the command acts on, cannot open this worktree directory as a git dir.
+        go_repo = _init_repo(tmp / "globalopt")
+        (go_repo / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")
+        go = str(go_repo)
+        _go_sep = ("-C " + go, "-c x.y=z", "--git-dir " + go + "/.git", "--work-tree " + go, "--namespace ns",
+                   "--exec-path /nonexistent-exec", "--super-prefix sp/", "--config-env x.y=HOME",
+                   "--attr-source HEAD")
+        if {_g.split(" ", 1)[0] for _g in _go_sep} != set(aiqt_hooks._GIT_ARG_OPTS):
+            failures.append("(go-argopts-covered) the separated global option vectors must cover exactly "
+                            "_GIT_ARG_OPTS, got {} against {}".format(sorted(_g.split(" ", 1)[0] for _g in _go_sep),
+                                                                     sorted(aiqt_hooks._GIT_ARG_OPTS)))
+        _go_globals = (_go_sep
+                       + tuple(_g.replace(" ", "=", 1) for _g in _go_sep if _g.startswith("--"))
+                       + ("--no-pager", "-p", "--paginate", "-P", "--no-replace-objects", "--literal-pathspecs",
+                          "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks",
+                          "--no-lazy-fetch", "--no-advice", "--bare", "--frobnicate"))
+        _go_clobbers = ("reset --hard", "checkout -f", "switch -f other", "switch --discard-changes other")
+        _go_forms = _go_clobbers + (
+            "reset --merge", "reset", "checkout -- file.txt", "checkout .", "restore file.txt",
+            "restore --staged file.txt", "rm -f file.txt", "clean -fd", "branch -D other", "checkout -B other",
+            "switch -C other", "stash drop", "stash clear")
+        _go_saved = "A pre-command recovery snapshot was saved"
+
+        def _go_run(command, cwd):
+            """(reduced decision, deny reason or note text, new recovery refs in go_repo) for one command."""
+            _r0 = len(_recovery_refs(go_repo))
+            _data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+                     "cwd": cwd}
+            _code, _out, _err = handler(_data)
+            _text = ""
+            if isinstance(_out, dict):
+                _hso = _out.get("hookSpecificOutput")
+                _text = (_hso.get("permissionDecisionReason", "") if isinstance(_hso, dict)
+                         else str(_out.get("systemMessage", "")))
+            return _reduce_result(_code, _out), _text, len(_recovery_refs(go_repo)) - _r0
+
+        for _form in _go_forms:
+            _bare, _bare_text, _bare_refs = _go_run("git " + _form, go)
+            if _form in _go_clobbers and (_bare != "deny" or _bare_refs != 1 or _go_saved not in _bare_text):
+                failures.append("(go-bare-clobber) the bare 'git {}' on a dirty tree must deny with one recovery "
+                                "snapshot named in its reason, got {} with {} new ref(s)"
+                                .format(_form, _bare, _bare_refs))
+            _go_sub, _go_args = aiqt_hooks._git_sub_and_args(["git"] + _form.split(" "))
+            _go_destructive = (_go_sub in aiqt_hooks._SNAPSHOTTABLE_VERBS
+                               and aiqt_hooks._discard_role(_go_sub, _go_args)[0] != "allow")
+            for _g in _go_globals:
+                _cmd = "git {} {}".format(_g, _form)
+                _bare_pin = _g == "--bare" and _go_destructive
+                _want = ("deny" if (_g.startswith("--git-dir") and _form.startswith("stash ")) or _bare_pin
+                         else _bare)
+                _want_refs = 0 if _bare_pin else _bare_refs
+                _got, _got_text, _got_refs = _go_run(_cmd, go)
+                if _got != _want or _got_refs != _want_refs:
+                    failures.append("(go-parity) {!r} must get {} with {} new recovery ref(s) like the bare "
+                                    "'git {}', got {} with {}".format(_cmd, _want, _want_refs, _form, _got,
+                                                                      _got_refs))
+                elif _bare_pin and "git could not report, read-only" not in _got_text:
+                    failures.append("(go-bare-pin) {!r} denies but its reason must say git could not resolve "
+                                    "the target read-only, got {!r}".format(_cmd, _got_text[:220]))
+                elif _form in _go_clobbers and not _bare_pin and _go_saved not in _got_text:
+                    failures.append("(go-clobber-pointer) {!r} denies but its reason must name the recovery "
+                                    "snapshot as the bare deny does, got {!r}".format(_cmd, _got_text[:220]))
+
+        # The boundary of the new deny is the probe's verdict on the resolved target: dirty denies (above);
+        # a provably clean target allows with the existing note and no snapshot; a probe that did not
+        # complete snapshot-then-allows exactly as the bare form does; a failed snapshot on a dirty target
+        # denies on both forms.
+        go_clean = str(_init_repo(tmp / "globalopt-clean"))
+        for _cmd, _want in (("git reset --hard", "allow"), ("git --no-pager reset --hard", "allow-note"),
+                            ("git -c x.y=z checkout -f", "allow-note")):
+            expect("(go-clean-target) {!r} on a provably clean tree is not denied".format(_cmd), _cmd, _want,
+                   cwd=go_clean)
+        _orig_go_clean = aiqt_hooks._tree_is_clean
+        aiqt_hooks._tree_is_clean = lambda repo: None
+        try:
+            _go_unk = [(_c,) + _go_run(_c, go) for _c in ("git reset --hard", "git --no-pager reset --hard",
+                                                          "git --frobnicate switch -f other")]
+        finally:
+            aiqt_hooks._tree_is_clean = _orig_go_clean
+        for _c, _dec, _text, _refs in _go_unk:
+            if _dec != "allow-note" or _refs != 1:
+                failures.append("(go-probe-uncertain) {!r} with a probe that did not complete must "
+                                "snapshot-then-allow like the bare form, got {} with {} new ref(s)"
+                                .format(_c, _dec, _refs))
+        _orig_go_rec = aiqt_hooks._record_recovery
+        aiqt_hooks._record_recovery = lambda repo, verb: ("fail", "forced failure (self-test)")
+        try:
+            _go_fail = [(_c,) + _go_run(_c, go) for _c in ("git reset --hard", "git --no-pager reset --hard",
+                                                           "git -C {} checkout -f".format(go))]
+        finally:
+            aiqt_hooks._record_recovery = _orig_go_rec
+        for _c, _dec, _text, _refs in _go_fail:
+            if _dec != "deny":
+                failures.append("(go-snapshot-fail) {!r} whose snapshot fails on a dirty tree must deny, got {}"
+                                .format(_c, _dec))
+        # An ambient GIT_* override is unreadable from the command and keeps its best-effort
+        # snapshot-then-allow; the global option still changes nothing there.
+        os.environ["GIT_NAMESPACE"] = "globalopt-selftest"
+        try:
+            _go_amb = [(_c,) + _go_run(_c, go) for _c in ("git reset --hard", "git --no-pager reset --hard")]
+        finally:
+            os.environ.pop("GIT_NAMESPACE", None)
+        for _c, _dec, _text, _refs in _go_amb:
+            if _dec != "allow-note" or _refs != 1:
+                failures.append("(go-ambient) {!r} under an ambient GIT_NAMESPACE must keep the best-effort "
+                                "snapshot-then-allow, got {} with {} new ref(s)".format(_c, _dec, _refs))
+        # The closed allowlist grammar still refuses an unknown global option in a compound command.
+        _go_cmp, _go_cmp_text, _go_cmp_refs = _go_run("git --frobnicate reset --hard && true", go)
+        if _go_cmp != "deny" or "--frobnicate" not in _go_cmp_text or "closed allowlist grammar" not in _go_cmp_text:
+            failures.append("(go-unknown-compound) an unknown global option in a compound must get the grammar "
+                            "deny naming it, got {} {!r}".format(_go_cmp, _go_cmp_text[:220]))
 
         # === tombstones of the retired GUARDRAIL_ALLOW_DISCARD opt-out (F-65.F3, blocker 4) ==============
         # The override is removed; each vector below keeps its input and now asserts the outcome of the same
@@ -6338,7 +6463,7 @@ def _main_isolated(monitor):
             ("pristine-clean", "git reset --hard", _rmo_clean, None, "allow", "allow"),
             ("pristine-dirty-clobber", "git reset --hard", rp, None, "deny", "deny"),
             ("pristine-dirty-scoped", "git checkout -- file.txt", rp, None, "allow-note", "allow-note"),
-            ("c-redirect", "git -C {} reset --hard".format(rp), rp, None, "allow-note", "allow-note"),
+            ("c-redirect", "git -C {} reset --hard".format(rp), rp, None, "deny", "deny"),
             ("ambient-git-var", "git reset --hard", rp, "GIT_NAMESPACE", "allow-note", "allow-note"),
             ("compound", "git reset --hard ; true", rp, None, "allow-note", "deny"),
             ("heredoc", "git reset --hard" + _hd, rp, None, "deny", "deny"),
@@ -6619,8 +6744,10 @@ def _main_isolated(monitor):
         (f4_target / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")  # dirty it
         f4_before_target = len(_recovery_refs(f4_target))
         f4_before_sess = len(_recovery_refs(repo))
-        expect("(f4-C-otherrepo) -C into a DIFFERENT dirty repo snapshots the TARGET and allows",
-               "git -C {} reset --hard".format(str(f4_target)), "allow-note", cwd=rp)
+        # FLIPPED (was "allow-note"): the TARGET probes dirty, so the whole-tree clobber DENIES as the bare
+        # form run in that repo does; the target snapshot is still taken first (the ref counts below).
+        expect("(f4-C-otherrepo) -C into a DIFFERENT dirty repo snapshots the TARGET and denies",
+               "git -C {} reset --hard".format(str(f4_target)), "deny", cwd=rp)
         if len(_recovery_refs(f4_target)) != f4_before_target + 1:
             failures.append("(f4-C-target-ref) the recovery snapshot for a -C-redirected discard must land "
                             "in the -C TARGET repo (finding 4): expected exactly one new ref there")
@@ -6630,9 +6757,10 @@ def _main_isolated(monitor):
         # (b) -C into a NON-repo target cannot be snapshotted -> DENY (was an allow-note in round 1).
         expect("(f4-C-nonrepo) -C into a NON-repo target DENIES (the target snapshot cannot be taken)",
                "git -C {} reset --hard".format(str(tmp / "f4nonrepo")), "deny", cwd=rp)
-        # (c) -C into the SAME repo as the session cwd still ALLOWS (target resolves to the session repo).
-        expect("(f4-C-samerepo) -C into the SAME repo as cwd still allows (target == session repo)",
-               "git -C {} reset --hard".format(rp), "allow-note", cwd=rp)
+        # (c) -C into the SAME repo as the session cwd resolves to the session repo; FLIPPED (was
+        # "allow-note"): that repo is dirty, so the whole-tree clobber DENIES like the bare (rs-a).
+        expect("(f4-C-samerepo) -C into the SAME dirty repo as cwd denies like the bare form",
+               "git -C {} reset --hard".format(rp), "deny", cwd=rp)
         # (d) a --work-tree redirect to a NON-repo dir also DENIES a destructive discard.
         expect("(f4-worktree-nonrepo) --work-tree to a non-repo dir DENIES a destructive discard",
                "git --work-tree={0} --git-dir={0}/.git reset --hard".format(str(tmp / "f4nonrepo2")),
@@ -6640,13 +6768,13 @@ def _main_isolated(monitor):
         # (e) a NON-destructive redirected form (reset --soft) still ALLOWS regardless of the target.
         expect("(f4-soft-redirect) a non-destructive reset --soft under -C to a non-repo still allows",
                "git -C {} reset --soft".format(str(tmp / "f4nonrepo")), "allow-note", cwd=rp)
-        # (f) the same-repo -C allow-note still names the prsunc rule (round-19 Fix B carry-forward).
+        # (f) the same-repo -C banner (a deny now that the dirty clobber denies) still names the prsunc rule.
         _f4d = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                 "tool_input": {"command": "git -C {} reset --hard".format(rp)}, "cwd": rp}
         _f4c, _f4o, _ = handler(_f4d)
         _f4banner = _f4o.get("systemMessage", "") if isinstance(_f4o, dict) else ""
         if "prsunc" not in _f4banner:
-            failures.append("(f4-note-rule) the same-repo -C redirect allow-note must name the prsunc rule")
+            failures.append("(f4-note-rule) the same-repo -C redirect banner must name the prsunc rule")
 
         # === ROUND-2 FINDING 5: the recovery snapshot preserves the STAGED (index) state as the ref's
         # === SECOND PARENT, so staged-only content a `git restore --staged` discards stays recoverable.
@@ -8388,6 +8516,228 @@ def _main_isolated(monitor):
         # so it DENIES. (Before the fix it snapshotted the clean decoy and allow-noted a false recovery.)
         expect("(cf1c-worktree-split-denies) --work-tree (outside) worktree discard DENIES (split state)",
                "git --work-tree={} reset --hard".format(str(cf1_decoy)), "deny", cwd=str(cf1_wt))
+
+        # === -C beside a path-valued global option: git takes a relative --git-dir/--work-tree (and an inline
+        # GIT_DIR=/GIT_WORK_TREE=) only after the WHOLE -C chain, so git_discard asks git itself (a read-only
+        # rev-parse --absolute-git-dir --show-toplevel carrying the same options) which git dir and worktree a
+        # destructive discard acts on. A worktree whose own repository is that git dir is snapshotted there and
+        # allowed (a whole-tree clobber on a dirty target still DENIES there, with that snapshot, exactly as the
+        # bare form does); a git dir and worktree split across repositories, or a target git cannot resolve
+        # read-only, DENIES, with a best-effort snapshot of the worktree's own repository when it is not
+        # provably clean. The unfixed guard joined a relative --git-dir to the SESSION directory and ignored
+        # that -C moves the worktree, so 'git -C <dirty repo> --git-dir=.git reset --hard' from a clean session
+        # allowed with NO snapshot anywhere, as did an absolute --git-dir naming the session repository beside
+        # -C <other repo>. The two denies that read the redirect from the session directory stay as a floor
+        # under git's answer (the '(gdc-keep-*)' vectors): a --git-dir that is not the session repository's
+        # and a --work-tree outside the -C or session repository still DENY where git resolves one repository,
+        # with that repository snapshotted first when it is not provably clean. Each fixture is a clean session
+        # repository 'sess', a target repository 'tgt' (with a committed sub/ directory) and, where named, a
+        # third repository 'oth', all siblings, the hook running from sess. Each vector asserts the verdict,
+        # the recovery refs written in every fixture repository and, where named, the text the reason or note
+        # carries, so each is red on revert of the fix ('(gdc-*-control)' vectors excepted: they pin unchanged
+        # neighbours).
+        def _gdc_fixture(name, tgt_state, oth_state):
+            base = tmp / "gdc" / name
+            repos = {"sess": _init_repo(base / "sess"), "tgt": _init_repo(base / "tgt")}
+            (repos["tgt"] / "sub").mkdir()
+            (repos["tgt"] / "sub" / "keep.txt").write_text("kept\n", encoding="utf-8")
+            _git(repos["tgt"], "add", "sub/keep.txt")
+            _git(repos["tgt"], "commit", "-q", "-m", "sub", env_identity=True)
+            if oth_state is not None:
+                repos["oth"] = _init_repo(base / "oth")
+            for role, state in (("tgt", tgt_state), ("oth", oth_state)):
+                if state in ("dirty", "staged"):
+                    (repos[role] / "file.txt").write_text("committed line\nuncommitted work\n", encoding="utf-8")
+                if state == "staged":
+                    _git(repos[role], "add", "file.txt")
+            return base, repos
+
+        def gdc(label, template, want, tgt_state, refs_want, needle=None, oth_state=None, ambient=None):
+            try:
+                base, repos = _gdc_fixture(label[1:label.index(")")], tgt_state, oth_state)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("{}: could not build the fixture: {}".format(label, exc))
+                return
+            fmt = {"B": str(base), "S": str(repos["sess"]), "T": str(repos["tgt"]),
+                   "O": str(repos.get("oth", "")), "TR": os.path.realpath(str(repos["tgt"]))}
+            data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": template.format(**fmt)}, "cwd": str(repos["sess"])}
+            for _k, _v in (ambient or {}).items():
+                os.environ[_k] = _v
+            try:
+                code, stdout_obj, _stderr = handler(data)
+            finally:
+                for _k in (ambient or {}):
+                    os.environ.pop(_k, None)
+            got = _reduce_result(code, stdout_obj)
+            text = ""
+            if isinstance(stdout_obj, dict):
+                hso = stdout_obj.get("hookSpecificOutput")
+                text = str(hso.get("permissionDecisionReason", "")) if isinstance(hso, dict) else str(
+                    stdout_obj.get("systemMessage", ""))
+            if got != want:
+                failures.append("{}: expected {}, got {} {!r}".format(label, want, got, text[:300]))
+            for role, count in sorted(refs_want.items()):
+                have = len(_recovery_refs(repos[role]))
+                if have != count:
+                    failures.append("{}: expected {} recovery ref(s) in {}, found {}".format(
+                        label, count, role, have))
+            for _nd in ((needle,) if isinstance(needle, str) else (needle or ())):
+                if _nd.format(**fmt) not in text:
+                    failures.append("{}: expected the reason or note to carry {!r}, got {!r}".format(
+                        label, _nd.format(**fmt), text[:300]))
+
+        _gdc_at = "the repository git resolves for it ({TR})"
+        _gdc_saved = "A pre-command recovery snapshot was saved"
+        _gdc_keep_gitdir = "does not name the session repository's git dir"
+        _gdc_keep_wt = "whose worktree lies outside the repository this guard reads from the -C or session"
+        # Snapshot then allow: git resolves the worktree to the target, whose own repository is the git dir.
+        # A whole-tree clobber on a DIRTY target there denies like the bare form, with the target snapshot
+        # named in its reason (so the snapshot still lands in the target, never the session).
+        gdc("(gdc-shape1) -C <abs dirty repo> --git-dir=.git snapshots the TARGET, not the session, and denies",
+            "git -C {T} --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-shape1-clean) the same on a CLEAN target allows, naming the target, with no snapshot",
+            "git -C {T} --git-dir=.git reset --hard", "allow-note", "clean", {"tgt": 0, "sess": 0}, _gdc_at)
+        gdc("(gdc-shape1-scoped) a scoped discard under -C <dirty repo> --git-dir=.git snapshots the target",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_saved))
+        gdc("(gdc-rel-sep) -C <relative> --git-dir .git (separated) snapshots the target and denies",
+            "git -C ../tgt --git-dir .git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-chain-rel) a relative -C chain then --git-dir=.git snapshots the target and denies",
+            "git -C .. -C tgt --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-chain-abs) an absolute then relative -C chain with --git-dir .git snapshots the target",
+            "git -C {B} -C tgt --git-dir .git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-reversed) --git-dir=.git BEFORE -C still resolves after the -C chain",
+            "git --git-dir=.git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-reversed-scoped) a scoped restore with --git-dir=.git before -C snapshots the target",
+            "git --git-dir=.git -C ../tgt restore file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_saved))
+        # FLIPPED (was "allow-note"): kept denied, as before git resolved the redirect (see the gdc-keep-*
+        # vectors below); the target is snapshotted first.
+        gdc("(gdc-abs-own) -C <target> --git-dir=<target>/.git (absolute) stays denied, snapshotting the target",
+            "git -C {T} --git-dir={T}/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-abs-own-sep-clean) --git-dir <target>/.git (separated) -C <relative>, clean: stays denied",
+            "git --git-dir {T}/.git -C ../tgt reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
+        gdc("(gdc-env-gitdir) an inline GIT_DIR=.git with -C <target> snapshots the target and denies",
+            "GIT_DIR=.git git -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-env-gitdir-append) an inline GIT_DIR+=.git is resolved by git like GIT_DIR=",
+            "GIT_DIR+=.git git -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-env-gitdir-append-scoped) a scoped discard under GIT_DIR+=.git snapshots the target",
+            "GIT_DIR+=.git git -C {T} restore file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_saved))
+        # FLIPPED (was "allow-note"): kept denied, as before git resolved the redirect.
+        gdc("(gdc-wt-rel) -C <target> --git-dir=.git --work-tree=. stays denied, snapshotting the target",
+            "git -C {T} --git-dir=.git --work-tree=. reset --hard", "deny", "dirty",
+            {"tgt": 1, "sess": 0}, (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-wt-sep-clean) -C <relative> --work-tree . --git-dir .git (separated), clean: stays denied",
+            "git -C ../tgt --work-tree . --git-dir .git reset --hard", "deny", "clean",
+            {"tgt": 0, "sess": 0}, _gdc_keep_wt)
+        gdc("(gdc-wt-sub) -C <target> --work-tree=sub snapshots the target repository holding sub/",
+            "git -C {T} --work-tree=sub reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-wt-abs) --work-tree=<target> -C <target> snapshots the target and denies",
+            "git --work-tree={T} -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-env-wt) an inline GIT_WORK_TREE=sub with -C <relative> snapshots the target and denies",
+            "GIT_WORK_TREE=sub git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            _gdc_saved)
+        gdc("(gdc-env-wt-scoped) a scoped discard under GIT_WORK_TREE=sub -C <relative> snapshots the target",
+            "GIT_WORK_TREE=sub git -C ../tgt checkout -- keep.txt", "allow-note", "dirty",
+            {"tgt": 1, "sess": 0}, ("the repository git resolves for it ({TR}/sub)", _gdc_saved))
+        # Kept denied: the four forms that denied before git resolved the redirect still DENY, on a clean
+        # target with no snapshot and on a dirty one with the target snapshotted first, for a whole-tree
+        # clobber, a scoped discard and an index-only form alike. Each is red when the two session-read
+        # denies under git's answer are removed (the scoped, clean and index-only ones then allow).
+        gdc("(gdc-keep-abs-own-clean) -C <target> --git-dir=<target>/.git on a clean target stays denied",
+            "git -C {T} --git-dir={T}/.git reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
+        gdc("(gdc-keep-abs-own-scoped) -C <target> --git-dir=<target>/.git scoped discard stays denied",
+            "git -C {T} --git-dir={T}/.git checkout -- file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-abs-own-index) -C <target> --git-dir=<target>/.git restore --staged stays denied",
+            "git -C {T} --git-dir={T}/.git restore --staged file.txt", "deny", "staged", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-rev-sep-dirty) --git-dir <target>/.git -C <relative> on a dirty target stays denied",
+            "git --git-dir {T}/.git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-rev-sep-scoped) --git-dir <target>/.git -C <relative> scoped restore stays denied",
+            "git --git-dir {T}/.git -C ../tgt restore file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-wt-rel-clean) -C <target> --git-dir=.git --work-tree=. on a clean target stays denied",
+            "git -C {T} --git-dir=.git --work-tree=. reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_wt)
+        gdc("(gdc-keep-wt-rel-scoped) -C <target> --git-dir=.git --work-tree=. scoped discard stays denied",
+            "git -C {T} --git-dir=.git --work-tree=. checkout -- file.txt", "deny", "dirty",
+            {"tgt": 1, "sess": 0}, (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-keep-wt-sep-dirty) -C <relative> --work-tree . --git-dir .git on a dirty target stays denied",
+            "git -C ../tgt --work-tree . --git-dir .git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-keep-wt-sep-scoped) -C <relative> --work-tree . --git-dir .git checkout . stays denied",
+            "git -C ../tgt --work-tree . --git-dir .git checkout .", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-index-staged) -C <target> --git-dir=.git restore --staged snapshots the target's index",
+            "git -C {T} --git-dir=.git restore --staged file.txt", "allow-note", "staged",
+            {"tgt": 1, "sess": 0}, _gdc_at)
+        gdc("(gdc-index-split) an index-only form under --work-tree=<other> snapshots the -C repository",
+            "git -C ../tgt --work-tree={O} restore --staged file.txt", "allow-note", "staged",
+            {"tgt": 1, "sess": 0, "oth": 0}, "the repository git resolves for it (", oth_state="dirty")
+        # Deny: git splits the git dir and the worktree across repositories, or cannot resolve the target.
+        gdc("(gdc-shape2) -C <dirty repo> --git-dir=<session>/.git DENIES, snapshotting the worktree's repo",
+            "git -C {T} --git-dir={S}/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-clean) the same on a CLEAN worktree DENIES with no snapshot",
+            "git -C {T} --git-dir={S}/.git reset --hard", "deny", "clean", {"tgt": 0, "sess": 0})
+        gdc("(gdc-shape2-rev-sep) --git-dir <session>/.git (separated) before -C <relative> DENIES",
+            "git --git-dir {S}/.git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-chain) a -C chain beside --git-dir=<session>/.git DENIES",
+            "git -C .. -C tgt --git-dir={S}/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-rel) -C <target> --git-dir=../sess/.git (relative, naming the session) DENIES",
+            "git -C {T} --git-dir=../sess/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-env) an inline GIT_DIR=<session>/.git with -C <target> DENIES",
+            "GIT_DIR={S}/.git git -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-wt-other) -C <target> --work-tree=<other dirty repo> DENIES, snapshotting the other repo",
+            "git -C {T} --work-tree={O} reset --hard", "deny", "clean", {"tgt": 0, "sess": 0, "oth": 1},
+            oth_state="dirty")
+        gdc("(gdc-wt-other-rel-sep) -C <target> --work-tree ../oth (separated, relative) DENIES",
+            "git -C {T} --work-tree ../oth reset --hard", "deny", "clean", {"tgt": 0, "sess": 0, "oth": 1},
+            oth_state="dirty")
+        gdc("(gdc-index-nocand) an index-only form whose git dir no candidate directory discovers DENIES",
+            "git -C {O} --git-dir={T}/.git restore --staged file.txt", "deny", "staged",
+            {"tgt": 0, "sess": 0, "oth": 1}, oth_state="dirty")
+        gdc("(gdc-unresolvable) a --git-dir git cannot open DENIES with no snapshot",
+            "git -C {T} --git-dir=nonexistent reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0},
+            "git could not report, read-only")
+        gdc("(gdc-other-opt) a -c global option beside --git-dir leaves the oracle unasked and DENIES",
+            "git -c core.abbrev=12 --git-dir=.git -C {T} reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0})
+        gdc("(gdc-other-env) another inline GIT_* assignment beside GIT_DIR= DENIES",
+            "GIT_INDEX_FILE={B}/alt.index GIT_DIR=.git git -C {T} reset --hard", "deny", "dirty",
+            {"tgt": 0, "sess": 0})
+        gdc("(gdc-bare) --bare after -C makes the -C directory the git dir, which git cannot open: DENIES",
+            "git -C {T} --bare reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0})
+        gdc("(gdc-ambient) a non-cosmetic ambient GIT_* beside --git-dir DENIES",
+            "git -C {T} --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0},
+            "a non-cosmetic ambient GIT_* variable", ambient={"GIT_NAMESPACE": "gdc"})
+        # Controls: a non-destructive form and the compound grammar path are unchanged by the fix.
+        gdc("(gdc-soft-control) a non-destructive reset --soft under the same redirect still allows",
+            "git -C {T} --git-dir=.git reset --soft", "allow-note", "dirty", {"tgt": 0, "sess": 0})
+        gdc("(gdc-compound-control) the compound form stays outside the closed grammar and DENIES",
+            "git -C {T} --git-dir=.git reset --hard && true", "deny", "dirty", {"tgt": 0, "sess": 0})
+        # A leading GIT_DIR+= on a stash drop/clear names the git dir just as GIT_DIR= does, so it DENIES
+        # rather than preserve the -C repository's stash (here none, a silent allow on the unfixed guard)
+        # while the command clears the stash of the repository GIT_DIR names.
+        try:
+            gdc_st = _init_repo(tmp / "gdc" / "stash-sess")
+            (gdc_st / "file.txt").write_text("to stash\n", encoding="utf-8")
+            _git(gdc_st, "stash", "push", "-m", "wip", env_identity=True)
+            gdc_st_other = _init_repo(tmp / "gdc" / "stash-other")
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("(gdc-stash-fixture) could not build the stash fixture: {}".format(exc))
+        else:
+            expect("(gdc-stash-append) GIT_DIR+=<session>/.git with -C <other> on stash clear DENIES",
+                   "GIT_DIR+={}/.git git -C {} stash clear".format(gdc_st, gdc_st_other), "deny",
+                   cwd=str(gdc_st))
+            expect("(gdc-stash-eq-control) the GIT_DIR= spelling of the same stash clear still DENIES",
+                   "GIT_DIR={}/.git git -C {} stash clear".format(gdc_st, gdc_st_other), "deny",
+                   cwd=str(gdc_st))
 
         # === CLAUDE-F1: a redirected/ambient 'checkout-index' (sub outside the recognized lossy-verb set,
         # flagged by the raw scan) entering the view-override branch DENIES (was allowed with no snapshot). ==
@@ -20073,6 +20423,10 @@ def _main_isolated(monitor):
           "-c key, leading assignment or subcommand; an unhonoured cd; or any raw-flagged unparseable "
           "command, which the fallback now denies outright with no snapshot); a provably-clean tree ALLOWS "
           "with no snapshot; an ambient GIT_*/redirect view-override snapshot-then-allows on a dirty cwd "
+          "(except that a whole-tree clobber behind a git global option or a leading assignment DENIES on a "
+          "dirty target, with its snapshot, exactly as the bare command does, and a destructive form "
+          "carrying a --git-dir, --work-tree or --bare redirect is resolved by git itself, DENYING when git "
+          "splits the git dir and worktree across repositories or cannot resolve them read-only) "
           "and ALLOWS on a clean one (nothing to snapshot); stash/branch are not snapshottable and "
           "allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
           "deletion, DENIES fail-safe a push it cannot prove misses the protected line (a "
