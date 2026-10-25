@@ -278,13 +278,14 @@ POINTER_TREE = b"040000 tree " + b"d" * 40 + b"\t.opf.toml\0"
 WORKING_TREE = b"040000 tree " + b"e" * 40 + b"\t.working\0"
 
 
-def scripted(rev_list, prefix="", **extra):
+def scripted(rev_list, prefix="", pinned=PINNED, **extra):
     """git answers keyed by the exact argv prior_store_holder must send; extra maps a
-    commit's probe (tree, parent or listing) to its answer."""
+    commit's probe (tree, parent or listing) to its answer. An answer that is an int is
+    that nonzero exit with empty output."""
     base = prefix + "/" if prefix else ""
     escaped = "".join("\\" + ch if ch in "*?[]\\" else ch for ch in base)
     answers = {("rev-parse", "--is-shallow-repository"): b"false\n",
-               ("rev-list", "--first-parent", "--max-count=1", PINNED, "--",
+               ("rev-list", "--first-parent", "--max-count=1", pinned, "--",
                 ":(literal)" + base + ".opf.toml",
                 ":(glob)" + escaped + ".working/*/manifest.toml"): rev_list}
     for commit, tree in extra.get("trees", {}).items():
@@ -297,7 +298,7 @@ def scripted(rev_list, prefix="", **extra):
     return answers
 
 
-def holder(module, answers, prefix="", grafts=None):
+def holder(module, answers, prefix="", grafts=None, pinned=PINNED):
     """prior_store_holder over scripted answers: (holder, or ("refused", code, detail), calls).
     An unscripted argv answers rc 128, so a changed command refuses rather than passing."""
     import _opf_observe
@@ -316,13 +317,15 @@ def holder(module, answers, prefix="", grafts=None):
         out = answers.get(tuple(args))
         if out is None:
             return _opf_observe._GitOutcome(True, 128, b"", "unscripted fixture command")
+        if type(out) is int:
+            return _opf_observe._GitOutcome(True, out, b"", "scripted fixture failure")
         return _opf_observe._GitOutcome(True, 0, out, "")
 
     module.GitObjects = Adapter
     real = _opf_observe._run_git
     _opf_observe._run_git = run_git
     try:
-        result = module.prior_store_holder("/fixture/git", "/fixture/repo", pinned_head=PINNED,
+        result = module.prior_store_holder("/fixture/git", "/fixture/repo", pinned_head=pinned,
                                            prefix=prefix, object_format="sha1")
     except module.ObservationError as exc:
         result = ("refused", exc.code, exc.detail)
@@ -387,6 +390,59 @@ def holder_graft_recheck(module):
                             grafts=[("fixture", "absent"), ("fixture", "changed")])
     check(refused_as(module, result) and "metadata changed" in result[2],
           "prior-holder-grafts-rechecked")
+
+
+def holder_git_failure(module):
+    # rev-list exits 128 (a pinned head git cannot resolve) with empty output: read as an
+    # empty walk that would be "no prior store", so the exit status alone must refuse.
+    result, _calls = holder(module, scripted(128))
+    check(refused_as(module, result) and result[2].startswith("rc 128:"),
+          "prior-holder-git-failure-refused")
+
+
+def holder_bad_pinned(module):
+    # An uppercase OID is malformed; git would resolve it, and the scripted walk answers
+    # empty, so only the shape check refuses, before any git read.
+    bad = PINNED.upper()
+    result, calls = holder(module, scripted(b"", pinned=bad), pinned=bad)
+    check(refused_as(module, result) and result[2] == "invalid commit OID" and calls == [],
+          "prior-holder-malformed-pinned-head")
+
+
+def holder_bad_object_id(module):
+    # The walk answers a name that is not an OID, and that name's tree would hold a pointer.
+    result, _calls = holder(module, scripted(b"not-a-commit\n",
+                                             trees={"not-a-commit": POINTER_BLOB}))
+    check(refused_as(module, result) and result[2] == "unexpected object id",
+          "prior-holder-unexpected-object-id")
+
+
+def holder_shallow_unexpected(module):
+    # A git too old for --is-shallow-repository echoes the flag back: neither true nor false.
+    answers = scripted(b"")
+    answers[("rev-parse", "--is-shallow-repository")] = b"--is-shallow-repository\n"
+    result, _calls = holder(module, answers)
+    check(refused_as(module, result) and "unexpected --is-shallow-repository" in result[2],
+          "prior-holder-shallow-answer-unexpected")
+
+
+def holder_listing_no_tab(module):
+    # Three fields but no tab: without the tab test the entry names nothing, the hit reads
+    # as a deletion, and the parent's pointer would be reported.
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: b"100644 blob " + b"d" * 40 + b"\0",
+                                                    PARENT: POINTER_BLOB},
+                                             parents={NEWEST: PARENT.encode() + b"\n"}))
+    check(refused_as(module, result) and "unparseable ls-tree entry" in result[2],
+          "prior-holder-listing-tab-required")
+
+
+def holder_listing_two_fields(module):
+    # A tab but only two fields: without the field count the pointer would match as a blob.
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: b"100644 blob\t.opf.toml\0"}))
+    check(refused_as(module, result) and "unparseable ls-tree entry" in result[2],
+          "prior-holder-listing-three-fields")
 
 
 def scope_omission(module):
@@ -638,6 +694,18 @@ CASES = [
     ("prior-holder-grafts-rechecked", holder_graft_recheck,
      'rather than guessing")\n    if source.graft_snapshot(budget) != grafts:',
      'rather than guessing")\n    if False:'),
+    ("prior-holder-git-failure-refused", holder_git_failure,
+     "if not outcome.completed or outcome.rc != 0:", "if not outcome.completed:"),
+    ("prior-holder-malformed-pinned-head", holder_bad_pinned,
+     "if not oid_ok(pinned_head, object_format):", "if False:"),
+    ("prior-holder-unexpected-object-id", holder_bad_object_id,
+     "if not oid_ok(text, object_format):", "if False:"),
+    ("prior-holder-shallow-answer-unexpected", holder_shallow_unexpected,
+     'if shallow != b"false\\n":', "if False:"),
+    ("prior-holder-listing-tab-required", holder_listing_no_tab,
+     'if tab != b"\\t" or len(fields) != 3:', "if len(fields) != 3:"),
+    ("prior-holder-listing-three-fields", holder_listing_two_fields,
+     'if tab != b"\\t" or len(fields) != 3:', 'if tab != b"\\t":'),
     ("graft-search-only-ancestor", graft_search_only,
      "next_fd = os.open(component, _opf_store._WALK_O_TRAVERSE | os.O_DIRECTORY\n"
      "                                      | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)",

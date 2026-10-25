@@ -3885,7 +3885,10 @@ def _ancestry_tests(base, env, ok):
     side branch, proceed, each having consulted the detector (_opf_init_observe.prior_store_holder)
     for the pinned HEAD; and a re-adoption over the same history is not scanned and seeds from its
     evidence commit. Without the _fresh_plan call every refusal here fails (the store is published)
-    and each proceeding run consults nothing."""
+    and each proceeding run consults nothing. A first adoption over an unborn HEAD reaches
+    VIEWS-READY unscanned (scanning it would raise, having no commit to pin), and a git read that
+    exits non-zero (rev-list over a pinned head the repository does not hold) is CANNOT-EVALUATE,
+    never None."""
     from unittest import mock
     d = os.path.join(base, "ancestry")
     real = _opf_init_observe.prior_store_holder
@@ -4025,6 +4028,32 @@ def _ancestry_tests(base, env, ok):
     ok("ANC-side-branch-only-store-proceeds-after-scan", merged.returncode == 0
        and res.status == VIEWS_READY and calls == [(head, None)],
        "{} {} {} {}".format(merged.returncode, res.status, res.primary_failure, calls))
+
+    # An unborn HEAD (a fresh git init, no commit) has no history: the first adoption reaches
+    # its normal outcome without consulting the detector, whose pinned head would not exist.
+    root = os.path.join(d, "unborn")
+    os.makedirs(root)
+    _git(["init", "-q", "-b", "main", "."], root, env)
+    try:
+        res = run(root)
+        outcome = (res.status, res.primary_failure)
+    except Exception as exc:
+        outcome = ("raised", "{}: {}".format(type(exc).__name__, exc))
+    ok("ANC-unborn-head-proceeds-without-scan", outcome[0] == VIEWS_READY and calls == [],
+       "{} {}".format(outcome, calls))
+
+    # A git read that exits non-zero is CANNOT-EVALUATE, never "no prior store": rev-list over
+    # a well-formed pinned head the repository does not hold fails, and its empty output must
+    # not read as an empty walk.
+    root = _plain_repo(os.path.join(d, "unresolvable"), env)
+    try:
+        out = _opf_init_observe.prior_store_holder(
+            _opf_observe._git_path(), root, pinned_head="f" * 40, prefix="",
+            object_format="sha1")
+    except _opf_init_observe.ObservationError as exc:
+        out = (exc.code, exc.detail)
+    ok("ANC-unresolvable-pinned-head-cannot-evaluate", type(out) is tuple
+       and out[0] == _opf_init_observe.CANNOT_EVALUATE and out[1].startswith("rc "), repr(out))
 
 
 def _b6_tests(base, env, ok, refuses):
