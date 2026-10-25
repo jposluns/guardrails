@@ -331,6 +331,14 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_prompt_pack.py
 
+      - name: OPF implementation-prompt pin drift gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_prompt_pin.py --self-test
+
+      - name: OPF implementation-prompt pin drift gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_prompt_pin.py
+
       - name: OPF enforcement-pack platform coverage gate self-test
         shell: bash
         run: python3 -I -B tools/check_opf_enforce_platforms.py --self-test

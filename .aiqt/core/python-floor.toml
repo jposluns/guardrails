@@ -87,6 +87,7 @@ guarded-surfaces = [
     "opf/tools/check_opf_init_p0.py",
     "opf/tools/check_opf_init_qa.py",
     "opf/tools/check_opf_prompt_pack.py",
+    "opf/tools/check_opf_prompt_pin.py",
     "opf/tools/check_opf_record.py",
     "opf/tools/check_opf_upgrade.py",
     "opf/tools/opf.py",
