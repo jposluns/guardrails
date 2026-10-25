@@ -6,11 +6,19 @@ recognized family with a name that both fits its family's derivation shape AND m
 derives, none loose or misfiled, the apex is standard, and each vendored external/<source>/ carries its
 provenance. Check-only; never writes (the self-test builds fixtures under a tempdir only).
   check_rule_placement.py [--root DIR]   exit 0 clean, 1 violations, 2 usage/read error
-  check_rule_placement.py --self-test    tempdir fixtures only; assert the probe and gate vectors
-  check_rule_placement.py --execution-report ABS_PATH
-                                         the self-test, also writing its execution report, finalized
-                                         at interpreter exit (tools/_selftest_exit_report.py), as the
+  check_rule_placement.py --self-test    assert the probe and gate vectors over tempdir fixtures and the
+                                         gate's own --root vectors, each discriminating
+  check_rule_placement.py [--self-test] --execution-report ABS_PATH
+                                         the self-test, also writing its execution report, finalized at
+                                         interpreter exit (tools/_selftest_exit_report.py), as the
                                          execution gate runs it
+
+An explicit --root must be given once and name an existing directory: a repeated --root, an empty value, a
+path that does not exist (a dangling symlink included) or one that is not a directory is exit 2 (cannot
+evaluate), never read as a tree with no .claude/rules/. An existing root with no .claude/rules/ tree still
+passes. Residual: the root is checked once, before it is read, so a root removed or replaced between that
+check and the read (by another writer at the same moment) is not detected and can still read as a tree with
+no .claude/rules/.
 
 An existing .claude/rules that is NOT a real directory (a regular file, a FIFO, a dangling symlink, or
 a symlink even to a directory) exits 2: _standards.dir_present is a three-way probe that refuses a
@@ -48,6 +56,8 @@ import importlib.util
 import io
 import os
 import re
+import stat
+import subprocess
 import tempfile
 import tomllib
 from pathlib import Path
@@ -58,6 +68,16 @@ import _standards  # noqa: E402  (the module itself, so the self-test can patch 
 import gen_rules  # noqa: E402  for MAP_KEYS/SEQ_KEYS rebind under --root
 from gen_rules import parse_source, derive  # noqa: E402
 from _standards import dir_present, map_keys  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+REGISTRY_REL = "tools/selftest_checks.toml"
+# This gate's own self-test suite in the registry.
+SUITE_ID = "rule-placement-selftest"
+CHILD_TIMEOUT = 60
+# The stat call and directory test the --root guard uses, named so the self-test can patch each one to
+# build its mutants.
+_stat = os.stat
+_is_dir = stat.S_ISDIR
 
 METADATA = {"PROVENANCE.md", "README.md"}
 BUILTIN_FAMILIES = {"aiqt", "security", "external"}
@@ -79,6 +99,35 @@ SECURITY_RE = re.compile(r"^(SECC|SECI|SECA|SECP)-" + _SLUG + r"\.md$")
 def repo_root_default():
     p = Path.cwd().resolve()
     return next((a for a in [p, *p.parents] if (a / ".git").exists()), p)
+
+
+def root_problem(root_arg):
+    """Return why an explicitly named --root cannot be evaluated, or None when it names an existing directory.
+
+    The root is resolved non-strictly and an absent .claude/rules/ is a PASS, so without this an absent or
+    mistyped root would read as a tree with no rules and pass over input never read, and an empty value would
+    silently name the working directory. os.stat follows a symlink, as resolve() does, so a symlink to a
+    directory is accepted and a dangling one is refused."""
+    if not root_arg:
+        return "--root is empty"
+    try:
+        st = _stat(root_arg)
+    except OSError as exc:
+        return "cannot read --root {}: {}".format(root_arg, exc)
+    if not _is_dir(st.st_mode):
+        return "--root {} is not a directory".format(root_arg)
+    return None
+
+
+def repeat_problem(root_args):
+    """Return why more than one --root cannot be evaluated, or None for at most one.
+
+    Only one root is read, so a second --root would otherwise silently replace the first and leave it never
+    checked. The message names every value given, in order."""
+    if len(root_args) > 1:
+        return "--root is given {} times ({}); name one root".format(
+            len(root_args), ", ".join(repr(root_arg) for root_arg in root_args))
+    return None
 
 
 def check_name(family, name):
@@ -126,21 +175,32 @@ def check_drift(f, rules):
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else list(argv)
+    if (len(args) in (2, 3) and args[-2] == "--execution-report" and os.path.isabs(args[-1])
+            and args[:-2] in ([], ["--self-test"])):
+        return self_test(args[-1])
     if args == ["--self-test"]:
         return self_test()
-    if len(args) == 2 and args[0] == "--execution-report" and os.path.isabs(args[1]):
-        return self_test(args[1])
-    root = None
+    root_args = []
     i = 0
     while i < len(args):
         if args[i] == "--root" and i + 1 < len(args):
-            root = Path(args[i + 1])
+            root_args.append(args[i + 1])
             i += 2
         else:
-            print("usage: check_rule_placement.py [--root DIR | --self-test | "
-                  "--execution-report ABS_PATH]", file=sys.stderr)
+            print("usage: check_rule_placement.py [--root DIR] | [--self-test] [--execution-report ABS_PATH]",
+                  file=sys.stderr)
             return 2
-    root = (root or repo_root_default()).resolve()
+    problem = repeat_problem(root_args)
+    if problem is not None:
+        print("error: {} (cannot evaluate)".format(problem), file=sys.stderr)
+        return 2
+    root = root_args[-1] if root_args else None
+    if root is not None:
+        problem = root_problem(root)
+        if problem is not None:
+            print("error: {} (cannot evaluate)".format(problem), file=sys.stderr)
+            return 2
+    root = (Path(root) if root is not None else repo_root_default()).resolve()
     # gen_rules binds MAP_KEYS/SEQ_KEYS at import from ITS OWN repo_root(); derive() (called by
     # check_drift) validates a rule's map-* keys against them. Under --root against an adopter tree with
     # its own .aiqt/standards/, rebind from that root so their map-keys are judged against their
@@ -230,10 +290,10 @@ def main(argv=None):
 # directory as a tree, fails a populated tree on its violation, and exits 2 on a wrong-type
 # .claude/rules or .aiqt/standards entry and on a symlinked or dangling .claude or .aiqt; and each
 # listed probe mutant (a scratch copy of _standards.py with one guard reverted, loaded with
-# importlib) is caught by its named probe vector.
+# importlib) is caught by its named probe vector. It then proves the gate's own --root guard: every
+# --root vector holds, each patched guard mutant fails exactly its named vectors, and the default
+# root, launched as both rosters launch the gate, passes on this tree.
 
-SUITE_ID = "rule-placement-selftest"
-CHECKS_MANIFEST = Path(__file__).resolve().parent / "selftest_checks.toml"
 FAILURES = []
 EXECUTED = []
 _EXECUTED_SET = set()
@@ -249,24 +309,23 @@ def check(name, ok, detail=""):
         FAILURES.append("{}: {!r}".format(name, detail))
 
 
-def _expected_check_ids():
+def _registered_check_ids():
+    """This suite's registered check ids: (set of ids, None), or (None, reason)."""
     try:
-        with open(CHECKS_MANIFEST, "rb") as handle:
-            data = tomllib.load(handle)
+        data = tomllib.loads((ROOT / REGISTRY_REL).read_text(encoding="utf-8"))
     # ValueError and RecursionError too, as in _standards.load_manifests.
-    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
-        print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
-              file=sys.stderr)
-        return None
-    for row in data.get("suite", []):
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError,
+            MemoryError) as exc:
+        return None, "{}: {}".format(REGISTRY_REL, exc)
+    suites = data.get("suite")
+    for row in suites if isinstance(suites, list) else ():
         if isinstance(row, dict) and row.get("id") == SUITE_ID:
             ids = row.get("expected-check-ids")
-            if isinstance(ids, list) and ids and all(isinstance(item, str) and item for item in ids):
-                return set(ids)
+            if (isinstance(ids, list) and ids and all(isinstance(item, str) and item for item in ids)
+                    and len(set(ids)) == len(ids)):
+                return set(ids), None
             break
-    print("SELF-TEST HARNESS ERROR: missing or malformed suite {!r} in {}".format(
-        SUITE_ID, CHECKS_MANIFEST), file=sys.stderr)
-    return None
+    return None, "{} registers no valid suite {}".format(REGISTRY_REL, SUITE_ID)
 
 
 @contextlib.contextmanager
@@ -442,14 +501,6 @@ def _root_fixture(base, name, rules=None, standards=None):
     return root
 
 
-def _gate(argv):
-    """Run main(argv) in process with both streams captured: (exit code, stdout, stderr)."""
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = main(argv)
-    return code, out.getvalue(), err.getvalue()
-
-
 def _load_probe_mutant(source, directory, number):
     """Write one mutated copy of _standards.py to the scratch directory and load it with importlib."""
     path = directory / "standards_mutant_{}.py".format(number)
@@ -460,11 +511,135 @@ def _load_probe_mutant(source, directory, number):
     return module
 
 
+NO_RULES = "PASS: no .claude/rules/ tree\n"
+# (vector, fixture key, expected exit, expected stdout or None, expected stderr fragment or None); each
+# "{}" or "{!r}" in a stderr fragment is filled, in order, with the fixture's --root values. Each root/
+# vector is a --root the guard must refuse; each control/ vector is one it must still read.
+VECTORS = (
+    ("root/repeated", "repeated", 2, "", "error: --root is given 2 times ({!r}, {!r}); name one root (cannot "
+     "evaluate)"),
+    ("root/nonexistent", "missing", 2, "", "error: cannot read --root {}: "),
+    ("root/comma-joined", "comma-joined", 2, "", "error: cannot read --root {}: "),
+    ("root/dangling-symlink", "dangling", 2, "", "error: cannot read --root {}: "),
+    ("root/regular-file", "regular-file", 2, "", "error: --root {} is not a directory (cannot evaluate)"),
+    ("root/empty", "empty", 2, "", "error: --root is empty (cannot evaluate)"),
+    ("control/no-rules-passes", "no-rules", 0, NO_RULES, None),
+    ("control/symlinked-root-passes", "linked", 0, NO_RULES, None),
+    ("control/violation-found", "violation", 1, None, None),
+    ("control/repository-passes", "repository", 0, "PASS: rule placement conforms to the taxonomy\n", None),
+)
+VIOLATION = "  .claude/rules/stray.md: loose: "
+
+
+def _fixtures(base):
+    """Build the fixture roots; returns the --root value for each fixture key (a tuple where the vector gives
+    --root more than once)."""
+    base = Path(base)
+    regular = base / "regular-file"
+    regular.write_text("not a directory\n", encoding="utf-8")
+    no_rules = base / "no-rules"
+    no_rules.mkdir()
+    linked = base / "linked-root"
+    linked.symlink_to(no_rules, target_is_directory=True)
+    dangling = base / "dangling-root"
+    dangling.symlink_to(base / "absent-target")
+    violation = base / "violation"
+    (violation / ".claude" / "rules").mkdir(parents=True)
+    (violation / ".claude" / "rules" / "stray.md").write_text("# stray\n", encoding="utf-8")
+    return {"missing": str(base / "no-such-root"), "comma-joined": str(base / "no-such-root") + ",also-missing",
+            "dangling": str(dangling), "regular-file": str(regular), "empty": "", "no-rules": str(no_rules),
+            "linked": str(linked), "violation": str(violation), "repository": str(ROOT),
+            "repeated": (str(base / "no-such-root"), str(no_rules))}
+
+
+def _gate(module, argv):
+    """Run module.main(argv) in process; returns (exit code, or "crashed (...)", stdout, stderr)."""
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = module.main(argv)
+    except Exception as exc:
+        code = "crashed ({})".format(type(exc).__name__)
+    return code, out.getvalue(), err.getvalue()
+
+
+def _holds(vector, values, code, stdout, stderr, got):
+    got_code, got_out, got_err = got
+    if got_code != code or (stdout is not None and got_out != stdout):
+        return False
+    if vector == "control/violation-found":
+        return VIOLATION in got_out and got_err == ""
+    return got_err == "" if stderr is None else stderr.format(*values) in got_err
+
+
+def _run_vectors(module, roots):
+    """Run every vector against module; returns [(vector, ok, (exit code, stdout, stderr))]."""
+    results = []
+    for vector, key, code, stdout, stderr in VECTORS:
+        values = roots[key] if isinstance(roots[key], tuple) else (roots[key],)
+        got = _gate(module, [arg for value in values for arg in ("--root", value)])
+        results.append((vector, _holds(vector, values, code, stdout, stderr, got), got))
+    return results
+
+
+def _launch(*args):
+    result = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve())] + list(args),
+                            capture_output=True, text=True, timeout=CHILD_TIMEOUT, cwd=str(ROOT),
+                            env=dict(LC_ALL="C.UTF-8"))
+    return result.returncode, result.stdout, result.stderr
+
+
+@contextlib.contextmanager
+def _patched(owner, name, replacement):
+    original = getattr(owner, name)
+    setattr(owner, name, replacement)
+    try:
+        yield
+    finally:
+        setattr(owner, name, original)
+
+
+_ORIGINAL_ROOT_PROBLEM = root_problem
+
+
+def _stat_admitting_errors(path):
+    """A stat that reads an unreachable path as a directory: the guard's stat-error refusal removed."""
+    try:
+        return os.stat(path)
+    except OSError:
+        return os.stat(ROOT)
+
+
+def _empty_admitted(root_arg):
+    """The guard with its empty-value refusal removed: an empty value is judged as the directory it names."""
+    return _ORIGINAL_ROOT_PROBLEM(root_arg or ".")
+
+
+# The refusals root_problem makes; the repeated-root refusal comes before it and is not among them.
+REFUSALS = {"root/nonexistent", "root/comma-joined", "root/dangling-symlink", "root/regular-file", "root/empty"}
+CONTROLS = {"control/no-rules-passes", "control/symlinked-root-passes", "control/violation-found",
+            "control/repository-passes"}
+# Each mutant removes one refusal from the --root guard (or, the last, makes it refuse every root) by
+# patching one module attribute: (mutant id, attribute, replacement, the exact set of vectors that must then
+# fail). The self-test requires each mutant to fail exactly its set, so every vector discriminates and no
+# mutant reaches a vector it should not.
+MUTANTS = (
+    ("guard-removed", "root_problem", lambda root_arg: None, REFUSALS),
+    ("stat-error-admitted", "_stat", _stat_admitting_errors,
+     {"root/nonexistent", "root/comma-joined", "root/dangling-symlink"}),
+    ("non-directory-admitted", "_is_dir", lambda mode: True, {"root/regular-file"}),
+    ("empty-admitted", "root_problem", _empty_admitted, {"root/empty"}),
+    ("repeat-admitted", "repeat_problem", lambda root_args: None, {"root/repeated"}),
+    ("every-root-refused", "_is_dir", lambda mode: False, CONTROLS),
+)
+
+
 def self_test(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
         # (tools/_selftest_exit_report.py); nothing writes it in band.
         _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
+    this = sys.modules[__name__]
     saved_map_keys, saved_seq_keys = gen_rules.MAP_KEYS, gen_rules.SEQ_KEYS
     with tempfile.TemporaryDirectory(prefix="rule-placement-selftest-") as tmp:
         base = Path(tmp)
@@ -528,17 +703,17 @@ def self_test(report_path=None):
                     ("gate/symlink-to-directory-exits-2", "dirlink", 2, "cannot read")):
                 root = _root_fixture(base, "gate-" + rules_kind,
                                      rules=None if rules_kind == "absent" else rules_kind)
-                code, out, err = _gate(["--root", str(root)])
+                code, out, err = _gate(this, ["--root", str(root)])
                 check(cid, code == want_code and want_text in out + err, (code, out, err))
             root = _root_fixture(base, "gate-standards-file", rules="dir", standards="file")
-            code, out, err = _gate(["--root", str(root)])
+            code, out, err = _gate(this, ["--root", str(root)])
             check("gate/standards-non-directory-exits-2", code == 2 and "cannot read" in err,
                   (code, out, err))
             # The empty-directory pass above cannot show the tree was scanned; a populated tree with a
             # known violation can: it must fail, naming the violation.
             root = _root_fixture(base, "gate-populated", rules="dir")
             (root / ".claude" / "rules" / "bogusfamily").mkdir()
-            code, out, err = _gate(["--root", str(root)])
+            code, out, err = _gate(this, ["--root", str(root)])
             check("gate/populated-tree-violation-fails",
                   code == 1 and ".claude/rules/bogusfamily: unknown-family:" in out.replace(os.sep, "/"),
                   (code, out, err))
@@ -562,7 +737,7 @@ def self_test(report_path=None):
                 else:
                     (root / entry).symlink_to(root / "no-such-target")
                 probed = root.resolve() / entry / child
-                code, out, err = _gate(["--root", str(root)])
+                code, out, err = _gate(this, ["--root", str(root)])
                 check(cid, code == 2 and "cannot read {}".format(probed) in err, (code, out, err))
 
             # 3. each probe mutant (one guard reverted in a scratch copy of _standards.py) must be
@@ -602,19 +777,53 @@ def self_test(report_path=None):
                         got = _probe(mutant, fixture, paths, base)
                     caught = got != want
                 check(cid, caught, got)
+
+            # 4. every --root vector holds against this gate
+            roots = _fixtures(base)
+            outcomes = _run_vectors(this, roots)
+            failing = [(vector, got) for vector, ok, got in outcomes if not ok]
+            check("vector/every-vector-holds", len(outcomes) == len(VECTORS) and not failing, failing)
+
+            # 5. the reported inputs, launched as an operator runs them, now give the fixed result: a
+            # missing root, plain or comma-joined, is cannot-evaluate with no PASS line, and the message
+            # names the root
+            for check_id, key in (("launch/nonexistent-root-cannot-evaluate", "missing"),
+                                  ("launch/comma-joined-root-cannot-evaluate", "comma-joined")):
+                got = _launch("--root", roots[key])
+                check(check_id, got[0] == 2 and got[1] == "" and "--root {}: ".format(roots[key]) in got[2],
+                      got)
+
+            # 6. every --root guard mutant fails exactly its named vectors, and every vector fails under
+            # at least one mutant
+            exposed, uncaught = set(), []
+            for mutant, name, replacement, expected in MUTANTS:
+                with _patched(this, name, replacement):
+                    failed = set(vector for vector, ok, _got in _run_vectors(this, roots) if not ok)
+                exposed |= failed
+                if failed != expected:
+                    uncaught.append((mutant, sorted(failed)))
+            check("mutant/every-mutant-caught", MUTANTS and not uncaught, uncaught)
+            never = sorted(set(vector for vector, *_rest in VECTORS) - exposed)
+            check("mutant/every-vector-discriminates", not never, never)
         finally:
             gen_rules.MAP_KEYS, gen_rules.SEQ_KEYS = saved_map_keys, saved_seq_keys
 
+    # 7. the live leg: the default root, launched as both rosters launch the gate, passes on this tree
+    got = _launch()
+    check("live/default-root-passes", got == (0, "PASS: rule placement conforms to the taxonomy\n", ""), got)
+
     # the in-run self-guard: the executed set is exactly this suite's registered set
-    expected = _expected_check_ids()
-    if expected is None:
+    expected, problem = _registered_check_ids()
+    if problem is not None:
+        print("SELF-TEST HARNESS ERROR: {}".format(problem), file=sys.stderr)
         return 2
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
     for check_id in sorted(_EXECUTED_SET - expected):
         FAILURES.append("execution-set/extra: {}".format(check_id))
     if FAILURES:
-        print("SELF-TEST FAIL: check_rule_placement {} check(s) failed".format(len(FAILURES)))
+        print("SELF-TEST FAIL: check_rule_placement {} of {} check(s) failed".format(len(FAILURES),
+                                                                                    len(EXECUTED)))
         for failure in FAILURES:
             print("  - " + failure)
         return 1
@@ -628,7 +837,11 @@ def self_test(report_path=None):
           "an absent one as empty; the gate passes an absent tree, scans an existing empty directory "
           "as a tree, fails a populated tree on its violation, and exits 2 on a wrong-type rules tree "
           "or standards dir and on a symlinked or dangling .claude or .aiqt; 7 probe mutants each "
-          "caught); execution set reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
+          "caught; {} --root vectors: a repeated, empty, missing, comma-joined, dangling or "
+          "non-directory --root is cannot-evaluate; an existing root with no rules tree, a symlinked "
+          "root, a violating root and the repository are still read; {} --root guard mutants each "
+          "caught exactly, every vector discriminating; the default root passes); execution set "
+          "reconciled against tools/selftest_checks.toml".format(len(EXECUTED), len(VECTORS), len(MUTANTS)))
     return 0
 
 

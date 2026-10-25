@@ -364,6 +364,11 @@ ALLOWLIST = (
      _MUTANT + " (the descriptor cleanup and cancellation reverts)"),
     ("opf/tools/_opf_adopt_observe.py", "self_test.source_mutant", "code", 1,
      _MUTANT + " (source_mutant requires exactly one matching site)"),
+    ("opf/tools/_opf_adopt_apply.py", "_load_sweep_report_slice", "code", 1,
+     "self-test harness: exec_module loads, from a file under the self-test's temporary directory,"
+     " the sweep-reporting slice its only caller cuts from the repository's own _self_test_checks"
+     " (read from __file__, or one of its literal mutants), never registered in sys.modules; no"
+     " external input"),
     ("opf/tools/_opf_emit.py", "_fixture_main", "code", 1,
      "self-test fixture runner: runs the Python body its own supervisor passes after an"
      " explicit isolated sys.executable -I -B -c argv, the same trust as python3 -c; the body"

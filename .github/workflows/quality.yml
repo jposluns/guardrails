@@ -110,6 +110,16 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_derived_command_parameters.py
 
+      # Relied exit pipes: an adopter-parameterized scan flagging an adopter-declared relied-on command
+      # in a non-final pipeline stage of a declared script, where the pipe discards its exit (gatdis).
+      # Adopter-declared: NOT APPLICABLE in this repo, which ships no .aiqt/relied-exit-pipes.toml.
+      - name: Relied exit pipes self-test
+        shell: bash
+        run: python3 -I -B tools/check_relied_exit_pipes.py --self-test
+      - name: Relied exit pipes
+        shell: bash
+        run: python3 -I -B tools/check_relied_exit_pipes.py
+
   site:
     name: Text and site
     runs-on: ubuntu-latest
@@ -735,10 +745,6 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_entry_guard.py
 
-      - name: Rule-placement self-test (execution-reconciled)
-        shell: bash
-        run: python3 -I -B tools/check_selftest_execution.py --suite rule-placement-selftest
-
   git-fixture-env-core:
     name: Git-fixture-env core self-test
     runs-on: ubuntu-latest
@@ -821,8 +827,8 @@ jobs:
   # release) and the job's suites in order, each held step with exactly name, run and shell: bash; its
   # jobs leg also runs outside these jobs, in the registry job (--jobs-only), so an edit here cannot
   # silence every CI run of it. Both are required through Quality gates. They run the OPF tooling
-  # self-test and the four git-fixture-env suites a second time in every run, including the run that an
-  # edit to a pull request's title or body starts.
+  # self-test and the four git-fixture-env suites a second time in every run; an edit to a pull request's
+  # title or body starts no Quality run.
   opf-host-patch:
     name: OPF tooling (host patch)
     runs-on: ubuntu-24.04
@@ -1007,6 +1013,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_clauses.py --genesis --with-manifest
 
+      - name: Rule placement self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite rule-placement-selftest
       - name: Rule placement
         shell: bash
         run: python3 -I -B tools/check_rule_placement.py
