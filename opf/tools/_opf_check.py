@@ -2100,30 +2100,36 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
 def _check_receipts(recs, by_id, rep, unread=frozenset()):
     """C-RECEIPTS (R1): the done<->backlog_item receipt is one-to-one in BOTH directions (OPF-SPEC 8.5).
     Every ratified backlog_item (unqualified `done`) has exactly one done receipt; every done's receipt_of
-    target resolves to a backlog_item ratified at `done`. The count covers every clean done receipt,
-    whoever authored it: it grades the receipt link structure, not a current-state join (spec 8.6), since a
-    done receipt is a created-terminal record whose `recorded` status confers no current authority, and a
-    legacy importer-authored receipt keeps its bytes and its place in the clean series. So an importer
-    receipt beside a non-importer one is a second receipt and a finding, never discounted to make the item
-    pass, and an importer-authored item ratified at done still owes its one receipt. The writer never
-    mints that store (done-with-receipt refuses an item that already has a receipt); the section 8.6
-    firewall on this join, keyed on provenance alone (OPF has never been released, so no store predates
-    the firewall), is _check_importer_receipts: an importer-authored done never satisfies a non-importer
-    backlog_item's receipt, and the remedy spec 8.6 defines for an item whose only receipt is
-    importer-authored is a maintainer-authored `corrects` decision, which that arm accepts. An
-    imported-series row neither owes a receipt nor confers one (the doctor never routes one here; the skip
-    is the backstop for a direct caller). When the backlog_item or done records could not all be read, or
-    a seated one's status or links could not be interpreted (`unread` from the collectors, widened by
-    _make_rec's `unparsed`), the join is CANNOT-EVALUATE and is not run: a missing or unreadable receipt
-    or target could hide a defect or report a false one."""
+    target resolves to a backlog_item ratified at `done`. The section 8.6 firewall applies here as in
+    every current-state join, keyed on provenance alone (the maintainer ruling: OPF has never been
+    released, so no store predates the firewall): a record whose `actor.kind` is exactly `importer`, and
+    an imported-series row, neither owes a receipt nor confers one, so an importer-authored done never
+    satisfies a non-importer backlog_item's receipt and an importer-authored ratified backlog_item is
+    owed none. Only the exact kind is exempt; an unreadable kind (None) joins, fail-closed. A
+    non-importer item whose every receipt is importer-authored is not reported here: the driver runs
+    _check_importer_receipts beside this join on every store, and that arm reports it, or accepts in its
+    place the remedy spec 8.6 defines (a maintainer-authored `corrects` decision), so the one defect is
+    reported once and the remedy is never refused. When the backlog_item or done records could not all
+    be read, or a seated one's status or links could not be interpreted (`unread` from the collectors,
+    widened by _make_rec's `unparsed`), the join is CANNOT-EVALUATE and is not run: a missing or
+    unreadable receipt or target could hide a defect or report a false one."""
     unread = unread | {r.rtype for r in recs if r.location != "imported" and r.unparsed}
     if unread & {"backlog_item", "done"}:
         rep.cant("C-RECEIPTS: the backlog_item and done records could not all be read or interpreted (see "
                  "C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the receipt join is not evaluated "
                  "over a partial set (spec 8.5)")
         return
-    joined = [r for r in recs if r.location != "imported"]
+    joined = [r for r in recs if r.location != "imported" and r.actor_kind != "importer"]
     bi_state = {r.id: (r.state, r.qual) for r in joined if r.rtype == "backlog_item" and isinstance(r.id, str)}
+    # The items _check_importer_receipts grades: every receipt_of naming them comes from an importer-authored
+    # done, read exactly as that arm reads its receipts.
+    receipt_kinds = {}
+    for r in recs:
+        if r.rtype == "done":
+            for rel, tid in r.links:
+                if rel == "receipt_of" and isinstance(tid, str):
+                    receipt_kinds.setdefault(tid, []).append(r.actor_kind)
+    arm_graded = {tid for tid, kinds in receipt_kinds.items() if all(k == "importer" for k in kinds)}
     done_targets = {}
     for r in joined:
         if r.rtype == "done" and isinstance(r.id, str):
@@ -2135,7 +2141,7 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
     for bid, (state, qual) in bi_state.items():
         if state == "done" and qual is None:
             n = len(bi_to_dones.get(bid, ()))
-            if n == 0:
+            if n == 0 and bid not in arm_graded:
                 rep.finding("C-RECEIPTS: ratified backlog_item {!r} (at 'done') has no done receipt (the "
                             "receipt is one-to-one; spec 8.5)".format(bid))
             elif n > 1:
@@ -7579,7 +7585,7 @@ def self_test():
                       if "backlog_item.imported.index.toml record[1]" in m and "0" * 64 in m])
             # C-IMPORTED-SEGREGATION, the receipt firewall: a maintainer-authored backlog item ratified at
             # done whose only receipt is importer-authored is the firewall finding alone (C-RECEIPTS
-            # counts the receipt and passes); with the check disabled the SAME store certifies VALID. An
+            # leaves that item to this arm and passes); with the check disabled the SAME store certifies VALID. An
             # importer-authored item with that receipt is history the firewall does not grade.
             _i3_idn = dn(1, "BI-1")
             _i3_idn["actor"] = {"kind": "importer"}
@@ -7709,10 +7715,11 @@ def self_test():
                   and _i3_rmo is not None and _i3_rmo.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
                   and any("'BI-1'" in m for m in _i3_msgs(_i3_rmo, "C-IMPORTED-SEGREGATION")))
             # The receipt firewall's edges: an item holding one importer and one maintainer receipt
-            # holds a clean receipt, so the firewall passes while C-RECEIPTS reports the one-to-one
-            # finding, since that count covers importer-authored receipts too (see _check_receipts; red
-            # when its all() weakens to any()); a proposed done item is not ratified, so
-            # it is not graded (red when the qualifier guard is dropped).
+            # holds a clean receipt, so the firewall passes, and C-RECEIPTS passes too, since an
+            # importer-authored done confers no receipt and so is no second one (see _check_receipts; red
+            # when the arm's all() weakens to any(), or when the count reads importer-authored receipts
+            # again); a proposed done item is not ratified, so it is not graded (red when the qualifier
+            # guard is dropped).
             _i3_mx = _i3_machine()
             _i3_mx["done.index.toml"] = idx([copy.deepcopy(_i3_idn), dn(2, "BI-1")])
             _i3_mx["counters.toml"]["counters"]["DN"] = 2
@@ -7720,8 +7727,8 @@ def self_test():
             check("imported-segregation-mixed-receipts-pass",
                   _i3_mxr is not None and _i3_mxr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
                   and not _i3_msgs(_i3_mxr, "C-IMPORTED-SEGREGATION")
-                  and _i3_mxr.checks.get("C-RECEIPTS") == "FINDING"
-                  and any("has 2 done receipts" in m for m in _i3_msgs(_i3_mxr, "C-RECEIPTS")))
+                  and _i3_mxr.checks.get("C-RECEIPTS") == "PASS"
+                  and not _i3_msgs(_i3_mxr, "C-RECEIPTS"))
             _i3_ql = _i3_machine()
             _i3_ql["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open"),
                                                      dict(bi(3, "done/proposed"),
@@ -8619,9 +8626,9 @@ def self_test():
                   and not any("is not this bucket's type index" in f_ for f_ in _mv_unconf.findings))
         # The section 8.6 firewall on the sibling joins (the maintainer ruling: keyed on provenance, on
         # every store): an importer-authored done confers no receipt on a non-importer ratified
-        # backlog_item. The one-to-one count reads the receipt as present, so the defect is the
-        # firewall arm's finding under C-RECEIPTS (red when that arm stops reading importer-authored
-        # receipts).
+        # backlog_item. The count leaves an item whose every receipt is importer-authored to the firewall
+        # arm, so the defect is reported once, as that arm's finding under C-RECEIPTS (red when the count
+        # reports it too, or when that arm stops reading importer-authored receipts).
         f = clean_machine()
         _r1_impdn = dn(1, "BI-1")
         _r1_impdn["actor"] = {"kind": "importer", "id": "import-assistant"}
@@ -8632,9 +8639,8 @@ def self_test():
               and any("its only receipt(s) 'DN-1' are importer-authored" in f_
                       for f_ in _r1_imp.by_check.get("C-RECEIPTS", []))
               and not any("has no done receipt" in f_ for f_ in _r1_imp.by_check.get("C-RECEIPTS", [])))
-        # ... and an importer-authored ratified backlog_item still owes its one receipt: the count covers
-        # every clean backlog item, whoever authored it, so one with no receipt at all is the C-RECEIPTS
-        # finding (red when the count stops reading importer-authored items).
+        # ... and an importer-authored ratified backlog_item is owed no receipt: exempt history, the store
+        # stays VALID (red when the join starts requiring receipts of importer-authored records again).
         f = clean_machine()
         _r1_impbi = envelope("BI-1", "backlog_item", "done",
                              actor={"kind": "importer", "id": "import-assistant"})
@@ -8646,12 +8652,8 @@ def self_test():
         del _r1_impo["prior"]["records"]["DN-1"]
         del _r1_impo["prior"]["digests"]["DN-1"]
         del _r1_impo["prior"]["held"]["DN"]
-        _r1_impb = run(f, obs=_r1_impo)
-        check("r1-importer-authored-backlog-item-still-owes-receipt",
-              _r1_impb is not None and _r1_impb.status == INVALID
-              and _r1_impb.by_check.get("C-RECEIPTS")
-              == ["C-RECEIPTS: ratified backlog_item 'BI-1' (at 'done') has no done receipt (the receipt is "
-                  "one-to-one; spec 8.5)"])
+        check("r1-importer-authored-backlog-item-owes-no-receipt",
+              run(f, obs=_r1_impo).status == VALID)
         # An importer-authored decided pending_decision confers no resolution: a chain whose only
         # non-superseded decided member is importer-authored has zero current effective resolutions
         # (red when the chain derivation reads the importer record as the resolution).
@@ -8666,6 +8668,19 @@ def self_test():
               _r3_imp is not None and _r3_imp.status == INVALID
               and any("has 0 current effective resolutions" in f_
                       for f_ in _r3_imp.by_check.get("C-DECISION-CHAINS", [])))
+        # ... and an importer-authored supersedes link removes no current authority: a clean decided PD-1
+        # that an importer-authored withdrawn PD-2 supersedes stays its chain's one current resolution,
+        # and with no importer decision current the store is VALID (red when the C-DECISION-CHAINS count
+        # derives its chains with the importer-authored records kept in, as only the firewall arm does).
+        f = clean_machine()
+        _r3_implk = pd(2, status="withdrawn", supersedes="PD-1")
+        _r3_implk["actor"] = {"kind": "importer", "id": "import-assistant"}
+        f["pending_decision.index.toml"] = idx([pd(1), _r3_implk])
+        f["counters.toml"] = counters(PD=2)
+        _r3_lk = run(f)
+        check("r3-importer-link-removes-no-authority",
+              _r3_lk is not None and _r3_lk.status == VALID
+              and _r3_lk.checks.get("C-DECISION-CHAINS") == "PASS")
         # Only the exact kind `importer` is barred by the receipt firewall and exempt from the chain
         # derivation: a done authored by a lookalike kind (another case, an extension, a prefix, padding)
         # or by an actor whose kind cannot be read still confers its receipt, and such a decided
@@ -8713,6 +8728,20 @@ def self_test():
         _check_receipts(_r1_srecs, {r.id: r for r in _r1_srecs}, _r1_srep)
         check("r1-imported-series-rows-neither-confer-nor-owe-receipts",
               _r1_srep.findings == ["C-RECEIPTS: ratified backlog_item 'BI-1' (at 'done') has no done receipt "
+                                    "(the receipt is one-to-one; spec 8.5)"])
+        # The count hands an item to the firewall arm only where that arm grades it, every receipt naming
+        # it importer-authored: an item whose receipts are an importer-authored done and an imported-series
+        # row stays the count's finding, so the count and the arm never pass it between them (red when the
+        # hand-off widens to an item with any importer-authored receipt).
+        _r1_hrecs = [_make_rec(bi(1, "done"), "backlog_item", "active"),
+                     _make_rec(_with_kind(dn(1, "BI-1"), "importer"), "done", "active"),
+                     _make_rec(dn(2, "BI-1"), "done", "imported")]
+        _r1_hrep = _Report()
+        _r1_hrep.ran("C-RECEIPTS")
+        _check_receipts(_r1_hrecs, {r.id: r for r in _r1_hrecs}, _r1_hrep)
+        _check_importer_receipts(_r1_hrecs, _r1_hrep, "C-RECEIPTS")
+        check("r1-receipt-handoff-only-where-the-arm-grades",
+              _r1_hrep.findings == ["C-RECEIPTS: ratified backlog_item 'BI-1' (at 'done') has no done receipt "
                                     "(the receipt is one-to-one; spec 8.5)"])
         _r3_srecs = [_make_rec(pd(1), "pending_decision", "active"),
                      _make_rec(pd(2, status="withdrawn", supersedes="PD-1"), "pending_decision", "active"),
