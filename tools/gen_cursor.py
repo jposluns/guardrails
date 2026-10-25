@@ -82,7 +82,7 @@ def run(root, check):
     try:
         # dir_present (not is_dir) inside the try: an unreadable .aiqt/ parent must fail closed as exit 2,
         # not read as an absent corpus (which would delete every generated .mdc as an orphan below).
-        if dir_present(src_dir):
+        if dir_present(src_dir, root=root):
             for src, _fm, rel in load_corpus(src_dir):
                 desired[cursor_rel(rel)] = render_rule(src)
     except (ValueError, OSError) as exc:
@@ -108,7 +108,7 @@ def run(root, check):
         # Orphan scan, scoped to the reserved subtree ONLY (it is 100% generated; siblings under
         # .cursor/rules/ may be the adopter's own and are never walked). dir_present, not is_dir: an
         # unreadable .cursor/ parent must fail closed, not skip the orphan scan.
-        if dir_present(out_dir):
+        if dir_present(out_dir, root=root):
             for dirpath, _dirs, filenames in os.walk(out_dir, onerror=_raise):
                 for fn in sorted(f for f in filenames if f.endswith(".mdc")):
                     f = Path(dirpath) / fn

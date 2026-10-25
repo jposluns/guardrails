@@ -114,10 +114,12 @@ def audit(manifests, today):
     return results, worst
 
 
-def run(std_dir, today, warn_only=False):
-    """Audit the manifests under std_dir as of `today`; print a report; return the exit code."""
+def run(std_dir, today, warn_only=False, *, root):
+    """Audit the manifests under std_dir as of `today`; print a report; return the exit code. std_dir is
+    probed beneath root (the repository root for the default dir; a --std directory is its own root), so a
+    symlinked or dangling .aiqt or standards fails closed (exit 2)."""
     try:
-        manifests = load_manifests(std_dir)
+        manifests = load_manifests(std_dir, root=root)
     except (ManifestError, OSError) as exc:
         # OSError too: an unreadable manifest file or an unlistable standards dir is a read error, not a
         # clean skip. Fail closed (exit 2) rather than escape as a traceback.
@@ -307,7 +309,7 @@ def self_test_main(_mkdtemp=None, _vectors=True):
 
     def _run_quiet(sd, warn_only=False):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            return run(sd, today, warn_only=warn_only)
+            return run(sd, today, warn_only=warn_only, root=sd)
 
     try:
         tmp = Path((_mkdtemp or tempfile.mkdtemp)(prefix="aiqt-currency-selftest-"))
@@ -364,7 +366,7 @@ def self_test_main(_mkdtemp=None, _vectors=True):
                     big_err = io.StringIO()
                     try:
                         with redirect_stdout(io.StringIO()), redirect_stderr(big_err):
-                            rc_big = run(big, today)
+                            rc_big = run(big, today, root=big)
                     except (ValueError, RecursionError) as exc:
                         rc_big = "a bare {} escaped".format(type(exc).__name__)
                     finally:
@@ -423,11 +425,12 @@ def main():
     std, warn_only, self_test = parsed
     if self_test:
         return self_test_main()
-    std_dir = std if std is not None else (repo_root() / ".aiqt" / "standards")
+    root = std if std is not None else repo_root()
+    std_dir = std if std is not None else (root / ".aiqt" / "standards")
     # UTC, not date.today(): the `retrieved` dates and every project record are UTC, and a local-tz
     # "today" could shift a boundary-day age by a day on a differently-zoned runner. Deterministic in UTC.
     today = datetime.now(timezone.utc).date()
-    return run(std_dir, today, warn_only=warn_only)
+    return run(std_dir, today, warn_only=warn_only, root=root)
 
 
 if __name__ == "__main__":

@@ -456,7 +456,7 @@ def _verify_with_loader(toml_path):
     try:
         shutil.copy(toml_path, tmp / "cwe.toml")
         try:
-            manifests = load_manifests(tmp)
+            manifests = load_manifests(tmp, root=tmp)
         except ManifestError as exc:
             raise ImportError_("load_manifests rejected the rendered manifest: {}".format(exc))
         man = manifests.get("map-cwe")

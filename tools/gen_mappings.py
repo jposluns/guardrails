@@ -455,7 +455,7 @@ def main():
     check = "--check" in sys.argv[1:]
     root = repo_root()
     try:
-        manifests = load_manifests(root / ".aiqt" / "standards")
+        manifests = load_manifests(root / ".aiqt" / "standards", root=root)
         src_dir = root / ".aiqt" / "core" / "rules"
         if not src_dir.is_dir():
             print("error: rule corpus not found at {}".format(src_dir), file=sys.stderr)
