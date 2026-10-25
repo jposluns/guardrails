@@ -140,6 +140,7 @@ guarded-surfaces = [
     "tools/check_release_build.py",
     "tools/check_release_cut.py",
     "tools/check_release_delta.py",
+    "tools/check_relied_exit_pipes.py",
     "tools/check_rule_placement.py",
     "tools/check_secrets.py",
     "tools/check_selftest_execution.py",
