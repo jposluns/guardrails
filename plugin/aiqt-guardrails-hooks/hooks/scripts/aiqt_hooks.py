@@ -360,8 +360,8 @@ PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0
 # json.dumps, print or sys.stdout, for example) is outside it.
 NOTE_CONSTRUCTORS = (
     "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
-    "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
-    "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
+    "_discard_recovery_result", "_errexit_unreadable", "_expbnd_breadth_ask", "_expbnd_fallback",
+    "_expbnd_target_ask", "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
     "_orch_ask_attended", "_orch_stop_family")
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
@@ -5381,6 +5381,10 @@ _ERREXIT_PIPEFAIL_NOTE = (
     " (The step read as failing here is a pipeline whose last command does not fail on its own, and whether "
     "pipefail is on at that point could not be read from the command text, so this hazard is possible, not "
     "certain: without pipefail the pipeline takes its last command's status.)")
+# The note for a payload field inline_errexit cannot read (_errexit_unreadable): the field, then what it held.
+_ERREXIT_UNREADABLE_NOTE = (
+    "AIQT guardrail (rule nocncl): this call's {} was {}, so the inline errexit check did not run on it. This "
+    "guard never blocks a call, so it is allowed: the check was not run, not passed.")
 
 
 def _errexit_set_effect(words):
@@ -5725,6 +5729,19 @@ def _errexit_hazard(pairs, tail):
     return armed  # the tail counts only as a later statement, preserving a "possible" reading
 
 
+def _errexit_unreadable(field, present, value, kind):
+    """inline_errexit's outcome on a payload field it cannot read: a missing field, an empty string, or a value
+    that is not `kind`. This note-only guard never denies, so its fail-closed outcome is an allow with a note
+    naming the field and what it held, never a silent allow that would read as a checked call."""
+    if not present:
+        held = "missing"
+    elif value == "":
+        held = "empty"
+    else:
+        held = "{}, not {}".format(_orch_json_kind(value), kind)
+    return _allow_note(_ERREXIT_UNREADABLE_NOTE.format(field, held))
+
+
 def inline_errexit(data):
     """nocncl (integ/no-concealed-failure), PreToolUse/Bash. NOTE-ONLY: it allows every Bash command, and
     blocks only when wired to an event other than PreToolUse (the sibling hard-block convention); main()
@@ -5751,17 +5768,24 @@ def inline_errexit(data):
     ignores errexit inside a function called in an && or || list, a condition or a ! pipeline, which is not
     modelled. Compound commands are read only through their reserved words (_errexit_hazard). An unquoted
     heredoc is read again with its delimiter quoted, a best-effort reading the note says it is; nothing after
-    any other construct the lexer refuses is read. A missing tool_name, another tool, and an absent or
-    unreadable command silently allow."""
+    any other construct the lexer refuses is read. Another tool silently allows. A tool_name that is missing,
+    empty or not a string, a tool_input that is not an object, and a command that is missing, empty or not a
+    string each allow with a note naming that field (_errexit_unreadable), never silently and never with a
+    deny."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: inline_errexit wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
-    if data.get("tool_name") != "Bash":
-        return _allow()  # a missing tool_name included: this note-only guard never denies
+    tool = data.get("tool_name")
+    if not isinstance(tool, str) or not tool:
+        return _errexit_unreadable("tool_name", "tool_name" in data, tool, "a string")
+    if tool != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
     tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(tool_input, dict):
+        return _errexit_unreadable("tool_input", "tool_input" in data, tool_input, "an object")
+    command = tool_input.get("command")
     if not isinstance(command, str) or not command:
-        return _allow()
+        return _errexit_unreadable("command", "command" in tool_input, command, "a string")
     pairs, tail, exact = _errexit_statements(command)
     hazard = _errexit_hazard(pairs, tail)
     if not hazard:
@@ -24905,7 +24929,7 @@ def main(argv):
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
     # wedge the session (an error path keeps no loop bound and never consults the stop_hook_active
     # field of the payload), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
-    # path (FIX 2). A bad-argv PreToolUse handler still fails closed (exit 2), except a note-only one
+    # path. A bad-argv PreToolUse handler still fails closed (exit 2), except a note-only one
     # (NOTE_ONLY_PRETOOL_MODES), which never blocks a call and so takes the fail-open posture throughout.
     mode = argv[0] if argv else None
     if mode not in HANDLERS:

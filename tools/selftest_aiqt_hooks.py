@@ -2576,6 +2576,12 @@ _IE_MUTANTS = {
     "possible-tail": (('return armed  # the tail counts only as a later statement, preserving a "possible" '
                        "reading", "return bool(armed)"),),
     "nothing-after": (("return False  # the last statement never notes: nothing runs after it", "return on"),),
+    "unread-tool-name": (('return _errexit_unreadable("tool_name", "tool_name" in data, tool, "a string")',
+                          "return _allow()"),),
+    "unread-tool-input": (('return _errexit_unreadable("tool_input", "tool_input" in data, tool_input, "an object")',
+                           "return _allow()"),),
+    "unread-command": (('return _errexit_unreadable("command", "command" in tool_input, command, "a string")',
+                        "return _allow()"),),
 }
 
 # (label, command, mutant): rows the real handler must note, each silent under its mutant.
@@ -2648,6 +2654,9 @@ _IE_FIRE_ROWS = (
      "set -e; false\n> /abs/log &", "redirect-later-kind"),
     ("(ie-f43) an && list of redirections only is a later statement",
      "set -e; false; > /abs/a && > /abs/b", "redirect-only"),
+    ("(ie-f44) a pipefail change inside a case arm may not run",
+     "set -o pipefail; set -e; case $x in a) set +o pipefail;; esac; false | true; echo after",
+     "branch-pipefail"),
 )
 
 # (label, command, mutant): rows the real handler must leave silent, each noted by its mutant. "over-broad"
@@ -2922,6 +2931,46 @@ def _test_inline_errexit(failures, tmp):
         if mutants[mutant](payload(command)) != degraded:
             failures.append("{}: the {} mutant must change the note wording for {!r}, so the check shows the "
                             "rule decides it".format(label, mutant, command))
+    # A payload field the guard cannot read allows with the note naming that field and what it held, never in
+    # silence and never with a deny; each row is silent under the mutant that restores the silent allow there.
+    unread = aiqt_hooks._ERREXIT_UNREADABLE_NOTE
+    for label, data, mutant, field, held in (
+            ("(ie-m1) a missing tool_name", {"tool_input": {"command": "set -e; a; b"}}, "unread-tool-name",
+             "tool_name", "missing"),
+            ("(ie-m2) a null tool_name", {"tool_name": None, "tool_input": {"command": "set -e; a; b"}},
+             "unread-tool-name", "tool_name", "null, not a string"),
+            ("(ie-m3) an empty tool_name", {"tool_name": "", "tool_input": {"command": "set -e; a; b"}},
+             "unread-tool-name", "tool_name", "empty"),
+            ("(ie-m4) an array tool_name", {"tool_name": ["Bash"], "tool_input": {"command": "set -e; a; b"}},
+             "unread-tool-name", "tool_name", "an array, not a string"),
+            ("(ie-m5) a missing tool_input", {"tool_name": "Bash"}, "unread-tool-input", "tool_input", "missing"),
+            ("(ie-m6) a null tool_input", {"tool_name": "Bash", "tool_input": None}, "unread-tool-input",
+             "tool_input", "null, not an object"),
+            ("(ie-m7) an array tool_input", {"tool_name": "Bash", "tool_input": []}, "unread-tool-input",
+             "tool_input", "an array, not an object"),
+            ("(ie-m8) a string tool_input", {"tool_name": "Bash", "tool_input": "set -e; a; b"}, "unread-tool-input",
+             "tool_input", "a string, not an object"),
+            ("(ie-m9) a missing command", {"tool_name": "Bash", "tool_input": {}}, "unread-command", "command",
+             "missing"),
+            ("(ie-m10) a null command", {"tool_name": "Bash", "tool_input": {"command": None}}, "unread-command",
+             "command", "null, not a string"),
+            ("(ie-m11) a number command", {"tool_name": "Bash", "tool_input": {"command": 42}}, "unread-command",
+             "command", "a number, not a string"),
+            ("(ie-m12) an empty command", {"tool_name": "Bash", "tool_input": {"command": ""}}, "unread-command",
+             "command", "empty"),
+            ("(ie-m13) an array command", {"tool_name": "Bash", "tool_input": {"command": ["set -e; a; b"]}},
+             "unread-command", "command", "an array, not a string")):
+        used.add(mutant)
+        data = dict(data, hook_event_name=aiqt_hooks.PRETOOL)
+        want = aiqt_hooks._allow_note(unread.format(field, held))
+        if handler(data) != want:
+            failures.append("{}: expected the unreadable-input note {!r}, got {!r}".format(label, want, handler(data)))
+        if mutant not in mutants:
+            failures.append("{}: its mutant {} was not built".format(label, mutant))
+            continue
+        if mutants[mutant](data) != (0, None, None):
+            failures.append("{}: the {} mutant must silence this row, so the row shows the note decides it; got "
+                            "{!r}".format(label, mutant, mutants[mutant](data)))
 
     unused = sorted(set(_IE_MUTANTS) - used)
     if unused:
@@ -2972,21 +3021,11 @@ def _test_inline_errexit(failures, tmp):
         if got != want:
             failures.append("{} _errexit_statements({!r}) gave {!r}, want {!r}".format(label, command, got, want))
 
-    # Note-only: a missing tool_name, another tool and an unreadable command all allow silently.
-    for label, data in (
-            ("(ie-m1) missing tool_name", {"hook_event_name": aiqt_hooks.PRETOOL,
-                                           "tool_input": {"command": "set -e; a; b"}}),
-            ("(ie-m2) None tool_name", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": None,
-                                        "tool_input": {"command": "set -e; a; b"}}),
-            ("(ie-other-tool)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Read",
-                                 "tool_input": {"command": "set -e; a; b"}})):
-        if handler(data) != (0, None, None):
-            failures.append("{}: a note-only guard must allow silently, got {!r}".format(label, handler(data)))
-    for tool_input in (None, [], {}, {"command": None}, {"command": 42}, {"command": ""}):
-        data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "tool_input": tool_input}
-        if handler(data) != (0, None, None):
-            failures.append("(ie-unreadable) expected a silent allow for {!r}, got {!r}".format(
-                tool_input, handler(data)))
+    # Note-only: another tool allows silently.
+    data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Read", "tool_input": {"command": "set -e; a; b"}}
+    if handler(data) != (0, None, None):
+        failures.append("(ie-other-tool): a note-only guard must allow another tool silently, got {!r}".format(
+            handler(data)))
 
     data = payload("set -e; a; b")
     data["hook_event_name"] = "Stop"
@@ -3985,7 +4024,9 @@ _DEADLINE_SHAPES = {
 # with no word and no redirect, the two costliest cases measured on one host (max of five runs) are
 # gate_weakening on seps_hash5 at 1 MB, 0.63 s against the 7 s bound, and commit_identity on seps_hash_lines
 # at 64 KB, under 0.01 s against the 1.5 s bound; before those changes they measured 3.1 s and 0.7 s on the
-# same host, which overran those bounds on hosts 3 to 4.5 times slower.
+# same host, which overran those bounds on hosts 3 to 4.5 times slower. Those figures predate inline_errexit,
+# which is timed on these shapes too and costs more: its slowest, paren_hash4 at 1 MB, used 2.07 to 2.09 s of
+# CPU over two runs on a 24-core host with Python 3.14.4 (2026-10-25), against the same 7 s bound.
 _DEADLINE_HASH_SHAPES = ("seps_hash", "seps_hash_lines", "seps_hash_nested", "paren_hash4", "seps_hash5")
 _DEADLINE_HASH_DECISIONS = {
     ("orch_truncation_guard", "seps_hash"): "deny", ("orch_truncation_guard", "seps_hash_lines"): "deny",
