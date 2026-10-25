@@ -18873,9 +18873,10 @@ def _main_isolated(monitor):
              'echo "a > b"; cat <<<y', "allow")
         bcmd("(ap-c93b) a '>' in a here-string's quoted text DENIES (unread tail, disclosed over-deny)",
              'cat <<<"a > b"', "deny")
-        # an unquoted here-document: the plain body of the one the lex stopped at is data and is left out;
-        # its line, the text after its body, a body holding a command substitution, an unterminated body and
-        # a body after an opener line holding quoting are read.
+        # an unquoted here-document: the body of the one the lex stopped at is data and is left out only when
+        # it holds no backslash, '$' or backquote (the characters bash treats specially there); its line, the
+        # text after its body, a body holding any of those three, an unterminated body and a body after an
+        # opener line holding quoting are read.
         bcmd("(ap-c94) a relative truncating redirect on an unquoted here-document's line DENIES (unread tail)",
              "cat <<EOF > out.txt\nx\nEOF", "deny")
         bcmd("(ap-c94b) a relative truncating redirect after an unquoted here-document's body DENIES "
@@ -18894,6 +18895,41 @@ def _main_isolated(monitor):
              'cat <<EOF "q"\na > b\nEOF', "deny")
         bcmd("(ap-c94i) a here-document opener inside a later quoted text is not trusted, so the text after it "
              "is read and DENIES", "cat <<<'see <<EOF here'\necho y > out.txt\ncat <<EOF\nbody\nEOF", "deny")
+        # a body holding a backslash, '$' or backquote is read whatever form it takes, so each shape below,
+        # which hides a command or the body's end from a match on the raw text, DENIES: a '${ cmd; }' or
+        # '${| cmd; }' substitution, a backslash-newline that joins a split delimiter line (bash ends the body
+        # there and runs the next line) and a '$', backslash-newline, '(' substitution. A body holding one of
+        # the three where bash reads it as data denies too (a disclosed over-deny); a plain body allows.
+        bcmd("(ap-c94j) a '${ cmd; }' substitution in an unquoted here-document body is read and DENIES",
+             "cat <<EOF > {}/out\n${{ echo y > out.txt; }}\nEOF".format(rp), "deny")
+        bcmd("(ap-c94k) a '${| cmd; }' substitution in an unquoted here-document body is read and DENIES",
+             "cat <<EOF > {}/out\n${{| echo y > out.txt; }}\nEOF".format(rp), "deny")
+        bcmd("(ap-c94l) a delimiter split by a backslash-newline ends the body, so the command after it DENIES",
+             "cat <<EOF > {}/out\nbody\nE\\\nOF\necho y > out.txt\nEOF".format(rp), "deny")
+        bcmd("(ap-c94m) a '<<-' body holding a backslash-newline is read and DENIES (disclosed over-deny where "
+             "bash reads the rest as body)", "cat <<-EOF > {}/out\n\tE\\\n\tOF\necho y > out.txt\n\tEOF".format(rp),
+             "deny")
+        bcmd("(ap-c94n) a '$', backslash-newline, '(' substitution in an unquoted body is read and DENIES",
+             "cat <<EOF > {}/out\n$\\\n(echo y > out.txt)\nEOF".format(rp), "deny")
+        bcmd("(ap-c94o) a split 'EO\\<newline>F' delimiter ends the body, so the command after it DENIES",
+             "cat <<EOF\nx\nEO\\\nF\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c94p) a '$\\<newline>(' substitution in an unquoted body DENIES (no redirect on the opener line)",
+             "cat <<EOF\n$\\\n(echo y > out.txt)\nEOF\n", "deny")
+        bcmd("(ap-c94q) a delimiter joined to an empty line by a backslash-newline ends the body, so the command "
+             "after it DENIES", "cat <<EOF\nEOF\\\n\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c94r) a split delimiter with its leading tab in a '<<-' body ends it, so the command after it "
+             "DENIES", "cat <<-EOF\nx\n\tEO\\\nF\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c94s) a split delimiter after a '0<<' opener ends the body, so the command after it DENIES",
+             "cat 0<<EOF\nx\nEO\\\nF\ntrue > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c94t) a backslash-newline that joins a body line to the delimiter line is read and DENIES "
+             "(disclosed over-deny where bash reads the rest as body)",
+             "cat <<EOF\nx\\\nEOF\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c94u) a '$' that starts no substitution in an unquoted body is read and DENIES (disclosed "
+             "over-deny)", "cat <<EOF > {}/out\ncost $5 -> y\nEOF".format(rp), "deny")
+        bcmd("(ap-c94v) a backslash before a letter in an unquoted body is read and DENIES (disclosed over-deny)",
+             "cat <<EOF > {}/out\na\\b -> y\nEOF".format(rp), "deny")
+        bcmd("(ap-c94w) a plain body holding '->' and '=>' and no backslash, '$' or backquote allows (the body "
+             "is data)", "cat <<EOF > {}/out\nx -> y\na => b\nEOF".format(rp), "allow")
         # the deny names the unread construct, the target and the remedy.
         _ut_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": "cat <<<y > out.txt"}})

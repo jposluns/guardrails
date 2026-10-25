@@ -4428,8 +4428,10 @@ _ABSPTH_UNREAD_HEREDOC_RE = re.compile(r"[0-9]*<<(?!<)")
 # A quote, escape, expansion, brace or parenthesis after a here-document's delimiter on its line: where one
 # appears, the first newline there may not end the command line, so the body cannot be placed.
 _ABSPTH_OPENER_REST_RE = re.compile(r"[\\'\"`$(){}]")
-# A command substitution, which bash runs inside an unquoted here-document body.
-_ABSPTH_BODY_SUBST_RE = re.compile(r"\$\(|`")
+# A backslash, '$' or backquote, the three characters bash treats specially in an unquoted here-document
+# body: it removes a backslash-newline there before it looks for the delimiter line, and it expands a '$' or
+# backquote form. A body holding any of them is read, whatever form it takes.
+_ABSPTH_BODY_SPECIAL_RE = re.compile(r"[\\$`]")
 
 
 def _abspth_unread_truncation(command, stop):
@@ -4443,11 +4445,16 @@ def _abspth_unread_truncation(command, stop):
     '>&-'), an unquoted current-user tilde, a process substitution or an absolute static path passes; a
     relative or opaque target, or one this scan cannot read (no word, or a quote or escape the word read
     cannot close), is returned. A '>' in quoted text or a here-string reads the same way, an over-deny the
-    caller discloses. One body is left out: where the lex stopped at an unquoted here-document whose line
-    holds no quote, escape, expansion, brace or parenthesis after its delimiter and whose body ends at a line
-    that is exactly its delimiter (leading tabs stripped for the <<- form) with no command substitution
-    before it, that body is data to bash and is not read; every other here-document body, one with no such
-    line included, is read like any other text."""
+    caller discloses. One body is left out: the body of the unquoted here-document the lex stopped at, the
+    text from the line after its opener up to the first line that is exactly its delimiter (leading tabs
+    stripped for the <<- form), and only where the opener's line holds no quote, escape, expansion, brace or
+    parenthesis after the delimiter and that body holds no backslash, no '$' and no backquote; such a body
+    is data to bash and is not read. Those three are the characters bash treats specially in an unquoted
+    body (a backslash-newline is removed before bash looks for the delimiter line, and a '$' or backquote
+    form is expanded), so a body holding any one of them is read whatever form it takes, as is every other
+    here-document body, one with no such delimiter line included. A truncating redirect operator in a body
+    read that way is judged like one in any other text there, even where bash reads it as data, an
+    over-deny the caller discloses."""
     n = len(command)
     body = None
     opener = _ABSPTH_UNREAD_HEREDOC_RE.match(command, stop)
@@ -4459,7 +4466,7 @@ def _abspth_unread_truncation(command, stop):
             if nl >= 0 and not _ABSPTH_OPENER_REST_RE.search(command, after, nl):
                 close = re.compile("^{}{}$".format("\t*" if strip_tabs else "", re.escape(delim)),
                                    re.M).search(command, nl + 1)
-                if close is not None and not _ABSPTH_BODY_SUBST_RE.search(command, nl + 1, close.start()):
+                if close is not None and not _ABSPTH_BODY_SPECIAL_RE.search(command, nl + 1, close.start()):
                     body = (nl + 1, close.end())
     k = stop
     while k < n:
@@ -4550,11 +4557,11 @@ def bash_absolute_paths(data):
     # stopped): a truncating redirect ('>', '>|', '&>', '>&' to a file) whose target that text does not show
     # absolute DENIES, while an append '>>', a descriptor duplication ('2>&1') and an absolute or current-user
     # tilde target pass. That scan cannot tell quoted text from a redirect, so a '>' in a here-string, in
-    # quoted text, in an unbalanced quote's text or in a here-document body it cannot place denies too (a
-    # disclosed over-deny); it leaves out only the plain body of the unquoted here-document the lex stopped
-    # at. A cd or a non-truncating redirect position WITHIN or AFTER the construct is still left to the
-    # human's own permission flow (a disclosed residual), rather than noting on every such command. This is
-    # the conservative-floor boundary, not a proof of safety.
+    # quoted text, in an unbalanced quote's text or in a here-document body it reads denies too (a disclosed
+    # over-deny); it leaves out only the body of the unquoted here-document the lex stopped at, and only a
+    # body that holds no backslash, '$' or backquote. A cd or a non-truncating redirect position WITHIN or
+    # AFTER the construct is still left to the human's own permission flow (a disclosed residual), rather
+    # than noting on every such command. This is the conservative-floor boundary, not a proof of safety.
     # A '#' whose comment reading the lexer cannot judge under both readings is the exception: the lexer
     # reads nothing past it, so a command whose text carries a '>' (a truncating redirect, the deny tier, may
     # follow it) denies, and one whose text names cd or pushd or carries a '<' notes, as does one whose
