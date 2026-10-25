@@ -11341,12 +11341,14 @@ def _main_isolated(monitor):
             if _gla_got is not _gla_want:
                 failures.append("({}) _git_local_alias({!r}): expected {}, got {}".format(
                     _gla_label, _gla_tokens, _gla_want, _gla_got))
-        # A git alias defined outside the git command's own segment (_git_alias_from_env): an export, declare,
-        # typeset, local or readonly word naming GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_<n>, or a
-        # bare assignment to one, anywhere in the command and whatever its value, or a variable in the hook's own
-        # environment naming one. Before that reading every glx-<guard>-<form> vector allowed: the alias name was
-        # read as the subcommand and the export segment as no git command. The git_discard alias values are built
-        # at run time ($GLX_CMD), so its raw lossy-verb scan names no work-losing verb either.
+        # A git alias defined outside the git command's own segment: when the command's text names
+        # GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ anywhere, whatever form sets it, every git
+        # command of it runs under an alias the command may define (_git_alias_named); so does every git segment
+        # when a variable in the hook's own environment names one (_git_alias_inherited). Before the export reading
+        # every glx-<guard>-<form> vector allowed: the alias name was read as the subcommand and the defining
+        # segment as no git command; before the text rule the set-a, allexport, nameref and reserved-word forms
+        # still allowed (each defined the alias on git 2.53.0). The git_discard alias values are built at run time
+        # ($GLX_CMD), so its raw lossy-verb scan names no work-losing verb either.
         _glx_forms = (
             ("count", "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.{n} GIT_CONFIG_VALUE_0={v}; {cmd}"),
             ("count-and", "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.{n} GIT_CONFIG_VALUE_0={v} && {cmd}"),
@@ -11358,7 +11360,17 @@ def _main_isolated(monitor):
             ("export-name", "GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; export GIT_CONFIG_PARAMETERS; {cmd}"),
             ("local", "f() {{ local -x GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; {cmd}; }}; f"),
             ("include", "export GIT_CONFIG_PARAMETERS=\"'include.path'='/abs/aliases.cfg'\"; {cmd}"),
-            ("run-time", "export GIT_CONFIG_PARAMETERS=\"$GLX_PARAMS\"; {cmd}"))
+            ("run-time", "export GIT_CONFIG_PARAMETERS=\"$GLX_PARAMS\"; {cmd}"),
+            ("set-a-read", "set -a; read -r GIT_CONFIG_PARAMETERS <<< \"'alias.{n}'='{v}'\"; {cmd}"),
+            ("allexport-printf", "set -o allexport; printf -v GIT_CONFIG_PARAMETERS %s \"'alias.{n}'='{v}'\"; {cmd}"),
+            ("set-a-for", "set -a; for GIT_CONFIG_PARAMETERS in \"'alias.{n}'='{v}'\"; do {cmd}; done"),
+            ("set-a-default", "set -a; : \"${{GIT_CONFIG_PARAMETERS:='alias.{n}'='{v}'}}\"; {cmd}"),
+            ("nameref", "declare -n r=GIT_CONFIG_PARAMETERS; r=\"'alias.{n}'='{v}'\"; export r; {cmd}"),
+            ("set-a-key-read", "set -a; GIT_CONFIG_COUNT=1; read -r GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 <<< "
+                               "'alias.{n} {v}'; {cmd}"),
+            ("if-export", "if export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; then {cmd}; fi"),
+            ("then-body", "export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; if true; then {cmd}; fi"),
+            ("while-export", "while export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; do {cmd}; break; done"))
         _glx_dirty = _init_repo(tmp / "glx-discard")
         (_glx_dirty / "file.txt").write_text("uncommitted\n", encoding="utf-8")
         _glx_branch = _init_repo(tmp / "glx-branch")
@@ -11376,18 +11388,20 @@ def _main_isolated(monitor):
                 if _glx_got != "deny":
                     failures.append("(glx-{}-{}) {} on {!r}: expected deny, got {}".format(
                         _glx_handler.__name__, _glx_form, _glx_handler.__name__, _glx_full, _glx_got))
-        # glx-feat: the exported alias denies on a feature HEAD too. glx-o1: the disclosed over-refusal, an export
-        # unrelated to aliases denies (its value is not read). glx-c1 to glx-c7: an export of an unrelated variable
-        # keeps the verdict each guard gave before the export reading. glx-u1 to glx-u4: on an unparseable command a
-        # git segment the partial lex recovers that runs under an alias denies (_git_alias_recovered), as the
-        # git_discard and gate_weakening residues state; glx-u5 and glx-u6 keep a plain unparseable git command's
-        # allow.
+        # glx-feat: the exported alias denies on a feature HEAD too. glx-o1 to glx-o3: the disclosed over-refusal, a
+        # mention that defines no alias (an unrelated value, an echo, a comment) denies, since neither the form
+        # nor the value is read. glx-c1 to glx-c9: a command naming no such variable keeps the verdict each guard
+        # gave before. glx-u1 to glx-u4 and glx-u7: on an unparseable command a git command that runs under an
+        # alias denies (_git_alias_recovered), as the residues state; glx-u5 and glx-u6 keep a plain unparseable
+        # git command's allow. glx-u7 is commit_msg_subst's fallback, which read no alias before the text rule.
         for _glx_label, _glx_handler, _glx_full, _glx_cwd, _glx_want in (
                 ("glx-feat", aiqt_hooks.protected_line,
                  "export GIT_CONFIG_PARAMETERS=\"'alias.p'='push'\"; git p --force origin", plf, "deny"),
                 ("glx-o1", aiqt_hooks.protected_line,
                  "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat; git status", plr,
                  "deny"),
+                ("glx-o2", aiqt_hooks.protected_line, "echo GIT_CONFIG_COUNT; git status", plr, "deny"),
+                ("glx-o3", aiqt_hooks.gate_weakening, "git status # GIT_CONFIG_PARAMETERS", None, "deny"),
                 ("glx-c1", aiqt_hooks.protected_line, "export X=1; git push --force origin", plr, "deny"),
                 ("glx-c2", aiqt_hooks.protected_line, "export X=1; git p --force origin", plr, "allow"),
                 ("glx-c3", aiqt_hooks.gate_weakening, "export X=1; git c --no-verify -m y", None, "allow"),
@@ -11395,6 +11409,8 @@ def _main_isolated(monitor):
                 ("glx-c5", aiqt_hooks.git_discard, "export X=1; git r --hard", str(_glx_dirty), "allow"),
                 ("glx-c6", aiqt_hooks.commit_identity, "export X=1; " + _glx_author, None, "allow"),
                 ("glx-c7", aiqt_hooks.commit_msg_subst, 'export X=1; git c -m "$(date)"', None, "allow"),
+                ("glx-c8", aiqt_hooks.protected_line, 'set -a; read -r X <<< "v"; git p --force origin', plr, "allow"),
+                ("glx-c9", aiqt_hooks.gate_weakening, "if export X=1; then git c --no-verify -m y; fi", None, "allow"),
                 ("glx-u1", aiqt_hooks.git_discard, 'git --config-env alias.r=RCMD r --hard "', str(_glx_dirty),
                  "deny"),
                 ("glx-u2", aiqt_hooks.git_discard, 'export GIT_CONFIG_PARAMETERS="$GLX_PARAMS"; git r --hard "',
@@ -11403,7 +11419,9 @@ def _main_isolated(monitor):
                 ("glx-u4", aiqt_hooks.gate_weakening, 'export GIT_CONFIG_PARAMETERS="$GLX_PARAMS"; git c -m y "', None,
                  "deny"),
                 ("glx-u5", aiqt_hooks.git_discard, 'git status "', str(_glx_dirty), "allow"),
-                ("glx-u6", aiqt_hooks.gate_weakening, 'git status "', None, "allow")):
+                ("glx-u6", aiqt_hooks.gate_weakening, 'git status "', None, "allow"),
+                ("glx-u7", aiqt_hooks.commit_msg_subst, 'git --config-env alias.c=CCMD c -m "$(date)"\necho "', None,
+                 "deny")):
             _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
             if _glx_got != _glx_want:
                 failures.append("({}) {} on {!r}: expected {}, got {}".format(
@@ -11443,24 +11461,38 @@ def _main_isolated(monitor):
                     os.environ.pop(_glx_name, None)
                 else:
                     os.environ[_glx_name] = _glx_value
-        # The segment reading at its edges: an assignment after a leading reserved word, '!' or time counts, and so
-        # do a wrapped export and a name exported alone; a git segment's own prefix assignment, an argument of
-        # another command, GIT_CONFIG_VALUE_<n> alone, a longer name and unset do not.
-        for _glx_label, _glx_tokens, _glx_want in (
-                ("glx-t1", ["{", "GIT_CONFIG_PARAMETERS=x"], True),
-                ("glx-t2", ["then", "GIT_CONFIG_COUNT=1"], True),
-                ("glx-t3", ["builtin", "export", "GIT_CONFIG_KEY_0=alias.x"], True),
-                ("glx-t4", ["export", "GIT_CONFIG_PARAMETERS"], True),
-                ("glx-t5", ["GIT_CONFIG_PARAMETERS+=x"], True),
-                ("glx-t6", ["echo", "GIT_CONFIG_COUNT=1"], False),
-                ("glx-t7", ["GIT_CONFIG_COUNT=1", "git", "status"], False),
-                ("glx-t8", ["export", "GIT_CONFIG_VALUE_0=push"], False),
-                ("glx-t9", ["export", "GIT_CONFIG_COUNTX=1"], False),
-                ("glx-t10", ["unset", "GIT_CONFIG_PARAMETERS"], False)):
-            _glx_got = aiqt_hooks._git_config_env_declared(_glx_tokens)
-            if _glx_got is not _glx_want:
-                failures.append("({}) _git_config_env_declared({!r}): expected {}, got {}".format(
-                    _glx_label, _glx_tokens, _glx_want, _glx_got))
+        # The text rule at its edges (_git_config_env_named): the name in a word (glx-t1), in quotes (glx-t2), in a
+        # here-string (glx-t3), split across lines by a continuation (glx-t4) or on a line before the git command
+        # (glx-t5), escaped (glx-t6), in an unparseable command (glx-t7), and a git command inside an eval word
+        # (glx-t8) each deny; each allowed before the text rule, and each defined the alias on git 2.53.0. A name
+        # built at run time (glx-r1) or by a brace expansion (glx-r2), and one set in a sourced file (glx-r3), stay
+        # the disclosed residual and allow.
+        for _glx_label, _glx_handler, _glx_full, _glx_cwd, _glx_want in (
+                ("glx-t1", aiqt_hooks.protected_line,
+                 'set -a; printf -v GIT_CONFIG_PARAMETERS %s "$V"; git p --force origin', plr, "deny"),
+                ("glx-t2", aiqt_hooks.gate_weakening,
+                 'declare -n r="GIT_CONFIG_PARAMETERS"; r="$V"; export r; git c -m y', None, "deny"),
+                ("glx-t3", aiqt_hooks.git_discard,
+                 'read -r N <<< "GIT_CONFIG_PARAMETERS"; export "$N=$V"; git r --hard', str(_glx_dirty), "deny"),
+                ("glx-t4", aiqt_hooks.branch_root,
+                 'set -a; printf -v GIT_CONFIG_\\\nPARAMETERS %s "$V"; git co -b glx-new', str(_glx_branch), "deny"),
+                ("glx-t5", aiqt_hooks.protected_line,
+                 'set -a\nread -r GIT_CONFIG_PARAMETERS <<< "$V"\ngit p --force origin', plr, "deny"),
+                ("glx-t6", aiqt_hooks.protected_line,
+                 'set -a; printf -v G\\IT_CONFIG_PARAMETERS %s "$V"; git p --force origin', plr, "deny"),
+                ("glx-t7", aiqt_hooks.commit_msg_subst,
+                 'if export GIT_CONFIG_PARAMETERS="$V"; then git c -m "$(date)"; fi\necho "', None, "deny"),
+                ("glx-t8", aiqt_hooks.protected_line,
+                 "export GIT_CONFIG_PARAMETERS=\"$V\"; eval 'git p --force origin'", plr, "deny"),
+                ("glx-r1", aiqt_hooks.protected_line,
+                 'set -a; printf -v "GIT_CONFIG_$X" %s "$V"; git p --force origin', plr, "allow"),
+                ("glx-r2", aiqt_hooks.protected_line,
+                 'export GIT_CONFIG_{PARAMETERS,X}="$V"; git p --force origin', plr, "allow"),
+                ("glx-r3", aiqt_hooks.protected_line, "source ./cfg.sh; git p --force origin", plr, "allow")):
+            _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+            if _glx_got != _glx_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _glx_label, _glx_handler.__name__, _glx_full, _glx_want, _glx_got))
         # Re-expected from allow to deny: the wrapper-hidden fallback now also reads the
         # DE-QUOTED text, where -'f' is the -f bash passes, so this force-push to main is caught (a
         # closed residual, not an over-refusal). The raw-text backstop reads each segment
@@ -13875,10 +13907,12 @@ def _main_isolated(monitor):
         _git(pl_mcfg, "config", "remote.origin.mirror", "true")  # persisted file config: NOT read
         pexpect("(gd146-m33) a PERSISTED file-config mirror mode is a disclosed residual, allows",
                 "git push origin", "allow", cwd=str(pl_mcfg))
-        pexpect("(gd146-m34) the GIT_CONFIG_* env protocol (and the explicit-refspec ambient gap) is a "
-                "disclosed residual, allows",
+        # Re-expected from allow to deny: the command's text names GIT_CONFIG_COUNT, so every git command of it runs
+        # under an alias the command may define (_git_alias_named) and denies before the push reading; the
+        # GIT_CONFIG_* env protocol from the session environment stays the disclosed residual.
+        pexpect("(gd146-m34) the GIT_CONFIG_* env protocol named in the command denies as a possible alias",
                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true "
-                "git push origin main", "allow", cwd=plf)
+                "git push origin main", "deny", cwd=plf, detail="defines a git alias for itself")
         # Re-expected from allow to deny: a git alias the command defines makes the subcommand unknown, so
         # protected_line denies it on any branch (the gla vectors); an alias from a configuration file stays the
         # disclosed residual.
@@ -19440,8 +19474,11 @@ def _main_isolated(monitor):
                  "git add -A && git -c alias.p=push p origin feat", "deny")
         ebexpect("(gla-eb-c) a command-local alias, which may stage the whole tree, followed by a push denies",
                  "git --config-env=alias.a=ADDCMD a && git push origin feat", "deny")
-        # An alias an export defines (_git_alias_from_env) counts the same way for every git command of the
-        # command; each allowed silently before that reading. An unrelated export keeps the silent allow.
+        # A command whose text names a git configuration variable (_git_alias_named) counts the same way for every
+        # git command of it, behind a reserved word too (glx-eb-d) and on an unparseable command with two git
+        # words, as many as a breadth stage and a later publish need (glx-eb-e); each allowed silently before. One
+        # git word in such an unparseable command (glx-eb-f) and a command naming no such variable keep the silent
+        # allow.
         ebexpect("(glx-eb-a) an exported alias, then a cd feeding an untargeted alias command, allows with a note",
                  "export GIT_CONFIG_PARAMETERS=\"'alias.c'='commit'\"; cd /abs/repo && git c -m y", "allow-note")
         ebexpect("(glx-eb-b) a breadth stage followed by a command an exported alias may make a push denies",
@@ -19449,6 +19486,12 @@ def _main_isolated(monitor):
                  "git p origin feat", "deny")
         ebexpect("(glx-eb-c) an unrelated export keeps the silent allow",
                  "export X=1; cd /abs/repo && git c -m y", "allow")
+        ebexpect("(glx-eb-d) a breadth stage and an aliased command in a then body deny",
+                 "if export GIT_CONFIG_PARAMETERS=\"'alias.p'='push'\"; then git add -A; git p; fi", "deny")
+        ebexpect("(glx-eb-e) an unparseable command naming the variable and git twice denies",
+                 'set -a; read -r GIT_CONFIG_PARAMETERS <<< "$V"; git add -A && git p origin feat', "deny")
+        ebexpect("(glx-eb-f) an unparseable command naming the variable and git once keeps the silent allow",
+                 'set -a; read -r GIT_CONFIG_PARAMETERS <<< "$V"; git p origin feat', "allow")
         for _eb_sub, _eb_args, _eb_want in (
                 ("commit", ["-am", "x"], True),
                 ("add", ["-A"], True),
