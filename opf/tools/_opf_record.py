@@ -87,7 +87,10 @@ record authoring (spec 8.8 is normative):
      and for a transition the one named record's `status` and `updated_at` change plus its `proposed_from`
      write or removal, a pending_decision's resolution bundle write or removal, a contribution's delivery
      bundle or receipt write or removal, and the `supersedes` link a decision landing unqualified `decided`
-     appends. The delta is
+     appends; a handoff create additionally supersedes the one prior clean current handoff in the same
+     act (spec 8.5): that row's `status` to `superseded` for a maintainer post, or to
+     `superseded/proposed` with `proposed_from` for an assistant or automation post (spec 8.4), its
+     `updated_at`, plus the `supersedes` link appended to the new record. The delta is
      derived INDEPENDENTLY of the planner's rows, from a pre-planning copy of the request, the allocation
      result, the clock value, the planned-from bytes, and the schema rules;
   6. the planned-destination cleanliness gate and the single-writer lease (the shared _opf_write_guard
@@ -109,12 +112,14 @@ the counters without ever un-publishing an observed id. Homes 2 derives each nex
 one more than the maximum of the counters.toml high-water and every reservation's [claims] value for
 that key across every journal kind's journals/<kind>/allocations home (the homes enumerated from
 _opf_store.JOURNAL_KINDS, each reservation validated against its own kind and file name; spec 8.2),
-so a reserved number is treated as issued even where no published record carries it, then publishes
-this run's own irrevocable reservation through
-_opf_journal.reserve_allocation BEFORE the journaled publication, under the SAME held operation
-capability that re-verified that derivation (_reserve_claim), so two runs never receive the same id: a
-peer's reservation landing between planning and the capability changes the derivation and refuses this
-run (re-run), never a duplicate. The homes-2 publication boundary itself (_publish_homes2) refuses to
+so a reserved number is treated as issued even where no published record carries it. Planning derives
+it to build the plan; the binding derivation is the reservation seam's own:
+_opf_journal.reserve_allocation, called BEFORE the journaled publication (_reserve_claim) with this
+run's demand and the planned claims as `expected`, reads counters.toml and every reservation again
+under the SAME held operation capability that publishes the reservation, so two runs never receive the
+same id: a peer's reservation landing between planning and the capability changes the derivation and
+refuses this run (re-run), never a duplicate. The homes-2 publication boundary itself
+(_publish_homes2) refuses to
 open a transaction unless the canonical reservation of the run id it publishes under stands with this
 plan's claims. An unreadable, malformed or conflicting reservation refuses (exit 2),
 never a silent fallback to the homes-1 counters path; a run killed after reserving and before
@@ -214,8 +219,33 @@ transition changes `status` and `updated_at` only, plus `proposed_from` (written
 (written by `proposed -> sent`, removed by the rejection of `sent/proposed`) and its receipt keys (written
 by `sent -> acknowledged` with --receipt-ref, removed by the rejection of `acknowledged/proposed`), and the
 `supersedes` link a decision landing unqualified `decided` appends, so a target state that requires any
-other field refuses at validate_record; posting a new handoff does not supersede the previous one in the
-same act. Three contribution cases stay outside this verb: an assistant or automation send under a
+other field refuses at validate_record. Posting a new handoff supersedes the previous one in the same act
+(spec 8.5): a `create --type handoff`, which lands unqualified `current` whatever the actor, moves the one
+clean current handoff of the active index to the status the transition grammar derives for the posting
+actor (spec 8.4: a maintainer post lands the unqualified terminal `superseded`; an assistant or
+automation post, a terminal transition, lands `superseded/proposed` with `proposed_from` recording
+`current`, awaiting a maintainer's ratification) in the same journaled transaction, appends one
+`supersedes` link to the new record after its requested links (a requested `supersedes` link naming that
+same handoff refuses, duplicate-supersedes-link: the writer appends the posting's own link itself), and
+reports that status change as the plan's transition, so the final gate accepts its one pending snapshot
+comparison exactly as it does a transition's; a first handoff, with no current handoff to supersede,
+supersedes nothing. The current-handoff set this reads is the section 8.5 join over the records the
+doctor reads (the active handoff index and every archived record, through the doctor's own archive
+walk), restricted to clean records authored by non-importer actors (spec 8.6): an importer-authored
+current handoff is readable history that neither blocks the posting nor receives the supersession, its
+bytes untouched. A prior state the spec forbids refuses with every byte untouched before anything is
+written, each refusal carrying a named diagnostic: more than one clean current handoff
+(two-current-handoffs, a C-HANDOFF finding already) and a current handoff found in the archive, which
+never holds one (archived-current-handoff, spec 12). The same join guards the one transition that lands
+a handoff back at `current`, the maintainer rejection of a supersession proposal: spec 8.8 fixes the
+rejection's restore target (exactly the recorded `proposed_from`) and bounds its delta to the one named
+record, and no spec section settles what that rejection does to a newer current handoff whose posting
+proposed the supersession, so this verb invents no second status change: while another clean current
+handoff stands, the rejection refuses whole (two-current-handoffs, nothing written), keeping the
+section 8.5 at-most-one-current rule over every reachable sequence; the operator ratifies the proposal
+instead, or posts a new handoff restating the rejected one, which supersedes the newer post in its own
+act. Three contribution cases stay outside this verb:
+an assistant or automation send under a
 standing authorization (spec 8.4) still lands `sent/proposed`, since the verb does not read the
 declaration; a planned delivery at `proposed` cannot be written (create takes no `delivery`) and a row
 carrying one refuses the send (the way out is to withdraw that record and create a new contribution,
@@ -252,6 +282,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import base64
 import binascii
+import collections
 import copy
 import datetime
 import hashlib
@@ -323,8 +354,10 @@ PENDING_DECISION = "pending_decision"
 # The resolution bundle a pending_decision's `open -> decided` writes (spec 8.5, 8.8): all-or-none, all
 # three keys on `decided`, none on `open` or `withdrawn`.
 DECISION_BUNDLE = ("decision", "decided_at", "decided_by")
-# The link relation --supersedes appends when a decision lands unqualified `decided` (spec 8.5, 8.6).
+# The link relation --supersedes appends when a decision lands unqualified `decided` (spec 8.5, 8.6),
+# and the one a handoff create appends to the handoff it supersedes in the same act (spec 8.5).
 SUPERSEDES = "supersedes"
+HANDOFF = "handoff"
 CONTRIBUTION = "contribution"
 # The delivery bundle a contribution's `proposed -> sent` writes (spec 8.5, 8.8), and the receipt keys
 # --receipt-ref adds to it on `sent -> acknowledged` (legal only at acknowledged).
@@ -606,10 +639,15 @@ def _counter_state(ctx, counters_model):
     """(high, findings): the counters map validated with the COMPLETENESS control (every enabled type's
     namespace must carry a high-water, the C-COUNTERS rule). Empty findings is the proof that licenses
     next_id(..., known_complete=True): an absent counter can then never read as high-water 0 and reuse an
-    existing id (spec 8.2)."""
+    existing id (spec 8.2). Where the manifest activates the imported series (_opf_check.imported_series_active,
+    the flag the doctor's C-COUNTERS reads), the proof is that C-COUNTERS rule too: one "imported:<NS>" row
+    per enabled type except legacy_fragment is required and preserved, and this verb never claims or
+    rewrites one."""
     return _opf_schema.validate_counters(
         counters_model, known_namespaces=frozenset(ctx.types.values()),
-        optional_namespaces=frozenset(_opf_store.IMPORTER_TYPES.values()))
+        optional_namespaces=frozenset(_opf_store.IMPORTER_TYPES.values()),
+        imported_namespaces=(_opf_check._imported_counter_namespaces(ctx.types)
+                             if _opf_check.imported_series_active(ctx.manifest) else None))
 
 
 def claim_ids(homes, high, demand, known_complete, reserved=None):
@@ -626,7 +664,9 @@ def claim_ids(homes, high, demand, known_complete, reserved=None):
     included, never moves it), so a reserved number is never issued again even where no published
     record carries it; a next id past 2**63 - 1 could never be reserved, so that exhausted range
     refuses here. The caller then publishes the run's own irrevocable reservation BEFORE the
-    journaled publication (_reserve_claim; this function derives only). A homes-2 call without the
+    journaled publication (_reserve_claim, through _opf_journal.reserve_allocation, which derives the
+    claims again under the held capability and refuses a plan they no longer match; this function
+    derives the plan only). A homes-2 call without the
     reservation scan, a malformed or out-of-range scan, and any other generation each refuse
     fail-closed rather than claim through the homes-1 counters path."""
     if type(homes) is int and homes == 1:
@@ -667,138 +707,48 @@ def claim_ids(homes, high, demand, known_complete, reserved=None):
 
 
 def _allocations_rel(kind):
-    """The homes-2 reservation home of one journal kind, derived from the one path authority
-    (_opf_store.allocation_record, over a placeholder run id in that kind's own run grammar): the
-    directory every run of the kind publishes its irrevocable id reservation into (spec 4.2/8.2).
-    Raises KeyError or ValueError for a kind the store grammar does not admit."""
-    placeholder = _opf_store._HOME_RUN_PREFIXES[kind] + "-00000000T000000Z-0000000000000000"
-    return _opf_store.allocation_record(kind, placeholder).rsplit("/", 1)[0]
+    """The homes-2 reservation home of one journal kind (_opf_journal._allocations_rel, the one
+    derivation the reservation seam's own scan uses). Raises KeyError or ValueError for a kind the
+    store grammar does not admit."""
+    return _opf_journal._allocations_rel(kind)
 
 
 # The reservation home this verb's own runs publish into.
 _ALLOCATIONS_REL = _allocations_rel("record")
 
 
-def _reservation_run_id(kind, entry):
-    """The run id a reservation file name binds in `kind`'s home, or None when the name is not
-    <kind-run-id>.toml (allocation_record is the one grammar authority)."""
-    if not (isinstance(entry, str) and entry.endswith(".toml")):
-        return None
-    run_id = entry[:-len(".toml")]
-    try:
-        _opf_store.allocation_record(kind, run_id)
-    except ValueError:
-        return None
-    return run_id
-
-
-def _is_reservation_garbage(kind, entry):
-    """True ONLY for a staging leftover of a reservation publication (the _opf_oplock staging pattern
-    bound to a grammar-valid reservation name of `kind`): a process that died before its exclusive link
-    published no reservation (reserve_allocation retires such a leftover as garbage under the held
-    capability), so the scan skips it, never reads it, and never removes it."""
-    head, marker, _hexpart = entry.rpartition(_opf_oplock._STAGING_MARKER)
-    return (bool(marker) and entry.startswith(".") and _opf_oplock._is_staging_name(entry, head[1:])
-            and _reservation_run_id(kind, head[1:]) is not None)
-
-
 def _read_reservation(afd, kind, entry):
     """One reservation of `kind`, read fail-closed beneath that kind's already-open allocations
-    directory fd, returning its validated claims map: the entry bytes must equal the exact canonical
-    payload of the `kind` reservation its own name and content declare (reservation_payload: a reader
-    requires exact equality, so content naming another kind or run conflicts), so an unreadable,
-    non-regular, misnamed, malformed or conflicting entry refuses (RecordError), never a silent
-    fallback."""
-    home = _allocations_rel(kind)
-    rel = "{}/{}".format(home, entry)
-    run_id = _reservation_run_id(kind, entry)
-    if run_id is None:
-        raise RecordError("the {} allocations home {} holds {!r}, which is not an id reservation "
-                          "(<{}-run-id>.toml) or a staging leftover of one; manual intervention "
-                          "required (fail-closed)".format(kind, home, entry, kind))
+    directory fd (_opf_journal._read_reservation, the reader the reservation seam's own scan uses),
+    returning its validated claims map; an unreadable, non-regular, misnamed, malformed or conflicting
+    entry refuses (RecordError, the seam's own message), never a silent fallback."""
     try:
-        raw, _st = _journal._read_at(afd, entry, rel)
-    except (_journal.JournalError, OSError) as exc:
-        raise RecordError("cannot read the id reservation {} ({}); fail-closed".format(rel, exc))
-    try:
-        model = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
-        # ValueError: tomllib.TOMLDecodeError and an over-long integer literal; RecursionError and MemoryError:
-        # deep nesting and a many-part key.
-        raise RecordError("the id reservation {} is malformed ({}); fail-closed".format(rel, exc))
-    claims = model.get("claims") if isinstance(model, dict) else None
-    operation_id = model.get("operation_id") if isinstance(model, dict) else None
-    try:
-        expected = _opf_journal.reservation_payload(kind, run_id, operation_id, claims)
+        return _opf_journal._read_reservation(afd, kind, entry)
     except _journal.JournalError as exc:
-        raise RecordError("the id reservation {} is malformed ({}); fail-closed".format(rel, exc))
-    if raw != expected:
-        raise RecordError("the id reservation {} conflicts with the exact canonical reservation its "
-                          "name and content declare (a reservation is never rewritten, spec 8.2); "
-                          "manual intervention required (fail-closed)".format(rel))
-    return dict(claims)
+        raise RecordError(str(exc))
 
 
 def _reservation_high(ctx):
     """The per-counter-key maximum over EVERY existing id reservation in EVERY journal kind's
-    allocations home, the spec 8.2 next-ID derivation input (every reservation's [claims] value for
-    each counter key, whichever kind published it): the homes are enumerated from the authoritative
-    _opf_store.JOURNAL_KINDS registry, read at call time, never one hard-coded home, and each
-    reservation is validated against its own kind and file name (_read_reservation). Planning
-    (_claim), the held revalidation (_reserve_claim) and the postcondition (_expected_delta) all read
-    this one scan. An absent home reads as no reservations of that kind; a kind whose home cannot be
-    derived, and an unreadable, non-regular, misnamed, malformed or conflicting entry in any home,
-    refuse (exit 2 through cli), never a silent fallback to the homes-1 counters path."""
-    high = {}
-    for kind in _opf_store.JOURNAL_KINDS:
-        try:
-            home = _allocations_rel(kind)
-        except (KeyError, ValueError) as exc:
-            raise RecordError("the journal kind {!r} has no reservation home this build can derive ({}); "
-                              "fail-closed".format(kind, exc))
-        for key, value in _kind_reservation_high(ctx, kind, home).items():
-            if value > high.get(key, 0):
-                high[key] = value
-    return high
+    allocations home (_opf_journal.reservation_high, the scan the reservation seam itself derives
+    from under the held capability). Planning (_claim) and the postcondition (_expected_delta) read
+    it. An absent home reads as no reservations of that kind; a kind whose home cannot be derived,
+    and an unreadable, non-regular, misnamed, malformed or conflicting entry in any home, refuse
+    (exit 2 through cli, the seam's own message), never a silent fallback to the homes-1 counters
+    path."""
+    try:
+        return _opf_journal.reservation_high(ctx.root_fd)
+    except _journal.JournalError as exc:
+        raise RecordError(str(exc))
 
 
 def _kind_reservation_high(ctx, kind, home):
-    """The per-counter-key maximum over the reservations in one kind's allocations home `home`: an
-    absent home reads as no reservations (the empty map); an unopenable or unlistable home, and any
-    entry _read_reservation refuses, refuses. A staging leftover of the publication idiom is skipped
-    (_is_reservation_garbage): it carries no reservation."""
+    """The per-counter-key maximum over the reservations in one kind's allocations home `home`
+    (_opf_journal._kind_reservation_high); a refusal is a RecordError with the seam's own message."""
     try:
-        pfd, name = _journal._open_parent(ctx.root_fd, home)
-    except FileNotFoundError:
-        return {}
-    except (_journal.JournalError, OSError) as exc:
-        raise RecordError("cannot open the {} allocations home {} ({}); fail-closed".format(kind, home, exc))
-    try:
-        try:
-            afd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
-        except FileNotFoundError:
-            return {}
-        except OSError as exc:
-            raise RecordError("cannot open the {} allocations home {} ({}); fail-closed".format(
-                kind, home, exc))
-        try:
-            try:
-                entries = sorted(os.listdir(afd))
-            except OSError as exc:
-                raise RecordError("cannot list the {} allocations home {} ({}); fail-closed".format(
-                    kind, home, exc))
-            high = {}
-            for entry in entries:
-                if _is_reservation_garbage(kind, entry):
-                    continue
-                for key, value in _read_reservation(afd, kind, entry).items():
-                    if value > high.get(key, 0):
-                        high[key] = value
-            return high
-        finally:
-            _journal._close_fd_quietly(afd)
-    finally:
-        _journal._close_fd_quietly(pfd)
+        return _opf_journal._kind_reservation_high(ctx.root_fd, kind, home)
+    except _journal.JournalError as exc:
+        raise RecordError(str(exc))
 
 
 def _claim(ctx, demand):
@@ -1003,11 +953,90 @@ def _check_request(req, ctx):
         _operand_rel(req, ctx)
 
 
+def _current_handoffs(ctx, rows, verb="create handoff"):
+    """The current handoffs of the section 8.5 at-most-one-current join (a handoff at `current` with no
+    qualifier, authored by a non-importer actor: spec 8.6 requires every current-state join to evaluate
+    only clean records authored by non-importer actors, so an importer-authored row is readable history
+    here, never a current handoff), gathered over the records the doctor reads: the active handoff index
+    (`rows`, as _opf_check._make_rec views), then every archived record through the doctor's own archive
+    walk (_opf_check.archived_records). A current handoff the walk finds rotated to the archive, which
+    never holds one (spec 12), refuses with the named archived-current-handoff diagnostic; any other
+    archive input the walk finds missing, unreadable or malformed refuses with the walk's own problems,
+    never skipped (spec 8.8, 12). Either refusal lands before anything is written, named for the acting
+    `verb` (the handoff create's posting join, and the sole-current rule a transition landing a handoff
+    at `current` applies, _require_sole_current_handoff)."""
+    archived, problems = _opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types, ctx.vendors,
+                                                     ctx.import_status, homes=ctx.homes)
+    recs = [_opf_check._make_rec(r, HANDOFF, "active") for r in rows if isinstance(r, dict)] + archived
+    current = [rec for rec in recs if rec.rtype == HANDOFF and rec.state == "current" and rec.qual is None
+               and rec.actor_kind != "importer"]
+    rotated = [rec for rec in current if rec.location != "active"]
+    if rotated:
+        raise RecordError("{} refused (archived-current-handoff): the current handoff {} sits "
+                          "in {}; the current handoff never rotates (spec 12), this verb writes the "
+                          "active index only, and the at-most-one-current rule (spec 8.5) is judged over "
+                          "the records the doctor reads. Repair the rotation first; nothing written "
+                          "(fail-closed)".format(verb, _opf_store._safe_display(rotated[0].id),
+                                                 rotated[0].location))
+    if problems:
+        raise RecordError("the archive does not pass the doctor's own archive walk ({}), so this {} "
+                          "is refused: the at-most-one-current handoff rule (spec 8.5) reads the records "
+                          "the doctor reads, every archived record included. Nothing written; "
+                          "fail-closed".format("; ".join(problems), verb))
+    return current
+
+
+def _handoff_supersession(ctx, operand, ts):
+    """The supersession a handoff create performs in the same act (spec 8.5): the id of the ONE clean
+    current handoff the new record supersedes, or None when none exists (a first handoff supersedes
+    nothing, and an importer-authored current handoff is history outside every current-state join, spec
+    8.6, so it neither blocks the posting nor receives the supersession: its bytes stay untouched). The
+    current set is the section 8.5 join of _current_handoffs, which also carries the named
+    archived-current-handoff refusal and the archive-walk refusal, so a prior state the spec forbids,
+    which the final doctor would refuse only after publication, refuses HERE with every byte untouched:
+      two-current-handoffs: more than one clean current handoff stands (spec 8.5 allows at most one; the
+        store is already a C-HANDOFF finding and no supersession target is determinable);
+      archived-current-handoff (raised by _current_handoffs): the current handoff was rotated to the
+        archive, which never holds one (spec 12), and this verb writes the active index only.
+    The superseded row is seated once (_locate), schema-valid before it is trusted or overwritten
+    (_require_valid_current), and dated before the clock (_require_later)."""
+    current = _current_handoffs(ctx, _index_rows(operand))
+    if not current:
+        return None
+    if len(current) > 1:
+        raise RecordError("create handoff refused (two-current-handoffs): {} current handoffs stand ({}); "
+                          "at most one current handoff exists across the store (spec 8.5, C-HANDOFF), so "
+                          "no supersession target is determinable. Repair the store under opf doctor "
+                          "first; nothing written (fail-closed)".format(
+                              len(current), ", ".join(_opf_store._safe_display(rec.id) for rec in current)))
+    rec = current[0]
+    if not isinstance(rec.id, str):
+        raise RecordError("the current handoff carries a malformed id ({}); a transition never trusts or "
+                          "overwrites an invalid record (repair it under opf doctor first); nothing "
+                          "written (fail-closed)".format(_opf_store._safe_display(rec.id)))
+    row = _locate(operand, rec.id)
+    _require_valid_current(row, HANDOFF, ctx, rec.id, operand.rel)
+    _require_later(row, ts)
+    return rec.id
+
+
 def _plan_create(req, ctx, operand, now):
     """`create`: one new record of a baseline type in its initial state. An assistant or automation
     author entering a gated initial state lands `/proposed` (spec 8.4); a created-terminal factual type
     (reference, autonomous_decision, maintainer_decision) carries no qualifier. The id is claimed through
-    the seam; the record is validated by validate_record before anything is planned further."""
+    the seam; the record is validated by validate_record before anything is planned further. A handoff,
+    which lands unqualified `current` whatever the actor, supersedes the one prior clean current handoff
+    in the same act (spec 8.5, _handoff_supersession): that row lands at the status this verb's own
+    transition grammar derives for the posting actor (spec 8.4, _derived_status: a maintainer post lands
+    the unqualified terminal `superseded`; an assistant or automation post, a terminal transition, lands
+    `superseded/proposed` with the pre-proposal state written into `proposed_from`, awaiting a
+    maintainer's ratification) with this operation's `updated_at`, the new record appends one
+    `supersedes` link to it after its requested links (a requested `supersedes` link naming that same
+    handoff refuses: the writer appends the posting's own link itself, duplicate-supersedes-link), the
+    worklog entry records it, and the plan reports that status change; a first handoff supersedes
+    nothing, an importer-authored current handoff is history outside the join (spec 8.6: it neither
+    blocks nor receives the supersession), and a prior state the spec forbids refuses with every byte
+    untouched (the named diagnostics of _handoff_supersession and _current_handoffs)."""
     rtype = req.values["--type"]
     spec = _require_create_type(rtype, ctx)
     rows = _index_rows(operand)
@@ -1029,15 +1058,44 @@ def _plan_create(req, ctx, operand, now):
         if "scopes" not in spec.extra_keys:
             raise RecordError("--scope applies to block records only, not {}; fail-closed".format(rtype))
         record["scopes"] = list(req.scopes)
+    superseded = _handoff_supersession(ctx, operand, ts) if rtype == HANDOFF and qual is None else None
+    landing = None
+    if superseded is not None:
+        if any(link["rel"] == SUPERSEDES and link["id"] == superseded for link in req.links):
+            raise RecordError("create handoff refused (duplicate-supersedes-link): --link supersedes={0} "
+                              "names the handoff this posting itself supersedes; the writer appends that "
+                              "link in the same act (spec 8.5), so the request must not repeat it. Nothing "
+                              "written (fail-closed)".format(superseded))
+        landing = _derived_status(req.actor["kind"], spec, "current", "superseded")
+        tc = _opf_schema.validate_transition(HANDOFF, "current", landing, req.actor["kind"])
+        if tc.status != _opf_store.VALID:
+            raise RecordError("the supersession {} current -> {} by a {} is {}: {} (fail-closed)".format(
+                superseded, landing, req.actor["kind"], tc.status, "; ".join(tc.findings)))
+        record["links"] = list(record.get("links", [])) + [{"rel": SUPERSEDES, "id": superseded}]
     _validated(record, rtype, ctx)
+    detail = "opf-record create {} {}".format(rid, record["status"])
+    related = [{"rel": "relates", "id": rid}]
+    if superseded is not None:
+        detail += "\nsupersedes: " + superseded
+        related.append({"rel": "relates", "id": superseded})
     entry = _lifecycle_entry(ctx, wid, now, req.actor, "added",
                              "created {} ({}) at {}".format(rid, rtype, record["status"]),
-                             "opf-record create {} {}".format(rid, record["status"]),
-                             [{"rel": "relates", "id": rid}])
+                             detail, related)
     operand.new_model = copy.deepcopy(operand.model)
+    if superseded is not None:
+        fields = {"status": landing, "updated_at": ts}
+        # Landing a `/proposed` status records the pre-proposal state in the record itself (spec 8.8),
+        # exactly as a transition's landing does; the unqualified maintainer landing writes no such key.
+        if landing.endswith("/proposed"):
+            fields[PROPOSED_FROM] = "current"
+        for prior in operand.new_model["record"]:
+            if isinstance(prior, dict) and prior.get("id") == superseded:
+                prior.update(fields)
+                _validated(prior, HANDOFF, ctx)
     operand.new_model["record"] = list(operand.new_model.get("record", [])) + [record]
     _append_worklog(ctx, entry)
-    return Plan([ctx.counters, operand, ctx.worklog], [rid, wid])
+    return Plan([ctx.counters, operand, ctx.worklog], [rid, wid],
+                transition=None if superseded is None else (superseded, "current", landing))
 
 
 def _plan_worklog_append(req, ctx, operand, now):
@@ -1350,6 +1408,29 @@ def _require_one_current_resolution(ctx, rows, rid, rel):
                                   if held else ""))
 
 
+def _require_sole_current_handoff(ctx, rows, rid, rel):
+    """A transition that lands a handoff at unqualified `current` (the maintainer rejection of a
+    supersession proposal, which must restore exactly the recorded `proposed_from` state, spec 8.8) must
+    leave the store with at most one clean current handoff (spec 8.5; spec 8.6 keeps importer-authored
+    history outside the join): the section 8.5 join of _current_handoffs, run over the planned index
+    (`rows`, the restored row included) together with every archived record, before anything is written.
+    Spec 8.8 fixes the rejection's restore target and bounds its delta to the one named record, and no
+    section settles what such a rejection does to a NEWER current handoff (one whose posting proposed
+    this supersession, spec 8.5), so no second status change is invented here: while another clean
+    current handoff stands, the restore refuses whole, fail-closed, and the operator either ratifies the
+    proposal or posts a new handoff restating it, which supersedes the newer one in its own act."""
+    current = _current_handoffs(ctx, rows, verb="transition to current")
+    others = [rec.id for rec in current if rec.id != rid]
+    if others:
+        raise RecordError("transition refused (two-current-handoffs): restoring {} to current would "
+                          "stand it beside the current handoff {} in {}; at most one current handoff "
+                          "exists across the store (spec 8.5, C-HANDOFF), and a rejection restores only "
+                          "the one named record (spec 8.8), never re-superseding another. Ratify the "
+                          "proposal to superseded, or post a new handoff restating it (which supersedes "
+                          "the newer one in its own act); nothing written (fail-closed)".format(
+                              rid, ", ".join(_opf_store._safe_display(o) for o in others), rel))
+
+
 def _plan_transition(req, ctx, operand, now):
     """`transition ID STATE`: one status change checked by validate_transition (spec 8.4, 8.5). The target
     status is derived from the actor: an assistant or automation landing a terminal or gated state gets
@@ -1369,7 +1450,10 @@ def _plan_transition(req, ctx, operand, now):
     index and the archive). A contribution's `proposed -> sent` writes its delivery bundle (_delivery_fields)
     and the rejection of `sent/proposed` removes it (_proposal_keys); `sent -> acknowledged` with
     --receipt-ref adds the receipt keys, and the rejection of `acknowledged/proposed` removes them
-    (_rejected_delivery). The change is `status`, `updated_at`, the
+    (_rejected_delivery). A transition that lands a handoff at unqualified `current` (the rejection of a
+    supersession proposal) must leave at most one clean current handoff across the planned index and the
+    archive (_require_sole_current_handoff, spec 8.5/8.6): while another clean current handoff stands,
+    the rejection refuses whole with nothing written. The change is `status`, `updated_at`, the
     `proposed_from` write or removal, those bundle writes or removals, and that link append on that one
     record, plus its own worklog entry."""
     rid, target = req.positionals
@@ -1432,6 +1516,9 @@ def _plan_transition(req, ctx, operand, now):
     if rtype == PENDING_DECISION and to_status == "decided":
         _require_one_current_resolution(ctx, [new_row if isinstance(r, dict) and r.get("id") == rid else r
                                               for r in _index_rows(operand)], rid, operand.rel)
+    if rtype == HANDOFF and to_status == "current":
+        _require_sole_current_handoff(ctx, [new_row if isinstance(r, dict) and r.get("id") == rid else r
+                                            for r in _index_rows(operand)], rid, operand.rel)
     (wid,) = _claim(ctx, [_opf_release.WL_NAMESPACE])
     detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
     if "--reason" in req.values:
@@ -1605,10 +1692,52 @@ def _expected_delta(req, ctx, raws, now):
             row["refs"] = [{"kind": ref["kind"], "locator": ref["locator"], "note": ref["note"]}
                            for ref in req.refs]
         if sub == "create":
+            detail = "opf-record create {} {}".format(ids[0], row["status"])
+            targets = [ids[0]]
+            # The handoff posting rule (spec 8.5/8.8), derived here on its own, apart from the planner: a
+            # handoff created at unqualified `current` supersedes the one prior clean current handoff of
+            # the prior index (type `handoff`, status exactly `current`, not importer-authored: spec 8.6
+            # keeps imported history outside every current-state join, so such a row is never a candidate
+            # and never changes): that row's `status` moves to `superseded` for a maintainer post, or to
+            # `superseded/proposed` with `proposed_from` recording `current` when the posting actor's kind
+            # is a proposer kind (spec 8.4: an assistant or automation terminal transition lands
+            # `/proposed`), with `updated_at` at the clock value; the new row appends one `supersedes`
+            # link to it after its requested links (a request already linking `supersedes` to that same
+            # handoff is the planner's duplicate-supersedes-link refusal and never an expected delta), the
+            # worklog entry adds a `supersedes:` detail line and a `relates` link to it, and the expected
+            # status change is that supersession. Whether the write is legal (the archive walk, a second
+            # current handoff) is the planner's refusal and is not judged again here.
+            if rtype == "handoff" and not proposed:
+                prior_rows = docs[rels[1]].get("record")
+                cands = [r for r in (prior_rows if isinstance(prior_rows, list) else [])
+                         if isinstance(r, dict) and r.get("type") == "handoff"
+                         and r.get("status") == "current"
+                         and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer")]
+                if len(cands) > 1:
+                    raise _postcondition_failed("the prior {} holds more than one current handoff".format(
+                        rels[1]))
+                if cands:
+                    hid = cands[0].get("id")
+                    if not isinstance(hid, str):
+                        raise _postcondition_failed("the prior current handoff in {} carries no string "
+                                                    "id".format(rels[1]))
+                    if any(link["rel"] == "supersedes" and link["id"] == hid for link in req.links):
+                        raise _postcondition_failed("the request itself links supersedes to the handoff "
+                                                    "the posting supersedes")
+                    if req.actor["kind"] in _opf_schema.PROPOSER_KINDS:
+                        cands[0].update({"status": "superseded/proposed", "updated_at": ts,
+                                         "proposed_from": "current"})
+                        transition = (hid, "current", "superseded/proposed")
+                    else:
+                        cands[0].update({"status": "superseded", "updated_at": ts})
+                        transition = (hid, "current", "superseded")
+                    row["links"] = list(row.get("links", [])) + [{"rel": "supersedes", "id": hid}]
+                    detail += "\nsupersedes: " + hid
+                    targets.append(hid)
             docs[rels[1]]["record"] = list(docs[rels[1]].get("record", [])) + [row]
             entry = _expected_entry(wid, ts, req.actor, "added",
                                     "created {} ({}) at {}".format(ids[0], rtype, row["status"]),
-                                    "opf-record create {} {}".format(ids[0], row["status"]), [ids[0]])
+                                    detail, targets)
         else:
             entry = row
     elif sub == "transition":
@@ -1722,7 +1851,10 @@ def _postcondition(plan, req, ctx, now):
     schema rules give, the clock's timestamps, and the claimed ids; for a status change exactly `status`,
     `updated_at`, the `proposed_from` write or removal, a pending_decision's resolution bundle write or
     removal, a contribution's delivery bundle or receipt write or removal, and its `supersedes` link
-    append of the one named record; the counters advanced by
+    append of the one named record; for a handoff create additionally the one prior clean current
+    handoff's supersession (spec 8.5: its `status` to `superseded`, or to `superseded/proposed` with
+    `proposed_from` when the posting actor's kind is a proposer kind (spec 8.4), its `updated_at`, the
+    `supersedes` link appended to the new record, and that status change reported); the counters advanced by
     exactly the claim; nothing else. A stray mutation of an existing record or of a new row, a lost or
     reordered row, a changed schema marker, a status change touching another field or another record, or
     a counter moved by anything but the claim refuses before anything is written, and so does a plan whose
@@ -2573,35 +2705,60 @@ _FAILED_STATE = {"open": "still open",
                  "complete": "COMPLETE (its publication is present, with its render and final doctor never run)"}
 
 
+def _check_planned_ids(ctx, plan):
+    """The plan's ordered ids must be exactly the ones its demand and planned claims imply, checked
+    purely (no store read): under each demanded key, the demanded count of numbers ending at the
+    planned claim, issued in demand order (claim_ids over the high-water just below each claim). The
+    seam compares only the claims, and plan.ids is a separate input the run reports and publishes, so
+    a plan whose ids differ (another number, another order, an id missing or extra) refuses here,
+    before anything is reserved. On the record path this is a second guard: _postcondition already
+    refuses such a plan before the lease, and nothing changes plan.ids between the two; this check
+    keeps the reservation step itself from reserving for ids its claims do not imply."""
+    counts = collections.Counter(ctx.demand)
+    implied = None
+    if isinstance(ctx.claims, dict) and set(ctx.claims) == set(counts) and all(
+            type(ctx.claims[ns]) is int and ctx.claims[ns] >= n for ns, n in counts.items()):
+        try:
+            implied, _high = claim_ids(ctx.homes, {ns: ctx.claims[ns] - n for ns, n in counts.items()},
+                                       ctx.demand, known_complete=True, reserved={})
+        except RecordError:
+            implied = None
+    if implied is None or list(plan.ids) != implied:
+        raise RecordError("the plan's ids {!r} are not the ids its demand and planned claims imply ({!r} "
+                          "for {!r}); nothing written (fail-closed)".format(
+                              list(plan.ids), implied, ctx.claims))
+
+
 def _reserve_claim(ctx, plan, cap, run_id):
-    """Publish the run's irrevocable id reservation (spec 4.2/8.2) UNDER the held
-    operation capability, re-deriving the claim first from the same counters bytes (re-checked
-    unchanged under the capability) and a FRESH reservation scan: the capability lease leg is the
-    single-writer lock, so the derivation verified here is the one no peer can move, and a reservation
-    that landed between planning and the capability changes the derived ids and refuses this run
-    (re-run), never a duplicate id. The reservation is published BEFORE the journaled publication:
-    a run that dies between the two leaves the reservation standing, its numbers conservatively
-    still reserved and never issued again. A reservation refusal (an existing conflicting entry
-    included) refuses the run with nothing recorded."""
+    """Publish the run's irrevocable id reservation (spec 4.2/8.2) UNDER the held operation
+    capability. The counters completeness proof (every enabled type's namespace carries a high-water,
+    which needs the manifest) is re-checked here, and so is the plan's own ids against its demand and
+    planned claims (_check_planned_ids); the derivation itself is the seam's: reserve_allocation
+    reads counters.toml and a FRESH reservation scan under the same capability that publishes, derives
+    the claims from this run's demand, and refuses (nothing written) when they differ from the planned
+    ctx.claims, so a reservation that landed between planning and the capability refuses this run
+    (re-run), never a duplicate id. The reservation is published BEFORE the journaled publication: a
+    run that dies between the two leaves the reservation standing, its numbers conservatively still
+    reserved and never issued again. A reservation refusal (an existing conflicting entry included)
+    refuses the run with nothing recorded."""
     if ctx.demand is None or ctx.claims is None:
         raise RecordError("no claim was planned for this operation; nothing written (fail-closed)")
-    high, findings = _counter_state(ctx, ctx.counters.model)
+    _high, findings = _counter_state(ctx, ctx.counters.model)
     if findings:
         raise RecordError("counters.toml cannot license an allocation: {} (fail-closed)".format(
             "; ".join(findings)))
-    ids, new_high = claim_ids(ctx.homes, high, ctx.demand, known_complete=True,
-                              reserved=_reservation_high(ctx))
-    claims = {ns: new_high[ns] for ns in ctx.demand}
-    if list(plan.ids) != ids or claims != ctx.claims:
+    _check_planned_ids(ctx, plan)
+    try:
+        _opf_journal.reserve_allocation(cap, "record", run_id, dict(collections.Counter(ctx.demand)),
+                                        expected=ctx.claims)
+    except _opf_journal.ReservationDerivationChanged:
         raise RecordError("the homes-2 id derivation changed between planning and the held capability "
                           "(an id reservation landed in between); nothing written; re-run (fail-closed)")
-    try:
-        _opf_journal.reserve_allocation(cap, "record", run_id, claims)
     except (_journal.JournalError, OSError) as exc:
-        raise RecordError("the homes-2 id reservation {} for {} could not be published ({}); nothing "
-                          "is offered as recorded, and a reservation this failure may have left "
-                          "standing is irrevocable, its numbers conservatively reserved "
-                          "(fail-closed)".format(
+        raise RecordError("the homes-2 id reservation {} for {} could not be derived or published ({}); "
+                          "nothing is offered as recorded: a refusal while deriving writes nothing, and "
+                          "a reservation a failed publication may have left standing is irrevocable, "
+                          "its numbers conservatively reserved (fail-closed)".format(
                               _opf_store.allocation_record("record", run_id), run_id, exc))
 
 
@@ -3240,8 +3397,8 @@ def self_test():
             print("  - " + f, file=sys.stderr)
         return 1
     print("opf-record self-test: PASS ({} checks: grammar, allocation seam, completeness proof, planners, "
-          "transitions, resolution bundle, supersession, receipts, released span, precondition, "
-          "postcondition)".format(checked[0]))
+          "transitions, resolution bundle, supersession, handoff posting, receipts, released span, "
+          "precondition, postcondition)".format(checked[0]))
     return EXIT_OK
 
 
@@ -3454,6 +3611,44 @@ def _self_test_contexts(check, root_fd, now):
     del partial["BI"]
     ctx = ctx_of(partial)
     check("a missing enabled namespace breaks the proof", _counter_state(ctx, ctx.counters.model)[1] != [])
+    # Where the imported series is active (the graded 2.0.0 / homes = 2 declaration under the tooling's
+    # imported-series support, the manifest here) the proof is the C-COUNTERS rule of
+    # that series (spec 8.2): the zero imported rows are accepted and each is required. Inactive
+    # (support below the series), an imported row still breaks it: at the shipped constants, and on
+    # the same 2.0.0 manifest with homes 2 supported but not the imported series.
+    imported_full = dict(full, **{"imported:" + ns: 0 for ns in full})
+    pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
+    prev_gates = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
+    try:
+        _opf_store.SUPPORTED_HOMES = 2
+        ctx = ctx_of(imported_full)
+        ctx.manifest = pair
+        check("an imported row breaks the proof without imported-series support",
+              _counter_state(ctx, ctx.counters.model)[1] != [])
+        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+        check("the active-series proof holds with every imported row",
+              _counter_state(ctx, ctx.counters.model)[1] == [])
+        # A homes-1 store declaring the imported series' own spec_version 1.3.0 stays off under both
+        # toggles: the imported series activates only inside the homes-2 declaration, so an imported row
+        # breaks the proof and the clean map alone proves it (red when the flag drops homes_generation >= 2).
+        ctx = ctx_of(imported_full)
+        ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
+        homes1_rows = _counter_state(ctx, ctx.counters.model)[1] != []
+        ctx = ctx_of(full)
+        ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
+        check("an imported row breaks the proof on a 1.3.0 homes-1 manifest with imported-series support",
+              homes1_rows and _counter_state(ctx, ctx.counters.model)[1] == [])
+        imported_partial = dict(imported_full)
+        del imported_partial["imported:BI"]
+        ctx = ctx_of(imported_partial)
+        ctx.manifest = pair
+        check("a missing imported row breaks the active-series proof",
+              _counter_state(ctx, ctx.counters.model)[1] != [])
+    finally:
+        _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = prev_gates
+    ctx = ctx_of(imported_full)
+    check("an imported row breaks the proof at the shipped support",
+          _counter_state(ctx, ctx.counters.model)[1] != [])
     # Schema markers are exact integers everywhere this verb reads one (codex QA3 F1's sibling checks):
     # a bool or float marker (True == 1, 1.0 == 1 under ==) is refused, never read as schema 1.
     for marker in (True, 1.0):
@@ -3464,7 +3659,16 @@ def _self_test_contexts(check, root_fd, now):
         ctx.worklog = _model_operand(ctx.worklog.rel, dict(schema=marker, entry=[]))
         check("a non-integer worklog schema marker refuses ({!r})".format(marker),
               _refuses(lambda ctx=ctx: _worklog_entries(ctx), "schema-1"))
-    _self_test_planners(check, ctx_of, full, now)
+    # The planner fixtures claim against the clean map on an inactive store, so a proof that wrongly
+    # requires imported rows there refuses their first claim: that refusal is this named failure, never a
+    # harness error that hides the proof vectors above (red when the record gate is dropped).
+    planners_ran = False
+    try:
+        _self_test_planners(check, ctx_of, full, now)
+        planners_ran = True
+    except RecordError:
+        pass
+    check("the planner fixtures claim against the clean map without a refusal", planners_ran)
 
 
 def _model_operand(rel, model):
@@ -3758,6 +3962,7 @@ def _self_test_transitions(check, plan, post, full, now):
             needle))
     _self_test_decisions(check, plan, post, full, now)
     _self_test_supersession(check, plan, post, full, now)
+    _self_test_handoff(check, plan, post, full, now)
     _self_test_delivery(check, plan, post, full, now)
     _self_test_pending(check)
     _self_test_leftover_lock(check)
@@ -3955,6 +4160,183 @@ def _self_test_supersession(check, plan, post, full, now):
         mutate(op)
         check("the postcondition refuses {}".format(label),
               _refuses(lambda argv=argv, p=p, c=c: post(p, c, argv), "postcondition failed"))
+
+
+def _self_test_handoff(check, plan, post, full, now):
+    """The supersession a handoff create performs in the same act (spec 8.5): a second handoff supersedes
+    the first in one plan, landing the status the transition grammar derives for each posting actor kind
+    (spec 8.4: a maintainer post lands unqualified `superseded`; an assistant or automation post lands
+    `superseded/proposed` with `proposed_from`), a first handoff supersedes nothing, importer-authored
+    history neither blocks the posting nor receives the supersession (spec 8.6), each prior state the
+    spec forbids refuses with its named diagnostic, and the postcondition vectors that discriminate a
+    planner drifting from the rule (the delta is derived by the oracle on its own, so each drift refuses
+    with nothing written)."""
+    earlier = "2026-09-26T00:00:00Z"
+    ts = _rfc3339(now)
+    counters = dict(full, HO=1)
+
+    def ho(n, status, kind="assistant", **kw):
+        return dict({"id": "HO-{}".format(n), "type": HANDOFF, "status": status, "title": "t",
+                     "created_at": earlier, "updated_at": earlier, "actor": {"kind": kind}}, **kw)
+
+    proposed = dict(status="superseded/proposed", updated_at=ts, proposed_from="current")
+    argv = ["create", "--type", "handoff", "--title", "h", "--actor", "assistant", "--link", "relates=HO-1"]
+    p, c, op = plan(argv, rows=[ho(1, "current")], counters=counters)
+    old, new = op.new_model["record"]
+    entry = c.worklog.new_model["entry"][-1]
+    check("an assistant post supersedes the first handoff in the same plan, landing superseded/proposed "
+          "with the pre-proposal state, the link after its requested links",
+          old == dict(ho(1, "current"), **proposed)
+          and new["status"] == "current"
+          and new["links"] == [{"rel": "relates", "id": "HO-1"}, {"rel": SUPERSEDES, "id": "HO-1"}]
+          and p.ids == ["HO-2", "WL-1"] and p.transition == ("HO-1", "current", "superseded/proposed")
+          and post(p, c, argv) is None)
+    check("the posting's worklog entry names and relates the superseded handoff",
+          entry["detail"] == "opf-record create HO-2 current\nsupersedes: HO-1"
+          and entry["links"] == [{"rel": "relates", "id": "HO-2"}, {"rel": "relates", "id": "HO-1"}])
+    auto = ["create", "--type", "handoff", "--title", "h", "--actor", "automation"]
+    p, c, op = plan(auto, rows=[ho(1, "current")], counters=counters)
+    check("an automation post lands the supersession at superseded/proposed with the pre-proposal state",
+          op.new_model["record"][0] == dict(ho(1, "current"), **proposed)
+          and p.transition == ("HO-1", "current", "superseded/proposed") and post(p, c, auto) is None)
+    first = ["create", "--type", "handoff", "--title", "h", "--actor", "maintainer"]
+    p, c, op = plan(first, rows=[ho(1, "current")], counters=counters)
+    check("a maintainer post lands the supersession at unqualified superseded with no proposed_from",
+          op.new_model["record"][0] == dict(ho(1, "current"), status="superseded", updated_at=ts)
+          and p.transition == ("HO-1", "current", "superseded") and post(p, c, first) is None)
+    p, c, op = plan(first)
+    check("a first handoff supersedes nothing",
+          op.new_model["record"] == [{"id": "HO-1", "type": HANDOFF, "status": "current", "title": "h",
+                                      "created_at": ts, "updated_at": ts, "actor": {"kind": "maintainer"}}]
+          and p.ids == ["HO-1", "WL-1"] and p.transition is None and post(p, c, first) is None)
+    plain = first[:-2] + ["--actor", "assistant"]
+    p, c, op = plan(plain, rows=[ho(1, "superseded")], counters=counters)
+    check("a store holding only superseded handoffs is a first-handoff case",
+          "links" not in op.new_model["record"][-1] and p.transition is None and post(p, c, plain) is None)
+    legacy = ho(1, "current", kind="importer")
+    p, c, op = plan(plain, rows=[legacy], counters=counters)
+    check("an importer-authored current handoff neither blocks the posting nor receives the supersession",
+          op.new_model["record"][0] == legacy and "links" not in op.new_model["record"][-1]
+          and p.transition is None and post(p, c, plain) is None)
+    p, c, op = plan(plain, rows=[legacy, ho(2, "current")], counters=dict(counters, HO=2))
+    check("a mixed store supersedes the one clean current handoff and leaves importer history untouched",
+          op.new_model["record"][0] == legacy
+          and op.new_model["record"][1] == dict(ho(2, "current"), **proposed)
+          and op.new_model["record"][-1]["links"] == [{"rel": SUPERSEDES, "id": "HO-2"}]
+          and p.transition == ("HO-2", "current", "superseded/proposed") and post(p, c, plain) is None)
+    cont = plain + ["--link", "supersedes=HO-9"]
+    p, c, op = plan(cont, rows=[ho(1, "current"), ho(9, "superseded")], counters=dict(counters, HO=9))
+    check("a requested supersedes link to another handoff stays, the automatic link appended after it",
+          op.new_model["record"][-1]["links"] == [{"rel": SUPERSEDES, "id": "HO-9"},
+                                                  {"rel": SUPERSEDES, "id": "HO-1"}]
+          and p.transition == ("HO-1", "current", "superseded/proposed") and post(p, c, cont) is None)
+    for label, rows, argv2, needle in (
+            ("two current handoffs", [ho(1, "current"), ho(2, "current")], plain, "two-current-handoffs"),
+            ("a requested supersedes link naming the handoff the posting supersedes", [ho(1, "current")],
+             plain + ["--link", "supersedes=HO-1"], "duplicate-supersedes-link"),
+            ("a current handoff with a malformed id", [dict(ho(1, "current"), id=3)], plain, "malformed id"),
+            ("a schema-invalid current handoff", [dict(ho(1, "current"), title="   ")], plain,
+             "not schema-valid"),
+            ("a duplicate-seated current handoff", [ho(1, "current"), ho(1, "superseded")], plain,
+             "seated 2 times"),
+            ("a clock not past the current handoff", [ho(1, "current", updated_at="2026-09-28T00:00:00Z")],
+             plain, "must follow")):
+        check("a handoff create refuses {} ({})".format(label, needle), _refuses(
+            lambda rows=rows, argv2=argv2: plan(argv2, rows=rows, counters=dict(counters, HO=2)), needle))
+    walk = _opf_check.archived_records
+    for label, archived, problems, needle in (
+            ("a current handoff rotated to the archive (the named diagnostic, ahead of the walk's own "
+             "problems)", [_opf_check._make_rec(ho(1, "current"), HANDOFF, "archive/2026")],
+             ["C-ROTATION: archived record 'HO-1' (handoff) is not in an unqualified terminal state"],
+             "archived-current-handoff"),
+            ("an importer-authored archived current handoff (outside the join, so the walk's problems "
+             "refuse)", [_opf_check._make_rec(ho(1, "current", kind="importer"), HANDOFF, "archive/2026")],
+             ["C-ROTATION: archived record 'HO-1' (handoff) is not in an unqualified terminal state"],
+             "doctor's own archive walk"),
+            ("an archive the walk cannot read", [],
+             ["C-ARCHIVE-ENUM: the 2026 bucket is unreadable"], "doctor's own archive walk")):
+        _opf_check.archived_records = lambda *a, **kw: (list(archived), list(problems))
+        try:
+            check("a handoff create refuses {} ({})".format(label, needle), _refuses(
+                lambda: plan(plain, counters=counters), needle))
+        finally:
+            _opf_check.archived_records = walk
+    base = [ho(1, "current"), ho(2, "superseded")]
+    for label, poster, mutate in (
+            ("a supersession that leaves the old handoff current", plain,
+             lambda p, op: (op.new_model["record"][0].pop(PROPOSED_FROM),
+                            op.new_model["record"][0].update({"status": "current", "updated_at": earlier}))),
+            ("an assistant supersession landed unqualified (the ratification skipped)", plain,
+             lambda p, op: (op.new_model["record"][0].pop(PROPOSED_FROM),
+                            op.new_model["record"][0].__setitem__("status", "superseded"))),
+            ("a proposal written without its pre-proposal state", plain,
+             lambda p, op: op.new_model["record"][0].pop(PROPOSED_FROM)),
+            ("a maintainer supersession landed as a proposal", first,
+             lambda p, op: op.new_model["record"][0].update(
+                 {"status": "superseded/proposed", PROPOSED_FROM: "current"})),
+            ("a supersession that writes no link", plain,
+             lambda p, op: op.new_model["record"][-1].pop("links")),
+            ("a supersession that touches the already-superseded sibling", plain,
+             lambda p, op: op.new_model["record"][1].__setitem__("updated_at", ts)),
+            ("a plan that reports no status change", plain,
+             lambda p, op: setattr(p, "transition", None))):
+        p, c, op = plan(poster, rows=copy.deepcopy(base), counters=dict(counters, HO=2))
+        mutate(p, op)
+        check("the postcondition refuses {}".format(label),
+              _refuses(lambda p=p, c=c, poster=poster: post(p, c, poster), "postcondition failed"))
+    p, c, op = plan(plain, rows=[legacy, ho(2, "current")], counters=dict(counters, HO=2))
+    op.new_model["record"][0]["updated_at"] = ts
+    check("the postcondition refuses a supersession that touches importer-authored history",
+          _refuses(lambda: post(p, c, plain), "postcondition failed"))
+    p, c, op = plan(plain, rows=[legacy], counters=counters)
+    op.new_model["record"][0].update(proposed)
+    op.new_model["record"][-1]["links"] = [{"rel": SUPERSEDES, "id": "HO-1"}]
+    check("the postcondition refuses a supersession written onto the importer-authored handoff",
+          _refuses(lambda: post(p, c, plain), "postcondition failed"))
+    p, c, op = plan(plain, rows=[ho(1, "superseded")], counters=counters)
+    op.new_model["record"][-1]["links"] = [{"rel": SUPERSEDES, "id": "HO-1"}]
+    check("the postcondition refuses a supersedes link written on a first handoff",
+          _refuses(lambda: post(p, c, plain), "postcondition failed"))
+    # -- the rejection of a supersession proposal is bounded by the at-most-one-current rule ---------------
+    # Spec 8.8 fixes the restore target (exactly the recorded proposed_from) and bounds the delta to the
+    # one named record; spec 8.5 allows at most one clean current handoff. While another clean current
+    # handoff stands, the rejection refuses whole (_require_sole_current_handoff), and with none it
+    # restores current as any rejection does.
+    reject = ["transition", "HO-1", "current", "--actor", "maintainer", "--reason", "the old one stands"]
+    pending = dict(ho(1, "superseded/proposed"), proposed_from="current")
+    check("a rejection that would stand the restored handoff beside another clean current one refuses "
+          "(two-current-handoffs)",
+          _refuses(lambda: plan(reject, rows=[pending, ho(2, "current")], counters=dict(counters, HO=2)),
+                   "two-current-handoffs"))
+    p, c, op = plan(reject, rows=[pending], counters=counters)
+    check("a rejection with no other clean current handoff restores exactly the recorded pre-proposal "
+          "state and passes the postcondition",
+          op.new_model["record"][0]["status"] == "current"
+          and PROPOSED_FROM not in op.new_model["record"][0]
+          and p.transition == ("HO-1", "superseded/proposed", "current") and post(p, c, reject) is None)
+    p, c, op = plan(reject, rows=[pending, ho(2, "current", kind="importer")],
+                    counters=dict(counters, HO=2))
+    check("an importer-authored current handoff is history outside the rejection's join (spec 8.6)",
+          op.new_model["record"][0]["status"] == "current" and post(p, c, reject) is None)
+    ratify = ["transition", "HO-1", "superseded", "--actor", "maintainer"]
+    p, c, op = plan(ratify, rows=[pending, ho(2, "current")], counters=dict(counters, HO=2))
+    check("the ratification of the proposal lands superseded beside the newer current handoff",
+          op.new_model["record"][0]["status"] == "superseded"
+          and PROPOSED_FROM not in op.new_model["record"][0]
+          and p.transition == ("HO-1", "superseded/proposed", "superseded") and post(p, c, ratify) is None)
+    for label, archived, problems, needle in (
+            ("a current handoff rotated to the archive", [_opf_check._make_rec(ho(2, "current"), HANDOFF,
+                                                                               "archive/2026")],
+             ["C-ROTATION: archived record 'HO-2' (handoff) is not in an unqualified terminal state"],
+             "archived-current-handoff"),
+            ("an archive the walk cannot read", [],
+             ["C-ARCHIVE-ENUM: the 2026 bucket is unreadable"], "doctor's own archive walk")):
+        _opf_check.archived_records = lambda *a, **kw: (list(archived), list(problems))
+        try:
+            check("a rejection refuses {} ({})".format(label, needle), _refuses(
+                lambda: plan(reject, rows=[pending], counters=dict(counters, HO=2)), needle))
+        finally:
+            _opf_check.archived_records = walk
 
 
 def _self_test_delivery(check, plan, post, full, now):
