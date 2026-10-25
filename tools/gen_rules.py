@@ -8,8 +8,9 @@ silently drift (including orphaned generated files with no source). Vendored `ex
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
   gen_rules.py --self-test  assert an invalid-UTF-8 generated target and a source path that is not a
-                            directory fail closed (exit 2), and the MAP_KEYS read refusal exits 2 with
-                            empty stdout under each stderr condition
+                            directory or a symlink to a directory inside the root fail closed (exit 2),
+                            and the MAP_KEYS read refusal exits 2 with empty stdout under each stderr
+                            condition
 """
 import sys
 
@@ -248,9 +249,10 @@ def run(root, check):
     desired = {}
     try:
         # dir_or_absent (not is_dir) inside the try: an unreadable .aiqt/ parent, or a source path that is
-        # there but is not a directory, must fail closed as exit 2, not read as an absent corpus (which
-        # would delete every generated file as an orphan below).
-        present, problem = dir_or_absent(src_dir)
+        # there but cannot be read as a directory, must fail closed as exit 2, not read as an absent corpus
+        # (which would delete every generated file as an orphan below). A symlink to a directory inside the
+        # root is read.
+        present, problem = dir_or_absent(src_dir, root)
         if problem is not None:
             print("error: {} {} (cannot evaluate)".format(src_dir, problem))
             return 2
@@ -422,6 +424,28 @@ def self_test_main():
         if run_quiet(nondir, check=False) != 2 or not kept.exists():
             failures.append("a source path that is a regular file expected exit 2 with the generated "
                             "target kept")
+        # A source path that is a symlink: to a directory inside the root holding the rule, it is read (--check
+        # exit 0, the generated target in sync); dangling, to a regular file inside the root, or to an empty
+        # directory outside the root, it is exit 2 in write mode with the generated target kept, never read as
+        # an absent corpus or followed to one that prunes it as an orphan.
+        (tmp / "outside").mkdir()
+        for shape, check, want in (("in-root", True, 0), ("dangling", False, 2), ("to-file", False, 2),
+                                   ("outside", False, 2)):
+            linked = tmp / ("linked-" + shape)
+            kept = linked / ".claude" / "rules" / _RULE_REL
+            kept.parent.mkdir(parents=True)
+            kept.write_text(_RULE_SRC, encoding="utf-8")
+            (linked / "shared" / "rules").mkdir(parents=True)
+            (linked / "shared" / "rules" / "gen-rules-selftest-target.md").write_text(_RULE_SRC, encoding="utf-8")
+            (linked / "shared" / "file.txt").write_text("not a directory\n", encoding="utf-8")
+            (linked / ".aiqt" / "core").mkdir(parents=True)
+            target = {"in-root": Path("..", "..", "shared", "rules"), "dangling": Path("absent"),
+                      "to-file": Path("..", "..", "shared", "file.txt"), "outside": tmp / "outside"}[shape]
+            (linked / ".aiqt" / "core" / "rules").symlink_to(target)
+            got = run_quiet(linked, check=check)
+            if got != want or not kept.exists():
+                failures.append("a source path that is a symlink {} expected exit {} with the generated target "
+                                "kept, got {}".format(shape, want, got))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     failures.extend(_map_keys_refusal_failures())
@@ -433,7 +457,9 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: an invalid-UTF-8 generated target fails closed (exit 2), not a raw "
           "UnicodeDecodeError traceback (guards the widened reconcile arm); a source path that is a regular "
-          "file exits 2 with the generated target kept; the MAP_KEYS read refusal "
+          "file or a symlink that is dangling, to a regular file or to a directory outside the root exits 2 "
+          "with the generated target kept, and one symlinked to a directory inside the root is read; the "
+          "MAP_KEYS read refusal "
           "exits 2 with empty stdout under {} stderr conditions ({}).".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS)))
     return 0

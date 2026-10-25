@@ -178,8 +178,9 @@ def _not_run(failures, case, cause):
 
 
 _RUN_LEVEL_CASES = ("the run()-level exit-contract cases (current, stale, stale under --warn-only, "
-                    "malformed, malformed under --warn-only, absent dir, a regular file as the dir, over-long "
-                    "integer literal, "
+                    "malformed, malformed under --warn-only, absent dir, a regular file as the dir, a symlink "
+                    "as the dir (to a directory inside the root, dangling, to a regular file, to a directory "
+                    "outside the root), over-long integer literal, "
                     "injected parser overflow)")
 
 
@@ -344,6 +345,34 @@ def self_test_main(_mkdtemp=None, _vectors=True):
             if rc_file != 2 or "is not a directory (cannot evaluate)" not in file_err.getvalue():
                 failures.append("run() with a standards path that is a regular file expected exit 2 naming it, "
                                 "got {}: {!r}".format(rc_file, file_err.getvalue()))
+            # A <root>/.aiqt/standards that is a symlink: to a directory inside the root holding a current
+            # manifest it is read (exit 0); dangling, to a regular file inside the root, or to a directory
+            # outside the root holding a current manifest (so following it would be exit 0), it is refused
+            # (exit 2, named), never read as no manifests and never followed.
+            outside = tmp / "outside-standards"
+            outside.mkdir()
+            (outside / "cur.toml").write_text(_manifest("cur", "stable", days_ago(10)), encoding="utf-8")
+            for shape, want, reason in (("in-root", 0, None), ("dangling", 2, "whose target does not exist"),
+                                        ("to-file", 2, "whose target is not a directory"),
+                                        ("outside", 2, "whose target resolves outside the repository")):
+                repo = tmp / ("repo-" + shape)
+                (repo / ".aiqt").mkdir(parents=True)
+                (repo / "shared" / "standards").mkdir(parents=True)
+                (repo / "shared" / "standards" / "cur.toml").write_text(_manifest("cur", "stable", days_ago(10)),
+                                                                       encoding="utf-8")
+                (repo / "shared" / "file.txt").write_text("not a directory\n", encoding="utf-8")
+                target = {"in-root": Path("..", "shared", "standards"), "dangling": Path("..", "absent"),
+                          "to-file": Path("..", "shared", "file.txt"), "outside": outside}[shape]
+                (repo / ".aiqt" / "standards").symlink_to(target)
+                link_err = io.StringIO()
+                with redirect_stdout(io.StringIO()), redirect_stderr(link_err):
+                    rc_link = run(repo / ".aiqt" / "standards", today)
+                named = (reason is None
+                         or "is a symbolic link {} (cannot evaluate)".format(reason) in link_err.getvalue())
+                if rc_link != want or not named:
+                    failures.append("run() with a standards path that is a symlink {} expected exit {}{}, got {}: "
+                                    "{!r}".format(shape, want, " naming it" if reason else "", rc_link,
+                                                  link_err.getvalue()))
             # F-TOML-BARE-VALUEERROR-CLASS: an integer literal past CPython's 4300-digit int-string limit
             # makes tomllib raise a BARE ValueError (not TOMLDecodeError). _standards.load_manifests must
             # still raise ManifestError, so run() fails closed at exit 2 rather than escaping a traceback.

@@ -14,12 +14,14 @@ provenance. Check-only; never writes.
 An explicit --root must be given once and name an existing directory: a repeated --root, an empty value, a
 path that does not exist (a dangling symlink included) or one that is not a directory is exit 2 (cannot
 evaluate), never read as a tree with no .claude/rules/. An existing root with no .claude/rules/ tree still
-passes; a .claude/rules that is there but is not a directory (a regular file, or a symlink, dangling or to a
-directory) is exit 2 (cannot evaluate), named, never read as that absence, and so is a .aiqt/standards that is
-there but is not a directory, never read as no manifests. Residual: the root is checked
-once, before it is read, so a root removed or replaced between that check and the read (by another writer at
-the same moment) is not detected and can still read as a tree with no .claude/rules/. Only the last
-component of .claude/rules is judged: a .claude that is itself a symlink is followed.
+passes; a .claude/rules that is there but cannot be read as the tree (a regular file, or a symlink that is
+dangling, whose target is not a directory, or whose target resolves outside the root) is exit 2 (cannot
+evaluate), named, never read as that absence, and so is such a .aiqt/standards, never read as no manifests. A
+symlink whose target is a directory inside the root is read as that directory (_standards.dir_or_absent).
+Residual: the root is checked once, before it is read, so a root removed or replaced between that check and
+the read (by another writer at the same moment) is not detected and can still read as a tree with no
+.claude/rules/, and so is a symlinked .claude/rules retargeted after it is resolved. Only the last component
+of .claude/rules is judged: a .claude that is itself a symlink is followed.
 
 Emits the deterministic section 6.6 codes: loose, unknown-family, nested-dir, bad-name,
 tier-code-mismatch, numbered-non-aiqt, apex-nonstandard, frontmatter-drift, missing-provenance. Each
@@ -55,7 +57,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules  # noqa: E402  for MAP_KEYS/SEQ_KEYS rebind under --root
 from gen_rules import parse_source, derive  # noqa: E402
+import _standards  # noqa: E402  the self-test's map_keys mutants patch its dir_or_absent
 from _standards import dir_or_absent, dir_present, map_keys  # noqa: E402
+from _standards import LINK_DANGLING, LINK_NOT_A_DIRECTORY, LINK_OUTSIDE_ROOT  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_REL = "tools/selftest_checks.toml"
@@ -203,10 +207,11 @@ def main(argv=None):
         return 2
     rules = root / ".claude" / "rules"
     # dir_or_absent (not is_dir or dir_present): an unreadable .claude/ parent must fail closed (exit 2),
-    # not read as an absent tree and PASS, and so must a .claude/rules that is there but is not a
-    # directory (a regular file, or a symlink, dangling or not): only genuine absence passes.
+    # not read as an absent tree and PASS, and so must a .claude/rules that is there but cannot be read as
+    # the tree (a regular file, or a symlink that is dangling, whose target is not a directory or resolves
+    # outside the root): only genuine absence passes. A symlink to a directory inside the root is read.
     try:
-        present, problem = dir_or_absent(rules)
+        present, problem = dir_or_absent(rules, root)
     except OSError as exc:
         print("cannot read {}: {}".format(rules, exc), file=sys.stderr)
         return 2
@@ -283,17 +288,27 @@ VECTORS = (
     ("root/regular-file", "regular-file", 2, "", "error: --root {} is not a directory (cannot evaluate)"),
     ("root/empty", "empty", 2, "", "error: --root is empty (cannot evaluate)"),
     ("rules/regular-file", "rules-file", 2, "", "/.claude/rules is not a directory (cannot evaluate)"),
-    ("rules/dangling-symlink", "rules-dangling", 2, "",
-     "/.claude/rules is a symbolic link, not a directory (cannot evaluate)"),
-    ("rules/symlink-to-directory", "rules-linked", 2, "",
-     "/.claude/rules is a symbolic link, not a directory (cannot evaluate)"),
+    ("rules/dangling-symlink", "rules-dangling", 2, "", "/.claude/rules " + LINK_DANGLING + " (cannot evaluate)"),
+    ("rules/symlink-to-file", "rules-to-file", 2, "", "/.claude/rules " + LINK_NOT_A_DIRECTORY + " (cannot evaluate)"),
+    ("rules/symlink-outside-root", "rules-outside", 2, "",
+     "/.claude/rules " + LINK_OUTSIDE_ROOT + " (cannot evaluate)"),
     ("standards/regular-file", "standards-file", 2, "", "/.aiqt/standards is not a directory (cannot evaluate)"),
+    ("standards/dangling-symlink", "standards-dangling", 2, "",
+     "/.aiqt/standards " + LINK_DANGLING + " (cannot evaluate)"),
+    ("standards/symlink-to-file", "standards-to-file", 2, "",
+     "/.aiqt/standards " + LINK_NOT_A_DIRECTORY + " (cannot evaluate)"),
+    ("standards/symlink-outside-root", "standards-outside", 2, "",
+     "/.aiqt/standards " + LINK_OUTSIDE_ROOT + " (cannot evaluate)"),
     ("control/no-rules-passes", "no-rules", 0, NO_RULES, None),
     ("control/symlinked-root-passes", "linked", 0, NO_RULES, None),
     ("control/violation-found", "violation", 1, None, None),
+    ("control/rules-symlink-in-root-read", "rules-in-root", 1, None, None),
+    ("control/standards-symlink-in-root-read", "standards-in-root", 0, NO_RULES, None),
     ("control/repository-passes", "repository", 0, "PASS: rule placement conforms to the taxonomy\n", None),
 )
 VIOLATION = "  .claude/rules/stray.md: loose: "
+# The vectors whose root holds the stray rule, read through a real or a symlinked .claude/rules.
+VIOLATING = {"control/violation-found", "control/rules-symlink-in-root-read"}
 
 
 def _fixtures(base):
@@ -311,27 +326,33 @@ def _fixtures(base):
     violation = base / "violation"
     (violation / ".claude" / "rules").mkdir(parents=True)
     (violation / ".claude" / "rules" / "stray.md").write_text("# stray\n", encoding="utf-8")
-    # Existing roots whose .claude/rules is there but is not a directory: a regular file, a dangling symlink,
-    # and a symlink to a directory outside the root (empty, so following it would read as a clean tree).
-    rules_file, rules_dangling, rules_linked = (base / "rules-file", base / "rules-dangling",
-                                                base / "rules-linked")
-    for tree in (rules_file, rules_dangling, rules_linked):
-        (tree / ".claude").mkdir(parents=True)
-    (rules_file / ".claude" / "rules").write_text("not a directory\n", encoding="utf-8")
-    (rules_dangling / ".claude" / "rules").symlink_to(base / "absent-rules")
-    (base / "outside-rules").mkdir()
-    (rules_linked / ".claude" / "rules").symlink_to(base / "outside-rules", target_is_directory=True)
-    # An existing root with no rules tree whose .aiqt/standards is a regular file: read as no manifests, it
-    # would pass as a root with no .claude/rules/.
-    standards_file = base / "standards-file"
-    (standards_file / ".aiqt").mkdir(parents=True)
-    (standards_file / ".aiqt" / "standards").write_text("not a directory\n", encoding="utf-8")
-    return {"missing": str(base / "no-such-root"), "comma-joined": str(base / "no-such-root") + ",also-missing",
-            "dangling": str(dangling), "regular-file": str(regular), "empty": "", "no-rules": str(no_rules),
-            "linked": str(linked), "violation": str(violation), "repository": str(ROOT),
-            "repeated": (str(base / "no-such-root"), str(no_rules)), "rules-file": str(rules_file),
-            "rules-dangling": str(rules_dangling), "rules-linked": str(rules_linked),
-            "standards-file": str(standards_file)}
+    # Existing roots whose .claude/rules (rules-*) or, with no rules tree, .aiqt/standards (standards-*) is a
+    # regular file, a dangling symlink, a symlink to a regular file in the root, a symlink to a directory
+    # outside the root (empty, so following it would read as a clean tree), or a symlink to a directory
+    # inside the root, which is read: for rules, one holding the stray rule.
+    keys = {}
+    for kind, parts in (("rules", (".claude", "rules")), ("standards", (".aiqt", "standards"))):
+        trees = {shape: base / "{}-{}".format(kind, shape)
+                 for shape in ("file", "dangling", "to-file", "outside", "in-root")}
+        link = {}
+        for shape, tree in trees.items():
+            tree.joinpath(*parts[:-1]).mkdir(parents=True)
+            keys["{}-{}".format(kind, shape)] = str(tree)
+            link[shape] = tree.joinpath(*parts)
+        link["file"].write_text("not a directory\n", encoding="utf-8")
+        link["dangling"].symlink_to(base / ("absent-" + kind))
+        (trees["to-file"] / "target.txt").write_text("not a directory\n", encoding="utf-8")
+        link["to-file"].symlink_to(Path("..", "target.txt"))
+        (base / ("outside-" + kind)).mkdir()
+        link["outside"].symlink_to(base / ("outside-" + kind), target_is_directory=True)
+        (trees["in-root"] / "shared" / kind).mkdir(parents=True)
+        link["in-root"].symlink_to(Path("..", "shared", kind), target_is_directory=True)
+    (base / "rules-in-root" / "shared" / "rules" / "stray.md").write_text("# stray\n", encoding="utf-8")
+    keys.update({"missing": str(base / "no-such-root"), "comma-joined": str(base / "no-such-root") + ",also-missing",
+                 "dangling": str(dangling), "regular-file": str(regular), "empty": "", "no-rules": str(no_rules),
+                 "linked": str(linked), "violation": str(violation), "repository": str(ROOT),
+                 "repeated": (str(base / "no-such-root"), str(no_rules))})
+    return keys
 
 
 def _gate(module, argv):
@@ -349,7 +370,7 @@ def _holds(vector, values, code, stdout, stderr, got):
     got_code, got_out, got_err = got
     if got_code != code or (stdout is not None and got_out != stdout):
         return False
-    if vector == "control/violation-found":
+    if vector in VIOLATING:
         return VIOLATION in got_out and got_err == ""
     return got_err == "" if stderr is None else stderr.format(*values) in got_err
 
@@ -383,6 +404,7 @@ def _patched(owner, name, replacement):
 
 _ORIGINAL_ROOT_PROBLEM = root_problem
 _ORIGINAL_MAP_KEYS = map_keys
+_ORIGINAL_DIR_OR_ABSENT = dir_or_absent
 
 
 def _stat_admitting_errors(path):
@@ -398,31 +420,50 @@ def _empty_admitted(root_arg):
     return _ORIGINAL_ROOT_PROBLEM(root_arg or ".")
 
 
-def _rules_non_directory_admitted(path):
-    """The rules-tree probe as it was before non-directories were refused: dir_present, which reads a
-    regular file or a dangling symlink as absent and follows a symlink to a directory."""
+def _non_directory_admitted(path, root):
+    """The probe as it was before non-directories were refused: dir_present, which reads a regular file, a
+    dangling symlink or a symlink to a regular file as absent and follows any symlink to a directory."""
     return (dir_present(path), None)
 
 
-def _standards_non_directory_admitted(root):
-    """map_keys as it was before a non-directory .aiqt/standards was refused: dir_present, which reads a
-    regular file there as no manifests."""
-    if not dir_present(Path(root) / ".aiqt" / "standards"):
-        return set()
-    return _ORIGINAL_MAP_KEYS(root)
+def _reverted(reason, outcome):
+    """dir_or_absent with one symlink branch put back: where it gives `reason`, it gives `outcome`."""
+    def probe(path, root):
+        got = _ORIGINAL_DIR_OR_ABSENT(path, root)
+        return outcome if got[1] == reason else got
+    return probe
+
+
+def _link_refused(path, root):
+    """dir_or_absent as it was when every symlink was refused, a symlink to a directory inside the root too."""
+    got = _ORIGINAL_DIR_OR_ABSENT(path, root)
+    return (False, "is a symbolic link, not a directory") if got[0] and os.path.islink(path) else got
+
+
+def _map_keys_under(probe):
+    """map_keys with the dir_or_absent it judges .aiqt/standards by replaced by probe."""
+    def mutant(root):
+        with _patched(_standards, "dir_or_absent", probe):
+            return _ORIGINAL_MAP_KEYS(root)
+    return mutant
 
 
 # The refusals root_problem makes; the repeated-root refusal comes before it and is not among them.
 REFUSALS = {"root/nonexistent", "root/comma-joined", "root/dangling-symlink", "root/regular-file", "root/empty"}
-# The refusals the .claude/rules probe makes on an existing root. Each names the rules path, so a --root
-# guard that refused every root (its own message instead) fails them too.
-RULES_REFUSALS = {"rules/regular-file", "rules/dangling-symlink", "rules/symlink-to-directory"}
+# The refusals the .claude/rules and .aiqt/standards probes make on an existing root. Each names the probed
+# path, so a --root guard that refused every root (its own message instead) fails them too.
+RULES_REFUSALS = {"rules/regular-file", "rules/dangling-symlink", "rules/symlink-to-file",
+                  "rules/symlink-outside-root"}
+STANDARDS_REFUSALS = {"standards/regular-file", "standards/dangling-symlink", "standards/symlink-to-file",
+                      "standards/symlink-outside-root"}
 CONTROLS = {"control/no-rules-passes", "control/symlinked-root-passes", "control/violation-found",
+            "control/rules-symlink-in-root-read", "control/standards-symlink-in-root-read",
             "control/repository-passes"}
-# Each mutant removes one refusal from the --root guard or the .claude/rules probe (or, the last, makes the
-# --root guard refuse every root) by patching one module attribute: (mutant id, attribute, replacement, the
-# exact set of vectors that must then fail). The self-test requires each mutant to fail exactly its set, so every vector discriminates and no
-# mutant reaches a vector it should not.
+# Each mutant removes one refusal from the --root guard or the .claude/rules or .aiqt/standards probe, puts
+# back one symlink branch of that probe, or (the last) makes the --root guard refuse every root, by patching
+# one module attribute: (mutant id, attribute, replacement, the exact set of vectors that must then fail).
+# The self-test requires each mutant to fail exactly its set, so every vector discriminates and no mutant
+# reaches a vector it should not.
 MUTANTS = (
     ("guard-removed", "root_problem", lambda root_arg: None, REFUSALS),
     ("stat-error-admitted", "_stat", _stat_admitting_errors,
@@ -430,10 +471,25 @@ MUTANTS = (
     ("non-directory-admitted", "_is_dir", lambda mode: True, {"root/regular-file"}),
     ("empty-admitted", "root_problem", _empty_admitted, {"root/empty"}),
     ("repeat-admitted", "repeat_problem", lambda root_args: None, {"root/repeated"}),
-    ("rules-non-directory-admitted", "dir_or_absent", _rules_non_directory_admitted, RULES_REFUSALS),
-    ("standards-non-directory-admitted", "map_keys", _standards_non_directory_admitted,
-     {"standards/regular-file"}),
-    ("every-root-refused", "_is_dir", lambda mode: False, CONTROLS | RULES_REFUSALS | {"standards/regular-file"}),
+    ("rules-non-directory-admitted", "dir_or_absent", _non_directory_admitted, RULES_REFUSALS),
+    ("rules-link-in-root-refused", "dir_or_absent", _link_refused, {"control/rules-symlink-in-root-read"}),
+    ("rules-dangling-link-absent", "dir_or_absent", _reverted(LINK_DANGLING, (False, None)),
+     {"rules/dangling-symlink"}),
+    ("rules-link-to-file-absent", "dir_or_absent", _reverted(LINK_NOT_A_DIRECTORY, (False, None)),
+     {"rules/symlink-to-file"}),
+    ("rules-link-outside-followed", "dir_or_absent", _reverted(LINK_OUTSIDE_ROOT, (True, None)),
+     {"rules/symlink-outside-root"}),
+    ("standards-non-directory-admitted", "map_keys", _map_keys_under(_non_directory_admitted),
+     STANDARDS_REFUSALS),
+    ("standards-link-in-root-refused", "map_keys", _map_keys_under(_link_refused),
+     {"control/standards-symlink-in-root-read"}),
+    ("standards-dangling-link-absent", "map_keys", _map_keys_under(_reverted(LINK_DANGLING, (False, None))),
+     {"standards/dangling-symlink"}),
+    ("standards-link-to-file-absent", "map_keys",
+     _map_keys_under(_reverted(LINK_NOT_A_DIRECTORY, (False, None))), {"standards/symlink-to-file"}),
+    ("standards-link-outside-followed", "map_keys",
+     _map_keys_under(_reverted(LINK_OUTSIDE_ROOT, (True, None))), {"standards/symlink-outside-root"}),
+    ("every-root-refused", "_is_dir", lambda mode: False, CONTROLS | RULES_REFUSALS | STANDARDS_REFUSALS),
 )
 
 
@@ -515,11 +571,12 @@ def self_test(report_path=None):
             print("  {}: {!r}".format(check_id, detail))
         return 1
     print("SELF-TEST PASS: rule-placement {} checks ({} vectors: a repeated, empty, missing, comma-joined, "
-          "dangling or non-directory --root, and a .claude/rules that is a regular file or a symlink, dangling "
-          "or to a directory, or a .aiqt/standards that is a regular file, is cannot-evaluate; an existing root "
-          "with no rules tree, a "
-          "symlinked root, a violating root and the repository are still read; {} mutants each caught exactly, "
-          "every vector discriminating; the default root passes)".format(len(results), len(VECTORS), len(MUTANTS)))
+          "dangling or non-directory --root, and a .claude/rules or .aiqt/standards that is a regular file or a "
+          "symlink that is dangling, to a regular file or to a directory outside the root, is cannot-evaluate; "
+          "an existing root with no rules tree, a symlinked root, a violating root, a .claude/rules or "
+          ".aiqt/standards symlinked to a directory inside the root and the repository are still read; {} "
+          "mutants each caught exactly, every vector discriminating; the default root passes)".format(
+              len(results), len(VECTORS), len(MUTANTS)))
     return 0
 
 

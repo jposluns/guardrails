@@ -582,9 +582,10 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
     desired = {}
     try:
         # dir_or_absent (not is_dir) inside the try: an unreadable .aiqt/ parent, or a source path that
-        # is there but is not a directory, must fail closed as exit 2, not read as an absent manifest
-        # (which would prune the whole surface as orphans).
-        present, problem = dir_or_absent(src_dir)
+        # is there but cannot be read as a directory, must fail closed as exit 2, not read as an absent
+        # manifest (which would prune the whole surface as orphans). A symlink to a directory inside the
+        # root is read.
+        present, problem = dir_or_absent(src_dir, root)
         if problem is not None:
             print("error: {} {} (cannot evaluate)".format(src_dir, problem))
             return 2
@@ -661,6 +662,8 @@ def main():
 #   4. an empty residue fails closed (exit 2),
 #   5. an unreadable .aiqt/core/hooks/ fails closed (exit 2), never an all-absent clean,
 #  5b. a .aiqt/core/hooks that is not a directory fails closed (exit 2), the generated surface kept,
+#  5c. a .aiqt/core/hooks symlinked to a directory inside the root is read; one that is dangling, to a
+#      regular file, or to a directory outside the root fails closed (exit 2), the generated surface kept,
 #   6. a bad/unknown event fails closed (exit 2),
 #   7. an uncompilable matcher regex fails closed (exit 2),
 #   8. a named handler not defined in the source script fails closed (exit 2),
@@ -1512,6 +1515,37 @@ def self_test_main(_nested=False):
         if run_quiet(nondir, check=False) != 2 or not (nondir / HOOKS_JSON_REL).is_file():
             failures.append("a .aiqt/core/hooks that is a regular file expected exit 2 with the generated "
                             "surface kept")
+
+        # 5c. A .aiqt/core/hooks that is a symlink: to the source moved elsewhere inside the root, it is read
+        #     (--check exit 0, the surface in sync); dangling, to a regular file inside the root, or to the
+        #     source moved outside the root (so following it would regenerate cleanly), it is exit 2 in write
+        #     mode with the generated surface kept, never read as absent and never followed.
+        for shape, check, want in (("in-root", True, 0), ("dangling", False, 2), ("to-file", False, 2),
+                                   ("outside", False, 2)):
+            linked = tmp / ("linked-" + shape)
+            linked.mkdir()
+            _build_tree(linked)
+            run_quiet(linked, check=False)
+            linked_src = linked / ".aiqt" / "core" / "hooks"
+            target = {"in-root": linked / "shared" / "hooks", "dangling": linked / "absent",
+                      "to-file": linked / "file.txt", "outside": tmp / "outside-hooks"}[shape]
+            if shape in ("in-root", "outside"):
+                target.parent.mkdir(exist_ok=True)
+                shutil.move(str(linked_src), str(target))
+            else:
+                shutil.rmtree(linked_src)
+            if shape == "to-file":
+                target.write_text("not a directory\n", encoding="utf-8")
+            try:
+                linked_src.symlink_to(target if shape == "outside" else os.path.relpath(target, linked_src.parent))
+            except OSError as exc:
+                failures.append("NOT RUN: a .aiqt/core/hooks that is a symlink {}: the fixture could not be "
+                                "planted ({}); coverage that did not run fails the self-test".format(shape, exc))
+                continue
+            got = run_quiet(linked, check=check)
+            if got != want or not (linked / HOOKS_JSON_REL).is_file():
+                failures.append("a .aiqt/core/hooks that is a symlink {} expected exit {} with the generated "
+                                "surface kept, got {}".format(shape, want, got))
 
         # 6. A bad/unknown hook event fails closed (the event whitelist).
         badevent = tmp / "badevent"
@@ -3806,7 +3840,8 @@ def self_test_main(_nested=False):
     print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; every rendered "
           "launcher runs isolated (args[0] == '-I'); hooks.json "
           "drift and a plugin hooks/ orphan fail the check; an unknown corpus-id, an empty residue, "
-          "an unreadable source tree, a source path that is not a directory, a bad/unknown event, an uncompilable matcher, a handler not in "
+          "an unreadable source tree, a source path that is not a directory (a symlink to a directory inside "
+          "the root is read), a bad/unknown event, an uncompilable matcher, a handler not in "
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
           "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
           "every non-warn event, accepted on every WARN_EVENTS event, plus warn+stage=bake on "

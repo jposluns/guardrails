@@ -180,23 +180,50 @@ def dir_present(path):
     return stat.S_ISDIR(st.st_mode)
 
 
-def dir_or_absent(path):
-    """Three-way fail-closed probe for an input that must be a real directory or be absent. Return
-    (True, None) for a directory, (False, None) when nothing is there, and (False, reason) when something
-    is there that is not a directory: a regular file or other non-directory, or a symbolic link, dangling
-    or not (the link itself is judged with os.lstat, never its target, so a tree elsewhere is never read
-    in its place). RAISE OSError when the path cannot be examined other than by absence (an unreadable
-    ancestor, or an ancestor that is not a directory), as dir_present does. dir_present reads every
-    non-directory as absent; a caller that must not pass over an input it never read refuses the reason
-    as cannot-evaluate instead. Only the last component is judged: an ancestor symlink is followed."""
+# The reasons dir_or_absent gives for something there that cannot be read as the directory.
+NOT_A_DIRECTORY = "is not a directory"
+LINK_DANGLING = "is a symbolic link whose target does not exist"
+LINK_NOT_A_DIRECTORY = "is a symbolic link whose target is not a directory"
+LINK_OUTSIDE_ROOT = "is a symbolic link whose target resolves outside the repository"
+
+
+def _inside(real, real_root):
+    """True when the resolved path `real` is the resolved root `real_root` or under it."""
+    try:
+        return os.path.commonpath([real, real_root]) == real_root
+    except ValueError:
+        return False
+
+
+def dir_or_absent(path, root):
+    """Three-way fail-closed probe for an input that must be a directory or be absent, under the repository
+    root `root`. Return (True, None) for a directory, (False, None) when nothing is there, and (False, reason)
+    when something is there that cannot be read as that directory: a regular file or other non-directory, or
+    a symbolic link that is dangling, whose target is not a directory, or whose target resolves outside root.
+    A symbolic link whose target is an existing directory inside root is a directory, as dir_present reads
+    it: the link is resolved once (os.path.realpath, strict), and that one resolved path is the path tested
+    against the resolved root and, with os.lstat, as a directory. RAISE OSError when the path cannot be
+    examined other than by absence (an unreadable ancestor, an ancestor that is not a directory, or a
+    symbolic link loop), as dir_present does. dir_present reads every non-directory as absent; a caller that
+    must not pass over an input it never read refuses the reason as cannot-evaluate instead. Only the last
+    component is judged: an ancestor symlink is followed. The caller reads the tree through path, so a link
+    retargeted between this probe and that read (by another writer at the same moment) is not detected."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
         return (False, None)
-    if stat.S_ISLNK(st.st_mode):
-        return (False, "is a symbolic link, not a directory")
-    if not stat.S_ISDIR(st.st_mode):
-        return (False, "is not a directory")
+    if not stat.S_ISLNK(st.st_mode):
+        if not stat.S_ISDIR(st.st_mode):
+            return (False, NOT_A_DIRECTORY)
+        return (True, None)
+    try:
+        real = os.path.realpath(path, strict=True)
+    except FileNotFoundError:
+        return (False, LINK_DANGLING)
+    if not _inside(real, os.path.realpath(root)):
+        return (False, LINK_OUTSIDE_ROOT)
+    if not stat.S_ISDIR(os.lstat(real).st_mode):
+        return (False, LINK_NOT_A_DIRECTORY)
     return (True, None)
 
 
@@ -222,23 +249,26 @@ def _check_stem(path):
             "{}: manifest stem may not end in -tight/-broad (reserved fit suffix)".format(path.name))
 
 
-def _standards_present(std_dir):
-    """dir_or_absent for the standards dir, raising (OSError) where something is there that is not a
-    directory, so it is never read as no manifests; every caller already renders an OSError as exit 2."""
-    present, problem = dir_or_absent(std_dir)
+def _standards_present(std_dir, root):
+    """dir_or_absent for the standards dir under root, raising (OSError) where something is there that
+    cannot be read as the directory, so it is never read as no manifests; every caller already renders an
+    OSError as exit 2."""
+    present, problem = dir_or_absent(std_dir, root)
     if problem is not None:
         raise NotADirectoryError("{} {} (cannot evaluate)".format(std_dir, problem))
     return present
 
 
-def load_manifests(std_dir):
+def load_manifests(std_dir, root=None):
     """Return {map_key: Manifest} for every *.toml under std_dir, fully validated. Raise ManifestError
     on any malformed manifest or duplicate map-key. An absent/empty dir returns {} (transition-safe); an
-    existing dir that cannot be listed, or a std_dir that is there but is not a directory (a regular file
-    or a symlink), raises OSError (fail-closed), never a false-clean empty."""
+    existing dir that cannot be listed, or a std_dir that is there but cannot be read as a directory
+    (dir_or_absent: a regular file, or a symlink that is dangling, whose target is not a directory or
+    resolves outside root), raises OSError (fail-closed), never a false-clean empty. root is the
+    repository root; by default the directory two levels up, whose .aiqt/standards std_dir is."""
     std_dir = Path(std_dir)
     out = {}
-    if not _standards_present(std_dir):
+    if not _standards_present(std_dir, std_dir.parent.parent if root is None else root):
         return out
     ensure_listable(std_dir)
     for path in sorted(std_dir.glob("*.toml")):
@@ -265,9 +295,10 @@ def map_keys(root):
     else. A bare `map-<stem>` (no fit) or a bad suffix (`map-<stem>-medium`) is therefore not a legal
     frontmatter key, rejected fail-closed by gen_rules._check_keys with no extra gate code. Cheap (no
     parse) so gen_rules can build MAP_KEYS at import; check_mappings does the full parse/validation via
-    load_manifests. A .aiqt/standards that is there but is not a directory raises, as load_manifests does."""
+    load_manifests. A .aiqt/standards that is there but cannot be read as a directory raises, as
+    load_manifests does."""
     std_dir = Path(root) / ".aiqt" / "standards"
-    if not _standards_present(std_dir):
+    if not _standards_present(std_dir, root):
         return set()
     ensure_listable(std_dir)
     keys = set()
