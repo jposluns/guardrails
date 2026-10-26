@@ -1523,6 +1523,24 @@ def _test_note_literal_sites(failures, tmp):
     rd = orch.RdpFixture(base, "review-dispatch")
     note("(nl-review-dispatch) a review dispatch brief that declares a working-tree target allows with a note",
          rd.dispatch(rd.brief(["Review-target: working-tree"])), "declares target working-tree")
+    rw = base / "review-hold"
+    rw.mkdir()
+    orch._rdp_git(base, "init", "-q", "-b", "main", str(rw))
+    (rw / "seed.txt").write_text("s\n", encoding="utf-8")
+    orch._rdp_git(rw, "add", "seed.txt")
+    orch._rdp_git(rw, "commit", "-q", "-m", "seed")
+    rw_holds = rw / ".git" / "aiqt" / "review-holds"
+    rw_holds.mkdir(parents=True)
+    (rw_holds / "expired.json").write_text(json.dumps(dict(
+        version=1, workdir=str(rw), head=orch._rdp_git(rw, "rev-parse", "HEAD"),
+        dispatch_id="nl-hold", created_utc=orch._rwh_iso(-2), expires_utc=orch._rwh_iso(-1))),
+        encoding="utf-8")
+    note("(nl-review-hold-expired) an expired review-hold marker is ignored with a note on the next "
+         "Bash call, so a crashed dispatcher cannot pin a worktree forever",
+         aiqt_hooks.review_workdir_hold(dict(
+             hook_event_name="PreToolUse", cwd=str(rw), session_id="s1", tool_name="Bash",
+             tool_input=dict(command="ls"))),
+         "expired review-hold marker")
 
 
 def _shape_mutant(source, func_name, lines):
@@ -2339,7 +2357,14 @@ def _test_git_stash_ref(failures):
              "FOO=x command env git -C /tmp/repo stash pop"),
             ("(sr-w20) several bare segments", "git stash pop; git stash apply"),
             ("(sr-w21) quote-decoded command and verb", "g'it' stash p'op'"),
-            ("(sr-w22) brace group with a separated git segment warns", "{ true; git stash pop; }")):
+            ("(sr-w22) brace group with a separated git segment warns", "{ true; git stash pop; }"),
+            # An ordinary parse failure is not passed clean where a bare pop/apply cannot be ruled out: text
+            # naming git and then stash, as written or de-quoted, keeps the note.
+            ("(sr-w23) parse failure naming stash pop notes", 'git stash pop "unbalanced'),
+            ("(sr-w24) parse failure with visible relocation notes", 'cd /abs && git stash pop "unbalanced'),
+            ("(sr-w25) here-string beside stash pop notes", "git stash pop <<<x"),
+            ("(sr-w26) here-string + quote-fragmented stash notes", "git st'ash' pop <<<x"),
+            ("(sr-w27) here-string + ANSI-C escape spelling stash notes", "git $'\\x73'tash pop <<<x")):
         expect_warn(label, command)
 
     for label, command in (
@@ -2364,7 +2389,6 @@ def _test_git_stash_ref(failures):
             ("(sr-a18) echo quoted prose", 'echo "git stash pop"'),
             ("(sr-a19) decoded subcommand with ref", "git 'st''ash' pop stash@{1}"),
             ("(sr-a20) unrelated command", "ls -la"),
-            ("(sr-a21) unbalanced quote", 'git stash pop "unbalanced'),
             ("(sr-a22) wrapper option", "env -i git stash pop"),
             ("(sr-a23) sudo option", "sudo -u u git stash apply"),
             ("(sr-a24) wrapper assignment", "env FOO=x git stash pop"),
@@ -2377,10 +2401,11 @@ def _test_git_stash_ref(failures):
             ("(sr-a31) empty quoted operand", 'git stash apply ""'),
             ("(sr-a32) dash operand after separator", "git stash apply -- -ref"),
             ("(sr-a33) command substitution operand", "git stash apply $(printf x)"),
-            ("(sr-a34) parse failure with visible relocation",
-             'cd /abs && git stash pop "unbalanced'),
             ("(sr-a35) parse failure with sibling hazard",
              'git add -A && git push "unbalanced'),
+            ("(sr-a40) parse failure naming no stash", "wc -l <<<x"),
+            ("(sr-a41) parse failure with a quoted commit message naming no stash",
+             'git commit -m "fix bug" <<<x'),
             ("(sr-a36) brace group is a disclosed lexical bound", "{ git stash pop; }"),
             ("(sr-a37) brace group with option", "{ git stash apply --index; }"),
             ("(sr-a38) shell-keyword block is a disclosed bound", "if true; then git stash pop; fi"),
@@ -3279,6 +3304,15 @@ _DEADLINE_SHAPES = {
     # 1 MB CPU bound when measured); the call record (dl-procsubst-taken) does.
     "procsubst_run_after": lambda n, base: ("Bash", {"command": "cat " + _repeat(
         "<(x) >(x) ", n - 4, "; git push --force origin main")}),
+    # A run of ANSI-C quotes beside a here-string (an ordinary parse failure), whose escapes the gatdis and
+    # stash fallbacks decode for their de-quoted reading (_decoded_readings), and the same run before a
+    # --no-verify spelled through an escape, which only the decoded reading shows, so that deny has to
+    # arrive within the bound as well (at 1 MB about 0.65 s of CPU for gate_weakening on the run, 0.50 s for
+    # its deny after it, and 0.21 s for git_stash_ref, in-process on a 24-core host with Python 3.14.4,
+    # 2026-10-25 UTC).
+    "ansi_c_herestr": lambda n, base: ("Bash", {"command": _repeat("git $'\\x41' ", n, " <<<x")}),
+    "ansi_c_noverify_after": lambda n, base: ("Bash", {"command": _repeat(
+        "git $'\\x41' ", n, "; git commit --no-$'\\x76'erify -m x <<<x")}),
     "write_content": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": "a" * n}),
     "write_secretish": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": _repeat("a=", n)}),
     "write_deep_path": lambda n, base: ("Write", {"file_path": base + _repeat("/a", n - len(base)),
@@ -3288,6 +3322,23 @@ _DEADLINE_SHAPES = {
         "question": "q" * n, "header": "h", "multiSelect": False,
         "options": [{"label": "a", "description": "b"}, {"label": "c", "description": "d"}]}]}),
     "wakeup_long": lambda n, base: ("ScheduleWakeup", {"prompt": "p" * n, "delaySeconds": 60, "reason": "r"}),
+    "fg_detach_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "long_job &")}),
+    "fg_arith_open": lambda n, base: ("Bash", {"command": _repeat("$((", n)}),
+    "fg_heredocs_amp": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na & b's\nE\n", n)}),
+    "fg_heredoc_ops_open": lambda n, base: ("Bash", {"command": _repeat("cat <<A ", n, "\nx & y")}),
+    "fg_subshells": lambda n, base: ("Bash", {"command": "(" * (n // 2 - 2) + "true" + ")" * (n // 2 - 2)}),
+    # Nested GLUED command substitutions: each `(` sits directly after a `$`, so, unlike the bare
+    # subshell parentheses above, every closer takes the glued branch of the note scan's `)` handling.
+    # That branch once tested the enclosed text for emptiness by slicing it (one copy per closer, so
+    # the characters copied grew with the square of the nesting depth); the running-index test reads
+    # each enclosed position at most once, keeping the scan linear on this shape. The bounds here are
+    # not what pins the running-index test (the sliced test measured about 3.6 s of CPU for both scan
+    # passes at 1 MB, in-process on a 24-core host with Python 3.14.4, 2026-10-24, under that size's
+    # 7 s bound, against about 0.49 s for the running index); the orch-behaviour self-test's
+    # running-index-walk row does.
+    "fg_nested_glued_substs": lambda n, base: ("Bash", {"command": "x=$(" * (n // 5 - 1) + "true"
+                                                        + ")" * (n // 5 - 1)}),
+    "fg_setsid_options": lambda n, base: ("Bash", {"command": "setsid" + _repeat(" -c", n - 6)}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
     # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
@@ -3330,11 +3381,12 @@ _DEADLINE_CASES = {
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
-    "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after"),
+    "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
+                       "ansi_c_herestr", "ansi_c_noverify_after"),
     "gensrc_guard": ("write_content", "write_deep_path"),
     "git_discard": ("git_segments_reset", "nest_parens"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
-    "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens"),
+    "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens", "ansi_c_herestr"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
@@ -3343,15 +3395,43 @@ _DEADLINE_CASES = {
     "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
                        "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
+    "review_workdir_hold": ("git_segments_reset", "cd_git_fetch_unbal", "nest_cmdsubst"),
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
     "write_scope_guard": ("write_content", "write_deep_path"),
+}
+# Cases run from the plain cwd, which no orchestration registry scopes, for a handler the table above runs
+# from the orchestration repository: the truncation guard scans a foreground command there too, for its
+# out-of-scope detach note.
+_DEADLINE_PLAIN_CASES = {
+    "orch_truncation_guard": ("fg_detach_after", "fg_arith_open", "fg_heredocs_amp", "fg_heredoc_ops_open",
+                              "fg_subshells", "fg_nested_glued_substs", "fg_setsid_options"),
 }
 # The (handler, shape) cases whose hazard must still be denied, each within its bound.
 _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
-    ("gate_weakening", "noverify_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
+    ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
+    ("git_explicit_binding", "breadth_push_after_unbal"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
+# The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
+# a detach or detacher (fg_detach_after, fg_setsid_options), or a construct left open at the end of the
+# scan (the repeated unclosed `$((` openers and the unterminated heredoc body), which the scan reports as
+# unreadable instead of a silent allow.
+_DEADLINE_NOTE_CASES = frozenset((
+    ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
+    ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open")))
+# The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
+# bound: the plain-delimiter heredoc bodies (their `&`
+# and apostrophe are skipped data and every body is closed; a quoted delimiter would note, and its early
+# note would also cut the
+# timing short), the balanced subshells and the nested glued command
+# substitutions are all skipped, provably closed or carry no outer
+# detach, so none draws a note. Pinning the outcome keeps these timing shapes from passing a scanner that
+# mistook one for a detach.
+_DEADLINE_ALLOW_CASES = frozenset((
+    ("orch_truncation_guard", "fg_heredocs_amp"),
+    ("orch_truncation_guard", "fg_subshells"),
+    ("orch_truncation_guard", "fg_nested_glued_substs")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
@@ -3428,7 +3508,36 @@ def _deadline_shape_runs(tmp, sizes):
         for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
                 runs.append((name, shape, size, cwd) + _deadline_shape_case(name, shape, size, cwd))
+    with _no_registry_above(plain):
+        for name, shapes in sorted(_DEADLINE_PLAIN_CASES.items()):
+            for shape in shapes:
+                for size in sorted(sizes):
+                    runs.append((name, shape, size, str(plain))
+                                + _deadline_shape_case(name, shape, size, str(plain)))
     return runs
+
+
+@contextlib.contextmanager
+def _no_registry_above(root):
+    """While the block runs, every directory STRICTLY ABOVE root (matched by device and inode on root's
+    resolved path) reads as carrying no orchestration registry, so a registry on the host above the
+    fixture cannot scope a no-registry case in; root and the directories under it are probed as usual."""
+    above = set()
+    path = os.path.realpath(str(root))
+    while os.path.dirname(path) != path:
+        path = os.path.dirname(path)
+        st = os.stat(path)
+        above.add((st.st_dev, st.st_ino))
+    probe = aiqt_hooks._orch_dirfd_has_registry
+
+    def ceiling(dirfd):
+        st = os.fstat(dirfd)
+        return False if (st.st_dev, st.st_ino) in above else probe(dirfd)
+    aiqt_hooks._orch_dirfd_has_registry = ceiling
+    try:
+        yield
+    finally:
+        aiqt_hooks._orch_dirfd_has_registry = probe
 
 
 def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
@@ -3443,6 +3552,10 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
             wall, _DEADLINE_WALL_BOUND))
     if (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
         problems.append("expected deny, got {}".format(outcome))
+    elif (name, shape) in _DEADLINE_NOTE_CASES and outcome != "allow-note":
+        problems.append("expected allow-note, got {}".format(outcome))
+    elif (name, shape) in _DEADLINE_ALLOW_CASES and outcome != "allow":
+        problems.append("expected allow, got {}".format(outcome))
     elif shape in _DEADLINE_HASH_SHAPES and outcome != _deadline_hash_decision(name, shape, size):
         problems.append("expected {}, got {}".format(_deadline_hash_decision(name, shape, size), outcome))
     elif outcome not in ("allow", "allow-note", "deny"):
@@ -6218,16 +6331,145 @@ def _main_isolated(monitor):
                "cd sub & git reset --hard", "deny", cwd=rp)
         expect("(dir-c) subshell cd misdirect DENIES (F-62.2; R8: a parenthesis is outside the grammar)",
                "( cd {} ) ; git reset --hard".format(str(clean_repo)), "deny", cwd=rp)
-        expect("(dir-d) -C global option not-certain allows with a note (F-66.2)", "git -C {} reset --hard".format(rp),
-               "allow-note", cwd=rp)
-        expect("(dir-e) --git-dir global option not-certain allows with a note (F-66.4)",
-               "git --git-dir={}/.git reset --hard".format(rp), "allow-note", cwd=rp)
-        expect("(dir-f) --work-tree global option not-certain allows with a note",
-               "git --work-tree={0} --git-dir={0}/.git reset --hard".format(rp), "allow-note", cwd=rp)
-        expect("(dir-g) GIT_WORK_TREE= env not-certain allows with a note (F-62.3)", "GIT_WORK_TREE=sub git reset --hard",
-               "allow-note", cwd=rp)
-        expect("(dir-h) GIT_DIR= env not-certain allows with a note (F-62.3/F-66.4)", "GIT_DIR=.git git reset --hard",
-               "allow-note", cwd=rp)
+        # FLIPPED (was "allow-note"): each redirect below resolves to this dirty repo, and a whole-tree clobber
+        # whose resolved target probes dirty now DENIES (with its snapshot) exactly like the bare (rs-a), so a
+        # global option or a leading assignment can no longer turn the bare deny into a snapshot-then-allow.
+        expect("(dir-d) -C global option on a dirty target denies like the bare form (F-66.2)",
+               "git -C {} reset --hard".format(rp), "deny", cwd=rp)
+        expect("(dir-e) --git-dir global option on a dirty target denies like the bare form (F-66.4)",
+               "git --git-dir={}/.git reset --hard".format(rp), "deny", cwd=rp)
+        expect("(dir-f) --work-tree global option on a dirty target denies like the bare form",
+               "git --work-tree={0} --git-dir={0}/.git reset --hard".format(rp), "deny", cwd=rp)
+        expect("(dir-g) GIT_WORK_TREE= env on a dirty target denies like the bare form (F-62.3)",
+               "GIT_WORK_TREE=sub git reset --hard", "deny", cwd=rp)
+        expect("(dir-h) GIT_DIR= env on a dirty target denies like the bare form (F-62.3/F-66.4)",
+               "GIT_DIR=.git git reset --hard", "deny", cwd=rp)
+        # A plain leading assignment redirects nothing, yet it routes the command off the pristine bare path all
+        # the same; the whole-tree clobber on this dirty repo must still deny like the bare form.
+        expect("(dir-i) a plain leading assignment on a dirty target denies like the bare form",
+               "FOO=1 git reset --hard", "deny", cwd=rp)
+
+        # === a git global option never changes the verdict on a discarding form ===========================
+        # Every global option spelling (each value-taking member of _GIT_ARG_OPTS, separated and, for a long
+        # one, '='-attached; the flag-only ones; and an option git does not know) in front of every discarding
+        # form gets the bare command's decision on the same dirty repo, and takes exactly the bare form's
+        # recovery snapshots (counted as new refs). A whole-tree clobber there used to snapshot-then-allow
+        # behind any global option while the bare form denied; reverting the clobber deny in the
+        # view-override branch turns every clobber row back to allow-note. The two pinned exceptions are
+        # stricter, never looser: a --git-dir stash drop/clear denies, since the stash it would clear cannot
+        # be preserved under a --git-dir redirect; and --bare before a form git_discard treats as destructive
+        # (a snapshottable verb in a non-allow form) denies with no snapshot, since git, asked read-only
+        # which git dir and worktree the command acts on, cannot open this worktree directory as a git dir.
+        go_repo = _init_repo(tmp / "globalopt")
+        (go_repo / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")
+        go = str(go_repo)
+        _go_sep = ("-C " + go, "-c x.y=z", "--git-dir " + go + "/.git", "--work-tree " + go, "--namespace ns",
+                   "--exec-path /nonexistent-exec", "--super-prefix sp/", "--config-env x.y=HOME",
+                   "--attr-source HEAD")
+        if {_g.split(" ", 1)[0] for _g in _go_sep} != set(aiqt_hooks._GIT_ARG_OPTS):
+            failures.append("(go-argopts-covered) the separated global option vectors must cover exactly "
+                            "_GIT_ARG_OPTS, got {} against {}".format(sorted(_g.split(" ", 1)[0] for _g in _go_sep),
+                                                                     sorted(aiqt_hooks._GIT_ARG_OPTS)))
+        _go_globals = (_go_sep
+                       + tuple(_g.replace(" ", "=", 1) for _g in _go_sep if _g.startswith("--"))
+                       + ("--no-pager", "-p", "--paginate", "-P", "--no-replace-objects", "--literal-pathspecs",
+                          "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks",
+                          "--no-lazy-fetch", "--no-advice", "--bare", "--frobnicate"))
+        _go_clobbers = ("reset --hard", "checkout -f", "switch -f other", "switch --discard-changes other")
+        _go_forms = _go_clobbers + (
+            "reset --merge", "reset", "checkout -- file.txt", "checkout .", "restore file.txt",
+            "restore --staged file.txt", "rm -f file.txt", "clean -fd", "branch -D other", "checkout -B other",
+            "switch -C other", "stash drop", "stash clear")
+        _go_saved = "A pre-command recovery snapshot was saved"
+
+        def _go_run(command, cwd):
+            """(reduced decision, deny reason or note text, new recovery refs in go_repo) for one command."""
+            _r0 = len(_recovery_refs(go_repo))
+            _data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+                     "cwd": cwd}
+            _code, _out, _err = handler(_data)
+            _text = ""
+            if isinstance(_out, dict):
+                _hso = _out.get("hookSpecificOutput")
+                _text = (_hso.get("permissionDecisionReason", "") if isinstance(_hso, dict)
+                         else str(_out.get("systemMessage", "")))
+            return _reduce_result(_code, _out), _text, len(_recovery_refs(go_repo)) - _r0
+
+        for _form in _go_forms:
+            _bare, _bare_text, _bare_refs = _go_run("git " + _form, go)
+            if _form in _go_clobbers and (_bare != "deny" or _bare_refs != 1 or _go_saved not in _bare_text):
+                failures.append("(go-bare-clobber) the bare 'git {}' on a dirty tree must deny with one recovery "
+                                "snapshot named in its reason, got {} with {} new ref(s)"
+                                .format(_form, _bare, _bare_refs))
+            _go_sub, _go_args = aiqt_hooks._git_sub_and_args(["git"] + _form.split(" "))
+            _go_destructive = (_go_sub in aiqt_hooks._SNAPSHOTTABLE_VERBS
+                               and aiqt_hooks._discard_role(_go_sub, _go_args)[0] != "allow")
+            for _g in _go_globals:
+                _cmd = "git {} {}".format(_g, _form)
+                _bare_pin = _g == "--bare" and _go_destructive
+                _want = ("deny" if (_g.startswith("--git-dir") and _form.startswith("stash ")) or _bare_pin
+                         else _bare)
+                _want_refs = 0 if _bare_pin else _bare_refs
+                _got, _got_text, _got_refs = _go_run(_cmd, go)
+                if _got != _want or _got_refs != _want_refs:
+                    failures.append("(go-parity) {!r} must get {} with {} new recovery ref(s) like the bare "
+                                    "'git {}', got {} with {}".format(_cmd, _want, _want_refs, _form, _got,
+                                                                      _got_refs))
+                elif _bare_pin and "git could not report, read-only" not in _got_text:
+                    failures.append("(go-bare-pin) {!r} denies but its reason must say git could not resolve "
+                                    "the target read-only, got {!r}".format(_cmd, _got_text[:220]))
+                elif _form in _go_clobbers and not _bare_pin and _go_saved not in _got_text:
+                    failures.append("(go-clobber-pointer) {!r} denies but its reason must name the recovery "
+                                    "snapshot as the bare deny does, got {!r}".format(_cmd, _got_text[:220]))
+
+        # The boundary of the new deny is the probe's verdict on the resolved target: dirty denies (above);
+        # a provably clean target allows with the existing note and no snapshot; a probe that did not
+        # complete snapshot-then-allows exactly as the bare form does; a failed snapshot on a dirty target
+        # denies on both forms.
+        go_clean = str(_init_repo(tmp / "globalopt-clean"))
+        for _cmd, _want in (("git reset --hard", "allow"), ("git --no-pager reset --hard", "allow-note"),
+                            ("git -c x.y=z checkout -f", "allow-note")):
+            expect("(go-clean-target) {!r} on a provably clean tree is not denied".format(_cmd), _cmd, _want,
+                   cwd=go_clean)
+        _orig_go_clean = aiqt_hooks._tree_is_clean
+        aiqt_hooks._tree_is_clean = lambda repo: None
+        try:
+            _go_unk = [(_c,) + _go_run(_c, go) for _c in ("git reset --hard", "git --no-pager reset --hard",
+                                                          "git --frobnicate switch -f other")]
+        finally:
+            aiqt_hooks._tree_is_clean = _orig_go_clean
+        for _c, _dec, _text, _refs in _go_unk:
+            if _dec != "allow-note" or _refs != 1:
+                failures.append("(go-probe-uncertain) {!r} with a probe that did not complete must "
+                                "snapshot-then-allow like the bare form, got {} with {} new ref(s)"
+                                .format(_c, _dec, _refs))
+        _orig_go_rec = aiqt_hooks._record_recovery
+        aiqt_hooks._record_recovery = lambda repo, verb: ("fail", "forced failure (self-test)")
+        try:
+            _go_fail = [(_c,) + _go_run(_c, go) for _c in ("git reset --hard", "git --no-pager reset --hard",
+                                                           "git -C {} checkout -f".format(go))]
+        finally:
+            aiqt_hooks._record_recovery = _orig_go_rec
+        for _c, _dec, _text, _refs in _go_fail:
+            if _dec != "deny":
+                failures.append("(go-snapshot-fail) {!r} whose snapshot fails on a dirty tree must deny, got {}"
+                                .format(_c, _dec))
+        # An ambient GIT_* override is unreadable from the command and keeps its best-effort
+        # snapshot-then-allow; the global option still changes nothing there.
+        os.environ["GIT_NAMESPACE"] = "globalopt-selftest"
+        try:
+            _go_amb = [(_c,) + _go_run(_c, go) for _c in ("git reset --hard", "git --no-pager reset --hard")]
+        finally:
+            os.environ.pop("GIT_NAMESPACE", None)
+        for _c, _dec, _text, _refs in _go_amb:
+            if _dec != "allow-note" or _refs != 1:
+                failures.append("(go-ambient) {!r} under an ambient GIT_NAMESPACE must keep the best-effort "
+                                "snapshot-then-allow, got {} with {} new ref(s)".format(_c, _dec, _refs))
+        # The closed allowlist grammar still refuses an unknown global option in a compound command.
+        _go_cmp, _go_cmp_text, _go_cmp_refs = _go_run("git --frobnicate reset --hard && true", go)
+        if _go_cmp != "deny" or "--frobnicate" not in _go_cmp_text or "closed allowlist grammar" not in _go_cmp_text:
+            failures.append("(go-unknown-compound) an unknown global option in a compound must get the grammar "
+                            "deny naming it, got {} {!r}".format(_go_cmp, _go_cmp_text[:220]))
 
         # === tombstones of the retired GUARDRAIL_ALLOW_DISCARD opt-out (F-65.F3, blocker 4) ==============
         # The override is removed; each vector below keeps its input and now asserts the outcome of the same
@@ -6348,7 +6590,7 @@ def _main_isolated(monitor):
             ("pristine-clean", "git reset --hard", _rmo_clean, None, "allow", "allow"),
             ("pristine-dirty-clobber", "git reset --hard", rp, None, "deny", "deny"),
             ("pristine-dirty-scoped", "git checkout -- file.txt", rp, None, "allow-note", "allow-note"),
-            ("c-redirect", "git -C {} reset --hard".format(rp), rp, None, "allow-note", "allow-note"),
+            ("c-redirect", "git -C {} reset --hard".format(rp), rp, None, "deny", "deny"),
             ("ambient-git-var", "git reset --hard", rp, "GIT_NAMESPACE", "allow-note", "allow-note"),
             ("compound", "git reset --hard ; true", rp, None, "allow-note", "deny"),
             ("heredoc", "git reset --hard" + _hd, rp, None, "deny", "deny"),
@@ -6629,8 +6871,10 @@ def _main_isolated(monitor):
         (f4_target / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")  # dirty it
         f4_before_target = len(_recovery_refs(f4_target))
         f4_before_sess = len(_recovery_refs(repo))
-        expect("(f4-C-otherrepo) -C into a DIFFERENT dirty repo snapshots the TARGET and allows",
-               "git -C {} reset --hard".format(str(f4_target)), "allow-note", cwd=rp)
+        # FLIPPED (was "allow-note"): the TARGET probes dirty, so the whole-tree clobber DENIES as the bare
+        # form run in that repo does; the target snapshot is still taken first (the ref counts below).
+        expect("(f4-C-otherrepo) -C into a DIFFERENT dirty repo snapshots the TARGET and denies",
+               "git -C {} reset --hard".format(str(f4_target)), "deny", cwd=rp)
         if len(_recovery_refs(f4_target)) != f4_before_target + 1:
             failures.append("(f4-C-target-ref) the recovery snapshot for a -C-redirected discard must land "
                             "in the -C TARGET repo (finding 4): expected exactly one new ref there")
@@ -6640,9 +6884,10 @@ def _main_isolated(monitor):
         # (b) -C into a NON-repo target cannot be snapshotted -> DENY (was an allow-note in round 1).
         expect("(f4-C-nonrepo) -C into a NON-repo target DENIES (the target snapshot cannot be taken)",
                "git -C {} reset --hard".format(str(tmp / "f4nonrepo")), "deny", cwd=rp)
-        # (c) -C into the SAME repo as the session cwd still ALLOWS (target resolves to the session repo).
-        expect("(f4-C-samerepo) -C into the SAME repo as cwd still allows (target == session repo)",
-               "git -C {} reset --hard".format(rp), "allow-note", cwd=rp)
+        # (c) -C into the SAME repo as the session cwd resolves to the session repo; FLIPPED (was
+        # "allow-note"): that repo is dirty, so the whole-tree clobber DENIES like the bare (rs-a).
+        expect("(f4-C-samerepo) -C into the SAME dirty repo as cwd denies like the bare form",
+               "git -C {} reset --hard".format(rp), "deny", cwd=rp)
         # (d) a --work-tree redirect to a NON-repo dir also DENIES a destructive discard.
         expect("(f4-worktree-nonrepo) --work-tree to a non-repo dir DENIES a destructive discard",
                "git --work-tree={0} --git-dir={0}/.git reset --hard".format(str(tmp / "f4nonrepo2")),
@@ -6650,13 +6895,13 @@ def _main_isolated(monitor):
         # (e) a NON-destructive redirected form (reset --soft) still ALLOWS regardless of the target.
         expect("(f4-soft-redirect) a non-destructive reset --soft under -C to a non-repo still allows",
                "git -C {} reset --soft".format(str(tmp / "f4nonrepo")), "allow-note", cwd=rp)
-        # (f) the same-repo -C allow-note still names the prsunc rule (round-19 Fix B carry-forward).
+        # (f) the same-repo -C banner (a deny now that the dirty clobber denies) still names the prsunc rule.
         _f4d = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                 "tool_input": {"command": "git -C {} reset --hard".format(rp)}, "cwd": rp}
         _f4c, _f4o, _ = handler(_f4d)
         _f4banner = _f4o.get("systemMessage", "") if isinstance(_f4o, dict) else ""
         if "prsunc" not in _f4banner:
-            failures.append("(f4-note-rule) the same-repo -C redirect allow-note must name the prsunc rule")
+            failures.append("(f4-note-rule) the same-repo -C redirect banner must name the prsunc rule")
 
         # === ROUND-2 FINDING 5: the recovery snapshot preserves the STAGED (index) state as the ref's
         # === SECOND PARENT, so staged-only content a `git restore --staged` discards stays recoverable.
@@ -6936,16 +7181,48 @@ def _main_isolated(monitor):
                cwd=rh)
 
         # === malformed / robustness (F-66.7) ================================================
-        # A malformed tool_input (a string, not a dict) -> boundary ALLOW (fail open), not a crash. This is
-        # the DELIBERATE true-boundary fail-open the module and git_discard docstrings state (F-86): a
-        # malformed/missing command is input git_discard cannot read as a discard, so it fails OPEN here
-        # rather than fail-CLOSED like the other PreToolUse controls; it never silently allows a RECOGNIZED
-        # discard, only input it cannot recognize as one.
+        # A malformed tool_input (a string, not a dict) is a Bash call whose command cannot be read: a
+        # cannot-evaluate input, NOT the true fail-open boundary (which is a non-Bash tool, a non-git
+        # command, or no recognized lossy verb). A discard could hide in what was not read, so it DENIES
+        # under the shared fail-closed contract rather than passing clean, and never crashes.
         malformed = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": "malformed"}
         code, stdout_obj, _stderr = handler(malformed)
-        if not (code == 0 and stdout_obj is None):
-            failures.append("(robust-a) malformed tool_input: expected allow, got code={!r}, stdout={!r}"
-                            .format(code, stdout_obj))
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(robust-a) malformed tool_input: expected the fail-closed deny, got code={!r}, "
+                            "stdout={!r}".format(code, stdout_obj))
+        # The same contract for an EMPTY tool_input object (no command member at all): deny, fail closed.
+        missing_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}
+        code, stdout_obj, _stderr = handler(missing_cmd)
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(robust-a2) missing tool_input.command: expected the fail-closed deny, got "
+                            "code={!r}, stdout={!r}".format(code, stdout_obj))
+        # And for a present but non-string command; a present EMPTY STRING is readable (it runs nothing)
+        # and stays at the true boundary (allow), the just-inside case of the same boundary.
+        nonstr_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": 42}}
+        code, stdout_obj, _stderr = handler(nonstr_cmd)
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(robust-a3) non-string tool_input.command: expected the fail-closed deny, got "
+                            "code={!r}, stdout={!r}".format(code, stdout_obj))
+        empty_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": ""}}
+        code, stdout_obj, _stderr = handler(empty_cmd)
+        if _reduce_result(code, stdout_obj) != "allow":
+            failures.append("(robust-a4) empty-string command is readable and out of scope: expected allow, "
+                            "got code={!r}, stdout={!r}".format(code, stdout_obj))
+        # A Bash-shaped payload (a tool_input with a discard command) whose tool_name is missing or null is
+        # malformed, not another tool: the shared missing-tool_name deny. A PRESENT non-Bash tool_name stays
+        # out of scope (allow), even carrying the same command.
+        for _rb_label, _rb_fields in (("(robust-a5) missing tool_name", {}),
+                                      ("(robust-a6) null tool_name", {"tool_name": None})):
+            _rb_result = handler(dict({"hook_event_name": "PreToolUse",
+                                       "tool_input": {"command": "git reset --hard"}}, **_rb_fields))
+            if _rb_result != aiqt_hooks._deny_missing_tool_name("prsunc"):
+                failures.append("{} on a Bash-shaped payload: expected the shared missing-tool_name deny, got "
+                                "{!r}".format(_rb_label, _rb_result))
+        code, stdout_obj, _stderr = handler({"hook_event_name": "PreToolUse", "tool_name": "Write",
+                                             "tool_input": {"command": "git reset --hard"}})
+        if _reduce_result(code, stdout_obj) != "allow":
+            failures.append("(robust-a7) a present non-Bash tool_name is out of scope: expected allow, got "
+                            "code={!r}, stdout={!r}".format(code, stdout_obj))
         # No cwd and a dir-simple lossy verb: the worktree cannot be resolved -> ASK, never silent-allow.
         expect("(robust-b) no-cwd reset --hard denies", "git reset --hard", "deny")
 
@@ -8398,6 +8675,364 @@ def _main_isolated(monitor):
         # so it DENIES. (Before the fix it snapshotted the clean decoy and allow-noted a false recovery.)
         expect("(cf1c-worktree-split-denies) --work-tree (outside) worktree discard DENIES (split state)",
                "git --work-tree={} reset --hard".format(str(cf1_decoy)), "deny", cwd=str(cf1_wt))
+
+        # === -C beside a path-valued global option: git takes a relative --git-dir/--work-tree (and an inline
+        # GIT_DIR=/GIT_WORK_TREE=) only after the WHOLE -C chain, so git_discard asks git itself (a read-only
+        # rev-parse --absolute-git-dir --show-toplevel carrying the same options) which git dir and worktree a
+        # destructive discard acts on. A worktree whose own repository is that git dir is snapshotted there and
+        # allowed (a whole-tree clobber on a dirty target still DENIES there, with that snapshot, exactly as the
+        # bare form does); a git dir and worktree split across repositories, or a target git cannot resolve
+        # read-only, DENIES, with a best-effort snapshot of the worktree's own repository when it is not
+        # provably clean. The unfixed guard joined a relative --git-dir to the SESSION directory and ignored
+        # that -C moves the worktree, so 'git -C <dirty repo> --git-dir=.git reset --hard' from a clean session
+        # allowed with NO snapshot anywhere, as did an absolute --git-dir naming the session repository beside
+        # -C <other repo>. The two denies that read the redirect from the session directory stay as a floor
+        # under git's answer (the '(gdc-keep-*)' vectors): a --git-dir that is not the session repository's
+        # and a --work-tree outside the -C or session repository still DENY where git resolves one repository,
+        # with that repository snapshotted first when it is not provably clean. The session directory such a
+        # --git-dir/GIT_DIR form was read from stays a floor too: it is snapshotted as well when it is not
+        # provably clean, and a failed snapshot there is allowed with that failure named only when the target
+        # git resolved was probed and is provably clean or was snapshotted, and DENIES otherwise (the
+        # '(gdc-floor-*)' vectors). Each fixture is a session repository 'sess' (clean unless the vector names a
+        # sess_cause: uncommitted session work, whose snapshot fails through a lowered size cap or a temp dir
+        # inside sess), a target repository 'tgt' (with a committed sub/ directory) and, where named, a third
+        # repository 'oth', all siblings, the hook running from sess. Each vector asserts the verdict,
+        # the recovery refs written in every fixture repository and, where named, the text the reason or note
+        # carries, so each is red on revert of the fix ('(gdc-*-control)' vectors excepted: they pin unchanged
+        # neighbours).
+        def _gdc_fixture(name, tgt_state, oth_state):
+            base = tmp / "gdc" / name
+            repos = {"sess": _init_repo(base / "sess"), "tgt": _init_repo(base / "tgt")}
+            (repos["tgt"] / "sub").mkdir()
+            (repos["tgt"] / "sub" / "keep.txt").write_text("kept\n", encoding="utf-8")
+            _git(repos["tgt"], "add", "sub/keep.txt")
+            _git(repos["tgt"], "commit", "-q", "-m", "sub", env_identity=True)
+            if oth_state is not None:
+                repos["oth"] = _init_repo(base / "oth")
+            for role, state in (("tgt", tgt_state), ("oth", oth_state)):
+                if state in ("dirty", "staged"):
+                    (repos[role] / "file.txt").write_text("committed line\nuncommitted work\n", encoding="utf-8")
+                if state == "staged":
+                    _git(repos[role], "add", "file.txt")
+                if state == "big":
+                    # 4 KiB of uncommitted work: over the 1 KiB cap sess_cause "sizecap" sets, so the target's
+                    # own snapshot fails beside the session's.
+                    (repos[role] / "file.txt").write_text("committed line\n" + "w" * 4095 + "\n", encoding="utf-8")
+            return base, repos
+
+        def gdc(label, template, want, tgt_state, refs_want, needle=None, oth_state=None, ambient=None,
+                sess_cause=None, tgt_probe=None):
+            try:
+                base, repos = _gdc_fixture(label[1:label.index(")")], tgt_state, oth_state)
+                if sess_cause is not None:
+                    # 4 KiB of untracked session work: over the 1 KiB cap "sizecap" sets, while the target's
+                    # change (under 100 bytes) stays under it; "tmpdir" points the temp snapshot dir inside sess.
+                    (repos["sess"] / "session-work.txt").write_text("w" * 4095 + "\n", encoding="utf-8")
+                    (repos["sess"] / "tmpd").mkdir()
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("{}: could not build the fixture: {}".format(label, exc))
+                return
+            fmt = {"B": str(base), "S": str(repos["sess"]), "T": str(repos["tgt"]),
+                   "O": str(repos.get("oth", "")), "TR": os.path.realpath(str(repos["tgt"]))}
+            data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": template.format(**fmt)}, "cwd": str(repos["sess"])}
+            for _k, _v in (ambient or {}).items():
+                os.environ[_k] = _v
+            _orig_gdc_cap, _orig_gdc_tempdir = aiqt_hooks._RECOVERY_SIZE_CAP, tempfile.tempdir
+            _orig_gdc_clean = aiqt_hooks._tree_is_clean
+            if sess_cause == "sizecap":
+                aiqt_hooks._RECOVERY_SIZE_CAP = 1024
+            elif sess_cause == "tmpdir":
+                tempfile.tempdir = str(repos["sess"] / "tmpd")
+            if tgt_probe == "incomplete":
+                # The clean probe of the target alone does not complete; every other probe runs as it is.
+                _gdc_tgt_real = os.path.realpath(str(repos["tgt"]))
+                aiqt_hooks._tree_is_clean = lambda repo: (
+                    None if os.path.realpath(repo) == _gdc_tgt_real else _orig_gdc_clean(repo))
+            try:
+                code, stdout_obj, _stderr = handler(data)
+            finally:
+                for _k in (ambient or {}):
+                    os.environ.pop(_k, None)
+                aiqt_hooks._RECOVERY_SIZE_CAP, tempfile.tempdir = _orig_gdc_cap, _orig_gdc_tempdir
+                aiqt_hooks._tree_is_clean = _orig_gdc_clean
+            got = _reduce_result(code, stdout_obj)
+            text = ""
+            if isinstance(stdout_obj, dict):
+                hso = stdout_obj.get("hookSpecificOutput")
+                text = str(hso.get("permissionDecisionReason", "")) if isinstance(hso, dict) else str(
+                    stdout_obj.get("systemMessage", ""))
+            if got != want:
+                failures.append("{}: expected {}, got {} {!r}".format(label, want, got, text[:300]))
+            for role, count in sorted(refs_want.items()):
+                have = len(_recovery_refs(repos[role]))
+                if have != count:
+                    failures.append("{}: expected {} recovery ref(s) in {}, found {}".format(
+                        label, count, role, have))
+            for _nd in ((needle,) if isinstance(needle, str) else (needle or ())):
+                if _nd.format(**fmt) not in text:
+                    failures.append("{}: expected the reason or note to carry {!r}, got {!r}".format(
+                        label, _nd.format(**fmt), text[:300]))
+
+        _gdc_at = "the repository git resolves for it ({TR})"
+        _gdc_saved = "A pre-command recovery snapshot was saved"
+        _gdc_keep_gitdir = "does not name the session repository's git dir"
+        _gdc_keep_wt = "whose worktree lies outside the repository this guard reads from the -C or session"
+        # Snapshot then allow: git resolves the worktree to the target, whose own repository is the git dir.
+        # A whole-tree clobber on a DIRTY target there denies like the bare form, with the target snapshot
+        # named in its reason (so the snapshot still lands in the target, never the session).
+        gdc("(gdc-shape1) -C <abs dirty repo> --git-dir=.git snapshots the TARGET, not the session, and denies",
+            "git -C {T} --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-shape1-clean) the same on a CLEAN target allows, naming the target, with no snapshot",
+            "git -C {T} --git-dir=.git reset --hard", "allow-note", "clean", {"tgt": 0, "sess": 0}, _gdc_at)
+        gdc("(gdc-shape1-scoped) a scoped discard under -C <dirty repo> --git-dir=.git snapshots the target",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_saved))
+        gdc("(gdc-rel-sep) -C <relative> --git-dir .git (separated) snapshots the target and denies",
+            "git -C ../tgt --git-dir .git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-chain-rel) a relative -C chain then --git-dir=.git snapshots the target and denies",
+            "git -C .. -C tgt --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-chain-abs) an absolute then relative -C chain with --git-dir .git snapshots the target",
+            "git -C {B} -C tgt --git-dir .git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-reversed) --git-dir=.git BEFORE -C still resolves after the -C chain",
+            "git --git-dir=.git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-reversed-scoped) a scoped restore with --git-dir=.git before -C snapshots the target",
+            "git --git-dir=.git -C ../tgt restore file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_saved))
+        # FLIPPED (was "allow-note"): kept denied, as before git resolved the redirect (see the gdc-keep-*
+        # vectors below); the target is snapshotted first.
+        gdc("(gdc-abs-own) -C <target> --git-dir=<target>/.git (absolute) stays denied, snapshotting the target",
+            "git -C {T} --git-dir={T}/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-abs-own-sep-clean) --git-dir <target>/.git (separated) -C <relative>, clean: stays denied",
+            "git --git-dir {T}/.git -C ../tgt reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
+        gdc("(gdc-env-gitdir) an inline GIT_DIR=.git with -C <target> snapshots the target and denies",
+            "GIT_DIR=.git git -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-env-gitdir-append) an inline GIT_DIR+=.git is resolved by git like GIT_DIR=",
+            "GIT_DIR+=.git git -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-env-gitdir-append-scoped) a scoped discard under GIT_DIR+=.git snapshots the target",
+            "GIT_DIR+=.git git -C {T} restore file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_saved))
+        # FLIPPED (was "allow-note"): kept denied, as before git resolved the redirect.
+        gdc("(gdc-wt-rel) -C <target> --git-dir=.git --work-tree=. stays denied, snapshotting the target",
+            "git -C {T} --git-dir=.git --work-tree=. reset --hard", "deny", "dirty",
+            {"tgt": 1, "sess": 0}, (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-wt-sep-clean) -C <relative> --work-tree . --git-dir .git (separated), clean: stays denied",
+            "git -C ../tgt --work-tree . --git-dir .git reset --hard", "deny", "clean",
+            {"tgt": 0, "sess": 0}, _gdc_keep_wt)
+        gdc("(gdc-wt-sub) -C <target> --work-tree=sub snapshots the target repository holding sub/",
+            "git -C {T} --work-tree=sub reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-wt-abs) --work-tree=<target> -C <target> snapshots the target and denies",
+            "git --work-tree={T} -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-env-wt) an inline GIT_WORK_TREE=sub with -C <relative> snapshots the target and denies",
+            "GIT_WORK_TREE=sub git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            _gdc_saved)
+        gdc("(gdc-env-wt-scoped) a scoped discard under GIT_WORK_TREE=sub -C <relative> snapshots the target",
+            "GIT_WORK_TREE=sub git -C ../tgt checkout -- keep.txt", "allow-note", "dirty",
+            {"tgt": 1, "sess": 0}, ("the repository git resolves for it ({TR}/sub)", _gdc_saved))
+        # Kept denied: the four forms that denied before git resolved the redirect still DENY, on a clean
+        # target with no snapshot and on a dirty one with the target snapshotted first, for a whole-tree
+        # clobber, a scoped discard and an index-only form alike. Each is red when the two session-read
+        # denies under git's answer are removed (the scoped, clean and index-only ones then allow).
+        gdc("(gdc-keep-abs-own-clean) -C <target> --git-dir=<target>/.git on a clean target stays denied",
+            "git -C {T} --git-dir={T}/.git reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
+        gdc("(gdc-keep-abs-own-scoped) -C <target> --git-dir=<target>/.git scoped discard stays denied",
+            "git -C {T} --git-dir={T}/.git checkout -- file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-abs-own-index) -C <target> --git-dir=<target>/.git restore --staged stays denied",
+            "git -C {T} --git-dir={T}/.git restore --staged file.txt", "deny", "staged", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-rev-sep-dirty) --git-dir <target>/.git -C <relative> on a dirty target stays denied",
+            "git --git-dir {T}/.git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-rev-sep-scoped) --git-dir <target>/.git -C <relative> scoped restore stays denied",
+            "git --git-dir {T}/.git -C ../tgt restore file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-wt-rel-clean) -C <target> --git-dir=.git --work-tree=. on a clean target stays denied",
+            "git -C {T} --git-dir=.git --work-tree=. reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_wt)
+        gdc("(gdc-keep-wt-rel-scoped) -C <target> --git-dir=.git --work-tree=. scoped discard stays denied",
+            "git -C {T} --git-dir=.git --work-tree=. checkout -- file.txt", "deny", "dirty",
+            {"tgt": 1, "sess": 0}, (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-keep-wt-sep-dirty) -C <relative> --work-tree . --git-dir .git on a dirty target stays denied",
+            "git -C ../tgt --work-tree . --git-dir .git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-keep-wt-sep-scoped) -C <relative> --work-tree . --git-dir .git checkout . stays denied",
+            "git -C ../tgt --work-tree . --git-dir .git checkout .", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-index-staged) -C <target> --git-dir=.git restore --staged snapshots the target's index",
+            "git -C {T} --git-dir=.git restore --staged file.txt", "allow-note", "staged",
+            {"tgt": 1, "sess": 0}, _gdc_at)
+        gdc("(gdc-index-split) an index-only form under --work-tree=<other> snapshots the -C repository",
+            "git -C ../tgt --work-tree={O} restore --staged file.txt", "allow-note", "staged",
+            {"tgt": 1, "sess": 0, "oth": 0}, "the repository git resolves for it (", oth_state="dirty")
+        # Deny: git splits the git dir and the worktree across repositories, or cannot resolve the target.
+        gdc("(gdc-shape2) -C <dirty repo> --git-dir=<session>/.git DENIES, snapshotting the worktree's repo",
+            "git -C {T} --git-dir={S}/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-clean) the same on a CLEAN worktree DENIES with no snapshot",
+            "git -C {T} --git-dir={S}/.git reset --hard", "deny", "clean", {"tgt": 0, "sess": 0})
+        gdc("(gdc-shape2-rev-sep) --git-dir <session>/.git (separated) before -C <relative> DENIES",
+            "git --git-dir {S}/.git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-chain) a -C chain beside --git-dir=<session>/.git DENIES",
+            "git -C .. -C tgt --git-dir={S}/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-rel) -C <target> --git-dir=../sess/.git (relative, naming the session) DENIES",
+            "git -C {T} --git-dir=../sess/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-env) an inline GIT_DIR=<session>/.git with -C <target> DENIES",
+            "GIT_DIR={S}/.git git -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-wt-other) -C <target> --work-tree=<other dirty repo> DENIES, snapshotting the other repo",
+            "git -C {T} --work-tree={O} reset --hard", "deny", "clean", {"tgt": 0, "sess": 0, "oth": 1},
+            oth_state="dirty")
+        gdc("(gdc-wt-other-rel-sep) -C <target> --work-tree ../oth (separated, relative) DENIES",
+            "git -C {T} --work-tree ../oth reset --hard", "deny", "clean", {"tgt": 0, "sess": 0, "oth": 1},
+            oth_state="dirty")
+        gdc("(gdc-index-nocand) an index-only form whose git dir no candidate directory discovers DENIES",
+            "git -C {O} --git-dir={T}/.git restore --staged file.txt", "deny", "staged",
+            {"tgt": 0, "sess": 0, "oth": 1}, oth_state="dirty")
+        gdc("(gdc-unresolvable) a --git-dir git cannot open DENIES with no snapshot",
+            "git -C {T} --git-dir=nonexistent reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0},
+            "git could not report, read-only")
+        gdc("(gdc-other-opt) a -c global option beside --git-dir leaves the oracle unasked and DENIES",
+            "git -c core.abbrev=12 --git-dir=.git -C {T} reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0})
+        gdc("(gdc-other-env) another inline GIT_* assignment beside GIT_DIR= DENIES",
+            "GIT_INDEX_FILE={B}/alt.index GIT_DIR=.git git -C {T} reset --hard", "deny", "dirty",
+            {"tgt": 0, "sess": 0})
+        # The scoped form pins the verdict itself: no clobber deny stands behind it, so an oracle that ignored
+        # the other inline GIT_* would snapshot the target and allow.
+        gdc("(gdc-other-env-scoped) another inline GIT_* beside GIT_DIR= on a scoped discard DENIES",
+            "GIT_INDEX_FILE={B}/alt.index GIT_DIR=.git git -C {T} restore file.txt", "deny", "dirty",
+            {"tgt": 0, "sess": 0}, "git could not report, read-only")
+        gdc("(gdc-bare) --bare after -C makes the -C directory the git dir, which git cannot open: DENIES",
+            "git -C {T} --bare reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0})
+        gdc("(gdc-ambient) a non-cosmetic ambient GIT_* beside --git-dir DENIES",
+            "git -C {T} --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0},
+            "a non-cosmetic ambient GIT_* variable", ambient={"GIT_NAMESPACE": "gdc"})
+        # Controls: a non-destructive form and the compound grammar path are unchanged by the fix.
+        gdc("(gdc-soft-control) a non-destructive reset --soft under the same redirect still allows",
+            "git -C {T} --git-dir=.git reset --soft", "allow-note", "dirty", {"tgt": 0, "sess": 0})
+        gdc("(gdc-compound-control) the compound form stays outside the closed grammar and DENIES",
+            "git -C {T} --git-dir=.git reset --hard && true", "deny", "dirty", {"tgt": 0, "sess": 0})
+        # The session-directory floor: a --git-dir/GIT_DIR form beside -C was read from the session directory
+        # before git resolved it, and that directory is still probed and snapshotted when it is not provably
+        # clean. When that snapshot fails (the size cap, or a temp dir inside the session repository) and the
+        # target git resolved was probed and is provably clean, or was snapshotted, the discard is allowed with
+        # that failure named, in each prefix order, on a clean target and on a dirty one (whose own snapshot is
+        # taken and named); each of those is red under a floor that denies every failed session snapshot.
+        # When the target's own snapshot also fails, or its probe does not complete, it DENIES with the session
+        # failure named; each of those is red when the floor stops requiring that target outcome. A whole-tree
+        # clobber on a dirty target still denies there, naming the session failure. When the session snapshot
+        # succeeds, both repositories are snapshotted and it allows.
+        _gdc_floor = "but this guard also snapshots the session directory"
+        _gdc_cap = "exceeds the 0 MiB recovery snapshot size cap"
+        _gdc_tmp = "the temp snapshot dir resolved inside the repo"
+        _gdc_floor_note = ("The session directory, the directory this guard reads the redirect from without asking "
+                           "git, could not be snapshotted (")
+        _gdc_floor_pass = "that failure alone does not deny the command"
+        _gdc_tgt_clean = "which it acts on, was probed and is provably clean"
+        _gdc_tgt_snap = "which it acts on, was snapshotted first"
+        # FLIPPED (was "deny"): a failed session snapshot is allowed past once the target is provably clean or
+        # snapshotted.
+        gdc("(gdc-floor-cap-clean) -C <target> --git-dir=.git, session over the size cap, clean target: allows",
+            "git -C {T} --git-dir=.git reset --hard", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_at, _gdc_floor_note, _gdc_cap, _gdc_floor_pass, _gdc_tgt_clean), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-dirty) -C <target> --git-dir=.git, session over the size cap, dirty target: allows",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-rev-clean) --git-dir=.git -C <relative>, session over the size cap, clean: allows",
+            "git --git-dir=.git -C ../tgt restore --staged file.txt", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_clean), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-rev-dirty) --git-dir=.git -C <relative>, session over the size cap, dirty: allows",
+            "git --git-dir=.git -C ../tgt reset", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-env-clean) GIT_DIR=.git with -C <target>, session over the size cap, clean: allows",
+            "GIT_DIR=.git git -C {T} clean -fd", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_clean), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-env-dirty) GIT_DIR=.git with -C <target>, session over the size cap, dirty: allows",
+            "GIT_DIR=.git git -C {T} restore file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-tmp-clean) -C <target> --git-dir=.git, temp dir inside the session, clean: allows",
+            "git -C {T} --git-dir=.git restore file.txt", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_clean), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-dirty) -C <target> --git-dir=.git, temp dir inside the session, dirty: allows",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_snap, _gdc_saved), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-rev-clean) --git-dir=.git -C <relative>, temp dir inside the session, clean: allows",
+            "git --git-dir=.git -C ../tgt reset --hard", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_clean), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-rev-dirty) --git-dir=.git -C <relative>, temp dir inside the session, dirty: allows",
+            "git --git-dir=.git -C ../tgt clean -fd", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_snap, _gdc_saved), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-env-clean) GIT_DIR=.git with -C <target>, temp dir inside the session, clean: allows",
+            "GIT_DIR=.git git -C {T} reset", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_clean), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-env-staged) GIT_DIR=.git with -C <target>, temp dir inside the session, staged: allows",
+            "GIT_DIR=.git git -C {T} restore --staged file.txt", "allow-note", "staged", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_snap, _gdc_saved), sess_cause="tmpdir")
+        # The target's own snapshot fails too (its 4 KiB change is over the same lowered cap): DENIES in each
+        # prefix order, with both failures named and no snapshot anywhere.
+        _gdc_tgt_fail = "NOTE: no pre-command recovery snapshot could be created (the working tree exceeds"
+        gdc("(gdc-floor-cap-tgtfail) -C <target> --git-dir=.git, session and target over the size cap: DENIES",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "deny", "big", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its snapshot failed", _gdc_tgt_fail), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-rev-tgtfail) --git-dir=.git -C <relative>, session and target over the cap: DENIES",
+            "git --git-dir=.git -C ../tgt restore file.txt", "deny", "big", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its snapshot failed", _gdc_tgt_fail), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-env-tgtfail) GIT_DIR=.git with -C <target>, session and target over the cap: DENIES",
+            "GIT_DIR=.git git -C {T} reset", "deny", "big", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its snapshot failed", _gdc_tgt_fail), sess_cause="sizecap")
+        # The target's clean probe does not complete (its snapshot is still taken and named): DENIES in each
+        # prefix order, though the same target snapshot would allow a discard whose session snapshot succeeded.
+        gdc("(gdc-floor-cap-noprobe) -C <target> --git-dir=.git, session over the cap, target probe unfinished: "
+            "DENIES", "git -C {T} --git-dir=.git checkout -- file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its probe did not complete", _gdc_saved), sess_cause="sizecap",
+            tgt_probe="incomplete")
+        gdc("(gdc-floor-tmp-rev-noprobe) --git-dir=.git -C <relative>, temp dir in the session, target probe "
+            "unfinished: DENIES", "git --git-dir=.git -C ../tgt restore file.txt", "deny", "dirty",
+            {"tgt": 1, "sess": 0}, (_gdc_floor, _gdc_tmp, "and its probe did not complete", _gdc_saved),
+            sess_cause="tmpdir", tgt_probe="incomplete")
+        gdc("(gdc-floor-tmp-env-noprobe) GIT_DIR=.git with -C <target>, temp dir in the session, target probe "
+            "unfinished: DENIES", "GIT_DIR=.git git -C {T} restore --staged file.txt", "deny", "staged",
+            {"tgt": 1, "sess": 0}, (_gdc_floor, _gdc_tmp, "and its probe did not complete", _gdc_saved),
+            sess_cause="tmpdir", tgt_probe="incomplete")
+        # A whole-tree clobber on a dirty target still DENIES as the bare form does, with the target snapshot
+        # and the session failure named.
+        gdc("(gdc-floor-cap-clobber) -C <target> --git-dir=.git reset --hard, session over the cap, dirty: DENIES",
+            "git -C {T} --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            ("would overwrite the working tree", _gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved),
+            sess_cause="sizecap")
+        gdc("(gdc-floor-both) a dirty session whose snapshot succeeds is snapshotted beside the target; allows",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 1},
+            (_gdc_at, "The session directory, the directory this guard reads the redirect from without asking "
+                      "git, was snapshotted as well."), sess_cause="dirty")
+        # A leading GIT_DIR+= reaches the session-read --git-dir deny exactly as GIT_DIR= does; two GIT_DIR
+        # assignments joined by += build a value that read does not trust, so they DENY.
+        gdc("(gdc-env-gitdir-append-own) GIT_DIR+=<target>/.git with -C <target> on a clean target DENIES",
+            "GIT_DIR+={T}/.git git -C {T} reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
+        gdc("(gdc-env-gitdir-append-own-scoped) GIT_DIR+=<target>/.git with -C <target>, scoped discard DENIES",
+            "GIT_DIR+={T}/.git git -C {T} restore file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-env-gitdir-append-joined) two GIT_DIR+= assignments joined into one value DENY",
+            "GIT_DIR+=.gi GIT_DIR+=t git restore file.txt", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
+        # A leading GIT_DIR+= on a stash drop/clear names the git dir just as GIT_DIR= does, so it DENIES
+        # rather than preserve the -C repository's stash (here none, a silent allow on the unfixed guard)
+        # while the command clears the stash of the repository GIT_DIR names.
+        try:
+            gdc_st = _init_repo(tmp / "gdc" / "stash-sess")
+            (gdc_st / "file.txt").write_text("to stash\n", encoding="utf-8")
+            _git(gdc_st, "stash", "push", "-m", "wip", env_identity=True)
+            gdc_st_other = _init_repo(tmp / "gdc" / "stash-other")
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("(gdc-stash-fixture) could not build the stash fixture: {}".format(exc))
+        else:
+            expect("(gdc-stash-append) GIT_DIR+=<session>/.git with -C <other> on stash clear DENIES",
+                   "GIT_DIR+={}/.git git -C {} stash clear".format(gdc_st, gdc_st_other), "deny",
+                   cwd=str(gdc_st))
+            expect("(gdc-stash-eq-control) the GIT_DIR= spelling of the same stash clear still DENIES",
+                   "GIT_DIR={}/.git git -C {} stash clear".format(gdc_st, gdc_st_other), "deny",
+                   cwd=str(gdc_st))
 
         # === CLAUDE-F1: a redirected/ambient 'checkout-index' (sub outside the recognized lossy-verb set,
         # flagged by the raw scan) entering the view-override branch DENIES (was allowed with no snapshot). ==
@@ -12225,10 +12860,15 @@ def _main_isolated(monitor):
                        ("cd-checkout-b", "\ncd foo; git checkout -b feat; true"),
                        ("cd-commit", "\ncd foo; git commit -m y; true"),
                        ("cd-add-push", "\ncd foo; git add -A; git push; true"))
+        # AMENDED RECORDS (two letters): on the cd-add-push rows the recorded module gave
+        # git_explicit_binding the relocate note through its failed-lex fallback, where the visible
+        # breadth+push pairing must deny; the fallback now tests the publish deny before the
+        # directory-change note (the parsed pre-scan's precedence), so those two rows record D at the
+        # git_explicit_binding position in place of the recorded N. Every other letter is the record.
         _hdx_main = {"E": ("AAAADAAAAA", "AAAADAAAAA", "AAAAADDAAA", "AAAAADDAAA", "AAAAADAAAA", "AANANDDAAA",
-                           "AANANAAADD", "AANANAAAAA"),
+                           "AANANAAADD", "AADANAAAAA"),
                      "F": ("AAAADAAADD", "AANADAAADD", "AAAAADDADD", "AAAAADDADD", "AAAAADAADD", "AANANDDADD",
-                           "AANANAAADD", "AANANAAADD")}
+                           "AANANAAADD", "AADANAAADD")}
         _hd_main_rows = [("early-close-switch", "git commit -m \"$(cat <<'EOF'\n)\"; git switch -c test origin/other; "
                           "echo \"\nEOF\n)\"", "AAAAADDADD")]
         for _hdxf, _hdxform in (("E", _hdx_e), ("F", _hdx_f)):
@@ -13889,6 +14529,69 @@ def _main_isolated(monitor):
         gexpect("(gw-ae) unparseable checker + swallow allows-with-note (finding 14; fallback relaxed)",
                 'pytest || true "unbalanced', "allow-note")
         gexpect("(gw-af) unparseable non-gate command allows", 'ls -la "unbalanced', "allow")
+        # A bypass the raw text hides behind quoting, behind an ordinary parse failure (a here-string): the
+        # fallback also reads the de-quoted text (quote characters, backslashes and a '$' before a quote
+        # removed, line continuations joined, each ANSI-C quote's escapes decoded), so the fragmented
+        # spelling keeps the deny its plain spelling earns. Each reads as no bypass in the raw text alone.
+        gexpect("(gw-pf1) here-string + quote-fragmented commit verb with --no-verify denies (the "
+                "fallback reads the de-quoted text)",
+                "git co'mmit' --no-verify -m x <<<x", "deny")
+        gexpect("(gw-pf2) here-string + ANSI-C-fragmented commit verb with --no-verify denies (the '$' "
+                "before the quote is removed too)",
+                "git co$'mmit' --no-verify -m x <<<x", "deny")
+        gexpect("(gw-pf6) here-string + quote-fragmented --no-verify denies", 'git commit "-"-no-verify -m x <<<x',
+                "deny")
+        gexpect("(gw-pf7) here-string + continuation-split --no-verify denies",
+                "git commit -\\\n-no-verify -m x <<<x", "deny")
+        gexpect("(gw-pf8) here-string + quote-fragmented short -n on commit denies", 'git commit -m x -"n" <<<x',
+                "deny")
+        gexpect("(gw-pf9) here-string + ANSI-C hex escape spelling --no-verify denies (escapes decoded)",
+                "git commit --no-$'\\x76'erify -m x <<<x", "deny")
+        gexpect("(gw-pf10) here-string + ANSI-C octal escape spelling --no-verify denies",
+                "git commit $'--no-\\166erify' -m x <<<x", "deny")
+        gexpect("(gw-pf11) here-string + ANSI-C Unicode escape spelling the commit verb denies",
+                "git $'\\u0063'ommit --no-verify -m x <<<x", "deny")
+        # Quoting alone is no ground to deny: an ordinary command whose quotes touch letters, behind a
+        # here-string or a process substitution, and that spells no bypass in any reading keeps the raw
+        # probes' allow (the same decision the main branch gives it).
+        # Except on a roster-verb git segment: the closed literal grammar refuses a here-string or a process
+        # substitution there, so a git commit carrying one denies, quoted message or not (the stricter
+        # fail-closed choice where the two readings disagree, pending maintainer review).
+        gexpect("(gw-pf3) here-string commit with a quoted message denies by the closed grammar",
+                'git commit -m "fix bug" <<<x', "deny")
+        gexpect("(gw-pf12) here-string with a quoted word allows", 'wc -l <<<"hello"', "allow")
+        gexpect("(gw-pf13) quoted pattern and here-string allows", 'grep "foo" <<<"bar"', "allow")
+        # A process substitution on a roster-verb git commit segment denies by the closed grammar (the
+        # stricter fail-closed choice, pending maintainer review), as gw-fb-procsub pins.
+        gexpect("(gw-pf14) commit message from a process substitution with a quoted word denies by the closed "
+                "grammar", 'git commit -F <(echo "msg")', "deny")
+        gexpect("(gw-pf15) two process substitutions with quoted paths allow",
+                'diff <(sort "a.txt") <(sort "b.txt")', "allow")
+        gexpect("(gw-pf16) an ANSI-C here-string whose escapes decode to no bypass allows",
+                "cat <<<$'line1\\nline2'", "allow")
+        # A here-string on a roster-verb git commit segment denies by the closed grammar even with no bypass
+        # flag (the stricter fail-closed choice, pending maintainer review).
+        gexpect("(gw-pf4) here-string commit with no bypass flag denies by the closed grammar",
+                "git commit -m x <<<x", "deny")
+        gexpect("(gw-pf5) here-string non-git command still allows", "wc -l <<<x", "allow")
+        # The ANSI-C decoder behind gw-pf9 to gw-pf11, at each escape's bounds (just inside, at, just past):
+        # \x reads one or two hex digits, an octal escape one to three digits (its value keeps its low
+        # eight bits, 0o377 the last value kept whole), \u one to four and \U one to eight hex digits (a
+        # code point past U+10FFFF reads as nothing), \cX a control character, an unknown letter stays
+        # escaped, an escaped quote does not end the body, and an unclosed $' is left as written.
+        for _ac_raw, _ac_want in (
+                ("$'\\x7'", "\x07"), ("$'\\x76'", "v"), ("$'\\x766'", "v6"),
+                ("$'\\7'", "\x07"), ("$'\\166'", "v"), ("$'\\1666'", "v6"),
+                ("$'\\377'", "\xff"), ("$'\\400'", "\x00"), ("$'\\555'", "m"),
+                ("$'\\u63'", "c"), ("$'\\u0063'", "c"), ("$'\\u00633'", "c3"),
+                ("$'\\U00000063'", "c"), ("$'\\U000000631'", "c1"),
+                ("$'\\U0010FFFE'", "\U0010fffe"), ("$'\\U0010FFFF'", "\U0010ffff"), ("$'\\U00110000'", ""),
+                ("$'\\cA\\c?'", "\x01\x7f"), ("$'\\z'", "\\z"), ("$'it\\'s'", "it's"),
+                ("a$'b'c", "abc"), ("\"$'\"", "\"$'\"")):
+            _ac_got = aiqt_hooks._ansi_c_decoded(_ac_raw)
+            if _ac_got != _ac_want:
+                failures.append("(gw-ansi-c) _ansi_c_decoded({!r}) must be {!r}, got {!r}".format(
+                    _ac_raw, _ac_want, _ac_got))
         # DENY outranks the parse error only over complete segments: the segment the lexer was still inside
         # is dropped, and a segment the scan had already closed (by ';', '&&' or a newline) before the
         # unparseable construct begins is judged, so the closed verification-into-sink pipeline denies as it
@@ -15322,10 +16025,11 @@ def _main_isolated(monitor):
                 "(true #'\n)\ntools/testı.py | cut -c1", "allow-note")
         gexpect("(gw-dbt-note-latest) control: 'latest' carries no checker part, allows",
                 "(true #'\n)\ntools/latest.py | cut -c1", "allow")
-        # The doubt tests run ONLY behind a '#' the lexer cannot judge under both readings: the plain
-        # parse-error fallback and the failed-main-reading floor keep the conservative raw probes, so
-        # these commands keep the allow the probes have always given them (each was denied while widened
-        # spelling probes ran on every fallback path, though no path here can read a bypass in them).
+        # The doubt tests run ONLY behind a '#' the lexer cannot judge under both readings; the plain
+        # parse-error fallback keeps the conservative raw probes (adding only a deny for a bypass that a
+        # de-quoted reading spells), and the failed-main-reading floor keeps the raw probes alone, so these
+        # commands keep the allow the probes have always given them (each was denied while widened spelling
+        # probes ran on every fallback path, though no path here can read a bypass in them).
         gexpect("(gw-fb-herestring) outside the doubt path, a here-string parse error with a '-name' "
                 "operand in another segment still allows",
                 "git commit -m x && find . -name z <<<y", "allow")
@@ -20069,6 +20773,30 @@ def _main_isolated(monitor):
                  "git add -A && git commit -m x", "allow")
         ebexpect("(eb-e10e) a push BEFORE the breadth stage does not fire (publishes pre-breadth state)",
                  "git push && git add -A", "allow")
+        # The fallback's deny precedence: behind a '#' the lexer cannot judge under both readings (the
+        # backquote prefix), a visible cd+mutate pairing must not note its way past the visible
+        # breadth+push pairing - the raw fallback tests the publish deny first, like the parsed pre-scan.
+        ebexpect("(eb-e10f) fallback: cd+mutate beside breadth+push still DENIES (the cd note cannot mask "
+                 "the publish deny)",
+                 "x=`true #`\ncd /abs/repo && git add --all && git commit -m x && git push", "deny")
+        # Order state is judged one reading of an uncertain '#' at a time: flattening the readings would
+        # read the first reading's trailing breadth into the second reading's push and invent a
+        # stage-then-publish sequence no single reading holds, so the prefixed spelling of eb-e10e must
+        # keep its control's allow.
+        ebexpect("(eb-e10g) per-reading order: push before breadth behind an uncertain '#' prefix allows",
+                 "x=$(true)#\ngit push && git add -A", "allow")
+        ebexpect("(eb-e10h) control for eb-e10g: the unprefixed push-before-breadth command allows",
+                 "git push && git add -A", "allow")
+        # The directory-change scan is judged one reading at a time too: flattening the readings would read
+        # the first reading's trailing cd into the second reading's commit and invent a cd-then-mutation
+        # sequence no single reading holds, so a cd AFTER the commit keeps its control's allow, while a cd
+        # BEFORE the commit inside one reading still notes.
+        ebexpect("(eb-e10i) per-reading order: a cd after the commit behind an uncertain '#' prefix allows",
+                 "x=$(true)#\ngit commit -m y && cd /abs", "allow")
+        ebexpect("(eb-e10j) control for eb-e10i: the unprefixed commit-then-cd command allows",
+                 "git commit -m y && cd /abs", "allow")
+        ebexpect("(eb-e10k) per-reading order: a cd before the commit behind the same prefix still notes",
+                 "x=$(true)#\ncd /abs && git commit -m y", "allow-note")
         ebexpect("(eb-e11) cd feeding read-only git allows", "cd /abs && git status", "allow")
         ebexpect("(eb-e12) cd feeding non-git allows", "cd /abs && ls -la", "allow")
         ebexpect("(eb-e13) bare discard remains the git_discard control's boundary",
@@ -21214,6 +21942,35 @@ def _main_isolated(monitor):
             failures.append("(noask-trunc-note) orch_truncation_guard must ALLOW WITH A NOTE a background "
                             "dispatch whose shell syntax it does not parse (a redirect, no truncating sink) "
                             "on a real repo; got {}".format(_f18_note))
+        # (noask-trunc-out-of-scope-note) with NO orchestration registry, a foreground bare-& detach reaches
+        # the out-of-scope allow-with-note. Falsifiable: the silent allow reads "allow", a deny "deny".
+        _f18_plain = _f18_tmp / "plain"
+        _f18_plain.mkdir()
+        with _no_registry_above(_f18_plain):
+            _f18_oos = _decision_any(aiqt_hooks.orch_truncation_guard, {
+                "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "sleep 1 &", "run_in_background": False}, "cwd": str(_f18_plain)})
+        if _f18_oos != "allow-note":
+            failures.append("(noask-trunc-out-of-scope-note) orch_truncation_guard must ALLOW WITH A NOTE a "
+                            "foreground bare-& detach where no orchestration registry is found; got {}"
+                            .format(_f18_oos))
+        # (noask-trunc-oos-unreadable-input) with NO orchestration registry, input the guard cannot read
+        # draws the unreadable-input note naming the field, never the silent allow it was and never ask
+        # or deny: a tool_input that is not an object, a command that is not a string, and a
+        # run_in_background that is present but not a real boolean, one probe per note site.
+        with _no_registry_above(_f18_plain):
+            _f18_oos_badinput = [
+                _decision_any(aiqt_hooks.orch_truncation_guard, {
+                    "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": _f18_ti, "cwd": str(_f18_plain)})
+                for _f18_ti in ("long_job &",
+                                {"command": 7},
+                                {"command": "long_job &", "run_in_background": "true"})]
+        if _f18_oos_badinput != ["allow-note"] * 3:
+            failures.append("(noask-trunc-oos-unreadable-input) orch_truncation_guard must ALLOW WITH A "
+                            "NOTE an out-of-scope Bash call whose input it cannot read (a non-object "
+                            "tool_input, a non-string command, a non-boolean run_in_background); got {}"
+                            .format(_f18_oos_badinput))
     except (OSError, subprocess.SubprocessError) as _f18_exc:
         failures.append("(noask-orch-fixture) could not build the finding-18 armed orch fixture: {}"
                         .format(_f18_exc))
@@ -21261,6 +22018,12 @@ def _main_isolated(monitor):
           "-c key, leading assignment or subcommand; an unhonoured cd; or any raw-flagged unparseable "
           "command, which the fallback now denies outright with no snapshot); a provably-clean tree ALLOWS "
           "with no snapshot; an ambient GIT_*/redirect view-override snapshot-then-allows on a dirty cwd "
+          "(except that a whole-tree clobber behind a git global option or a leading assignment DENIES on a "
+          "dirty target, with its snapshot, exactly as the bare command does, and a destructive form "
+          "carrying a --git-dir, --work-tree or --bare redirect is resolved by git itself, DENYING when git "
+          "splits the git dir and worktree across repositories or cannot resolve them read-only, or when the "
+          "session directory a --git-dir beside -C was read from cannot be snapshotted while the repository "
+          "git resolved was neither probed clean nor snapshotted; otherwise the note names that failure) "
           "and ALLOWS on a clean one (nothing to snapshot); stash/branch are not snapshottable and "
           "allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
           "deletion, DENIES fail-safe a push it cannot prove misses the protected line (a "
