@@ -10816,10 +10816,13 @@ _NOVERIFY_SHORT_N_VERBS = frozenset(("commit", "am"))
 # sets are the mandatory-value long options in their SEPARATED form (--message <msg>), whose value
 # token could itself begin with '-n' and must be skipped (their '--opt=value' shape carries the value
 # in the same token and consumes nothing). These sets cover the COMMON value-taking options rather
-# than claiming an exhaustive enumeration: an OMITTED value-taking option is safe-direction (on a
+# than claiming an exhaustive enumeration: an option NOT in these sets is safe-direction (on a
 # contrived input whose value itself spells -n or --no-verify it can only cause an over-ask/over-deny,
 # never a silent allow), so an option is added only once confirmed value-taking (adding a NON-value-
 # taking option would wrongly skip a real operand and could cause a silent allow, so it is never done).
+# The value-aware '--' boundary (_gate_terminator_index) matches a listed long option by UNAMBIGUOUS
+# PREFIX as git does, so an abbreviated value-taking option (--mess for --message) consuming the '--'
+# that follows it does NOT leave the trailing -n a silent allow.
 _GATE_SHORT_VALUE_OPTS = {
     "commit": frozenset(("m", "F", "C", "c", "t")),
     "am": frozenset(()),
@@ -10873,6 +10876,12 @@ _GATE_ALTS = (
     "Safe route: run the gate as-is and let its exit status stand; a failing gate is signal, so fix "
     "the artefact it guards. A genuinely broken hook or check is repaired or retired at its source "
     "through a reviewed change, never bypassed for one run.")
+# The way on named in every hook-skip and grammar deny a git commit whose quoted message only quotes a
+# hook-skip spelling can draw: the message read from a file is never opened here, so git commit -F FILE and
+# cat FILE | git commit -F - allow (a '<' redirection or a here-document on the git segment still denies).
+_GATE_FILE_ROUTE = (
+    "If a commit message only quotes a hook-skip spelling, write it to a file and commit with git commit -F FILE "
+    "(or cat FILE | git commit -F -): this guard does not read the file, so its text is data.")
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
@@ -10997,7 +11006,8 @@ _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
 def _no_verify_spelling(sub, args):
     """The matched hook-bypass spelling on this git segment, or None. The long form: a --no-verify
-    token in the option region (before '--'/'--end-of-options', via the shipped _split_pre_post),
+    token in the option region (before the FIRST real '--'/'--end-of-options' terminator, via
+    _gate_terminator_index so a '--' consumed as a value-taking option's value does not end the region),
     matched exact or by CONSERVATIVE LONG PREFIX (_has_long_prefix, exactly as protected_line matches
     'force'): an ambiguous abbreviation git itself would reject ('--no-ver') matches ANYWAY, and a
     separated option VALUE in pre is scanned too - both err toward a deny, never an allow, while a
@@ -11005,8 +11015,10 @@ def _no_verify_spelling(sub, args):
     is not a prefix of 'no-verify'. The short form: a bare or clustered -n, ONLY on the verbs where -n
     IS --no-verify (commit, am), with the value-taking short and long options skipped (mirroring
     _push_parse) so an attached value ('-m-n ...'), a separated value ('--message -n'), or a stuck
-    optional value ('-Skeyid') is never char-scanned as the flag."""
-    pre, _post, _had_sep = _split_pre_post(args)
+    optional value ('-Skeyid') is never char-scanned as the flag. The value-aware terminator closes the
+    gap where a value-consuming option eats the '--' (git commit -m -- -n, git commit --message -- -n:
+    the '--' is that option's value, so the following -n is still an option, the bypass)."""
+    pre = args[:_gate_terminator_index(sub, args)]
     if _has_long_prefix(pre, "no-verify"):
         return "a --no-verify spelling"
     if sub not in _NOVERIFY_SHORT_N_VERBS:
@@ -11034,6 +11046,520 @@ def _no_verify_spelling(sub, args):
                     break
                 if ch == "n":
                     return "the short -n (--no-verify) in {!r}".format(tok[:40])
+    return None
+
+
+def _gate_terminator_index(sub, lits):
+    """Index of the FIRST '--'/'--end-of-options' that is a real option terminator, or len(lits). A '--'
+    CONSUMED as the value of a preceding value-taking option (git commit --message -- ...: the '--' is the
+    message) is NOT a terminator, so a '-n' after it is still an option, not an operand. An ABBREVIATED
+    value-taking long option consumes its value the same way (git commit --mess -- -n: git resolves --mess
+    to --message, so the '--' is its value and -n is still the bypass), so a '--<name>' that is a prefix of
+    a value-taking long option also skips the next token; an abbreviation git would reject as ambiguous is
+    skipped too, a safe-direction over-match on a command git itself errors on, never a silent allow. lits
+    is the per-word literal text, None for a word that is not purely literal (an expansion is never '--'
+    nor a known value-taking option). Value tables exist for commit and am; other verbs keep the plain
+    split."""
+    value_opts = _GATE_SHORT_VALUE_OPTS.get(sub, frozenset())
+    stuck = _GATE_SHORT_STUCK_OPTS.get(sub, frozenset())
+    long_val = _GATE_LONG_ARG_OPTS.get(sub, frozenset())
+    skip = False
+    for idx, lit in enumerate(lits):
+        if skip:
+            skip = False
+            continue
+        if lit in _EOO_TOKENS:
+            return idx
+        if lit is None:
+            continue
+        if lit.startswith("--"):
+            if "=" not in lit and any(opt.startswith(lit) for opt in long_val):
+                skip = True  # exact OR an unambiguous abbreviation (--mess for --message) consumes its value
+            continue
+        if lit.startswith("-") and len(lit) > 1:
+            for j, ch in enumerate(lit[1:]):
+                if ch in value_opts:
+                    if j == len(lit) - 2:
+                        skip = True
+                    break
+                if ch in stuck:
+                    break
+    return len(lits)
+
+
+# The uncertain-git-segment scan holds the RAW command text to a CLOSED LITERAL allowlist grammar
+# wherever it names git. This is the fail-closed shape the work-discarding git guard already uses
+# (_discard_grammar_lex, the positive literal grammar judged directly on the raw string): only
+# constructs the grammar spells out can reach an accepted segment, so no quoting, expansion, operator
+# or continuation it does not spell out needs to be modelled on this path. An earlier revision
+# modelled those shapes one at a time (an expansion-aware word reader with per-word narrowings), and
+# spellings it mis-modelled kept surfacing (a process substitution split the segment, an expansion
+# in the subcommand or global-option position was waved through, a glob was read as inert, and a raw
+# backslash-newline replacement rewrote an escaped backslash and a comment tail, turning two denied
+# spellings into allows); the closed grammar replaces that reader outright. The grammar
+# accepts: bare words of _GATE_GRAMMAR_WORD_CHARS (a '#' or '~' may appear inside a word, where bash
+# treats it literally, but never lead one, where it is a comment or a tilde expansion); ONE
+# standalone complete single-quoted literal per word; ONE standalone complete double-quoted literal
+# per word whose interior stays on one line and holds no '$', backquote, backslash or '!' (inside
+# double quotes bash treats every other character literally, so such a word is exactly the literal
+# between the quotes, and its decoded interior is judged like a bare word; '!' is refused because
+# bash history expansion can rewrite it before git parses its options); the three harmless redirect
+# spellings (>/dev/null, 2>/dev/null, 2>&1), which bash removes from the argument list and which
+# write no file; on a parsed command only, the git commit message form git commit -m "$(cat <<'EOF'
+# ... EOF)" as the value of a separated -m (_gate_heredoc_message: a single-quoted delimiter, so bash
+# reads the body as literal text, a substitution holding nothing but that cat, and a body with no '$'
+# or backquote); and a segment end at ';', '&', '|', ')', a newline or the end of the text.
+# EVERYTHING ELSE DENIES BY CONSTRUCTION on a flagged segment: an expansion, substitution or
+# backquote (inside double quotes too), a process substitution, a backslash (a line continuation
+# included, inside double quotes too), a double-quoted word that is glued, unterminated, spans a
+# newline or holds an interior '!', a glob character, a brace, a leading '#' comment or '~', a
+# here-document, here-string or any other redirection, a glued or unterminated single quote. A
+# segment is FLAGGED when its resolved literal subcommand is on the no-verify roster, OR when its
+# subcommand cannot be resolved because a global option, a global option's value, or the subcommand
+# word itself is outside the grammar (git $g commit, git -C $d: the verb bash will run cannot be
+# known, so the segment fails closed). A segment whose subcommand resolves to a verb OFF the roster
+# is left alone (git log --format="$f" stays allowed), as is a git word inside a region an earlier
+# accepted scan consumed (the -m value in git commit -m 'git commit x' is data, not a command). But
+# a quoted interior that could hold live command text leaves the quote's pairing ambiguous (the scan
+# begins at a git word, not at the command start), so it is NOT treated as consumed data: a git inside
+# such a span is re-judged as its own segment, catching a bypass hidden where bash's own close and the
+# next open bracket live command text. A single-quoted interior triggers this on ANY byte that is not
+# a bare-word character or a space or tab (so a backquote, a '$', a shell operator, a newline or a
+# double quote all count); a double-quoted interior triggers it on a shell operator or a single quote
+# (a '$', backquote, backslash or newline inside double quotes already denies outright). An interior
+# that is ALL bare-word bytes and spaces still counts when it names a roster git command (a 'git' word
+# followed by a no-verify roster verb, _gate_span_hides_roster_git): bash's own close and the next open
+# could bracket that live 'git <verb>', so it is re-judged whatever the interior bytes hold, which
+# denies a roster-verb git command named inside otherwise-literal quoted data (a disclosed over-deny).
+_GATE_GRAMMAR_WORD_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./=@:+,%^#~")
+# What may follow a completed bare word or quoted literal: whitespace, a segment end, or a
+# redirect operator (judged on its own). Any other adjacency glues onto the word and denies.
+_GATE_GRAMMAR_TOKEN_END = frozenset(" \t\n;&|)<>")
+_GATE_GRAMMAR_REDIR_WHY = "carries a redirection outside the accepted >/dev/null, 2>/dev/null and 2>&1 forms"
+_GATE_GIT_WORD_RE = re.compile(r"(?i)\bgit\b")
+# Whitespace-delimited tokens of a quoted span interior, tokenized ONCE so _gate_span_hides_roster_git
+# can read each 'git' match's option-walk outcome by token position instead of re-splitting the suffix.
+_GATE_SPAN_TOKEN_RE = re.compile(r"\S+")
+# A shell operator or newline inside a quoted word makes the quote's pairing ambiguous: this gate
+# starts its scan at a 'git' word, so it cannot tell whether such a quote OPENS a word or CLOSES a
+# double- or single-quoted span bash opened earlier. When one appears (or the other quote character),
+# the quoted span is not treated as CONSUMED data, so a 'git' inside it is still judged as its own
+# segment (see _gate_grammar_lex and _gate_closed_grammar_scan); the enclosing word is still read for
+# its own bypass spelling, so a real flag after the quote is not missed.
+_GATE_GRAMMAR_QUOTE_BREAK = frozenset(";&|()\n")
+_GATE_GRAMMAR_BANG_WHY = ("carries '!' inside double quotes, which bash history expansion can rewrite "
+                          "before git parses its options (re-issue with the interior single-quoted)")
+
+
+def _gate_grammar_violation(command, word_start, offender, n):
+    """(snippet, why) naming the first byte outside the closed literal grammar: snippet is the raw
+    non-whitespace run around it, from word_start (so the deny names the word as typed, '${x}-n' and
+    not '-n'), why names the construct class the grammar refuses."""
+    j = word_start
+    while j < n and command[j] not in " \t\n":
+        j += 1
+    snippet = command[word_start:j][:40]
+    c = command[offender]
+    nxt = command[offender + 1:offender + 2]
+    if c in "<>" and nxt == "(":
+        why = "opens a process substitution"
+    elif c == "<":
+        why = "carries a '<' redirection, here-document or here-string, which this gate does not accept"
+    elif c == ">":
+        why = _GATE_GRAMMAR_REDIR_WHY
+    elif c in "$`":
+        why = "carries a shell expansion, substitution or backquote"
+    elif c == '"':
+        why = ("carries a double-quoted word this gate cannot accept as one literal: it is "
+               "unterminated, glued to adjacent text, or spans a newline")
+    elif c == "\\":
+        why = "carries a backslash escape or line continuation"
+    elif c in "*?[]":
+        why = "carries a glob character, which a matching filename can turn into an option word"
+    elif c in "{}":
+        why = "carries a brace-expansion character"
+    elif c == "#":
+        why = "starts a comment, whose reach over the rest of the line this gate does not model"
+    elif c == "~":
+        why = "leads with a tilde expansion"
+    elif c == "(":
+        why = "opens a subshell or function form"
+    elif c == "'":
+        why = "carries a single quote that is unterminated or glued to adjacent text"
+    else:
+        why = "carries {!r}, a character outside the closed literal grammar".format(c)
+    return snippet, why
+
+
+def _gate_grammar_redirect(command, i, start, fd):
+    """Accept ONE redirect whose '>' sits at command[i]: exactly >/dev/null (fd "1"), 2>/dev/null or
+    2>&1 (fd "2"), whitespace allowed before the /dev/null target; `start` is where the spelling
+    begins (the fd digit when present) so a refusal names it as typed. Returns (next index, None)
+    when accepted, else (i, (snippet, why))."""
+    n = len(command)
+    j = i + 1
+    if command[j:j + 1] == "(":
+        return i, _gate_grammar_violation(command, start, i, n)
+    if command[j:j + 1] in (">", "|"):
+        return i, (command[start:j + 1][:40], _GATE_GRAMMAR_REDIR_WHY)
+    if command[j:j + 1] == "&":
+        if fd == "2" and command[j + 1:j + 2] == "1" and (
+                j + 2 >= n or command[j + 2] in _GATE_GRAMMAR_TOKEN_END):
+            return j + 2, None
+        return i, (command[start:j + 2][:40], _GATE_GRAMMAR_REDIR_WHY)
+    while j < n and command[j] in " \t":
+        j += 1
+    k = j
+    while k < n and command[k] in _GATE_GRAMMAR_WORD_CHARS:
+        k += 1
+    if command[j:k] != "/dev/null" or (k < n and command[k] not in _GATE_GRAMMAR_TOKEN_END):
+        return i, (command[start:max(k, j + 1)][:40], _GATE_GRAMMAR_REDIR_WHY)
+    return k, None
+
+
+def _gate_span_hides_roster_git(interior):
+    """True when a quoted span's interior NAMES a roster git command: a 'git' word whose own next
+    non-option word is a no-verify roster verb (git commit, git push, ...), OR a 'git' word whose
+    option walk runs off the end of the interior before any non-option word is reached (git --namespace
+    at the interior's end). In the second case the would-be verb falls in the NEXT span bash's own close
+    and open could bracket, so the pairing is treated as live command text and FAILS CLOSED. Bash's own
+    quote close and the next open could bracket the hidden git as live command text, so a span naming
+    one is NOT treated as consumed data even when every interior byte is a bare-word character or a
+    space: the hidden git is re-judged as its own segment. The global-option skip mirrors
+    _gate_grammar_sub (a separated arg-consuming global option swallows the next word). A disclosed
+    safe-direction over-deny: quoted text that merely names such a command is re-judged and denies.
+    Linear in the interior length: the interior is tokenized ONCE, the outcome of an option walk from
+    every token position is filled ONCE from the end (a walk from k ends where the walk from the
+    position after k's option, and its value, ends), and each 'git' match reads the outcome at its
+    forward-only base pointer, so no match re-walks the later tokens (a run of option words that each
+    hold a 'git' match, or a '-C git' chain whose values are git words, costs one pass, not one per match)."""
+    toks = [(mt.start(), mt.group()) for mt in _GATE_SPAN_TOKEN_RE.finditer(interior)]
+    # hides[k]: True when an option walk starting at token k reaches a roster verb or runs out of interior
+    # before a non-option word (the two entries past the end: fail closed), False at an off-roster word.
+    hides = [True] * (len(toks) + 2)
+    for k in range(len(toks) - 1, -1, -1):
+        w = toks[k][1]
+        if w.startswith("-") and w != "-":
+            hides[k] = hides[k + (2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1)]
+        else:
+            hides[k] = w.lower() in _NOVERIFY_VERBS
+    base = 0
+    for gm in _GATE_GIT_WORD_RE.finditer(interior):
+        gend = gm.end()
+        while base < len(toks) and toks[base][0] < gend:
+            base += 1
+        if hides[base]:
+            return True
+    return False
+
+
+# The one here-document shape the closed literal grammar accepts (_gate_heredoc_message): from the opening
+# double quote to the newline that ends the '<<' line, a '$(' holding cat and blanks, then '<<' and a
+# single-quoted delimiter of word characters; and, after the delimiter line, only blanks and blank lines
+# before the ')' that closes the substitution, with the closing double quote right after it.
+_GATE_HEREDOC_OPEN_RE = re.compile(r"\"\$\([ \t]*cat[ \t]+<<[ \t]*'([A-Za-z0-9_]+)'[ \t]*\n")
+_GATE_HEREDOC_CLOSE_RE = re.compile(r"[ \t\n]*\)\"")
+
+
+def _gate_heredoc_message(command, i):
+    """(end, value) when the double quote at command[i] opens the git commit message form
+    "$(cat <<'EOF'<newline>BODY<newline>EOF<newline>)": the substitution holds nothing but cat and one
+    here-document (_GATE_HEREDOC_OPEN_RE and _GATE_HEREDOC_CLOSE_RE); its delimiter is single-quoted, so bash
+    reads the body as literal text; the body ends at the first line that begins with the delimiter, which
+    must be exactly it (_subst_heredoc_end, the rule the lexer's body read uses); and the body holds no '$'
+    or backquote, so no further substitution or expansion stands in it. end is the index just past the
+    closing double quote; value is the word bash builds there, the body with its trailing newlines removed
+    (a command substitution strips them). None for any other shape: an unquoted, double-quoted, escaped or
+    <<- delimiter, another command before or after the here-document inside the substitution, a body that
+    does not end, or a '$' or backquote in the body. Linear in the length of the text it reads."""
+    opened = _GATE_HEREDOC_OPEN_RE.match(command, i)
+    if opened is None:
+        return None
+    delim = opened.group(1)
+    end = _subst_heredoc_end(command, opened.end(), len(command), ((delim, False),))
+    if end is None:
+        return None
+    body = command[opened.end():end - len(delim) - 1]  # the text before the delimiter line
+    if "$" in body or "`" in body:
+        return None
+    close = _GATE_HEREDOC_CLOSE_RE.match(command, end)
+    if close is None:
+        return None
+    return close.end(), body.rstrip("\n")
+
+
+def _gate_commit_message_next(words):
+    """True when the words of a flagged segment read so far (words[0] the git word) resolve the subcommand
+    commit and end with a -m that git reads as an option, so the next word is that -m's separated value:
+    not the value of an option before it and not past the option terminator. Read with the value tables of
+    _gate_terminator_index: a '--' in the -m's place is a real terminator exactly when the -m there is an
+    option."""
+    sub, args, resolved = _gate_grammar_sub(words)
+    if not resolved or sub != "commit" or not args or args[-1] != "-m":
+        return False
+    return _gate_terminator_index(sub, args[:-1] + ["--"]) == len(args) - 1
+
+
+def _gate_grammar_lex(command, start, heredoc_message=False):
+    """Lex ONE flagged segment of the raw command under the closed literal grammar, starting at the
+    'git' word at command[start]. Returns (words, end, bad, data_end): words is the ordered list of
+    resolved literal word texts (a quoted word contributes its content; everything accepted is
+    literal, so the list IS the argv bash would build), end is the index scanning stopped at (the
+    segment terminator, the first violation, or len(command)), bad is None or the (snippet, why) of
+    the first byte outside the grammar, and data_end is how far a caller may treat this segment as
+    CONSUMED data when it leaves the segment alone: `end` normally, but the index of the FIRST quoted
+    word whose interior turned the quote's pairing ambiguous (inside single quotes: any byte that is
+    not a bare-word character or a space or tab; inside double quotes: a shell operator or the other
+    quote character; in either quote: an all-literal interior that names a roster git command,
+    _gate_span_hides_roster_git) when there was one, so a 'git' hidden in such a span is re-judged as its
+    own segment rather than swallowed. The lexer never guesses past a violation: scanning stops there,
+    so `end` is also where a caller may safely resume. As soon as the words already resolve an
+    OFF-ROSTER subcommand and an ambiguous quote is seen, the lexer stops at that quote
+    (offroster_resolved): the segment can carry no bypass and the caller consumes it only to
+    data_end, so reading the rest is discarded work. That early stop bounds each off-roster lex to its
+    first ambiguous quote, keeping the whole-command pass linear when many off-roster git words that
+    each open an ambiguous quote share one line; a ROSTER verb's segment is still read to its end (its
+    own flags may sit anywhere before the terminator), so a line packing many ambiguity-opening
+    roster-verb git words is still super-linear, bounded by the hook deadline (it fails closed).
+    heredoc_message (True on a parsed command only) also accepts ONE git commit message form per segment
+    (_gate_heredoc_message) where the segment's words so far end with a -m whose value it is
+    (_gate_commit_message_next): its value word is the literal body, so a bypass spelling after it is still
+    read, and the word always leaves the quote's pairing ambiguous (data_end stops at it), so a 'git' in
+    the body is re-judged as its own segment. A second such word on the segment denies like any other '$'."""
+    words = []
+    i = start
+    n = len(command)
+    data_stop = None  # first ambiguous-pairing quote position; None until one is seen
+    # Off-roster resolution, CACHED so a line with many ambiguous quotes never re-walks `words` from the
+    # start at each one: the scan pointer only advances as words are appended, so the per-quote stop is
+    # O(1) amortized and the whole pass stays linear. _sub_off is None until the subcommand resolves,
+    # then True when that subcommand is OFF the no-verify roster.
+    _sub_scan = [1]
+    _sub_off = [None]
+
+    def result(end, bad):
+        return words, end, bad, (end if data_stop is None else data_stop)
+
+    def offroster_resolved():
+        # True once the words resolve an off-roster subcommand. Mirrors _gate_grammar_sub's global-option
+        # skip but resumes from the cached pointer (a separated arg-consuming global option swallows the
+        # next word). While the subcommand is unresolved (an option's value fell on an ambiguous quote)
+        # it returns False, so the lexer keeps scanning and the segment still fails closed.
+        if _sub_off[0] is None:
+            p = _sub_scan[0]
+            while p < len(words):
+                w = words[p]
+                if w.startswith("-") and w != "-":
+                    p += 2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1
+                    continue
+                _sub_off[0] = w.lower() not in _NOVERIFY_VERBS
+                break
+            _sub_scan[0] = p
+        return _sub_off[0] is True
+
+    while i < n:
+        c = command[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c in "\n;&|)":
+            return result(i, None)
+        if c == ">":
+            i, bad = _gate_grammar_redirect(command, i, i, "1")
+            if bad is not None:
+                return result(i, bad)
+            continue
+        if c == "'":
+            # Everything between single quotes is literal to bash, but an interior byte that is not a
+            # bare-word character or a space or tab (a shell operator, a newline, a double quote, a
+            # backquote, a '$', or any other shape) leaves the quote's pairing ambiguous: this scan
+            # began at a 'git' word, so it cannot know bash's quote context, and such a byte is exactly
+            # where bash's own close and the next open can bracket live command text. The span is then
+            # not treated as consumed data, so a 'git' inside it is re-judged, while the word itself is
+            # still read. (A backquote or '$' in particular would otherwise hide a live substitution the
+            # shell runs between a mis-paired single-quote close and the next open.) An interior that is
+            # ALL bare-word bytes and spaces still leaves the pairing ambiguous when it names a roster
+            # git command (_gate_span_hides_roster_git): bash's own close and the next open could bracket
+            # that live 'git <roster verb>', so it is re-judged too, whatever bytes the interior holds.
+            j = command.find("'", i + 1)
+            if j < 0:
+                return result(i, _gate_grammar_violation(command, i, i, n))
+            if data_stop is None:
+                for k in range(i + 1, j):
+                    ck = command[k]
+                    if ck not in _GATE_GRAMMAR_WORD_CHARS and ck not in " \t":
+                        data_stop = i
+                        break
+                if data_stop is None and _gate_span_hides_roster_git(command[i + 1:j]):
+                    data_stop = i
+            # The off-roster early stop sits OUTSIDE the `data_stop is None` guard (like the double-quote
+            # branch): once the words so far resolve an off-roster subcommand, every later ambiguous
+            # quote on the segment can stop here even after an earlier quote already set data_stop, which
+            # keeps a line of many off-roster git words that each open an ambiguous quote linear. The
+            # cached offroster_resolved never re-walks the words from the start, so the stop stays O(1).
+            if data_stop is not None and offroster_resolved():
+                return result(i, None)
+            if j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END:
+                return result(i, _gate_grammar_violation(command, i, i, n))
+            words.append(command[i + 1:j])
+            i = j + 1
+            continue
+        if c == '"':
+            # Inside double quotes bash treats most characters literally, but '$', a backquote and a
+            # backslash still expand or escape, '!' can trigger history expansion, and the closing
+            # quote ends the word; so a complete standalone pair holding none of those is exactly the
+            # literal between the quotes and its interior is judged like a bare word (a quoted '-n' or
+            # '--no-verify' still reaches _no_verify_spelling). An interior '$', backquote or
+            # backslash denies at that byte; an interior '!' denies (history expansion could rewrite
+            # it); an interior newline denies at the quote (the segment model ends at a newline, so a
+            # quoted one cannot be carried); a glued or unterminated pair denies like its
+            # single-quoted counterpart. An interior shell operator or single quote leaves the quote's
+            # pairing ambiguous, so the span is not treated as consumed data (a 'git' inside it is
+            # re-judged) while the word itself is still read for its own bypass spelling.
+            if heredoc_message and words and words[-1] == "-m":
+                message = _gate_heredoc_message(command, i)
+                if (message is not None and (message[0] >= n or command[message[0]] in _GATE_GRAMMAR_TOKEN_END)
+                        and _gate_commit_message_next(words)):
+                    heredoc_message = False  # one message word per segment, so the -m check stays linear
+                    if data_stop is None:
+                        data_stop = i
+                    words.append(message[1])
+                    i = message[0]
+                    continue
+            j = command.find('"', i + 1)
+            if j < 0:
+                return result(i, _gate_grammar_violation(command, i, i, n))
+            for k in range(i + 1, j):
+                ck = command[k]
+                if ck in "$`\\":
+                    return result(i, _gate_grammar_violation(command, i, k, n))
+                if ck == "\n":
+                    return result(i, _gate_grammar_violation(command, i, i, n))
+                if ck == "!":
+                    return result(i, (command[i:j + 1][:40], _GATE_GRAMMAR_BANG_WHY))
+                if data_stop is None and (ck in _GATE_GRAMMAR_QUOTE_BREAK or ck == "'"):
+                    data_stop = i
+            if data_stop is None and _gate_span_hides_roster_git(command[i + 1:j]):
+                data_stop = i  # an all-literal interior still re-judged when it names a roster git
+            if data_stop is not None and offroster_resolved():
+                return result(i, None)
+            if j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END:
+                return result(i, _gate_grammar_violation(command, i, i, n))
+            words.append(command[i + 1:j])
+            i = j + 1
+            continue
+        if c in _GATE_GRAMMAR_WORD_CHARS:
+            if c in "#~":
+                return result(i, _gate_grammar_violation(command, i, i, n))
+            j = i
+            while j < n and command[j] in _GATE_GRAMMAR_WORD_CHARS:
+                j += 1
+            word = command[i:j]
+            nxt = command[j:j + 1]
+            if nxt == ">":
+                if word.isdigit():
+                    # an ALL-DIGIT word standing immediately before '>' is bash's IO number, not a
+                    # word; only 2 is accepted (the 2>/dev/null and 2>&1 forms)
+                    if word != "2":
+                        return result(i, (command[i:j + 1][:40], _GATE_GRAMMAR_REDIR_WHY))
+                    i, bad = _gate_grammar_redirect(command, j, i, "2")
+                    if bad is not None:
+                        return result(i, bad)
+                    continue
+                words.append(word)  # the word ends at the operator, judged on the next pass
+                i = j
+                continue
+            if nxt and nxt not in _GATE_GRAMMAR_TOKEN_END:
+                return result(i, _gate_grammar_violation(command, i, j, n))
+            words.append(word)
+            i = j
+            continue
+        return result(i, _gate_grammar_violation(command, i, i, n))
+    return result(n, None)
+
+
+def _gate_grammar_sub(words):
+    """(sub, args, resolved) for a lexed flagged segment whose words[0] is the git word: the first
+    word after the git global options, and every word after it. git does not abbreviate its global
+    options, so a '-'-leading word here is a global option: an inline '--opt=value' form carries its
+    value in its own word, a separated arg-consuming global option (_GIT_ARG_OPTS: -C DIR, -c
+    NAME=VALUE, --git-dir DIR, ...) consumes the next word, and any other is bare. resolved is False
+    when the words end before a subcommand word appears (bare 'git', 'git -C dir' at a segment end,
+    or a lex violation where a global option's value or the subcommand was expected: the caller
+    fails closed on the latter, since the verb bash will run cannot be known)."""
+    i = 1
+    n = len(words)
+    while i < n:
+        w = words[i]
+        if w.startswith("-") and w != "-":
+            if "=" in w:
+                i += 1  # an inline '--opt=value' global option carries its value in this word
+            elif w in _GIT_ARG_OPTS:
+                i += 2  # a separated arg-consuming global option: skip its value word
+            else:
+                i += 1
+            continue
+        return w, words[i + 1:], True
+    return None, [], False
+
+
+def _gate_closed_grammar_scan(command, heredoc_message=False):
+    """(kind, what, how) for the first raw 'git' occurrence whose segment the closed literal grammar
+    refuses, or None. kind is 'bypass' when the resolved literal words already spell the hook bypass
+    (what is the subcommand, how the matched spelling, via _no_verify_spelling, so the value-aware
+    '--' boundary and the value-taking option tables apply here exactly as on the parsed path);
+    'grammar' when a roster-verb segment carries a byte outside the grammar; 'unresolved' when the
+    subcommand cannot be resolved because the violation sits where a global option's value or the
+    subcommand is expected (for both: what is the raw snippet, how the construct class). EVERY
+    '\\bgit\\b' occurrence is scanned, wherever it sits: bash runs git wherever the word reaches a
+    command position, and this gate deliberately does not model which positions those are, so a git
+    occurrence inside quoted text or a here-document body is judged as if it ran (a disclosed
+    over-deny; the roster probe is case-insensitive for the same reason). An occurrence inside a
+    region an earlier scan consumed is skipped: there it is literal data or an operand of an
+    accepted or off-roster git command, already judged by that scan. The consumed watermark advances
+    only to the lexer's data_end, which stops SHORT of a quoted span whose interior turned the
+    quote's pairing ambiguous (inside single quotes, any non-word non-space byte; inside double quotes,
+    a shell operator or the other quote; in either quote, an all-literal interior that names a roster
+    git command), so a 'git' hidden in such a span is re-judged as
+    its own segment instead of swallowed. Scanning resumes at each scan's stop point, and the watermark
+    never moves backwards. The pass is linear in the command length while off-roster segments dominate:
+    the lexer stops an off-roster segment at its first ambiguous quote (the stop sits outside the
+    single-quote branch's data_stop guard, like the double-quote branch, so a later off-roster quote
+    stops the lex even after an earlier quote set data_stop), so each such segment is read
+    once and the watermark passes it. A ROSTER-verb segment is read to its end (its own flags may sit
+    anywhere before the terminator), so a line packing many ambiguity-opening roster-verb git words
+    re-reads the remainder from each and is super-linear in that count; such a line is bounded by the
+    PreToolUse hook deadline, past which the check fails closed (deny). WHERE that deadline is armed (a
+    platform with SIGALRM/setitimer, the alarm unblocked, on the main thread) this is an availability
+    cost, never a bypass; on a platform or call that runs with no deadline (see the module docstring:
+    Windows, a blocked SIGALRM, an off-main-thread call) such a line is not time-bounded here, so the
+    super-linear cost is not fail-closed and the fallback to platform-level limits is all that remains.
+    heredoc_message is True only where the shared lexer parsed the command (gate_weakening's parsed path and
+    the failed-main-reading floor after it): there the grammar also accepts the git commit message form
+    (_gate_heredoc_message, read by _gate_grammar_lex). The parse-error fallback and the doubt path keep
+    False, so on a command the lexer cannot parse that form still denies."""
+    consumed = 0
+    for m in _GATE_GIT_WORD_RE.finditer(command):
+        p = m.start()
+        if p < consumed:
+            continue
+        words, end, bad, data_end = _gate_grammar_lex(command, p, heredoc_message)
+        sub, args, resolved = _gate_grammar_sub(words)
+        if not resolved:
+            if bad is not None:
+                return ("unresolved",) + bad
+            consumed = data_end  # bare git at a segment end: no verb runs
+            continue
+        if sub.lower() not in _NOVERIFY_VERBS:
+            consumed = data_end  # off-roster verb: this gate leaves the segment alone
+            continue
+        spelling = _no_verify_spelling(sub.lower(), args)
+        if spelling is not None:
+            return ("bypass", sub, spelling)
+        if bad is not None:
+            return ("grammar",) + bad
+        consumed = data_end
     return None
 
 
@@ -11625,22 +12151,59 @@ def _gate_flow_note(records, command):
             .format(kind) + _GATE_NOTE_TAIL)
 
 
-def _gate_weakening_fallback(command):
+def _gate_grammar_messages(kind, what, how, unparsed):
+    """(reason, banner) for a _gate_closed_grammar_scan hit, for the parsed path (unparsed False) and
+    the unparseable fallback (unparsed True): a 'bypass' hit names the subcommand and the matched
+    spelling; a 'grammar' or 'unresolved' hit names the offending word as typed and the construct
+    class, and tells the caller to re-issue the git command plainly (the closed literal grammar)."""
+    lead = ("the command could not be parsed by the shell lexer (likely unbalanced quotes) and its "
+            "raw text " if unparsed else "the raw command text ")
+    if kind == "bypass":
+        return (
+            "AIQT rule gatdis (gate-discipline): {}names a git {} carrying {}, a deliberate bypass "
+            "of the verification hooks that gate it. The gate reads the raw text, so a bypass "
+            "spelling inside quoted data denies too; never weaken a gate to obtain a pass, and keep "
+            "hook-bypass spellings out of command text. {} {}".format(lead, what, how, _GATE_ALTS,
+                                                                     _GATE_FILE_ROUTE),
+            "AIQT guardrail: denied a command whose text names a git verification-hook bypass "
+            "(--no-verify family) (rule gatdis, fail-closed).")
+    where = ("where its subcommand or a global option's value is expected, so the verb bash would "
+             "run cannot be resolved" if kind == "unresolved"
+             else "on a git subcommand whose verification hooks a skip option can turn off")
+    return (
+        "AIQT rule gatdis (gate-discipline): {}names a git command, and the word {!r} {} {}. The "
+        "gate holds such a git segment to a closed literal grammar (bare literal words, one "
+        "standalone single-quoted literal per word, one standalone double-quoted literal per word "
+        "holding no '$', backquote, backslash or '!', literal global-option values, and only the "
+        ">/dev/null, 2>/dev/null and 2>&1 redirections), because bash rewrites anything else before "
+        "git parses its options (an empty expansion leaves a bare '-n' or '--no-verify', silently "
+        "skipping the verification hooks), and this gate does not model those rewrites; it denies "
+        "fail-closed. Re-issue the command plainly: spell every word of the git command literally, "
+        "resolve any expansion before the call, and keep comments, redirections and here-documents "
+        "off the git segment. {} {}".format(lead, what[:60], how, where, _GATE_ALTS, _GATE_FILE_ROUTE),
+        "AIQT guardrail: denied a git command whose word {!r} is outside the gate's closed literal "
+        "grammar (rule gatdis, fail-closed).".format(what[:40]))
+
+
+def _gate_weakening_fallback(command, heredoc_message=False):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
     so it cannot prove the -n is the bypass rather than an unrelated flag, and it reads the cluster as
-    the bypass, the safe direction); a checker keyword next to a raw swallow
+    the bypass, the safe direction); a raw git naming whose segment the closed literal grammar refuses
+    (_gate_closed_grammar_scan, the same scan the parsed path runs over the raw text) DENIES;
+    a checker keyword next to a raw swallow
     or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
     design, the documented posture of the sibling fallbacks (_diff_source_fallback,
     _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable. Which decision the
-    text earns is _gate_weakening_fallback_kind's."""
+    text earns is _gate_weakening_fallback_kind's. heredoc_message is passed to the grammar scan: True only
+    on the failed-main-reading floor, where the lexer did parse the command."""
     kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to bypass verification hooks with a --no-verify "
-            "spelling; failing closed. {}".format(_GATE_ALTS),
+            "spelling; failing closed. {} {}".format(_GATE_ALTS, _GATE_FILE_ROUTE),
             "AIQT guardrail: denied an unparseable command that appears to bypass git verification "
             "hooks (rule gatdis, fail-safe).")
     if kind == "short-n":
@@ -11648,10 +12211,15 @@ def _gate_weakening_fallback(command):
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to run git commit or git am with a short -n, "
             "which on those verbs bypasses the verification hooks; it is denied fail-safe. Never weaken a "
-            "gate to obtain a pass; re-issue it as a parseable command with no -n so the hooks run. {}"
-            .format(_GATE_ALTS),
+            "gate to obtain a pass; re-issue it as a parseable command with no -n so the hooks run. {} {}"
+            .format(_GATE_ALTS, _GATE_FILE_ROUTE),
             "AIQT guardrail: denied an unparseable git commit/am that appears to carry -n (--no-verify) "
             "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
+    grammar_hit = _gate_closed_grammar_scan(command, heredoc_message)
+    if grammar_hit is not None:
+        grammar_kind, what, how = grammar_hit
+        reason, banner = _gate_grammar_messages(grammar_kind, what, how, True)
+        return _deny(reason, banner)
     if kind == "swallow":
         # ROUND-2 FINDING 14: the swallow/truncate checker-shape heuristic is too broad (a benign optional
         # probe is common), so on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; the
@@ -11665,6 +12233,157 @@ def _gate_weakening_fallback(command):
             "let its exit status stand (redirect output to a file if you need to page it), rather than "
             "discarding its failure signal; if it is a benign optional probe, this is allowed.")
     return _allow()
+
+
+# The command-running wrappers whose own options and operands stand BEFORE the git command they run, so
+# the gate-weakening parsed path judges the git behind one (env 'A=git' git commit -nv runs git commit
+# -nv; the command word 'env' would otherwise hide it). Each maps to (options taking a separate value,
+# valueless flag options); env also consumes leading VAR=value assignments, timeout a trailing duration
+# operand, and 'command -v'/'-V' looks a name up and runs nothing. A wrapper option this grammar does
+# NOT resolve (an attached short-option value such as env -uX, nice -n5, a combined flag) fails closed:
+# the peel returns _GATE_PEEL_UNRESOLVED and the caller judges the dequoted words, so a quoted git
+# spelling (g'i't) the raw \bgit\b scan cannot see still denies. The same wrapper class the sibling
+# commit-identity finder reads (_CMTIDN_GIT_WRAPPERS), less sudo/xargs/setsid/stdbuf, which carry operand
+# shapes (an -I replacement string, a sudo command vector) this bounded peel does not model; those
+# unlisted wrappers (_GATE_UNLISTED_WRAPPERS) get the SAME dequoted fail-closed judgement in the caller.
+_GATE_NOVERIFY_WRAPPERS = dict((
+    ("env", (frozenset(("-u", "--unset", "-C", "--chdir")),
+             frozenset(("-i", "--ignore-environment", "-0", "--null", "-v", "--debug")))),
+    ("nice", (frozenset(("-n", "--adjustment")), frozenset())),
+    ("timeout", (frozenset(("-s", "--signal", "-k", "--kill-after")),
+                 frozenset(("--preserve-status", "--foreground", "-v", "--verbose", "-f")))),
+    ("time", (frozenset(("-o", "--output", "-f", "--format")),
+              frozenset(("-p", "--portability", "-a", "--append", "-v", "--verbose", "-q", "--quiet")))),
+    ("exec", (frozenset(("-a",)), frozenset(("-c", "-l")))),
+    ("nohup", (frozenset(), frozenset())),
+    ("command", (frozenset(), frozenset(("-p",)))),
+))
+
+# The command-running wrappers the sibling commit-identity finder recognizes but this bounded peel does
+# not model (their operand shapes are not parsed here). The caller judges a segment that runs the git
+# behind one with the fail-closed dequoted-word scan, so a hidden roster-git bypass still denies.
+_GATE_UNLISTED_WRAPPERS = _CMTIDN_GIT_WRAPPERS - frozenset(_GATE_NOVERIFY_WRAPPERS)
+
+# Peel sentinel: a wrapper option the grammar could not resolve, so the command behind it is unknown
+# here. Distinct from None (no command runs) and from an argv list (a resolved command word).
+_GATE_PEEL_UNRESOLVED = ("__gate_peel_unresolved__",)
+
+
+def _gate_novrf_peel(argv):
+    """The argv of the command a segment runs after the wrappers in _GATE_NOVERIFY_WRAPPERS (each with
+    its own option grammar) are peeled; _GATE_PEEL_UNRESOLVED when a wrapper option is outside that
+    grammar (fail closed: the command behind it is unknown here, so the caller judges the dequoted
+    words); or None when no command runs here (an empty result or a 'command -v'/'-V' name lookup).
+    Leading VAR=value words are skipped first. Purely lexical, bounded by the token count."""
+    i = _command_word_index(argv)
+    n = len(argv)
+    while i < n:
+        word = _gate_word(argv[i])
+        grammar = _GATE_NOVERIFY_WRAPPERS.get(word)
+        if grammar is None:
+            return argv[i:]
+        value_opts, flag_opts = grammar
+        i += 1
+        while i < n:
+            tok = argv[i]
+            if word == "env" and _ENV_ASSIGN_RE.match(tok):
+                i += 1
+                continue
+            if tok == "--":
+                i += 1
+                break
+            if not tok.startswith("-") or (tok == "-" and word != "env"):
+                break
+            if word == "command" and tok in ("-v", "-V"):
+                return None  # a name lookup runs no command
+            if tok in value_opts:
+                i += 2
+            elif (tok in flag_opts or tok.split("=", 1)[0] in value_opts
+                  or (word == "nice" and tok[1:].isdigit())):
+                i += 1
+            else:
+                # a wrapper option outside the grammar: fail closed, the caller judges the dequoted words
+                return _GATE_PEEL_UNRESOLVED
+        if word == "timeout":
+            i += 1   # the duration operand
+    return None
+
+
+def _gate_novrf_dequoted_bypass(words):
+    """(sub, spelling) when the already shell-dequoted literal words name a git whose roster subcommand
+    carries a no-verify bypass (-n in a short cluster, or --no-verify), else None. This is the fail-
+    closed judgement for a wrapper whose option grammar did not resolve the command (env -uX, nice -n5,
+    a combined flag) and for an unlisted command-running wrapper (sudo, xargs, setsid, stdbuf), read over the
+    lexer's words (the de-quoted text readings use the any-word walk, _gate_any_word_bypass, which finds every
+    bypass this walk finds on the same words): the
+    spelling is read from the dequoted argv bash would build, so a quote-concatenated git spelling the
+    raw \\bgit\\b scan cannot see (g'i't) still denies. Any word whose basename is 'git' starts the
+    roster/spelling walk, so text that merely names such a command is a disclosed safe-direction
+    over-deny. Purely lexical, and linear in the word count. The subcommand each git word resolves is read
+    from two tables filled ONCE from the end, the run of leading VAR=value words at each position (the
+    _command_word_index skip) and where a global-option walk from each position stops (the _git_sub_and_args
+    walk). A roster-verb subcommand's arguments are read to its option terminator (_no_verify_spelling), but
+    that reading can find a bypass only in a '--' word naming a prefix of no-verify or a single-dash word
+    holding an 'n', so it stops after the last such word and a roster git with none after its verb is passed
+    over; the terminator is found over slices that double in length, so a walk costs what it reads; and a walk
+    that found no bypass has already read, in the same state, every word a later git word with the same verb
+    would read (that verb is a plain word, so no option value is pending after it, and both walks end at the
+    same terminator or at that last word), so such a later git word is passed over too. Each verb's walks so
+    read disjoint stretches of the list, and every decision, and the spelling returned, is the one a full
+    walk from every git word gives."""
+    n = len(words)
+    assigns = [0] * (n + 1)  # assigns[p]: how many leading VAR=value words start at p
+    subs = [None] * (n + 2)  # subs[p]: index of the word a global-option walk from p stops at, or None
+    last = -1  # the last word _no_verify_spelling can read as a bypass, or -1
+    for p in range(n - 1, -1, -1):
+        w = words[p]
+        if last < 0 and (_has_long_prefix((w,), "no-verify") or (w[:1] == "-" and w[1:2] != "-" and "n" in w)):
+            last = p
+        if _ENV_ASSIGN_RE.match(w):
+            assigns[p] = assigns[p + 1] + 1
+        if w.startswith("-"):
+            subs[p] = subs[p + (2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1)]
+        else:
+            subs[p] = p
+    read_to = {}  # verb -> the end of the stretch a walk for that verb read without finding a bypass
+    for idx in range(max(last, 0)):
+        if _gate_word(words[idx]) != "git":
+            continue
+        s = subs[idx + assigns[idx] + 1]  # skip the leading assignments and the command word itself
+        if s is None or s >= last or words[s] not in _NOVERIFY_VERBS or s < read_to.get(words[s], 0):
+            continue
+        sub = words[s]
+        size = 16
+        while True:  # the walk's end: its terminator, or the word after last
+            stop = min(s + 1 + size, last + 1)
+            end = s + 1 + _gate_terminator_index(sub, words[s + 1:stop])
+            if end < stop or stop == last + 1:
+                break
+            size *= 2
+        spelling = _no_verify_spelling(sub, words[s + 1:end])
+        if spelling is not None:
+            return sub, spelling
+        read_to[sub] = end
+    return None
+
+
+def _gate_novrf_segment_bypass(tokens):
+    """(sub, spelling) when a segment runs a roster git carrying a no-verify bypass behind the command-
+    running wrappers, else None. A recognized wrapper (_GATE_NOVERIFY_WRAPPERS) is peeled and the git
+    behind it judged directly; a wrapper option the grammar could not resolve (_GATE_PEEL_UNRESOLVED) and
+    an unlisted command-running wrapper (_GATE_UNLISTED_WRAPPERS: sudo, xargs, setsid, stdbuf) both fall
+    to the fail-closed dequoted-word scan."""
+    peeled = _gate_novrf_peel(tokens)
+    if peeled is _GATE_PEEL_UNRESOLVED or (
+            peeled is not None and _command_word(peeled) in _GATE_UNLISTED_WRAPPERS):
+        return _gate_novrf_dequoted_bypass(tokens)
+    if peeled is not None and _command_word(peeled) == "git" and not _has_info_flag(peeled):
+        sub, args = _git_sub_and_args(peeled)
+        if sub in _NOVERIFY_VERBS:
+            spelling = _no_verify_spelling(sub, args)
+            if spelling is not None:
+                return sub, spelling
+    return None
 
 
 # The kinds of _gate_weakening_fallback_kind on which _gate_weakening_fallback denies.
@@ -11687,25 +12406,358 @@ def _gate_weakening_fallback_kind(command):
     return None
 
 
-def _gate_recovered_sink(command, doubt=None):
-    """The verification run piped into a truncating sink (_verification_sink) that the complete segments a
-    partial lex of command recovers prove, or None: gate_weakening's first check on a lex that fails, before
-    its raw fallback. The in-progress segment the lexer was inside is dropped, since its unseen tokens could
-    change it; a construct that begins a new segment leaves every recovered segment complete. doubt, when
-    given, is the _UncertainHashError the caller's own full lex of command just raised: where a partial lex
-    of the same command would raise it too, the partial lex resumes from the fork it carries
-    (_lex_resume_partial) instead of lexing the text before the command's first uncertain '#' a second time.
-    A doubt raised because a reading failed to lex (reading_failed) takes the full partial lex instead: a
-    partial lex does not raise there, it returns every reading's recovered segments, so resuming from the
-    fork would drop the segments of the readings that lex whole and miss a sink past the first uncertain
-    '#'."""
+def _gate_partial_segments(command, doubt=None):
+    """(complete, open_segment) from a partial lex of command: complete is the list of complete segments it
+    recovers, and open_segment is the in-progress segment the lexer was inside when it stopped (its words
+    and redirects read before the construct, and its raw slice, which runs from that segment's start to the
+    end of command), or None where a construct that begins a new segment stopped it, leaving every
+    recovered segment complete. doubt, when given, is the _UncertainHashError the caller's own full lex of
+    command just raised: where a partial lex of the same command would raise it too, the partial lex resumes
+    from the fork it carries (_lex_resume_partial) instead of lexing the text before the command's first
+    uncertain '#' a second time. A doubt raised because a reading failed to lex (reading_failed) takes the
+    full partial lex instead: a partial lex does not raise there, it returns every reading's recovered
+    segments, so resuming from the fork would drop the segments of the readings that lex whole and miss a
+    sink past the first uncertain '#'."""
     if doubt is not None and not doubt.reading_failed:
         recovered, _complete, in_progress = _lex_resume_partial(command, doubt)
     else:
         recovered, _complete, in_progress = _lex_command(command, partial=True)
     if in_progress:
-        recovered = recovered[:-1]
-    return _verification_sink(recovered)
+        return recovered[:-1], recovered[-1]
+    return recovered, None
+
+
+def _gate_recovered_segments(command, doubt=None):
+    """The complete segments a partial lex of command recovers (_gate_partial_segments): the in-progress
+    segment the lexer was inside is dropped, since its unseen tokens could change it, so a sink check reads
+    only segments whose every token was seen."""
+    return _gate_partial_segments(command, doubt)[0]
+
+
+# An ANSI-C $'...' quote with its body (escapes kept), and one escape in such a body: an octal, \x, \u or \U
+# code, a \c control character, or any other escaped character (_gate_dequoted_words).
+_GATE_ANSI_C_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
+_GATE_ANSI_C_ESCAPE_RE = re.compile(
+    r"\\(?:([0-7]{1,3})|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c(.)|(.))", re.S)
+_GATE_ANSI_C_LETTERS = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r",
+                        "t": "\t", "v": "\v"}
+
+
+def _gate_ansi_c_escape(match):
+    """The character bash reads for one ANSI-C escape (_GATE_ANSI_C_ESCAPE_RE); '' for a code past Unicode."""
+    octal, hex2, hex4, hex8, control, other = match.groups()
+    if control is not None:
+        return chr(ord(control) & 0x1F)
+    if other is not None:
+        return _GATE_ANSI_C_LETTERS.get(other, other)
+    code = int(octal, 8) if octal is not None else int(hex2 or hex4 or hex8, 16)
+    return chr(code) if code <= 0x10FFFF else ""
+
+
+def _gate_dequoted_words(text):
+    """The words the fail-closed dequoted-word scan reads from raw text: each ANSI-C $'...' quote decoded
+    first, escapes included (so $'g\\x69t' reads git), then the de-quoted copy (_dequoted_text: continuations
+    joined, quote characters and backslashes removed) split at blanks. After an option word whose attached
+    value names git (a '--name=' value whose basename is git, or a single-dash word ending in git:
+    env --split-string='g"i"t ...', env -S'git ...') a 'git' word is added, so the git that option runs starts
+    the walk too. A raw-text reading only: it can only add a deny, never prove a command safe. It reads no
+    git word built at run time (an expansion, a substitution, a glob or brace expansion), and a quote is
+    removed wherever it stands, so a quoted word holding a blank is split into several words. This is the
+    blank-split reading: its escapes keep a NUL and the rest of the quote, and it splits at every character
+    str.split() treats as whitespace; the bash-model readings (_gate_bash_readings) are read beside it, so a
+    deny it gives is kept."""
+    words = []
+    decoded = _GATE_ANSI_C_RE.sub(lambda m: _GATE_ANSI_C_ESCAPE_RE.sub(_gate_ansi_c_escape, m.group(1)), text)
+    for w in _dequoted_text(decoded).split():
+        words.append(w)
+        if w[:2] == "--":
+            if "=" in w and _gate_word(w.split("=", 1)[1]) == "git":
+                words.append("git")
+        elif w[:1] == "-" and len(w) > 4 and w[-3:].lower() == "git":
+            words.append("git")
+    return words
+
+
+# The escapes of an ANSI-C $'...' body as bash decodes them (bash 5.3.9, checked 2026-10-25): an octal code of
+# one to three digits, and a \x code of one or two hex digits or \x{...} with any number, keep their low byte;
+# \u and \U take up to four and eight hex digits; \c reads the next character as a control character (\c\\
+# takes both backslashes, \c? is DEL); the letter escapes and \\, \', \" and \? decode; any other escape keeps
+# its backslash, so env -S still sees the \_ of $'git\_commit'. The body of one such quote runs to the first
+# quote no backslash escapes (_GATE_ANSI_C_BODY_RE).
+_GATE_BASH_ESCAPE_RE = re.compile(
+    r"\\(?:([0-7]{1,3})|x\{([0-9A-Fa-f]*)\}?|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})"
+    r"|c(\\\\|.)|(.))", re.S)
+_GATE_ANSI_C_BODY_RE = re.compile(r"(?:[^'\\]|\\.)*", re.S)
+
+# Where the bash-model readings split words: bash's blanks (space, tab and newline, not the other characters
+# Python's str.split() treats as whitespace) and every shell operator character and opener (; & | ( ) < > and
+# the backquote, so $(, <( and >( split at their '('), wherever each stands, quoted or not, so a git inside a
+# quoted script (sh -c 'true;g"i"t commit -nv') or glued to an operator (cat <(g'i't commit -nv)) is a word.
+_GATE_WORD_BREAK_RE = re.compile(r"[ \t\n;&|()<>`]+")
+
+
+def _gate_ansi_c_text(body):
+    """The text bash reads for the body of one ANSI-C $'...' quote: each escape decoded as bash decodes it
+    (_GATE_BASH_ESCAPE_RE), and the body cut at the first escape that yields a NUL byte (\\0, \\x00, \\x{},
+    \\u0000, \\c@ and their kin), since bash ends that quote's text there and keeps the rest of the word."""
+    out = []
+    pos = 0
+    for m in _GATE_BASH_ESCAPE_RE.finditer(body):
+        octal, braced, hex2, hex4, hex8, control, other = m.groups()
+        if control is not None:
+            # bash reads one byte here: a multibyte character gives its first byte, and the rest stays text
+            first = control[0].encode("utf-8", "surrogatepass")[0]
+            char = "\x7f" if control == "?" else chr(first & 0x1F)
+            if first > 0x7F:
+                char += "\ufffd"
+        elif other is not None:
+            char = _GATE_ANSI_C_LETTERS.get(other, other if other in "\\'\"?" else "\\" + other)
+        elif octal is not None:
+            char = chr(int(octal, 8) & 0xFF)
+        elif braced is not None:
+            char = chr(int(braced[-2:] or "0", 16))
+        elif hex2 is not None:
+            char = chr(int(hex2, 16))
+        else:
+            code = int(hex4 or hex8, 16)
+            char = chr(code) if code <= 0x10FFFF else ""
+        out.append(body[pos:m.start()])
+        if char[:1] == "\x00":
+            return "".join(out)
+        out.append(char)
+        pos = m.end()
+    out.append(body[pos:])
+    return "".join(out)
+
+
+def _gate_shell_level(text):
+    """text with one level of shell quoting read as bash reads it: a backslash outside quotes escapes the next
+    character, a single-quoted span is literal, a double-quoted span is literal but for a backslash before $,
+    backquote, double quote, backslash or newline, and an ANSI-C $'...' span is decoded (_gate_ansi_c_text). A
+    quote is removed only where it opens or closes a span at this level, so the quoting of a script handed on
+    inside it (sh -c, eval, env -S) is left for the next level; a quote left open runs to the end. Raw text
+    only: no expansion or substitution is performed, and a quote inside a command substitution that stands in
+    double quotes is read at this level, where bash reads it inside the substitution."""
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            out.append(text[i + 1:i + 2])
+            i += 2
+        elif c == "'":
+            end = text.find("'", i + 1)
+            end = n if end < 0 else end
+            out.append(text[i + 1:end])
+            i = end + 1
+        elif c == "$" and text[i + 1:i + 2] == "'":
+            body = _GATE_ANSI_C_BODY_RE.match(text, i + 2)
+            out.append(_gate_ansi_c_text(body.group()))
+            i = body.end() + 1
+        elif c == '"' or (c == "$" and text[i + 1:i + 2] == '"'):
+            i += 1 if c == '"' else 2
+            while i < n and text[i] != '"':
+                if text[i] == "\\" and text[i + 1:i + 2] in ("$", "`", '"', "\\", "\n"):
+                    i += 1
+                out.append(text[i])
+                i += 1
+            i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _gate_reading_words(text):
+    """The words of one bash-model reading (_gate_bash_readings): env -S's \\_ read as a separator wherever it
+    stands, a '$' before a quote and every quote character and backslash left in text removed, the rest split at
+    _GATE_WORD_BREAK_RE, and a 'git' word added after an option word whose attached value names git, as in
+    _gate_dequoted_words."""
+    plain = re.sub(r"\$(?=['\"])", "", text.replace("\\_", " "))
+    plain = plain.replace("'", "").replace('"', "").replace(chr(92), "")
+    words = []
+    for w in _GATE_WORD_BREAK_RE.split(plain):
+        if not w:
+            continue
+        words.append(w)
+        if w[:2] == "--":
+            if "=" in w and _gate_word(w.split("=", 1)[1]) == "git":
+                words.append("git")
+        elif w[:1] == "-" and len(w) > 4 and w[-3:].lower() == "git":
+            words.append("git")
+    return words
+
+
+def _gate_bash_readings(text):
+    """The word lists of the bash-model readings of text, its line continuations joined first: the text at its
+    own quoting level as bash reads it (_gate_shell_level), that result read once more as the shell it is handed
+    to reads it (sh -c, eval or env -S, one level in), and the text with every ANSI-C $'...' quote the raw match
+    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words."""
+    joined = _join_continuations(text)[0]
+    outer = _gate_shell_level(joined)
+    decoded = _GATE_ANSI_C_RE.sub(lambda m: _gate_ansi_c_text(m.group(1)), joined)
+    return (_gate_reading_words(outer), _gate_reading_words(_gate_shell_level(outer)),
+            _gate_reading_words(decoded))
+
+
+def _gate_any_word_bypass(words):
+    """(sub, spelling) when a word after the first word naming git (_gate_word) is a roster verb and a word after
+    that verb is a hook-skip spelling for it, else None: a '--' word naming a prefix of no-verify
+    (_has_long_prefix) after any roster verb, or a single-dash word holding an 'n' after commit or am. Each word
+    is read on its own: no '--' ends the options, no option takes the next word or the rest of its own word as
+    its value, and no global option between git and the verb is resolved, so a quoted span that splits into a
+    '--', a value-taking option or a global option can never swallow a real -n. One pass from the end, linear
+    in the word count."""
+    first = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
+    long_at = short_at = None  # the nearest long and short spelling words after the word being read
+    found = None
+    for p in range(len(words) - 1, first, -1):
+        w = words[p]
+        if w in _NOVERIFY_VERBS:
+            if long_at is not None:
+                found = (w, "a --no-verify spelling")
+            elif short_at is not None and w in _NOVERIFY_SHORT_N_VERBS:
+                found = (w, "the short -n (--no-verify) in {!r}".format(words[short_at][:40]))
+        if _has_long_prefix((w,), "no-verify"):
+            long_at = p
+        elif w[:1] == "-" and w[1:2] != "-" and "n" in w:
+            short_at = p
+    return found
+
+
+def _gate_text_bypass(text, skip_own=False):
+    """(sub, spelling) when a de-quoted reading of text names a roster git carrying a no-verify bypass, else
+    None. The blank-split reading (_gate_dequoted_words) and the bash-model readings (_gate_bash_readings) are
+    each judged by the any-word walk (_gate_any_word_bypass), which finds every bypass the value-aware walk
+    (_gate_novrf_dequoted_bypass) finds on the same words, so a deny the blank-split reading gave is kept. With
+    skip_own, each reading's first git word is dropped first. That word is the segment's own git only in text
+    that starts at it, so that git keeps the value-aware reading of the lexer's words; in a whole segment's
+    text the first git word may be one hidden before it, in an assignment, a redirection or a wrapper's option
+    value (A="$(g'i't commit -nv)" git status), and dropping it would pass that git over, so a caller that
+    passes skip_own for such text also reads the text before the own git without it (_gate_behind_bypass). A
+    raw-text reading only: it can only add a deny, never prove a command safe."""
+    for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
+        if skip_own:
+            k = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
+            words = words[k + 1:]
+        bypass = _gate_any_word_bypass(words)
+        if bypass is not None:
+            return bypass
+    return None
+
+
+def _gate_unread_bypass(text):
+    """(sub, spelling) when text, the part of a command a partial lex could not read, names a roster git
+    carrying a no-verify bypass, else None. text is split into raw command segments at the ;, &, | and newline
+    separators outside any quoting _skip_quoting can prove (_raw_push_segments, the bounded split the push
+    backstop reads), and each segment is judged by its de-quoted readings (_gate_text_bypass), so a
+    quote-concatenated git (g'i't) past a here-string or process substitution the lexer stops at is still read.
+    A raw-text reading only, read beside the partial lex and the raw fallback, so it can only add a deny, never
+    prove a command safe. Disclosed safe-direction over-deny: a quoted word holding a blank or an operator is
+    split into several words here (g'i't commit -m 'fix -n' <<<x reads a -n), and any word whose basename is
+    git starts the walk, so text that merely names such a command denies too."""
+    for segment in _raw_push_segments(text):
+        bypass = _gate_text_bypass(segment)
+        if bypass is not None:
+            return bypass
+    return None
+
+
+def _gate_word_start(raw, argv, idx):
+    """The index in raw, the raw slice of one lexed segment whose words are argv, at which the word argv[idx]
+    starts, or None where this rescan cannot place it. raw is read from its start as the lexer reads it:
+    blanks are passed over, each redirection operator is skipped with its target word (a digits-only word
+    glued to the operator is its source descriptor), and every other word is read by the shared word reader
+    (_read_word) and must decode to the next word of argv. A '#' at a word boundary, any other operator, a
+    word that differs from argv, an unreadable word, or text that ends first gives None. Linear in the length
+    of the text read up to that word."""
+    i, n, k = 0, len(raw), 0
+    try:
+        while i < n and k < len(argv):
+            c = raw[i]
+            if c in " \t\n":
+                i += 1
+                continue
+            if c == "#":
+                return None
+            op_at = i
+            if c not in _METACHARS:
+                text, _opaque, started, all_digits, _tilde, j = _read_word(raw, i, n)
+                if j == i:
+                    return None
+                if not (all_digits and text and j < n and raw[j] in "<>"):
+                    if started:
+                        if text != argv[k]:
+                            return None
+                        if k == idx:
+                            return i
+                        k += 1
+                    i = j
+                    continue
+                op_at = j
+            _op, kind, oplen = _match_operator(raw, op_at, n)
+            if kind != "redirect":
+                return None
+            i = op_at + oplen
+            while i < n and raw[i] in " \t":
+                i += 1
+            if i >= n or raw[i] in "#\n" or raw[i] in _METACHARS:
+                return None
+            _target, _opaque, started, _digits, _tilde, i = _read_word(raw, i, n)
+            if not started:
+                return None
+    except ValueError:
+        return None
+    return None
+
+
+def _gate_behind_bypass(seg):
+    """(sub, spelling) when the de-quoted text of one lexed segment (seg.raw, read by _gate_text_bypass) names a
+    roster git carrying a no-verify bypass behind any other word of that segment, else None: one rule for every
+    command word, with no list of wrappers, so a git that ionice, doas, taskset, flock, chroot, builtin exec or
+    env -S runs, or one spelled with quotes inside an operand (sh -c 'true;g"i"t commit -nv'), is judged
+    whatever runs it. The segment's OWN git, the command word the parsed path's wrapper peel resolves to git
+    and _gate_novrf_segment_bypass judges over the lexer's words, is left to that value-aware reading, so git
+    commit -m 'fix -n' keeps its allow: the text from that word on is read with its first git word, the own
+    git, dropped. The text before it (leading assignments, the peeled wrappers with their options and values,
+    and any redirection there) is read with no git word dropped, so a hook-skipping git in a substitution there
+    denies (A="$(g'i't commit -nv)" git status, exec -a "$(g'i't commit -nv)" git status, >"$(g'i't commit -nv)"
+    git status), and the whole text with its first git word dropped is read as before too, so no deny it gave is
+    lost. Where the own git's place in the text cannot be found (_gate_word_start), the whole text is read
+    with no git word dropped. A segment with no command word runs none, but bash still expands its
+    redirection words, so the text of one that holds a redirection is read with no git word dropped
+    (>"$(g'i't commit -nv)"); one with neither a word nor a redirection is passed over.
+    Disclosed safe-direction over-deny: behind a command word the peel does not resolve to git (sudo, ionice,
+    nice -n5), a quoted word holding a blank is split, so ionice git commit -m 'fix -n' reads a -n, and so is
+    one on a git before the own git or in a redirection of a segment with no command word (A="$(g'i't commit
+    -m 'fix -n')" git status), one after an own git that cannot be placed, and one after an own git with a
+    git word before it, which the kept whole-text reading drops instead (exec -a git git commit -m 'fix -n',
+    > /tmp/git git commit -m 'fix -n'); and text that merely names a
+    roster git with a bypass spelling denies wherever it is read: behind any word (echo g'i't commit -nv),
+    before the own git (exec -a "g'i't commit -n" git status), in a redirection of a segment with no command
+    word (>'g'i't commit -nv') or in a comment after one (>x # g'i't commit -nv)."""
+    if not seg.argv:
+        return _gate_text_bypass(seg.raw) if seg.redirects else None
+    peeled = _gate_novrf_peel(seg.argv)
+    if not isinstance(peeled, list) or _command_word(peeled) != "git":
+        return _gate_text_bypass(seg.raw)
+    at = _gate_word_start(seg.raw, seg.argv, len(seg.argv) - len(peeled) + _command_word_index(peeled))
+    if at is None:
+        return _gate_text_bypass(seg.raw)
+    if not seg.raw[:at].strip():
+        return _gate_text_bypass(seg.raw, True)
+    for text, skip_own in ((seg.raw[:at], False), (seg.raw[at:], True), (seg.raw, True)):
+        bypass = _gate_text_bypass(text, skip_own)
+        if bypass is not None:
+            return bypass
+    return None
+
+
+def _gate_recovered_sink(command, doubt=None):
+    """The verification run piped into a truncating sink (_verification_sink) that the complete segments a
+    partial lex of command recovers (_gate_recovered_segments) prove, or None: gate_weakening's first check
+    on a lex that fails, before its raw fallback."""
+    return _verification_sink(_gate_recovered_segments(command, doubt))
 
 
 def gate_weakening(data):
@@ -11714,7 +12766,128 @@ def gate_weakening(data):
     that accepts it (commit, merge, push, pull, rebase, am), or the short -n on the two verbs where
     -n IS --no-verify (commit, am; on push -n is --dry-run and on merge/pull it is --no-stat, so it
     is deliberately not flagged there); the CONFIRMED --no-verify bypass DENIES (certain, returned
-    immediately). The checker-output check has TWO TIERS. DENY tier, held to one canonical shape whose two
+    immediately), and the option region is read with a value-aware boundary so a '--' consumed as a
+    value-taking option's value (git commit -m -- -n: the '--' is the message) does not end it and the
+    following -n is still read as the bypass. UNCERTAIN GIT SEGMENTS also DENY, fail-closed, via
+    _gate_closed_grammar_scan over the raw command: every raw 'git' naming is held to a CLOSED LITERAL
+    allowlist grammar (the git_discard shape, judged directly on the raw string), under which an accepted
+    segment can hold ONLY bare literal words, one standalone single-quoted literal per word, one
+    standalone double-quoted literal per word whose interior stays on one line and holds no '$',
+    backquote, backslash or '!' (bash reads such a word as exactly the literal between the quotes),
+    literal global-option values, a literal subcommand and the >/dev/null, 2>/dev/null and 2>&1
+    redirections. On a segment whose resolved subcommand is on the roster, ANY other construct DENIES
+    naming the word as typed: an expansion, substitution or backquote ('${x}-n', '$x-n', '`true`-n',
+    '-m $(date)', and a dash-free '-m "$msg"' or '--author="$a"' alike, inside double quotes too), a
+    process substitution, a backslash (a line continuation included, inside double quotes too), a
+    double-quoted word that is glued, unterminated, spans a newline or holds an interior '!', a glob or
+    brace character, a '#' comment or leading '~', a here-document, here-string or unlisted redirection,
+    an ANSI-C '$'...'' word, or a glued quote. One here-document shape is accepted where the shared lexer
+    parsed the command (this parsed path and the failed-main-reading floor, never the parse-error fallback
+    or the doubt path): the git commit message form git commit -m "$(cat <<'EOF' ... EOF)" as a separated
+    -m's value, with a single-quoted delimiter, a substitution holding nothing but that cat and a body with
+    no '$' or backquote (_gate_heredoc_message); its body is that -m's value, and a git named in the body is
+    re-judged. A segment whose subcommand CANNOT be resolved (an
+    expansion where the subcommand or a global option's value is expected: git $g commit, git -C $d)
+    also DENIES: the verb bash will run cannot be known.
+    Accepted literal words are then checked for the bypass spellings themselves (_no_verify_spelling on
+    the resolved words, so a single- or double-quoted '-n' or '--no-verify' still denies while '-m'
+    consumes its value), and EVERY raw 'git' occurrence is scanned, wherever it sits, so a bypass the
+    shared lexer cannot place (after an escaped-backslash line end or a backslash-continued comment,
+    inside quoted text or a here-document body) is still judged; an occurrence inside a region an earlier
+    accepted scan consumed is data, not a command, and is skipped, EXCEPT where that region is a quoted
+    interior that could bracket live command text: a single-quoted interior holding ANY byte that is not
+    a bare-word character or a space or tab (a backquote, a '$', a shell operator, a newline or a double
+    quote), or a double-quoted interior holding a shell operator or a single quote (a '$', backquote,
+    backslash or newline there already denies outright), or, in EITHER quote, an all-literal interior
+    that names a roster git command (a 'git' word followed by a no-verify roster verb): the
+    quote's pairing is then ambiguous (the scan starts at a git word, not at the command start), so the
+    span is not treated as consumed data and a git inside it is re-judged as its own segment (the
+    enclosing word is still read for its own bypass spelling, so a real flag after the quote is not
+    missed). The parsed path also PEELS the command-running wrappers in _GATE_NOVERIFY_WRAPPERS (env with
+    its assignments and options, exec -a, nice, nohup, command, time, timeout) so the git command behind
+    one is judged (env 'A=git log ' git commit -nv runs git commit -nv). A wrapper option the peel cannot
+    resolve (an attached short-option value, a combined flag: env -uX, nice -n5) and an unlisted command-
+    running wrapper (sudo, xargs, setsid, stdbuf) FAIL CLOSED instead: the dequoted words are scanned
+    (_gate_novrf_dequoted_bypass) and a roster git carrying a no-verify spelling denies even when the git
+    word is a quote-concatenation (g'i't) the raw \bgit\b scan cannot see. DISCLOSED
+    OVER-DENIAL (the deliberate cost of the closed grammar, pending maintainer review): outside that one
+    accepted here-document message form, a roster-verb git command carrying ANY live expansion denies even
+    where it is a safe operand or value (git commit -m
+    "$msg", git push origin "$branch", git merge "release-$v"), and so does one carrying a comment, a
+    file redirection, or a glob, and so does TEXT that merely names such a git command inside quoted data
+    or a here-document body (echo 'git commit -n', the heredoc line of cat <<EOF); a plain double-quoted
+    literal that stays on one line and holds no '$', backquote, backslash or '!' inside is accepted like
+    a bare word (git commit -m "fix the parser"), but an interior '!' denies (history expansion could
+    rewrite it; single-quote the text instead), and a quoted interior that could bracket live command
+    text (a single-quoted non-word byte, a double-quoted shell operator or the other quote, or an
+    all-literal interior that names a roster git command) re-judges any git named inside it and so denies
+    a NAMED roster-verb bypass there EVEN when the interior is all bare-word characters and spaces. This
+    over-deny is wider than one commit message: a quoted operand on ANY raw git line, roster or off-roster,
+    in EITHER quote style and matched case-insensitively, re-judges a roster-git naming inside it, so
+    git commit -m 'fix; git commit -nv', git commit -m 'hi `git commit -nv`', git commit -m 'git commit
+    -nv', git commit -m 'docs: git commit -n is banned', git commit -m 'mention git push', git log --grep
+    'git push' and git commit -m 'Use GIT PUSH carefully' all deny; a 'git' word whose own verb falls off
+    the end of such a span (git commit -m 'look at git --namespace') fails closed and denies too. An
+    interior naming only an OFF-roster git (git commit -m 'see git log for history'), or no git at all, or
+    a benign operator message (git commit -m "a; b | c") still allows; re-issue anything else plainly with
+    every word literal, or keep git-with-roster-verb spellings out of quoted data. Every hook-skip and grammar
+    deny such a message can draw (parsed, de-quoted, parse-error fallback and opaque '#' doubt) ends with the
+    way on (_GATE_FILE_ROUTE): commit the message from a file with git commit -F FILE, or cat FILE | git
+    commit -F -, which allows because this guard never opens the file; a '<' redirection or here-document on
+    the git segment, or a stage before it whose own text names the spelling, still denies.
+    DISCLOSED RESIDUAL: a '-n'/'--no-verify' assembled in a separate stage the shell runs and feeds to
+    git (printf ... | xargs git commit) is not reconstructed, and an alias or shell function that renames
+    git is not resolved. A command-running wrapper outside _GATE_NOVERIFY_WRAPPERS (sudo, xargs, setsid,
+    stdbuf) and a wrapper option the peel cannot resolve FAIL CLOSED through the dequoted-word scan
+    (_gate_novrf_segment_bypass), and behind ANY other word of a segment, a wrapper on no list included,
+    the segment's de-quoted text is read too (_gate_behind_bypass, _gate_text_bypass), in four readings: the
+    blank-split reading (_gate_dequoted_words), and three bash-model readings (_gate_bash_readings): the text
+    at its own quoting level as bash reads it, that result read once more as a shell it is handed to reads it
+    (sh -c, eval, env -S), and the text with every ANSI-C quote the raw match finds decoded. In those three an
+    ANSI-C quote is decoded with bash's own escapes and cut at its first NUL escape as bash cuts it
+    ($'gi\\0zz't is git), words split only at bash's blanks (space, tab, newline) and at every shell operator
+    character and opener (; & | ( ) < >, the backquote, so $(, <( and >( too), wherever each stands, and env
+    -S's \\_ is a separator; in all four a git named by an option's attached value counts, and the blank-split
+    reading keeps the escapes, NUL and split it read before, so a deny it gave is kept. Each reading is judged
+    by the any-word walk
+    (_gate_any_word_bypass): after a git word, ANY later roster-verb word, and after it ANY no-verify prefix or,
+    on commit and am, any single-dash word holding an 'n', with no '--', option value or global option read,
+    so a quoted span that splits into one cannot swallow a real -n. So ionice g'i't commit -nv, doas g'i't commit
+    -nv, env -S 'g"i"t\\_commit\\_-nv', env $'g\\x69t\\0' commit -nv, ionice g'i't commit 'x --' -n,
+    sh -c 'true;g"i"t commit -nv' and cat <(g'i't commit -nv) deny; only the segment's own git, the command
+    word the wrapper peel resolves, keeps its value-aware reading: the text from that word on is read with only
+    that git dropped, and the text before it (assignments, wrapper options and values, redirections) with no
+    git word dropped, so a hook-skipping git in a substitution before the own git denies (A="$(g'i't commit -nv)"
+    git status, exec -a "$(g'i't commit -nv)" git status, >"$(g'i't commit -nv)" git status); where the own
+    git cannot be placed in the text (_gate_word_start) no git word is dropped. A segment with no command word
+    runs none, but bash still expands its redirection words, so the text of one holding a redirection is read
+    too (>"$(g'i't commit -nv)" denies). Disclosed safe-direction over-deny: text that merely names git with
+    a roster verb and a no-verify spelling behind any word denies (echo g'i't commit -nv), and
+    so does such text before the own git (exec -a "g'i't commit -n" git status), in a redirection of a
+    segment with no command word (>'g'i't commit -nv') or in a comment after one (>x # g'i't commit -nv); a
+    quoted value holding a blank is split on a git before the own git or in such a redirection (A="$(g'i't
+    commit -m 'fix -n')" git status denies), after an own git that cannot be placed, and after an own git with
+    a git word before it, which the whole text, still read with its first git word dropped, drops instead
+    (exec -a git git commit -m 'fix -n' denies);
+    behind a command word the peel does not resolve to git a quoted value holding a blank is split, so sudo git
+    commit -m 'fix -n' denies, and an option value holding an 'n' counts, so ionice git commit -uno -m x and
+    ionice git commit -mnew deny; any later roster-verb word counts as the verb (ionice git log --grep commit
+    -n 3 denies); a quoted message or here-document body on a git line that names git, then a roster verb, then
+    such a word denies (git commit -m 'see git log; then commit -n'); a quoted operator or blank splits words
+    inside any script, so a later unrelated -n there counts (sh -c 'git commit -m x; ls -n'); and a \\_ is
+    read as a separator wherever it stands, not only inside an env -S value (env -S g"i"t\\_commit\\_-nv, which
+    bash does not split, denies). This reading still cannot see a git word built at run time (an expansion, a
+    substitution, a glob or brace expansion: $g commit -nv, g$()it commit -nv), a here-document body a shell
+    reads as commands, or an ANSI-C quote the two level readings do not decode (two or more shell levels in,
+    or behind a quote inside a command substitution standing in double quotes, which they pair at the outer
+    level) whose opener the raw match also pairs with an earlier '$''. A verb off the roster
+    is untouched (git log ${x}-n, git log
+    --format="$f"). On a parse error the same judgement reads every segment the partial lex recovers, the
+    in-progress segment the lexer stopped in included, and outside the doubt path the text from that
+    segment onward (the whole command where none was in progress) is read by the bounded de-quoted reading
+    (_gate_unread_bypass), so a bypass before or past a here-string or process substitution denies (sudo
+    g'i't commit -nv <<<x, cat <<<x; g'i't commit -nv); the failed-main-reading floor keeps its own probes.
+    The checker-output check has TWO TIERS. DENY tier, held to one canonical shape whose two
     ends are ALLOW-LISTS (_verification_sink): the first simple command of a pipeline is a KNOWN VERIFICATION
     INVOCATION (_is_verification_run: a run form in _GATE_VERIFY_RUNS, or a python script form) and pipes
     through pass-through stages (_gate_plain_filter: cat, tee, tr, uniq) into a sink on the sink allow-list
@@ -11783,21 +12956,77 @@ def gate_weakening(data):
     except ValueError as exc:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
         # the unparseable construct are judged first for a verification run piped into a truncating sink;
-        # otherwise the raw fallback stands. Only the in-progress segment the lexer was inside is dropped,
-        # since its unseen tokens could change it; a construct that begins a new segment (a lone quote after
-        # 'pytest | head;') leaves every recovered segment complete, so none is dropped.
-        hit = _gate_recovered_sink(command, exc if isinstance(exc, _UncertainHashError) else None)
+        # otherwise the raw fallback stands. The sink check drops the in-progress segment the lexer was
+        # inside, since its unseen tokens could change it; a construct that begins a new segment (a lone quote
+        # after 'pytest | head;') leaves every recovered segment complete, so none is dropped.
+        recovered, open_seg = _gate_partial_segments(
+            command, exc if isinstance(exc, _UncertainHashError) else None)
+        for seg in recovered + ([open_seg] if open_seg is not None else []):
+            # the same fail-closed wrapper judgement as the parsed path, over each recovered segment's
+            # dequoted argv, so a git bypass hidden behind an unresolved or unlisted wrapper on an
+            # otherwise-unparseable line (env -uX git commit -nv ...) still denies. The in-progress segment
+            # is judged too, exactly as a complete one, over the words read before the construct the lexer
+            # stopped at (sudo g'i't commit -nv <<<x): a later or glued token cannot turn an option read
+            # there back into a value or an operand, at most make git refuse the command (a safe-direction
+            # over-deny).
+            bypass = _gate_novrf_segment_bypass(seg.argv)
+            if bypass is not None:
+                sub, spelling = bypass
+                return _deny(
+                    "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate bypass of "
+                    "the verification hooks that gate it. Never weaken a gate to obtain a pass; fix the "
+                    "artefact instead. {} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
+                    "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) "
+                    "(rule gatdis).")
+        for seg in recovered:
+            # each complete segment's de-quoted text too, as on the parsed path (a git behind any other word:
+            # ionice g'i't commit -nv; cat <<<x; or in a redirection of a segment with no command word:
+            # >"$(g'i't commit -nv)"; cat <<<x); the in-progress segment's text is read below
+            bypass = _gate_behind_bypass(seg)
+            if bypass is not None:
+                sub, spelling = bypass
+                return _deny(
+                    "AIQT rule gatdis (gate-discipline): this command's text, with quotes and backslashes "
+                    "removed, names a git {} carrying {} after another word of the same command (a wrapper on "
+                    "no list, an assignment or option value, a redirection or quoted text), a deliberate bypass "
+                    "of the verification hooks that gate it whatever runs that git; it is denied fail-closed. "
+                    "Never weaken a gate to obtain a pass; fix the artefact instead. If the text only names "
+                    "such a command, keep that spelling out of it. {} {}".format(sub, spelling, _GATE_ALTS,
+                                                                                 _GATE_FILE_ROUTE),
+                    "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) behind another "
+                    "word of the command (rule gatdis, fail-closed).")
+        hit = _verification_sink(recovered)
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
         if not isinstance(exc, _UncertainHashError):
+            # The text the partial lex could not read, from the start of the in-progress segment (its raw
+            # slice runs to the end of command) or the whole command where no segment was in progress, is
+            # read by the bounded de-quoted reading (_gate_unread_bypass), so a git bypass past the construct
+            # the lexer stopped at (cat <<<x; g'i't commit -nv) denies. A '#' the lexer could not judge takes
+            # the doubt tests below instead, whose bypass test reads the de-quoted text more broadly.
+            unread = command
+            if open_seg is not None and command.endswith(open_seg.raw):
+                unread = open_seg.raw
+            bypass = _gate_unread_bypass(unread)
+            if bypass is not None:
+                sub, spelling = bypass
+                return _deny(
+                    "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
+                    "(a here-string, a process substitution, an unquoted here-document or an unbalanced quote) "
+                    "and its text from the segment the lexer stopped in onward, with quotes and backslashes removed, "
+                    "names a git {} carrying {}, a deliberate bypass of the verification hooks that gate it; "
+                    "it is denied fail-closed. Never weaken a gate to obtain a pass; fix the artefact instead. "
+                    "{} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
+                    "AIQT guardrail: denied an unparseable command whose de-quoted text names a git "
+                    "verification-hook bypass (--no-verify family) (rule gatdis, fail-closed).")
             return _gate_weakening_fallback(command)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
             return _hash_doubt_opaque_deny("gatdis (gate-discipline)", "a git hook bypass (a --no-verify "
                                            "spelling, or -n on commit or am) or a verification run piped into "
-                                           "a truncating sink", _GATE_ALTS)
+                                           "a truncating sink", _GATE_ALTS + " " + _GATE_FILE_ROUTE)
         # Behind a '#' the lexer could not judge under both readings, a sink word the deny tier lists
         # (head, tail, grep, egrep, fgrep, rg) anywhere in text that holds a '|' may receive a verification
         # run's output past that '#' whatever stands between or around them (a blank or comment continuation
@@ -11826,9 +13055,16 @@ def gate_weakening(data):
                                    "carries a dash-prefixed option this guard cannot bind to that "
                                    "subcommand's grammar past that '#', so a verification-hook bypass "
                                    "spelling cannot be ruled out") + " " +
-                _GATE_ALTS,
+                _GATE_ALTS + " " + _GATE_FILE_ROUTE,
                 "AIQT guardrail: denied a git call that could bypass verification hooks behind a '#' this "
                 "guard could not read (rule gatdis, fail-closed).")
+        # The closed literal grammar reads the raw text and needs no lex, so it judges this command as it
+        # judges a parsed one: a git naming it refuses denies before any note.
+        grammar_hit = _gate_closed_grammar_scan(command)
+        if grammar_hit is not None:
+            kind, what, how = grammar_hit
+            reason, banner = _gate_grammar_messages(kind, what, how, False)
+            return _deny(reason, banner)
         # What remains is still text this guard cannot evaluate: where it holds a checker-shaped word
         # (_gate_doubt_checker, the parsed recognizer's own name splitter and lexicon, so a swallow or
         # truncating spelling behind the '#' pairs through its own '|', '<<<' or substitution marker) and
@@ -11849,22 +13085,34 @@ def gate_weakening(data):
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
     for index, seg in enumerate(records):
         tokens = seg.argv
-        if not tokens:
-            continue  # no command word, so neither git nor a checker (a run of separators reads nothing here)
+        if not tokens and not seg.redirects:
+            continue  # no word and no redirection, so nothing runs or expands (a run of separators reads nothing here)
         sep_after = seg.sep_after
-        if _command_word(tokens) == "git" and not _has_info_flag(tokens):
-            sub, args = _git_sub_and_args(tokens)
-            if sub in _NOVERIFY_VERBS:
-                spelling = _no_verify_spelling(sub, args)
-                if spelling is not None:
-                    return _deny(
-                        "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate "
-                        "bypass of the verification hooks that gate it. Never weaken a gate to obtain "
-                        "a pass; fix the artefact instead. {}".format(sub, spelling, _GATE_ALTS),
-                        "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) "
-                        "(rule gatdis).")
-        if not _is_checker_segment(tokens):
-            continue
+        bypass = _gate_novrf_segment_bypass(tokens)
+        if bypass is not None:
+            sub, spelling = bypass
+            return _deny(
+                "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate bypass of "
+                "the verification hooks that gate it. Never weaken a gate to obtain a pass; fix the "
+                "artefact instead. {} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
+                "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) (rule gatdis).")
+        # A git behind any other word of the segment (a wrapper on no list, an option value, quoted text), before
+        # its own git, or in a redirection of a segment with no command word, which bash still expands, is read
+        # from the segment's de-quoted text, whatever runs it (_gate_behind_bypass).
+        bypass = _gate_behind_bypass(seg)
+        if bypass is not None:
+            sub, spelling = bypass
+            return _deny(
+                "AIQT rule gatdis (gate-discipline): this command's text, with quotes and backslashes removed, "
+                "names a git {} carrying {} after another word of the same command (a wrapper on no list, an "
+                "assignment or option value, a redirection or quoted text), a deliberate bypass of the "
+                "verification hooks that gate it whatever runs that git; it is denied fail-closed. Never weaken a "
+                "gate to obtain a pass; fix the artefact instead. If the text only names such a command, keep "
+                "that spelling out of it. {} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
+                "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) behind another word "
+                "of the command (rule gatdis, fail-closed).")
+        if not tokens or not _is_checker_segment(tokens):
+            continue  # with no command word, neither git nor a checker runs here
         # The "immediately following" segment, advancing PAST any EMPTY segments (a bare
         # line-continuation/newline inserts a segment with no tokens, so 'pytest ||\n true' and
         # 'pytest |\n head' would otherwise read as having no following swallow/sink and miss the
@@ -11897,8 +13145,15 @@ def gate_weakening(data):
                     "is not discarded; if it is only a benign output glance, this is allowed."
                     .format(_command_word(tokens), _command_word(nxt)))
     # The deny tier is held until the loop ends, so a --no-verify deny anywhere in the command returns first
-    # with its own message; a verification-sink deny then outranks (and suppresses) the broad-tier note. It
-    # judges each reading of an uncertain '#' on its own and denies on the first reading that holds the shape.
+    # with its own message; the closed-grammar deny and a verification-sink deny then outrank (and
+    # suppress) the broad-tier note. The sink check judges each reading of an uncertain '#' on its own and
+    # denies on the first reading that holds the shape. The lexer parsed this command, so the grammar also
+    # accepts the git commit message form (_gate_heredoc_message).
+    grammar_hit = _gate_closed_grammar_scan(command, heredoc_message=True)
+    if grammar_hit is not None:
+        kind, what, how = grammar_hit
+        reason, banner = _gate_grammar_messages(kind, what, how, False)
+        return _deny(reason, banner)
     hit = next((found for found in (_verification_sink(reading) for reading in readings) if found is not None),
                None)
     if hit is not None:
@@ -11913,14 +13168,15 @@ def gate_weakening(data):
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
         if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
-            return _gate_weakening_fallback(command)
+            return _gate_weakening_fallback(command, heredoc_message=True)
     if pending_note is not None:
         return _allow_note(pending_note)
     flow_note = _gate_flow_note(records, command)
     if flow_note is not None:
         return _allow_note(flow_note)
     if floor:
-        return _gate_weakening_fallback(command)  # its note, or the allow, in place of this allow
+        # its note, or the allow, in place of this allow
+        return _gate_weakening_fallback(command, heredoc_message=True)
     return _allow()
 
 
