@@ -14992,10 +14992,18 @@ def _main_isolated(monitor):
         # ~2); a quadratic re-walk quadruples it
         # (ratio ~4). The assertion is a RATIO, not a fixed wall-clock bound, so a threshold between 2x and
         # 4x discriminates regardless of host speed (a fixed bound passes a quadratic scan on a fast host).
-        # Because a sub-millisecond t_n gives a noisy ratio, n is DOUBLED (bounded, at most 6 times) until
-        # t_n clears a 0.02s floor; if it never does, the check FAILS 'linearity not evaluated' rather than
-        # passing silently (the former early-pass path). A ROSTER-verb-dense line is still super-linear by
-        # design and relies on the deadline's fail-closed, as the scan docstring states.
+        # Each scan is timed with time.process_time (this process's CPU time, as in the lex-cost rows), so
+        # time the process spends waiting for a CPU on a busy runner is not counted. Because a short t_n gives
+        # a noisy ratio, n is DOUBLED (bounded: from 4000 repetitions, at most 9 sizes) until t_n clears a
+        # 0.1 s floor; if it never does, the check FAILS 'linearity not evaluated' rather than passing
+        # silently (the former early-pass path). The floor sets how much stray cost one comparison absorbs:
+        # extra work counted in t_2n moves a linear row's ratio of about 2 past 3 only when it costs more
+        # than t_n itself. With a 0.02 s floor and a wall clock, one CI row failed at 3.24x (0.030 s then
+        # 0.097 s); at 0.1 s the clock's resolution and the cost of the call itself are negligible against
+        # t_n. On one host the slowest-growing rows (gw-lin-dq-off, gw-lin-dq-chain) clear 0.1 s only at
+        # 512000 repetitions, so the cap of 1024000 leaves a host about twice as fast room to clear it too.
+        # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
+        # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
         # gw-lin-opts (`git ` + `-C 'a;' `*n): the subcommand never resolves (all global options), so the
         #   off-roster stop never fires and the former per-quote re-walk of `words` was quadratic; the
@@ -15022,24 +15030,27 @@ def _main_isolated(monitor):
         # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
         import time as _time_lin
 
+        _gw_floor = 0.1
+        _gw_sizes = 9
+
         def _gw_scan_once(cmd, scan):
-            # (seconds, decision) for one scan of cmd
-            _t0 = _time_lin.perf_counter()
+            # (CPU seconds, decision) for one scan of cmd
+            _t0 = _time_lin.process_time()
             decision = scan(cmd)
-            return _time_lin.perf_counter() - _t0, decision
+            return _time_lin.process_time() - _t0, decision
 
         def _gw_scan_ratio(unit, prefix, suffix, scan):
-            # Double n (from 4000, at most 6 times) until t_n clears the 0.02s floor, then compare
-            # t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions), or (None, t_n, None, length,
+            # Double n (from 4000, at most _gw_sizes sizes) until t_n clears the _gw_floor floor, then
+            # compare t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions), or (None, t_n, None, length,
             # decisions) when the floor was never cleared in the bound, so the caller fails 'linearity not
             # evaluated'; decisions lists every timed scan's decision, in order. The input is a command string
             # for the whole-command scan or a word list for the dequoted-word scan.
             reps = 4000
             decisions = []
-            for _ in range(6):
+            for _ in range(_gw_sizes):
                 t_n, decision = _gw_scan_once(prefix + unit * reps + suffix, scan)
                 decisions.append(decision)
-                if t_n > 0.02:
+                if t_n > _gw_floor:
                     cmd_2n = prefix + unit * (reps * 2) + suffix
                     t_2n, decision = _gw_scan_once(cmd_2n, scan)
                     decisions.append(decision)
@@ -15071,8 +15082,8 @@ def _main_isolated(monitor):
                 failures.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
                                 .format(_gw_lbl, _gw_wrong[0], len(_gw_wrong), len(_gw_got), _gw_want))
             if _gw_ratio is None:
-                failures.append("({}) linearity not evaluated: t_n stayed under the 0.02s floor through "
-                                "6 doublings (last {:.4f}s)".format(_gw_lbl, _gw_tn))
+                failures.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
+                                "{} sizes (last {:.4f}s)".format(_gw_lbl, _gw_floor, _gw_sizes, _gw_tn))
             elif _gw_ratio > 3.0:
                 failures.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
                                 "{:.3f}s then {:.3f}s for an input of length {}"
