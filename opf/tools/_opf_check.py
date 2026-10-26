@@ -664,7 +664,7 @@ class _Rec:
         self.state = state            # the parsed status state (or "recorded" for a worklog entry)
         self.qual = qual              # the status qualifier ("proposed") or None
         self.links = links            # list of (rel, target-id) tuples with a string rel
-        self.actor_kind = actor_kind  # the actor.kind string, or None
+        self.actor_kind = actor_kind  # the actor.kind when ACTOR_KINDS holds it, else None
         self.location = location      # "active", "archive/<YYYY>", or "imported" (an imported leaf row)
         self.scopes = scopes          # a block's scoped ids (list), or [] (spec 8.5)
         self.body = body              # the raw record table, read by the immutable-body preservation check
@@ -678,10 +678,12 @@ def _make_rec(table, rtype, location):
     status of a type with a shipped schema that is absent, not a string or does not parse; "links", a
     links value that is not an array of tables, each with a rel in the closed vocabulary and a string
     id; "scopes", a block's scopes value that is not an array of strings; and "actor", an actor that is
-    absent or not a table, or whose kind is absent or not a string (actor_kind is then None). A check over
-    the readable fields of such a record cannot stand in for one over the record, so each check that reads
-    the field grades the population as not fully read (fail-closed): the current-state joins over status,
-    links and scopes, C-LINKS over links and scopes. The actor kind is the section 8.6 provenance, so an
+    absent or not a table, or whose kind is absent, not a string, or a string the schema does not admit
+    (ACTOR_KINDS; a lookalike such as 'Importer' or 'importer-legacy'); actor_kind is then None, so a
+    lookalike never reads as the importer kind and never earns its exemption. A check over the readable
+    fields of such a record cannot stand in for one over the record, so each check that reads the field
+    grades the population as not fully read (fail-closed): the current-state joins over status, links and
+    scopes, C-LINKS over links and scopes. The actor kind is the section 8.6 provenance, so an
     uninterpreted one makes C-RECEIPTS and C-DECISION-CHAINS CANNOT-EVALUATE over their types and stops
     the firewall arm that reads it (_firewall_partial); C-HANDOFF alone counts such a record, since an
     uninterpreted kind can only add to its at-most-one count. The per-record schema findings name the
@@ -719,8 +721,9 @@ def _make_rec(table, rtype, location):
     elif lk is not None:
         unparsed.add("links")
     actor = table.get("actor")
-    akind = actor.get("kind") if isinstance(actor, dict) and isinstance(actor.get("kind"), str) else None
-    if akind is None:
+    akind = actor.get("kind") if isinstance(actor, dict) else None
+    if not isinstance(akind, str) or akind not in ACTOR_KINDS:   # a lookalike kind is unknown provenance
+        akind = None
         unparsed.add("actor")
     scopes = table.get("scopes")
     if rtype == "block" and scopes is not None:
@@ -2109,11 +2112,12 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
     firewall applies here as in every current-state join, keyed on provenance alone (the maintainer
     ruling: OPF has never been released, so no store predates the firewall): a record whose `actor.kind`
     is exactly `importer`, and an imported-series row, neither owes a receipt nor confers one. Only the
-    exact kind is exempt. A backlog_item or done whose actor kind is absent or unreadable (_make_rec's
-    `unparsed` "actor") is not known to be importer-authored or not, so the join is then CANNOT-EVALUATE
-    naming those types, never a pass; it still runs, reading each such record as not importer-authored,
-    and a finding it raises over them stands beside the CANNOT-EVALUATE. The clean receipts are therefore
-    the clean dones not authored by an importer, and the join grades three rules over them. At most one:
+    exact kind is exempt. A backlog_item or done whose actor kind is absent, unreadable or a kind the
+    schema does not admit, a lookalike such as 'Importer' included (_make_rec's `unparsed` "actor"), is
+    not known to be importer-authored or not, so the join is then CANNOT-EVALUATE naming those types,
+    never a pass; it still runs, reading each such record as not importer-authored, and a finding it
+    raises over them stands beside the CANNOT-EVALUATE. The clean receipts are therefore the clean dones
+    not authored by an importer, and the join grades three rules over them. At most one:
     every clean backlog_item ratified at unqualified `done`, importer-authored ones included, has at most
     one clean receipt, so two clean receipts naming one ratified importer-authored item are a finding; an
     importer-authored done is never counted, so two of them on an importer-authored item, or one beside a
@@ -2206,14 +2210,15 @@ def _check_handoff(recs, rep, unread=frozenset()):
     (_opf_views.render_handoff), which apply it the same way. An imported-series row never counts either
     (_validate_opened_store builds the graded record list from the active, archive and worklog records and
     never adds an imported-series row; the skip matches that routing for a direct caller). Only the exact
-    kind `importer` is exempt: a lookalike kind (another case, a prefix or an extension) counts, and a
-    record whose actor kind cannot be read (None) counts, fail-closed (validate_record already names the
-    unknown or unreadable actor), never a silent pass; its "actor" entry in _make_rec's `unparsed` is
-    therefore not a cause here, since counting it can only add to the count. When the handoff records
-    could not all be read (`unread`, from the collectors), or a seated handoff's status or links could not
-    be interpreted (_make_rec's `unparsed`: a record read as 'not current' only because its status is
-    unreadable is a partial count, never a pass), the check is CANNOT-EVALUATE; a count above one is still
-    reported, since a record not read or not interpreted can only add to it."""
+    kind `importer` is exempt: a record whose actor kind cannot be read, or is a lookalike (another case,
+    a prefix or an extension) the schema does not admit, reads as None and counts, fail-closed
+    (validate_record already names the unknown or unreadable actor), never a silent pass; its "actor"
+    entry in _make_rec's `unparsed` is therefore not a cause here, since counting it can only add to the
+    count. When the handoff records could not all be read (`unread`, from the collectors), or a seated
+    handoff's status or links could not be interpreted (_make_rec's `unparsed`: a record read as 'not
+    current' only because its status is unreadable is a partial count, never a pass), the check is
+    CANNOT-EVALUATE; a count above one is still reported, since a record not read or not interpreted can
+    only add to it."""
     unread = unread | {r.rtype for r in recs if r.location != "imported" and r.unparsed - {"actor"}}
     current = [r.id for r in recs if r.rtype == "handoff" and r.state == "current" and r.qual is None
                and r.location != "imported"
@@ -2237,15 +2242,15 @@ def decision_chains(recs, by_id, firewall=True):
     never been released, so no store predates the firewall): the chains are derived over clean records not
     authored by an importer, so an importer-authored pending_decision neither resolves nor supersedes a
     non-importer chain member and confers no decision authority. Only the exact kind `importer` is exempt;
-    a record whose actor kind is absent or unreadable (None) stays in the derivation, read as not
-    importer-authored. Its provenance is not known, so the doctor never passes a chain over it:
-    C-DECISION-CHAINS is then CANNOT-EVALUATE naming it, and the firewall arm (_check_importer_chains)
-    does not run. The one derivation shared by C-DECISION-CHAINS and opf record's pre-publication chain
-    check (spec 8.8), so the verb never judges a chain by a rule of its own and both apply the firewall
-    the same way (the verb derives over a record of unreadable kind as this does). `firewall` False
-    derives the chains over every clean pending_decision, importer-authored ones included, for the one
-    reader that must see where an importer-authored decision stands as the current resolution
-    (_check_importer_chains)."""
+    a record whose actor kind is absent, unreadable or a lookalike the schema does not admit (None) stays
+    in the derivation, read as not importer-authored. Its provenance is not known, so the doctor never
+    passes a chain over it: C-DECISION-CHAINS is then CANNOT-EVALUATE naming it, and the firewall arm
+    (_check_importer_chains) does not run. The one derivation shared by C-DECISION-CHAINS and opf record's
+    pre-publication chain check (spec 8.8), so the verb never judges a chain by a rule of its own and both
+    apply the firewall the same way (the verb derives over a record of unreadable or lookalike kind as
+    this does). `firewall` False derives the chains over every clean pending_decision, importer-authored
+    ones included, for the one reader that must see where an importer-authored decision stands as the
+    current resolution (_check_importer_chains)."""
     pds = [r for r in recs if r.rtype == "pending_decision" and isinstance(r.id, str)
            and r.location != "imported" and (not firewall or r.actor_kind != "importer")]
     parent = {r.id: r.id for r in pds}
@@ -2307,10 +2312,11 @@ def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
     pre-publication chain check applies it identically. When the pending_decision records could not all
     be read (`unread`, from the collectors), or a seated one's status or links could not be interpreted
     (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not run: a member not read or not
-    interpreted can split, join or resolve a chain. A pending_decision whose actor kind is absent or
-    unreadable (`unparsed` "actor") is not known to be importer-authored or not, so the check is then
-    CANNOT-EVALUATE naming it, never a pass; it still runs, decision_chains reading such a record as not
-    importer-authored, and a finding it raises over them stands beside the CANNOT-EVALUATE."""
+    interpreted can split, join or resolve a chain. A pending_decision whose actor kind is absent,
+    unreadable or a lookalike the schema does not admit (`unparsed` "actor") is not known to be
+    importer-authored or not, so the check is then CANNOT-EVALUATE naming it, never a pass; it still runs,
+    decision_chains reading such a record as not importer-authored, and a finding it raises over them
+    stands beside the CANNOT-EVALUATE."""
     clean = [r for r in recs if r.location != "imported"]
     no_kind = {r.rtype for r in clean if "actor" in r.unparsed} & {"pending_decision"}
     if no_kind:
@@ -2990,11 +2996,12 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
         read, since each such finding is that record's own. The receipt firewall reads the backlog_item,
         done and maintainer_decision records, and the decision-chain arm the pending_decision records:
         when one of an arm's types is unread, or a record of one has a status or links value that could
-        not be interpreted or an actor kind that is absent or unreadable (its provenance, so whether the
-        firewall bars it, is not known), that arm is CANNOT-EVALUATE naming each cause and is not run,
-        since a receipt, remedy or chain member not read or not interpreted could hide a finding or raise
-        a false one. Each arm applies this itself (_firewall_partial), so the driver's inactive-store
-        path, which grades the arms under C-RECEIPTS and C-DECISION-CHAINS, applies it too."""
+        not be interpreted or an actor kind that is absent, unreadable or a lookalike the schema does not
+        admit (its provenance, so whether the firewall bars it, is not known), that arm is CANNOT-EVALUATE
+        naming each cause and is not run, since a receipt, remedy or chain member not read or not
+        interpreted could hide a finding or raise a false one. Each arm applies this itself
+        (_firewall_partial), so the driver's inactive-store path, which grades the arms under C-RECEIPTS
+        and C-DECISION-CHAINS, applies it too."""
     if unevaluated:
         rep.cant("C-IMPORTED-SEGREGATION: {} did not evaluate, so the authority firewall (spec 8.6) is not "
                  "evaluated over the clean records it could not seat".format(", ".join(unevaluated)))
@@ -3025,7 +3032,7 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
 def _partial_causes(unread, uninterpreted, fields, no_kind=frozenset()):
     # The causes a fail-closed rule names, in the C-LINKS wording: the types whose records were not all
     # read, the types whose records carry a `fields` value that could not be interpreted, then the types
-    # whose records carry an actor kind that is absent or unreadable.
+    # whose records carry an actor kind that is absent, unreadable or not one ACTOR_KINDS holds.
     causes = []
     if unread:
         causes.append("the records of {} could not all be read".format(
@@ -3034,16 +3041,17 @@ def _partial_causes(unread, uninterpreted, fields, no_kind=frozenset()):
         causes.append("the {} of {} records could not be interpreted".format(
             fields, ", ".join(repr(t) for t in sorted(uninterpreted))))
     if no_kind:
-        causes.append("the actor kind of {} records is absent or unreadable".format(
-            ", ".join(repr(t) for t in sorted(no_kind))))
+        causes.append("the actor kind of {} records is absent or unreadable, or not a kind the schema "
+                      "admits".format(", ".join(repr(t) for t in sorted(no_kind))))
     return "; ".join(causes)
 
 
 def _firewall_partial(recs, rep, cid, unread, types, rule):
     # The gate a section 8.6 firewall arm applies before it runs, on either driver path: when one of the
     # arm's record `types` was not read in full (`unread`), or a clean record of one carries a status or
-    # links value that could not be interpreted or an actor kind that is absent or unreadable (_make_rec's
-    # `unparsed`), the arm is CANNOT-EVALUATE naming each cause, and True tells the arm not to run.
+    # links value that could not be interpreted or an actor kind that is absent, unreadable or not one the
+    # schema admits (_make_rec's `unparsed`), the arm is CANNOT-EVALUATE naming each cause, and True tells
+    # the arm not to run.
     clean = [r for r in recs if r.location != "imported" and r.rtype in types]
     missing = unread & types
     uninterpreted = {r.rtype for r in clean if r.unparsed - {"actor"}}
@@ -8077,6 +8085,57 @@ def self_test():
                   and _i3_seg_cant(_i3_kmdr,
                                    "the actor kind of 'maintainer_decision' records is absent or unreadable",
                                    "the receipt firewall"))
+            # A lookalike kind the schema does not admit (another case, an extension, padding; a C-RECORDS
+            # finding) is unknown provenance as well, and never the importer kind. Beside the
+            # importer-authored receipt above, a second receipt of such a kind leaves C-RECEIPTS and the
+            # receipt firewall CANNOT-EVALUATE naming it, with no finding of either; each read it as a
+            # clean non-importer receipt and passed (red when _make_rec takes a kind outside ACTOR_KINDS as
+            # known provenance).
+            _i3_lk_kinds = ("Importer", "importer-legacy", " importer")
+            _i3_lk_dn = ("the actor kind of 'done' records is absent or unreadable, or not a kind the schema "
+                         "admits")
+            check("imported-segregation-lookalike-receipt-kind-cannot-evaluate",
+                  all(r is not None and r.checks.get("C-RECORDS") == "FINDING"
+                      and r.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
+                      and not any(m.startswith("C-RECEIPTS:") for m in r.findings)
+                      and any(_i3_lk_dn in m and "the receipt join" in m for m in _i3_msgs(r, "C-RECEIPTS"))
+                      and _i3_seg_quiet(r) and _i3_seg_cant(r, _i3_lk_dn, "the receipt firewall")
+                      for r in [_i3_kind_receipts([copy.deepcopy(_i3_idn),
+                                                   dict(dn(2, "BI-1"), actor={"kind": k})])
+                                for k in _i3_lk_kinds]))
+            # The same on the chain store: a chain member of such a kind, the current resolution or the
+            # decision that resolution supersedes, leaves C-DECISION-CHAINS and the decision-chain firewall
+            # CANNOT-EVALUATE naming it, never the pass each read as over a non-importer member (red when
+            # _make_rec takes a kind outside ACTOR_KINDS as known provenance).
+            _i3_lk_pd = ("the actor kind of 'pending_decision' records is absent or unreadable, or not a "
+                         "kind the schema admits")
+            check("imported-segregation-lookalike-chain-kind-cannot-evaluate",
+                  all(r is not None and r.checks.get("C-RECORDS") == "FINDING"
+                      and r.checks.get("C-DECISION-CHAINS") == "CANNOT-EVALUATE"
+                      and not any(m.startswith("C-DECISION-CHAINS:") for m in r.findings)
+                      and any(_i3_lk_pd in m for m in _i3_msgs(r, "C-DECISION-CHAINS"))
+                      and _i3_seg_quiet(r) and _i3_seg_cant(r, _i3_lk_pd, "the decision-chain firewall")
+                      for r in [_i3_run(_i3_chain(cur_actor=k)) for k in _i3_lk_kinds]
+                      + [_i3_run(_i3_chain(old_actor="Importer"))]))
+            # The receipt firewall's other two types: a ratified item of such a kind beside its
+            # importer-authored receipt, which the firewall read as a non-importer item and reported, and a
+            # remedy decision of such a kind, which it read as no remedy and reported. Each is the
+            # firewall's CANNOT-EVALUATE naming the type, never a finding over an author not known (red
+            # when _make_rec takes a kind outside ACTOR_KINDS as known provenance).
+            _i3_lkb = copy.deepcopy(_i3_sg)
+            _i3_lkb["backlog_item.index.toml"] = idx([dict(bi(1, "done"), actor={"kind": "Importer"}),
+                                                      bi(2, "open")])
+            _i3_lkbr = _i3_run(_i3_lkb, obs=copy.deepcopy(_i3_sg_obs))
+            _i3_lkmr = _i3_run(_i3_remedy(actor_kind="Maintainer"), obs=copy.deepcopy(_i3_sg_obs))
+            check("imported-segregation-lookalike-item-and-remedy-kind-cannot-evaluate",
+                  _i3_lkbr is not None and _i3_lkbr.checks.get("C-RECORDS") == "FINDING"
+                  and _i3_seg_quiet(_i3_lkbr)
+                  and _i3_seg_cant(_i3_lkbr, "the actor kind of 'backlog_item' records is absent or "
+                                   "unreadable, or not a kind the schema admits", "the receipt firewall")
+                  and _i3_lkmr is not None and _i3_lkmr.checks.get("C-RECORDS") == "FINDING"
+                  and _i3_seg_quiet(_i3_lkmr)
+                  and _i3_seg_cant(_i3_lkmr, "the actor kind of 'maintainer_decision' records is absent or "
+                                   "unreadable, or not a kind the schema admits", "the receipt firewall"))
             # The section 8.6 residuals: an active store discloses the firewall entries and the
             # imported-series entry, and the inactive clean store, which holds no importer-authored record,
             # discloses neither (red when either disclosure is dropped or widened); the firewall-inactive
@@ -9003,8 +9062,11 @@ def self_test():
         # decided pending_decision still resolves its chain in the derivation, while the exact kind confers
         # neither in the same harness (red when either filter widens to a case-insensitive, prefix,
         # substring or stripped match, or exempts None). The receipt harness runs the count and its
-        # firewall arm together, as the driver does on this store; an unreadable kind (None) also makes the
-        # join CANNOT-EVALUATE and stops the arm, which the unreadable-kind vectors pin.
+        # firewall arm together, as the driver does on this store. A lookalike is a kind the schema does
+        # not admit, so like an unreadable kind its provenance is not known: each makes the receipt join
+        # and the receipt firewall CANNOT-EVALUATE naming it, with no finding, never the pass a lookalike
+        # read as, while the exact kind raises no CANNOT-EVALUATE (red when _make_rec takes a kind outside
+        # ACTOR_KINDS as known provenance).
         _r13_kinds = ("Importer", "IMPORTER", "importers", "importer-legacy", "import", " importer", None)
 
         def _with_kind(row, kind):
@@ -9014,23 +9076,38 @@ def self_test():
                 row["actor"] = {"kind": kind, "id": "import-assistant"}
             return row
 
-        def _r1_kind_findings(kind):
+        def _r1_kind_run(kind):
             _krecs = [_make_rec(bi(1, "done"), "backlog_item", "active"),
                       _make_rec(_with_kind(dn(1, "BI-1"), kind), "done", "active")]
             _krep = _Report()
             _krep.ran("C-RECEIPTS")
             _check_receipts(_krecs, {r.id: r for r in _krecs}, _krep)
             _check_importer_receipts(_krecs, _krep, "C-RECEIPTS")
-            return _krep.findings
+            return _krep.findings, _krep.cannot
 
         def _r3_kind_current(kind):
             _krecs = [_make_rec(pd(1), "pending_decision", "active"),
                       _make_rec(pd(2, status="withdrawn", supersedes="PD-1"), "pending_decision", "active"),
                       _make_rec(_with_kind(pd(3, supersedes="PD-2"), kind), "pending_decision", "active")]
             return [cur for _members, cur in decision_chains(_krecs, {r.id: r for r in _krecs})]
+        _r1_kinds = {k: _r1_kind_run(k) for k in ("importer",) + _r13_kinds}
+        _r1_kind_cause = ("C-RECEIPTS: the actor kind of 'done' records is absent or unreadable, or not a "
+                          "kind the schema admits (see C-RECORDS")
         check("r1-importer-lookalike-kinds-confer-receipt",
-              len(_r1_kind_findings("importer")) == 1
-              and all(_r1_kind_findings(k) == [] for k in _r13_kinds))
+              len(_r1_kinds["importer"][0]) == 1 and _r1_kinds["importer"][1] == []
+              and all(_r1_kinds[k][0] == [] and len(_r1_kinds[k][1]) == 2
+                      and all(m.startswith(_r1_kind_cause) for m in _r1_kinds[k][1])
+                      and any("the receipt join" in m for m in _r1_kinds[k][1])
+                      and any("the receipt firewall" in m for m in _r1_kinds[k][1]) for k in _r13_kinds))
+        # _make_rec reads each kind ACTOR_KINDS holds as itself, and a lookalike or absent kind as None with
+        # "actor" in `unparsed`, so no reader can take a lookalike for any schema kind (red when the kind
+        # test widens to any string, or keeps a lookalike's string).
+        _r13_recs = {k: _make_rec(_with_kind(dn(1, "BI-1"), k), "done", "active")
+                     for k in ACTOR_KINDS + _r13_kinds}
+        check("r13-actor-kind-outside-schema-read-as-unknown",
+              all(_r13_recs[k].actor_kind == k and "actor" not in _r13_recs[k].unparsed for k in ACTOR_KINDS)
+              and all(_r13_recs[k].actor_kind is None and "actor" in _r13_recs[k].unparsed
+                      for k in _r13_kinds))
         check("r3-importer-lookalike-kinds-resolve-chain",
               _r3_kind_current("importer") == [[]]
               and all(_r3_kind_current(k) == [["PD-3"]] for k in _r13_kinds))
@@ -9228,6 +9305,44 @@ def self_test():
                   "current effective resolutions; exactly one exists per chain (spec 8.5)"]
               and any(_fw_pd_kind in m and "the chains are not evaluated as a pass" in m
                       for m in _fw_c2.by_check.get("C-DECISION-CHAINS", [])))
+        # A lookalike kind the schema does not admit is unknown provenance on this store too, and never the
+        # importer kind: a second receipt of such a kind beside the importer-authored one leaves the receipt
+        # join and the receipt firewall CANNOT-EVALUATE under C-RECEIPTS naming it, and a chain member of
+        # such a kind, the current resolution or the decision it supersedes, leaves the chain join and the
+        # decision-chain firewall CANNOT-EVALUATE under C-DECISION-CHAINS naming it; each read the record
+        # as non-importer and passed (red when _make_rec takes a kind outside ACTOR_KINDS as known
+        # provenance).
+        _fw_lk_kinds = ("Importer", "importer-legacy", " importer")
+
+        def _fw_lk_receipt(kind):
+            m = _fw_receipt()
+            m["done.index.toml"] = idx([copy.deepcopy(_fw_idn), dict(dn(2, "BI-1"), actor={"kind": kind})])
+            m["counters.toml"] = counters(DN=2)
+            return _fw_run(m, _fw_dig)
+
+        def _fw_lk_chain(cur=None, old=None):
+            m = clean_machine()
+            p1, p2 = pd(1), pd(2, supersedes="PD-1")
+            if old is not None:
+                p1["actor"] = {"kind": old}
+            if cur is not None:
+                p2["actor"] = {"kind": cur}
+            m["pending_decision.index.toml"] = idx([p1, p2])
+            m["counters.toml"] = counters(PD=2)
+            return run(m)
+
+        _fw_lk_dn = ("the actor kind of 'done' records is absent or unreadable, or not a kind the schema "
+                     "admits")
+        check("firewall-inactive-lookalike-receipt-kind-cannot-evaluate",
+              all(_fw_cant(r, "C-RECEIPTS", _fw_lk_dn, "the receipt join")
+                  and _fw_cant(r, "C-RECEIPTS", _fw_lk_dn, "the receipt firewall")
+                  for r in [_fw_lk_receipt(k) for k in _fw_lk_kinds]))
+        _fw_lk_pd = ("the actor kind of 'pending_decision' records is absent or unreadable, or not a kind "
+                     "the schema admits")
+        check("firewall-inactive-lookalike-chain-kind-cannot-evaluate",
+              all(_fw_cant(r, "C-DECISION-CHAINS", _fw_lk_pd, "the chains are not evaluated as a pass")
+                  and _fw_cant(r, "C-DECISION-CHAINS", _fw_lk_pd, "the decision-chain firewall")
+                  for r in [_fw_lk_chain(cur=k) for k in _fw_lk_kinds] + [_fw_lk_chain(old="Importer")]))
         # Legacy importer-authored clean history the firewall leaves alone: an importer-authored item ratified
         # at done with its importer-authored receipt, and an importer-authored decision a maintainer decision
         # supersedes, certify VALID (red when either arm grades importer-authored history it must not).
