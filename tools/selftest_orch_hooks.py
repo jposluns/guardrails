@@ -9809,12 +9809,13 @@ def _main_isolated(report_path=None):
         check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
         check("trunc/fg-comment-then-detach-denies", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "deny")
         check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
-        # NO-REGISTRY WARN, BY DEFAULT when the orchestration registry is absent: a readable foreground
-        # bare-& detach is allowed with a warning (the reducer's "warn") naming rule trkasy and pointing at
+        # NO-REGISTRY WARN, BY DEFAULT when the orchestration registry is absent: a string command in a call
+        # that is not a real background dispatch, which the detector reads as a bare-& detach or cannot read
+        # to its end, is allowed with a warning (the reducer's "warn") naming rule trkasy and pointing at
         # run_in_background, never a prompt and never a silent allow; everything else stays inert there (a
-        # malformed tool_input, run_in_background or command, a command whose quoting the detector cannot
-        # read to its end, a background dispatch, and an `&` that is no bare detach). Each warn row reads
-        # "allow" with the guard returning its silent allow before reading the call.
+        # tool_input that is not an object, a command that is not a string, a background dispatch, and an
+        # `&` that is no bare detach). Each warn row reads "allow" with the guard returning its silent allow
+        # before reading the call.
         ti = Fixture(tmp, "trunc-inert")
         (ti.root / ".aiqt" / "orchestration.local.json").unlink()
         ti_call = lambda tool_input: aiqt_hooks.orch_truncation_guard(ti.payload("PreToolUse", "Bash", tool_input))
@@ -9830,15 +9831,39 @@ def _main_isolated(report_path=None):
               [_verdict(ti_call({"command": v, "run_in_background": False})) for v in (
                   "build && test", "build &> out.log", "build 2>&1", "build |& tee log", "echo 'a & b'",
                   "echo done # & comment", "cat > f <<'EOF'\nFix A & B\nEOF", "ls")], ["allow"] * 8)
-        check("trunc/fg-unbalanced-no-registry-allows",
-              [_verdict(ti_call({"command": v})) for v in (
-                  "echo 'oops & bg", "cat > f <<'EOF'\nthe user's file\nEOF")], ["allow"] * 2)
+        # A command whose quoting or comments the detector cannot read to its end ("unbalanced": an open
+        # quote, or a '#' whose comment reading depends on context) warns with a note saying so, since a
+        # later `&` can be a hidden detach: in the unquoted here-document row the apostrophe leaves the scan
+        # open while bash starts `sleep 1` in the background. The quoted here-document row is the disclosed
+        # over-warn on a safe body. Each row reads ("allow", False, False, False) with the guard keeping its
+        # silent allow on "unbalanced", and the note check fails if it gives the detach note instead.
+        ti_note_of = lambda res: (res[1] or {}).get("systemMessage", "")
+        check("trunc/fg-unbalanced-no-registry-warns",
+              [(_verdict(res), "could not read this foreground command to its end" in ti_note_of(res),
+                "trkasy" in ti_note_of(res), "run_in_background" in ti_note_of(res))
+               for res in (ti_call({"command": v}) for v in (
+                   "echo 'oops & bg", "cat > f <<'EOF'\nthe user's file\nEOF",
+                   "cat <<EOF\nuser's file\nEOF\nsleep 1 &", "[[ x =~ (a)#b ]] || echo RAN"))],
+              [("warn", True, True, True)] * 4)
+        # A run_in_background that is present but not a boolean beside a string command the detector reads
+        # as a detach or as unbalanced warns as well, the note naming the malformed flag (the platform's
+        # reading of such a flag is unknown, so the call may run in the foreground). Each row reads
+        # ("allow", False, False, False, False) with the guard keeping its silent allow on a malformed flag.
+        check("trunc/fg-malformed-rib-no-registry-warns",
+              [(_verdict(res), "not a boolean" in ti_note_of(res), "trkasy" in ti_note_of(res),
+                "run_in_background" in ti_note_of(res), "to its end" in ti_note_of(res))
+               for res in (ti_call({"command": c, "run_in_background": r}) for c, r in (
+                   ("long_job &", "false"), ("long_job &", None), ("long_job &", 0), ("long_job &", "true"),
+                   ("echo 'oops & bg", None)))],
+              [("warn", True, True, True, False)] * 4 + [("warn", True, True, True, True)])
+        # No readable command (a tool_input that is not an object, a command that is not a string) keeps the
+        # silent allow, as does a malformed run_in_background beside a command with no bare `&`.
         check("trunc/fg-malformed-no-registry-allows",
               [_verdict(aiqt_hooks.orch_truncation_guard(dict(
                   ti.payload("PreToolUse", "Bash"), tool_input=tool_input))) for tool_input in (
-                  "long_job &", ["long_job &"], {"command": "long_job &", "run_in_background": "false"},
-                  {"command": "long_job &", "run_in_background": None}, {"command": 5}, {})],
-              ["allow"] * 6)
+                  "long_job &", ["long_job &"], {"command": 5}, {}, {"command": 5, "run_in_background": "false"},
+                  {"command": "ls", "run_in_background": "false"}, {"command": "ls", "run_in_background": None})],
+              ["allow"] * 7)
         check("trunc/bg-no-registry-still-inert",
               [_verdict(ti_call({"command": v, "run_in_background": True})) for v in (
                   "python3 build.py | tail -5", "long_job &")], ["allow"] * 2)

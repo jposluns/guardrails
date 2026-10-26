@@ -12798,7 +12798,9 @@ def gensrc_guard(data):
 # not the session repo root alone but the UNION of the cwd's physical ancestor chain and any git-resolved
 # toplevel (_orch_registry_walk, _orch_git_toplevel_has_registry), and its pre-scope denies (a malformed
 # tool_name, a Bash call's malformed cwd, an unwalkable cwd) apply before that scope in every session,
-# registry or not; a malformed tool_input is checked only after the scope (inert with no registry). Second, in the opt-in
+# registry or not; a malformed tool_input is checked only after the scope (allowed with no registry, with
+# the NO-REGISTRY WARN where it still carries a string command the detector reads as a bare-& detach or
+# cannot read to its end). Second, in the opt-in
 # registry-required mode (AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value,
 # _orch_registry_required) that guard is NOT inert with no registry: a Bash call that passes its pre-scope
 # checks with no registry on that chain or at a git-resolved toplevel is DENIED, and so is one whose nearest
@@ -15935,11 +15937,14 @@ def orch_truncation_guard(data):
     refusal, a broken config, a bare repository - still never denies, while in registry-required mode one
     that hides a registry reachable only through the git toplevel reads as absent and denies), so with NO registry entry on that chain and
     none at a git-resolved toplevel the guard is, by default, inert and allows every Bash call that
-    passes the pre-scope checks below, except that a readable foreground command (a tool_input object whose
-    run_in_background is false or omitted, with a string command) that _orch_foreground_detach_lexed reads
-    as a "detach" is allowed WITH A WARNING naming rule trkasy and run_in_background (the NO-REGISTRY WARN,
-    which a later release turns into the deny the registry scope gives; a malformed tool_input,
-    run_in_background or command and an "unbalanced" command keep the silent allow there), while a chain or
+    passes the pre-scope checks below, except that a string command in a tool_input object whose
+    run_in_background is not true (false, omitted, or present but not a boolean) that
+    _orch_foreground_detach_lexed reads as a "detach" or as "unbalanced" (its quoting or comments cannot be
+    read to the end) is allowed WITH A WARNING naming rule trkasy and run_in_background, the "unbalanced"
+    one saying the command could not be read to its end and a malformed run_in_background named in the
+    warning (the NO-REGISTRY WARN, which a later release turns into the deny the registry scope gives; a
+    tool_input that is not an object, a command that is not a string and a background dispatch keep the
+    silent allow there), while a chain or
     toplevel directory whose registry entry is present,
     unreadable, or invalid keeps it active. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
@@ -16031,27 +16036,52 @@ def orch_truncation_guard(data):
                 "restore the default scoping (inert allow with no registry).",
                 "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
                 "registry found (rule trkasy, fail-closed).")
-        # NO-REGISTRY WARN: not an orchestrated session, so the guard stays inert (a malformed tool_input,
-        # run_in_background or command included, and a command whose quoting the detector cannot read to
-        # its end), except that a readable foreground command the detector reads as a bare-& detach is
-        # allowed with a warning naming the rule. A later release turns that warning into the deny the
+        # NO-REGISTRY WARN: not an orchestrated session, so the guard stays inert, except that a string
+        # command in a call that is not a real background dispatch (run_in_background false, omitted or
+        # malformed) is allowed with a warning naming the rule when the detector reads it as a bare-&
+        # detach or cannot read its quoting to the end (where a later '&' can be a hidden detach), never a
+        # silent allow. A tool_input that is not an object and a command that is not a string carry no
+        # readable '&' and keep the silent allow. A later release turns the warning into the deny the
         # registry scope gives.
         tool_input = data.get("tool_input")
-        if (not isinstance(tool_input, dict) or tool_input.get("run_in_background", False) is not False
-                or not isinstance(tool_input.get("command"), str)
-                or _orch_foreground_detach_lexed(tool_input["command"]) != "detach"):
+        if not isinstance(tool_input, dict) or not isinstance(tool_input.get("command"), str):
+            return _allow()  # not an orchestrated session, and no readable command to warn on
+        rib = tool_input.get("run_in_background", False)
+        detach_kind = None if rib is True else _orch_foreground_detach_lexed(tool_input["command"])
+        if detach_kind is None:
             return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
-        return _allow_note(
-            "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a bare "
-            "'&', launching asynchronous work this tool call does not track, so its result and failure would "
-            "be lost. No orchestration registry was found for this cwd, so this release allows it with this "
-            "warning; a later release denies it, as an orchestrated session already does. Use the "
-            "platform's tracked background dispatch (run_in_background) and collect its completion, or keep "
-            "the command in the foreground and wait for it. If this '&' is not a detach at all (for example a "
-            "bitwise AND in an arithmetic expansion, an '&' in the body of a here-document whose delimiter is "
-            "unquoted, or one inside a substitution in a double-quoted string), quote the here-document "
-            "delimiter (<<'EOF') where its body needs no expansion, or write the text to a file and pass the "
-            "file instead.")
+        if detach_kind == "unbalanced":
+            note = (
+                "AIQT rule trkasy (track-launched-work): this guard could not read this foreground command "
+                "to its end: its scan ends with a single or double quote still open, or meets a '#' whose "
+                "comment reading depends on context (right after a '(', ')' or backquote, or at the start of "
+                "a word inside an open parenthesis, ${...} or backquote substitution), so it cannot prove "
+                "that a later '&' is quoted or commented text rather than a bare detach that launches "
+                "asynchronous work this tool call does not track. No orchestration registry was found for "
+                "this cwd, so this release allows it with this warning; a later release denies it, as an "
+                "orchestrated session already does. If it launches work in the background, use the "
+                "platform's tracked background dispatch (run_in_background) and collect its completion. "
+                "Otherwise balance the quoting, put a blank before such a '#' outside any grouping or "
+                "substitution, or write the text to a file and pass the file.")
+        else:
+            note = (
+                "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a bare "
+                "'&', launching asynchronous work this tool call does not track, so its result and failure "
+                "would be lost. No orchestration registry was found for this cwd, so this release allows it "
+                "with this warning; a later release denies it, as an orchestrated session already does. Use "
+                "the platform's tracked background dispatch (run_in_background) and collect its completion, "
+                "or keep the command in the foreground and wait for it. If this '&' is not a detach at all "
+                "(for example a bitwise AND in an arithmetic expansion, an '&' in the body of a here-document "
+                "whose delimiter is unquoted, or one inside a substitution in a double-quoted string), quote "
+                "the here-document delimiter (<<'EOF') where its body needs no expansion, or write the text "
+                "to a file and pass the file instead.")
+        if not isinstance(rib, bool):
+            note += (
+                " This call's run_in_background is {} ({}), not a boolean, so this guard cannot tell a "
+                "background dispatch from a foreground call and reads it as foreground; re-issue with "
+                "run_in_background true or false, or omit it for a foreground call."
+                .format(_orch_json_kind(rib), json.dumps(rib, default=str)[:40]))
+        return _allow_note(note)
     if scope == "cannot-evaluate" and _orch_registry_required():
         # REGISTRY-REQUIRED MODE, round 5: the discovery found an entry it can neither rule out nor confirm
         # as a registry. By default that keeps the guard ACTIVE (deny-safe); in this mode a discovery fault
@@ -19453,9 +19483,9 @@ def _orch_guard_scope_report(root):
                  % (env, _ORCH_STRICT_SCOPE_FINDINGS[scope])], True)
     if scope == "none":
         return (["truncation guard: inert for a Bash call from the repository root, apart from a warning on "
-                 "a foreground bare-'&' detach (no registry on its ancestor chain or at its git toplevel; with "
-                 "registry-required mode enabled, %s set to a value other than an off value, such as 1, it "
-                 "denies instead)" % env], False)
+                 "a foreground command it reads as a bare-'&' detach or cannot read to its end (no registry on "
+                 "its ancestor chain or at its git toplevel; with registry-required mode enabled, %s set to a "
+                 "value other than an off value, such as 1, it denies instead)" % env], False)
     if scope in _ORCH_STRICT_SCOPE_FINDINGS:
         # Default mode reads a discovery fault as present (the deny-safe direction): the guard is active
         # without a confirmed registry, which is reported as the fault it is, not as a registry found.

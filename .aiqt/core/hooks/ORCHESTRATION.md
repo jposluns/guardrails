@@ -48,11 +48,16 @@ the doctor and the resume audit report and arm from it):
 - DEFAULT (`AIQT_ORCH_REQUIRE_REGISTRY` unset or an explicit off value: `""`, `0`, `false`, `no`,
   `off`, ASCII case-insensitive, matched exactly with nothing stripped): with no registry in its
   scope the truncation guard allows every Bash call that passes those pre-scope checks, silently
-  except for one case: a readable foreground command it reads as a bare `&` detach is allowed with a
-  warning that names rule trkasy and points at `run_in_background` (a later release turns that
-  warning into the deny a session with a registry already gets). A malformed `tool_input`,
-  `run_in_background` or command, and a command whose quoting it cannot read to the end, are allowed
-  silently there. A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
+  except for a string command in a call whose `run_in_background` is not `true` (false, omitted, or
+  present but not a boolean): a command it reads as a bare `&` detach, and one whose quoting or
+  comments it cannot read to the end (where a later `&` can be a hidden detach), are each allowed
+  with a warning that names rule trkasy and points at `run_in_background`. The second warning says
+  the guard could not read the command to its end, and a `run_in_background` that is not a boolean
+  is named in the warning (a later release turns these warnings into the deny a session with a
+  registry already gets). A safe command it cannot read to the end, such as a quoted here-document
+  whose body holds an unbalanced apostrophe, also gets that warning. A `tool_input` that is not an
+  object, a command that is not a string, and a background dispatch are allowed silently there. A
+  `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
   `.aiqt` directory the guard's process lacks search (execute) permission on, such as mode `0600`
   or `0000` for a process those modes bind; a `.aiqt` of mode `0100` evaluates normally for its owner
   where `O_PATH` exists (Linux), because the `O_PATH` open needs no read permission, and for a process
