@@ -527,6 +527,21 @@ ALLOWLIST = (
     ("tools/gen_hooks.py", "self_test_main._secondary_fault_case", "shell", 9,
      _SAVED + " (the saved real Popen.communicate, kill and wait the staged-cleanup vectors"
      " wrap and restore)"),
+    ("tools/check_opf_standalone_closure.py", "_bounds_self_test", "shell", 1,
+     "self-test launch refusal: keeps the real subprocess.Popen only to restore it in a finally"
+     " after patching in a stand-in that records the argv and raises OSError, so nothing is"
+     " launched; no call in this file turns shell on"),
+    ("tools/check_opf_standalone_closure.py", "_after_launch_fault_self_test", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the after-launch fault double, whose __init__"
+     " forwards _run_one's own sys.executable -I -B argv list; restored in a finally)"),
+    ("tools/check_opf_standalone_closure.py", "_harness_routing_self_test", "shell", 2,
+     "self-test launch refusal: the (subprocess, \"Popen\", real Popen) restore triple, set back"
+     " in a finally after each routing case patches in a stand-in that records the leg's script"
+     " and raises, so nothing is launched; no call in this file turns shell on"),
+    ("tools/check_opf_standalone_closure.py", "_ci_job_sweep_self_test", "shell", 1,
+     "self-test launch refusal: keeps the real subprocess.Popen only to restore it in a finally"
+     " after patching in a raiser for the whole check, so no per-job sweep vector can launch a"
+     " process; no call in this file turns shell on"),
     ("opf/tools/_opf_adopt_observe.py", "_runner_red_checks", "shell", 2, _SAVED),
     ("opf/tools/_opf_pack_manifest.py", "_runner_red_checks", "shell", 3, _SAVED),
     ("opf/tools/check_opf_doctor.py", "_self_test_isolated._doctor_suite", "shell", 3, _SAVED),
