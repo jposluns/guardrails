@@ -115,8 +115,9 @@ the sources and targets you pass. It never enters `.git`.
 - **Targets** are paths the plan will create outside the scanned roots, for example `opf`, the
   directory of the OPF pack mirror. The plan installs there only the members it names: the
   pre-commit hook at `opf/enforcement/precommit/pre-commit` with `install.sh` beside it, the CI
-  recipe and the tool entry point `opf/tools/opf.py`. The modules that entry point imports come
-  from a later install step (section 4). The planner needs to see that each target is absent.
+  recipe, and the tool entry point `opf/tools/opf.py` with every other file of the release's
+  `opf/tools/` directory, which that entry point runs (section 4). The planner needs to see that
+  each target is absent.
 
 **Discover the sources first.** Do not ask the adopter which old files exist; find them. Run the
 read-only discovery entry, with an absolute product root and the tooling directory that holds
@@ -230,8 +231,9 @@ The reserved store control area (`.working/archive`, `imported`, `staging`, `jou
 adopter content, and no decision may name it.
 
 Then write the planning worksheet, a TOML file with a closed set of keys; the planner refuses a
-key outside this set. The sample below is complete for one case: the investigation in section
-3 finds no store and one candidate, the named source `TODO.md`, which takes `retire`, and
+key outside this set. The sample below is complete for one case, except for the `opf/tools/`
+files after the entry point, which you add as described after the sample: the investigation in
+section 3 finds no store and one candidate, the named source `TODO.md`, which takes `retire`, and
 nothing exists yet at the enforcement member paths. Replace each value in angle brackets with a
 real one. Write every digest as `sha256:` followed by 64 lowercase hex digits. The
 `observation_digest` from section 3 and the `digest` in `pack.toml` already have that form, so
@@ -494,9 +496,20 @@ How to fill it:
   installs. So the pre-commit hook sits at `opf/enforcement/precommit/pre-commit` with
   `install.sh` beside it, the CI recipe sits at `opf/enforcement/ci/opf-ci.sh`, where the
   workflow's `run:` line points, and both rows name `opf/tools/opf.py`, the tool those files run.
-  The sample names only that entry point. The modules it imports sit beside it in the release's
-  `opf/tools/` directory, and the sample does not plant them, so the planted entry point cannot
-  run on its own in this build. The planner treats a member named `opf.yml`, `opf-ci.sh`,
+  That entry point imports the modules beside it and reads other files there, so it runs only
+  beside the whole `opf/tools/` directory of its release. Both rows therefore also name every
+  other file of that directory at its `opf/tools/` path, and the plan plants each one with a
+  `plant-governance` row, as it plants the entry point. The sample shows the entry point only;
+  add the rest to both rows and to `ops`. If a plan installs the entry point but leaves any file
+  of that directory out of a `ci` or `pre-commit` row, or plants no `plant-governance` row for
+  it, the plan refuses with exit 2. The planner lists that directory from the `opf/tools/` it runs
+  from, so plan with the release you install. Print each file's path and digest with:
+
+  ```
+  python3 -I -B -c "import sys, os, hashlib; sys.path.insert(0, sys.argv[1]); import _opf_adopt as a; [print(p, 'sha256:' + hashlib.sha256(open(os.path.join(sys.argv[1], p[len('opf/tools/'):]), 'rb').read()).hexdigest()) for p in a.tool_tree()]" <opf tools directory>
+  ```
+
+  The planner treats a member named `opf.yml`, `opf-ci.sh`,
   `pre-commit` or `install.sh`, in any row and in any mix of upper and lower case (`PRE-COMMIT` or
   `Pre-Commit` too), as that file, whichever of `plant-governance` or `enable-hook` installs it.
   If the path it runs lies outside `opf/` or above the product root, or no `plant-governance`

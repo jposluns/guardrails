@@ -21944,8 +21944,9 @@ def _cli_self_test():
                 bindings = _opf_adopt.canonical_plan_bindings()   # its revision is the fixture's HEAD, below
                 manifest = _opf_init.build_manifest()
                 views = sorted(v["target"] for v in tomllib.loads(manifest)["views"].values())
-                # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool entry
-                # point and the deny hook) lies outside every walked root, so its absence is a declared target.
+                # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool tree with
+                # its entry point, and the deny hook) lies outside every walked root, so its absence is a
+                # declared target.
                 sheet = dict(schema=1, product="opf", sources=["keep.md", "legacy.md"],
                              targets=[_opf_adopt.PACK_MIRROR_ROOT],
                              decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),

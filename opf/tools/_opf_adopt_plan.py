@@ -1153,8 +1153,8 @@ def self_test():
             self.views = sorted(v["target"] for v in views)
 
         def all_targets(self):
-            # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool entry point
-            # and the deny hook) lies outside every walked root, so its absence is a declared target.
+            # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool tree with its
+            # entry point, and the deny hook) lies outside every walked root, so its absence is a declared target.
             return sorted(set(self.targets) | {schema.PACK_MIRROR_ROOT})
 
         def base_ops(self):

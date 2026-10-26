@@ -12034,8 +12034,8 @@ def _self_test_checks():
                 dict(op="render-views", store_root=".",
                      members=[dict(path=v, digest=_digest(v.encode("utf-8"))) for v in views])]
         rows += schema.enforcement_install_ops(bindings["enforcement"])
-        # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool entry point and
-        # the deny hook) lies outside every walked root, so its absence is a declared target.
+        # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool tree with its entry
+        # point, and the deny hook) lies outside every walked root, so its absence is a declared target.
         sheet = dict(sources=["keep.md", "legacy.md"], targets=[schema.PACK_MIRROR_ROOT], product="opf",
                      decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),
                                 dict(path="legacy.md", disposition="retire", actor="fixture")],

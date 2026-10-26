@@ -31,9 +31,10 @@ platform's next load, and the file usually already carries the adopter's own sec
   1. Malicious or wrong registration content (privilege escalation). A plan row must never register
      arbitrary command text. The op-row grammar (`_opf_adopt._is_hook_entry`) admits exactly one
      `plugin_entry`, `_opf_adopt.HOOK_COMMAND`: the isolated interpreter running the deny hook at
-     `_opf_adopt.HOOK_MEMBER`, named from the platform's project directory, so no PATH lookup or
-     other repository file is chosen; the plan validator refuses a registration whose plan plants
-     no file at HOOK_MEMBER, and plant-governance plants that file only from its own
+     `_opf_adopt.HOOK_MEMBER`, whose path comes from the platform's project directory, so no other
+     repository file is chosen; the interpreter is the first python3 on PATH where the platform
+     runs the command, which this grammar does not pin; the plan validator refuses a registration
+     whose plan plants no file at HOOK_MEMBER, and plant-governance plants that file only from its own
      digest-verified pack member (the trust gate); the merge inserts exactly that command and
      nothing else; the exact post-merge bytes are pinned by the plan's `new_digest`, which the
      single approval binds transitively through `plan_digest`, so the adopter's one informed yes

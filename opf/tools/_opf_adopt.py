@@ -69,6 +69,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import os
 import re
 from pathlib import Path
 
@@ -149,6 +150,11 @@ ENFORCEMENT_INSTALL_OPS = ("plant-governance", "enable-hook")
 # The tool-install layout: an adopted project receives the OPF pack by plant-governance rows, mirrored
 # byte-identically at this product-relative root, so every mirrored pack member keeps its pack path beneath it.
 PACK_MIRROR_ROOT = "opf"
+# The tool the CI recipe and the pre-commit hook launch: its mirrored tool directory and its entry point there.
+# The entry point imports the modules beside it and reads other files there by path, so it runs only beside
+# the whole tool tree it ships in (tool_tree), which a plan that installs it installs too.
+TOOL_ROOT = PACK_MIRROR_ROOT + "/tools"
+TOOL_ENTRY = TOOL_ROOT + "/opf.py"
 # The enforcement members that launch another file, each read from its own launch line in the pack under
 # opf/enforcement/ (the self-test pins every line to the shipped member). A row is (platform, pack member,
 # destination, launch line, frame, target): the frame says whether the line names its target relative to the
@@ -169,8 +175,9 @@ ENFORCEMENT_LAUNCHERS = (
 )
 # The Claude Code deny hook, planted at its mirror path: it derives the trees it guards and the writer it
 # trusts from its own real path, so it runs only from there. The registration file the platform loads, and
-# the one command an enable-hook row may register in it: the deny hook under the isolated interpreter, named
-# from the project directory the platform exports, so no PATH lookup chooses the program.
+# the one command an enable-hook row may register in it: the deny hook under the isolated interpreter (-I).
+# The hook script's path comes from the project directory the platform exports; the interpreter is the first
+# python3 on PATH where the platform runs the command, so PATH, not this command, chooses the interpreter.
 HOOK_MEMBER = PACK_MIRROR_ROOT + "/enforcement/claude/pretooluse_deny.py"
 HOOK_REGISTRATION = ".claude/settings.json"
 HOOK_COMMAND = 'python3 -I "$CLAUDE_PROJECT_DIR"/' + HOOK_MEMBER
@@ -266,9 +273,11 @@ _REVISION_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 # member (ENFORCEMENT_LAUNCHERS) is recognized by its file name, compared case-insensitively (_launcher_of),
 # in any enforcement row, and what it launches, whichever of those two ops places it, is resolved from its
 # planned path against the paths the plan's plant-governance rows create, which proves the
-# launch path lands on a planned opf/ mirror member, not that the planted bytes are the launcher or that the
-# mirror holds every module the launched tool imports (the release inventory names the
-# whole opf/tools/** tree); a launcher-bearing row names its launchers, every file they launch and nothing
+# launch path lands on a planned opf/ mirror member, not that the planted bytes are the launcher. A launch of
+# the tool entry point also requires every file of the tool tree planted in the mirror (tool_tree); that tree
+# is listed from the tool directory this module ships in, so a plan is held to the tree of the release that
+# runs the check, never read from the release manifest the plan binds; a launcher-bearing row names its
+# launchers, every file they launch (the tool tree with its entry point) and nothing
 # else, each launcher under its exact installed file name (_validate_enforcement: a case variant is resolved
 # as that launcher but does not meet this floor). Every file any op row writes under a launcher's file name
 # (_launcher_writes: each creation, replacement and repointing that row adds to `effects`), a move-file
@@ -407,7 +416,8 @@ def _is_hook_entry(value):
     identity (the _opf_adopt_hook threat model, item 1: a plan row must never register arbitrary command
     text). The platform runs the registered value as a command, so no other program, path, argument or
     shell word is admitted, and the command runs the deny hook the same plan plants at HOOK_MEMBER
-    (_hook_target_refusal), never a program a PATH lookup or a repository file chooses."""
+    (_hook_target_refusal), whose path comes from the project directory, never another repository file. The
+    interpreter that runs it is the first python3 on PATH where the platform runs the command."""
     return type(value) is str and value == HOOK_COMMAND
 
 
@@ -595,10 +605,33 @@ def pack_source(path):
     return None
 
 
+def tool_tree(root=None):
+    """The mirror path under TOOL_ROOT of every file beneath `root`, sorted: by default the tool directory this
+    module ships in, the opf/tools/** tree the release inventory names, __pycache__ left out. TOOL_ENTRY runs
+    only beside this whole tree (it imports the modules there and reads other files there by path, the
+    vendored parser and its manifest among them), so the tree is listed from the directory, never kept by hand.
+    A directory that cannot be read, or a symlinked directory, whose files the walk would skip, raises
+    OSError: no partial tree is returned. Each call walks the directory again and returns a fresh list."""
+    top = str(Path(__file__).resolve().parent) if root is None else root
+
+    def refuse(exc):
+        raise exc
+    paths = []
+    for directory, dirnames, filenames in os.walk(top, onerror=refuse):
+        dirnames[:] = sorted(name for name in dirnames if name != "__pycache__")
+        for name in dirnames:
+            if os.path.islink(os.path.join(directory, name)):
+                raise OSError("the tool tree holds a symlinked directory {!r}".format(os.path.join(directory, name)))
+        rel = os.path.relpath(directory, top).replace(os.sep, "/")
+        paths += [TOOL_ROOT + "/" + (name if rel == "." else rel + "/" + name) for name in filenames]
+    return sorted(paths)
+
+
 def enforcement_launch_members(platform):
-    """The member paths a launcher-bearing platform row binds, derived from ENFORCEMENT_LAUNCHERS alone:
-    each launcher of `platform` at its destination, then each path one of them launches from there that is
-    not already listed (the tool entry point under the opf/ mirror among them), in table order. Empty for a
+    """The member paths a launcher-bearing platform row binds, derived from ENFORCEMENT_LAUNCHERS and the tool
+    tree: each launcher of `platform` at its destination, then each path one of them launches from there that
+    is not already listed (the tool entry point under the opf/ mirror among them), in table order, and, when
+    that is TOOL_ENTRY, every other file of the tool tree it runs beside (tool_tree), sorted. Empty for a
     platform with no launcher."""
     launchers = [row for row in ENFORCEMENT_LAUNCHERS if row[0] == platform]
     paths = [destination for _platform, _member, destination, _line, _frame, _target in launchers]
@@ -606,6 +639,8 @@ def enforcement_launch_members(platform):
         launched = launch_target(frame, target, destination)
         if launched not in paths:
             paths.append(launched)
+    if TOOL_ENTRY in paths:
+        paths += [path for path in tool_tree() if path not in paths]
     return paths
 
 
@@ -615,9 +650,9 @@ def canonical_plan_bindings():
     row per platform with its residuals, and the skip policy. The planner derives every other v2 field.
     The CI and pre-commit rows bind the members enforcement_launch_members derives, so each launcher sits
     where its own launch line resolves under the opf/ mirror, and the file each launches is a member to
-    install (the tool entry point opf/tools/opf.py stands in for the whole opf/tools/** tree). The
-    claude-code row binds the registration file and the deny hook its HOOK_COMMAND runs. Each call returns
-    fresh tables."""
+    install: the tool entry point opf/tools/opf.py with every other file of the tool tree it runs beside
+    (tool_tree), so the install rows built from these members plant the whole tree. The claude-code row
+    binds the registration file and the deny hook its HOOK_COMMAND runs. Each call returns fresh tables."""
     def row(platform, means, paths, residuals):
         return {"platform": platform, "means": means,
                 "members": [{"path": path, "digest": "sha256:" + "9" * 64} for path in paths],
@@ -1660,10 +1695,14 @@ def _enforcement_launch_refusal(plan):
     enable-hook rewrites an observed file in place, so it creates no mirror file). A launcher whose target
     would not exist in the mirrored tree (a hook placed outside opf/enforcement/, whose
     `$here/../../tools/opf.py` then names no mirror file, a launch that climbs above the product root, or a
-    mirror that omits the launched file) cannot run its check. A launcher-bearing platform's row names its
+    mirror that omits the launched file) cannot run its check. A launcher that launches TOOL_ENTRY also runs
+    every other file of the tool tree (tool_tree), beside which the entry point runs: a plant-governance row
+    of the same plan creates each, or the tool cannot run, and a tool tree that cannot be listed is refused
+    too. A launcher-bearing platform's row names its
     launchers and the files they launch and nothing else. Every file a placed launcher in that row launches
-    is itself a member of the row, so the file that actually runs (the hook beside install.sh, the recipe the
-    workflow runs) is inspected in turn, never left out while a decoy launcher elsewhere is named; and any
+    (the tool tree included) is itself a member of the row, so the file that actually runs (the hook beside
+    install.sh, the recipe the workflow runs, each module of the tool) is inspected in turn, never left out
+    while a decoy launcher elsewhere is named; and any
     other member placed there (a renamed hook, say) runs something this module cannot tell. Last, every file
     any op row writes under a launcher's file name (_launcher_writes: any op, a move-file destination beneath
     the store's Move archive excepted) is a member of some enforcement row, so a launcher the plan writes is
@@ -1683,7 +1722,7 @@ def _enforcement_launch_refusal(plan):
     placed = set(path for _op, path, _digest in placements)
     created = set(path for op, path, _digest in placements if op == "plant-governance")
     bearing = set(row[0] for row in ENFORCEMENT_LAUNCHERS)
-    named, complete = set(), True
+    named, complete, tree = set(), True, None
     for i, row in enumerate(rows):
         if not (isinstance(row, dict) and _valid_field("members", row.get("members"))):
             complete = False
@@ -1699,6 +1738,17 @@ def _enforcement_launch_refusal(plan):
             frame, target = launcher
             launched = launch_target(frame, target, member["path"])
             launched_here.add(launched)
+            beside = []
+            if launched == TOOL_ENTRY:
+                if tree is None:
+                    try:
+                        tree = tool_tree()
+                    except OSError as exc:
+                        return _cannot("the tool tree {} runs beside cannot be listed ({}), so whether this plan "
+                                       "installs it cannot be evaluated; it is refused rather than "
+                                       "planted".format(TOOL_ENTRY, exc))
+                beside = [path for path in tree if path != TOOL_ENTRY]
+                launched_here.update(beside)
             if member["path"] not in placed:
                 continue
             relative = "its own directory" if frame == "member" else "the product root"
@@ -1716,6 +1766,19 @@ def _enforcement_launch_refusal(plan):
                 return _cannot("plan enforcement[{}] member {!r} launches {!r}, which the row does not name, "
                                "so the file it runs is never inspected; it is refused rather than "
                                "planted".format(i, member["path"], launched))
+            # the tool entry point runs only beside its whole tool tree: the plan plants every file of it, and
+            # a launcher-bearing row names each, as it names the entry point
+            for path in beside:
+                if path not in created:
+                    return _cannot("plan enforcement[{}] member {!r} launches the tool entry point {!r}, which "
+                                   "runs beside every file of its tool tree, but no plant-governance row of this "
+                                   "plan creates {!r}; the tool cannot run, so it is refused rather than "
+                                   "planted".format(i, member["path"], launched, path))
+                if row.get("platform") in bearing and path not in paths:
+                    return _cannot("plan enforcement[{}] member {!r} launches the tool entry point {!r}, which "
+                                   "runs {!r} from its tool tree, but the row does not name it, so that file is "
+                                   "never inspected; it is refused rather than planted".format(
+                                       i, member["path"], launched, path))
         if row.get("platform") not in bearing:
             continue
         for member in row["members"]:
@@ -2861,8 +2924,34 @@ def self_test():
     _rows = canonical_plan_bindings()["enforcement"]
     _ci, _hook, _installer = ENFORCEMENT_LAUNCHERS[0], ENFORCEMENT_LAUNCHERS[2], ENFORCEMENT_LAUNCHERS[3]
     _HOOK, _INSTALLER = "opf/enforcement/precommit/pre-commit", "opf/enforcement/precommit/install.sh"
+    # the rest of the tool tree the entry point runs beside, listed from this module's own directory
+    _BESIDE = [path for path in tool_tree() if path != "opf/tools/opf.py"]
     check("launch-pre-commit-row-destinations",
-          [m["path"] for m in _rows[1]["members"]] == [_HOOK, _INSTALLER, "opf/tools/opf.py"])
+          [m["path"] for m in _rows[1]["members"]] == [_HOOK, _INSTALLER, "opf/tools/opf.py"] + _BESIDE)
+    # the tool tree is the walked directory: every module and data file beside the entry point, the vendored
+    # parser included, __pycache__ left out; a listing that cannot be complete raises instead of shrinking
+    check("tool-tree-walked-from-module-directory",
+          TOOL_ENTRY == "opf/tools/opf.py" and TOOL_ENTRY in tool_tree()
+          and {"opf/tools/_opf_adopt.py", "opf/tools/_opf_store.py", "opf/tools/_vendor/marko/__init__.py",
+               "opf/tools/_vendor/marko-2.2.4.manifest.sha256"} <= set(_BESIDE)
+          and tool_tree() == sorted(tool_tree()) and not [p for p in _BESIDE if "__pycache__" in p])
+    import tempfile
+
+    def _tree_raises(root):
+        try:
+            tool_tree(root)
+        except OSError:
+            return True
+        return False
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-tool-tree-") as _scratch:
+        for _rel in ("a.py", "sub/b.txt", "__pycache__/a.cpython-314.pyc", "sub/__pycache__/c.pyc"):
+            os.makedirs(os.path.dirname(os.path.join(_scratch, _rel)), exist_ok=True)
+            with open(os.path.join(_scratch, _rel), "wb") as _fh:
+                _fh.write(b"x\n")
+        check("tool-tree-lists-files-not-pycache", tool_tree(_scratch) == ["opf/tools/a.py", "opf/tools/sub/b.txt"])
+        check("tool-tree-missing-directory-raises", _tree_raises(os.path.join(_scratch, "absent")))
+        os.symlink(os.path.join(_scratch, "sub"), os.path.join(_scratch, "linked"))
+        check("tool-tree-symlinked-directory-raises", _tree_raises(_scratch))
     check("launch-pre-commit-hook-resolves", launch_target(_hook[4], _hook[5], _HOOK) == "opf/tools/opf.py")
     check("launch-installer-beside-hook", launch_target(_installer[4], _installer[5], _INSTALLER) == _HOOK)
     # the CI row keeps its workflow member unchanged, and its run line resolves to the recipe the row also
@@ -2871,7 +2960,7 @@ def self_test():
           _rows[0]["members"][0] == {"path": ".github/workflows/opf.yml", "digest": "sha256:" + "9" * 64})
     check("launch-ci-row-resolves",
           [m["path"] for m in _rows[0]["members"]] == [
-              ".github/workflows/opf.yml", "opf/enforcement/ci/opf-ci.sh", "opf/tools/opf.py"]
+              ".github/workflows/opf.yml", "opf/enforcement/ci/opf-ci.sh", "opf/tools/opf.py"] + _BESIDE
           and launch_target(_ci[4], _ci[5], ".github/workflows/opf.yml") == "opf/enforcement/ci/opf-ci.sh"
           and launch_target("member", "../../tools/opf.py", "opf/enforcement/ci/opf-ci.sh")
           == "opf/tools/opf.py")
@@ -3033,17 +3122,44 @@ def self_test():
                 "old_digest": _D5, "new_digest": _D9}]),
              "plan enable-hook row places '.opf/hooks/pre-commit' " + _unrowed),
             ("unnamed-hook-by-governance", _governed("opf/x/y/pre-commit", "opf/x/y/pre-commit"),
-             "plan plant-governance row places 'opf/x/y/pre-commit' " + _unrowed)):
+             "plan plant-governance row places 'opf/x/y/pre-commit' " + _unrowed),
+            # the tool entry point runs beside its whole tool tree: a module, or a vendored data file, dropped
+            # from the rows and the plant rows alike leaves the installed tool unable to run (VALID without
+            # the tool-tree clause), and the CI recipe, the first launcher of the tool, refuses first
+            ("tool-module-dropped", _drop("opf/tools/_opf_store.py"),
+             "member '" + _CI_RECIPE + "' launches the tool entry point '" + _TOOL + "', which runs beside "
+             "every file of its tool tree, but no plant-governance row of this plan creates "
+             "'opf/tools/_opf_store.py'"),
+            ("tool-data-file-dropped", _drop("opf/tools/_vendor/marko-2.2.4.manifest.sha256"),
+             "no plant-governance row of this plan creates 'opf/tools/_vendor/marko-2.2.4.manifest.sha256'"),
+            # planted and named in the CI row, but left out of the pre-commit row, whose hook runs it too
+            ("tool-module-unnamed-in-pre-commit-row", lambda p: p["enforcement"][1]["members"].__setitem__(
+                slice(None), [m for m in p["enforcement"][1]["members"] if m["path"] != "opf/tools/_opf_store.py"]),
+             "member '" + _HOOK + "' launches the tool entry point '" + _TOOL + "', which runs "
+             "'opf/tools/_opf_store.py' from its tool tree, but the row does not name it")):
         result = _validated(mutate)
         check("launch-" + label, result.status == CANNOT_EVALUATE and reason in result.findings[0])
+    # a tool tree that cannot be listed refuses the canonical plan rather than reading as installed
+    _listing = tool_tree
+
+    def _unlistable(root=None):
+        raise OSError("the tool directory is unreadable")
+    globals()["tool_tree"] = _unlistable
+    try:
+        _result = _validated(lambda p: None)
+    finally:
+        globals()["tool_tree"] = _listing
+    check("launch-tool-tree-unlistable-refused",
+          _result.status == CANNOT_EVALUATE and "cannot be listed" in _result.findings[0])
     for label, mutate in (
             # counter-vectors: the canonical plan, whose rows name every file their launchers launch, stays
             # VALID; so does a launch target a plant-governance row creates later in the program, a planted
-            # file named in no row whose file name is no launcher's, and a hook named in another platform's
-            # row whose launch resolves (only a launcher-bearing row must name its targets)
+            # mirror file outside the tool tree named in no row whose file name is no launcher's, and a hook
+            # named in another platform's row whose launch resolves (only a launcher-bearing row must name its
+            # targets, the tool tree among them)
             ("canonical-plan-valid", lambda p: None),
             ("governance-created-target-valid", _governed(_TOOL, _TOOL)),
-            ("unrowed-support-module-valid", lambda p: _insert(p, [_plant("opf/tools/_opf_store.py", _D9)])),
+            ("unrowed-mirror-file-valid", lambda p: _insert(p, [_plant("opf/spec/OPF-SPEC.md", _D9)])),
             ("hook-in-other-platform-row-valid", _add(2, "opf/enforcement/other/pre-commit"))):
         check("launch-" + label, _validated(mutate).status == VALID)
     # 15h, continued: the unnamed-launcher clause covers every op that writes a file, not only the three that
