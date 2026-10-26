@@ -473,6 +473,48 @@ _Redirect = collections.namedtuple(
 _Segment = collections.namedtuple(
     "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
                  "argv_leading_tilde"))
+# How the word reader (_read_word) found one word spelled: literal, the number of leading characters of the
+# decoded word spelled as plain literal text (unquoted text, single- or double-quoted text, or an escaped
+# character), so len(word) when the whole word is, and brace, True where the word holds an unquoted '{' that may
+# open a brace expansion (one right after a '$', or inside an open '${...}', opens a parameter expansion
+# instead). A character stops being plain literal text where a part of the word came from a parameter or
+# command expansion (a '$' or a backquote, unquoted or inside double quotes, as the reader reads it as opaque: a
+# '$' bash reads literally, as in 'x$', counts too), an ANSI-C quote $'...', a locale quote $"..." (with locale
+# False its '$' is such a '$'), or a brace expansion; a word read right after a ')' or inside an open '${...}'
+# continues one that carried a substitution, so none of it is.
+_WordSpelling = collections.namedtuple("_WordSpelling", ("literal", "brace"))
+
+
+class _SpelledWords(list):
+    """The decoded words of one segment (its argv) as a lex inside _WordSpellings returns them: the same words, in
+    the same order, as any other lex of the command returns, with spelling beside them, a tuple holding the
+    _WordSpelling of each word."""
+
+    __slots__ = ("spelling",)
+
+    def __init__(self, words, spelling):
+        list.__init__(self, words)
+        self.spelling = tuple(spelling)
+
+
+class _WordSpellings:
+    """A context in which every lex records how each word it returns was spelled: each segment's argv is a
+    _SpelledWords, whose words are those every other lex returns, with the _WordSpelling of each beside them.
+    Outside it argv is a plain list and nothing is recorded. The git alias readers read the record where it is
+    there (_git_alias_defined_at, _git_local_alias); protected_line, gate_weakening, git_discard and branch_root
+    lex inside this context, and so does the partial lex of _git_alias_recovered (HOW A KEY IS SPELLED, above
+    _GIT_ALIAS_KEY_RE). It restores the previous setting on exit, as _SubstHeredocFloor does."""
+
+    on = False
+
+    def __enter__(self):
+        self.was_on = _WordSpellings.on
+        _WordSpellings.on = True
+        return self
+
+    def __exit__(self, *exc_info):
+        _WordSpellings.on = self.was_on
+        return False
 
 # THE '#' COMMENT RULE, shared by the scanners that decide where a comment starts in what the guards read as
 # commands (the shared lexer and its word reader, the substitution skip _skip_quoting, the redirect-target
@@ -1137,7 +1179,8 @@ def _skip_quoting_walk(command, i, n, stack, nest, hash_reading, heredoc, opened
     return i
 
 
-def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=False, heredoc=None):
+def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=False, heredoc=None,
+               spelling=None):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
     newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
     the quote/escape decoded word, opaque is True if it carried an unquoted
@@ -1170,9 +1213,16 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
     double-quoted string (a locale one included) is skipped whole by _skip_quoting, which applies the same
     rule to a '#' inside it with nest and hash_reading, and reads a quoted here-document's body inside it as
     text with heredoc (the lexer's shared _SubstHeredocs; None reads none, see _skip_quoting), on which an
-    unquoted backquote the word holds is counted as a command substitution too."""
+    unquoted backquote the word holds is counted as a command substitution too. spelling, when given, is a
+    one-element list whose item the read sets to the word's _WordSpelling (how each part of it was spelled); the
+    tuple returned is the same either way."""
     chars = []
     opaque = bool(glued) or (nest is not None and "${" in nest)
+    # The decoded length where the first character not spelled as plain literal text begins (-1 while none has),
+    # and whether an unquoted '{' may open a brace expansion (_WordSpelling). Each is set only on a character that
+    # also makes the word opaque, so an ordinary character pays nothing for it.
+    literal = 0 if opaque else -1
+    brace = False
     started = False
     all_digits = True
     leading_tilde = False
@@ -1228,6 +1278,8 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             # by the branch below. The word stays opaque, as its '$' made it before, since a catalogue can
             # replace the text at run time.
             opaque = True
+            if literal < 0:
+                literal = sum(map(len, chars))
             i += 1
             c = '"'
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
@@ -1273,10 +1325,14 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                     _sub_start = i
                     i = _skip_quoting(command, i, n, nest, hash_reading, heredoc)
                     opaque = True
+                    if literal < 0:
+                        literal = sum(map(len, chars))
                     chars.append(command[_sub_start:i])
                     continue
                 if d in "$`":
                     opaque = True
+                    if literal < 0:
+                        literal = sum(map(len, chars))
                 chars.append(d)
                 i += 1
             all_digits = False
@@ -1292,6 +1348,8 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             if tilde_prefix_open:
                 leading_tilde = False
                 tilde_prefix_open = False
+            if literal < 0:
+                literal = sum(map(len, chars))
             i += 2
             while True:
                 if i >= n:
@@ -1336,6 +1394,13 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             tilde_prefix_open = True  # begin tracking the tilde-prefix; a later quote/escape voids the tilde
         elif c in _OPAQUE_WORD_CHARS:
             opaque = True
+            if c in "$`{":
+                # A parameter or command expansion, or a brace: no longer plain literal text (_WordSpelling). A
+                # '{' right after a '$', or inside an open '${...}', opens a parameter expansion, not a brace one.
+                if literal < 0:
+                    literal = sum(map(len, chars))
+                if c == "{" and dollar_end != i and (nest is None or "${" not in nest):
+                    brace = True
         elif c == "/" and tilde_prefix_open:
             # an UNQUOTED '/' ends the tilde-prefix cleanly: the leading '~' stays an expansion, and anything
             # after this '/' (an opaque '$VAR', a quote) no longer blocks it. 'cd ~/$VAR' remains an ALLOW.
@@ -1353,7 +1418,10 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             all_digits = False
         chars.append(c)
         i += 1
-    return "".join(chars), opaque, started, all_digits, leading_tilde, i
+    text = "".join(chars)
+    if spelling is not None:
+        spelling[0] = _WordSpelling(len(text) if literal < 0 else literal, brace)
+    return text, opaque, started, all_digits, leading_tilde, i
 
 
 def _match_operator(command, i, n):
@@ -1945,7 +2013,8 @@ class _LexFork:
     began with backslash-newlines and stopped at the '#', the redirect operator, or the IO_NUMBER before it,
     whose target begins with the '#'), before that token changed anything: the index at, the segments built
     so far, the words, flags and redirects of the segment in
-    progress, the start of that segment, the queued here-document delimiters, the nesting stack, what
+    progress (with the words' _WordSpelling records inside _WordSpellings, else None), the start of that
+    segment, the queued here-document delimiters, the nesting stack, what
     precedes at (glued_at and before), and the pass's _SubstHeredocs (None for a pass reading no body). A
     lex under a reading that extends the stopped one resumes from it with its own copies (_lex_reading,
     _lex_readings); the segments themselves are shared, and no reader changes one.
@@ -1959,13 +2028,14 @@ class _LexFork:
     lex the same rest, and a later one takes the recorded rest instead of lexing it again: readings of a '#'
     line meet again at its newline, so the text after it is lexed once too."""
 
-    def __init__(self, at, segments, argv, argv_opaque, argv_leading_tilde, redirects, opaque, seg_start,
-                 pending_heredocs, nest, glued_at, before, heredocs, tails):
+    def __init__(self, at, segments, argv, argv_opaque, argv_leading_tilde, argv_spelling, redirects, opaque,
+                 seg_start, pending_heredocs, nest, glued_at, before, heredocs, tails):
         self.at = at
         self.segments = segments
         self.argv = argv
         self.argv_opaque = argv_opaque
         self.argv_leading_tilde = argv_leading_tilde
+        self.argv_spelling = argv_spelling
         self.redirects = redirects
         self.opaque = opaque
         self.seg_start = seg_start
@@ -2182,13 +2252,17 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     skip_empty True leaves out every segment with no word and no redirect (_lex_command). fork, when given,
     is the _LexFork the pass resumes from (_lex_reading), with copies of its lists and nesting stack. Where
     hash_reading does not map an uncertain '#' met at a word boundary or at the start of a redirect target,
-    the _UncertainHashError raised carries the _LexFork of this pass at the start of that token."""
+    the _UncertainHashError raised carries the _LexFork of this pass at the start of that token. Inside
+    _WordSpellings each segment's argv is a _SpelledWords holding the words' _WordSpelling records (spelled,
+    the word reader's one-element list, and argv_spelling, parallel to argv), and a plain list outside it."""
     n = len(command)
+    spelled = [None] if _WordSpellings.on else None
     if fork is None:
         segments = []
         argv = []
         argv_opaque = []
         argv_leading_tilde = []
+        argv_spelling = None if spelled is None else []
         redirects = []
         opaque = [False]
         seg_start = [0]
@@ -2202,6 +2276,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
         argv = list(fork.argv)
         argv_opaque = list(fork.argv_opaque)
         argv_leading_tilde = list(fork.argv_leading_tilde)
+        # A fork from a lex outside _WordSpellings carries no records to resume, so its segments get none either.
+        argv_spelling = None if spelled is None or fork.argv_spelling is None else list(fork.argv_spelling)
         redirects = list(fork.redirects)
         opaque = [fork.opaque]
         seg_start = [fork.seg_start]
@@ -2226,16 +2302,22 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
             tails[tail_key] = (segments[tail_from:], flags,
                                None if subst_heredocs is None else subst_heredocs.state())
 
+    def words():
+        # The segment's argv: a copy of the words read so far, with their spelling records inside _WordSpellings.
+        return list(argv) if argv_spelling is None else _SpelledWords(argv, argv_spelling)
+
     def end_segment(sep, op_start, next_start):
-        # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde and opaque
-        # change only together with argv, so a skipped segment leaves them empty and False as well.
+        # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde, argv_spelling
+        # and opaque change only together with argv, so a skipped segment leaves them empty and False as well.
         if argv or redirects or not skip_empty:
-            segments.append(_Segment(list(argv), sep, list(redirects),
+            segments.append(_Segment(words(), sep, list(redirects),
                                       command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
                                       list(argv_leading_tilde)))
             del argv[:]
             del argv_opaque[:]
             del argv_leading_tilde[:]
+            if argv_spelling is not None:
+                del argv_spelling[:]
             del redirects[:]
             opaque[0] = False
         seg_start[0] = next_start
@@ -2378,7 +2460,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 continue
             text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, nest,
                                                                                  i == glued_at, hash_reading,
-                                                                                 locale, subst_heredocs)
+                                                                                 locale, subst_heredocs, spelled)
             if j == i:
                 # Unreachable while this loop decides every '#' before it calls the word reader, which then
                 # consumes at least one character (a '#' this reading takes as word text included); kept so a
@@ -2402,6 +2484,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 argv.append(text)
                 argv_opaque.append(w_opaque)
                 argv_leading_tilde.append(w_leading_tilde)
+                if argv_spelling is not None:
+                    argv_spelling.append(spelled[0])
                 if w_opaque:
                     opaque[0] = True
             else:
@@ -2421,7 +2505,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
         if partial and (hash_reading is None or not isinstance(exc, _UncertainHashError)):
             in_progress = bool(argv or redirects)
             if in_progress:
-                segments.append(_Segment(list(argv), "", list(redirects),
+                segments.append(_Segment(words(), "", list(redirects),
                                          command[seg_start[0]:], opaque[0], list(argv_opaque),
                                          list(argv_leading_tilde)))
             remember((False, in_progress))
@@ -2430,7 +2514,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
             # Stopped at the '#' the token at i asks about, before the token changed anything: a reading
             # that maps that '#' resumes here (_LexFork).
             exc.fork = _LexFork(i if hash_at[1] < 0 else hash_at[1], segments, argv, argv_opaque,
-                                argv_leading_tilde, redirects, opaque[0],
+                                argv_leading_tilde, argv_spelling, redirects, opaque[0],
                                 seg_start[0], pending_heredocs, nest, glued_at, before, subst_heredocs, tails)
         raise
     remember((True, False))
@@ -4782,20 +4866,54 @@ def _git_sub_and_args(tokens):
 # an assignment such as GIT_CONFIG_GLOBAL or HOME points git at), the value of an assignment before the command word
 # built at run time, a definition or git word built at run time, and a definition inside the text of another word
 # (an sh -c, bash -c or eval body), which is one word here.
+# HOW A KEY IS SPELLED. The decoded word a reader matches is not the word bash builds where part of it comes from
+# an expansion: '-c "${A:-alias}.l"=log', "-c $'\x61lias.l'=log", '-c $"alias".l=log' and '-c {alias,x}.l=log'
+# each pass alias.l to git while the decoded key names no alias section. So where the lexer records how each word
+# was spelled (_WordSpellings, read from argv's _SpelledWords record), a -c value or a --config-env word whose key
+# part (the text before its first '=', or the whole word when it has none) holds a character not spelled as plain
+# literal text (_WordSpelling: a parameter or command expansion, an ANSI-C or locale quote, or a brace expansion)
+# defines a git alias whatever it decodes to (_git_alias_defined_at), and so does a word holding an unquoted brace
+# and a comma in the region between a git word and its subcommand, the word read as the subcommand included
+# (_git_local_alias), since bash expands it into several words that can be global options and a definition ('git
+# {-c,alias.l=log} l' runs 'git -c alias.l=log l'). A -c value or a --config-env word is no such brace word: its key
+# part decides, and a value spelled through an expansion behind a literal key ('-c core.pager="$P"') defines
+# nothing. Disclosed over-refusal (the safe direction): a key that is literal in effect but spelled through an
+# expansion ("-c $'core.pager'=cat", '-c "${K:-core.pager}"=cat') now reads as an alias, and so does a brace word
+# there that expands to no option ('git {log,status}'). protected_line, gate_weakening, git_discard and branch_root
+# lex inside _WordSpellings, and _git_alias_spelled reads the same rule from the de-quoted text of an unparseable
+# command. A reader given words with no record reads the decoded key alone, as before: git_explicit_binding,
+# commit_identity and commit_msg_subst lex outside _WordSpellings, so on a parsed command they read no spelling,
+# while commit_msg_subst's unparseable fallback reads it through _git_alias_recovered.
 _GIT_ALIAS_KEY_RE = re.compile(r"(?i)(?:alias|include|includeif)\.")
 _GIT_CONFIG_ENV_ASSIGN_RE = re.compile(r"GIT_CONFIG_(?:PARAMETERS|KEY_[0-9]+)\+?=")
+
+
+def _git_key_spelled(word, literal, skip):
+    """Whether the key part of word, the text from index skip to its first '=' (to the end when there is none),
+    holds a character not spelled as plain literal text, literal being the number of leading characters of word
+    that were (_WordSpelling.literal)."""
+    key_end = word.find("=", skip)
+    return literal < (len(word) if key_end < 0 else key_end)
 
 
 def _git_alias_defined_at(tokens, i):
     """Whether tokens[i] defines a git alias for the command (see _GIT_ALIAS_KEY_RE): a separated -c or
     --config-env whose next word starts with a key of the alias, include or includeIf section, an attached
     --config-env=KEY=ENVVAR with such a key, or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> assignment whose
-    value names such a section."""
+    value names such a section. Where tokens carries the lexer's spelling record (_SpelledWords), a separated -c
+    or --config-env whose next word has a key part not spelled as plain literal text, or an attached
+    --config-env=KEY=ENVVAR whose KEY is not, defines one too, whatever the key decodes to (HOW A KEY IS SPELLED,
+    above); a value spelled so behind a literal key does not."""
     token = tokens[i]
+    spelling = getattr(tokens, "spelling", None)
     if token in ("-c", "--config-env"):
-        return i + 1 < len(tokens) and bool(_GIT_ALIAS_KEY_RE.match(tokens[i + 1]))
+        if i + 1 >= len(tokens):
+            return False
+        return bool(_GIT_ALIAS_KEY_RE.match(tokens[i + 1])) or (
+            spelling is not None and _git_key_spelled(tokens[i + 1], spelling[i + 1].literal, 0))
     if token.startswith("--config-env="):
-        return bool(_GIT_ALIAS_KEY_RE.match(token[len("--config-env="):]))
+        return bool(_GIT_ALIAS_KEY_RE.match(token[len("--config-env="):])) or (
+            spelling is not None and _git_key_spelled(token, spelling[i].literal, len("--config-env=")))
     assign = _GIT_CONFIG_ENV_ASSIGN_RE.match(token)
     return bool(assign and _GIT_ALIAS_KEY_RE.search(token, assign.end()))
 
@@ -4806,9 +4924,14 @@ def _git_local_alias(tokens):
     behind a reserved word, a '{', '!', time or any wrapper), with a definition among the assignments before the
     command word or among the git global options after that git word, walked as _git_sub_and_args walks them.
     That git command's subcommand is then unknown and possibly mutating. One pass: a git word inside the options
-    an earlier git word's walk has read is the value of one of them, so its own walk would read the same options."""
+    an earlier git word's walk has read is the value of one of them, so its own walk would read the same options.
+    Where tokens carries the lexer's spelling record (_SpelledWords), a word of that walk spelled with an unquoted
+    brace and holding a comma defines one too: an option word, the value of an option other than -c and
+    --config-env, or the word the walk stops at, which it reads as the subcommand (HOW A KEY IS SPELLED, above).
+    A -c or --config-env word and its value are read by their key part instead."""
     start = _command_word_index(tokens)
     assigned = any(_git_alias_defined_at(tokens, j) for j in range(start))
+    spelling = getattr(tokens, "spelling", None)
     n = len(tokens)
     end = 0
     for k in range(start, n):
@@ -4820,7 +4943,14 @@ def _git_local_alias(tokens):
         while i < n and tokens[i].startswith("-"):
             if _git_alias_defined_at(tokens, i):
                 return True
-            i += 2 if "=" not in tokens[i] and tokens[i] in _GIT_ARG_OPTS else 1
+            step = 2 if "=" not in tokens[i] and tokens[i] in _GIT_ARG_OPTS else 1
+            config = tokens[i] in ("-c", "--config-env") or tokens[i].startswith("--config-env=")
+            if spelling is not None and not config and any(
+                    spelling[j].brace and "," in tokens[j] for j in range(i, min(i + step, n))):
+                return True
+            i += step
+        if spelling is not None and i < n and spelling[i].brace and "," in tokens[i]:
+            return True
         end = i
     return False
 
@@ -4912,6 +5042,62 @@ def _git_alias_inherited():
 # characters (; & | < > ( ) { } and the backquote), so a word next to a redirect, a here-string or a '{fd}' name
 # reads as the word the lexer would have read there.
 _GIT_ALIAS_TEXT_SPLIT_RE = re.compile(r"[\s;&|<>(){}`]+")
+# The tokens _git_alias_spelled_segments reads: in the de-quoted text with each '$' kept, a redirection operator (a
+# run of '<' and '>', with a '&' after it, '&>', '&>>' or '>|'), a command separator (a newline, or a run of ; & | (
+# and )), or a word (a run of any other text but blanks, so a '$', a backquote, '{' and '}' stay in their word).
+_GIT_ALIAS_SPELLED_TOKEN_RE = re.compile(
+    r"(?P<redirect>&>>?|>\||[<>]+&?)|(?P<sep>\n|[;&|()]+)|(?P<word>[^\s;&|<>()]+)")
+# Where a de-quoted word's plain literal text ends: its first '$', backquote or '{'. A '{' that may open a brace
+# expansion in such a word: one not right after a '$', which opens a parameter expansion instead.
+_GIT_ALIAS_SPELLED_MARK_RE = re.compile(r"[$`{]")
+_GIT_ALIAS_SPELLED_BRACE_RE = re.compile(r"(?<!\$)\{")
+
+
+def _git_alias_spelled_segments(command):
+    """The commands of the text of command, read as _git_alias_spelled reads them: its line continuations joined
+    and its quote characters and backslashes removed, each '$' kept (so what is left of an ANSI-C or locale quote
+    is a '$'), split into commands at each separator and into words at blanks (_GIT_ALIAS_SPELLED_TOKEN_RE), with
+    each redirection, its target word, and an all-digit or '{name}' word right before it left out, as the lexer
+    leaves them out of argv. Each command is a _SpelledWords whose record reads a word's first '$', backquote or
+    '{' as where its plain literal text ends, and a '{' not right after a '$' as a brace. The de-quoted text cannot
+    tell a quoted or escaped '$', backquote, '{' or operator character from an unquoted one, so each counts as an
+    unquoted one would."""
+    text = _join_continuations(command)[0].replace("'", "").replace('"', "").replace(chr(92), "")
+    segments = []
+    words = []
+    target = False  # the next word is the target of a redirection, which no argv holds
+    last_end = -1  # where the last word kept ended, while no other token has followed it
+    for match in _GIT_ALIAS_SPELLED_TOKEN_RE.finditer(text):
+        kind = match.lastgroup
+        if kind == "word":
+            if target:
+                target = False
+                last_end = -1
+            else:
+                words.append(match.group())
+                last_end = match.end()
+            continue
+        if kind == "redirect":
+            if last_end == match.start() and (words[-1].isdigit() or _FD_VAR_RE.match(words[-1])):
+                words.pop()  # an IO number or a '{name}' before the operator is part of the redirection
+            target = True
+        else:
+            if words:
+                segments.append(words)
+            words = []
+            target = False
+        last_end = -1
+    if words:
+        segments.append(words)
+    spelled = []
+    for seg in segments:
+        spelling = []
+        for word in seg:
+            mark = _GIT_ALIAS_SPELLED_MARK_RE.search(word)
+            spelling.append(_WordSpelling(len(word) if mark is None else mark.start(),
+                                          bool(_GIT_ALIAS_SPELLED_BRACE_RE.search(word))))
+        spelled.append(_SpelledWords(seg, spelling))
+    return spelled
 
 
 def _git_alias_spelled(command):
@@ -4924,12 +5110,20 @@ def _git_alias_spelled(command):
     (on git 2.53.0 'git <<<x -c include.path=FILE c' ran an alias FILE defined). The whole text is read, the
     recovered part included, so neither where the lexer stopped nor which git command a definition belongs to is
     needed. Disclosed over-refusal (the safe direction): a definition spelling in any word of such a command counts,
-    one in an echo, a quoted sh -c body, a heredoc or here-string body or a 'grep -c alias.x' included. Read only
-    for a command whose lex failed; it only ever denies."""
+    one in an echo, a quoted sh -c body, a heredoc or here-string body or a 'grep -c alias.x' included. The rule
+    for a key or brace word spelled through an expansion (HOW A KEY IS SPELLED, above _GIT_ALIAS_KEY_RE) applies
+    here to the de-quoted words too, through the same reader: each command of the de-quoted text, its spelling read
+    from the '$', backquote and '{' left in its words (_git_alias_spelled_segments), defines one where
+    _git_local_alias finds one in it, in the region between a git word and its subcommand, past a here-string,
+    heredoc or '{fd}' redirect included. Since those words cannot tell a quoted or escaped '$', backquote or '{'
+    from an unquoted one, a quoted one counts too, a disclosed over-refusal. Read only for a command whose lex
+    failed; it only ever denies."""
     if not _GIT_WORD_RE.search(command):
         return False
     words = _GIT_ALIAS_TEXT_SPLIT_RE.split(_dequoted_text(command))
-    return any(_git_alias_defined_at(words, j) for j in range(len(words)))
+    if any(_git_alias_defined_at(words, j) for j in range(len(words))):
+        return True
+    return any(_git_local_alias(seg) for seg in _git_alias_spelled_segments(command))
 
 
 def _git_alias_recovered(command):
@@ -4937,11 +5131,14 @@ def _git_alias_recovered(command):
     git commands run under one defined outside their segment (_git_alias_named), its text defines one wherever the
     lexer stopped (_git_alias_spelled), or a segment that a partial lex recovers runs git under one
     (_git_alias_segment). The segment the lexer was still inside is kept: the words of it already read stand
-    whatever follows, and this reading only ever denies."""
+    whatever follows, and this reading only ever denies. The partial lex records how each word was spelled
+    (_WordSpellings), so a recovered key or brace word spelled through an expansion counts as on a parsed command
+    (HOW A KEY IS SPELLED, above _GIT_ALIAS_KEY_RE)."""
     if _git_alias_named(command) or _git_alias_spelled(command):
         return True
     try:
-        recovered = [seg.argv for seg in _lex_command(command, partial=True)[0]]
+        with _WordSpellings():
+            recovered = [seg.argv for seg in _lex_command(command, partial=True)[0]]
     except ValueError:
         return False
     outside = _git_alias_outside(command)
@@ -8286,7 +8483,13 @@ def git_discard(data):
     exactly where the raw text or its de-quoted copy names git with a work-losing verb, the scope scan below
     reads that text too (and the joined text), and such a command holds the form's '"', '$', '(' and '<<',
     so it is never pristine and the closed allowlist grammar denies it (as does the missing session
-    directory); where the fallback allows, this guard's own decision is at least as strict.
+    directory); where the fallback allows, this guard's own decision is at least as strict. A git alias the
+    command defines denies however its key is spelled (HOW A KEY IS SPELLED, above _GIT_ALIAS_KEY_RE): the lex
+    here runs inside _WordSpellings, so a -c or --config-env key part spelled through a parameter or command
+    expansion, an ANSI-C or locale quote or a brace expansion, or a brace word with a comma between a git word
+    and its subcommand, defines one, parsed or unparseable (_git_alias_recovered); a value so spelled behind a
+    literal key defines nothing, and a key literal in effect but so spelled now reads as an alias, a disclosed
+    over-refusal.
 
     SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
     decision for a snapshottable in-scope verb (checkout/switch/restore/reset/rm/clean) whose worktree it can
@@ -8329,7 +8532,9 @@ def git_discard(data):
         # segment with no command word, and _pristine_single_bare_git returns before reading the segments
         # when the command holds any shell metacharacter (every separator and the newline among them), so
         # it reads only the single segment that ends the command, and drops that one too when it has no word.
-        segments = _segments(command, skip_empty=True)
+        # Each word's spelling is recorded for the git alias reading below (_WordSpellings).
+        with _WordSpellings():
+            segments = _segments(command, skip_empty=True)
     except _UncertainHashError:
         # The same raw scan, also run on the text with its backslash-newlines and then its quote characters
         # and backslashes removed: the lexer saw nothing past a '#' whose comment reading it could not judge
@@ -10361,6 +10566,14 @@ def protected_line(data):
     _SubstHeredocFloor), and the push scan of the fallback (_protected_line_fallback_push)
     on a commit-free command (a commit the grammar proves cannot carry that body, since
     a '$' is outside the literal grammar).
+
+    A git alias the command defines denies however its key is spelled (HOW A KEY IS
+    SPELLED, above _GIT_ALIAS_KEY_RE): the commit syntax is lexed inside _WordSpellings,
+    so a -c or --config-env key part spelled through a parameter or command expansion,
+    an ANSI-C or locale quote or a brace expansion, or a brace word with a comma between
+    a git word and its subcommand, defines one, on an unparseable command too
+    (_git_alias_spelled). A value so spelled behind a literal key defines nothing; a key
+    literal in effect but so spelled now reads as an alias, a disclosed over-refusal.
     """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
@@ -10387,14 +10600,17 @@ def protected_line(data):
         return _raw_push_guard(command)
     deadline = time.monotonic() + _COMMIT_SECONDS
     reads = _SubstHeredocs.reads
-    syntax = _commit_command_syntax(command)
+    # Each lex of the commit syntax records each word's spelling for the git alias reading below and the commit
+    # recognizer's (_WordSpellings).
+    with _WordSpellings():
+        syntax = _commit_command_syntax(command)
     # A lex read a here-document body that main's lexer reads otherwise, and main's reading fails. The path
     # main's failed lex takes denies or allows: an apparent commit its commit syntax, read as main reads it,
     # cannot prove denies, and so does its push fallback on a commit-free command. Each such deny stands after
     # this guard's own denies and before its allows.
     floor = _SubstHeredocs.reads != reads
     if floor:
-        with _SubstHeredocFloor():
+        with _SubstHeredocFloor(), _WordSpellings():
             failed = _commit_command_syntax(command)
     # A git alias the command defines runs a subcommand neither reading below can see: it may commit on the
     # protected line or force-push to it (git -c alias.p=push p --force origin names no push), so it denies on any
@@ -10981,7 +11197,13 @@ def branch_root(data):
     are judged beside the lex's own where main's reading lexes (a partial lex returns main's partial reading
     beside its own), and where it fails the segments main's partial lex recovers, past the body, are judged
     too, after the clean lex's own, so a creation either list holds is checked (a cd in the clean lex's
-    segments also counts for a creation in the recovered ones, the stricter way)."""
+    segments also counts for a creation in the recovered ones, the stricter way). A git alias the command
+    defines counts however its key is spelled (HOW A KEY IS SPELLED, above _GIT_ALIAS_KEY_RE): each lex here
+    runs inside _WordSpellings, so a -c or --config-env key part spelled through a parameter or command
+    expansion, an ANSI-C or locale quote or a brace expansion, or a brace word with a comma between a git word
+    and its subcommand, defines one, on an unparseable command too (_git_alias_spelled); a value so spelled
+    behind a literal key defines nothing, and a key literal in effect but so spelled now reads as an alias, a
+    disclosed over-refusal."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
             "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
@@ -11002,8 +11224,10 @@ def branch_root(data):
     reads = _SubstHeredocs.reads
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
-        # and no redirect is not built at all, here, in the partial reread or in main's floor reread.
-        segments = _segments(command, skip_empty=True)
+        # and no redirect is not built at all, here, in the partial reread or in main's floor reread. Each lex
+        # records each word's spelling for the git alias reading below (_WordSpellings).
+        with _WordSpellings():
+            segments = _segments(command, skip_empty=True)
     except ValueError as exc:
         # The lexer saw nothing past a '#' whose comment reading it could not judge under both readings, so
         # a branch-creating git verb its text names cannot be proven rooted: it denies rather than take the
@@ -11028,8 +11252,9 @@ def branch_root(data):
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
         # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
         try:
-            segments = [(seg.argv, seg.sep_after)
-                        for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
+            with _WordSpellings():
+                segments = [(seg.argv, seg.sep_after)
+                            for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
         except ValueError:
             if named:
                 return _deny(*_BRNROT_UNCLASSIFIED)  # a git alias the text may define, read from the text alone
@@ -11037,7 +11262,7 @@ def branch_root(data):
     if _SubstHeredocs.reads != reads:
         # A lex read a here-document body that main's lexer reads otherwise, and main's reading fails: the
         # segments main's partial lex recovers, past the body, are judged too.
-        with _SubstHeredocFloor():
+        with _SubstHeredocFloor(), _WordSpellings():
             segments = segments + [(seg.argv, seg.sep_after)
                                    for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
 
@@ -12130,7 +12355,12 @@ def gate_weakening(data):
     GIT_CONFIG_KEY_ anywhere and git (_git_alias_named), every git command of which runs under an alias the
     command may define. On a parse error such a command DENIES too (_git_alias_recovered: the text, a definition
     anywhere in it, past where the lexer stopped included, or a git segment the partial lex recovers), after the
-    recovered sink.
+    recovered sink. A definition counts however its key is spelled (HOW A KEY IS SPELLED, above
+    _GIT_ALIAS_KEY_RE): the lex here runs inside _WordSpellings, so a -c or --config-env key part spelled through
+    a parameter or command expansion, an ANSI-C or locale quote or a brace expansion, or a brace word with a comma
+    between a git word and its subcommand, defines one, parsed or unparseable; a value so spelled behind a literal
+    key defines nothing, and a key literal in effect but so spelled now reads as an alias, a disclosed
+    over-refusal.
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
@@ -12154,8 +12384,10 @@ def gate_weakening(data):
     try:
         # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
         # below, whose canonical shape needs every earlier segment benign; every other check reads the
-        # segments of all readings in turn, as _lex_command returns them.
-        readings = _lex_readings(command)
+        # segments of all readings in turn, as _lex_command returns them. Each word's spelling is recorded for
+        # the git alias reading below (_WordSpellings).
+        with _WordSpellings():
+            readings = _lex_readings(command)
     except ValueError as exc:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
         # the unparseable construct are judged first for a verification run piped into a truncating sink;

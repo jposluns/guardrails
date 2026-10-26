@@ -11552,6 +11552,173 @@ def _main_isolated(monitor):
                     os.environ.pop(_glx_name, None)
                 else:
                     os.environ[_glx_name] = _glx_value
+        # How a git alias key is spelled (HOW A KEY IS SPELLED, above _GIT_ALIAS_KEY_RE): a -c or --config-env key
+        # part spelled through a parameter or command expansion, an ANSI-C or locale quote, or a brace expansion,
+        # and a brace word with a comma between a git word and its subcommand, define a git alias whatever they
+        # decode to. Every alias here maps to log. gks-<form>-<guard>: each guard denies the parsed form (each
+        # allowed before; protected_line already denied the ANSI-C and locale forms for their quoting, so its rows
+        # also require the alias reason). gku-<form>-<guard>: the same definition behind a here-string, where only
+        # the de-quoted reading of an unparseable command sees it (_git_alias_spelled; each allowed before, and the
+        # locale form, which the de-quoted text already decoded, and protected_line's ANSI-C form, which its
+        # commit recognizer already denied, are left out). gkc-<form>-<guard> and gkcu-<form>-<guard>: a value
+        # spelled so behind a literal key keeps the verdict each guard gave before, parsed and unparseable.
+        _gks_forms = (
+            ("param", 'git -c "${A:-alias}.l"=log l'),
+            ("subst", 'git -c "$(echo alias.l)"=log l'),
+            ("ansi", "git -c $'\\x61lias.l'=log l"),
+            ("locale", 'git -c $"alias".l=log l'),
+            ("brace-key", "git -c {alias,x}.l=log l"),
+            ("brace-word", "git {-c,alias.l=log} l"))
+        _gks_controls = (
+            ("param", 'git -c core.pager="${P:-cat}" log', "allow"),
+            ("subst", 'git -c core.pager="$(echo cat)" log', "allow"),
+            ("ansi", "git -c core.pager=$'cat' log", "allow"),
+            ("locale", 'git -c core.pager=$"cat" log', "allow"),
+            ("brace", "git -c core.pager={less,cat} log", "allow"))
+        _gks_guards = ((aiqt_hooks.protected_line, plr), (aiqt_hooks.gate_weakening, None),
+                       (aiqt_hooks.git_discard, str(_glx_dirty)), (aiqt_hooks.branch_root, str(_glx_branch)))
+        for _gks_handler, _gks_cwd in _gks_guards:
+            _gks_name = _gks_handler.__name__
+            for _gks_form, _gks_cmd in _gks_forms:
+                for _gks_label, _gks_full in (("gks", _gks_cmd), ("gku", _gks_cmd.replace("git ", "git <<<x ", 1))):
+                    if _gks_label == "gku" and (_gks_form == "locale" or (
+                            _gks_name == "protected_line" and _gks_form == "ansi")):
+                        continue
+                    _gks_data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                 "tool_input": {"command": _gks_full}, "cwd": _gks_cwd}
+                    _gks_code, _gks_out, _gks_err = _gks_handler(_gks_data)
+                    _gks_got = _reduce_result(_gks_code, _gks_out)
+                    _gks_reason = ((_gks_out or {}).get("hookSpecificOutput") or {}).get(
+                        "permissionDecisionReason", "")
+                    if _gks_got != "deny" or (_gks_label == "gks" and "git alias" not in _gks_reason):
+                        failures.append("({}-{}-{}) {} on {!r}: expected a deny naming the git alias, got {} {!r}"
+                                        .format(_gks_label, _gks_form, _gks_name, _gks_name, _gks_full, _gks_got,
+                                                _gks_reason))
+            for _gks_form, _gks_cmd, _gks_want in _gks_controls:
+                # protected_line already denied an ANSI-C or locale quote outside a commit it can prove.
+                if _gks_name == "protected_line" and _gks_form in ("ansi", "locale"):
+                    _gks_want = "deny"
+                for _gks_label, _gks_full in (("gkc", _gks_cmd), ("gkcu", _gks_cmd.replace("git ", "git <<<x ", 1))):
+                    _gks_got = _decision(_gks_handler, _gks_full, cwd=_gks_cwd)
+                    if _gks_got != _gks_want:
+                        failures.append("({}-{}-{}) {} on {!r}: expected {}, got {}".format(
+                            _gks_label, _gks_form, _gks_name, _gks_name, _gks_full, _gks_want, _gks_got))
+        # The shared readers at their edges, on words lexed inside _WordSpellings (gkr-*): an attached or separated
+        # --config-env key spelled through an expansion or an ANSI-C quote, a '${X,,}' key, a key literal in effect
+        # but spelled through an ANSI-C quote (the disclosed over-refusal), a brace word as a -C value or read as
+        # the subcommand define one; a value spelled so behind a literal key, a brace in a -c value, a brace word
+        # or a spelled definition after the subcommand, and a parameter expansion's '{' do not; words lexed
+        # outside _WordSpellings carry no record, so the decoded key alone is read there, as before; and gkr-m to
+        # gkr-o hold the key part's end on each side.
+        for _gks_label, _gks_cmd, _gks_want, _gks_on in (
+                ("gkr-a", 'git --config-env="${A:-alias}.l"=LCMD l', True, True),
+                ("gkr-b", "git --config-env $'\\x61lias.l'=LCMD l", True, True),
+                ("gkr-c", "git -c ${K,,}=log l", True, True),
+                ("gkr-d", "git -c $'core.pager'=cat log", True, True),
+                ("gkr-e", "git -C {/abs,-c,alias.l=log} l", True, True),
+                ("gkr-f", "git -C /abs {-c,alias.l=log} l", True, True),
+                ("gkr-g", 'git --config-env=core.pager="${P:-PAGER}" log', False, True),
+                ("gkr-h", "git -c core.pager={less,cat} log", False, True),
+                ("gkr-i", "git log {a,b} -c $'\\x61lias.l'=x", False, True),
+                ("gkr-j", "git -C ${D:-/abs} log", False, True),
+                ("gkr-k", 'git -c "${A:-alias}.l"=log l', False, False),
+                ("gkr-l", "git {-c,alias.l=log} l", False, False),
+                # The key part's end: a part not spelled as plain literal text that starts on the key's last
+                # character (inside), at its first '=' (at) or just after it (outside).
+                ("gkr-m", "git -c core.page$'r'=cat log", True, True),
+                ("gkr-n", "git -c core.pager$'='cat log", False, True),
+                ("gkr-o", "git -c core.pager=$'c'at log", False, True)):
+            if _gks_on:
+                with aiqt_hooks._WordSpellings():
+                    _gks_segs = aiqt_hooks._lex_command(_gks_cmd)
+            else:
+                _gks_segs = aiqt_hooks._lex_command(_gks_cmd)
+            _gks_got = any(aiqt_hooks._git_local_alias(_gks_seg.argv) for _gks_seg in _gks_segs)
+            if _gks_got is not _gks_want:
+                failures.append("({}) _git_local_alias on the lex of {!r} (spelling recorded: {}): expected {}, got {}"
+                                .format(_gks_label, _gks_cmd, _gks_on, _gks_want, _gks_got))
+        # The unparseable reading at its edges (gkr-u*): the same reader over the de-quoted commands, past a
+        # here-string and an IO-number redirect inside the region; a spelled definition after the subcommand, a brace
+        # word in another command and a value spelled behind a literal key define nothing.
+        for _gks_label, _gks_cmd, _gks_want in (
+                ("gkr-u1", 'git <<<x -c "${A:-alias}.l"=log l', True),
+                ("gkr-u2", "git <<<x 2>/dev/null {-c,alias.l=log} l", True),
+                ("gkr-u3", "git <<<x --config-env=`echo alias.l`=LCMD l", True),
+                ("gkr-u4", 'git <<<x log -c "$K"=v', False),
+                ("gkr-u5", "echo {a,b} <<<x; git log", False),
+                ("gkr-u6", 'git <<<x -c core.pager="$P" log', False)):
+            _gks_got = aiqt_hooks._git_alias_spelled(_gks_cmd)
+            if _gks_got is not _gks_want:
+                failures.append("({}) _git_alias_spelled({!r}): expected {}, got {}".format(
+                    _gks_label, _gks_cmd, _gks_want, _gks_got))
+        # The record leaves the decoded words unchanged (gkw-*): every lex of each command, full and partial, returns
+        # the same segments inside _WordSpellings as outside it, argv compared as plain lists; inside it each argv is
+        # a _SpelledWords with one record per word, outside it a plain list; the word reader returns the same tuple
+        # with a record asked for; and the switch is off again after each use, an exception included.
+        _gks_corpus = (
+            'git -c "${A:-alias}.l"=log l; echo $"x" a{b,c} ${X,,} ~/p \\$q',
+            "git -c $'\\x61lias.l'=log l | grep -c x",
+            "x=$(true)#y; git {-c,alias.l=log} l",
+            "(true)#x\ngit -c \"$K\"=v log",
+            "a=`echo {a,b}` b=$(echo 'c') git -C {/r,s} log",
+            "x=\"$(cat <<'EOF'\n# Don't stop\nEOF\n)\"; git status",
+            'git status "unterminated',
+            "git <<<x -c a.b=c l",
+            "cat {fd}>out",
+            "((((;;;; git log")
+        for _gks_index, _gks_cmd in enumerate(_gks_corpus):
+            for _gks_partial in (False, True):
+                _gks_runs = []
+                for _gks_on in (False, True):
+                    try:
+                        if _gks_on:
+                            with aiqt_hooks._WordSpellings():
+                                _gks_result = aiqt_hooks._lex_command(_gks_cmd, partial=_gks_partial)
+                        else:
+                            _gks_result = aiqt_hooks._lex_command(_gks_cmd, partial=_gks_partial)
+                    except ValueError as _gks_exc:
+                        _gks_runs.append(("raised", type(_gks_exc).__name__, str(_gks_exc)))
+                        continue
+                    _gks_segs = _gks_result[0] if _gks_partial else _gks_result
+                    _gks_flags = tuple(_gks_result[1:]) if _gks_partial else ()
+                    for _gks_seg in _gks_segs:
+                        _gks_spelling = getattr(_gks_seg.argv, "spelling", None)
+                        if _gks_on and _gks_seg.argv and (not isinstance(_gks_seg.argv, aiqt_hooks._SpelledWords)
+                                                          or len(_gks_spelling) != len(_gks_seg.argv)):
+                            failures.append("(gkw-{}) a lex of {!r} inside _WordSpellings returned an argv with no "
+                                            "record per word: {!r}".format(_gks_index, _gks_cmd, _gks_seg.argv))
+                        if not _gks_on and type(_gks_seg.argv) is not list:
+                            failures.append("(gkw-{}) a lex of {!r} outside _WordSpellings returned a {} argv".format(
+                                _gks_index, _gks_cmd, type(_gks_seg.argv).__name__))
+                    _gks_runs.append(([(list(_gks_seg.argv),) + tuple(_gks_seg[1:]) for _gks_seg in _gks_segs],
+                                      _gks_flags))
+                if _gks_runs[0] != _gks_runs[1]:
+                    failures.append("(gkw-{}) the lex of {!r} (partial {}) differs inside _WordSpellings: {!r} "
+                                    "against {!r}".format(_gks_index, _gks_cmd, _gks_partial, _gks_runs[1],
+                                                          _gks_runs[0]))
+                if aiqt_hooks._WordSpellings.on:
+                    failures.append("(gkw-{}) _WordSpellings stayed on after a lex of {!r}".format(_gks_index, _gks_cmd))
+            for _gks_at in range(len(_gks_cmd)):
+                if _gks_cmd[_gks_at] in " \t\n;&|<>()#":
+                    continue
+                _gks_holder = [None]
+                try:
+                    _gks_plain = aiqt_hooks._read_word(_gks_cmd, _gks_at, len(_gks_cmd), [])
+                    _gks_rec = aiqt_hooks._read_word(_gks_cmd, _gks_at, len(_gks_cmd), [], spelling=_gks_holder)
+                except ValueError:
+                    continue
+                if _gks_plain != _gks_rec or not isinstance(_gks_holder[0], aiqt_hooks._WordSpelling) or not (
+                        0 <= _gks_holder[0].literal <= len(_gks_plain[0])):
+                    failures.append("(gkw-read-{}-{}) _read_word on {!r} at {}: {!r} with a record asked for, {!r} "
+                                    "without, record {!r}".format(_gks_index, _gks_at, _gks_cmd, _gks_at, _gks_rec,
+                                                                  _gks_plain, _gks_holder[0]))
+        try:
+            with aiqt_hooks._WordSpellings():
+                aiqt_hooks._lex_command('git status "unterminated')
+        except ValueError:
+            pass
+        if aiqt_hooks._WordSpellings.on:
+            failures.append("(gkw-raise) _WordSpellings stayed on after a lex inside it raised")
         # The shared local-alias reading at its edges (_git_local_alias): a definition after a git word behind a
         # reserved word, a group, time or a wrapper carrying an assignment counts (glw-a to glw-d), as does an
         # assignment before the command word when a later word of the segment is git (glw-g) and a definition after
