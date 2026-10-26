@@ -768,7 +768,7 @@ def build_views(root):
     ValueError/OSError/gen_site.SchemaError on any malformed, unreadable, stale, or contradictory input
     (including a bad site shell or a display-fidelity failure); the caller maps those to exit 2."""
     rules_dir = root / RULES_DIR_REL
-    if not dir_present(rules_dir):
+    if not dir_present(rules_dir, root=root):
         raise ValueError("cannot build the register: no {} to load".format(rules_dir))
     ledger = load_ledger(root)
     by_cid, controls, linkage = ledger_index(ledger)

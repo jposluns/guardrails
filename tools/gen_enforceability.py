@@ -594,7 +594,7 @@ def build_ledger(root):
     rules_dir = root / RULES_DIR_REL
     # dir_present (not is_dir): an unreadable .aiqt/ parent must fail closed as exit 2, not read as an
     # absent corpus (which would emit an empty ledger, a false clean).
-    if not dir_present(rules_dir):
+    if not dir_present(rules_dir, root=root):
         raise ValueError("cannot build the ledger: no {} to load".format(rules_dir))
     corpus = load_corpus(rules_dir)
     corpus_ids = {str(fm["corpus-id"]) for _src, fm, _rel in corpus}

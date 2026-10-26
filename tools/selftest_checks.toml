@@ -2651,6 +2651,96 @@ expected-check-ids = [
 ]
 
 [[suite]]
+id = "rule-placement-selftest"
+runner = "tools/check_rule_placement.py"
+expected-check-ids = [
+  # ---------- the three-way dir_present probe, one vector per outcome ----------
+  "probe/absent-reads-false",
+  "probe/directory-reads-true",
+  "probe/regular-file-refused",
+  "probe/dangling-symlink-refused",
+  "probe/symlink-to-dir-refused",
+  "probe/symlink-to-file-refused",
+  "probe/fifo-refused",
+  "probe/unreachable-raises",
+  # ---------- the descriptor-bound walk under an explicit root ----------
+  "probe/ancestor-symlink-refused",
+  "probe/ancestor-dangling-refused",
+  "probe/ancestor-absent-reads-false",
+  "probe/nested-directory-reads-true",
+  "probe/ancestor-swapped-before-open-refused",
+  "probe/ancestor-vanished-before-open-raises",
+  "probe/ancestor-replaced-before-open-raises",
+  "probe/outside-root-raises",
+  "probe/parent-climb-raises",
+  "probe/descriptors-closed-once",
+  # ---------- the manifest loader, probed beneath its root ----------
+  "loader/aiqt-ancestor-dangling-refused",
+  "loader/aiqt-ancestor-symlink-refused",
+  "loader/absent-standards-reads-empty",
+  "loader/real-manifest-loads",
+  "loader/manifest-symlink-refused",
+  "loader/standards-swapped-after-probe-refused",
+  # ---------- open_dir holds the directory it judged ----------
+  "probe/open-dir-holds-directory",
+  "probe/open-dir-absent-reads-none",
+  "probe/open-dir-symlink-refused",
+  "probe/open-dir-swapped-before-open-refused",
+  "probe/open-dir-replaced-before-open-raises",
+  "probe/open-dir-vanished-before-open-raises",
+  # ---------- the placement gate over synthetic --root trees ----------
+  "gate/absent-tree-passes",
+  "gate/empty-directory-reads-tree",
+  "gate/populated-tree-violation-fails",
+  "gate/regular-file-exits-2",
+  "gate/dangling-symlink-exits-2",
+  "gate/symlink-to-directory-exits-2",
+  "gate/standards-non-directory-exits-2",
+  # ---------- ancestor symlinks under the gate's root ----------
+  "gate/claude-ancestor-symlink-exits-2",
+  "gate/claude-ancestor-dangling-exits-2",
+  "gate/aiqt-ancestor-symlink-exits-2",
+  "gate/aiqt-ancestor-dangling-exits-2",
+  # ---------- the gate reads only the rules directory its probe judged ----------
+  "gate/rules-swapped-before-listing-exits-2",
+  "gate/rules-replaced-before-listing-exits-2",
+  "gate/rules-vanished-before-open-exits-2",
+  "gate/claude-replaced-before-open-exits-2",
+  "gate/rules-swapped-after-open-reads-judged",
+  # ---------- links and non-regular rule files below the rules directory ----------
+  "gate/family-symlink-exits-2",
+  "gate/rule-file-symlink-exits-2",
+  "gate/vendored-source-symlink-exits-2",
+  "gate/rule-file-fifo-exits-2",
+  "gate/rule-file-fifo-bad-name-exits-2",
+  "gate/loose-rule-fifo-exits-2",
+  "gate/rule-drift-fails",
+  # ---------- family directories and vendored sources replaced after their listing ----------
+  "gate/family-replaced-after-listing-exits-2",
+  "gate/vendored-source-replaced-after-listing-exits-2",
+  # ---------- probe mutants, each caught by its named vector ----------
+  "mutant/stat-follows-links-caught",
+  "mutant/wrong-type-reads-absent-caught",
+  "mutant/eacces-reads-absent-caught",
+  "mutant/ancestor-walk-skipped-caught",
+  "mutant/nofollow-dropped-caught",
+  "mutant/descriptor-close-skipped-caught",
+  "mutant/loader-unrooted-caught",
+  "mutant/ancestor-identity-unchecked-caught",
+  "mutant/held-identity-unchecked-caught",
+  "mutant/held-final-unopened-caught",
+  "mutant/vanished-reads-absent-caught",
+  "mutant/listing-identity-unchecked-caught",
+  # ---------- the gate's own --root guard ----------
+  "vector/every-vector-holds",
+  "launch/nonexistent-root-cannot-evaluate",
+  "launch/comma-joined-root-cannot-evaluate",
+  "mutant/every-mutant-caught",
+  "mutant/every-vector-discriminates",
+  "live/default-root-passes",
+]
+
+[[suite]]
 id = "brief-capability-selftest"
 runner = "tools/check_brief_capability.py"
 expected-check-ids = [
@@ -3020,16 +3110,4 @@ expected-check-ids = [
   "measure/interrupt-sigterm-cleans-up",
   "measure/interrupt-sigint-cleans-up",
   "measure/interrupt-sighup-cleans-up",
-]
-
-[[suite]]
-id = "rule-placement-selftest"
-runner = "tools/check_rule_placement.py"
-expected-check-ids = [
-  "vector/every-vector-holds",
-  "launch/nonexistent-root-cannot-evaluate",
-  "launch/comma-joined-root-cannot-evaluate",
-  "mutant/every-mutant-caught",
-  "mutant/every-vector-discriminates",
-  "live/default-root-passes",
 ]

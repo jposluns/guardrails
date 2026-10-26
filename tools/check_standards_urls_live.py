@@ -12,11 +12,15 @@ falling back to GET when a server rejects HEAD) with a timeout, and reports any 
 with a 2xx/3xx status or that errors.
 
   check_standards_urls_live.py [--std DIR] [--timeout SECONDS]
+  check_standards_urls_live.py --self-test   offline self-test of the explicit --std probe (no network;
+                                             neither check roster runs it yet)
 
-Exit convention:
+Exit convention for an audit run:
   0  every manifest url is reachable (2xx/3xx)
   1  at least one url is unreachable (non-2xx/3xx or a network error)
-  2  a malformed manifest, or a read error on .aiqt/standards/ (fail-closed, same as load_manifests)
+  2  a malformed manifest, no manifest at all, a read error on the standards directory, or an explicit
+     --std that is or sits beneath a symlink (fail-closed, same as load_manifests); also a usage error
+The --self-test exits 0 when every vector holds and 1 when any fails, naming it.
 """
 import sys
 
@@ -37,7 +41,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _standards import load_manifests, ManifestError  # noqa: E402
+from _standards import load_manifests, ManifestError, std_root, _std_root_vectors  # noqa: E402
 
 try:
     from gen_rules import repo_root  # noqa: E402  reuse the repo's own root finder
@@ -74,9 +78,14 @@ def _reachable(url, timeout):
     return (False, "HEAD refused and GET did not resolve")
 
 
-def run(std_dir, timeout):
+def run(std_dir, timeout, *, root, search_only=False):
+    # std_dir is held and read beneath root (the repository root for the default dir; for a --std
+    # directory the filesystem root, which main takes from _standards.std_root after probing from it
+    # down, and passes with search_only), so a symlinked or dangling .aiqt or standards, or a --std
+    # that is a symlink or has one at any component, swapped in after the probe included, fails
+    # closed (exit 2).
     try:
-        manifests = load_manifests(std_dir)
+        manifests = load_manifests(std_dir, root=root, search_only=search_only)
     except (ManifestError, OSError) as exc:
         print("MALFORMED: {}".format(exc), file=sys.stderr)
         return 2
@@ -106,14 +115,58 @@ def run(std_dir, timeout):
     return 0
 
 
+def self_test_main():
+    """Offline self-test of the explicit --std probe, launched through main: a real directory exits 0,
+    and a --std that is a symlink, live or dangling, sits beneath a symlinked ancestor, or is swapped
+    for a symlink after its probe exits 2 naming it. The fixture manifest carries no url, so no
+    vector reaches the network."""
+    import io
+    import shutil
+    import tempfile
+    from contextlib import redirect_stderr, redirect_stdout
+    from datetime import date
+
+    def _launch(argv):
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            code = main(argv)
+        return code, err.getvalue()
+
+    failures = []
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-urls-live-selftest-"))
+    except OSError as exc:
+        tmp = None
+        failures.append("NOT RUN: the explicit --std vectors: no writable temp directory ({}); coverage "
+                        "that did not run FAILS the self-test, never a silent PASS".format(exc))
+    if tmp is not None:
+        try:
+            _std_root_vectors(_launch, tmp, date(2026, 8, 17), failures)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    if failures:
+        print("SELF-TEST FAIL:")
+        for f in failures:
+            print("  - " + f)
+        return 1
+    print("SELF-TEST PASS: an explicit --std that is a real directory exits 0, and one that is a live or "
+          "dangling symlink, sits beneath a symlinked ancestor or is swapped for a symlink after its "
+          "probe exits 2 naming it (offline, no network)")
+    return 0
+
+
 def _parse_args(argv):
     std = None
     timeout = DEFAULT_TIMEOUT
+    self_test = False
     i = 0
     while i < len(argv):
         if argv[i] == "--std" and i + 1 < len(argv):
             std = Path(argv[i + 1])
             i += 2
+        elif argv[i] == "--self-test":
+            self_test = True
+            i += 1
         elif argv[i] == "--timeout" and i + 1 < len(argv):
             try:
                 timeout = float(argv[i + 1])
@@ -122,19 +175,29 @@ def _parse_args(argv):
                 return None
             i += 2
         else:
-            print("usage: check_standards_urls_live.py [--std DIR] [--timeout SECONDS]",
+            print("usage: check_standards_urls_live.py [--std DIR] [--timeout SECONDS] | --self-test",
                   file=sys.stderr)
             return None
-    return (std, timeout)
+    return (std, timeout, self_test)
 
 
-def main():
-    parsed = _parse_args(sys.argv[1:])
+def main(argv=None):
+    parsed = _parse_args(sys.argv[1:] if argv is None else argv)
     if parsed is None:
         return 2
-    std, timeout = parsed
-    std_dir = std if std is not None else (repo_root() / ".aiqt" / "standards")
-    return run(std_dir, timeout)
+    std, timeout, self_test = parsed
+    if self_test:
+        return self_test_main()
+    if std is None:
+        root = repo_root()
+        std_dir = root / ".aiqt" / "standards"
+    else:
+        try:
+            root, std_dir = std_root(std)
+        except OSError as exc:
+            print("MALFORMED: --std {}: {}".format(std, exc), file=sys.stderr)
+            return 2
+    return run(std_dir, timeout, root=root, search_only=std is not None)
 
 
 if __name__ == "__main__":

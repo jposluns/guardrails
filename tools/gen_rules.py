@@ -122,27 +122,31 @@ def _value(v):
 
 
 def parse_source(path):
-    text = path.read_text(encoding="utf-8")
+    return parse_source_text(path.read_text(encoding="utf-8"), path.name)
+
+
+def parse_source_text(text, name):
+    """The frontmatter of a rule source's text, already read; name labels every error."""
     if not text.startswith("---\n"):
-        raise ValueError("{}: no frontmatter".format(path.name))
+        raise ValueError("{}: no frontmatter".format(name))
     end = text.find("\n---\n", 4)
     if end == -1:
-        raise ValueError("{}: unterminated frontmatter".format(path.name))
+        raise ValueError("{}: unterminated frontmatter".format(name))
     fm = {}
     for line in text[4:end].splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         if ":" not in line:
-            raise ValueError("{}: bad frontmatter line {!r}".format(path.name, line))
+            raise ValueError("{}: bad frontmatter line {!r}".format(name, line))
         key, val = line.split(":", 1)
         key = key.strip()
         if key in fm:
-            raise ValueError("{}: duplicate key {}".format(path.name, key))
+            raise ValueError("{}: duplicate key {}".format(name, key))
         try:
             fm[key] = _value(val.strip())
         except ValueError as exc:
-            raise ValueError("{}: {}".format(path.name, exc))
+            raise ValueError("{}: {}".format(name, exc))
     return fm
 
 
@@ -248,7 +252,7 @@ def run(root, check):
     try:
         # dir_present (not is_dir) inside the try: an unreadable .aiqt/ parent must fail closed as exit 2,
         # not read as an absent corpus (which would delete every generated file as an orphan below).
-        if dir_present(src_dir):
+        if dir_present(src_dir, root=root):
             for src, _fm, rel in load_corpus(src_dir):
                 desired[rel] = src.read_text(encoding="utf-8")
     except (ValueError, OSError) as exc:
@@ -273,7 +277,7 @@ def run(root, check):
                     target.write_text(content, encoding="utf-8")
         for family in ("aiqt", "security"):
             fam_dir = out_dir / family
-            if dir_present(fam_dir):  # not is_dir: an unreadable .claude parent must fail closed, not skip the orphan scan
+            if dir_present(fam_dir, root=root):  # not is_dir: an unreadable .claude parent must fail closed, not skip the orphan scan
                 for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_raise):
                     for fn in sorted(f for f in filenames if f.endswith(".md")):
                         f = Path(dirpath) / fn

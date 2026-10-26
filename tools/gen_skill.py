@@ -512,11 +512,13 @@ def _is_regular(path):
     return stat.S_ISREG(st.st_mode)
 
 
-def versioned_zips(downloads_dir):
-    """The sorted version-numbered skill zip basenames directly under downloads_dir that are REGULAR files by
-    lstat (top level only; the reserved aiqt/ subtree is not a download location). An absent dir has none; an
-    unreadable one raises OSError, which run_gen surfaces as exit 2."""
-    if not dir_present(downloads_dir):
+def versioned_zips(root):
+    """The sorted version-numbered skill zip basenames directly under root's site/downloads that are REGULAR
+    files by lstat (top level only; the reserved aiqt/ subtree is not a download location). An absent dir has
+    none; an unreadable one, or a symlink at site or downloads, raises OSError, which run_gen surfaces as
+    exit 2."""
+    downloads_dir = root.joinpath(*ZIP_PARTS[:-1])
+    if not dir_present(downloads_dir, root=root):
         return []
     return sorted(fn for fn in os.listdir(downloads_dir)
                   if is_versioned_zip(fn) and _is_regular(os.path.join(downloads_dir, fn)))
@@ -966,7 +968,7 @@ def run_gen(root, check):
         # output as an orphan for removal, never concealed and never deleted. A PRESENT corpus with a
         # missing/unreadable skill source is malformed (the
         # OSError from parse_source propagates here as exit 2), which is the correct fail-closed outcome.
-        if dir_present(corpus_dir):
+        if dir_present(corpus_dir, root=root):
             reserved_map, standalone, binary = build_outputs(root, root_fd)
         else:
             reserved_map, standalone, binary = {}, [], []
@@ -1506,7 +1508,7 @@ def self_test_main():
         _write_fixture(latest, good_src)
         capture(latest, False)
         ldl = latest.joinpath(*ZIP_PARTS[:-1])
-        found = versioned_zips(ldl)
+        found = versioned_zips(latest)
         if found != [ZIP_VERSIONED_PARTS[-1]]:
             failures.append("a clean tree must hold exactly the current versioned zip, got {}".format(found))
         alias_bytes = latest.joinpath(*ZIP_PARTS).read_bytes()
@@ -1549,7 +1551,7 @@ def self_test_main():
             failures.append("a missing current versioned zip expected latest-only drift (exit 1, found 0), "
                             "got {}\n{}".format(code, out))
         code, out = capture(latest, False)
-        if code != 0 or versioned_zips(ldl) != [ZIP_VERSIONED_PARTS[-1]]:
+        if code != 0 or versioned_zips(latest) != [ZIP_VERSIONED_PARTS[-1]]:
             failures.append("regen expected to restore exactly the current versioned zip, got {}\n{}".format(
                 code, out))
         code, out = capture(latest, True)

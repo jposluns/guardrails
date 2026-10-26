@@ -168,7 +168,7 @@ def measure(root):
     the corpus loader's ValueError/OSError) on an unreadable or ambiguous input."""
     agents = read_agents(root / AGENTS_REL)
     src_dir = root.joinpath(*RULES_PARTS)
-    if not dir_present(src_dir):
+    if not dir_present(src_dir, root=root):
         raise DemoError("the rule corpus {} is absent".format("/".join(RULES_PARTS)))
     pairs = [(src, fm) for src, fm, _ in load_corpus(src_dir)]
     pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))

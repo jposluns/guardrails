@@ -24,8 +24,8 @@ repo-anchored main()s (gen_rules.main / gen_agents.main / check_mappings.main ar
 repo_root() with no --root override), because those reconcile the repo the tool physically sits in,
 not an arbitrary --root. It reuses: gen_rules.load_corpus / gen_rules.derive, gen_agents.sort_key /
 ordered_bodies, _adapter_compose.load_registry / compose (the AGENTS.md and adapter layouts),
-check_rule_placement.check_name / check_drift, and _standards.load_manifests plus the
-mapping-validation loop.
+check_rule_placement's descriptor-bound placement walk (_scan_tree, with check_name / check_drift),
+and _standards.load_manifests plus the mapping-validation loop.
 
 The allowed set of `map-*` frontmatter keys and the standards ids are the ADOPTER's, not this repo's:
 gen_rules binds MAP_KEYS/SEQ_KEYS at import from ITS OWN repo_root(), so before any load_corpus/derive
@@ -64,8 +64,8 @@ import gen_adapters         # noqa: E402  ADAPTERS, TARGETS (GEMINI.md / copilot
 import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cursor .mdc tree)
 import gen_hooks            # noqa: E402  build_desired, PLUGIN_ROOT_PARTS, HOOKS_SUBTREE_PARTS (hooks plugin)
 import gen_skill            # noqa: E402  build_outputs, RESERVED_PARTS (the generated chat-skill surface)
-import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
-from _standards import dir_present, load_manifests, map_keys, validate_mappings, ManifestError  # noqa: E402
+import check_rule_placement as crp  # noqa: E402  _scan_tree (with check_name, check_drift)
+from _standards import dir_present, load_manifests, map_keys, open_dir, validate_mappings, ManifestError  # noqa: E402
 
 
 # Status constants for a single check's outcome.
@@ -103,15 +103,17 @@ def _standards_dir(root):
     return root / ".aiqt" / "standards"
 
 
-def _reachable(path):
+def _reachable(path, root):
     """Fail-closed replacement for the `if not X.is_dir()` absence guards. Returns (present, error):
     (True/False, None) when the path is reachable (present dir / genuinely absent), or (None, msg) when
     it EXISTS but cannot be read (an unreadable dir or an unreadable .aiqt/.claude/ parent). is_dir()
     swallows EACCES and returns False, so an unreadable input would read as absent -> NOT APPLICABLE (a
     false-clean); dir_present raises on EACCES so the caller can render it as MALFORMED (exit 2) in its
-    own Result/tuple shape."""
+    own Result/tuple shape. The probe is bound beneath root, as check_rule_placement binds it, so a
+    symlink, live or dangling, at .claude, .aiqt or any other component below root is MALFORMED too:
+    never followed, and never read as an absent tree (NOT APPLICABLE)."""
     try:
-        return (dir_present(path), None)
+        return (dir_present(path, root=root), None)
     except OSError as exc:
         return (None, "cannot read {}: {}".format(path, exc))
 
@@ -136,7 +138,7 @@ def check_c1(root, cache):
     for C2 and C4. Absent core -> NOT APPLICABLE (a read-tree-only install has no core to load); a
     present-but-empty core (a dir with no rule sources) is also NOT APPLICABLE, never a hollow pass."""
     src = _corpus_src(root)
-    present, err = _reachable(src)
+    present, err = _reachable(src, root)
     if err:
         cache["corpus_error"] = True
         return Result("C1", "corpus-loads", MALFORMED, err)
@@ -161,7 +163,7 @@ def _claude_drift(root, corpus):
     Returns (status, detail). Absent .claude/rules/ surface -> NOT APPLICABLE (the adopter did not
     install the Claude surface). Present-but-different or orphaned generated files -> FAIL."""
     claude_dir = root / ".claude" / "rules"
-    present, err = _reachable(claude_dir)
+    present, err = _reachable(claude_dir, root)
     if err:
         return (MALFORMED, err)
     if not present:
@@ -181,7 +183,7 @@ def _claude_drift(root, corpus):
                 drift.append(rel)
         for family in ("aiqt", "security"):
             fam_dir = claude_dir / family
-            if dir_present(fam_dir):  # not is_dir: an unreadable .claude parent must fail closed (MALFORMED), not skip the orphan scan
+            if dir_present(fam_dir, root=root):  # not is_dir: an unreadable .claude parent must fail closed (MALFORMED), not skip the orphan scan
                 # os.walk(onerror=raise), not rglob: rglob silently skips an unreadable dir at ANY depth
                 # (concealing an orphan); os.walk surfaces the read error, caught below as MALFORMED.
                 for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_walk_raise):
@@ -260,7 +262,7 @@ def _cursor_drift(root, corpus):
     scanned; an adopter's own rules beside it are never read. Absent subtree -> NOT APPLICABLE (the
     adopter did not install the Cursor surface)."""
     cursor_dir = root.joinpath(*gen_cursor.OUT_PARTS)
-    present, err = _reachable(cursor_dir)
+    present, err = _reachable(cursor_dir, root)
     if err:
         return (MALFORMED, err)
     if not present:
@@ -300,7 +302,7 @@ def _skill_drift(root, corpus):
     source, or an unknown cited corpus-id, is a broken install -> MALFORMED (fail closed), so the same
     anti-fabrication gate that guards the generator also guards an installed skill."""
     reserved_dir = root.joinpath(*gen_skill.RESERVED_PARTS)
-    present, err = _reachable(reserved_dir)
+    present, err = _reachable(reserved_dir, root)
     if err:
         return (MALFORMED, err)
     if not present:
@@ -352,7 +354,7 @@ def check_c2(root, cache):
     # reconcile against the empty corpus so orphaned .claude/rules files and a stale AGENTS.md are caught
     # (an empty desired set makes every generated file an orphan), exactly as gen_rules.main() does. A
     # bare `not corpus` guard would mask that empty-core case as NOT APPLICABLE.
-    present, err = _reachable(_corpus_src(root))
+    present, err = _reachable(_corpus_src(root), root)
     if err:
         return Result("C2", "no-drift", MALFORMED, err)
     if not present:
@@ -379,67 +381,47 @@ def check_c2(root, cache):
 
 def check_c3(root):
     """The read tree obeys the taxonomy: family, flatness, naming, frontmatter-derived path, apex,
-    provenance. Reuses check_rule_placement.check_name / check_drift and its module constants, and
-    re-orchestrates the same walk main() does (there is no standalone walk function to import), so the
-    orchestrator keeps control of reporting. Runs unconditionally: it needs only .claude/rules/, which
-    every adopter has. An absent tree trivially conforms."""
+    provenance. Runs the placement gate's own walk (check_rule_placement._scan_tree, with its
+    check_name / check_drift and module constants) over the descriptor _standards.open_dir returns for
+    the .claude/rules it judged, so the orchestrator keeps control of reporting and counts what was
+    checked. The tree is never read by name: every listing is made through a held descriptor, and
+    every family directory and vendored source is opened, and every rule file read, beneath its
+    parent's descriptor with O_NOFOLLOW. So a .claude/rules swapped for a symlink or another directory,
+    or removed, between the probe and its open, a .claude replaced by another directory between its
+    lstat and its open, a symlink at any entry the walk inspects (a family
+    directory, a rule file or a vendored source included) and a rule file that is not a regular file,
+    whatever its name, are each MALFORMED (exit 2) naming the path, never followed. Runs
+    unconditionally: it needs only
+    .claude/rules/, which every adopter has. An absent tree, or one holding no rule file or vendored
+    source, validated nothing and is NOT APPLICABLE, never a hollow PASS."""
     rules = root / ".claude" / "rules"
-    present, err = _reachable(rules)
-    if err:
-        return Result("C3", "placement", MALFORMED, err)
-    if not present:
+    try:
+        rules_fd = open_dir(rules, root=root)
+    except OSError as exc:
+        return Result("C3", "placement", MALFORMED, "cannot read {}: {}".format(rules, exc))
+    if rules_fd is None:
         return Result("C3", "placement", NA, "no .claude/rules/ tree installed to validate")
     findings = []
-    evaluated = 0  # rule files / vendored sources actually checked; 0 means nothing was validated
+    evaluated = []  # rule files / vendored sources actually checked; none means nothing was validated
 
     def report(path, code, detail):
         findings.append("{}: {}: {}".format(path.relative_to(root), code, detail))
 
     try:
-        for item in sorted(rules.iterdir()):
-            if item.name.startswith("."):
-                continue
-            if item.is_file():
-                if item.suffix == ".md" and item.name not in crp.METADATA:
-                    report(item, "loose", "a rule file at the tree root, not on the metadata allowlist")
-                continue
-            family = item.name
-            if family not in crp.BUILTIN_FAMILIES:
-                report(item, "unknown-family", "not a registered family directory")
-                continue
-            if family == "external":
-                for sub in sorted(p for p in item.iterdir() if p.is_dir()):
-                    evaluated += 1
-                    if not (sub / "PROVENANCE.md").exists() or not (sub / "LICENSE").exists():
-                        report(sub, "missing-provenance", "a vendored source lacks PROVENANCE.md or LICENSE")
-                continue
-            for entry in sorted(item.iterdir()):
-                if entry.name.startswith("."):
-                    continue
-                if entry.is_dir():
-                    report(entry, "nested-dir", "a flat family admits no subdirectory")
-                    continue
-                if entry.suffix != ".md":
-                    continue
-                evaluated += 1
-                nc = crp.check_name(family, entry.name)
-                if nc:
-                    report(entry, nc[0], nc[1])
-                    continue
-                drift = crp.check_drift(entry, rules)
-                if drift:
-                    report(entry, drift[0], drift[1])
+        crp._scan_tree(rules, rules_fd, report, evaluated.append)
     except OSError as exc:
         return Result("C3", "placement", MALFORMED, "cannot read the rules tree: {}".format(exc))
+    finally:
+        os.close(rules_fd)
     if findings:
         return Result("C3", "placement", FAIL,
                       "{} violation(s): {}".format(len(findings), "; ".join(sorted(set(findings)))))
     # A tree that exists but holds no rule files validated nothing: report NOT APPLICABLE, never a
     # hollow PASS that the coverage line would count as "verified C3".
-    if evaluated == 0:
+    if not evaluated:
         return Result("C3", "placement", NA, "no rule files under .claude/rules/ to validate")
     return Result("C3", "placement", PASS,
-                  "rule placement conforms to the taxonomy ({} item(s) checked)".format(evaluated))
+                  "rule placement conforms to the taxonomy ({} item(s) checked)".format(len(evaluated)))
 
 
 # --- C4: mappings (best-effort) ---------------------------------------------------------------------
@@ -454,7 +436,7 @@ def check_c4(root, cache):
         return Result("C4", "mappings", SKIPPED, "corpus did not load (see C1)")
     src = _corpus_src(root)
     std = _standards_dir(root)
-    present, err = _reachable(std)
+    present, err = _reachable(std, root)
     if err:
         return Result("C4", "mappings", MALFORMED, err)
     if not present:
@@ -463,10 +445,10 @@ def check_c4(root, cache):
     # unreadable manifest must surface as MALFORMED (exit 2), never hide behind an absent corpus and
     # read as clean. Catch OSError too (an unreadable manifest file is a read error, not a clean skip).
     try:
-        manifests = load_manifests(std)
+        manifests = load_manifests(std, root=root)
     except (ManifestError, OSError) as exc:
         return Result("C4", "mappings", MALFORMED, str(exc))
-    present, err = _reachable(src)
+    present, err = _reachable(src, root)
     if err:
         return Result("C4", "mappings", MALFORMED, err)
     if not present:
@@ -512,10 +494,10 @@ def check_c5(root, cache):
         return Result("C5", "hooks-no-drift", SKIPPED, "corpus did not load (see C1)")
     src_dir = root / ".aiqt" / "core" / "hooks"
     plugin_root = root.joinpath(*gen_hooks.PLUGIN_ROOT_PARTS)
-    src_present, src_err = _reachable(src_dir)
+    src_present, src_err = _reachable(src_dir, root)
     if src_err:
         return Result("C5", "hooks-no-drift", MALFORMED, src_err)
-    surf_present, surf_err = _reachable(plugin_root)
+    surf_present, surf_err = _reachable(plugin_root, root)
     if surf_err:
         return Result("C5", "hooks-no-drift", MALFORMED, surf_err)
     if not surf_present:
@@ -545,7 +527,7 @@ def check_c5(root, cache):
         # Orphan scan the RESERVED plugin hooks/ subtree only (100% generated); the plugin.json is in
         # desired and compared above, and .claude-plugin/ is not otherwise walked.
         hooks_dir = root.joinpath(*gen_hooks.HOOKS_SUBTREE_PARTS)
-        present, err = _reachable(hooks_dir)
+        present, err = _reachable(hooks_dir, root)
         if err:
             return Result("C5", "hooks-no-drift", MALFORMED, err)
         if present:
@@ -1038,6 +1020,7 @@ def self_test_main():
     import shutil
     import tempfile
     from contextlib import redirect_stderr, redirect_stdout
+    import _standards  # the module itself, so cases 16i to 16k can hook its probe's lstat
 
     def run_capture(root):
         # Capture stderr too: the bad-root case deliberately prints to stderr, and a self-test must not
@@ -1482,6 +1465,105 @@ def self_test_main():
                 failures.append("unreadable plugin hooks/ expected C5 MALFORMED:\n{}".format(out))
         os.chmod(hooks_surface, 0o755)  # restore so cleanup can remove it
 
+        # 16g. A symlink at .claude, live or dangling, must fail closed via C2 and C3 MALFORMED (exit 2),
+        #      as check_rule_placement refuses the same tree: a live link is never followed into the
+        #      conformant tree it names (which would verify C2/C3), and a dangling one never reads as
+        #      an absent surface (NOT APPLICABLE, a false clean).
+        for label, live in (("live", True), ("dangling", False)):
+            linked = tmp / "claude-link-{}".format(label)
+            linked.mkdir()
+            _build_conformant(linked)
+            if live:
+                (linked / ".claude").rename(linked / "real-claude")
+                (linked / ".claude").symlink_to(linked / "real-claude")
+            else:
+                shutil.rmtree(linked / ".claude")
+                (linked / ".claude").symlink_to(linked / "no-such-target")
+            code, out = run_capture(linked)
+            if code != 2 or status_of(out, "C2") != MALFORMED or status_of(out, "C3") != MALFORMED:
+                failures.append("a {} symlinked .claude expected exit 2 with C2 and C3 MALFORMED, got "
+                                "{}:\n{}".format(label, code, out))
+
+        # 16h. A symlink below .claude/rules, at a family directory or at a rule file, must fail closed
+        #      via C3 MALFORMED (exit 2) naming it, as check_rule_placement refuses the same tree: the
+        #      link's target is the conformant content, so following it would verify C3 (and, for a
+        #      rule file, which C2 reads by name, pass the whole run).
+        for label, rel in (("family directory", "aiqt"),
+                           ("rule file", "security/SECI-input-validation.md")):
+            below = (tmp / "rules-link-{}".format(label.replace(" ", "-"))).resolve()
+            below.mkdir()
+            _build_conformant(below)
+            linked = below / ".claude" / "rules" / rel
+            linked.rename(below / "outside")
+            linked.symlink_to(below / "outside")
+            code, out = run_capture(below)
+            c3_line = next((line for line in out.splitlines() if line.split()[:1] == ["C3"]), "")
+            if code != 2 or status_of(out, "C3") != MALFORMED or "'{}'".format(linked) not in c3_line:
+                failures.append("a symlinked {} below .claude/rules expected exit 2 with C3 MALFORMED "
+                                "naming it, got {}:\n{}".format(label, code, out))
+
+        # 16i. C3 reads only the .claude/rules its probe judged. A tree holding a violation, swapped for
+        #      a symlink to a clean copy or replaced by an empty directory right after the probe's lstat
+        #      of it (a hook on that lstat makes the window deterministic), is C3 MALFORMED naming it,
+        #      where a read by name would see the clean copy and pass, or the empty directory and find
+        #      nothing to validate.
+        for label, to_link in (("symlink", True), ("directory", False)):
+            swapped = (tmp / "rules-swap-{}".format(label)).resolve()
+            swapped.mkdir()
+            _build_conformant(swapped)
+            rules = swapped / ".claude" / "rules"
+            shutil.copytree(rules, swapped / "clean-rules")
+            (rules / "stray.md").write_text("# stray\n", encoding="utf-8")
+            with crp._patched_lstat(_standards, crp._replacing_lstat(
+                    _standards._lstat, rules, swapped / "clean-rules" if to_link else None)):
+                got = check_c3(swapped)
+            if got.status != MALFORMED or not got.detail.startswith("cannot read {}: ".format(rules)):
+                failures.append("a .claude/rules swapped for a {} after C3's probe expected C3 MALFORMED "
+                                "naming it, got {}: {}".format(label, got.status, got.detail))
+
+        # 16j. A .claude/rules removed between C3's probe's lstat and its open changed under the
+        #      probe: C3 MALFORMED naming it, never NOT APPLICABLE as an absent tree.
+        vanished = (tmp / "rules-vanished").resolve()
+        vanished.mkdir()
+        _build_conformant(vanished)
+        rules = vanished / ".claude" / "rules"
+        with crp._patched_lstat(_standards, crp._replacing_lstat(_standards._lstat, rules, vanish=True)):
+            got = check_c3(vanished)
+        if got.status != MALFORMED or not got.detail.startswith("cannot read {}: ".format(rules)):
+            failures.append("a .claude/rules removed after C3's probe expected C3 MALFORMED naming it, "
+                            "got {}: {}".format(got.status, got.detail))
+
+        # 16k. A .claude replaced by an empty directory between C3's probe's lstat of it and its open
+        #      changed under the probe: C3 MALFORMED naming .claude, never NOT APPLICABLE from a walk
+        #      that went on inside the replacement and found no rules there.
+        replaced = (tmp / "claude-replaced").resolve()
+        replaced.mkdir()
+        _build_conformant(replaced)
+        rules = replaced / ".claude" / "rules"
+        (rules / "stray.md").write_text("# stray\n", encoding="utf-8")
+        with crp._patched_lstat(_standards, crp._replacing_lstat(_standards._lstat, rules.parent)):
+            got = check_c3(replaced)
+        if (got.status != MALFORMED or not got.detail.startswith("cannot read {}: ".format(rules))
+                or "'{}'".format(rules.parent) not in got.detail):
+            failures.append("a .claude replaced after C3's probe's lstat of it expected C3 MALFORMED "
+                            "naming it, got {}: {}".format(got.status, got.detail))
+
+        # 16l. A family directory holding a badly named rule, replaced by an empty directory right
+        #      after C3's listing of .claude/rules judged it (a hook on the walk's listing), changed
+        #      under the walk: C3 MALFORMED naming it, never a walk into the replacement that misses
+        #      the violation and passes on the other families.
+        family_replaced = (tmp / "family-replaced").resolve()
+        family_replaced.mkdir()
+        _build_conformant(family_replaced)
+        family = family_replaced / ".claude" / "rules" / "aiqt"
+        (family / "bad.md").write_text("# bad\n", encoding="utf-8")
+        with crp._patched(crp, "_listing", crp._replacing_listing(crp._listing, family)):
+            got = check_c3(family_replaced)
+        if (got.status != MALFORMED or not got.detail.startswith("cannot read the rules tree: ")
+                or "'{}'".format(family) not in got.detail):
+            failures.append("a family directory replaced after C3's listing expected C3 MALFORMED "
+                            "naming it, got {}: {}".format(got.status, got.detail))
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:
@@ -1513,7 +1595,11 @@ def self_test_main():
           "orphan, or an orphaned surface with no source; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
           "(standards, core rules, generated families, the .aiqt/.claude/.github parents, and the plugin "
-          "hooks subtree), and a bad --root fail closed" + skip_note)
+          "hooks subtree), a live or dangling symlinked .claude, a symlinked family directory or rule "
+          "file below .claude/rules, a .claude/rules swapped for a symlink, replaced or removed after "
+          "C3's probe, a .claude replaced after that probe's lstat of it, a family directory "
+          "replaced after C3's listing, and a bad --root fail "
+          "closed" + skip_note)
     return 0
 
 
