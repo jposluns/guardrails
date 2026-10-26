@@ -12623,9 +12623,12 @@ def _gate_text_bypass(text, skip_own=False):
     None. The blank-split reading (_gate_dequoted_words) and the bash-model readings (_gate_bash_readings) are
     each judged by the any-word walk (_gate_any_word_bypass), which finds every bypass the value-aware walk
     (_gate_novrf_dequoted_bypass) finds on the same words, so a deny the blank-split reading gave is kept. With
-    skip_own, each reading's first git word, the segment's own git, is dropped first, so that git keeps the
-    value-aware reading of the lexer's words. A raw-text reading only: it can only add a deny, never prove a
-    command safe."""
+    skip_own, each reading's first git word is dropped first. That word is the segment's own git only in text
+    that starts at it, so that git keeps the value-aware reading of the lexer's words; in a whole segment's
+    text the first git word may be one hidden before it, in an assignment, a redirection or a wrapper's option
+    value (A="$(g'i't commit -nv)" git status), and dropping it would pass that git over, so a caller that
+    passes skip_own for such text also reads the text before the own git without it (_gate_behind_bypass). A
+    raw-text reading only: it can only add a deny, never prove a command safe."""
     for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
         if skip_own:
             k = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
@@ -12653,22 +12656,94 @@ def _gate_unread_bypass(text):
     return None
 
 
+def _gate_word_start(raw, argv, idx):
+    """The index in raw, the raw slice of one lexed segment whose words are argv, at which the word argv[idx]
+    starts, or None where this rescan cannot place it. raw is read from its start as the lexer reads it:
+    blanks are passed over, each redirection operator is skipped with its target word (a digits-only word
+    glued to the operator is its source descriptor), and every other word is read by the shared word reader
+    (_read_word) and must decode to the next word of argv. A '#' at a word boundary, any other operator, a
+    word that differs from argv, an unreadable word, or text that ends first gives None. Linear in the length
+    of the text read up to that word."""
+    i, n, k = 0, len(raw), 0
+    try:
+        while i < n and k < len(argv):
+            c = raw[i]
+            if c in " \t\n":
+                i += 1
+                continue
+            if c == "#":
+                return None
+            op_at = i
+            if c not in _METACHARS:
+                text, _opaque, started, all_digits, _tilde, j = _read_word(raw, i, n)
+                if j == i:
+                    return None
+                if not (all_digits and text and j < n and raw[j] in "<>"):
+                    if started:
+                        if text != argv[k]:
+                            return None
+                        if k == idx:
+                            return i
+                        k += 1
+                    i = j
+                    continue
+                op_at = j
+            _op, kind, oplen = _match_operator(raw, op_at, n)
+            if kind != "redirect":
+                return None
+            i = op_at + oplen
+            while i < n and raw[i] in " \t":
+                i += 1
+            if i >= n or raw[i] in "#\n" or raw[i] in _METACHARS:
+                return None
+            _target, _opaque, started, _digits, _tilde, i = _read_word(raw, i, n)
+            if not started:
+                return None
+    except ValueError:
+        return None
+    return None
+
+
 def _gate_behind_bypass(seg):
     """(sub, spelling) when the de-quoted text of one lexed segment (seg.raw, read by _gate_text_bypass) names a
     roster git carrying a no-verify bypass behind any other word of that segment, else None: one rule for every
     command word, with no list of wrappers, so a git that ionice, doas, taskset, flock, chroot, builtin exec or
     env -S runs, or one spelled with quotes inside an operand (sh -c 'true;g"i"t commit -nv'), is judged
-    whatever runs it. The segment's OWN git, the one the parsed path's wrapper peel resolves and
-    _gate_novrf_segment_bypass judges over the lexer's words, is left to that value-aware reading (each reading's
-    first git word is skipped), so git commit -m 'fix -n' keeps its allow; every later git word is judged.
+    whatever runs it. The segment's OWN git, the command word the parsed path's wrapper peel resolves to git
+    and _gate_novrf_segment_bypass judges over the lexer's words, is left to that value-aware reading, so git
+    commit -m 'fix -n' keeps its allow: the text from that word on is read with its first git word, the own
+    git, dropped. The text before it (leading assignments, the peeled wrappers with their options and values,
+    and any redirection there) is read with no git word dropped, so a hook-skipping git in a substitution there
+    denies (A="$(g'i't commit -nv)" git status, exec -a "$(g'i't commit -nv)" git status, >"$(g'i't commit -nv)"
+    git status), and the whole text with its first git word dropped is read as before too, so no deny it gave is
+    lost. Where the own git's place in the text cannot be found (_gate_word_start), the whole text is read
+    with no git word dropped. A segment with no command word runs none, but bash still expands its
+    redirection words, so the text of one that holds a redirection is read with no git word dropped
+    (>"$(g'i't commit -nv)"); one with neither a word nor a redirection is passed over.
     Disclosed safe-direction over-deny: behind a command word the peel does not resolve to git (sudo, ionice,
-    nice -n5), a quoted word holding a blank is split, so ionice git commit -m 'fix -n' reads a -n, and text
-    that merely names a roster git with a bypass spelling behind any word (echo g'i't commit -nv) denies. A
-    segment with no word runs no command and is passed over."""
+    nice -n5), a quoted word holding a blank is split, so ionice git commit -m 'fix -n' reads a -n, and so is
+    one on a git before the own git or in a redirection of a segment with no command word (A="$(g'i't commit
+    -m 'fix -n')" git status), one after an own git that cannot be placed, and one after an own git with a
+    git word before it, which the kept whole-text reading drops instead (exec -a git git commit -m 'fix -n',
+    > /tmp/git git commit -m 'fix -n'); and text that merely names a
+    roster git with a bypass spelling denies wherever it is read: behind any word (echo g'i't commit -nv),
+    before the own git (exec -a "g'i't commit -n" git status), in a redirection of a segment with no command
+    word (>'g'i't commit -nv') or in a comment after one (>x # g'i't commit -nv)."""
     if not seg.argv:
-        return None
+        return _gate_text_bypass(seg.raw) if seg.redirects else None
     peeled = _gate_novrf_peel(seg.argv)
-    return _gate_text_bypass(seg.raw, isinstance(peeled, list) and _command_word(peeled) == "git")
+    if not isinstance(peeled, list) or _command_word(peeled) != "git":
+        return _gate_text_bypass(seg.raw)
+    at = _gate_word_start(seg.raw, seg.argv, len(seg.argv) - len(peeled) + _command_word_index(peeled))
+    if at is None:
+        return _gate_text_bypass(seg.raw)
+    if not seg.raw[:at].strip():
+        return _gate_text_bypass(seg.raw, True)
+    for text, skip_own in ((seg.raw[:at], False), (seg.raw[at:], True), (seg.raw, True)):
+        bypass = _gate_text_bypass(text, skip_own)
+        if bypass is not None:
+            return bypass
+    return None
 
 
 def _gate_recovered_sink(command, doubt=None):
@@ -12768,9 +12843,21 @@ def gate_weakening(data):
     on commit and am, any single-dash word holding an 'n', with no '--', option value or global option read,
     so a quoted span that splits into one cannot swallow a real -n. So ionice g'i't commit -nv, doas g'i't commit
     -nv, env -S 'g"i"t\\_commit\\_-nv', env $'g\\x69t\\0' commit -nv, ionice g'i't commit 'x --' -n,
-    sh -c 'true;g"i"t commit -nv' and cat <(g'i't commit -nv) deny; only the segment's own git, the one the
-    wrapper peel resolves, keeps its value-aware reading. Disclosed safe-direction over-deny: text that merely
-    names git with a roster verb and a no-verify spelling behind any word denies (echo g'i't commit -nv);
+    sh -c 'true;g"i"t commit -nv' and cat <(g'i't commit -nv) deny; only the segment's own git, the command
+    word the wrapper peel resolves, keeps its value-aware reading: the text from that word on is read with only
+    that git dropped, and the text before it (assignments, wrapper options and values, redirections) with no
+    git word dropped, so a hook-skipping git in a substitution before the own git denies (A="$(g'i't commit -nv)"
+    git status, exec -a "$(g'i't commit -nv)" git status, >"$(g'i't commit -nv)" git status); where the own
+    git cannot be placed in the text (_gate_word_start) no git word is dropped. A segment with no command word
+    runs none, but bash still expands its redirection words, so the text of one holding a redirection is read
+    too (>"$(g'i't commit -nv)" denies). Disclosed safe-direction over-deny: text that merely names git with
+    a roster verb and a no-verify spelling behind any word denies (echo g'i't commit -nv), and
+    so does such text before the own git (exec -a "g'i't commit -n" git status), in a redirection of a
+    segment with no command word (>'g'i't commit -nv') or in a comment after one (>x # g'i't commit -nv); a
+    quoted value holding a blank is split on a git before the own git or in such a redirection (A="$(g'i't
+    commit -m 'fix -n')" git status denies), after an own git that cannot be placed, and after an own git with
+    a git word before it, which the whole text, still read with its first git word dropped, drops instead
+    (exec -a git git commit -m 'fix -n' denies);
     behind a command word the peel does not resolve to git a quoted value holding a blank is split, so sudo git
     commit -m 'fix -n' denies, and an option value holding an 'n' counts, so ionice git commit -uno -m x and
     ionice git commit -mnew deny; any later roster-verb word counts as the verb (ionice git log --grep commit
@@ -12882,17 +12969,18 @@ def gate_weakening(data):
                     "(rule gatdis).")
         for seg in recovered:
             # each complete segment's de-quoted text too, as on the parsed path (a git behind any other word:
-            # ionice g'i't commit -nv; cat <<<x); the in-progress segment's text is read below
+            # ionice g'i't commit -nv; cat <<<x; or in a redirection of a segment with no command word:
+            # >"$(g'i't commit -nv)"; cat <<<x); the in-progress segment's text is read below
             bypass = _gate_behind_bypass(seg)
             if bypass is not None:
                 sub, spelling = bypass
                 return _deny(
                     "AIQT rule gatdis (gate-discipline): this command's text, with quotes and backslashes "
                     "removed, names a git {} carrying {} after another word of the same command (a wrapper on "
-                    "no list, an option value or quoted text), a deliberate bypass of the verification hooks "
-                    "that gate it whatever runs that git; it is denied fail-closed. Never weaken a gate to "
-                    "obtain a pass; fix the artefact instead. If the text only names such a command, keep that "
-                    "spelling out of it. {}".format(sub, spelling, _GATE_ALTS),
+                    "no list, an assignment or option value, a redirection or quoted text), a deliberate bypass "
+                    "of the verification hooks that gate it whatever runs that git; it is denied fail-closed. "
+                    "Never weaken a gate to obtain a pass; fix the artefact instead. If the text only names "
+                    "such a command, keep that spelling out of it. {}".format(sub, spelling, _GATE_ALTS),
                     "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) behind another "
                     "word of the command (rule gatdis, fail-closed).")
         hit = _verification_sink(recovered)
@@ -12985,8 +13073,8 @@ def gate_weakening(data):
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
     for index, seg in enumerate(records):
         tokens = seg.argv
-        if not tokens:
-            continue  # no command word, so neither git nor a checker (a run of separators reads nothing here)
+        if not tokens and not seg.redirects:
+            continue  # no word and no redirection, so nothing runs or expands (a run of separators reads nothing here)
         sep_after = seg.sep_after
         bypass = _gate_novrf_segment_bypass(tokens)
         if bypass is not None:
@@ -12996,22 +13084,23 @@ def gate_weakening(data):
                 "the verification hooks that gate it. Never weaken a gate to obtain a pass; fix the "
                 "artefact instead. {}".format(sub, spelling, _GATE_ALTS),
                 "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) (rule gatdis).")
-        # A git behind any other word of the segment (a wrapper on no list, an option value, quoted text) is
-        # read from the segment's de-quoted text, whatever runs it (_gate_behind_bypass).
+        # A git behind any other word of the segment (a wrapper on no list, an option value, quoted text), before
+        # its own git, or in a redirection of a segment with no command word, which bash still expands, is read
+        # from the segment's de-quoted text, whatever runs it (_gate_behind_bypass).
         bypass = _gate_behind_bypass(seg)
         if bypass is not None:
             sub, spelling = bypass
             return _deny(
                 "AIQT rule gatdis (gate-discipline): this command's text, with quotes and backslashes removed, "
                 "names a git {} carrying {} after another word of the same command (a wrapper on no list, an "
-                "option value or quoted text), a deliberate bypass of the verification hooks that gate it "
-                "whatever runs that git; it is denied fail-closed. Never weaken a gate to obtain a pass; fix "
-                "the artefact instead. If the text only names such a command, keep that spelling out of it. "
-                "{}".format(sub, spelling, _GATE_ALTS),
+                "assignment or option value, a redirection or quoted text), a deliberate bypass of the "
+                "verification hooks that gate it whatever runs that git; it is denied fail-closed. Never weaken a "
+                "gate to obtain a pass; fix the artefact instead. If the text only names such a command, keep "
+                "that spelling out of it. {}".format(sub, spelling, _GATE_ALTS),
                 "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) behind another word "
                 "of the command (rule gatdis, fail-closed).")
-        if not _is_checker_segment(tokens):
-            continue
+        if not tokens or not _is_checker_segment(tokens):
+            continue  # with no command word, neither git nor a checker runs here
         # The "immediately following" segment, advancing PAST any EMPTY segments (a bare
         # line-continuation/newline inserts a segment with no tokens, so 'pytest ||\n true' and
         # 'pytest |\n head' would otherwise read as having no following swallow/sink and miss the

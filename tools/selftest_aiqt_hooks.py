@@ -14100,8 +14100,8 @@ def _main_isolated(monitor):
         # single-quoted interior byte that is not a bare-word character or a space or tab, or a shell
         # operator, newline or single quote inside a double-quoted interior, now marks the pairing
         # ambiguous: the span is not treated as consumed data, so the hidden 'git' is judged as its own
-        # segment and the bypass denies. Each of gw-dq-h1..h5 ALLOWS at cea096d25cc9 (an earlier
-        # revision) and DENIES here; the control gw-dq-h7/h8 shows a benign operator message still allows
+        # segment and the bypass denies. Each of gw-dq-h1..h5 ALLOWED at an earlier revision of this
+        # guard and DENIES here; the control gw-dq-h7/h8 shows a benign operator message still allows
         # (only a 'git' inside such a span is re-judged, not every operator), so a mutant that swallows
         # the span again turns gw-dq-h1..h5 (and gw-dq-m1a..m1e, gw-dq-q1, gw-dq-n2) red while one that
         # denies every operator interior turns gw-dq-h7/h8 red.
@@ -14433,6 +14433,108 @@ def _main_isolated(monitor):
                 "allow")
         gexpect("(gw-rd-ctl-sh-pushn) a git push -n (dry run) inside sh -c allows",
                 "sh -c 'true;g\"i\"t push -n origin main'", "allow")
+        # OWN-GIT AND NO-COMMAND-WORD VECTORS: a git hidden before the segment's own git (in an assignment value, a
+        # redirection word or a peeled wrapper's option value), and one in a redirection word of a segment with no
+        # command word, which bash still expands. Each allowed while every reading's first git word was dropped as
+        # the own git, or while a segment with no command word was passed over, and bash runs the substitution's
+        # hook-skipping git for each; the last four take the parse-error path.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-own-assign", "A=\"$(g'i't commit -nv)\" git status"),
+                ("gw-own-assign-commit", "A=\"$(g'i't commit -nv)\" git commit -m x"),
+                ("gw-own-assign-backquote", "A=\"`g'i't commit -nv`\" git status"),
+                ("gw-own-env-assign", "env A=\"$(g'i't commit -nv)\" git status"),
+                ("gw-own-exec-a", "exec -a \"$(g'i't commit -nv)\" git status"),
+                ("gw-own-nice-n", "nice -n \"$(g'i't commit -nv)\" git status"),
+                ("gw-own-timeout", "timeout \"$(g'i't commit -nv)\" git status"),
+                ("gw-own-redir-out", ">\"$(g'i't commit -nv)\" git status"),
+                ("gw-own-redir-in-push", "<\"$(g'i't push --no-verify)\" git status"),
+                ("gw-own-assign-ionice", "A=\"$(ionice g'i't commit -nv)\" git status"),
+                ("gw-own-assign-split", "A=\"$(g'i't commit 'x --' -n)\" git status"),
+                ("gw-nocmd-redir", ">\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-redir-space", "> \"$(g'i't commit -nv)\""),
+                ("gw-nocmd-redir-fd", "2>\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-redir-append", ">>\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-redir-in", "<\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-backquote", ">\"`g'i't commit -nv`\""),
+                ("gw-nocmd-after-true", "true; >\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-subshell", "(>\"$(g'i't commit -nv)\")"),
+                ("gw-nocmd-push", ">\"$(g'i't push --no-verify)\""),
+                ("gw-nocmd-ionice", ">\"$(ionice g'i't commit -nv)\""),
+                ("gw-nocmd-backslash", ">\"$(g\\it commit -nv)\""),
+                ("gw-nocmd-ansic", ">\"$($'g\\x69t' commit -nv)\""),
+                ("gw-nocmd-dup-first", "echo hi; 2>&1 >\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-both", "&>\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-both-append", "&>>\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-clobber", ">|\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-readwrite", "<>\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-dup-out", ">&\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-dup-in", "<&\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-pe", ">\"$(g'i't commit -nv)\"; cat <<<x"),
+                ("gw-own-pe", "A=\"$(g'i't commit -nv)\" git status; cat <<<x"),
+                ("gw-own-pe-exec-a", "exec -a \"$(g'i't commit -nv)\" git status; cat <(true)"),
+                ("gw-own-pe-redir", ">\"$(g'i't commit -nv)\" git status; cat <<<x")):
+            gdeny_names("({}) a git bypass before the own git or in a redirection, read from the de-quoted text, "
+                        "denies".format(_gw_lbl), _gw_cmd, "after another word of the same command")
+        # The disclosed safe-direction over-denies of that reading, pinned so a change to them is a deliberate one:
+        # text that only names a hook-skipping git before the own git, in a redirection of a segment with no command
+        # word or in a comment after one, and a quoted message holding a blank and a -n on a git in a substitution
+        # before the own git, which the reading splits.
+        gexpect("(gw-own-overdeny-exec-a) an exec -a name naming g'i't commit -n denies (disclosed over-deny)",
+                "exec -a \"g'i't commit -n\" git status", "deny")
+        gexpect("(gw-nocmd-overdeny-target) a redirection target naming one denies (disclosed over-deny)",
+                ">'g'i't commit -nv'", "deny")
+        gexpect("(gw-nocmd-overdeny-comment) a comment after a redirection naming one denies (disclosed over-deny)",
+                ">x # g'i't commit -nv", "deny")
+        gexpect("(gw-own-overdeny-msg) a split quoted message in a substitution before the own git denies "
+                "(disclosed over-deny)", "A=\"$(g'i't commit -m 'fix -n')\" git status", "deny")
+        # The whole text read with its first git word dropped, as before, is kept beside the split, so a deny it
+        # gave stays: each of these denied before the split and allows when that reading is removed.
+        gexpect("(gw-own-kept-exec-a) a git word as the exec -a name keeps its earlier deny (disclosed over-deny)",
+                "exec -a git git commit -m 'fix -n'", "deny")
+        gexpect("(gw-own-kept-redir) a redirection target ending in /git keeps its earlier deny (disclosed "
+                "over-deny)", "> /tmp/git git commit -m 'fix -n'", "deny")
+        # Controls: a git log -n3 before the own git or in a redirection, a plain wrapper option value, redirections
+        # and a stack of peeled wrappers before the own git, a plain redirection, and a comment alone allow.
+        gexpect("(gw-own-ctl-log) a git log -n3 in an assignment before the own git allows",
+                "A=\"$(g'i't log -n3)\" git status", "allow")
+        gexpect("(gw-own-ctl-log-pe) the same on the parse-error path allows",
+                "A=\"$(g'i't log -n3)\" git status; cat <<<x", "allow")
+        gexpect("(gw-own-ctl-exec-a) exec -a x + git commit -m 'fix -n' allows (own git, value-aware)",
+                "exec -a x git commit -m 'fix -n'", "allow")
+        gexpect("(gw-own-ctl-redir) redirections before git commit -m 'fix -n' allow (own git, value-aware)",
+                ">/dev/null 2>&1 git commit -m 'fix -n'", "allow")
+        gexpect("(gw-own-ctl-stack) assignments and peeled wrappers before git commit -m 'fix -n' allow",
+                "A=1 B='c d' env C=2 nice -n 3 timeout 9 git commit -m 'fix -n'", "allow")
+        gexpect("(gw-nocmd-ctl-log) a git log -n3 in a redirection with no command word allows",
+                ">\"$(g'i't log -n3)\"", "allow")
+        gexpect("(gw-nocmd-ctl-log-pe) the same on the parse-error path allows", ">\"$(g'i't log -n3)\"; cat <<<x",
+                "allow")
+        gexpect("(gw-nocmd-ctl-file) a plain redirection with no command word allows", "> out.txt", "allow")
+        gexpect("(gw-nocmd-ctl-comment) a comment alone, with no word and no redirection, is passed over",
+                "# g'i't commit -nv", "allow")
+        # Direct unit cases for _gate_word_start: the first word, a word after a redirection, the last word, an
+        # index just past the last word and one below the first, a word that differs from argv, a '#' at a word
+        # boundary, and a digits-only word glued to a redirection operator, read as its source descriptor.
+        _gw_ws = getattr(aiqt_hooks, "_gate_word_start", None)
+
+        def wsexpect(label, raw, argv, idx, want):
+            got = _gw_ws(raw, argv, idx) if _gw_ws is not None else "no _gate_word_start"
+            if got != want:
+                failures.append("{}: _gate_word_start({!r}, {!r}, {}) = {!r}, expected {!r}".format(
+                    label, raw, argv, idx, got, want))
+
+        _gw_raw = "A=\"$(x)\" 2>/dev/null git status"
+        _gw_argv = ["A=$(x)", "git", "status"]
+        wsexpect("(gw-ws-first) the first word starts the text", _gw_raw, _gw_argv, 0, 0)
+        wsexpect("(gw-ws-own) a redirection before the word is skipped", _gw_raw, _gw_argv, 1, 21)
+        wsexpect("(gw-ws-last) the last word is placed", _gw_raw, _gw_argv, 2, 25)
+        wsexpect("(gw-ws-past) an index just past the last word is not placed", _gw_raw, _gw_argv, 3, None)
+        wsexpect("(gw-ws-below) an index just below the first word is not placed", _gw_raw, _gw_argv, -1, None)
+        wsexpect("(gw-ws-differs) a word that differs from argv is not placed", _gw_raw, ["A=$(y)", "git", "status"],
+                 1, None)
+        wsexpect("(gw-ws-comment) a '#' at a word boundary is not placed", "x # git", ["x", "git"], 1, None)
+        wsexpect("(gw-ws-fd) a digits-only word glued to '>' is a descriptor, not a word", "2>x 2 git", ["2", "git"],
+                 1, 6)
         # Direct unit cases for the bash-model pieces: the ANSI-C body decoder (the NUL cut, the octal and \x{}
         # low byte just inside, at and just past 0xFF, \c's pair and DEL, an unknown escape kept, a multibyte
         # \c), the word split, and the any-word walk.
@@ -14596,8 +14698,8 @@ def _main_isolated(monitor):
         # runs, not quoted data (a '$' expansion is the same shape, but every command-running '$' form
         # also carries a '(' or '{', already a break byte, so these vectors isolate the backquote): the
         # single-quote ambiguity test marks the span on ANY interior byte outside the bare-word set plus
-        # space and tab, so the hidden 'git ... -nv' inside it is re-judged and denies. Each ALLOWS at
-        # cea096d25cc9 (an earlier revision, before the backquote was a single-quote break byte); a mutant
+        # space and tab, so the hidden 'git ... -nv' inside it is re-judged and denies. Each ALLOWED at
+        # an earlier revision of this guard, before the backquote was a single-quote break byte; a mutant
         # that tests only the shell operators, the newline and the double quote (the pre-change set) turns
         # gw-dq-m1a..m1e red.
         gexpect("(gw-dq-m1a) a backquote hidden between a single-quoted close and open denies",
@@ -14613,8 +14715,8 @@ def _main_isolated(monitor):
         # The other-quote and newline triggers the single-quote ambiguity test still needs are subsumed by
         # the bounded rule (a double quote and a newline are both outside the bare-word set plus space and
         # tab), and these two vectors pin them with the double quote (q1) or the newline (n2) as the ONLY
-        # non-word interior byte, so each isolates one trigger. Each ALLOWS at cea096d25cc9 (an earlier
-        # revision, before the ambiguity feature); a mutant that excludes the double quote from the test
+        # non-word interior byte, so each isolates one trigger. Each ALLOWED at an earlier revision of this
+        # guard, before the ambiguity feature; a mutant that excludes the double quote from the test
         # turns gw-dq-q1 red, one that excludes the newline turns gw-dq-n2 red. In q1 bash actually runs
         # only 'git log' (the double-quoted a" is one operand), so the deny is a safe-direction over-deny;
         # the vector pins the trigger MECHANISM, not a live bypass in that exact string.
@@ -21143,7 +21245,9 @@ def _main_isolated(monitor):
           "the command-running wrappers (env, exec -a, nice, nohup, command, time, timeout) to judge the "
           "git behind one, and FAILS CLOSED through the dequoted-word scan on a wrapper option it cannot "
           "resolve (env -uX, nice -n5) or an unlisted wrapper (sudo, xargs, setsid, stdbuf); behind ANY "
-          "other word of a segment, with no wrapper list, it reads that segment's de-quoted text (the "
+          "other word of a segment, with no wrapper list, before the segment's own git (an assignment, a "
+          "wrapper option value or a redirection), and in a redirection of a segment with no command word, "
+          "it reads that segment's de-quoted text (the "
           "blank-split reading, and bash-model readings that decode ANSI-C quotes as bash does, cutting at "
           "a NUL, and split at blanks, operator characters, backquotes and env -S's \\_) and denies a git "
           "followed by any roster verb and then any hook-skip word, with no '--' or option value read, and "
