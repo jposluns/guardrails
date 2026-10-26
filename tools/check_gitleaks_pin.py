@@ -13,22 +13,28 @@ before each member push: that is a process rule, not enforced per head.
   check_gitleaks_pin.py --self-test  run the deterministic vectors (stub binaries, no real gitleaks)
 
 The pin is the GITLEAKS_VERSION: X.Y.Z entry of the env: of the one step named Secrets (gitleaks) in
-quality.yml, the step that downloads that version and verifies it by checksum. That step is read only as a
-step item of a job's steps: list under the top-level jobs: mapping: every line that is not blank, a comment
-or block scalar text sits under the nearest such line above it indented less, and the step's item must sit
-under steps:, steps: under a job id key, the job id under jobs: at column 0, each at the indentation of its
-parent's first child (so an indentless steps: list is not read). A line that reads as the step once its
-indentation is removed anywhere else is refused and named, block scalar text included (the lines under a
-key or sequence item whose value is | or >, indented past it), and so are a YAML document marker or
-directive and a quoted scalar its line does not close, behind which a YAML reader can read as text a line
-this reader would place. A steps:, job id or jobs: key above that step item that a sibling line can repeat
-is refused too, naming both lines, because a YAML reader keeps at most one copy of a repeated key and the
-step may sit under a copy it drops: a sibling repeats it when its one-line key is the same once the tags and
-anchors before it are removed and its quotes undone, and an explicit key (?), an alias key (*) or an
-escaped double-quoted key, which this reader does not resolve, counts as a repeat. Only that entry decides:
-any other line of quality.yml naming GITLEAKS_VERSION (another step's or job's env:, a run script
-assigning it), other than a comment and a ${GITLEAKS_VERSION} expansion in that step's run: script, is
-refused, so a value set elsewhere can never stand in for the step's own. The file is read as LF lines
+quality.yml, the step that downloads that version and verifies it by checksum. The whole file is read only
+inside a closed subset of YAML, and every line outside it is refused, naming the line. The subset holds:
+block mappings and block sequences, each key or item at the column of its collection and each nested
+collection indented past the key or item that holds it (a - item may open a mapping or another sequence
+on its own line); scalars on their key's or item's line, either plain (holding no ': ' and not ending in
+a colon, a ' #' starting its comment), single-quoted or double-quoted and closed on that line, or a flow
+sequence of plain words ([a, b]) opened and closed on that line; block scalars introduced by | or > with
+their indicators, whose text is every later line that is blank or indented past that key or item, each
+text line indented at least as far as the text (the header's digit past that column, or else the first
+text line; a blank line above that first line indented past it is refused); comments and blank lines.
+Every key is a plain identifier written exactly as name: with a space or the line's end after the colon,
+and a line indents with spaces only and holds no tab before its first ' #'. So a flow mapping, any other
+flow sequence, a quoted scalar left open at the end of its line, a tag, an anchor, an alias, a document
+marker or directive, a merge key and a key spelled any other way (quoted, tagged, anchored, an alias,
+explicit with ?, or with a space before its colon) are each outside it. Within every mapping a repeated
+key is refused, naming both lines, because a YAML reader keeps at most one copy of it. Inside that subset
+every line sits where a YAML reader places it, so the step is the item of a job's steps: list under the
+top-level jobs: mapping whose name: reads Secrets (gitleaks), plain or quoted (its escapes decoded); a
+step name: given as a block scalar, or holding an escape YAML does not define, is refused. Only that
+entry decides: any other line of quality.yml naming GITLEAKS_VERSION (another step's or job's env:, a run
+script assigning it), other than a comment and a ${GITLEAKS_VERSION} expansion in that step's run: script,
+is refused, so a value set elsewhere can never stand in for the step's own. The file is read as LF lines
 once one trailing carriage return is removed from each: a line that still carries a carriage return, or
 carries U+0085, U+2028 or U+2029, is refused, because a YAML reader may break a line there and read a
 key this line reader would not see. The local binary is the first
@@ -41,20 +47,19 @@ Exit convention (matches the repo's gates):
   0  the gitleaks on PATH reports the pinned version
   1  gitleaks is not on PATH, or it reports another version
   2  cannot evaluate: quality.yml is unreadable; a line of it still carries a carriage return once its
-     one trailing CR is removed, or carries U+0085, U+2028 or U+2029; a line of it is a YAML document
-     marker or directive, or opens a quoted scalar it does not close; a line reads as the step named
-     Secrets (gitleaks) but is not a step item of a job's steps: list; a sibling line can repeat the
-     steps:, job id or jobs: key above that step item; it holds no such step item or more
-     than one; that step has no env: or more than one, or an env: line that is not a
-     plain KEY: value entry; its env: has no GITLEAKS_VERSION entry or more than one, or one whose value
-     is not a bare X.Y.Z; another line names GITLEAKS_VERSION; gitleaks version fails, times out or
-     prints anything but one version; or the arguments are not recognized
+     one trailing CR is removed, or carries U+0085, U+2028 or U+2029; a line of it is outside the
+     accepted subset above, or repeats a key of its mapping; it holds no step item named
+     Secrets (gitleaks) or more than one, or a step name: this reader does not decode; that step has no
+     env: or no run:, or an env: that is not a block mapping; its env: has no GITLEAKS_VERSION entry, or
+     one whose value is not a bare X.Y.Z; another line names GITLEAKS_VERSION; gitleaks version fails,
+     times out or prints anything but one version; or the arguments are not recognized
 
 NOT CHECKED: the binary's checksum (CI verifies the downloaded archive; this gate trusts the version a
 local binary reports, so a binary that misreports its version passes), the scan's own result (the gitleaks
-block of tools/run_all_checks.sh runs it), a gitleaks reached other than through PATH, and a version the
+block of tools/run_all_checks.sh runs it), a gitleaks reached other than through PATH, a version the
 workflow reaches without naming GITLEAKS_VERSION literally (a hard-coded download URL, or a name built at
-run time and written to GITHUB_ENV or assigned in a script).
+run time and written to GITHUB_ENV or assigned in a script), and two keys a YAML 1.1 reader resolves to the
+same boolean or null (on and ON, say), which this reader compares as written.
 """
 import sys
 
@@ -79,30 +84,31 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_REL = ".github/workflows/quality.yml"
-# The gitleaks step's first line, once its indentation is removed, and the name its env: pins.
-STEP_LINE = "- name: Secrets (gitleaks)"
+# The gitleaks step's name: and the name its env: pins.
+STEP_NAME = "Secrets (gitleaks)"
 PIN_KEY = "GITLEAKS_VERSION"
-# A job id key of the top-level jobs: mapping, once its indentation is removed: a plain id with no value.
-JOB_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*:")
-# A workflow line once its indentation is removed: its sequence and explicit-key indicators, its key (one-line
-# quoted or plain) with the separator after it, if it has one, then the tags and anchors its value starts
-# with and the | or > that opens a block scalar, if the value is one.
-NODE_RE = re.compile(r"((?:[-?:](?: +|$))*)"
-                     r"((?:'(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\"|[^\s#'\"](?:\S| +(?=[^\s#]))*?):(?: +|$))?"
-                     r"(?:[!&]\S*(?: +|$))*([|>])?")
+# A key: a plain identifier written exactly as name:, with the spaces after its colon or the line's end.
+KEY_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*):(?: +|$)")
+# What may follow a quoted scalar, a block scalar header or a flow sequence on its line: nothing, or spaces
+# and then a comment.
+TAIL = r"(?: +(?:#.*)?)?"
+TAIL_RE = re.compile(TAIL)
 # A quoted scalar its line closes.
 QUOTED_RE = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\"")
+# The escapes of a double-quoted scalar: each one-character escape with its value, and the hexadecimal ones
+# with their digit counts.
+ESCAPES = {"0": "\x00", "a": "\x07", "b": "\x08", "t": "\t", "\t": "\t", "n": "\n", "v": "\x0b", "f": "\x0c",
+           "r": "\r", "e": "\x1b", " ": " ", "\"": "\"", "/": "/", "\\": "\\", "N": "\x85", "_": "\xa0",
+           "L": "\u2028", "P": "\u2029"}
+HEX_ESCAPE_RE = re.compile(r"x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}")
+# A block scalar header: | or >, its indentation digit and chomping indicator in either order, then the tail.
+BLOCK_RE = re.compile(r"[|>](?:([1-9])[+-]?|[+-]([1-9])?)?" + TAIL)
+# The one flow collection read: a flow sequence of plain words, opened and closed on its line.
+FLOW_WORDS_RE = re.compile(r"(\[[A-Za-z0-9_][A-Za-z0-9_.-]*(?:, [A-Za-z0-9_][A-Za-z0-9_.-]*)*\])" + TAIL)
 # A YAML document marker or directive, at column 0.
 DOCUMENT_RE = re.compile(r"(?:---|\.\.\.)(?: |$)|%")
-# A mapping entry once its indentation is removed: the tags and anchors before its key, then the key (one-line
-# quoted or plain) and the separator after it.
-KEY_RE = re.compile(r"(?:[!&]\S*[ \t]+)*"
-                    r"('(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\"|[^\s#'\"](?:\S|[ \t]+(?=[^\s#]))*?)[ \t]*:(?:[ \t]|$)")
-# The pin entry, once the indentation of the step's env: entries is removed.
+# The pin entry, once its indentation is removed.
 PIN_RE = re.compile(r"GITLEAKS_VERSION: ([0-9]+\.[0-9]+\.[0-9]+)")
-# Every entry of the step's env:, once that indentation is removed: a plain key and a value, so a quoted
-# or escaped key, a merge key, a flow mapping or a continuation line cannot set the name unseen.
-ENV_ENTRY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*: \S.*")
 # The only spelling of the name the step's run: script may carry: its expansion.
 EXPANSION = "${GITLEAKS_VERSION}"
 # The whole output of gitleaks version, once surrounding whitespace is removed.
@@ -114,102 +120,214 @@ VERSION_TIMEOUT = 60
 LINE_BREAKS = ("\r", "\x85", "\u2028", "\u2029")
 
 
-def _indent(line):
-    return len(line) - len(line.lstrip(" "))
+def _value(rest):
+    """(kind, text) for rest, a line's text after its sequence indicators and its key, or (None, why not).
+
+    kind is "empty" (nothing but a comment, if anything), "block" (a block scalar header; text is its
+    indentation digit, or "" when YAML takes the indentation from the text), "plain" or "quoted" (a scalar;
+    text is the scalar without its comment) or "flow" (a flow sequence of plain words)."""
+    lead = rest[:1]
+    if not rest or lead == "#":
+        return "empty", ""
+    if lead in ("|", ">"):
+        header = BLOCK_RE.fullmatch(rest)
+        if header is None:
+            return None, "writes a block scalar header other than | or > with its indicators"
+        return "block", header.group(1) or header.group(2) or ""
+    if lead in ("'", "\""):
+        quoted = QUOTED_RE.match(rest)
+        if quoted is None:
+            return None, "opens a quoted scalar it does not close"
+        if TAIL_RE.fullmatch(rest, quoted.end()) is None:
+            return None, "writes more than a comment after the quoted scalar it closes (a quoted key, say)"
+        return "quoted", quoted.group()
+    if lead == "[":
+        flow = FLOW_WORDS_RE.fullmatch(rest)
+        if flow is None:
+            return None, "opens a flow sequence that is not one line of plain words"
+        return "flow", flow.group(1)
+    if lead == "{":
+        return None, "opens a flow mapping"
+    if lead == "!":
+        return None, "writes a tag"
+    if lead == "&":
+        return None, "writes an anchor"
+    if lead == "*":
+        return None, "writes an alias"
+    if lead in ("?", ":", "-") and rest[1:2] in ("", " "):
+        return None, "writes an explicit key (?), a value indicator (:) or a sequence item where a value belongs"
+    if lead in (",", "]", "}", "%", "@", "`"):
+        return None, "starts a scalar with a character YAML reserves"
+    plain = rest.split(" #", 1)[0].rstrip(" ")
+    if ": " in plain or plain.endswith(":"):
+        return None, "writes a key other than as a plain identifier followed by a colon and a space"
+    return "plain", plain
 
 
-def _block_end(lines, start, indent):
-    """The index of the first line after lines[start] that is not blank and is indented at most indent."""
-    end = start + 1
-    while end < len(lines) and (not lines[end].strip() or _indent(lines[end]) > indent):
+def _open(stack, column, kind):
+    """(the mapping (kind dict) or sequence (kind list) that a key or sequence item at column continues or
+    opens, None), or (None, why not). stack holds the open nodes, innermost last, each (column, node, open):
+    a mapping or sequence, or an entry whose value is still open (a key or item with nothing after it on its
+    line). A key or item past an open entry's column opens that entry's value; at its column the entry stays
+    empty and the collection holding it continues."""
+    while stack and stack[-1][0] > column:
+        stack.pop()
+    if not stack:
+        return None, "is indented less than the first line of the document"
+    top, node, is_open = stack[-1]
+    if is_open and top < column:
+        node[1] = kind()
+        stack[-1] = (column, node[1], False)
+        return node[1], None
+    if is_open and kind is list and len(stack) > 1 and type(stack[-2][1]) is dict:
+        return None, "holds a sequence item at the column of the key whose value it would be"
+    if is_open:
+        stack.pop()
+        top, node, is_open = stack[-1]
+    if top < column:
+        return None, "is indented past a line whose value is complete (a continuation line, say)"
+    if type(node) is not kind:
+        return None, "holds a {} at the column of the {} above it".format(
+            "key" if kind is dict else "sequence item", "sequence items" if kind is dict else "keys")
+    return node, None
+
+
+def _text_end(lines, header, column, digit):
+    """(the index after the last text line of the block scalar whose header is on lines[header], None), or
+    (None, why not). Its text is every later line that is blank or indented past column, the column of its key
+    or sequence item. YAML takes the text's indentation from the header's digit past that column, or else from
+    the first text line that is not blank, so a line indented past column but less than that, and a blank line
+    above that first text line indented past it, are refused."""
+    width = column + int(digit) if digit else None
+    blank = 0
+    end = header + 1
+    while end < len(lines):
+        text = lines[end].lstrip(" ")
+        indent = len(lines[end]) - len(text)
+        if not text:
+            blank = max(blank, indent)
+        elif indent <= column:
+            break
+        else:
+            if width is None:
+                if blank > indent:
+                    return None, ("a blank line above line {}, the first text line of the block scalar on line "
+                                  "{}, is indented past it".format(end + 1, header + 1))
+                width = indent
+            if indent < width:
+                return None, ("line {} is indented past the key of the block scalar on line {} but less than "
+                              "its text".format(end + 1, header + 1))
         end += 1
-    return end
+    return end, None
 
 
-def _repeats(text, name):
-    """Whether YAML can read the line text, its indentation removed, as a mapping entry whose key is name: true
-    when its one-line key, once the tags and anchors before it are removed and its quotes undone, is name, and
-    for an explicit key (?), an alias key (*) and an escaped double-quoted key, which this reader does not
-    resolve."""
-    if text[:1] == "?" and text[1:2] in ("", " ", "\t"):
-        return True
-    entry = KEY_RE.match(text)
-    if entry is None:
-        return False
-    key = entry.group(1)
-    if key[0] == "*" or (key[0] == "\"" and "\\" in key):
-        return True
-    if key[0] == "'":
-        return key[1:-1].replace("''", "'") == name
-    return (key[1:-1] if key[0] == "\"" else key) == name
-
-
-def _step_items(lines):
-    """(the indices of the step items named Secrets (gitleaks), None), or (None, why not).
-
-    Every line that is not blank, a comment or block scalar text is placed under its parent, the nearest such
-    line above it indented less. A step item is a sequence item whose parent is a steps: key, whose parent is
-    a job id key, whose parent is jobs: at column 0, each at the indentation of its parent's first child. A
-    line that reads as the step once its indentation is removed and is not such an item is refused, block
-    scalar text included (the lines under a key or sequence item whose value is | or >, indented past it),
-    and so are a YAML document marker or directive and a quoted scalar its line does not close, behind which a
-    YAML reader can read as text a line this reader would place. A steps:, job id or jobs: key above a step
-    item that a sibling line can repeat (_repeats) is refused too, naming both lines: a YAML reader keeps at
-    most one copy of a repeated key, so the item may sit under a copy it drops."""
-    parents = {}
-    children = {}
-    placed = []
-    scalar = None
+def _parse(lines):
+    """(the root node of lines, None) when every line is inside the accepted subset, or (None, why not, naming
+    the line). A mapping is a dict from key to entry, a sequence a list of entries, and an entry a list [the
+    index of its line, its value]; a value is a mapping, a sequence, None when empty, (kind, text) for a
+    scalar on its line (_value) or ("block", the index of its header line, the index after its text)."""
+    root = [None, None]
+    stack = [(-1, root, True)]
+    skip = 0
     for index, line in enumerate(lines):
+        if index < skip:
+            continue
         text = line.lstrip(" ")
         indent = len(line) - len(text)
-        if scalar is not None and (not text or indent > scalar):
-            if text == STEP_LINE:
-                return None, ("line {} names the Secrets (gitleaks) step inside a block scalar, which "
-                              "YAML reads as text".format(index + 1))
-            continue
-        scalar = None
         if not text or text.startswith("#"):
             continue
         if indent == 0 and DOCUMENT_RE.match(text):
             return None, "line {} is a YAML document marker or directive".format(index + 1)
-        while placed and placed[-1][0] >= indent:
-            placed.pop()
-        parents[index] = placed[-1][1] if placed else None
-        children.setdefault(parents[index], []).append(index)
-        placed.append((indent, index))
-        node = NODE_RE.match(text)
-        indicators, key, block = node.groups()
-        if block:
-            # The scalar's text is every later line indented past its key, or past its last indicator.
-            if key:
-                scalar = indent + len(indicators)
-            elif indicators:
-                scalar = indent + len(indicators.rstrip(" ")) - 1
-            else:
-                scalar = -1 if parents[index] is None else _indent(lines[parents[index]])
-        elif text[node.end():node.end() + 1] in ("'", "\"") and QUOTED_RE.match(text, node.end()) is None:
-            return None, "line {} opens a quoted scalar it does not close".format(index + 1)
-    items = []
-    for index in parents:
-        if lines[index].lstrip(" ") != STEP_LINE:
+        if "\t" in text.split(" #", 1)[0]:
+            return None, "line {} carries a tab outside a comment".format(index + 1)
+        entry = None
+        offset = 0
+        while text[offset:offset + 1] == "-" and text[offset + 1:offset + 2] in ("", " "):
+            node, why = _open(stack, indent + offset, list)
+            if why is not None:
+                return None, "line {} {}".format(index + 1, why)
+            entry = [index, None]
+            node.append(entry)
+            stack.append((indent + offset, entry, True))
+            offset += 1
+            while text[offset:offset + 1] == " ":
+                offset += 1
+        key = KEY_RE.match(text, offset)
+        if key is not None:
+            node, why = _open(stack, indent + offset, dict)
+            if why is not None:
+                return None, "line {} {}".format(index + 1, why)
+            name = key.group(1)
+            if name in node:
+                return None, ("lines {} and {} both hold the {}: key of one mapping, of which a YAML reader keeps "
+                              "at most one copy".format(node[name][0] + 1, index + 1, name))
+            entry = [index, None]
+            node[name] = entry
+            stack.append((indent + offset, entry, True))
+            offset = key.end()
+        kind, value = _value(text[offset:])
+        if entry is None:
+            return None, "line {} {}".format(index + 1, value if kind is None else (
+                "holds a scalar with no key or sequence item before it on its line"))
+        if kind is None:
+            return None, "line {} {}".format(index + 1, value)
+        if kind == "empty":
             continue
-        chain = [index]
-        while parents[chain[-1]] is not None:
-            chain.append(parents[chain[-1]])
-        if not (len(chain) == 4 and lines[chain[1]].lstrip(" ") == "steps:"
-                and JOB_KEY_RE.fullmatch(lines[chain[2]].lstrip(" ")) and lines[chain[3]] == "jobs:"
-                and all(_indent(lines[link]) == _indent(lines[children[parents[link]][0]])
-                        for link in chain[:3])):
-            return None, ("line {} names the Secrets (gitleaks) step outside a step item of a job's steps: "
-                          "list".format(index + 1))
-        for link in chain[1:]:
-            name = lines[link].lstrip(" ")[:-1]
-            for sibling in children[parents[link]]:
-                if sibling != link and _repeats(lines[sibling].lstrip(" "), name):
-                    return None, ("lines {} and {} can both hold the {}: key, of which a YAML reader keeps at "
-                                  "most one copy".format(*sorted((link + 1, sibling + 1)), name))
-        items.append(index)
+        column = stack.pop()[0]
+        if kind == "block":
+            skip, why = _text_end(lines, index, column, value)
+            if why is not None:
+                return None, why
+            entry[1] = ("block", index, skip)
+        else:
+            entry[1] = (kind, value)
+    return root[1], None
+
+
+def _unquote(text):
+    """The value of the one-line quoted scalar text, or None when it holds an escape YAML does not define."""
+    if text[0] == "'":
+        return text[1:-1].replace("''", "'")
+    parts = []
+    index = 1
+    while index < len(text) - 1:
+        if text[index] != "\\":
+            parts.append(text[index])
+            index += 1
+            continue
+        code = text[index + 1]
+        if code in ESCAPES:
+            parts.append(ESCAPES[code])
+            index += 2
+            continue
+        digits = HEX_ESCAPE_RE.match(text, index + 1)
+        if digits is None or int(digits.group()[1:], 16) > 0x10FFFF:
+            return None
+        parts.append(chr(int(digits.group()[1:], 16)))
+        index = digits.end()
+    return "".join(parts)
+
+
+def _step_items(root):
+    """(the mappings of the step items named Secrets (gitleaks), None), or (None, why not): an item counts when
+    it is in the steps: list of a job id key of the top-level jobs: mapping and its name: reads Secrets
+    (gitleaks), plain or quoted. A step name: this reader does not decode (a block scalar, or a double-quoted
+    scalar with an escape YAML does not define) is refused."""
+    items = []
+    jobs = root.get("jobs") if isinstance(root, dict) else None
+    for job in (jobs[1].values() if jobs is not None and isinstance(jobs[1], dict) else ()):
+        steps = job[1].get("steps") if isinstance(job[1], dict) else None
+        for item in (steps[1] if steps is not None and isinstance(steps[1], list) else ()):
+            name = item[1].get("name") if isinstance(item[1], dict) else None
+            if name is None or not isinstance(name[1], tuple):
+                continue
+            kind, text = name[1][:2]
+            if kind == "quoted":
+                text = _unquote(text)
+            if kind == "block" or text is None:
+                return None, "line {} writes a step name: this reader does not decode".format(name[0] + 1)
+            if text == STEP_NAME:
+                items.append(item[1])
     return items, None
 
 
@@ -219,43 +337,33 @@ def read_pin(workflow_text):
     for index, line in enumerate(lines):
         if any(mark in line for mark in LINE_BREAKS):
             return None, "line {} carries a carriage return, U+0085, U+2028 or U+2029".format(index + 1)
-    steps, why = _step_items(lines)
-    if steps is None:
+    root, why = _parse(lines)
+    if why is not None:
+        return None, why
+    steps, why = _step_items(root)
+    if why is not None:
         return None, why
     if len(steps) != 1:
         return None, "{} steps are named Secrets (gitleaks), not one".format(len(steps))
-    step = steps[0]
-    key_indent = _indent(lines[step]) + 2
-    step_end = _block_end(lines, step, key_indent - 2)
-    envs = [index for index in range(step + 1, step_end) if lines[index] == " " * key_indent + "env:"]
-    runs = [index for index in range(step + 1, step_end)
-            if lines[index].startswith(" " * key_indent + "run:")]
-    if len(envs) != 1 or len(runs) != 1:
+    env, run = steps[0].get("env"), steps[0].get("run")
+    if env is None or run is None:
         return None, "the Secrets (gitleaks) step has {} env: and {} run: keys, not one each".format(
-            len(envs), len(runs))
-    env_end = _block_end(lines, envs[0], key_indent)
-    run_end = _block_end(lines, runs[0], key_indent)
-    entry_indent = " " * (key_indent + 2)
-    entries = []
-    for index in range(envs[0] + 1, env_end):
-        line = lines[index]
-        if not line.strip() or line.lstrip(" ").startswith("#"):
-            continue
-        if not (line.startswith(entry_indent) and ENV_ENTRY_RE.fullmatch(line[len(entry_indent):])):
-            return None, "line {} of the step's env: is not a plain KEY: value entry".format(index + 1)
-        if PIN_KEY in line:
-            entries.append(index)
-    if len(entries) != 1:
-        return None, "the step's env: names {} on {} lines, not one".format(PIN_KEY, len(entries))
+            int(env is not None), int(run is not None))
+    if not isinstance(env[1], dict):
+        return None, "the step's env: on line {} is not a block mapping".format(env[0] + 1)
+    entry = env[1].get(PIN_KEY)
+    if entry is None:
+        return None, "the step's env: has no {} entry".format(PIN_KEY)
+    run_end = run[1][2] if isinstance(run[1], tuple) and run[1][0] == "block" else run[0] + 1
     for index, line in enumerate(lines):
-        if (PIN_KEY not in line or index == entries[0] or line.lstrip(" ").startswith("#")
-                or (runs[0] <= index < run_end and PIN_KEY not in line.replace(EXPANSION, ""))):
+        if (PIN_KEY not in line or index == entry[0] or line.lstrip(" ").startswith("#")
+                or (run[0] <= index < run_end and PIN_KEY not in line.replace(EXPANSION, ""))):
             continue
         return None, ("line {} names {} outside the step's env: entry, a comment and the step's {} "
                       "expansions".format(index + 1, PIN_KEY, EXPANSION))
-    pin = PIN_RE.fullmatch(lines[entries[0]][len(entry_indent):])
+    pin = PIN_RE.fullmatch(lines[entry[0]].lstrip(" "))
     if pin is None:
-        return None, "the step's {} value on line {} is not a bare X.Y.Z".format(PIN_KEY, entries[0] + 1)
+        return None, "the step's {} value on line {} is not a bare X.Y.Z".format(PIN_KEY, entry[0] + 1)
     return pin.group(1), None
 
 
@@ -365,8 +473,8 @@ def self_test():
         # from any GITLEAKS_VERSION: X.Y.Z line passes these: the step's own value quoted (CI downloads
         # 8.30.2) beside an unquoted copy in another step's or the job's env:, the step's entry missing
         # beside such a copy, no step named Secrets (gitleaks), a step with no env:, a second env: key,
-        # a pin nested deeper than an env: entry, a run script assigning the name, and a quoted or
-        # escaped second key that YAML reads as GITLEAKS_VERSION.
+        # an env: that is not a block mapping, a pin nested deeper than an env: entry, a run script
+        # assigning the name, and a quoted or escaped second key that YAML reads as GITLEAKS_VERSION.
         for name, text in (
                 ("no-pin-line", workflow.replace(pin_line, "")),
                 ("two-pin-lines", workflow.replace(sha_line, sha_line + pin_line)),
@@ -382,6 +490,8 @@ def self_test():
                 ("step-without-env", workflow.replace("        env:\n" + pin_line, "").replace(
                     "    runs-on: ubuntu-latest\n", job_env)),
                 ("two-env-keys", workflow.replace("        run: |\n", "        env:\n        run: |\n")),
+                ("env-not-a-mapping", workflow.replace("        env:\n" + pin_line + sha_line,
+                                                       "        env: x\n")),
                 ("pin-nested-deeper", workflow.replace(pin_line, "  " + pin_line)),
                 ("run-assigns-pin", workflow.replace(
                     "          set -euo pipefail\n",
@@ -395,14 +505,14 @@ def self_test():
         def indented(text, spaces):
             return "".join(" " * spaces + line if line.strip() else line for line in text.splitlines(True))
 
-        # The step is read only as a step item of a job's steps: list under the top-level jobs:. Each of
-        # these holds the step's lines, its pin included, only where YAML reads no step (the real step
-        # removed), so a reader that takes any line reading as the step once its indentation is removed
-        # passes each: inside another step's run: | text, inside a job id's block scalar, after a document
-        # marker that opens a root block scalar, after a run: value that opens a quote its line does not
-        # close, as an item of a steps: key under another step's with:, as an item of a job's needs:, under
-        # a sequence item of jobs:, under a top-level key other than jobs:, and as an item indented less
-        # than the first item of its steps: list.
+        # The step is read only where YAML reads it, as a step item of a job's steps: list under the
+        # top-level jobs:. Each of these holds the step's lines, its pin included, only where YAML reads no
+        # step (the real step removed), so a reader that takes any line reading as the step once its
+        # indentation is removed passes each: inside another step's run: | text, inside a job id's block
+        # scalar, after a document marker that opens a root block scalar, after a run: value that opens a
+        # quote its line does not close, as an item of a steps: key under another step's with:, as an item
+        # of a job's needs:, under a sequence item of jobs:, under a top-level key other than jobs:, and as
+        # an item indented less than the first item of its steps: list.
         script_step = ("      - name: Leak denylist\n"
                        "        shell: bash\n"
                        "        run: |\n"
@@ -424,13 +534,13 @@ def self_test():
                 ("step-outside-jobs", head + other + "copy:\n  secrets:\n    steps:\n" + step),
                 ("step-indented-less-than-first-item", head + indented(other, 2) + step)):
             check(name, evaluate(text, pinned_path)[0], 2)
-        # The refusal names the line, and a copy inside a block scalar is refused beside the real step too.
+        # The step's lines inside another step's run: | text are text, so they hold no step; beside the real
+        # step, that text's copy of the pin is a line naming GITLEAKS_VERSION outside the step's env:.
         beside = workflow + script_step + indented(step, 4)
-        for name, text in (("step-in-run-text-names-line", in_script),
-                           ("step-copy-beside-real-step", beside)):
-            check(name, read_pin(text)[1],
-                  "line {} names the Secrets (gitleaks) step inside a block scalar, which YAML reads as "
-                  "text".format(text.split("\n").index("          " + STEP_LINE) + 1))
+        check("step-in-run-text-is-text", read_pin(in_script)[1], "0 steps are named Secrets (gitleaks), not one")
+        check("step-copy-beside-real-step", read_pin(beside)[1],
+              "line {} names GITLEAKS_VERSION outside the step's env: entry, a comment and the step's "
+              "${{GITLEAKS_VERSION}} expansions".format(beside.split("\n").index("    " + pin_line[:-1]) + 1))
         # Controls: a run: | block that ends at the step's item, quoted values closed on their lines and a
         # comment at column 0 between steps each leave the step read.
         for name, text in (
@@ -440,17 +550,122 @@ def self_test():
                  "        with:\n          python-version: '3.14'\n" + step),
                 ("control-column-0-comment", head + other + "# a note\n" + step)):
             check(name, evaluate(text, pinned_path)[0], 0)
-        # A jobs:, job id or steps: key above the step item, repeated among its siblings: a YAML reader keeps
-        # at most one copy, so a reader that reads the step under either copy passes each. The step sits
-        # under the first copy, and under the last one when the first is empty; a repeat is read once the
-        # tags and anchors before its key are removed and its quotes undone (a space before its colon or a
-        # tab after it included), and an explicit, alias or escaped double-quoted key counts as one.
+        # A key repeated within one mapping, at any level and among the step's own keys: a YAML reader keeps
+        # at most one copy, so a reader that reads the step or its pin under either copy passes each. The
+        # step or pin sits under the first copy, or under the last one when the first is empty or holds
+        # something else.
+        shell_line = "        shell: bash\n"
         lint_job = "  lint:\n    runs-on: ubuntu-latest\n    steps:\n" + other
+        second_env = "        env:\n          OTHER: x\n"
         for name, text in (
                 ("repeated-jobs-key", workflow + "jobs:\n" + lint_job),
                 ("repeated-job-id", workflow + "  secrets:\n    runs-on: ubuntu-latest\n    steps:\n" + other),
                 ("repeated-steps-key", workflow + "    steps:\n" + other),
-                ("repeated-key-step-under-last-copy", "jobs: {}\n" + workflow),
+                ("repeated-key-step-under-last-copy", "jobs:\n" + workflow),
+                ("repeated-step-env-pin-under-first-copy", workflow.replace(sha_line, sha_line + second_env)),
+                ("repeated-step-env-pin-under-last-copy",
+                 workflow.replace(shell_line, shell_line + second_env, 1)),
+                ("repeated-step-run-key", workflow.replace(sha_line, sha_line + "        run: echo\n")),
+                ("repeated-step-name-key", workflow.replace(shell_line, shell_line + "        name: x\n", 1)),
+                ("repeated-key-off-the-step-path", "name: a\nname: b\n" + workflow)):
+            check(name, evaluate(text, pinned_path)[0], 2)
+        check("repeated-key-names-lines", read_pin(workflow + "    steps:\n" + other)[1],
+              "lines 4 and {} both hold the steps: key of one mapping, of which a YAML reader keeps at most one "
+              "copy".format(workflow.count("\n") + 1))
+        check("repeated-step-key-names-lines", read_pin(workflow.replace(sha_line, sha_line + second_env))[1],
+              "lines 8 and 11 both hold the env: key of one mapping, of which a YAML reader keeps at most one "
+              "copy")
+        # Controls: a distinct sibling at each level (a top-level key beside jobs:, a job id beside the
+        # step's job and a job key beside its steps:), another job's steps: key, and keys that only start
+        # with jobs, steps or the job id, or carry jobs or steps as their value, each leave the step read.
+        for name, text in (
+                ("control-distinct-siblings", "name: Quality\non: [pull_request]\njobs:\n" + lint_job
+                 + "  secrets:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n" + step),
+                ("control-key-prefix-and-value", "name: jobs\njobs-note: x\n" + head.replace(
+                    "    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n    steps-note: steps\n")
+                 + step + "  secrets-2:\n    runs-on: ubuntu-latest\n    steps:\n" + other)):
+            check(name, evaluate(text, pinned_path)[0], 0)
+
+        curl_line = step.splitlines(True)[-1]
+
+        def in_job(text):
+            return workflow.replace("    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n" + text, 1)
+
+        def before_step(text):
+            return workflow.replace(step, text + step, 1)
+
+        def spans(opening, closing):
+            # A step before the gitleaks step ends with the line opening, which YAML continues across the
+            # gitleaks step to closing, put after the last line of that step's run: | text.
+            return (head + "      - name: Secret scan self-test\n        shell: bash\n" + opening
+                    + step.replace(curl_line, curl_line + closing) + "\n" + other)
+
+        # Every line outside the accepted subset is refused, naming it, the spellings above of a repeated key
+        # included. In each of these a reader without the refusals the text meets (one, or two where a line
+        # holding no key follows), taking each construct for a plain value and skipping each line that holds
+        # no key, reads the step and the pin the stub reports, and passes: a flow mapping or flow sequence
+        # whose quote YAML continues across the gitleaks step, which then sits inside that scalar (closed in
+        # the step's run: text, or at its key column), and each on one line; a quoted scalar left open at the
+        # end of its line; a tag, an anchor and an alias; a document marker or directive; a key spelled other
+        # than name: (spaced, quoted, tagged, explicit or merge), on an item and as a second env: of the step;
+        # a sequence item after a key; a scalar that starts with a reserved character or holds ': '; an
+        # indentless sequence; a key or item at the column of the other kind; a line indented past a complete
+        # value or less than the document; a plain scalar continued on the next line; a tab outside a
+        # comment; a block scalar header with text after it; block scalar text indented less than its first
+        # line or below a blank line indented further; and a step name: this reader does not decode, beside
+        # an escaped one that decodes to the step's own name.
+        for name, text in (
+                ("flow-mapping-quote-spans-step", spans("        env: {NOTE: 'x\n", "          y'}\n")),
+                ("flow-mapping-sequence-spans-step", spans("        env: {NOTE: ['x\n", "          y']}\n")),
+                ("flow-mapping-closed-at-key-column", spans("        env: {NOTE: 'x\n", "        y'}\n")),
+                ("flow-mapping-one-line", in_job("    defaults: {run: {shell: bash}}\n")),
+                ("flow-sequence-quote-spans-step", spans("        args: ['x\n", "          y']\n")),
+                ("flow-sequence-quoted-word", in_job("    needs: ['lint']\n")),
+                ("flow-sequence-nested", in_job("    needs: [lint, [site]]\n")),
+                ("flow-sequence-colon", in_job("    needs: [lint: site]\n")),
+                ("single-quote-left-open", spans("        args: 'x\n", "          y'\n")),
+                ("double-quote-left-open", spans("        args: \"x\n", "          y\"\n")),
+                ("tag", in_job("    timeout-minutes: !!int 5\n")),
+                ("anchor", in_job("    timeout-minutes: &minutes 5\n")),
+                ("alias", in_job("    timeout-minutes: *minutes\n")),
+                ("document-end-marker", workflow + "...\n"),
+                ("directive", "%YAML 1.1\n" + workflow),
+                ("spaced-key-copy-of-entry", workflow.replace(sha_line, sha_line + "        env :\n" + sha_line)),
+                ("spaced-key-second-env",
+                 workflow.replace(sha_line, sha_line + "        env :\n          OTHER: x\n")),
+                ("quoted-key-second-env", workflow.replace(
+                    sha_line, sha_line + "        \"env\":\n          \"GITLEAKS_\\x56ERSION\": 8.30.2\n")),
+                ("tagged-key-second-env", workflow.replace(
+                    sha_line, sha_line + "        !!str env:\n          \"GITLEAKS_\\x56ERSION\": 8.30.2\n")),
+                ("quoted-key-on-item", before_step("      - \"uses\": actions/checkout@v4\n")),
+                ("explicit-key-on-item", before_step("      - ? uses\n")),
+                ("merge-key-on-item", before_step("      - <<: *defaults\n")),
+                ("spaced-key-on-item", before_step("      - uses : actions/checkout@v4\n")),
+                ("value-indicator-on-item", before_step("      - : x\n")),
+                ("sequence-item-after-key", in_job("    needs: - lint\n")),
+                ("reserved-lead", in_job("    timeout-minutes: @5\n")),
+                ("colon-in-plain-value", in_job("    timeout-minutes: 5: x\n")),
+                ("indentless-steps-list", head + "".join(
+                    line[2:] if line.strip() else line for line in (step + "\n" + other).splitlines(True))),
+                ("key-at-item-column", workflow + "      note: x\n"),
+                ("item-at-key-column", in_job("    - x\n")),
+                ("indented-past-complete-value", in_job("      group: x\n")),
+                ("indented-less-than-document", indented(workflow, 2) + "name: x\n"),
+                ("plain-continuation-line", workflow.replace(other_run, other_run + "          --self-test\n")),
+                ("tab-after-value", in_job("    timeout-minutes: 5\t# minutes\n")),
+                ("tab-separator-in-item", before_step("      - uses#x:\tactions/checkout@v4\n")),
+                ("block-header-text", workflow.replace(
+                    other_run, "        run: |  x\n          python3 -I -B tools/check_leaks.py\n")),
+                ("block-text-less-indented", workflow.replace(
+                    "          set -euo pipefail\n", "            set -euo pipefail\n")),
+                ("block-blank-above-text",
+                 workflow.replace("        run: |\n", "        run: |\n              \n")),
+                ("step-name-escaped-reads-as-step",
+                 before_step("      - name: \"Secrets \\x28gitleaks)\"\n        run: echo\n")),
+                ("step-name-undefined-escape",
+                 before_step("      - name: \"Secrets \\q(gitleaks)\"\n        run: echo\n")),
+                ("step-name-block-scalar",
+                 before_step("      - name: >-\n          Secrets (gitleaks)\n        run: echo\n")),
                 ("repeated-jobs-key-double-quoted", workflow + "\"jobs\": {}\n"),
                 ("repeated-job-id-single-quoted", workflow + "  'secrets': {}\n"),
                 ("repeated-steps-key-tag-anchor", workflow + "    !!str &copy steps: []\n"),
@@ -460,18 +675,61 @@ def self_test():
                 ("repeated-jobs-key-alias", "name: &copy jobs\n" + workflow + "*copy : {}\n"),
                 ("repeated-jobs-key-explicit", workflow + "? jobs\n: {}\n")):
             check(name, evaluate(text, pinned_path)[0], 2)
-        check("repeated-key-names-lines", read_pin(workflow + "    steps:\n" + other)[1],
-              "lines 4 and {} can both hold the steps: key, of which a YAML reader keeps at most one "
-              "copy".format(workflow.count("\n") + 1))
-        # Controls: a distinct sibling at each level (a top-level key beside jobs:, a job id beside the
-        # step's job and a job key beside its steps:), another job's steps: key, and keys that only start
-        # with jobs, steps or the job id, or carry jobs or steps as their value, each leave the step read.
+        # The refusal names the line of the construct.
+        for name, text, opening, why in (
+                ("flow-mapping-names-line", spans("        env: {NOTE: 'x\n", "          y'}\n"),
+                 "        env: {NOTE: 'x", "opens a flow mapping"),
+                ("open-quote-names-line", spans("        args: 'x\n", "          y'\n"),
+                 "        args: 'x", "opens a quoted scalar it does not close"),
+                ("spaced-key-names-line", workflow.replace(sha_line, sha_line + "        env :\n" + sha_line),
+                 "        env :",
+                 "writes a key other than as a plain identifier followed by a colon and a space")):
+            check(name, read_pin(text)[1], "line {} {}".format(text.split("\n").index(opening) + 1, why))
+        # Controls: each accepted construct leaves the step read. Nested block sequences; plain scalars
+        # holding a # with no space before it, a colon with no space after it, brackets, braces and quotes
+        # past their first character, a comment holding ': ', and a leading -, : or ? before a non-space;
+        # quoted scalars holding '', escapes, ': ' and ' #' before a comment; the step's name: single- or
+        # double-quoted; block scalars with each indicator, whose text holds lines that read as a step, a
+        # comment, an open quote and a flow collection, with an indentation digit below a deeper first line;
+        # comment lines at, past and before the keys' column, trailing comments and blank lines holding
+        # spaces; one-line flow sequences of plain words; and keys holding - and _ or left empty.
+        block_step = ("      - name: Block scalars\n"
+                      "        shell: bash\n"
+                      "        run: |-\n"
+                      "          - name: Secrets (gitleaks)\n"
+                      "          # text, not a comment\n"
+                      "            key: 'open {flow: [x\n"
+                      "\n"
+                      "        with:\n"
+                      "          a: >+\n"
+                      "            folded &anchor *alias !tag\n"
+                      "          b: |2\n"
+                      "              deeper first\n"
+                      "            then at the digit\n"
+                      "          c: >-2\n"
+                      "            x\n"
+                      "          d: |+1\n"
+                      "           one past\n")
+        comments = workflow.replace(
+            shell_line, shell_line + "            # past the keys\n  # before the keys\n   \n", 1).replace(
+            "        env:\n", "        env:  # the pin\n", 1).replace(
+            "      - name: Leak denylist\n", "      - name: Leak denylist  # trailing\n")
         for name, text in (
-                ("control-distinct-siblings", "name: Quality\n'on': [pull_request]\njobs:\n" + lint_job
-                 + "  secrets:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n" + step),
-                ("control-key-prefix-and-value", "name: jobs\njobs-note: x\n" + head.replace(
-                    "    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n    steps-note: steps\n")
-                 + step + "  secrets-2:\n    runs-on: ubuntu-latest\n    steps:\n" + other)):
+                ("control-nested-sequences", in_job("    note:\n      - - lint\n        - site\n      - - x\n")),
+                ("control-plain-scalars", in_job(
+                    "    note-a: a#b c:d https://x.invalid/{x}[y] it's ${{ github.x }}  # see: below\n"
+                    "    note-b: -x\n    note-c: :x\n    note-d: ?x\n")),
+                ("control-quoted-scalars",
+                 in_job("    note-a: 'it''s: #'  # c\n    note-b: \"say \\\"hi\\\": # \\t\"\n")),
+                ("control-single-quoted-step-name",
+                 workflow.replace("- name: Secrets (gitleaks)", "- name: 'Secrets (gitleaks)'")),
+                ("control-double-quoted-step-name",
+                 workflow.replace("- name: Secrets (gitleaks)", "- name: \"Secrets (gitleaks)\"")),
+                ("control-block-scalars", before_step(block_step)),
+                ("control-comments-and-blank-lines", "# column 0\n" + comments),
+                ("control-flow-sequence-of-plain-words",
+                 in_job("    needs: [lint, site]  # both\n    tags: [ubuntu-latest, macos-latest]\n")),
+                ("control-keys", "_top: x\n" + in_job("    run-name_2-x: y\n    empty:\n    after-empty: z\n"))):
             check(name, evaluate(text, pinned_path)[0], 0)
         # A carriage return, U+0085, U+2028 or U+2029 inside a line can hide a second key from this LF
         # reader that a YAML reader breaks out (the step's value stays 8.30.1 here, so a reader without
