@@ -21,7 +21,11 @@ parent's first child (so an indentless steps: list is not read). A line that rea
 indentation is removed anywhere else is refused and named, block scalar text included (the lines under a
 key or sequence item whose value is | or >, indented past it), and so are a YAML document marker or
 directive and a quoted scalar its line does not close, behind which a YAML reader can read as text a line
-this reader would place. Only that entry decides:
+this reader would place. A steps:, job id or jobs: key above that step item that a sibling line can repeat
+is refused too, naming both lines, because a YAML reader keeps at most one copy of a repeated key and the
+step may sit under a copy it drops: a sibling repeats it when its one-line key is the same once the tags and
+anchors before it are removed and its quotes undone, and an explicit key (?), an alias key (*) or an
+escaped double-quoted key, which this reader does not resolve, counts as a repeat. Only that entry decides:
 any other line of quality.yml naming GITLEAKS_VERSION (another step's or job's env:, a run script
 assigning it), other than a comment and a ${GITLEAKS_VERSION} expansion in that step's run: script, is
 refused, so a value set elsewhere can never stand in for the step's own. The file is read as LF lines
@@ -39,7 +43,8 @@ Exit convention (matches the repo's gates):
   2  cannot evaluate: quality.yml is unreadable; a line of it still carries a carriage return once its
      one trailing CR is removed, or carries U+0085, U+2028 or U+2029; a line of it is a YAML document
      marker or directive, or opens a quoted scalar it does not close; a line reads as the step named
-     Secrets (gitleaks) but is not a step item of a job's steps: list; it holds no such step item or more
+     Secrets (gitleaks) but is not a step item of a job's steps: list; a sibling line can repeat the
+     steps:, job id or jobs: key above that step item; it holds no such step item or more
      than one; that step has no env: or more than one, or an env: line that is not a
      plain KEY: value entry; its env: has no GITLEAKS_VERSION entry or more than one, or one whose value
      is not a bare X.Y.Z; another line names GITLEAKS_VERSION; gitleaks version fails, times out or
@@ -47,11 +52,9 @@ Exit convention (matches the repo's gates):
 
 NOT CHECKED: the binary's checksum (CI verifies the downloaded archive; this gate trusts the version a
 local binary reports, so a binary that misreports its version passes), the scan's own result (the gitleaks
-block of tools/run_all_checks.sh runs it), a gitleaks reached other than through PATH, a version the
+block of tools/run_all_checks.sh runs it), a gitleaks reached other than through PATH, and a version the
 workflow reaches without naming GITLEAKS_VERSION literally (a hard-coded download URL, or a name built at
-run time and written to GITHUB_ENV or assigned in a script), and a repeated jobs:, job id or steps: key, of
-which a YAML reader keeps one: this reader reads the step under either copy, so a step under the copy that
-reader drops still passes.
+run time and written to GITHUB_ENV or assigned in a script).
 """
 import sys
 
@@ -91,6 +94,10 @@ NODE_RE = re.compile(r"((?:[-?:](?: +|$))*)"
 QUOTED_RE = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\"")
 # A YAML document marker or directive, at column 0.
 DOCUMENT_RE = re.compile(r"(?:---|\.\.\.)(?: |$)|%")
+# A mapping entry once its indentation is removed: the tags and anchors before its key, then the key (one-line
+# quoted or plain) and the separator after it.
+KEY_RE = re.compile(r"(?:[!&]\S*[ \t]+)*"
+                    r"('(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\"|[^\s#'\"](?:\S|[ \t]+(?=[^\s#]))*?)[ \t]*:(?:[ \t]|$)")
 # The pin entry, once the indentation of the step's env: entries is removed.
 PIN_RE = re.compile(r"GITLEAKS_VERSION: ([0-9]+\.[0-9]+\.[0-9]+)")
 # Every entry of the step's env:, once that indentation is removed: a plain key and a value, so a quoted
@@ -119,6 +126,24 @@ def _block_end(lines, start, indent):
     return end
 
 
+def _repeats(text, name):
+    """Whether YAML can read the line text, its indentation removed, as a mapping entry whose key is name: true
+    when its one-line key, once the tags and anchors before it are removed and its quotes undone, is name, and
+    for an explicit key (?), an alias key (*) and an escaped double-quoted key, which this reader does not
+    resolve."""
+    if text[:1] == "?" and text[1:2] in ("", " ", "\t"):
+        return True
+    entry = KEY_RE.match(text)
+    if entry is None:
+        return False
+    key = entry.group(1)
+    if key[0] == "*" or (key[0] == "\"" and "\\" in key):
+        return True
+    if key[0] == "'":
+        return key[1:-1].replace("''", "'") == name
+    return (key[1:-1] if key[0] == "\"" else key) == name
+
+
 def _step_items(lines):
     """(the indices of the step items named Secrets (gitleaks), None), or (None, why not).
 
@@ -128,7 +153,9 @@ def _step_items(lines):
     line that reads as the step once its indentation is removed and is not such an item is refused, block
     scalar text included (the lines under a key or sequence item whose value is | or >, indented past it),
     and so are a YAML document marker or directive and a quoted scalar its line does not close, behind which a
-    YAML reader can read as text a line this reader would place."""
+    YAML reader can read as text a line this reader would place. A steps:, job id or jobs: key above a step
+    item that a sibling line can repeat (_repeats) is refused too, naming both lines: a YAML reader keeps at
+    most one copy of a repeated key, so the item may sit under a copy it drops."""
     parents = {}
     children = {}
     placed = []
@@ -176,6 +203,12 @@ def _step_items(lines):
                         for link in chain[:3])):
             return None, ("line {} names the Secrets (gitleaks) step outside a step item of a job's steps: "
                           "list".format(index + 1))
+        for link in chain[1:]:
+            name = lines[link].lstrip(" ")[:-1]
+            for sibling in children[parents[link]]:
+                if sibling != link and _repeats(lines[sibling].lstrip(" "), name):
+                    return None, ("lines {} and {} can both hold the {}: key, of which a YAML reader keeps at "
+                                  "most one copy".format(*sorted((link + 1, sibling + 1)), name))
         items.append(index)
     return items, None
 
@@ -406,6 +439,39 @@ def self_test():
                  "        name: \"Set up \\\"Python\\\"\"\n"
                  "        with:\n          python-version: '3.14'\n" + step),
                 ("control-column-0-comment", head + other + "# a note\n" + step)):
+            check(name, evaluate(text, pinned_path)[0], 0)
+        # A jobs:, job id or steps: key above the step item, repeated among its siblings: a YAML reader keeps
+        # at most one copy, so a reader that reads the step under either copy passes each. The step sits
+        # under the first copy, and under the last one when the first is empty; a repeat is read once the
+        # tags and anchors before its key are removed and its quotes undone (a space before its colon or a
+        # tab after it included), and an explicit, alias or escaped double-quoted key counts as one.
+        lint_job = "  lint:\n    runs-on: ubuntu-latest\n    steps:\n" + other
+        for name, text in (
+                ("repeated-jobs-key", workflow + "jobs:\n" + lint_job),
+                ("repeated-job-id", workflow + "  secrets:\n    runs-on: ubuntu-latest\n    steps:\n" + other),
+                ("repeated-steps-key", workflow + "    steps:\n" + other),
+                ("repeated-key-step-under-last-copy", "jobs: {}\n" + workflow),
+                ("repeated-jobs-key-double-quoted", workflow + "\"jobs\": {}\n"),
+                ("repeated-job-id-single-quoted", workflow + "  'secrets': {}\n"),
+                ("repeated-steps-key-tag-anchor", workflow + "    !!str &copy steps: []\n"),
+                ("repeated-steps-key-space-before-colon", workflow + "    steps : []\n"),
+                ("repeated-jobs-key-tab-separator", workflow + "jobs:\t{}\n"),
+                ("repeated-job-id-escaped", workflow + "  \"secr\\x65ts\": {}\n"),
+                ("repeated-jobs-key-alias", "name: &copy jobs\n" + workflow + "*copy : {}\n"),
+                ("repeated-jobs-key-explicit", workflow + "? jobs\n: {}\n")):
+            check(name, evaluate(text, pinned_path)[0], 2)
+        check("repeated-key-names-lines", read_pin(workflow + "    steps:\n" + other)[1],
+              "lines 4 and {} can both hold the steps: key, of which a YAML reader keeps at most one "
+              "copy".format(workflow.count("\n") + 1))
+        # Controls: a distinct sibling at each level (a top-level key beside jobs:, a job id beside the
+        # step's job and a job key beside its steps:), another job's steps: key, and keys that only start
+        # with jobs, steps or the job id, or carry jobs or steps as their value, each leave the step read.
+        for name, text in (
+                ("control-distinct-siblings", "name: Quality\n'on': [pull_request]\njobs:\n" + lint_job
+                 + "  secrets:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n" + step),
+                ("control-key-prefix-and-value", "name: jobs\njobs-note: x\n" + head.replace(
+                    "    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n    steps-note: steps\n")
+                 + step + "  secrets-2:\n    runs-on: ubuntu-latest\n    steps:\n" + other)):
             check(name, evaluate(text, pinned_path)[0], 0)
         # A carriage return, U+0085, U+2028 or U+2029 inside a line can hide a second key from this LF
         # reader that a YAML reader breaks out (the step's value stays 8.30.1 here, so a reader without

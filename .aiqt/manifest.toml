@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "49b4b115677c09e6f5f2b0aaae57e4eff29ed5714466975be5305910df0f4c2d"
+tree-sha256 = "6e3fb21f67fa6bd6c7915f7d37bfc888233a4a3fff20d7f8f25c5ea310853332"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 460810
-sha256 = "133cc81cf772209252df8a9052220a8950a3472dea5cc152f09722b6afa51ecf"
+bytes = 461117
+sha256 = "3ac86abe1af1e3ae034628cea96984bf4c00c505b76e6c475ef8a1eb460c6dd0"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3391,8 +3391,8 @@ sha256 = "8452eefa4ea89f00c6cac593951443ba4e6113cd804655fb040eb3e29d85b833"
 
 [[sources]]
 path = "tools/check_gitleaks_pin.py"
-bytes = 26868
-sha256 = "09052057a56211e555766615b7c2088987dc37c87a1fb93e4537622f2e828ad7"
+bytes = 31863
+sha256 = "ec8ba8da2a07d195370cb23375d1f38ff9eeefc9c5e658fa5f7efe1cd9fbe6bf"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
