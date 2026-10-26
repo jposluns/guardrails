@@ -27,20 +27,22 @@ wrong-type input as "no tree". The probe is bound beneath the gate's root, so a 
 symlink, live or dangling, at an ANCESTOR below the root (.claude itself, or .aiqt on the standards
 side) is refused the same way (exit 2), never followed and never read as absence; a genuinely absent
 component still reads as absence, but one whose lstat found it and which is gone by its open (removed
-or renamed in between) exits 2 as a changed tree, never read as absence.
+or renamed in between), or which is replaced there by another directory (.claude included), exits 2
+as a changed tree, never read as absence and never walked into.
 
 The tree is read only through the descriptor open_dir returns for the .claude/rules it judged
-(opened beneath .claude's descriptor with O_DIRECTORY|O_NOFOLLOW, its st_dev and st_ino checked
-against the probe's lstat), never by name: every listing is made through a held descriptor, and
-every family directory and vendored source is opened, and every rule file read, beneath its parent's
-descriptor with O_NOFOLLOW. So a .claude/rules swapped for a symlink or another directory between the
-probe and the listing exits 2 naming it, a swap after the open changes nothing read, and a symlink
-at any entry the walk inspects (an entry of the tree root, of a family directory or of external/,
-or a vendored source's PROVENANCE.md or LICENSE; a dot-named entry of the tree root or of a flat
-family is skipped unread, as is everything else inside a vendored source) exits 2 naming it, never
-followed. A rule file that is not a regular file (a FIFO included), in a family directory or loose
-at the tree root, exits 2 the same way whatever its name: its listed type is judged before its name,
-and the descriptor it is read through is judged again (opened without blocking).
+(.claude and then rules each opened beneath its parent's descriptor with O_DIRECTORY|O_NOFOLLOW, and
+each one's st_dev and st_ino checked against the probe's lstat of it), never by name: every listing
+is made through a held descriptor, and every family directory and vendored source is opened, and every
+rule file read, beneath its parent's descriptor with O_NOFOLLOW. So a .claude/rules swapped for a
+symlink or another directory between the probe and the listing, or a .claude replaced by another
+directory between its lstat and its open, exits 2 naming it, a swap after the open changes nothing
+read, and a symlink at any entry the walk inspects (an entry of the tree root, of a family directory
+or of external/, or a vendored source's PROVENANCE.md or LICENSE; a dot-named entry of the tree root
+or of a flat family is skipped unread, as is everything else inside a vendored source) exits 2 naming
+it, never followed. A rule file that is not a regular file (a FIFO included), in a family directory
+or loose at the tree root, exits 2 the same way whatever its name: its listed type is judged before
+its name, and the descriptor it is read through is judged again (opened without blocking).
 
 Emits the deterministic section 6.6 codes: loose, unknown-family, nested-dir, bad-name,
 tier-code-mismatch, numbered-non-aiqt, apex-nonstandard, frontmatter-drift, missing-provenance. Each
@@ -408,9 +410,10 @@ def main(argv=None):
 # required) is refused with NotADirectoryError rather than read as absent, and an unreachable path
 # still raises OSError; every component below the probe's root is walked beneath directory
 # descriptors, so a symlink (live or dangling) at an ancestor is refused, one swapped in between an
-# ancestor's lstat and its open too, and one removed there raises as a changed tree, while a
-# genuinely absent ancestor still reads absent; a path outside the root raises; every descriptor the
-# probe opens is closed exactly once; open_dir holds the directory it judged and refuses a final
+# ancestor's lstat and its open too, and one removed there, or replaced there by another directory,
+# raises as a changed tree, while a genuinely absent ancestor still reads absent; a path outside the
+# root raises; every descriptor the probe opens is closed exactly once; open_dir holds the directory
+# it judged and refuses a final
 # directory swapped for a symlink, replaced, or removed, between its lstat and its open;
 # load_manifests refuses a symlinked or dangling .aiqt and reads only through the descriptor it
 # holds (a real manifest loads; a symlinked manifest, and a standards dir swapped for a symlink
@@ -418,7 +421,8 @@ def main(argv=None):
 # an absent tree, scans an existing empty directory as a tree, fails a populated tree on its
 # violation, and exits 2 on a wrong-type .claude/rules or .aiqt/standards entry and on a symlinked
 # or dangling .claude or .aiqt; it reads only the rules directory its probe judged, through the held
-# descriptor (a swap or a removal before the listing exits 2, a swap after the open changes nothing
+# descriptor (a swap or a removal before the listing exits 2, as does a .claude replaced by another
+# directory before its open, and a swap after the open changes nothing
 # read), and exits 2 on a symlink below it or a FIFO rule file (with a bad name or loose at the tree
 # root too), never following or blocking on either; and each
 # listed probe mutant (a scratch copy of _standards.py with one guard reverted, loaded with
@@ -494,9 +498,9 @@ def _replacing_lstat(real_lstat, target, link_to=None, vanish=False):
     """An lstat that judges target as it is (a real directory), then, once, moves it aside and puts at
     its name a symlink to link_to, or with no link_to a fresh empty directory, or with vanish nothing,
     before returning: the window between the probe's judgement of a directory and its open, made
-    deterministic, so only the open's O_NOFOLLOW (a link), the held descriptor's st_dev and st_ino
-    check (a directory) or the open's ENOENT, raised as a changed tree (nothing), can refuse the
-    replacement."""
+    deterministic, so only the open's O_NOFOLLOW (a link), the opened descriptor's st_dev and st_ino
+    check (a directory, at an ancestor or at the final component) or the open's ENOENT, raised as a
+    changed tree (nothing), can refuse the replacement."""
     moved = []
 
     def _lstat(name, dir_fd=None):
@@ -530,18 +534,19 @@ def _probe(module, fixture, paths, root):
     "error:<type>" for any other OSError; for a "loader-*" fixture, load_manifests over that fixture
     root's .aiqt/standards, "loaded:<count>" or the same refusal and error outcomes. An
     "ancestor-vanished" fixture is a fresh <top>/sub whose top is removed between its lstat and its
-    open; a "loader-swapped" fixture is a fresh root whose empty standards directory is swapped for a
-    symlink to one holding a manifest right after the loader's probe judged it."""
+    open, and an "ancestor-replaced" one is replaced there by an empty directory; a "loader-swapped"
+    fixture is a fresh root whose empty standards directory is swapped for a symlink to one holding a
+    manifest right after the loader's probe judged it."""
     try:
         if fixture == "unreachable":
             with _patched_lstat(module, _deny_lstat):
                 present = module.dir_present(paths["dir"], root=root)
-        elif fixture in ("ancestor-swapped", "ancestor-vanished"):
+        elif fixture in ("ancestor-swapped", "ancestor-vanished", "ancestor-replaced"):
             # A fresh <top>/sub per run: the swap consumes its fixture.
             top = Path(tempfile.mkdtemp(prefix="swap-", dir=str(root)))
             (top / "sub").mkdir()
             swap = (_swapping_lstat(module._lstat, top) if fixture == "ancestor-swapped"
-                    else _replacing_lstat(module._lstat, top, vanish=True))
+                    else _replacing_lstat(module._lstat, top, vanish=fixture == "ancestor-vanished"))
             with _patched_lstat(module, swap):
                 present = module.dir_present(top / "sub", root=root)
         elif fixture == "loader-swapped":
@@ -628,12 +633,12 @@ class _CountingOs:
 
 
 # One fixture per probe path that holds a descriptor when it ends: present, absent, refused at the
-# final component and at an ancestor, an error raised after the root is open, and an ancestor gone
-# between its lstat and its open; open_dir also meets a final component swapped for a symlink,
-# replaced, or removed, between its lstat and its open.
+# final component and at an ancestor, an error raised after the root is open, and an ancestor gone, or
+# replaced by another directory, between its lstat and its open; open_dir also meets a final component
+# swapped for a symlink, replaced, or removed, between its lstat and its open.
 _SHARED_DESCRIPTOR_FIXTURES = ("dir", "absent-path", "regular-file", "nested-dir", "ancestor-symlink",
                                "ancestor-dangling", "ancestor-absent", "unreachable")
-_DESCRIPTOR_FIXTURES = _SHARED_DESCRIPTOR_FIXTURES + ("ancestor-vanished",)
+_DESCRIPTOR_FIXTURES = _SHARED_DESCRIPTOR_FIXTURES + ("ancestor-vanished", "ancestor-replaced")
 _HELD_DESCRIPTOR_FIXTURES = _SHARED_DESCRIPTOR_FIXTURES + ("final-swapped", "final-replaced", "final-vanished")
 
 
@@ -910,8 +915,9 @@ def self_test(report_path=None):
             # three-way way, so a symlink there, live or dangling, is refused at an ancestor too, a
             # genuinely absent ancestor still reads absent, nested real directories still read
             # present, and an ancestor swapped for a symlink between its lstat and its open is
-            # refused by the open, never followed, while one removed there raises as a changed
-            # tree, never read as absent. A path outside the root, or one that
+            # refused by the open, never followed, while one removed there, or replaced there by an
+            # empty directory (on the st_dev and st_ino check), raises as a changed tree, never read
+            # as absent. A path outside the root, or one that
             # climbs with '..', raises rather than being walked.
             for cid, fixture, want in (
                     ("probe/ancestor-symlink-refused", "ancestor-symlink", "refused"),
@@ -919,7 +925,8 @@ def self_test(report_path=None):
                     ("probe/ancestor-absent-reads-false", "ancestor-absent", "absent"),
                     ("probe/nested-directory-reads-true", "nested-dir", "present"),
                     ("probe/ancestor-swapped-before-open-refused", "ancestor-swapped", "refused"),
-                    ("probe/ancestor-vanished-before-open-raises", "ancestor-vanished", "error:OSError")):
+                    ("probe/ancestor-vanished-before-open-raises", "ancestor-vanished", "error:OSError"),
+                    ("probe/ancestor-replaced-before-open-raises", "ancestor-replaced", "error:OSError")):
                 got = _probe(_standards, fixture, paths, base)
                 check(cid, got == want, got)
             for cid, probed in (
@@ -1016,12 +1023,16 @@ def self_test(report_path=None):
             # by a clean directory, right after the probe's lstat of it (a hook on the probe's lstat):
             # the gate exits 2 naming it, where a listing by name would read the clean tree and pass;
             # removed there instead, it exits 2 the same way as a changed tree, never read as an
-            # absent tree that passes. Swapped after the bound open (a hook on the listing), the
-            # judged directory is still what is read, so its violation is found.
+            # absent tree that passes. Its ancestor .claude replaced by an empty directory right after
+            # the probe's lstat of it exits 2 naming .claude, where the walk would go on inside the
+            # replacement, find no rules there, and pass as no tree. Swapped after the bound open (a
+            # hook on the listing), the judged directory is still what is read, so its violation is
+            # found.
             for cid, swap in (
                     ("gate/rules-swapped-before-listing-exits-2", "link"),
                     ("gate/rules-replaced-before-listing-exits-2", "directory"),
                     ("gate/rules-vanished-before-open-exits-2", "vanish"),
+                    ("gate/claude-replaced-before-open-exits-2", "ancestor"),
                     ("gate/rules-swapped-after-open-reads-judged", "after-open")):
                 root = _root_fixture(base, "gate-swap-" + swap, rules="dir").resolve()
                 rules = root / ".claude" / "rules"
@@ -1030,6 +1041,8 @@ def self_test(report_path=None):
                 clean.mkdir()
                 if swap == "after-open":
                     hook = _patched(this, "_scandir", _swapping_scandir(os.scandir, rules, clean))
+                elif swap == "ancestor":
+                    hook = _patched_lstat(_standards, _replacing_lstat(_standards._lstat, rules.parent))
                 else:
                     hook = _patched_lstat(_standards, _replacing_lstat(
                         _standards._lstat, rules, clean if swap == "link" else None,
@@ -1040,6 +1053,8 @@ def self_test(report_path=None):
                     ok = code == 1 and VIOLATION in out.replace(os.sep, "/") and err == ""
                 else:
                     ok = code == 2 and out == "" and "cannot read {}: ".format(rules) in err
+                    if swap == "ancestor":
+                        ok = ok and "'{}'".format(rules.parent) in err
                 check(cid, ok, (code, out, err))
 
             # 2d. a symlink below .claude/rules is refused (exit 2 naming it), never followed, though
@@ -1087,9 +1102,11 @@ def self_test(report_path=None):
             # caught by its named probe vector: the mutant's outcome differs from the intact one.
             # The walk mutant judges only the final component beneath its followed parent, the
             # semantics of a probe without a root; the loader mutant probes beneath the standards
-            # dir's own parent, which is that same form at the loader. The two held mutants drop
-            # open_dir's st_dev and st_ino check, or leave the held final component unopened; the
-            # vanished mutant reads an entry gone between its lstat and its open as absence.
+            # dir's own parent, which is that same form at the loader. The ancestor identity mutant
+            # checks st_dev and st_ino only at the final component, so an ancestor replaced by
+            # another directory is walked into; the two held mutants drop that check at the held
+            # final component only, or leave it unopened; the vanished mutant reads an entry gone
+            # between its lstat and its open as absence.
             source = (Path(__file__).resolve().parent / "_standards.py").read_text(encoding="utf-8")
             mutant_dir = base / "mutants"
             mutant_dir.mkdir()
@@ -1111,8 +1128,13 @@ def self_test(report_path=None):
                     ("mutant/loader-unrooted-caught", "std_fd = open_dir(std_dir, root=root, search_only",
                      "std_fd = open_dir(std_dir, root=std_dir.parent, search_only", "loader-dangling",
                      "refused"),
+                    ("mutant/ancestor-identity-unchecked-caught",
+                     "if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):",
+                     "if i + 1 == len(parts) and (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):",
+                     "ancestor-replaced", "error:OSError"),
                     ("mutant/held-identity-unchecked-caught",
-                     "if (held.st_dev, held.st_ino) != (st.st_dev, st.st_ino):", "if False:",
+                     "if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):",
+                     "if i + 1 < len(parts) and (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):",
                      "final-replaced", "replaced"),
                     ("mutant/held-final-unopened-caught", "if hold or i + 1 < len(parts):",
                      "if i + 1 < len(parts):", "dir", "held"),
@@ -1187,7 +1209,8 @@ def self_test(report_path=None):
           "present and genuine absence as absent, refuses a regular file, a FIFO and every symlink "
           "with NotADirectoryError, raises OSError on an unreachable path, and walks every component "
           "below its root, refusing a live or dangling symlink at an ancestor, and one swapped in "
-          "between its lstat and its open, and raising on one removed there, while a genuinely absent "
+          "between its lstat and its open, and raising on one removed or replaced by another "
+          "directory there, while a genuinely absent "
           "ancestor still reads absent; it raises on a path outside its root or climbing with '..', "
           "and closes every descriptor it opens exactly once; open_dir holds the directory it judged "
           "and refuses one swapped for a symlink, replaced or removed between its lstat and its open; "
@@ -1197,10 +1220,11 @@ def self_test(report_path=None):
           "scans an existing empty directory as a tree, fails a populated tree on its violation, and "
           "exits 2 on a wrong-type rules tree or standards dir and on a symlinked or dangling .claude "
           "or .aiqt; it reads only the rules directory its probe judged, exiting 2 on one swapped for "
-          "a symlink, replaced or removed before the listing and still finding the violation of one "
+          "a symlink, replaced or removed before the listing, and on a .claude replaced before its "
+          "open, and still finding the violation of one "
           "swapped after its open, and exits 2 on a symlinked family directory, rule file or vendored "
           "source and on a FIFO rule file, with a bad name or loose at the tree root too, while still "
-          "finding a rule's frontmatter drift; 10 probe mutants "
+          "finding a rule's frontmatter drift; 11 probe mutants "
           "each caught; {} --root vectors: a repeated, empty, missing, comma-joined, dangling or "
           "non-directory --root is cannot-evaluate; an existing root with no rules tree, a symlinked "
           "root, a violating root and the repository are still read; {} --root guard mutants each "

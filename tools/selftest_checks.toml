@@ -2314,6 +2314,7 @@ expected-check-ids = [
   "probe/nested-directory-reads-true",
   "probe/ancestor-swapped-before-open-refused",
   "probe/ancestor-vanished-before-open-raises",
+  "probe/ancestor-replaced-before-open-raises",
   "probe/outside-root-raises",
   "probe/parent-climb-raises",
   "probe/descriptors-closed-once",
@@ -2348,6 +2349,7 @@ expected-check-ids = [
   "gate/rules-swapped-before-listing-exits-2",
   "gate/rules-replaced-before-listing-exits-2",
   "gate/rules-vanished-before-open-exits-2",
+  "gate/claude-replaced-before-open-exits-2",
   "gate/rules-swapped-after-open-reads-judged",
   # ---------- links and non-regular rule files below the rules directory ----------
   "gate/family-symlink-exits-2",
@@ -2365,6 +2367,7 @@ expected-check-ids = [
   "mutant/nofollow-dropped-caught",
   "mutant/descriptor-close-skipped-caught",
   "mutant/loader-unrooted-caught",
+  "mutant/ancestor-identity-unchecked-caught",
   "mutant/held-identity-unchecked-caught",
   "mutant/held-final-unopened-caught",
   "mutant/vanished-reads-absent-caught",

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "59c87882b84a942fd34111aa2dea3c426203f5f078eeede64afc086799051980"
+tree-sha256 = "0ac4c783aab6a7d14238a1acfd6b75e274f891723dae6c4742f295ac26b45548"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "e672dd0e7e88771c8e699df3f31c22d583fff81d7f68e7db71dc73af149996c2"
+sha256 = "9135a291def63a504adfe3b11b827c913b22cbcb200bdc0b28da2aecb8d3e4b5"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3296,8 +3296,8 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_standards.py"
-bytes = 32784
-sha256 = "05c9b3d3b155c8e84eebe8d877701f4a1f9765355e12a6c955cf172bd14c2a98"
+bytes = 33852
+sha256 = "fbc1b0f285fdaacb06b1eda5c0e327ba9624cf103a381cb41ff1439d572365a6"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -3536,8 +3536,8 @@ sha256 = "8432b91994571a4d2e8a41007d84d32b24990b15c772a134449a7b3cd57440a3"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
-bytes = 66829
-sha256 = "a773fb2661b27d99056498326f962d7980f1625f2764ddac83444b871b8f50b7"
+bytes = 68841
+sha256 = "a58befaef7a4493bde447b64a006c4758e6e947c8b8f7982476d4b691b38d7e7"
 
 [[sources]]
 path = "tools/check_secrets.py"
@@ -3591,8 +3591,8 @@ sha256 = "d5e68bcbdfc7f4910676d047b73f8ede82a3602b027b23e442f58fee2bba453d"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 80174
-sha256 = "17931ace335ff5683d5c7cee4ab4d6b180ef0d617936f4d7b18ba6ab2870798e"
+bytes = 81328
+sha256 = "f749c83c6df1b505948cef35ec0a530104b65f9a3f08f98d0c7645e7a70170ca"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -3791,8 +3791,8 @@ sha256 = "c1409ccf43b2d3d31ea1a1799677ecef9e2602904f5d2c1a38f65a462442b483"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 111456
-sha256 = "b11898e87bcf0880939d70e59f15809a41100f2ec894e218cb11a76cbdef9b08"
+bytes = 111597
+sha256 = "22dc69b6dc40143b3802e3bb40b8fe76a8533af2318001e00e19f49b2ce2ff8e"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

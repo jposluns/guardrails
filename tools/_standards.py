@@ -204,8 +204,12 @@ def dir_present(path, *, root, search_only=False):
     its open) is refused, never followed and never read as absent, while a genuinely absent
     ancestor still reads as absence. A component whose lstat found it but which is gone by its open
     (removed or renamed in between) raises OSError naming it: the tree changed under the probe,
-    which is never absence. There is no form without a root: a probe that judged only the
-    final component would trust, and so follow, every ancestor, and read a dangling one as absence.
+    which is never absence. Every component the walk opens must also be the directory its lstat
+    judged, its descriptor's st_dev and st_ino equal to that lstat's, so one replaced by another
+    real directory in between (which O_NOFOLLOW admits) raises OSError naming it too, never walked
+    into: its contents, or its lack of the next component read as absence, never stand in for the
+    tree judged. There is no form without a root: a probe that judged only the final component
+    would trust, and so follow, every ancestor, and read a dangling one as absence.
     A path that is not beneath root (or that climbs with '..') raises OSError (EINVAL), so the
     callers' handlers refuse it too. The probe judges the tree only while it runs: a later read of
     the same path by name is not bound to it (open_dir returns a descriptor to read through
@@ -225,21 +229,24 @@ def open_dir(path, *, root, search_only=False):
     caller owns and closes; return None on genuine absence. Every refusal dir_present makes, this
     makes, and path must lie strictly beneath root (root itself raises EINVAL). The final component
     is judged by lstat like every other, then opened beneath its parent's descriptor with
-    O_DIRECTORY|O_NOFOLLOW, and the opened directory's st_dev and st_ino must equal that lstat's: a
-    symlink swapped in between the judgement and the open is refused by the open, another
-    directory swapped in raises OSError naming path, and so does a final directory removed in
-    between, so the descriptor is always the directory the probe judged and its absence is never
-    read from a changed tree. A caller that lists and reads through it (os.scandir on the
-    descriptor, os.open with dir_fd) is then bound to that directory whatever later happens to its
-    name. search_only opens root and the directories the walk passes through as dir_present's does;
-    the final directory is opened for reading either way, since its caller lists it."""
+    O_DIRECTORY|O_NOFOLLOW, and the opened directory's st_dev and st_ino must equal that lstat's,
+    as every directory the walk opens below root must: a symlink swapped in between the judgement
+    and the open is refused by the open, another directory swapped in, at path or at any ancestor
+    below root, raises OSError naming it, and so does a final directory removed in between, so the
+    descriptor is always the directory the probe judged, reached through the ancestors it judged,
+    and its absence is never read from a changed tree. A caller that lists and reads through it
+    (os.scandir on the descriptor, os.open with dir_fd) is then bound to that directory whatever
+    later happens to its name. search_only opens root and the directories the walk passes through
+    as dir_present's does; the final directory is opened for reading either way, since its caller
+    lists it."""
     return _walk(path, root, _SEARCH if search_only else 0, True)
 
 
 def _walk(path, root, search, hold):
     """The walk dir_present and open_dir share. Return None on genuine absence; otherwise True, or
     with hold the final directory's descriptor, the only one it leaves open, opened for reading
-    whatever search is."""
+    whatever search is. Every directory it opens below root is checked by st_dev and st_ino against
+    the lstat that judged it; root itself is opened as named."""
     path = Path(path)
     base = Path(root)
     try:
@@ -279,15 +286,17 @@ def _walk(path, root, search, hold):
                         # below would read as absence.
                         raise OSError(errno.ESTALE, "the entry the probe judged is gone (removed or "
                                       "renamed in between)", str(walked))
+                    # O_NOFOLLOW admits another real directory swapped in between the lstat above
+                    # and this open, so every directory opened, an ancestor as well as the held final
+                    # component, must be the one judged: otherwise the walk would go on inside the
+                    # replacement, reading its tree, or its missing child as absence.
+                    opened = os.fstat(fds[-1])
+                    if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+                        raise OSError(errno.ESTALE, "the directory opened is not the one the probe "
+                                      "judged (it was replaced in between)", str(walked))
         except FileNotFoundError:
             return None
-        if not hold:
-            return True
-        held = os.fstat(fds[-1])
-        if (held.st_dev, held.st_ino) != (st.st_dev, st.st_ino):
-            raise OSError(errno.ESTALE, "the directory opened is not the one the probe judged "
-                          "(it was replaced in between)", str(walked))
-        return fds.pop()
+        return fds.pop() if hold else True
     finally:
         for fd in reversed(fds):
             os.close(fd)

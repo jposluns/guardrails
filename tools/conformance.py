@@ -387,7 +387,8 @@ def check_c3(root):
     checked. The tree is never read by name: every listing is made through a held descriptor, and
     every family directory and vendored source is opened, and every rule file read, beneath its
     parent's descriptor with O_NOFOLLOW. So a .claude/rules swapped for a symlink or another directory,
-    or removed, between the probe and its open, a symlink at any entry the walk inspects (a family
+    or removed, between the probe and its open, a .claude replaced by another directory between its
+    lstat and its open, a symlink at any entry the walk inspects (a family
     directory, a rule file or a vendored source included) and a rule file that is not a regular file,
     whatever its name, are each MALFORMED (exit 2) naming the path, never followed. Runs
     unconditionally: it needs only
@@ -1019,7 +1020,7 @@ def self_test_main():
     import shutil
     import tempfile
     from contextlib import redirect_stderr, redirect_stdout
-    import _standards  # the module itself, so case 16i can hook its probe's lstat
+    import _standards  # the module itself, so cases 16i to 16k can hook its probe's lstat
 
     def run_capture(root):
         # Capture stderr too: the bad-root case deliberately prints to stderr, and a self-test must not
@@ -1532,6 +1533,21 @@ def self_test_main():
             failures.append("a .claude/rules removed after C3's probe expected C3 MALFORMED naming it, "
                             "got {}: {}".format(got.status, got.detail))
 
+        # 16k. A .claude replaced by an empty directory between C3's probe's lstat of it and its open
+        #      changed under the probe: C3 MALFORMED naming .claude, never NOT APPLICABLE from a walk
+        #      that went on inside the replacement and found no rules there.
+        replaced = (tmp / "claude-replaced").resolve()
+        replaced.mkdir()
+        _build_conformant(replaced)
+        rules = replaced / ".claude" / "rules"
+        (rules / "stray.md").write_text("# stray\n", encoding="utf-8")
+        with crp._patched_lstat(_standards, crp._replacing_lstat(_standards._lstat, rules.parent)):
+            got = check_c3(replaced)
+        if (got.status != MALFORMED or not got.detail.startswith("cannot read {}: ".format(rules))
+                or "'{}'".format(rules.parent) not in got.detail):
+            failures.append("a .claude replaced after C3's probe's lstat of it expected C3 MALFORMED "
+                            "naming it, got {}: {}".format(got.status, got.detail))
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:
@@ -1565,7 +1581,8 @@ def self_test_main():
           "(standards, core rules, generated families, the .aiqt/.claude/.github parents, and the plugin "
           "hooks subtree), a live or dangling symlinked .claude, a symlinked family directory or rule "
           "file below .claude/rules, a .claude/rules swapped for a symlink, replaced or removed after "
-          "C3's probe, and a bad --root fail closed" + skip_note)
+          "C3's probe, a .claude replaced after that probe's lstat of it, and a bad --root fail "
+          "closed" + skip_note)
     return 0
 
 
