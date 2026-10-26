@@ -498,17 +498,22 @@ _WordSpelling = collections.namedtuple("_WordSpelling", ("literal", "brace", "un
 # An expansion that bash expands to one word per element even inside double quotes, as bash 5.3 printed for each
 # form: the positional list ("$@", "${@}", "${@:1}", "${@/x/y}"), an array subscripted with @ in any parameter
 # expansion form ("${A[@]}", "${A[@]:0}", "${A[@]#-}", "${A[@]@Q}", "${!A[@]}"), the names with a prefix
-# ("${!pre@}"), and a plain indirect expansion with no subscript of its own ("${!R}"), whose named variable can
-# itself hold a list reference such as @ or an array[@] subscript, so bash splits it into one word per element
-# (bash 5.3: with R set to @ or to A[@], "${!R}" expanded to the positional or array list); anywhere in a
-# '${...}' the reader skips, so one nested in an operator word ("${x:-$@}") counts too. A length ('${#A[@]}',
-# '${#@}'), a '*' subscript or prefix ("$*", "${A[*]}", "${!pre*}") and one element ("${A[0]}") expand to one
-# word, and so match nothing here. The indirect form is read whatever operator follows the name ("${!R}",
-# "${!R:-x}", "${!R@Q}" each expand the array when R holds a list reference), except the prefix-names-star
-# "${!pre*}", one word, and a subscript of its own ("${!A[@]}" is read by the array-subscript alternative,
-# "${!A[0]}" is one element), so the name is matched only when a '*' or '[' does not immediately follow it.
+# ("${!pre@}"), and an indirect expansion, whose reference (a variable, an array element read through a
+# subscript of its own, or a positional parameter or $*) can itself hold a list reference such as @ or an
+# array[@] subscript, so bash splits it into one word per element (bash 5.3: with R, A[0], H[k] or $1 set to @
+# or to B[@], "${!R}", "${!A[0]}", "${!A[$i]}", "${!H[k]}", "${!1}" and "${!*}" expanded to the positional or
+# array list); anywhere in a '${...}' the reader skips, so one nested in an operator word ("${x:-$@}") counts
+# too. A length ('${#A[@]}', '${#@}'), a '*' subscript or prefix ("$*", "${A[*]}", "${!pre*}", "${!A[0]*}"),
+# the '*' key list ("${!A[*]}"), one element ("${A[0]}") and an indirect expansion through a parameter that
+# only holds a number or the option flags ("${!#}", "${!?}", "${!-}") expand to one word, and so match nothing
+# here. The indirect form is read whatever operator follows the reference ("${!R}", "${!R:-x}", "${!R@Q}",
+# "${!A[0]:-x}" each expand the array when the reference holds a list reference), except the prefix-names-star
+# "${!pre*}", one word, so a name is matched only when a '*' does not immediately follow it, and a subscript
+# only when it is not the '*' key list ("${!A[*]}" alone; "${!A[*]:-x}" reads the joined elements indirectly)
+# and does not close right before a prefix-names star.
 _DQ_LIST_EXPANSION_RE = re.compile(
-    r"\$(?:@|\{(?:!?@|!?[A-Za-z_][A-Za-z0-9_]*\[@\]|![A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_*[])))")
+    r"\$(?:@|\{(?:!?@|!?[A-Za-z_][A-Za-z0-9_]*\[@\]|![0-9*]"
+    r"|![A-Za-z_][A-Za-z0-9_]*(?:(?![A-Za-z0-9_*[])|\[(?!\*\]\})(?![^\]]*\]\*\}))))")
 
 
 class _SpelledWords(list):

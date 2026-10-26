@@ -10773,6 +10773,15 @@ def _oracle_corpus():
         ("brace", "", "{-c," + _ORACLE_ALIAS + "} qx"),
         ("indirect", "A=(" + alias + "); R='A[@]'; ", '"${!R}" qx'),
         ("indirect-op", "A=(" + alias + "); R='A[@]'; ", '"${!R:-x}" qx'),
+        # an indirect expansion through an array element (a subscript of its own) or a positional parameter
+        # whose value is a list reference: bash splits it as it does "${!R}".
+        ("indirect-sub", "A=(" + alias + "); S=('A[@]'); ", '"${!S[0]}" qx'),
+        ("indirect-sub-op", "A=(" + alias + "); S=('A[@]'); ", '"${!S[0]:-x}" qx'),
+        ("indirect-sub-var", "A=(" + alias + "); S=(x 'A[@]'); i=1; ", '"${!S[$i]}" qx'),
+        ("indirect-assoc", "A=(" + alias + "); declare -A H; H[k]='A[@]'; ", '"${!H[k]}" qx'),
+        ("indirect-star-op", "A=(" + alias + "); S=('A[@]'); ", '"${!S[*]:-x}" qx'),
+        ("indirect-pos", "A=(" + alias + "); set -- 'A[@]'; ", '"${!1}" qx'),
+        ("indirect-args", "A=(" + alias + "); set -- 'A[@]'; ", '"${!*}" qx'),
     )
     # control builders: a git word built by a glob (no match, literal) or a double-quoted scalar, defining no
     # alias; the oracle never fails on these (nothing in argv defines one) whatever the verdict.
@@ -10861,7 +10870,8 @@ def _gitalias_oracle_cases(tmp):
               ("branch_root", aiqt_hooks.branch_root, str(repo)))
     corpus = _oracle_corpus()
     alias_labels = {"literal", "unquoted", "list", "positional", "brace", "indirect", "indirect-op",
-                    "shift-c", "shift-C", "shift-past", "shift-lead"}
+                    "indirect-sub", "indirect-sub-op", "indirect-sub-var", "indirect-assoc", "indirect-star-op",
+                    "indirect-pos", "indirect-args", "shift-c", "shift-C", "shift-past", "shift-lead"}
     fail_open = []
     hermeticity = []
     for label, command in corpus:

@@ -12540,20 +12540,27 @@ def _main_isolated(monitor):
                     _gkt_label, _gkt_handler.__name__, _gkt_cmd, _gkt_got))
         # A word reads as one word to bash only when no part of it can expand to several (_DQ_LIST_EXPANSION_RE): a
         # double-quoted expansion of the positional list or of an array subscripted with @, in any parameter-expansion
-        # form, expands to one word per element (bash 5.3 printed <-c><alias.qx=version> for each form here), so the
-        # reader marks it as a word bash may split. gkl-<form>-<guard>: each guard denies it in the region, naming a
-        # word built at run time (each allowed before). gklc-<form>-<guard>: a double-quoted expansion that expands to
-        # one word (a '*' list, a length, one element, a pattern holding '@') keeps the allow. gkl-read-*: the record
-        # at the reader, each red where the double-quoted '$@' or '${...[@]}' branch stops setting the flag.
+        # form, expands to one word per element, and so does an indirect expansion whose reference (a variable, an
+        # array element read through a subscript of its own, a positional parameter or $*) holds a list reference
+        # (bash 5.3 printed <-c><alias.qx=version> for each form here), so the reader marks it as a word bash may
+        # split. gkl-<form>-<guard>: each guard denies it in the region, naming a word built at run time (each allowed
+        # before). gklc-<form>-<guard>: a double-quoted expansion that expands to one word (a '*' list, a length, one
+        # element, the '*' key list, a prefix-names star, an indirect one through the argument count, a pattern
+        # holding '@') keeps the allow. gkl-read-*: the record at the reader, each red where the double-quoted '$@' or
+        # '${...[@]}' branch stops setting the flag.
         _gkl_forms = (
             ("at", 'git "$@" l'), ("at-brace", 'git "${@:1}" l'), ("arr", 'git "${A[@]}" l'),
             ("arr-op", 'git "${A[@]:0}" l'), ("keys", 'git "${!A[@]}" l'), ("names", 'git "${!pre@}" l'),
             ("ind", 'git "${!R}" l'), ("ind-op", 'git "${!R:-x}" l'), ("ind-value", 'git -C "${!R}" l'),
+            ("ind-sub", 'git "${!A[0]}" l'), ("ind-sub-op", 'git "${!A[0]:-x}" l'),
+            ("ind-sub-var", 'git "${!A[$i]}" l'), ("ind-sub-value", 'git -C "${!A[0]}" l'),
+            ("ind-star-op", 'git "${!A[*]:-x}" l'), ("ind-pos", 'git "${!1}" l'), ("ind-args", 'git "${!*}" l'),
             ("nested", 'git "${x:-$@}" l'), ("value", 'git -C "${A[@]}" l'))
         _gkl_controls = (
             ("star", 'git "$*" log'), ("arr-star", 'git "${A[*]}" log'), ("length", 'git -C "${#A[@]}" log'),
             ("element", 'git -C "${A[0]}" log'), ("names-star", 'git "${!pre*}" log'),
-            ("ind-star", 'git "${!R*}" log'), ("ind-sub", 'git -C "${!A[0]}" log'),
+            ("ind-star", 'git "${!R*}" log'), ("keys-star", 'git -C "${!A[*]}" log'),
+            ("ind-sub-star", 'git -C "${!A[0]*}" log'), ("ind-count", 'git -C "${!#}" log'),
             ("pattern", 'git -c user.email="${EMAIL%@*}" log'))
         for _gks_handler, _gks_cwd in _gks_guards:
             _gks_name = _gks_handler.__name__
@@ -12572,12 +12579,22 @@ def _main_isolated(monitor):
         for _gkl_label, _gkl_word, _gkl_want, _gkl_locale in (
                 ("gkl-read-at", '"$@"', True, False), ("gkl-read-arr", '"${A[@]}"', True, False),
                 ("gkl-read-names", '"${!p@}"', True, False), ("gkl-read-star", '"$*"', False, False),
-                # An indirect expansion with no subscript of its own expands to a list when its named variable holds
-                # a list reference (bash 5.3: with R set to @ or A[@], "${!R}" and "${!R:-x}" expanded the list), so
-                # its word is marked as one bash may split; the prefix-names-star "${!R*}" stays one word, and a
-                # subscript of its own ("${!A[0]}") keeps the plain reading (outside this round's scope).
+                # An indirect expansion expands to a list when its reference holds a list reference, a subscript of
+                # its own or a positional parameter included (bash 5.3: with R, A[0], H[k], $0 or $1 set to B[@],
+                # "${!R}", "${!R:-x}", "${!A[0]}", "${!A[$i]}", "${!H[k]}", "${!A[*]:-x}", "${!1}", "${!0}" and
+                # "${!*}" expanded the list), so its word is marked as one bash may split; the prefix-names-star
+                # "${!R*}" and "${!A[0]*}", the '*' key list "${!A[*]}" and "${!#}", through the argument count, each
+                # stay one word.
                 ("gkl-read-ind", '"${!R}"', True, False), ("gkl-read-ind-op", '"${!R:-x}"', True, False),
-                ("gkl-read-ind-star", '"${!R*}"', False, False), ("gkl-read-ind-sub", '"${!A[0]}"', False, False),
+                ("gkl-read-ind-star", '"${!R*}"', False, False), ("gkl-read-ind-sub", '"${!A[0]}"', True, False),
+                ("gkl-read-ind-sub-op", '"${!A[0]:-x}"', True, False),
+                ("gkl-read-ind-sub-var", '"${!A[$i]}"', True, False), ("gkl-read-ind-assoc", '"${!H[k]}"', True, False),
+                ("gkl-read-ind-star-op", '"${!A[*]:-x}"', True, False), ("gkl-read-ind-pos", '"${!1}"', True, False),
+                ("gkl-read-ind-zero", '"${!0}"', True, False), ("gkl-read-ind-args", '"${!*}"', True, False),
+                ("gkl-read-ind-nested", '"${x:-${!A[0]}}"', True, False),
+                ("gkl-read-keys-star", '"${!A[*]}"', False, False),
+                ("gkl-read-ind-sub-star", '"${!A[0]*}"', False, False), ("gkl-read-ind-count", '"${!#}"', False, False),
+                ("gkl-read-element", '"${A[0]}"', False, False), ("gkl-read-length-elem", '"${#A[0]}"', False, False),
                 ("gkl-read-arr-star", '"${A[*]}"', False, False), ("gkl-read-length", '"${#A[@]}"', False, False),
                 ("gkl-read-scalar", '"$x"', False, False), ("gkl-read-transform", '"${x@Q}"', False, False),
                 # The locale-quote branch records its word as built at run time: with the locale reading on, $"x"
