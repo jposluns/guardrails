@@ -2431,7 +2431,22 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                     body_at = i
                     i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
                     if _LexPlaces.spans is not None:
-                        _LexPlaces.spans.append((body_at, i, "heredoc"))
+                        # The exact-delimiter-line skip above ends each body where bash ends it only
+                        # when the body is read at the TOP LEVEL of the command: inside a command or
+                        # process substitution or backquotes, bash 5.3 ends a body at a line that
+                        # merely STARTS with the delimiter when a ')' or a backquote follows it on
+                        # that line (after x=$(cat <<'EOF' then body then the line EOF), bash runs
+                        # the text after that line as commands, while this skip reads it as body),
+                        # and an unterminated body here consumes text bash executes. The nesting
+                        # stack alone cannot prove such a group closed (a bare case pattern's ')'
+                        # pops its parenthesis), so the span is recorded as a here-document body
+                        # ONLY when nothing is open on the stack AND no '(' and no backquote appears
+                        # anywhere before the body, quoted or not; every other body records as
+                        # "code", which the bare-'&' narrowing never lifts (fail closed), while the
+                        # segments are unchanged for every other reader of this lex.
+                        trusted = (not nest and command.find("(", 0, body_at) == -1
+                                   and command.find("`", 0, body_at) == -1)
+                        _LexPlaces.spans.append((body_at, i, "heredoc" if trusted else "code"))
                     del pending_heredocs[:]
                     seg_start[0] = i
                 if fork is not None and tail_key is None:
@@ -15788,7 +15803,9 @@ def _orch_foreground_detach_kind(command):
 
 # The places the shared lexer may put a bare `&` the foreground scan reads, for that `&` to read as no detach
 # (_orch_foreground_detach_lexed), as _LexPlaces span kinds: a single- or double-quoted string, a '#'
-# comment, and a quoted here-document's body. They are the only narrowing of the scan's detach.
+# comment, and a quoted here-document's body. They are the only narrowing of the scan's detach. A
+# here-document body whose end the lexer cannot prove is where bash ends it records as "code", not
+# "heredoc" (the span comment in _lex_pass), so it is never a lifting place.
 _ORCH_AMP_PLACES = frozenset(("quote", "comment", "heredoc"))
 
 
@@ -15850,7 +15867,13 @@ def _orch_foreground_detach_lexed(command):
     None only when both scan rules read the whole command (no quote open at the end and no uncertain '#') and
     every bare `&` they read lies, where the lexer places it in its one reading of the command
     (_orch_lexed_amp_places), inside one of three shapes: (1) the body of a here-document under a quoted
-    delimiter (<<'EOF' or <<"EOF", including the commit message form's body in "$(cat <<'EOF' ... EOF)"); (2)
+    delimiter (<<'EOF' or <<"EOF") whose end the lexer can prove is where bash ends it: one read at the
+    top level of the command, with nothing open on the nesting stack and no '(' and no backquote
+    anywhere before the body (inside a command or process substitution or backquotes bash 5.3 can end a
+    body at a line that merely STARTS with the delimiter when a ')' or a backquote follows it on that
+    line, running what this lex would read as body, so such a body records as "code" and is never
+    lifted, fail closed), or the commit message form's body in "$(cat <<'EOF' ... EOF)", whose exact
+    close the lex itself resolves; (2)
     a single- or double-quoted string; or (3) a '#' comment. Every other case where the lexer and the scan
     disagree still denies: an `&` the lexer places in a substitution or expansion that a double-quoted string
     holds (one in a quoted string or comment nested there included, since the lexer skips it whole), in an
@@ -16148,7 +16171,7 @@ def _orch_heredoc_bodies_end(command, i, n, heredocs):
     return i, closed
 
 
-def _orch_note_scan(command, bash_word_starts):
+def _orch_note_scan(command, bash_word_starts, lifted=False):
     """The scan behind the note outside registry scope. It reads quotes and escapes as _orch_foreground_scan
     does, and reads each unquoted `#` by the comment rule that scan applies (_hash_comment_reading, over a
     nesting stack this scan keeps, with bash_word_starts selecting the same word-start rule): a word-start
@@ -16283,7 +16306,25 @@ def _orch_note_scan(command, bash_word_starts):
     is not seen by this end check; its here-documents are still noted
     through the substitution count, and with no here-document and no detach after it the scan stays
     silent, a disclosed miss). The in-scope deny
-    does not use this scan; it reads _orch_foreground_detach_lexed."""
+    does not use this scan; it reads _orch_foreground_detach_lexed.
+
+    LIFTED MODE (lifted True; the caller passes it ONLY after the in-scope detector lifted every bare
+    `&` its raw scan reads, with the shared lexer placing each in a quoted here-document body, a quoted
+    string or a comment): the two here-document shapes that lift vouches for are read as the lexer
+    reads them, so the note they alone would draw is dropped while every note ANOTHER cause draws is
+    kept (the single note is then the true union). Exactly two readings change. (1) A here-document
+    opened with nothing on the nesting stack and no substitution counted open, whose delimiter spec is
+    not provably simple but which the shared in-scope parser (_parse_heredoc_delim) reads as QUOTED,
+    has its body skipped as literal data at the exact delimiter line, like a plain one; its body is
+    literal to bash, so a backslash-newline inside THAT body stays silent (an unquoted plain-delimiter
+    body keeps its continuation note: bash joins there). (2) A `<<` met directly inside the first
+    `$(...)` of a double-quoted string, where the commit-message form resolves to its exact close
+    (_subst_heredoc_close: a cat-and-blanks lead, a quoted delimiter, the body ending at a line that is
+    exactly the delimiter, then only blanks before the `)`), is skipped whole to that `)` as data
+    instead of noting at the operator. Every other reading is unchanged: a quoted-delimiter heredoc
+    opened while anything is open on the stack or the count still notes, a shape the parsers refuse
+    still notes, and a continuation, an unclosed construct, a detacher word and every other cause note
+    exactly as above."""
     in_single = in_double = escaped = False
     prev_dup = False
     redirect_target = False  # between a redirect operator and the start of its target operand
@@ -16294,6 +16335,7 @@ def _orch_note_scan(command, bash_word_starts):
     dq_nest = _NestStack()  # the substitutions opened inside the current double-quoted string: "(" or a backquote
     dq_prev = "word"  # the comment rule's class of the previous character inside those substitutions
     dq_single = False  # inside a single-quoted span within such a substitution
+    dq_subst_opened = -1  # the index of the `$` that opened the innermost dq substitution, or -1 (lifted mode)
     command_position = next_command = True  # next_command: the position the next word takes after a blank
     after_function = False  # the previous command-position word was the `function` keyword
     groups = []  # (glued, next_command, index, is_subst) saved at each unquoted `(`, restored at its `)`
@@ -16346,6 +16388,7 @@ def _orch_note_scan(command, bash_word_starts):
             elif ch == '"':
                 in_double, dq_single = False, False
                 dq_nest.clear()
+                dq_subst_opened = -1
             elif dq_single:
                 dq_single = ch != "'"
             elif dq_nest and ch == "#" and dq_prev != "word":
@@ -16362,15 +16405,32 @@ def _orch_note_scan(command, bash_word_starts):
                 # the `<<` itself (a `<<<` here-string here draws the same note: an over-note, never
                 # a miss). Best effort only: dq_nest follows quotes and parentheses in the
                 # substitution approximately, so a misread quote or `)` can hide this `<<` (the
-                # known misses in the docstring).
+                # known misses in the docstring). In LIFTED MODE the commit-message form that
+                # resolves to its exact close is the shape the lift vouches for, so it is skipped
+                # whole to the `)` as data (the LIFTED MODE paragraph of the docstring); the `)`
+                # itself is re-read by the branch below, which pops the substitution.
+                if lifted and len(dq_nest) == 1 and dq_nest[-1] == "(" and dq_subst_opened >= 0:
+                    close = _subst_heredoc_close(command, dq_subst_opened, i, n)
+                    if close is not None:
+                        prev_dup, prev, after_dollar = False, "word", False
+                        dq_prev = "word"
+                        i = close
+                        continue
                 return "unreadable"
             elif dq_nest and ch == "'":
                 dq_single = True
             else:
                 if ch == "(" and (dq_nest or after_dollar):
+                    if not dq_nest and after_dollar:
+                        # The index of the `$` that opened the substitution now innermost in this
+                        # string, for the lifted commit-message-form close above; stale once the
+                        # substitution closes or the string ends (both reset it below).
+                        dq_subst_opened = i - 1
                     dq_nest.append("(")
                 elif ch == ")" and dq_nest and dq_nest[-1] == "(":
                     dq_nest.pop()
+                    if not dq_nest:
+                        dq_subst_opened = -1
                 elif ch == "`":
                     _nest_track(dq_nest, ch, False)
                 dq_prev = ("paren" if ch in "()" else "backquote" if ch == "`"
@@ -16430,10 +16490,22 @@ def _orch_note_scan(command, bash_word_starts):
             # to the end, for a body left open) draws the note instead; and a body whose closing
             # delimiter line never comes consumes the rest of the command while bash would still be
             # reading here-document input, so nothing past its opener was really checked and it notes
-            # too (the open-construct rule at the end of this scan), never a silent skip.
-            end, bodies_closed = _orch_heredoc_bodies_end(command, i + 1, n, heredocs)
-            if not bodies_closed or command.find("\\\n", i + 1, end) != -1:
-                return "unreadable"
+            # too (the open-construct rule at the end of this scan), never a silent skip. A body under
+            # a QUOTED delimiter (reached only in lifted mode) is literal to bash, a backslash-newline
+            # in it included, so only an unquoted body draws the continuation note; and such a literal
+            # body whose closing line never comes (a quoted delimiter holding a backslash-newline
+            # matches no line) is data to the end of the command to bash too, so it is skipped to the
+            # end rather than noted, exactly as the lexer the lift vouched it with reads it.
+            end = i + 1
+            for delim, strip_tabs, literal_body in heredocs:
+                body_end, body_closed = _orch_heredoc_bodies_end(
+                    command, end, n, ((delim, strip_tabs),))
+                if literal_body:
+                    end = body_end
+                    continue
+                if not body_closed or command.find("\\\n", end, body_end) != -1:
+                    return "unreadable"
+                end = body_end
             i = end
             heredocs = []
             prev_dup, prev, after_dollar = False, "break", False
@@ -16519,9 +16591,19 @@ def _orch_note_scan(command, bash_word_starts):
                 # A here-document delimiter that is not provably simple (a character outside the plain
                 # set, a word bash reads further than this scan, or no delimiter word at all) draws the
                 # note: where the body ends is unknown, so the scan never reads the remainder as code to
-                # decide silence.
-                return "unreadable"
-            heredocs.append((parsed[0], parsed[1]))
+                # decide silence. In LIFTED MODE a spec the shared in-scope parser reads as QUOTED is
+                # the shape the lift vouches for, so its literal body is skipped as data at the exact
+                # delimiter line instead (the LIFTED MODE paragraph of the docstring); every spec that
+                # parser refuses, and every unquoted one it alone reads, still notes.
+                shared = _parse_heredoc_delim(command, i + 2, n) if lifted else None
+                if shared is None or not shared[0]:
+                    return "unreadable"
+                heredocs.append((shared[1], shared[2], True))
+                prev_dup, prev, after_dollar = False, "word", False
+                command_position = False
+                i = shared[3]
+                continue
+            heredocs.append((parsed[0], parsed[1], False))
             prev_dup, prev, after_dollar = False, "word", False
             command_position = False
             i = parsed[2]
@@ -16637,15 +16719,19 @@ def _orch_note_scan(command, bash_word_starts):
     return found
 
 
-def _orch_foreground_note_kind(command):
+def _orch_foreground_note_kind(command, lifted=False):
     """What the note outside registry scope names for a foreground command: "detach" when either `#`
     comment rule (_orch_note_scan) meets a bare `&`, else the first kind either rule met ("unreadable"
     for a skipped span it could not read with certainty, a backslash-newline line continuation outside
     a single-quoted span, a `#` whose comment reading depends on context, a scan that ends inside an
     open quote or with an opened construct still open, or a `<<` it reads as inside a double-quoted
     substitution, a best-effort rule, or a setsid, nohup or disown command word),
-    else None. Any non-None kind draws the note; none of them ever blocks."""
-    kinds = (_orch_note_scan(command, False), _orch_note_scan(command, True))
+    else None. Any non-None kind draws the note; none of them ever blocks. lifted is passed to both
+    scans (the LIFTED MODE paragraph of _orch_note_scan): the caller sets it only after the in-scope
+    detector lifted every bare `&` the raw scan reads, so the two vouched here-document shapes are
+    read as data and the returned kind is the first note cause OUTSIDE them (the true union), never
+    a note those shapes alone would draw."""
+    kinds = (_orch_note_scan(command, False, lifted), _orch_note_scan(command, True, lifted))
     if "detach" in kinds:
         return "detach"
     return kinds[0] or kinds[1]
@@ -17344,8 +17430,11 @@ def orch_truncation_guard(data):
         # to the end, where a later '&' can be a hidden detach) gives its own note, and otherwise the note
         # scan's detach, detacher word or unreadable span gives that scan's note. Where the detector lifts
         # every bare '&' its scan reads (the shared lexer places each in a quoted here-document body, a
-        # quoted string or a comment) the command is no detach, as in registry scope, so neither the note
-        # scan's '&' nor a span it cannot read draws a note; a setsid, nohup or disown it names still does.
+        # quoted string or a comment) the command is no detach, as in registry scope, and the lift
+        # suppresses ONLY the notes its own shapes cause: the note scan runs again in lifted mode,
+        # reading the vouched here-document shapes as data, so a setsid, nohup or disown command word
+        # anywhere, a line continuation, an unclosed expansion, and every other cause outside those
+        # shapes keeps its note (the single note is the true union of both readers).
         out_input = data.get("tool_input")
         if not isinstance(out_input, dict):
             kind = "missing" if "tool_input" not in data else _orch_json_kind(out_input)
@@ -17392,11 +17481,17 @@ def orch_truncation_guard(data):
                 "whose delimiter is unquoted, or one inside a substitution in a double-quoted string), quote "
                 "the here-document delimiter (<<'EOF') where its body needs no expansion, or write the text "
                 "to a file and pass the file instead.")
-        note_kind = _orch_foreground_note_kind(out_command)
-        if note_kind in ("detach", "unreadable") and _orch_foreground_detach_kind(out_command) == "detach":
+        if _orch_foreground_detach_kind(out_command) == "detach":
             # The detector read no detach although its raw scan did: it lifted every bare '&' that scan
-            # reads (a quoted here-document body, a quoted string or a comment), so the command is no detach.
-            note_kind = None
+            # reads (the shared lexer places each in a quoted here-document body, a quoted string or a
+            # comment), so the command is no detach and the lift's own shapes draw no note; but the lift
+            # vouches ONLY for those shapes, so the note scan runs again in lifted mode, reading them as
+            # data, and every note ANOTHER cause draws is kept (a setsid, nohup or disown anywhere, a
+            # line continuation or unclosed expansion after a body included): the single note is the
+            # true union, never silence bought by an unrelated lifted '&'.
+            note_kind = _orch_foreground_note_kind(out_command, lifted=True)
+        else:
+            note_kind = _orch_foreground_note_kind(out_command)
         if note_kind is None:
             return _allow()
         if note_kind == "detach":

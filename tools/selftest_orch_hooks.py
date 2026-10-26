@@ -11867,7 +11867,7 @@ def _main_isolated(report_path=None):
         # malformed run_in_background beside a command with no bare `&`, get the unreadable-input note,
         # never the silent allow. Each row reads ("allow", False) with the guard keeping its silent allow on
         # input it cannot read.
-        check("trunc/fg-malformed-no-registry-allows",
+        check("trunc/fg-malformed-no-registry-warns",
               [(_verdict(res), "input could not be read" in ti_note_of(res))
                for res in (aiqt_hooks.orch_truncation_guard(dict(
                    ti.payload("PreToolUse", "Bash"), tool_input=tool_input)) for tool_input in (
@@ -11919,11 +11919,11 @@ def _main_isolated(report_path=None):
                 # that detector's note: accepted over-warns for this warn-first release (nothing detaches).
                 # A body `&` under a QUOTED delimiter is no detach to that detector and draws no note (the
                 # trunc/fg-nonbare-amp-no-registry-allows row above).
-                ("trunc/oos-heredoc-unquoted-amp-allows",
+                ("trunc/oos-heredoc-unquoted-amp-notes",
                  _fg("cat > /tmp/f <<EOF\nFix A & B\nEOF"), "warn"),
                 ("trunc/oos-heredoc-detach-word-allows", _fg("cat <<EOF\nsetsid x\nEOF"), "allow"),
-                ("trunc/oos-arith-expansion-allows", _fg("echo $(( 6 & 3 ))"), "warn"),
-                ("trunc/oos-arith-command-allows", _fg("(( x = 6 & 3 ))"), "warn"),
+                ("trunc/oos-arith-expansion-notes", _fg("echo $(( 6 & 3 ))"), "warn"),
+                ("trunc/oos-arith-command-notes", _fg("(( x = 6 & 3 ))"), "warn"),
                 ("trunc/oos-setsid-wait-allows", _fg("setsid -w long_job"), "allow"),
                 ("trunc/oos-setsid-wait-long-allows", _fg("setsid --wait long_job"), "allow"),
                 ("trunc/oos-detach-word-argument-allows", _fg("git log --grep setsid"), "allow"),
@@ -12074,9 +12074,9 @@ def _main_isolated(report_path=None):
                  _fg("shopt -s extglob\ncat <<a+(b c)\nbody\na+(b c)\nlong_job &"), "warn"),
                 # The plain-delimiter controls below skip the body silently in the note scan; the
                 # body `&` under their unquoted delimiter gives the detector's note (accepted over-warns).
-                ("trunc/oos-heredoc-plain-set-delim-allows",
+                ("trunc/oos-heredoc-plain-set-delim-notes",
                  _fg("cat <<-END.v1+x\n\tFix A & B\n\tEND.v1+x"), "warn"),
-                ("trunc/oos-heredoc-delim-then-redirect-allows",
+                ("trunc/oos-heredoc-delim-then-redirect-notes",
                  _fg("cat <<EOF>/tmp/f\nFix A & B\nEOF"), "warn"),
                 # bash joins a backslash-newline in an unquoted body before it matches the closing line,
                 # so `EO\` then `F` closes the body and a raw `x\` then `EOF` does not; either way the raw
@@ -12089,7 +12089,7 @@ def _main_isolated(report_path=None):
                  _fg("cat <<EOF\nbody\nEO\\\nF\nlong_job &\nEOF"), "warn"),
                 ("trunc/oos-heredoc-continued-body-line-notes",
                  _fg("cat <<EOF\nx\\\nEOF\nit's\nEOF\nlong_job &"), "warn"),
-                ("trunc/oos-heredoc-body-backslash-allows", _fg("cat <<EOF\na\\b & c\nEOF"), "warn"),
+                ("trunc/oos-heredoc-body-backslash-notes", _fg("cat <<EOF\na\\b & c\nEOF"), "warn"),
                 ("trunc/oos-heredoc-continuation-after-close-notes",
                  _fg("cat <<EOF\nA & B\nEOF\necho a \\\nb"), "warn"),
                 # An ANSI-C $'...' delimiter is a quoted spelling, so it notes like any other non-plain
@@ -12266,7 +12266,7 @@ def _main_isolated(report_path=None):
                      "EOF\n)\" & long_job # 5\" screens"), "allow"),
                 # This row's real detach is now noted: the detector the registry scope denies on reads
                 # its `&` as a bare detach, so the note scan's miss no longer leaves it silent.
-                ("trunc/oos-dq-subst-sq-dq-amp-miss-allows",
+                ("trunc/oos-dq-subst-sq-dq-amp-miss-notes",
                  _fg("echo \"$(echo 'x\"y')\" & job # '"), "warn"),
                 ("trunc/oos-dq-subst-case-pattern-heredoc-miss-allows",
                  _fg(": \"$(case a in a) cat <<'EOF'\nSupport 5\" screens\nEOF\n;; esac)\" & long_job"
@@ -12724,6 +12724,85 @@ def _main_isolated(report_path=None):
                   (_bang_set, _verdict(bg(shape, rib=False)),
                    _verdict(ti_call({"command": shape, "run_in_background": False}))),
                   (detaches, "deny" if detaches else "allow", "warn" if detaches else "allow"))
+        # DIFFERENTIAL ORACLE against real bash over a bounded generated here-document corpus: every
+        # delimiter form the shared parsers model (unquoted, single-quoted, double-quoted,
+        # backslash-escaped, partially quoted, ANSI-C, plus the <<- strip-tabs rows appended last),
+        # opened at the top level, inside a command substitution (its close glued to the delimiter
+        # line, 'EOF)', and on its own line), inside a subshell (both close forms), inside backquotes
+        # and inside a double-quoted command substitution (the commit-message form), over bodies
+        # holding a bare '&', an apostrophe, a double-quoted '&', a '#' comment with an '&', a
+        # trailing-backslash line continuation and plain text, each followed or not by a real
+        # background job. Each case runs through real bash (env -i and the literal /usr/bin/bash, in
+        # this oracle's own temporary directory under the run fixture root; the command is read by
+        # eval from a -c string; nothing in the corpus touches the network or writes outside that
+        # directory), recording ONLY whether $! is set afterwards, and the REGISTRY-SCOPE verdict
+        # must agree with bash in both directions: a command after which bash sets $! (a real
+        # detach) must DENY, and a command bash does not background must ALLOW on the rows the
+        # three-shape narrowing lifts (expected_allow below: a top-level or commit-message-form body
+        # '&' under a quoted delimiter with an exact closing line and no trailing job; every other
+        # non-detaching row may fail closed). A bash run that yields no BANG line, or a probe error,
+        # is missing fixture evidence and FAILS its row rather than passing it. The corpus is a
+        # deterministic product of 506 cases, one short bash run each, well under the 60-second
+        # budget for the whole oracle.
+        oracle_dir = tmp / "trunc-bash-oracle"
+        oracle_dir.mkdir()
+        _oracle_specs = (("unquoted", "EOF"), ("squote", "'EOF'"), ("dquote", '"EOF"'),
+                         ("escaped", "\\EOF"), ("partial", "EO'F'"), ("ansi", "$'EOF'"))
+        _oracle_lifted_specs = frozenset(("squote", "dquote", "escaped", "partial", "ansi"))
+        _oracle_bodies = (("amp", "A & B"), ("apos", "it's"), ("dq-amp", 'say "a & b"'),
+                         ("comment-amp", "# x &"), ("cont", "x\\"), ("plain", "body"))
+        _oracle_contexts = (
+            ("top", "cat <<{s}\n{b}\nEOF{t}"),
+            ("cmdsubst-glued", "x=$(cat <<{s}\n{b}\nEOF){t}"),
+            ("cmdsubst-own-line", "x=$(cat <<{s}\n{b}\nEOF\n){t}"),
+            ("subshell-glued", "(cat <<{s}\n{b}\nEOF){t}"),
+            ("subshell-own-line", "(cat <<{s}\n{b}\nEOF\n){t}"),
+            ("backquote", "x=`cat <<{s}\n{b}\nEOF`{t}"),
+            ("dq-subst", ": \"$(cat <<{s}\n{b}\nEOF\n)\"{t}"),
+        )
+        _oracle_tails = (("alone", ""), ("job", "\nsleep 0 &"))
+        oracle_cases = []
+        for _ckey, _template in _oracle_contexts:
+            for _skey, _spec in _oracle_specs:
+                for _bkey, _body in _oracle_bodies:
+                    for _tkey, _tail in _oracle_tails:
+                        expected_allow = (
+                            _tkey == "alone"
+                            and ((_ckey == "top" and _skey in _oracle_lifted_specs
+                                  and _bkey == "amp")
+                                 # the commit-message form's exact close; its delimiter spec must
+                                 # hold no '$' (the shared close parser refuses one, fail closed)
+                                 or (_ckey == "dq-subst" and _skey in _oracle_lifted_specs
+                                     and _skey != "ansi" and _bkey in ("amp", "dq-amp"))))
+                        oracle_cases.append(
+                            ("/".join((_ckey, _skey, _bkey, _tkey)),
+                             _template.format(s=_spec, b=_body, t=_tail), expected_allow))
+        oracle_cases.append(("top/strip-tabs/amp/alone", "cat <<-'EOF'\n\tA & B\n\tEOF", True))
+        oracle_cases.append(
+            ("top/strip-tabs/amp/job", "cat <<-'EOF'\n\tA & B\n\tEOF\nsleep 0 &", False))
+        oracle_failures = []
+        for _okey, _oshape, _oexpect_allow in oracle_cases:
+            try:
+                _obash = subprocess.run(
+                    ["/usr/bin/env", "-i", "/usr/bin/bash", "-c", 'eval "$1"; echo "BANG=$!"',
+                     "probe", _oshape],
+                    cwd=str(oracle_dir), capture_output=True, text=True, timeout=30)
+                _obang = [line for line in _obash.stdout.split("\n") if line.startswith("BANG=")]
+                _obang_set = _obang[-1] != "BANG=" if _obang else None
+            except (OSError, subprocess.SubprocessError):
+                _obang_set = None
+            _overdict = _verdict(bg(_oshape, rib=False))
+            if _obang_set is None:
+                oracle_failures.append("{}: missing or malformed bash evidence".format(_okey))
+            elif _obang_set and _overdict != "deny":
+                oracle_failures.append(
+                    "{}: bash sets $! but registry scope reads {}".format(_okey, _overdict))
+            elif not _obang_set and _oexpect_allow and _overdict != "allow":
+                oracle_failures.append(
+                    "{}: bash does not background and the narrowing lifts this shape, but registry "
+                    "scope reads {}".format(_okey, _overdict))
+        check("trunc/oracle-heredoc-bash-differential",
+              (len(oracle_cases), oracle_failures), (506, []))
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a

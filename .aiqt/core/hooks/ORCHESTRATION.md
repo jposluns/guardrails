@@ -61,10 +61,12 @@ the doctor and the resume audit report and arm from it):
   Otherwise the note scan decides: a readable foreground command that detaches work (a bare
   `&`, or a `setsid` without `-w`, a `nohup` or a `disown` in command position) is allowed with its
   note; a command whose every bare `&` the detector lifts, because the shared lexer places each in a
-  quoted here-document body, a quoted string or a comment, is no detach, as with a registry, and gets
-  no note for that `&` or for a span the note scan cannot read with certainty (a `setsid`, `nohup` or
-  `disown` the note scan names still gets its note, while one it would reach only past such a span,
-  after a quoted here-document for instance, is not seen: a disclosed miss); the note scan
+  quoted here-document body whose end the lexer can prove is where bash ends it, a quoted string or
+  a comment, is no detach, as with a registry, and the lift suppresses only the notes its own shapes
+  cause: the note scan runs again reading those vouched here-document shapes as data, so a `setsid`,
+  `nohup` or `disown` in command position anywhere in the command (one past a quoted here-document
+  body included), a line continuation, an unclosed expansion, and every other cause outside those
+  shapes keeps its note, the one note being the true union of both readers; the note scan
   reads a `#` by the in-scope deny's comment rule, so a `#` whose reading depends on context (right
   after a `)`, as in `x=$(true)#`, or at a word start inside an open `${...}` or backquote
   substitution, as in `echo ${x:- #} & job`) draws the note rather than being read as a comment; a
