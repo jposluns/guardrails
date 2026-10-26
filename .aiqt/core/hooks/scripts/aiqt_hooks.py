@@ -481,12 +481,21 @@ _Segment = collections.namedtuple(
 # command expansion (a '$' or a backquote, unquoted or inside double quotes, as the reader reads it as opaque: a
 # '$' bash reads literally, as in 'x$', counts too), an ANSI-C quote $'...', a locale quote $"..." (with locale
 # False its '$' is such a '$'), or a brace expansion; a word read right after a ')' or inside an open '${...}'
-# continues one that carried a substitution, so none of it is. unquoted, True where such a part came from outside
-# double quotes other than through a brace: an unquoted parameter or command expansion (an unquoted '$' or
-# backquote, a '$' bash reads literally included, or a word read right after a ')' or inside an open '${...}'),
-# which bash may split into several words, or an ANSI-C or locale quote. A word whose every such part stands inside
-# double quotes, which bash does not split, has it False, as does one whose only such part is a brace.
+# continues one that carried a substitution, so none of it is. unquoted, True where such a part may expand to
+# several words, or came through an ANSI-C or locale quote: an unquoted parameter or command expansion (an unquoted
+# '$' or backquote, a '$' bash reads literally included, or a word read right after a ')' or inside an open
+# '${...}'), which bash may split, and, inside double quotes too, an expansion of the positional list or of an
+# array subscripted with @ (_DQ_LIST_EXPANSION_RE), which bash expands to one word per element. A word whose every
+# such part stands inside double quotes and expands to one word has it False, as does one whose only such part is a
+# brace; so a word reads as one word to bash only where no part of it can expand to several.
 _WordSpelling = collections.namedtuple("_WordSpelling", ("literal", "brace", "unquoted"))
+# An expansion that bash expands to one word per element even inside double quotes, as bash 5.3 printed for each
+# form: the positional list ("$@", "${@}", "${@:1}", "${@/x/y}"), an array subscripted with @ in any parameter
+# expansion form ("${A[@]}", "${A[@]:0}", "${A[@]#-}", "${A[@]@Q}", "${!A[@]}"), and the names with a prefix
+# ("${!pre@}"), anywhere in a '${...}' the reader skips, so one nested in an operator word ("${x:-$@}") counts too.
+# A length ('${#A[@]}', '${#@}'), a '*' subscript or prefix ("$*", "${A[*]}", "${!pre*}") and one element ("${A[0]}")
+# expand to one word, and so match nothing here.
+_DQ_LIST_EXPANSION_RE = re.compile(r"\$(?:@|\{(?:!?@|!?[A-Za-z_][A-Za-z0-9_]*\[@\]|![A-Za-z_][A-Za-z0-9_]*@))")
 
 
 class _SpelledWords(list):
@@ -518,6 +527,25 @@ class _WordSpellings:
 
     def __exit__(self, *exc_info):
         _WordSpellings.on = self.was_on
+        return False
+
+
+class _LexStops:
+    """A context in which every partial lex that stops before the end of the command records, in seen, one (start,
+    words) pair per pass that stops: start, the index of the token it could not read, where the text it read no word
+    of begins, and words, the words it read of the segment it was still inside (its argv), else None. The git
+    alias reading of an unparseable command reads them (_git_alias_unread); the segments a lex returns are the same
+    inside it as outside. It restores the previous record on exit, as _WordSpellings restores its setting."""
+
+    at = None
+
+    def __enter__(self):
+        self.was = _LexStops.at
+        self.seen = _LexStops.at = []
+        return self
+
+    def __exit__(self, *exc_info):
+        _LexStops.at = self.was
         return False
 
 # THE '#' COMMENT RULE, shared by the scanners that decide where a comment starts in what the guards read as
@@ -1223,9 +1251,9 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
     chars = []
     opaque = bool(glued) or (nest is not None and "${" in nest)
     # The decoded length where the first character not spelled as plain literal text begins (-1 while none has),
-    # whether an unquoted '{' may open a brace expansion, and whether such a part came from outside double quotes
-    # other than through a brace (_WordSpelling). Each is set only on a character that also makes the word opaque,
-    # so an ordinary character pays nothing for it.
+    # whether an unquoted '{' may open a brace expansion, and whether such a part may expand to several words or
+    # came through an ANSI-C or locale quote (_WordSpelling). Each is set only on a character that also makes the
+    # word opaque, so an ordinary character pays nothing for it.
     literal = 0 if opaque else -1
     brace = False
     unquoted = opaque
@@ -1334,12 +1362,17 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                     opaque = True
                     if literal < 0:
                         literal = sum(map(len, chars))
+                    if d == "$" and command[_sub_start + 1] == "{" and _DQ_LIST_EXPANSION_RE.search(
+                            command, _sub_start, i):
+                        unquoted = True  # a list expansion: one word per element, inside double quotes too
                     chars.append(command[_sub_start:i])
                     continue
                 if d in "$`":
                     opaque = True
                     if literal < 0:
                         literal = sum(map(len, chars))
+                    if d == "$" and i + 1 < n and command[i + 1] == "@":
+                        unquoted = True  # "$@": one word per positional parameter
                 chars.append(d)
                 i += 1
             all_digits = False
@@ -2518,6 +2551,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 segments.append(_Segment(words(), "", list(redirects),
                                          command[seg_start[0]:], opaque[0], list(argv_opaque),
                                          list(argv_leading_tilde)))
+            if _LexStops.at is not None:
+                _LexStops.at.append((i, segments[-1].argv if in_progress and argv else None))
             remember((False, in_progress))
             return segments, False, in_progress
         if isinstance(exc, _UncertainHashError) and exc.at is not None and exc.at == hash_at[0]:
@@ -4891,9 +4926,14 @@ def _git_sub_and_args(tokens):
 # -c value or a --config-env word whose key part (the text before its first '=', or the whole word when it has
 # none) holds a character not spelled as plain literal text (_WordSpelling.literal: a parameter or command
 # expansion, inside double quotes too, an ANSI-C or locale quote, or a brace expansion) (_git_alias_defined_at). A
-# word whose every expansion stands inside double quotes is one word to bash and keeps the plain reading: behind a
-# literal key ('-c core.pager="$P"'), as another option's value ('git -C "$D" log') or as the subcommand it
-# defines nothing. Disclosed over-refusal (the safe direction): an unquoted variable in a git option or subcommand
+# word reads as one word to bash only when no part of it can expand to several: a double-quoted expansion of the
+# positional list or of an array subscripted with @, in any parameter-expansion form ("$@", "${A[@]}", "${A[@]:0}",
+# _DQ_LIST_EXPANSION_RE), expands to one word per element ('set -- -c alias.l=log; git "$@" l' ran the alias on bash
+# 5.3), so the reader marks it as it marks an unquoted expansion. A word whose every expansion stands inside double
+# quotes and expands to one word keeps the plain reading: behind a literal key ('-c core.pager="$P"'), as another
+# option's value ('git -C "$D" log') or as the subcommand it defines nothing. The deny reason of each git guard
+# names a word read so as one the shell builds at run time, with the fix, and keeps the alias wording for a
+# definition its decoded words spell (_git_alias_built). Disclosed over-refusal (the safe direction): an unquoted variable in a git option or subcommand
 # position now reads as an alias ('git -C $D log', 'git $SUB', 'git -c core.pager=$P log'), as does one after any
 # other word the readers take for a git word ('grep -r git $D'), and a git command inside an unquoted backquote
 # substitution whose closing backquote the lexer reads into the subcommand word ('echo `git status`'); quoting
@@ -4901,7 +4941,8 @@ def _git_sub_and_args(tokens):
 # $'core.pager'=cat", '-c "${K:-core.pager}"=cat') reads as an alias, and so does a brace word in the region that
 # expands to no option ('git {log,status}'). protected_line, gate_weakening, git_discard and branch_root lex inside
 # _WordSpellings, and _git_alias_spelled reads the same rule from the de-quoted text of an unparseable command,
-# where a quoted '$' or backquote counts as an unquoted one. A reader given words with no record reads the decoded
+# where a quoted '$' or backquote counts as an unquoted one; a git region such a command leaves unread denies (A GIT
+# REGION THE LEXER DID NOT READ, above _git_region_open). A reader given words with no record reads the decoded
 # key alone, as before: git_explicit_binding, commit_identity and commit_msg_subst lex outside _WordSpellings, so on
 # a parsed command they read no spelling, while commit_msg_subst's unparseable fallback reads it through
 # _git_alias_recovered. Outside this reading: a word past the subcommand word; the git word itself, read by its
@@ -4909,8 +4950,8 @@ def _git_sub_and_args(tokens):
 # word, '{git,-c,alias.l=log} l', each passed -c alias.l=log); a word in the region that bash builds by filename
 # expansion (an unquoted '*', '?' or '[': '-[c]' passed -c where a file named -c existed) or by a brace sequence
 # expression ('-{c..c}' passed -c; it holds no comma), each printed so by bash 5.3; and a word whose every expansion
-# stands inside double quotes, which keeps the plain reading by decision, so one that names an option at run time
-# ('git -"$C" alias.l=log l' with C set to c) is not read as one.
+# stands inside double quotes and expands to one word, which keeps the plain reading by decision, so one that names
+# an option at run time ('git -"$C" alias.l=log l' with C set to c) is not read as one.
 _GIT_ALIAS_KEY_RE = re.compile(r"(?i)(?:alias|include|includeif)\.")
 _GIT_CONFIG_ENV_ASSIGN_RE = re.compile(r"GIT_CONFIG_(?:PARAMETERS|KEY_[0-9]+)\+?=")
 
@@ -4931,8 +4972,9 @@ def _git_alias_defined_at(tokens, i):
     or --config-env whose next word has a key part not spelled as plain literal text, or an attached
     --config-env=KEY=ENVVAR whose KEY is not, defines one too, whatever the key decodes to (HOW A WORD IS SPELLED,
     above). This reads the key part alone, so a value spelled so behind a literal key defines nothing here; the
-    region rule of _git_local_alias reads such a value as a definition where it carries an unquoted expansion or
-    came through an ANSI-C or locale quote, and as none where its every expansion stands inside double quotes."""
+    region rule of _git_local_alias reads such a value as a definition where it carries an expansion that may expand
+    to several words (an unquoted one, or a double-quoted list expansion such as "$@") or came through an ANSI-C or
+    locale quote, and as none where its every expansion stands inside double quotes and expands to one word."""
     token = tokens[i]
     spelling = getattr(tokens, "spelling", None)
     if token in ("-c", "--config-env"):
@@ -5157,15 +5199,24 @@ def _git_alias_spelled(command):
     words cannot tell a quoted or escaped '$', backquote or '{' from an unquoted one, a quoted one counts too, a
     disclosed over-refusal: here a double-quoted expansion in that region ('git -C "$D" log') defines one as well.
     Read only for a command whose lex failed; it only ever denies."""
+    return _git_alias_spelled_kind(command) is not None
+
+
+def _git_alias_spelled_kind(command):
+    """What _git_alias_spelled finds in the text of command: "alias" where a de-quoted word starts a definition its
+    decoded text spells, "built" where only how a word in a git command's region is spelled reads as one (a '$',
+    backquote or brace there), and None where neither does."""
     if not _GIT_WORD_RE.search(command):
-        return False
+        return None
     words = _GIT_ALIAS_TEXT_SPLIT_RE.split(_dequoted_text(command))
     if any(_git_alias_defined_at(words, j) for j in range(len(words))):
-        return True
-    return any(_git_local_alias(seg) for seg in _git_alias_spelled_segments(command))
+        return "alias"
+    if any(_git_local_alias(seg) for seg in _git_alias_spelled_segments(command)):
+        return "built"
+    return None
 
 
-def _git_alias_recovered(command):
+def _git_alias_recovered(command, unread=False):
     """Whether an unparseable command runs git under a git alias the command defines: its text names git while its
     git commands run under one defined outside their segment (_git_alias_named), its text defines one wherever the
     lexer stopped (_git_alias_spelled), or a segment that a partial lex recovers runs git under one
@@ -5174,16 +5225,182 @@ def _git_alias_recovered(command):
     (_WordSpellings), so a recovered word spelled through an expansion, a quote or a brace counts as on a parsed
     command (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE), where the de-quoted reading of _git_alias_spelled
     splits the text otherwise (a quoted blank or ';' moves its subcommand word: 'git -C "a b" $X' is read there as
-    git -C a with the subcommand b)."""
-    if _git_alias_named(command) or _git_alias_spelled(command):
-        return True
+    git -C a with the subcommand b). With unread True a git command whose option region the lexer did not read
+    counts too (_git_alias_unread), read from the stops of the same partial lex: gate_weakening and git_discard pass
+    it, protected_line and branch_root read _git_alias_unread from their own partial lex, and commit_msg_subst's
+    fallback does not read it. The result is False, or "alias"
+    where a definition the decoded words spell, or one outside the segment, is found, and "built" where only how a
+    word in a git command's region is spelled, or that region left unread, reads as one (_git_alias_built), which a
+    guard's deny reason tells apart."""
+    if _git_alias_named(command):
+        return "alias"
+    kind = _git_alias_spelled_kind(command)
+    if kind is not None:
+        return kind
     try:
-        with _WordSpellings():
+        with _WordSpellings(), _LexStops() as stops:
             recovered = [seg.argv for seg in _lex_command(command, partial=True)[0]]
     except ValueError:
-        return False
+        return "built" if unread and _git_alias_unread(command, [(0, None)]) else False
     outside = _git_alias_outside(command)
-    return any(_git_alias_segment(tokens, outside) for tokens in recovered)
+    for tokens in recovered:
+        if _git_alias_segment(tokens, outside):
+            return "built" if _git_alias_built(tokens, outside) else "alias"
+    return "built" if unread and _git_alias_unread(command, stops.seen) else False
+
+
+def _git_alias_built(tokens, outside):
+    """Whether a segment that runs git under a git alias (_git_alias_segment) does so only through how a word in its
+    git command's region is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE): read as plain words, with no
+    spelling record, it defines none and runs under none. A guard's deny then names the word the shell builds at run
+    time, not an alias the command never wrote."""
+    return not _git_alias_segment(list(tokens), outside)
+
+
+# How each git guard's deny reason states a git command whose region holds a word the shell builds at run time, or
+# that the lexer did not read (_git_alias_built, _git_alias_unread), in place of the wording for an alias definition,
+# which such a command may never have written, and the fix.
+_GIT_BUILT_WORD_REASON = (
+    "runs git with a word in its global options or subcommand position that the shell builds at run time (an "
+    "unquoted variable or command substitution such as -C $D, a \"$@\" or \"${A[@]}\" list, an ANSI-C or locale "
+    "quote, a brace expansion with a comma, or a -c or --config-env key spelled through an expansion), or with "
+    "options this guard could not read (a here-string, heredoc, process substitution or {fd} redirect before the "
+    "subcommand word of a command the shell lexer cannot parse); bash can expand such a word into several words, "
+    "such as -c and a git alias definition, so the subcommand git runs is unknown here")
+_GIT_BUILT_WORD_FIX = (
+    "Quote the expansion (\"$D\" rather than $D): on a command the shell lexer can parse, that keeps it one word and "
+    "restores the plain reading; on one it cannot parse (a here-string, an unquoted heredoc, a process substitution "
+    "or a {fd} redirect anywhere in it) a quoted expansion in those options counts too, so write that value "
+    "literally or run the git command on its own. Spell a -c or --config-env key literally, write a list's words "
+    "out, and put a here-string or heredoc after the subcommand word.")
+
+
+# A GIT REGION THE LEXER DID NOT READ. On a command the full parse cannot read, the partial lexer stops at the first
+# construct it refuses (a here-string, an unquoted heredoc, a process substitution, a '{fd}' redirect or an unbalanced
+# quote) and reads no word after it. Where it stops before a git command's option region ('git <<<x -C "a b" $X l')
+# or inside it, that region is unread, and the de-quoted reading of _git_alias_spelled cannot stand in for it: a
+# quoted blank or separator moves its subcommand word ('-C "a b" $X' reads there as -C a with the subcommand b, so $X
+# stands past it; with X set to '-c alias.l=log', bash 5.3 passed git -C 'a b' -c alias.l=log l). So an unread region
+# on a git segment counts as a definition, fail closed (_git_alias_unread): a git word among the words of the
+# segment the lexer was still inside whose walk (_git_local_alias) reads no subcommand word among them
+# (_git_region_open), and a git word in the text past where the lexer stopped whose region a quote-aware reading
+# from that word (_git_region_read, the word reader with its spelling record) cannot read to its subcommand word, or
+# reads with a word that defines one under HOW A WORD IS SPELLED. A literal region read in full keeps its decision.
+# Disclosed over-refusal (the safe direction): a word naming git that is the last word read before such a construct
+# ('git <<<x log', 'grep -c git <<<"$s"'), and a word naming git past it inside quoted or here-document text that the
+# reading from that word cannot read ('cat <<<x; echo "run git"'). Read only for a command whose lex failed.
+
+
+def _git_region_open(tokens):
+    """Whether a git word among the words a lex read before it stopped has a region that runs past them: its walk
+    (as _git_local_alias walks it, a git word inside an earlier walk's options skipped) reads no subcommand word."""
+    start = _command_word_index(tokens)
+    n = len(tokens)
+    end = 0
+    for k in range(start, n):
+        if k < end or tokens[k].startswith("-") or not _GIT_WORD_RE.search(tokens[k]):
+            continue
+        i = k + 1
+        while i < n and tokens[i].startswith("-"):
+            i += 2 if "=" not in tokens[i] and tokens[i] in _GIT_ARG_OPTS else 1
+        if i >= n:
+            return True
+        end = i
+    return False
+
+
+def _git_region_target(command, i, n):
+    """The index past the target word of a redirection whose operator ends at i, read as the lexer reads it, or None
+    where the lexer would refuse it (no target word, or one it cannot read)."""
+    while i < n and command[i] in " \t":
+        i += 1
+    if i >= n or command[i] == "\n" or command[i] in _METACHARS or command[i] == "#":
+        return None
+    try:
+        _text, _opaque, started, _digits, _tilde, j = _read_word(command, i, n)
+    except ValueError:
+        return None
+    return j if started else None
+
+
+def _git_region_read(command, at):
+    """The words of the git command whose git word starts at index at, read from that word through its subcommand
+    word (or to the end of its segment) as the lexer reads them, blanks, redirections and their targets aside, with
+    their spelling record: (words, end), words a _SpelledWords and end the index past the last one; None where a
+    construct the lexer refuses (a here-string, a heredoc, a process substitution, a '{fd}' redirect, a word it cannot
+    read) stands before the subcommand word, so the region is unread."""
+    n = len(command)
+    words = []
+    spelling = []
+    value = False  # the next word is the value of the option before it
+    i = at
+    while i < n:
+        c = command[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c == "\n":
+            break
+        if c in _METACHARS:
+            op, kind, oplen = _match_operator(command, i, n)
+            if kind == "sep":
+                break
+            i = None if kind == "cannot" else _git_region_target(command, i + oplen, n)
+            if i is None:
+                return None
+            continue
+        holder = [None]
+        try:
+            text, _opaque, started, all_digits, _tilde, j = _read_word(command, i, n, spelling=holder)
+        except ValueError:
+            return None
+        if not started:
+            if j == i:
+                break  # a '#' that starts a word: a comment to the end of the line
+            i = j
+            continue
+        if j < n and command[j] in "<>" and (all_digits or _FD_VAR_RE.match(text)):
+            op, kind, oplen = _match_operator(command, j, n)
+            i = None if kind == "cannot" or not all_digits else _git_region_target(command, j + oplen, n)
+            if i is None:
+                return None
+            continue
+        words.append(text)
+        spelling.append(holder[0])
+        i = j
+        if len(words) == 1:
+            continue
+        if value:
+            value = False
+        elif text.startswith("-"):
+            value = "=" not in text and text in _GIT_ARG_OPTS
+        else:
+            break
+    return _SpelledWords(words, spelling), i
+
+
+def _git_alias_unread(command, stops):
+    """Whether an unparseable command holds a git command whose option region the lexer did not read (A GIT REGION
+    THE LEXER DID NOT READ, above), given stops, the (start, words) pairs its partial lex recorded (_LexStops): a
+    git word of the words read in a segment the lexer stopped inside whose region runs past them, or a git word in
+    the text from the earliest stop on whose region _git_region_read cannot read, or reads with a word that defines
+    a git alias under HOW A WORD IS SPELLED. Each git word inside a region already read is skipped, so the text is
+    read about once."""
+    if any(words is not None and _git_region_open(words) for _start, words in stops):
+        return True
+    if not stops:
+        return False
+    end = min(start for start, _words in stops)
+    for match in _GIT_WORD_RE.finditer(command, end):
+        if match.start() < end:
+            continue
+        region = _git_region_read(command, match.start())
+        if region is None:
+            return True
+        words, end = region
+        if _git_local_alias(words):
+            return True
+    return False
 
 
 # The option-parsing boundary tokens: after either, every remaining token is an operand (a pathspec or
@@ -6652,8 +6869,9 @@ def _git_discard_fallback(command):
     text names git and defines one anywhere, past where the lexer stopped included, or a git segment a partial lex
     recovers defines one or runs under one the session environment carries) denies first, as on a parsed command,
     since the alias may name no work-losing verb this scan can see."""
-    if _git_alias_recovered(command):
-        return _git_discard_alias_deny()
+    kind = _git_alias_recovered(command, unread=True)
+    if kind:
+        return _git_discard_alias_deny(kind == "built")
     if not (_raw_has_lossy_git(command) or _raw_has_lossy_git(_dequoted_text(command))):
         return _allow()  # no git + work-losing verb in the raw text or its de-quoted copy: the true boundary
     return _deny(
@@ -6668,10 +6886,18 @@ def _git_discard_fallback(command):
         "re-issue it as a plain, parseable git command, or commit or stash first.")
 
 
-def _git_discard_alias_deny():
+def _git_discard_alias_deny(built=False):
     """git_discard's deny of a git command that runs under a git alias the command defines (_git_local_alias,
     _git_alias_inherited, _git_alias_named), on a parsed command and on an unparseable one (_git_discard_fallback)
-    alike."""
+    alike. With built True the git command reads so only through a word built at run time, or a region the lexer
+    did not read (_git_alias_built), and the reason says that, with the fix (_GIT_BUILT_WORD_REASON)."""
+    if built:
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command " + _GIT_BUILT_WORD_REASON + ", and it may "
+            "be a work-losing verb this guard cannot resolve or snapshot; denied rather than run on an unknown "
+            "discard. " + _GIT_BUILT_WORD_FIX + " Or commit or stash your work first. " + _DISCARD_ALTS,
+            "AIQT guardrail: denied a git command whose options hold a word built at run time, which may discard "
+            "work (rule prsunc); quote the expansion or spell the option literally.")
     return _deny(
         "AIQT rule prsunc (preserve-uncommitted-work): this command defines a git alias for itself, or runs git "
         "under one (a -c or --config-env alias.<name>, include.path or includeIf key, a GIT_CONFIG_PARAMETERS or "
@@ -8738,8 +8964,8 @@ def git_discard(data):
     exactly what FOO=<the same value> gets); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
     reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
-    reserved for the TRUE boundary (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
-    or no recognized lossy verb). A wrapper is in scope while the raw scan, the continuation-joined text or
+    reserved for the TRUE boundary (a non-Bash or absent tool, a non-git command, or no recognized lossy verb); a
+    missing or non-string command DENIES fail-closed, as in the other git guards. A wrapper is in scope while the raw scan, the continuation-joined text or
     the DE-QUOTED copy (_dequoted_text: continuations joined, a '$' before a quote, quote characters and
     backslashes removed) sees a contiguous git verb keyword. The de-quoted copy is read on a
     certain lex too, so a wrapper that ALSO fragments the COMMAND WORD 'git' itself or the verb with quotes or
@@ -8778,7 +9004,7 @@ def git_discard(data):
     runs inside _WordSpellings, so in the region after a git word through its subcommand word a word carrying an
     unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma, or a -c or
     --config-env key part spelled through any expansion, quote or brace defines one, parsed or unparseable
-    (_git_alias_recovered); a word whose every expansion stands inside double quotes keeps the plain reading, so a
+    (_git_alias_recovered); a word whose every expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading, so a
     value so spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a git
     option or subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it
     restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote.
@@ -8818,7 +9044,12 @@ def git_discard(data):
     tool_input = data.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
-        return _allow()  # boundary: unreadable/malformed command container
+        # A missing or non-string command cannot be read as a discard or not, so it fails closed, as the other
+        # git guards' unreadable-input checks do.
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): the Bash payload carried no readable command string, so "
+            "the discard check could not run; failing closed.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule prsunc, fail-closed).")
     try:
         # Segments with no word and no redirect are skipped unbuilt: the lossy scan below passes over a
         # segment with no command word, and _pristine_single_bare_git returns before reading the segments
@@ -8901,8 +9132,11 @@ def git_discard(data):
     # configuration variable or that runs under an alias the hook's environment carries (_git_alias_named,
     # _git_alias_segment), wherever its git word stands.
     outside = _git_alias_outside(command)
-    if _git_alias_named(command) or any(_git_alias_segment(tokens, outside) for tokens, _sep in segments):
+    if _git_alias_named(command):
         return _git_discard_alias_deny()
+    for tokens, _sep in segments:
+        if _git_alias_segment(tokens, outside):
+            return _git_discard_alias_deny(_git_alias_built(tokens, outside))
     if not lossy and not raw_lossy:
         return _allow()  # boundary: no git + work-losing verb anywhere
 
@@ -9882,7 +10116,8 @@ def _commit_command_syntax(command):
         # comment reading the lexer could not judge under both readings, the raw commit probe also reads the
         # text with its backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and
         # a command whose quoting that removal does not decode (_hash_doubt_opaque) is an apparent commit.
-        partial, _complete, _in_progress = _lex_command(command, partial=True)
+        with _LexStops() as stops:
+            partial, _complete, _in_progress = _lex_command(command, partial=True)
         doubt = isinstance(exc, _UncertainHashError)
         scan = _hash_doubt_scan(command) if doubt else command
         apparent = bool(_RAW_COMMIT_RE.search(scan)) or (doubt and _hash_doubt_opaque(command))
@@ -9890,8 +10125,10 @@ def _commit_command_syntax(command):
         # Every git command of a command whose text names a git configuration variable, or that runs under an
         # alias the hook's environment carries, is apparent, the ones the partial lex does not recover included
         # (_git_alias_named), and so is a command whose text defines a git alias wherever the lexer stopped
-        # (_git_alias_spelled).
-        apparent = apparent or _git_alias_named(command) or _git_alias_spelled(command)
+        # (_git_alias_spelled), and so is a git command whose option region the lexer did not read
+        # (_git_alias_unread, from the stops of the partial lex above).
+        apparent = (apparent or _git_alias_named(command) or _git_alias_spelled(command)
+                    or _git_alias_unread(command, stops.seen))
         named = _git_alias_outside(command)
         apparent = apparent or any(_commit_apparent_segment(seg, named) for seg in partial)
         status = "unverifiable" if apparent else "outside"
@@ -10970,7 +11207,7 @@ def protected_line(data):
     parameter or command expansion or an ANSI-C or locale quote, a brace word with a
     comma, or a -c or --config-env key part spelled through any expansion, quote or brace
     defines one, on an unparseable command too (_git_alias_spelled). A word whose every
-    expansion stands inside double quotes keeps the plain reading, so a value so spelled
+    expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading, so a value so spelled
     behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in
     a git option or subcommand position, or after any word naming git, now denies
     ('git -C $D log'; quoting it restores the plain reading), and so does a key literal
@@ -11023,7 +11260,16 @@ def protected_line(data):
     # definition anywhere in the text, past where the lexer stopped included, as an apparent commit too
     # (_git_alias_spelled), which denies below as an unverifiable commit.
     outside = _git_alias_outside(command)
-    if _git_alias_named(command) or any(_git_alias_segment(seg.argv, outside) for seg in syntax.records):
+    aliased = [seg.argv for seg in syntax.records if _git_alias_segment(seg.argv, outside)]
+    if aliased and not _git_alias_named(command) and all(_git_alias_built(tokens, outside) for tokens in aliased):
+        return _deny(
+            "AIQT rules prtbrn (protected-branch-integrity) and artbr1 (branch-and-merge-on-green): this command "
+            + _GIT_BUILT_WORD_REASON + ", and it may be a commit on the protected line or a push that rewrites it; "
+            "denied fail-safe. " + _GIT_BUILT_WORD_FIX + " " + _PROTECTED_ALTS,
+            "AIQT guardrail: denied a git command whose options hold a word built at run time, which may commit to "
+            "or force-push the protected branch (rules prtbrn, artbr1); quote the expansion or spell the option "
+            "literally.")
+    if _git_alias_named(command) or aliased:
         return _deny(
             "AIQT rules prtbrn (protected-branch-integrity) and artbr1 (branch-and-merge-on-green): this command "
             "defines a git alias for itself, or runs git under one (a -c or --config-env alias.<name>, include.path "
@@ -11569,6 +11815,14 @@ _BRNROT_UNCLASSIFIED = (
     "names; the CI branch-root gate remains the authoritative backstop.",
     "AIQT guardrail: denied a branch-creation form whose start point is ambiguous "
     "(rule brnrot); re-issue with an explicit start point.")
+# branch_root's deny of a git command that reads as running under a git alias only through a word built at run time,
+# or a region the lexer did not read (_git_alias_built, _git_alias_unread), in place of the alias wording above.
+_BRNROT_BUILT = (
+    "AIQT rule brnrot (branch-rooted-on-live-main): this command " + _GIT_BUILT_WORD_REASON + ", and it may create "
+    "a branch from an unverified or orphaned start, so its ancestry cannot be checked here and it is denied "
+    "fail-safe. " + _GIT_BUILT_WORD_FIX + " The CI branch-root gate remains the authoritative backstop.",
+    "AIQT guardrail: denied a git command whose options hold a word built at run time, which may create a branch "
+    "from an unchecked start (rule brnrot); quote the expansion or spell the option literally.")
 
 
 def branch_root(data):
@@ -11603,7 +11857,7 @@ def branch_root(data):
     inside _WordSpellings, so in the region after a git word through its subcommand word a word carrying an
     unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma, or a -c or
     --config-env key part spelled through any expansion, quote or brace defines one, on an unparseable command
-    too (_git_alias_spelled); a word whose every expansion stands inside double quotes keeps the plain reading,
+    too (_git_alias_spelled); a word whose every expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading,
     so a value so spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a
     git option or subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it
     restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote."""
@@ -11624,6 +11878,7 @@ def branch_root(data):
             "command string, so branch creation could not be checked; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
     named = _git_alias_named(command)
+    built = False  # a git command that reads as under an alias only through a word built at run time (_BRNROT_BUILT)
     reads = _SubstHeredocs.reads
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
@@ -11648,20 +11903,27 @@ def branch_root(data):
                 "(rule brnrot, fail-closed).")
         # A git alias the text defines past where the lexer stopped is in no segment the partial lex recovers
         # (_git_alias_spelled), so every git command of the command counts as running under it, as under a text
-        # naming a git configuration variable: a form this guard cannot classify.
-        named = named or _git_alias_spelled(command)
+        # naming a git configuration variable: a form this guard cannot classify. One the text reads only through
+        # how a word in a git command's region is spelled is a word built at run time (_BRNROT_BUILT).
+        spelled = _git_alias_spelled_kind(command)
+        named = named or spelled == "alias"
+        built = spelled == "built"
         # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
         # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
-        # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
+        # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed). A git
+        # command whose option region the lexer did not read counts as built at run time (_git_alias_unread).
         try:
-            with _WordSpellings():
+            with _WordSpellings(), _LexStops() as stops:
                 segments = [(seg.argv, seg.sep_after)
                             for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
         except ValueError:
             if named:
                 return _deny(*_BRNROT_UNCLASSIFIED)  # a git alias the text may define, read from the text alone
+            if built or _git_alias_unread(command, [(0, None)]):
+                return _deny(*_BRNROT_BUILT)
             return _allow()  # even partial recovery failed: open grammar, best-effort
+        built = built or _git_alias_unread(command, stops.seen)
     if _SubstHeredocs.reads != reads:
         # A lex read a here-document body that main's lexer reads otherwise, and main's reading fails: the
         # segments main's partial lex recovers, past the body, are judged too.
@@ -11676,8 +11938,8 @@ def branch_root(data):
     # pending_deny so a confirmed orphan elsewhere wins first. Every git command of a command whose text names a
     # git configuration variable, or that runs under an alias the hook's environment carries, runs under a git
     # alias (_git_alias_named), a subcommand this guard cannot read, so that command holds a form this guard cannot
-    # classify from the start.
-    pending_deny = _BRNROT_UNCLASSIFIED if named else None
+    # classify from the start; one that reads so only through a word built at run time holds one too (_BRNROT_BUILT).
+    pending_deny = _BRNROT_UNCLASSIFIED if named else (_BRNROT_BUILT if built else None)
     pending_note = None
     saw_dir_change = False
     outside = _git_alias_outside(command)
@@ -11687,7 +11949,7 @@ def branch_root(data):
         # defines one for itself (_git_alias_segment), runs a subcommand this guard cannot read, as one whose
         # command word is git does below.
         if word != "git" and pending_deny is None and _git_alias_segment(tokens, outside):
-            pending_deny = _BRNROT_UNCLASSIFIED
+            pending_deny = _BRNROT_BUILT if _git_alias_built(tokens, outside) else _BRNROT_UNCLASSIFIED
         if word in _CD_BUILTINS or word == "popd":
             # a cd/pushd/popd BEFORE the git segment moves the target out of the session cwd; popd lands on
             # an unknowable stack-top directory, so it too routes the following creation to a fail-safe deny.
@@ -11700,12 +11962,14 @@ def branch_root(data):
         sub, args = _git_sub_and_args(tokens)
         # A git alias the segment runs under or defines for itself (_git_alias_segment) runs a subcommand this
         # guard cannot read, possibly a branch creation, so it is a form this guard cannot classify.
-        start = _ASK_START if _git_alias_segment(tokens, outside) else _branch_creation_start(sub, args)
+        aliased = _git_alias_segment(tokens, outside)
+        start = _ASK_START if aliased else _branch_creation_start(sub, args)
         if start is None:
             continue
         if start is _ASK_START:
             if pending_deny is None:
-                pending_deny = _BRNROT_UNCLASSIFIED
+                pending_deny = (_BRNROT_BUILT if aliased and _git_alias_built(tokens, outside)
+                                else _BRNROT_UNCLASSIFIED)
             continue
         cwd0 = data.get("cwd")
         cwd0 = cwd0 if isinstance(cwd0, str) and cwd0 else None
@@ -12646,9 +12910,18 @@ def _gate_weakening_fallback(command):
     return _allow()
 
 
-def _gate_alias_deny():
+def _gate_alias_deny(built=False):
     """gate_weakening's deny of a git command that runs under a git alias the command defines (_git_local_alias,
-    _git_alias_inherited, _git_alias_named), on a parsed command and on an unparseable one alike."""
+    _git_alias_inherited, _git_alias_named), on a parsed command and on an unparseable one alike. With built True the
+    git command reads so only through a word built at run time, or a region the lexer did not read
+    (_git_alias_built), and the reason says that, with the fix (_GIT_BUILT_WORD_REASON)."""
+    if built:
+        return _deny(
+            "AIQT rule gatdis (gate-discipline): this command " + _GIT_BUILT_WORD_REASON + ", so a bypass of the "
+            "verification hooks (--no-verify, or -n on commit or am) cannot be ruled out. " + _GIT_BUILT_WORD_FIX +
+            " " + _GATE_ALTS,
+            "AIQT guardrail: denied a git command whose options hold a word built at run time, which may bypass "
+            "verification hooks (rule gatdis); quote the expansion or spell the option literally.")
     return _deny(
         "AIQT rule gatdis (gate-discipline): this git command defines a git alias for itself, or runs under one (a "
         "-c or --config-env alias.<name>, include.path or includeIf key, a GIT_CONFIG_PARAMETERS or "
@@ -12762,7 +13035,7 @@ def gate_weakening(data):
     the lex here runs inside _WordSpellings, so in the region after a git word through its subcommand word a word
     carrying an unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma,
     or a -c or --config-env key part spelled through any expansion, quote or brace defines one, parsed or
-    unparseable; a word whose every expansion stands inside double quotes keeps the plain reading, so a value so
+    unparseable; a word whose every expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading, so a value so
     spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a git option or
     subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it restores the
     plain reading), and so does a key literal in effect but spelled through an expansion or quote.
@@ -12807,8 +13080,9 @@ def gate_weakening(data):
         # (_git_alias_recovered: a text naming a git configuration variable and git, a text naming git that defines
         # one past where the lexer stopped, or a recovered git segment): its subcommand and options cannot be read,
         # and the raw probes below may see no bypass spelling in an alias value they cannot reach.
-        if _git_alias_recovered(command):
-            return _gate_alias_deny()
+        kind = _git_alias_recovered(command, unread=True)
+        if kind:
+            return _gate_alias_deny(kind == "built")
         if not isinstance(exc, _UncertainHashError):
             return _gate_weakening_fallback(command)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
@@ -12882,7 +13156,7 @@ def gate_weakening(data):
         sep_after = seg.sep_after
         git_word = _command_word(tokens) == "git"
         if _git_alias_segment(tokens, outside):
-            return _gate_alias_deny()
+            return _gate_alias_deny(_git_alias_built(tokens, outside))
         if git_word and not _has_info_flag(tokens):
             sub, args = _git_sub_and_args(tokens)
             if sub in _NOVERIFY_VERBS:
