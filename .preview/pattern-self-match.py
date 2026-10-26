@@ -35,12 +35,20 @@ WHAT IT DOES
     an optional signal: -9, -15, -1, -2 or -3, or -KILL, -TERM, -HUP, -INT or -QUIT with or without a SIG prefix,
     or one of those values (without the dash) after `-s` (kill only; pkill reads -s as a session) or as
     `--signal X` or `--signal=X` (pkill and the kill that xargs runs only; bash's builtin kill rejects that spelling
-    and sends nothing). Signal 0 and every other option take the note. Options are separate words.
-      (a) pkill OPTS LITERAL [R]: OPTS hold -f or --full, and optionally -e or --echo, one SIG, and `--` just
-          before LITERAL; exactly one operand;
-      (b) for V in $(pgrep F LITERAL); do BODY; done, where F is -f or --full, optionally then `--`, and BODY is
-          simple commands separated by `;` or newlines: exactly one `kill [SIG] "$V" [R]` or `kill [SIG] $V [R]`
-          naming the loop's own V, and otherwise only echo (an argument may be "$V"), sleep N, `:` or true;
+    and sends nothing). Signal 0 takes the note. OWN is `-u` or `--euid` and then a LITERAL that is the hook's own
+    effective user id in decimal or that uid's account name, or `-U` or `--uid` and then a LITERAL that is the
+    hook's own real user id in decimal or that uid's account name, so pgrep or pkill selects only processes of the
+    user the hook runs as (RESIDUAL COVERAGE, the user). A value of digits alone is compared as a uid only; a name
+    is compared with the account name the user database gives the hook's own uid, and the value itself is never
+    looked up. Each such option in a shape must be an OWN, since procps keeps the last when one is repeated
+    (`pgrep -u 0 -u N -f` matched the shell running it, whose uid is N, and `pgrep -u N -u 0 -f` did not). Every
+    other option takes the note. Options are separate words.
+      (a) pkill OPTS LITERAL [R]: OPTS hold -f or --full, and optionally -e or --echo, one SIG, any OWN, and `--`
+          just before LITERAL; exactly one operand;
+      (b) for V in $(pgrep F LITERAL); do BODY; done, where F is -f or --full and any OWN, in any order, optionally
+          then `--`, and BODY is simple commands separated by `;` or newlines: exactly one `kill [SIG] "$V" [R]` or
+          `kill [SIG] $V [R]` naming the loop's own V, and otherwise only echo (an argument may be "$V"), sleep N,
+          `:` or true;
       (c) kill [SIG] $(pgrep F LITERAL) [R], the substitution unquoted and the only operand, or the two-stage
           pipeline pgrep F LITERAL | xargs [-r | --no-run-if-empty] kill [SIG] [R];
       (d) while pgrep G LITERAL [R]; do BODY; done, or until ! pgrep G LITERAL [R]; do BODY; done, where G is F
@@ -85,7 +93,9 @@ WHAT IT DOES
 
     NOTE (allow, with a systemMessage) when the command is not denied, names a process matcher (pgrep, pkill,
     killall or pidof, or grep in a command that also names ps), and that matcher's pattern (the first later word
-    that does not start with `-`, or the word just after `--`) is text the command itself holds. The words are read
+    that does not start with `-`, or the word just after `--`; for pgrep and pkill, also the word found that way
+    after passing over the value of each option that takes one, such as `-u NAME` or `-P PID`, so that
+    `pkill -u "$USER" -f x/` is noted) is text the command itself holds. The words are read
     with Python's shlex; a word that holds a blank and names a matcher is read again, up to four layers deep
     (`bash -c '...'`). A pattern holding `$` or a backtick is built when the command runs and is passed over
     silently. A command that names a matcher and that shlex cannot read, or that is over 64 KiB, gets a note that
@@ -151,7 +161,9 @@ THREAT MODEL
     payload carrying agent_id (a subagent's call) is checked like any other. Work is bounded: a
     command over 64 KiB of UTF-8 is not read; the tokenizer and the grammar read each token a bounded number of
     times, the note scan reads each word at most four times (once per layer), and each distinct pattern it checks
-    is searched for once in the command. The hook never runs the command and starts no process.
+    is searched for once in the command. The user database is read only for an OWN candidate that is a name, at
+    most once per process for each of the hook's own effective and real uids (RESIDUAL COVERAGE, the user). The
+    hook never runs the command and starts no process.
 
 RESIDUAL COVERAGE.
     Each deny rests on premises observed on one host (procps-ng 4.0.4 and one harness's Bash tool), not proved for
@@ -174,6 +186,15 @@ RESIDUAL COVERAGE.
       - shell state set before the command (by a shell snapshot, say): an IFS without a newline changes how
         $(pgrep ...) splits, and a loop variable made readonly, a nameref or otherwise given an attribute changes
         the loop;
+      - the user: a deny that rests on an OWN assumes that the shell running the command has the hook's own
+        effective and real uids (the harness starts both: on one host, `pgrep -c -u N -f` through the Bash tool
+        matched its shell for the uid N a python3 started by that tool reported, and for N's account name, but the
+        hook's own process was not observed), that procps reads a value of digits alone as a uid, and that procps
+        resolves the account name to the uid the user database gives the hook. The name form costs one
+        pwd.getpwuid call on the hook's own uid per process, made only when a selector value is a name: a user
+        database that answers slowly (a directory service) delays the hook that long, and nothing here bounds it;
+        a lookup that fails leaves the name unproved, so the command takes the note. The effective and real uid
+        were equal on that host, so the -u (effective) and -U (real) split was checked only with stand-in uids;
       - /dev/null opens for writing (a redirection that fails stops its command), and a benign command finishes
         (an ls on a hung network mount, or an echo into a full pipe, would keep a later shape from running);
       - a trap on the shell: the deny says the command selects or signals its own shell, not that the shell dies.
@@ -181,7 +202,10 @@ RESIDUAL COVERAGE.
     groups, subshells), `&&` and `||` lists other than one trailing `|| CMD` or `&& CMD` as above, `ps | grep`
     pipelines, prefix words such as `sudo` or `exec`, name mode (pkill without -f), killall and pidof, other loops,
     a pattern outside LITERAL (one holding a blank, as in `pkill -f 'python worker.py'`),
-    options outside the lists above (an option cluster such as -ef too), printf, cd, an echo or other benign
+    options outside the lists above (an option cluster such as -ef too), a -u, --euid, -U or --uid value that is
+    not an OWN (another user, a list such as `N,0`, a zero-padded uid, `$USER` or another expansion, and the
+    spellings `--euid=N` and `-uN`), the other selection options (-g, -G, -P, -s, -t and the rest, `-g 0` and
+    `-s 0` included), printf, cd, an echo or other benign
     command with an argument starting with `-`, a loop variable outside V's rule, sleeps over the 60-second bound,
     redirections outside R, an R redirection in a shape anywhere but after the last word of its signalling command
     or of the pgrep of (d) (so `kill $(pgrep -f x/ 2>/dev/null)` takes the note), and nested shell strings. A
@@ -199,7 +223,9 @@ Self-test: python3 -I -S -B pattern-self-match.py --self-test
     The reference hook the vendored block was copied from is looked up in the directory named by the G_REF_DIR
     environment variable, else in this file's own directory; when it is absent its byte-identity check reports
     SKIPPED, never a pass. The check that bash accepts every deny vector reports SKIPPED when no trusted, root-owned
-    /usr/bin/bash or /bin/bash is found.
+    /usr/bin/bash or /bin/bash is found. The check that the account name of the uid running the self-test is an
+    OWN reports SKIPPED when the user database gives that uid no account name that is a LITERAL and not digits
+    alone; the other OWN checks use the running uids and a stand-in user database.
 """
 
 import sys
@@ -222,6 +248,11 @@ import re
 import select
 import shlex
 import time
+
+try:
+    import pwd
+except ImportError:  # no user database here: an account name is never OWN (_account)
+    pwd = None
 
 HOOK_ID = "pattern-self-match"
 
@@ -388,6 +419,10 @@ _FOR_BODY = frozenset(("echo", "sleep", ":", "true"))
 _WAIT_BODY = frozenset(("echo", "sleep", ":", "true", "date"))
 _FULL = frozenset(("-f", "--full"))
 _LISTING = frozenset(("-a", "-l", "-c"))
+# The options whose value may be an OWN (_own): -u and --euid select by effective user id, -U and --uid by real one.
+_SELECTORS = {"-u": "euid", "--euid": "euid", "-U": "uid", "--uid": "uid"}
+# uid -> the account name the user database gives it, read at most once per process (_account).
+_ACCOUNTS = {}
 _RESERVED = frozenset(("for", "in", "do", "done", "while", "until", "if", "then", "else", "elif", "fi", "case",
                        "esac", "select", "function", "time", "coproc"))
 # The operators of a trailing `|| CMD` or `&& CMD`.
@@ -397,6 +432,11 @@ _DQ_SPECIAL = "$`\\"
 _SEPS = (("op", ";", None), ("op", "\n", None))
 # The note scan: the matcher words, the operator characters that end a simple command, and the layers read.
 _MATCHERS = frozenset(("pgrep", "pkill", "killall", "pidof"))
+# The pgrep and pkill options that read the next word as their value (pgrep --help, procps-ng 4.0.4; an option only
+# pkill takes was not checked): the note scan also reads a pattern past each such value (_pattern).
+_VALUED = frozenset(("-d", "--delimiter", "-g", "--pgroup", "-G", "--group", "-O", "--older", "-P", "--parent",
+                     "-s", "--session", "--signal", "-t", "--terminal", "-u", "--euid", "-U", "--uid", "-F",
+                     "--pidfile", "-r", "--runstates", "--cgroup", "--ns", "--nslist"))
 _PUNCT = frozenset("();<>|&")
 _NOTE_DEPTH = 4
 _MATCHER_RE = re.compile(r"\b(?:pgrep|pkill|killall|pidof)\b")
@@ -619,19 +659,52 @@ def _signal(run, k, who):
     return 0
 
 
+def _account(uid):
+    """The account name the user database gives uid, read at most once per process (_ACCOUNTS); "" when it cannot
+    be read."""
+    if uid not in _ACCOUNTS:
+        try:
+            _ACCOUNTS[uid] = pwd.getpwuid(uid).pw_name if pwd is not None else ""
+        except (KeyError, OSError):
+            _ACCOUNTS[uid] = ""
+    return _ACCOUNTS[uid]
+
+
+def _own(run, k):
+    """How many tokens at run[k] spell one OWN: -u or --euid, or -U or --uid, then a LITERAL that is the hook's own
+    effective uid (-u, --euid) or real uid (-U, --uid) in decimal, or that uid's account name (_account); 0 when
+    they do not. A value of digits alone is compared as a uid only, so the user database is read only for a name,
+    and only for the hook's own uid: the value itself is never looked up."""
+    t = run[k]
+    kind = _SELECTORS.get(t[1]) if _w(t) else None
+    if kind is None or k + 1 >= len(run) or not _literal(run[k + 1]):
+        return 0
+    uid = os.geteuid() if kind == "euid" else os.getuid()
+    value = run[k + 1][1]
+    if _DIGITS_RE.match(value):
+        return 2 if value == str(uid) else 0
+    return 2 if value == _account(uid) else 0
+
+
 def _pgrep(run, extra):
     """The LITERAL of the stage `pgrep OPTS LITERAL`, whose OPTS are separate words: -f or --full (required), the
-    words in extra, and `--` just before LITERAL; else None."""
-    if len(run) < 3 or not _w(run[0], "pgrep") or not _literal(run[-1]):
+    words in extra, any OWN (_own), and `--` just before LITERAL; else None."""
+    last = len(run) - 1
+    if last < 2 or not _w(run[0], "pgrep") or not _literal(run[last]):
         return None
-    full = False
-    for k in range(1, len(run) - 1):
+    full, k = False, 1
+    while k < last:
         t = run[k]
         if _w(t) and t[1] in _FULL:
-            full = True
-        elif not (_w(t) and t[1] in extra) and not (_w(t, "--") and k == len(run) - 2):
-            return None
-    return run[-1][1] if full else None
+            full, k = True, k + 1
+        elif (_w(t) and t[1] in extra) or (_w(t, "--") and k == last - 1):
+            k += 1
+        else:
+            m = _own(run[:last], k)  # run[:last]: a value is never the LITERAL
+            if not m:
+                return None
+            k += m
+    return run[last][1] if full else None
 
 
 def _pkill(run):
@@ -649,10 +722,13 @@ def _pkill(run):
         elif _w(t, "--") and k == last - 1:
             k += 1
         else:
-            m = 0 if sig else _signal(run[:last], k, "pkill")
+            m = _own(run[:last], k)
             if not m:
-                return None
-            sig, k = True, k + m
+                m = 0 if sig else _signal(run[:last], k, "pkill")
+                if not m:
+                    return None
+                sig = True
+            k += m
     return run[last][1] if full else None
 
 
@@ -853,10 +929,14 @@ def _words(text):
     return list(lexer)
 
 
-def _pattern(words, k):
+def _pattern(words, k, valued=None):
     """The pattern operand after the matcher words[k]: the first later word that does not start with `-`, or the
-    word just after `--`; None at an operator word or the end."""
-    for j in range(k + 1, len(words)):
+    word just after `--`; None at an operator word or the end. Given valued (options that take a value), a word in
+    it also passes over the next word unless that word is an operator or names a matcher, or over an unquoted
+    `$(...)` (which shlex splits into words) through its closing `)`; a word starting with `-` that names a matcher,
+    or one inside such a `$(...)`, ends the reading (None), so that reading never reads past the next matcher."""
+    j = k + 1
+    while j < len(words):
         w = words[j]
         if w and all(ch in _PUNCT for ch in w):
             return None
@@ -865,6 +945,21 @@ def _pattern(words, k):
             return nxt if nxt and not all(ch in _PUNCT for ch in nxt) else None
         if not w.startswith("-"):
             return w
+        if valued is not None:
+            if w[w.rfind("/") + 1:] in _MATCHERS:
+                return None
+            v = words[j + 1] if j + 1 < len(words) else ""
+            if w in valued and v == "$" and words[j + 2:j + 3] == ["("]:
+                j += 3
+                while j < len(words) and not words[j].startswith(")"):
+                    if words[j][words[j].rfind("/") + 1:] in _MATCHERS:
+                        return None
+                    j += 1
+                if j < len(words) and words[j].strip(")"):
+                    return None  # `)` joined to another operator, as in `);`: the command ends there
+            elif w in valued and not (v and all(ch in _PUNCT for ch in v)) and v[v.rfind("/") + 1:] not in _MATCHERS:
+                j += 1
+        j += 1
     return None
 
 
@@ -877,11 +972,14 @@ def _self_text(text, raw, depth, seen):
     for k, w in enumerate(words):
         name = w[w.rfind("/") + 1:]
         if name in _MATCHERS or (ps and name == "grep"):
-            pat = _pattern(words, k)
-            if pat is not None and "$" not in pat and "`" not in pat and pat not in seen:
-                if pat in raw:
-                    return True
-                seen.add(pat)
+            pats = (_pattern(words, k),)
+            if name in ("pgrep", "pkill"):  # and read past option values (_VALUED): either reading can note
+                pats += (_pattern(words, k, _VALUED),)
+            for pat in pats:
+                if pat is not None and "$" not in pat and "`" not in pat and pat not in seen:
+                    if pat in raw:
+                        return True
+                    seen.add(pat)
         if depth > 1 and (" " in w or "\t" in w or "\n" in w) and _MATCHER_RE.search(w):
             if _self_text(w, raw, depth - 1, seen):
                 return True
@@ -1177,6 +1275,18 @@ def _self_test():
             module.update(self.saved)
             return False
 
+    class user_db(object):
+        """A stand-in for the pwd module: getpwuid records each uid it is asked for in calls, then raises error or
+        gives an entry whose pw_name is name."""
+        def __init__(self, name, error=None):
+            self.pw_name, self.error, self.calls = name, error, []
+
+        def getpwuid(self, uid):
+            self.calls.append(uid)
+            if self.error is not None:
+                raise self.error
+            return self
+
     def outcome(command):
         """"deny", "note" or "silent" for one command, by _decide."""
         out = decide(command)
@@ -1272,6 +1382,21 @@ def _self_test():
         "pkill -f 'w[t]-x/'",
         "pkill -f 'qq7\\.dot'",
     ]
+    # OWN: the hook's own effective and real uids, read when the test runs (it may run as any user, root included),
+    # and a uid that is neither
+    own_u, own_r = str(os.geteuid()), str(os.getuid())
+    other = str(max(os.geteuid(), os.getuid()) + 1)
+    own_vectors = [
+        "while pgrep -u %s -f qa-verify/x; do sleep 20; done" % own_u,
+        "until ! pgrep --euid %s -f qa-x/ >/dev/null; do sleep 1; done" % own_u,
+        "while pgrep -U %s -c -f -- qa-x/; do sleep 1; done" % own_r,
+        "while pgrep -u %s -U %s -f qa-x/; do :; done" % (own_u, own_r),
+        "pkill -u %s -f qa-x/" % own_u, "pkill -9 --uid %s -f qa-x/" % own_r, 'pkill -u "%s" -f qa-x/' % own_u,
+        "pkill -u %s -9 -u '%s' -f qa-x/" % (own_u, own_u), "kill $(pgrep -u %s -f qa-x/)" % own_u,
+        "for p in $(pgrep -U %s -f qa-x/); do kill $p; done" % own_r,
+        "pgrep --euid %s -f qa-x/ | xargs -r kill" % own_u,
+    ]
+    deny_more += own_vectors
 
     def newer_syntax(text):
         """The (form, line) of each syntax newer than Python 3.4 that parsing with the 3.4 grammar setting lets
@@ -1800,7 +1925,12 @@ def _self_test():
                          lambda k: "echo pkill; " * k + "pgrep -f x/",
                          lambda k: "bash -c 'echo " + "a " * k + "pgrep -f x/'",
                          lambda k: "echo a; " * k + "pkill -f x/ # c",
-                         lambda k: "pgrep 'a'b; " * k + "pkill x"):
+                         lambda k: "pgrep 'a'b; " * k + "pkill x",
+                         # the note scan's reading past option values stops at the next matcher (each pattern here
+                         # but the last is absent from the raw text, so every matcher is read)
+                         lambda k: "'pg'rep -d " * k + "'x'y; pkill x/",
+                         lambda k: "pgrep " + "-u 'v'w -x/pgrep " * k + "; pkill x/",
+                         lambda k: "pkill -u $(echo " * k + "x" + ")" * k + " -f 'q'x/; pkill x/"):
                 small, large = lines_run(make(30)), lines_run(make(240))
                 self.assertLess(large / small, 16, (small, large, make(2)))
 
@@ -1854,10 +1984,10 @@ def _self_test():
             self.kill_mutant(dict(_pkill=lambda run: real(run[:1] + [("w", "-f", "bare")] + run[1:])),
                              ["pkill qa-x"], "note", "deny")
 
-        def drop_option(self, option, values):
-            real = _pkill
+        def drop_option(self, option, values, name="_pkill"):
+            real = module[name]
 
-            def mutant(run):
+            def mutant(run, *extra):
                 out, k = [], 0
                 while k < len(run):
                     if run[k] == ("w", option, "bare"):
@@ -1865,8 +1995,8 @@ def _self_test():
                         continue
                     out.append(run[k])
                     k += 1
-                return real(out)
-            return dict(_pkill=mutant)
+                return real(out, *extra)
+            return {name: mutant}
 
         def test_m06_option_x(self):
             self.kill_mutant(self.drop_option("-x", 0), ["pkill -x -f qa-x/"], "note", "deny")
@@ -1875,7 +2005,8 @@ def _self_test():
             self.kill_mutant(self.drop_option("-A", 0), ["pkill -A -f qa-x/"], "note", "deny")
 
         def test_m08_option_selector(self):
-            self.kill_mutant(self.drop_option("-u", 1), ["pkill -u me -f qa-x/"], "note", "deny")
+            # a uid that is not the hook's own: the selector picks another user's processes, never the shell
+            self.kill_mutant(self.drop_option("-u", 1), ["pkill -u %s -f qa-x/" % other], "note", "deny")
 
         def test_m09_option_cluster(self):
             real = _pkill
@@ -1963,8 +2094,8 @@ def _self_test():
 
         def test_m19_substitution_options(self):
             real = _pgrep
-            self.kill_mutant(dict(_pgrep=lambda run, extra: real(run, _LISTING)), ["kill $(pgrep -a -f qa-x/)"],
-                             "note", "deny")
+            self.kill_mutant(dict(_pgrep=lambda run, extra: real(run, _LISTING)),
+                             ["kill $(pgrep -a -f qa-x/)", "kill $(pgrep -a -u %s -f qa-x/)" % own_u], "note", "deny")
 
         def test_m20_any_xargs(self):
             real = _pgrep
@@ -2714,6 +2845,85 @@ def _self_test():
                 with self.assertRaises(OSError, msg=fd):  # EBADF: that end was closed
                     os.fstat(fd)
 
+        def test_m53_own_value_only(self):
+            # a selector's value names whose processes are selected: any other user's never include the shell
+            def any_value(run, k):
+                t = run[k]
+                return 2 if _w(t) and t[1] in _SELECTORS and k + 1 < len(run) and _literal(run[k + 1]) else 0
+            self.kill_mutant(dict(_own=any_value),
+                             ["while pgrep -u %s -f qa-x/; do sleep 1; done" % other, "pkill -U %s -f qa-x/" % other,
+                              "kill $(pgrep -u %s -u %s -f qa-x/)" % (own_u, other),
+                              "pgrep --euid %s -f qa-x/ | xargs kill" % other], "note", "deny")
+
+        def test_m54_other_pgrep_options(self):
+            # beside an OWN, every other pgrep option still takes the note: -x and -v change what matches, -A
+            # leaves the shell out, and -P, -g and -s select by parent, group or session (-g 0 and -s 0 too)
+            for option, values, word in (("-x", 0, "-x"), ("-A", 0, "-A"), ("-v", 0, "-v"), ("-P", 1, "-P 1"),
+                                         ("-g", 1, "-g 1"), ("-g", 1, "-g 0"), ("-s", 1, "-s 0")):
+                self.kill_mutant(self.drop_option(option, values, "_pgrep"),
+                                 ["while pgrep -u %s %s -f qa-x/; do sleep 1; done" % (own_u, word),
+                                  "kill $(pgrep %s -u %s -f qa-x/)" % (word, own_u)], "note", "deny")
+
+        def test_m55_note_scan_option_values(self):
+            # the note scan reads past the value of an option that takes one: a variable or substitution there
+            # is not the pattern, and without the second reading these commands are silent
+            self.kill_mutant(dict(_VALUED=frozenset()),
+                             ['while pgrep -u "$USER" -f qa-x/; do sleep 20; done', "pkill -u $USER -f qa-x/",
+                              'kill $(pgrep -P "$PPID" -f qa-x/)', "pkill -u $(id -u) -f qa-x/",
+                              'pkill -U "$(id -u)" -f qa-x/', "while pgrep -u $LOGNAME -f qa-x/; do :; done"],
+                             "note", "silent")
+            # the first reading is kept: reading only past the values loses the note this command had
+            real = _pattern
+            self.kill_mutant(dict(_pattern=lambda words, k, valued=None: real(words, k, _VALUED)),
+                             ['pkill -u qa-other -f "$PAT"'], "note", "silent")
+
+        def test_m56_blank_pattern_boundary(self):
+            # an OWN does not widen LITERAL: a pattern holding a blank still takes the note
+            self.kill_mutant(dict(_LITERAL_RE=re.compile(r"[A-Za-z0-9_./:@%=, -]+\Z")),
+                             ['while pgrep -u %s -f "qa-verify x"; do sleep 20; done' % own_u], "note", "deny")
+
+        def test_m57_effective_and_real(self):
+            # -u and --euid compare the effective uid, -U and --uid the real one; stand-in uids that differ
+            real_os = os
+
+            class Split(object):
+                def __getattr__(self, name):
+                    return getattr(real_os, name)
+
+                def geteuid(self):
+                    return 4242
+
+                def getuid(self):
+                    return 4243
+            straight = ["pkill -u 4242 -f qa-x/", "pkill -U 4243 -f qa-x/",
+                        "while pgrep --euid 4242 -f qa-x/; do sleep 1; done", "kill $(pgrep --uid 4243 -f qa-x/)"]
+            crossed = ["pkill -u 4243 -f qa-x/", "pkill -U 4242 -f qa-x/",
+                       "while pgrep --euid 4243 -f qa-x/; do sleep 1; done", "kill $(pgrep --uid 4242 -f qa-x/)"]
+            swapped = {"-u": "uid", "--euid": "uid", "-U": "euid", "--uid": "euid"}
+
+            def either(run, k):
+                t = run[k]
+                if not (_w(t) and t[1] in _SELECTORS and k + 1 < len(run) and _literal(run[k + 1])):
+                    return 0
+                return 2 if run[k + 1][1] in (str(os.geteuid()), str(os.getuid())) else 0
+            with patched(os=Split(), pwd=user_db("qa-own"), _ACCOUNTS={}):
+                self.kill_mutant(dict(_SELECTORS=swapped), straight, "deny", "note")
+                self.kill_mutant(dict(_SELECTORS=swapped), crossed, "note", "deny")
+                self.kill_mutant(dict(_own=either), crossed, "note", "deny")
+
+        def test_m58_own_digits_are_a_uid(self):
+            # a value of digits alone is compared as a uid only (procps reads it as one), so an account name of
+            # digits alone is never an OWN
+            def by_name(run, k):
+                t = run[k]
+                kind = _SELECTORS.get(t[1]) if _w(t) else None
+                if kind is None or k + 1 >= len(run) or not _literal(run[k + 1]):
+                    return 0
+                uid = os.geteuid() if kind == "euid" else os.getuid()
+                return 2 if run[k + 1][1] in (str(uid), _account(uid)) else 0
+            with patched(pwd=user_db(other), _ACCOUNTS={}):
+                self.kill_mutant(dict(_own=by_name), ["pkill -u %s -f qa-x/" % other], "note", "deny")
+
         def test_15_adjacent_redirection_probe(self):
             # non-signalling: pgrep -c in the wrapper form (a command after the eval), in its own process group,
             # under a timeout, the group killed if it still runs; the pattern selects the shell running it
@@ -2736,6 +2946,66 @@ def _self_test():
                         os.killpg(p.pid, signal.SIGKILL)
                         p.communicate()
                 self.assertEqual(out, status, (pattern, err))
+
+        def test_16_own_selector_values(self):
+            # only the hook's own uid, or its account name, as a separate LITERAL word is an OWN: the uids just
+            # beside it, other spellings, lists, expansions and the other selection options take the note
+            for value in [str(n) for n in (os.geteuid() - 1, os.geteuid() + 1) if n >= 0]:
+                self.assertNote("pkill -u %s -f qa-x/" % value)
+                self.assertNote("while pgrep --euid %s -f qa-x/; do sleep 1; done" % value)
+            for command in ("pkill -u 0%s -f qa-x/" % own_u, "pkill -u %s,0 -f qa-x/" % own_u,
+                            "pkill -u 0,%s -f qa-x/" % own_u, "pkill --euid=%s -f qa-x/" % own_u,
+                            "pkill -u%s -f qa-x/" % own_u, "kill $(pgrep -u %s -u %s -f qa-x/)" % (other, own_u),
+                            "pkill -f -u %s" % own_u, "pkill -u -f qa-x/", "pkill -u %s qa-x/" % own_u,
+                            "kill $(pgrep -f -u %s)" % own_u, "while pgrep -f -u %s; do sleep 1; done" % own_u,
+                            "while pgrep -u %s -g 0 -f qa-x/; do sleep 1; done" % own_u,
+                            "while pgrep -u %s -s 0 -f qa-x/; do sleep 1; done" % own_u,
+                            "pkill -u %s -s 9 -f qa-x/" % own_u, "pkill -u %s -9 -15 -f qa-x/" % own_u,
+                            'while pgrep -u "$USER" -f qa-x/; do sleep 20; done', "pkill -u $LOGNAME -f qa-x/",
+                            "pkill -u $(id -u) -f qa-x/", "pkill -u `id -u` -f qa-x/", 'pkill -U "$UID" -f qa-x/',
+                            "pgrep -u qa-v -f qa-x/ >/dev/null && echo up"):
+                self.assertNote(command)
+            # a runtime pattern is passed over whichever way it is read; the first reading keeps its note; and a
+            # reading past a `$(...)` value stops where `);` ends the command (pkill has no pattern there)
+            self.assertSilent('pkill -u "$USER" -f "$PAT"')
+            self.assertNote('pkill -u qa-other -f "$PAT"')
+            self.assertSilent("pkill -u $(id -u); echo -f qa-x/")
+
+        def test_16_own_account_name(self):
+            # on a stand-in user database: a name is compared with the account name of the hook's own uid, read at
+            # most once per uid per process, never for a value of digits alone; the value itself is never looked up
+            ids = sorted(set((os.geteuid(), os.getuid())))
+            db = user_db("qa-own")
+            with patched(pwd=db, _ACCOUNTS={}):
+                for _ in range(2):
+                    self.assertDeny("while pgrep -u qa-own -f qa-x/; do sleep 1; done", "wait", "qa-x/")
+                    self.assertDeny("pkill -U qa-own -f qa-x/", "signal", "qa-x/")
+                self.assertNote("pkill -u qa-own2 -f qa-x/")
+            self.assertEqual(sorted(db.calls), ids)
+            db = user_db("qa-own")
+            with patched(pwd=db, _ACCOUNTS={}):
+                self.assertDeny("pkill -u %s -f qa-x/" % own_u)
+                self.assertNote("pkill -u %s -f qa-x/" % other)
+            self.assertEqual(db.calls, [])
+            for error in (KeyError("no such uid"), OSError("user database unreadable")):
+                with patched(pwd=user_db(None, error), _ACCOUNTS={}):
+                    self.assertNote("pkill -u qa-own -f qa-x/")  # the plain note: a failed lookup is not an error
+                    self.assertDeny("pkill -u %s -f qa-x/" % own_u)
+            with patched(pwd=None, _ACCOUNTS={}):  # no user database module on this platform
+                self.assertNote("pkill -u qa-own -f qa-x/")
+                self.assertDeny("pkill -U %s -f qa-x/" % own_r)
+
+        def test_16_own_account_name_on_this_host(self):
+            # the real user database: the account name of the uid running this test is an OWN
+            try:
+                me = pwd.getpwuid(os.geteuid()).pw_name if pwd is not None else ""
+            except (KeyError, OSError):
+                me = ""
+            if not (me and _literal(("w", me, "bare"))) or _DIGITS_RE.match(me):
+                self.skipTest("SKIPPED, the uid running this test has no account name that is a LITERAL")
+            with patched(_ACCOUNTS={}):
+                self.assertDeny("while pgrep -u %s -f qa-x/; do sleep 1; done" % me)
+                self.assertDeny("pkill --euid %s -f qa-x/" % me)
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(T)
     result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2).run(suite)

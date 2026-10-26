@@ -185,7 +185,7 @@ files are served from this repository's main branch; for a raw download, use
 | `clock-inject.py` | `262749a3409d0fe8821cc115db28e05f35311cc0329008ff51f67090fd3d2e54` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `725974c306e63a3f9a1b4a2be2992c9ee9792c231aaad66035a813525d10c48a` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `9687140625e12fe271c20a876f01642f5cdd374197ad12850f24078cd0eb9660` | [pattern-self-match.py](pattern-self-match.py) |
+| `pattern-self-match.py` | `75e0a9256de7036fb5ea3f4230b70660d45af1749863078053e7ef0f854b80e9` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `5d3b5d716cdbe6255c750aec4bb44f17a583f167c055cdb26a17a27d5ccfc715` | [stamp-truth-stop.py](stamp-truth-stop.py) |
@@ -353,7 +353,9 @@ fails and report it; do not work around a failed check.
    checks report `SKIPPED` until the reference files are available; skipped is not a pass. The
    `record-remove-check.py` differential check and the `pattern-self-match.py` check that bash accepts
    its deny examples also report `SKIPPED, no trusted bash` when they cannot find a trusted root-owned
-   `/usr/bin/bash` or `/bin/bash`.
+   `/usr/bin/bash` or `/bin/bash`. The `pattern-self-match.py` check that the account name of the user
+   running its self-test selects that user reports `SKIPPED` when the user database gives no such name
+   made only of the characters its patterns may use, or gives one of digits alone.
    The `char-policy-write.py` policy validator is generated from the marked region of the CI gate
    `tools/check_no_dashes.py` by `tools/gen_char_policy.py`. The hook's self-test compares that region byte
    for byte with the gate's, and a sample of policies and its scope test with the gate. The hook's self-test
@@ -691,8 +693,14 @@ section of its opening docstring. Read that section before relying on a hook; in
 - **`pattern-self-match.py`** denies only its closed set of shapes, and each deny rests on premises
   observed on one host: that the Bash tool runs each command inside a shell whose own command line holds
   the command's text (its docstring gives a one-line `pgrep -c` probe to re-check a host), and how procps
-  matches. A shell function or alias that shadows a command word the hook accepts (`kill`, `pkill`,
-  `pgrep`, `xargs`, `echo`, `sleep`, `ls`, `date`, `pwd`, `true` or `:`), an alias named for a reserved
+  matches. A denied shape may also select processes with `-u`, `--euid`, `-U` or `--uid` when the value is
+  the user id the hook itself runs as (effective for `-u` and `--euid`, real for `-U` and `--uid`) or that
+  id's account name. Such a deny assumes the Bash tool's shell runs as the same user as the hook, which was
+  not observed for the hook's own process. A name is compared with the account name of the hook's own user
+  id, read at most once per hook process; the value itself is never looked up, but a slow user database (a
+  directory service) can delay the hook. A shell function or alias that shadows a command word the hook
+  accepts (`kill`, `pkill`, `pgrep`, `xargs`, `echo`, `sleep`, `ls`, `date`, `pwd`, `true` or `:`), an
+  alias named for a reserved
   word (`for`, `while`, `until`, `do`, `done`, `if`, `then`, `fi`, `case`, `esac` or `!`; one named for a
   loop word turned the loop into a syntax error in bash 5.3.9, and one named `!` ended an
   `until ! pgrep ...` loop at once), or shell state set before the command (an `IFS`
@@ -708,6 +716,8 @@ section of its opening docstring. Read that section before relying on a hook; in
   gets a note at most:
   compound commands, other `&&` and `||` lists, `ps | grep` pipelines, `sudo` or `exec` prefixes,
   `killall`, `pidof`, nested shell strings, other redirections, `printf`, `cd`, an `echo` with an option,
+  another user's id or name after `-u` or `-U` (or a variable or substitution there, such as `$USER` or
+  `$(id -u)`), other selection options such as `-P`, `-g` or `-s`,
   a pattern holding a blank, an all-caps loop variable, and sleeps that add up to more than 60 seconds
   before the shape or in a `for` loop shape's body (a `while` or `until` wait loop's body is not counted:
   its `pgrep` runs first). A
