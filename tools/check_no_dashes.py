@@ -289,8 +289,9 @@ def scope_paths(root, policy):
         else:
             tree = entry["tree"]
             base = root if tree == "." else root.joinpath(*tree.split("/"))
-            # dir_present raises on an unreadable parent and walk_files on an unlistable subtree (exit 2).
-            if tree != "." and not dir_present(base):
+            # dir_present raises on an unreadable or symlinked component below root and walk_files on an
+            # unlistable subtree (exit 2).
+            if tree != "." and not dir_present(base, root=root):
                 continue
             found = sorted(walk_files(base, frozenset(entry.get("skip", ())), suffixes=set(entry["suffixes"])))
         for path in found:
