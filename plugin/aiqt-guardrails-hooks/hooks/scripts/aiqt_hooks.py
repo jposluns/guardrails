@@ -12625,6 +12625,28 @@ def _gate_any_word_bypass(words):
     return found
 
 
+# The characters a de-quoted reading can remove from between two letters of a word: the quote characters, '$',
+# a backslash and the newline of a backslash-newline pair (_gate_text_may_name_git).
+_GATE_READING_DROPS = str.maketrans("", "", "'\"$\n" + chr(92))
+
+
+def _gate_text_may_name_git(text):
+    """False when no de-quoted reading of text (_gate_dequoted_words, _gate_bash_readings) can hold a word that
+    _gate_word reads as git, so _gate_text_bypass, whose any-word walk starts only at such a word, passes text
+    over without building the readings; True otherwise. Only an ANSI-C $'...' escape decodes a character text
+    does not hold, and that needs both a '$' and a backslash. Without one of them, each reading only removes
+    characters (quote characters, a '$' before a quote, backslashes, a backslash-newline pair), reads env -S's
+    \\_ as a blank and splits what is left into words, so a word is a run of text's own characters with only
+    removed ones between them, and the 'git' word added after an option word stands for letters that word
+    holds. A word _gate_word reads as git ends in g, i and t, each in either case (no other character
+    lowercases to one of them), so those three letters stand in text with only quote characters, '$',
+    backslashes and newlines between them, and text with those removed and lowercased holds 'git'. One
+    translate and one substring test, where the readings take several passes per character and per word."""
+    if "$" in text and chr(92) in text:
+        return True
+    return "git" in text.translate(_GATE_READING_DROPS).lower()
+
+
 def _gate_text_bypass(text, skip_own=False):
     """(sub, spelling) when a de-quoted reading of text names a roster git carrying a no-verify bypass, else
     None. The blank-split reading (_gate_dequoted_words) and the bash-model readings (_gate_bash_readings) are
@@ -12635,7 +12657,12 @@ def _gate_text_bypass(text, skip_own=False):
     text the first git word may be one hidden before it, in an assignment, a redirection or a wrapper's option
     value (A="$(g'i't commit -nv)" git status), and dropping it would pass that git over, so a caller that
     passes skip_own for such text also reads the text before the own git without it (_gate_behind_bypass). A
-    raw-text reading only: it can only add a deny, never prove a command safe."""
+    raw-text reading only: it can only add a deny, never prove a command safe. Text in which no reading can
+    hold a git word (_gate_text_may_name_git) gives None before any reading is built, the result every walk
+    gives it, so a long segment that names no git (echo and many plain words) costs a translate, not the
+    readings."""
+    if not _gate_text_may_name_git(text):
+        return None
     for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
         if skip_own:
             k = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
