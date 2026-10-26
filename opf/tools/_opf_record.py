@@ -78,9 +78,10 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
      merge that leaves canonical bytes is NOT detectable by this check);
   4. plan the new models: claim the ids through the ONE allocation seam (claim_ids); require the
      CURRENT row a transition or done-with-receipt acts on to be schema-valid, its proposed_from
-     included, BEFORE it is trusted or overwritten (_require_valid_current); compose and validate each
-     record through the _opf_schema primitives (validate_transition for a status change); refuse an
-     append into a released span;
+     included, BEFORE it is trusted or overwritten (_require_valid_current), and authored by a
+     clean-series author, so importer-authored history is never an operand (_require_clean_author, spec
+     8.6/8.8); compose and validate each record through the _opf_schema primitives (validate_transition
+     for a status change); refuse an append into a released span;
   5. POSTCONDITION: each emitted document, reparsed, equals its prior bytes, reparsed, plus exactly the
      allowed delta, value for value and TYPE for type (the strict _opf_emit._model_equal comparison, so a
      True or 1.0 never reads as 1): the new rows appended, the counters advanced by exactly the claim,
@@ -321,6 +322,7 @@ JOURNAL_REL = ".aiqt/record/journal"
 SESSION_ID = "opf-record"
 CLEAN_SCOPE = "record and render destinations"
 # Record authors. An importer records imported history through `opf import`, never through this verb.
+# The record a transition or done-with-receipt acts on must carry one of these too (_require_clean_author).
 AUTHOR_KINDS = ("maintainer", "assistant", "automation")
 # Baseline types minted by another subcommand, never by `create`.
 _OTHER_SUBCOMMAND = {"done": "done-with-receipt", "worklog": "worklog-append"}
@@ -864,6 +866,30 @@ def _require_valid_current(row, rtype, ctx, rid, rel):
         raise RecordError("{} in {} is not schema-valid as it stands ({}); a transition never trusts or "
                           "overwrites an invalid record (repair it under opf doctor first); nothing "
                           "written (fail-closed)".format(rid, rel, "; ".join(rv.findings)))
+
+
+def _require_clean_author(row, rid, rel, verb):
+    """The record a clean-series subcommand changes must be authored by a clean-series author
+    (AUTHOR_KINDS): spec 8.6 has the clean-series writer refuse a transition on an importer-authored
+    record in either series, and spec 8.8 has every clean-series subcommand refuse one as its operand;
+    acting on that history is a new clean record linking back. Keyed on the row's own provenance, never
+    on its series: a legacy importer-authored row in the clean index refuses here (an imported-series id
+    never reaches this check, since the operand grammar admits clean <NS>-<n> ids only, parse_request).
+    An allow-list, so an absent or malformed actor, or any kind outside AUTHOR_KINDS, refuses too and
+    nothing unreadable reads as clean. The operand only: a --supersedes target is read and linked, never
+    changed (_require_valid_target), so a clean decision superseding an importer-authored resolution, the
+    spec 8.6 remedy for such a chain, stays open. There is no carve-out for a `/proposed` status a clean
+    actor already landed on such a record (by a writer without this check): its ratification and its
+    rejection refuse here too, so that proposal stays as recorded, stranded (spec 8.6/8.8 name no
+    exception). Refused with every byte untouched."""
+    actor = row.get("actor")
+    kind = actor.get("kind") if isinstance(actor, dict) else None
+    if not (isinstance(kind, str) and kind in AUTHOR_KINDS):
+        raise RecordError("{} refused (importer-authored-operand): {} in {} carries actor.kind {}, not a "
+                          "clean-series author ({}); the clean-series writer never acts on importer-authored "
+                          "history (spec 8.6, 8.8). Act on it with a new clean record linking back to it; "
+                          "nothing written (fail-closed)".format(verb, rid, rel, _opf_store._safe_display(kind),
+                                                                 ", ".join(AUTHOR_KINDS)))
 
 
 def _recorded_pre_proposal(ctx, row, rid, status):
@@ -1436,8 +1462,9 @@ def _plan_transition(req, ctx, operand, now):
     status is derived from the actor: an assistant or automation landing a terminal or gated state gets
     `/proposed`, and the record's pre-proposal state is then written into its own `proposed_from` field in
     the same act (spec 8.8). The current row must be schema-valid before it is trusted or overwritten
-    (_require_valid_current). Leaving a `/proposed` status is maintainer-only: a rejection (--reason
-    required) must return to exactly the recorded `proposed_from` state, and rejection and ratification
+    (_require_valid_current), and authored by a clean-series author (_require_clean_author: importer-authored
+    history is never an operand, spec 8.6/8.8). Leaving a `/proposed` status is maintainer-only: a rejection
+    (--reason required) must return to exactly the recorded `proposed_from` state, and rejection and ratification
     each remove the field. A proposed record that carries no `proposed_from` (proposed outside
     `transition`, a record created at a `/proposed` initial state included) cannot be rejected here, and
     no predecessor is inferred or invented; the worklog lifecycle line is informational, never evidence. A
@@ -1463,6 +1490,7 @@ def _plan_transition(req, ctx, operand, now):
     if spec is None or ctx.types.get(rtype) != _ID_RE.match(rid).group(1):
         raise RecordError("{} in {} does not carry its index's baseline type; fail-closed".format(rid, operand.rel))
     _require_valid_current(row, rtype, ctx, rid, operand.rel)
+    _require_clean_author(row, rid, operand.rel, "transition")
     current = row.get("status")
     parsed, err = _opf_schema.parse_status(current, spec)
     if parsed is None:
@@ -1538,7 +1566,9 @@ def _plan_transition(req, ctx, operand, now):
 def _plan_done_with_receipt(req, ctx, operand, now):
     """`done-with-receipt BI-ID` (maintainer-only, checked by the parser and again here): `active -> done`,
     or the ratification `done/proposed -> done`, AND the one-to-one `done` receipt linked `receipt_of`,
-    both in this one publication (spec 8.5). A backlog item that already has a receipt refuses."""
+    both in this one publication (spec 8.5). The item must be schema-valid and authored by a clean-series
+    author (_require_valid_current, _require_clean_author). A backlog item that already has a receipt
+    refuses."""
     (rid,) = req.positionals
     _require_maintainer(req.actor)
     row = _locate(operand, rid)
@@ -1547,6 +1577,7 @@ def _plan_done_with_receipt(req, ctx, operand, now):
         raise RecordError("done-with-receipt moves an active or done/proposed backlog item to done; {} is {} "
                           "(fail-closed)".format(rid, _opf_store._safe_display(current)))
     _require_valid_current(row, BACKLOG, ctx, rid, operand.rel)
+    _require_clean_author(row, rid, operand.rel, "done-with-receipt")
     tc = _opf_schema.validate_transition(BACKLOG, current, "done", req.actor["kind"])
     if tc.status != _opf_store.VALID:
         raise RecordError("{} {} -> done is {}: {} (fail-closed)".format(rid, current, tc.status,
@@ -3397,8 +3428,8 @@ def self_test():
             print("  - " + f, file=sys.stderr)
         return 1
     print("opf-record self-test: PASS ({} checks: grammar, allocation seam, completeness proof, planners, "
-          "transitions, resolution bundle, supersession, handoff posting, receipts, released span, "
-          "precondition, postcondition)".format(checked[0]))
+          "transitions, resolution bundle, supersession, handoff posting, receipts, importer-authored operands, "
+          "released span, precondition, postcondition)".format(checked[0]))
     return EXIT_OK
 
 
@@ -3964,6 +3995,7 @@ def _self_test_transitions(check, plan, post, full, now):
     _self_test_supersession(check, plan, post, full, now)
     _self_test_handoff(check, plan, post, full, now)
     _self_test_delivery(check, plan, post, full, now)
+    _self_test_importer_operand(check, plan, post, full, now)
     _self_test_pending(check)
     _self_test_leftover_lock(check)
 
@@ -4505,6 +4537,67 @@ def _self_test_delivery(check, plan, post, full, now):
         check("the {} refusal on {} from {} {} the ratification".format(
             needle, " ".join(argv[1:3]), rows[0]["status"], "names" if keeps else "does not name"),
             needle in text and ("a ratification keeps" in text) == keeps)
+
+
+def _self_test_importer_operand(check, plan, post, full, now):
+    """The operand firewall (spec 8.6, 8.8): transition and done-with-receipt refuse an importer-authored
+    record as their operand, whatever the acting author and target state, a proposal a clean actor already
+    landed on one included; the author allow-list refuses an absent, malformed or unknown actor kind too;
+    an imported-series id never parses as an operand; and an importer-authored --supersedes target, read
+    and linked but never changed, stays open to the clean decision that resolves its chain (spec 8.6)."""
+    earlier = "2026-09-26T00:00:00Z"
+    later = "2026-09-26T12:00:00Z"
+    counters = dict(full, BI=1, HO=1, PD=2, WL=1)
+
+    def rec(rid, rtype, status, kind="importer", **kw):
+        return dict({"id": rid, "type": rtype, "status": status, "title": "t", "created_at": earlier,
+                     "updated_at": earlier, "actor": {"kind": kind}}, **kw)
+
+    for label, argv, rows in (
+            ("a maintainer transition", ["transition", "BI-1", "active", "--actor", "maintainer"],
+             [rec("BI-1", BACKLOG, "open")]),
+            ("an assistant proposal", ["transition", "BI-1", "done", "--actor", "assistant"],
+             [rec("BI-1", BACKLOG, "active")]),
+            ("an automation proposal", ["transition", "BI-1", "dropped", "--actor", "automation"],
+             [rec("BI-1", BACKLOG, "open")]),
+            ("the ratification of a proposal already landed on it",
+             ["transition", "BI-1", "dropped", "--actor", "maintainer"],
+             [rec("BI-1", BACKLOG, "dropped/proposed", updated_at=later, proposed_from="open")]),
+            ("the rejection of a proposal already landed on it",
+             ["transition", "BI-1", "open", "--actor", "maintainer", "--reason", "not ours to drop"],
+             [rec("BI-1", BACKLOG, "dropped/proposed", updated_at=later, proposed_from="open")]),
+            ("a handoff supersession", ["transition", "HO-1", "superseded", "--actor", "maintainer"],
+             [rec("HO-1", HANDOFF, "current")]),
+            ("done-with-receipt", ["done-with-receipt", "BI-1", "--actor", "maintainer"],
+             [rec("BI-1", BACKLOG, "active")])):
+        check("{} refuses an importer-authored operand".format(label), _refuses(
+            lambda argv=argv, rows=rows: plan(argv, rows=rows, counters=counters), "importer-authored-operand"))
+    for label, row in (("no actor", {}), ("a non-table actor", {"actor": "importer"}), ("no kind", {"actor": {}}),
+                       ("a non-string kind", {"actor": {"kind": ["importer"]}}),
+                       ("an unknown kind", {"actor": {"kind": "robot"}}),
+                       ("the importer", {"actor": {"kind": "importer"}})):
+        check("the author allow-list refuses {}".format(label), _refuses(
+            lambda row=row: _require_clean_author(row, "BI-1", "x", "transition"), "importer-authored-operand"))
+    check("the author allow-list admits every clean-series author",
+          all(_require_clean_author({"actor": {"kind": k}}, "BI-1", "x", "transition") is None for k in AUTHOR_KINDS))
+    check("an imported-series id never parses as an operand",
+          _refuses(lambda: parse_request(["transition", "imported:BI-1", "active", "--actor", "maintainer"]),
+                   "not a record id")
+          and _refuses(lambda: parse_request(["done-with-receipt", "imported:BI-1", "--actor", "maintainer"]),
+                       "not a record id"))
+    decide = ["transition", "PD-2", "decided", "--actor", "maintainer", "--decision", "use Y", "--decided-by",
+              "the board", "--supersedes", "PD-1"]
+    held = rec("PD-1", PENDING_DECISION, "decided", decision="use X", decided_at=earlier, decided_by="the board")
+    try:
+        p, c, op = plan(decide, rows=[held, rec("PD-2", PENDING_DECISION, "open", kind="maintainer")],
+                        counters=counters)
+        planned = (op.new_model["record"][0] == held and op.new_model["record"][1]["status"] == "decided"
+                   and op.new_model["record"][1]["links"] == [{"rel": SUPERSEDES, "id": "PD-1"}]
+                   and post(p, c, decide) is None)
+    except RecordError:
+        planned = False
+    check("a clean decide superseding an importer-authored resolution plans with the target untouched (a "
+          "--supersedes target is read and linked, never the operand)", planned)
 
 
 def _self_test_pending(check):

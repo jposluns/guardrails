@@ -159,6 +159,7 @@ _SUBSET = [
     ("opf-adopt-hook-selftest", "_opf_adopt_hook.py", ["--self-test"]),
     ("opf-adopt-complete-selftest", "_opf_adopt_complete.py", ["--self-test"]),
     ("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"]),
+    ("opf-import-complete-selftest", "_opf_import_complete.py", ["--self-test"]),
     ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]),
     ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]),
     ("opf-adopt-discover-selftest", "_opf_adopt_discover.py", ["--self-test"]),
@@ -226,6 +227,9 @@ _SUBSET = [
 # `git rev-parse HEAD:opf` with it). Two rows come from no run at all: opf-adopt-state-selftest and
 # opf-adopt-complete-selftest, legs main added after that run, carry main's 600 s figure (not
 # measured on 2026-10-11; under the former flat 600 s bound, an inference), never a measurement.
+# One row comes from another run: opf-import-complete-selftest, a leg main added after that run, carries
+# main's 20 s figure, sized from three runs main measured on 2026-10-14 at another opf/ tree (2.3 to
+# 2.4 s), so INFERRED here.
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
 # an INFERENCE, not a measurement, and no observation supports it (one measured run contradicts it, see
 # below): the host carried other work during the run, but a host loaded beyond it adds contention these
@@ -248,8 +252,8 @@ _SUBSET = [
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
 # The multiplier is capped by the job fit (_job_worst_case_s against each CI job's 21600 s default
-# limit): on this tree the whole roster's worst case is 89565 s at 3 (no one job fits it: the premise
-# of the split), the per-job worst cases are 20523 s (A), 20340 s (B), 15810 s (C), 17390 s (D) and
+# limit): on this tree the whole roster's worst case is 92105 s at 3 (no one job fits it: the premise
+# of the split), the per-job worst cases are 20523 s (A), 20340 s (B), 15810 s (C), 19930 s (D) and
 # 19302 s (E) at 3, and the same at 4 but for C, 18210 s (at 3 and at 4 the config-lane floors,
 # _LEG_BOUND_FLOOR_S, hold every floored leg's bound above its headroom term, opf-homes-selftest's
 # 1260 s above its 273 s and 364 s included; only opf-adopt-state-selftest and
@@ -307,6 +311,9 @@ _LEG_CEILING_S = {
     "opf-adopt-hook-selftest": 1,  # INFERRED here (measured at 7bf8107f: 1.0 s at load5 21.6)
     "opf-adopt-complete-selftest": 600,  # INFERRED (main's row; not measured: 7bf8107f has no such leg)
     "opf-import-batch-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.7 s at load5 21.6)
+    # opf-import-complete-selftest: the slowest run times 20 / 3 for load, 2.4 * 20 / 3 = 16.0, rounded up to
+    # a multiple of 5, 20 s.
+    "opf-import-complete-selftest": 20,  # INFERRED (main's row, measured 2026-10-14: 2.3 to 2.4 s, three runs)
     "opf-pack-manifest-selftest": 17,  # INFERRED here (measured at 7bf8107f: 16.8 s at load5 21.7)
     "opf-adopt-observe-selftest": 284,  # INFERRED here (measured at 7bf8107f: 283.7 s at load5 21.9)
     "opf-adopt-discover-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.5 s at load5 23.9)
@@ -327,7 +334,7 @@ _LEG_CEILING_S = {
 # added or renamed together with its ceiling row, which leaves the two tables agreeing, is still drift.
 # A deliberate roster change records the new figures here in the same change (the drift line prints
 # them); this pin does not judge whether that change is right.
-_ROSTER_PIN = (28, "6b4178b70fc10b169cc37033057dc7b49be246152fb8d800e08307b89c1f2c19")
+_ROSTER_PIN = (29, "08b11708b39db512f337e92753592777f5de6fe0a668e55fd9d871acedec8d0c")
 _LOAD_HEADROOM = 3
 _LAUNCH_MARGIN_S = 60
 # The post-kill cleanup deadline (_kill_and_reap): ONE absolute deadline that the output drain and the
@@ -409,7 +416,7 @@ _MIN_LEG_BOUND_S = 60
 # from about 3773 to about 10038 checks) is NOT shown absorbed by this sizing: its lane time must be
 # re-measured and the lanes' deadline for the command re-sized, and once that deadline rises above
 # 1200 s, closure/leg-bound-reaches-the-lane-deadline refuses this floor until it is raised to match.
-# FIT: each of the 22 rows below raises its leg's bound, and the jobs those bounds fit are set out on
+# FIT: each of the 23 rows below raises its leg's bound, and the jobs those bounds fit are set out on
 # _CI_JOB_LEGS.
 # A row naming no subset leg, or a value that is not a positive int (a bool included), is refused
 # fail-closed (_leg_bounds): a stale row left behind by a leg rename would otherwise silently stop
@@ -425,6 +432,7 @@ _LEG_BOUND_FLOOR_S = {
     "opf-adopt-selftest": 1260,
     "opf-adopt-hook-selftest": 1260,
     "opf-import-batch-selftest": 1260,
+    "opf-import-complete-selftest": 1260,
     "opf-pack-manifest-selftest": 1260,
     "opf-adopt-observe-selftest": 1860,
     "opf-adopt-discover-selftest": 1260,
@@ -466,11 +474,14 @@ _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 # (_job_worst_case_s over every leg) does not fit one job's time limit with the bound rule above
 # unchanged, and, once every lane-member leg reaches its config-lane deadline plus the launch margin
 # (see _LEG_BOUND_FLOOR_S), it does not fit four. ARITHMETIC on this tree: the legs' two sweeps,
-# their cleanup deadlines and the flip come to 88615 s, and each job adds the 350 s vector allowance
+# their cleanup deadlines and the flip come to 91155 s, and each job adds the 350 s vector allowance
 # and the 600 s setup to them, so four jobs hold at most 4 x (21600 - 950) = 82600 s of that work,
-# 6015 s short; five is the fewest that fit. The worst cases, at a headroom of 3, are 20523 s (A,
-# the flip's job), 20340 s (B), 15810 s (C), 17390 s (D) and 19302 s (E), each within its 21600 s
-# limit. When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
+# 8555 s short; five is the fewest that fit. The worst cases, at a headroom of 3, are 20523 s (A,
+# the flip's job), 20340 s (B), 15810 s (C), 19930 s (D) and 19302 s (E), each within its 21600 s
+# limit. opf-import-complete-selftest, a leg main added, sits in D beside opf-import-batch-selftest:
+# its 1260 s config-lane floor adds 2540 s to a job's worst case (two sweeps and two cleanup
+# deadlines), which A, B and E cannot hold, and D, unlike C, is not moved by the headroom multiplier
+# up to 5.412. When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
 # (the two legs' declared-wait sums from 3554.012 s to 4760.012 s and from 2820 s to 4026 s), the
 # opf-adopt-apply-selftest bound rose by 1206 s (2880 s to 4086 s) and the opf-tooling-selftest bound
 # by 1161 s (from 3660 s, set by its former floor row, to 4821 s), A, which had held
@@ -514,6 +525,7 @@ _CI_JOB_LEGS = {
     }),
     "opf-closure-d": frozenset({
         "opf-import-batch-selftest",
+        "opf-import-complete-selftest",
         "opf-pack-manifest-selftest",
         "opf-adopt-observe-selftest",
         "opf-adopt-discover-selftest",
@@ -1291,6 +1303,37 @@ def _import_batch_registration_self_test():
     print("RED closure-registration -> closure/import-batch-registration")
 
 
+def _check_import_complete_registration(subset, tools_dir=None):
+    """Independent requirement, not inferred from the release manifest.
+
+    Covers this exact closure-roster tuple, not arbitrary dispatcher changes
+    or the registrations of other gates. tools_dir is unused: the tuple
+    names its own script (_check_roster_registration checks scripts exist).
+    """
+    expected = ("opf-import-complete-selftest", "_opf_import_complete.py", ["--self-test"])
+    matches = [row for row in subset
+               if row[0] == expected[0] or row[1] == expected[1]]
+    if matches != [expected]:
+        raise _CheckFailure("closure/import-complete-registration")
+
+
+def _import_complete_registration_self_test():
+    _under_test("import-complete-registration", _check_import_complete_registration, _SUBSET)
+    print("PASS closure/import-complete-registration")
+    # Mutate the real roster, independently of the shell-runner deletion.
+    # No digest or generated-manifest check participates in the verdict.
+    changed = list(_SUBSET)
+    changed.remove(("opf-import-complete-selftest", "_opf_import_complete.py", ["--self-test"]))
+    try:
+        _under_test("import-complete-registration", _check_import_complete_registration, changed)
+    except _CheckFailure as exc:
+        if str(exc) != "closure/import-complete-registration":
+            raise
+    else:
+        raise _CheckFailure("closure/import-complete-registration-not-red")
+    print("RED closure-registration -> closure/import-complete-registration")
+
+
 def _roster_pin(legs):
     """(count, sha256) of the leg names in legs: how many there are, and the sha256 of the names,
     sorted, each followed by one newline, encoded UTF-8 (the form _ROSTER_PIN records)."""
@@ -1362,7 +1405,7 @@ def _check_roster_registration(subset, tools_dir=None):
     named as drift, though the copy still refuses any symlink in it that resolves outside it
     (_materialize). LIMIT: a roster change that also records its new pin passes; and the check holds
     names, the pin and each script's name and presence only, so a row's arguments, or its script
-    changed to another file that exists, are held only for the three rows the tuple checks above
+    changed to another file that exists, are held only for the four rows the tuple checks above
     pin."""
     names = [row[0] for row in subset]
     faults = ["row {} missing".format(name) for name in _LEG_CEILING_S if name not in names]
@@ -1513,6 +1556,7 @@ _REGISTRATION_CHECKS = (
     ("closure/pack-manifest-registration", _check_pack_manifest_registration),
     ("closure/adopt-observe-registration", _check_adopt_observe_registration),
     ("closure/import-batch-registration", _check_import_batch_registration),
+    ("closure/import-complete-registration", _check_import_complete_registration),
 )
 
 
@@ -4788,6 +4832,7 @@ def _fast_vectors(root):
     _pack_manifest_registration_self_test()
     _adopt_observe_registration_self_test()
     _import_batch_registration_self_test()
+    _import_complete_registration_self_test()
     _negative_verdict_self_test()
     _verdict_routing_self_test()
     _harness_routing_self_test()
