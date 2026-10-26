@@ -20026,6 +20026,18 @@ def _main_isolated(monitor):
             failures.append("(noask-trunc-note) orch_truncation_guard must ALLOW WITH A NOTE a background "
                             "dispatch whose shell syntax it does not parse (a redirect, no truncating sink) "
                             "on a real repo; got {}".format(_f18_note))
+        # (noask-trunc-no-registry-warn) the same foreground bare-& detach from a directory with NO
+        # orchestration registry reaches orch_truncation_guard's no-registry warn: an allow WITH A NOTE,
+        # never an ask and never a silent allow (a silent allow reads "allow").
+        _f18_plain = _f18_tmp / "plain"
+        _f18_plain.mkdir()
+        _f18_warn = _decision_any(aiqt_hooks.orch_truncation_guard, {
+            "hook_event_name": "PreToolUse", "tool_name": "Bash",
+            "tool_input": {"command": "sleep 1 &", "run_in_background": False}, "cwd": str(_f18_plain)})
+        if _f18_warn != "allow-note":
+            failures.append("(noask-trunc-no-registry-warn) orch_truncation_guard must ALLOW WITH A NOTE a "
+                            "foreground bare-& detach where no orchestration registry is found; got {}"
+                            .format(_f18_warn))
     except (OSError, subprocess.SubprocessError) as _f18_exc:
         failures.append("(noask-orch-fixture) could not build the finding-18 armed orch fixture: {}"
                         .format(_f18_exc))

@@ -47,8 +47,12 @@ the doctor and the resume audit report and arm from it):
 
 - DEFAULT (`AIQT_ORCH_REQUIRE_REGISTRY` unset or an explicit off value: `""`, `0`, `false`, `no`,
   `off`, ASCII case-insensitive, matched exactly with nothing stripped): with no registry in its
-  scope the truncation guard is inert and allows every Bash call that passes those pre-scope
-  checks. A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
+  scope the truncation guard allows every Bash call that passes those pre-scope checks, silently
+  except for one case: a readable foreground command it reads as a bare `&` detach is allowed with a
+  warning that names rule trkasy and points at `run_in_background` (a later release turns that
+  warning into the deny a session with a registry already gets). A malformed `tool_input`,
+  `run_in_background` or command, and a command whose quoting it cannot read to the end, are allowed
+  silently there. A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
   `.aiqt` directory the guard's process lacks search (execute) permission on, such as mode `0600`
   or `0000` for a process those modes bind; a `.aiqt` of mode `0100` evaluates normally for its owner
   where `O_PATH` exists (Linux), because the `O_PATH` open needs no read permission, and for a process
@@ -90,7 +94,8 @@ the doctor and the resume audit report and arm from it):
   a Bash call whose cwd is missing, empty or not a string in every mode, before its scope check. For a
   Bash call from a non-empty string cwd where git resolves nothing, whether the guard's scope check denies it depends only on its own ancestor walk of
   that cwd and the mode, because its git leg resolves nothing either; its other checks still read the
-  call itself (in scope, a foreground bare `&` is denied): with a regular registry on the walk the scope
+  call itself (in scope, a foreground bare `&` is denied; with no registry found and by default, it is
+  allowed with a warning): with a regular registry on the walk the scope
   check does not deny a plain command in either mode, while a walk it cannot carry out denies in both.
   Git can still resolve a root this process cannot enter (through `core.worktree`, from a session cwd
   inside the repository's git directory). Where that root exists but this process cannot search it, or

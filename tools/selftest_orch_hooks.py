@@ -9809,15 +9809,43 @@ def _main_isolated(report_path=None):
         check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
         check("trunc/fg-comment-then-detach-denies", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "deny")
         check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
-        # inert BY DEFAULT when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
+        # NO-REGISTRY WARN, BY DEFAULT when the orchestration registry is absent: a readable foreground
+        # bare-& detach is allowed with a warning (the reducer's "warn") naming rule trkasy and pointing at
+        # run_in_background, never a prompt and never a silent allow; everything else stays inert there (a
+        # malformed tool_input, run_in_background or command, a command whose quoting the detector cannot
+        # read to its end, a background dispatch, and an `&` that is no bare detach). Each warn row reads
+        # "allow" with the guard returning its silent allow before reading the call.
         ti = Fixture(tmp, "trunc-inert")
         (ti.root / ".aiqt" / "orchestration.local.json").unlink()
-        check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
-            ti.payload("PreToolUse", "Bash",
-                       {"command": "long_job &", "run_in_background": False}))), "allow")
+        ti_call = lambda tool_input: aiqt_hooks.orch_truncation_guard(ti.payload("PreToolUse", "Bash", tool_input))
+        ti_warn = ti_call({"command": "long_job &", "run_in_background": False})
+        ti_note = (ti_warn[1] or {}).get("systemMessage", "")
+        check("trunc/fg-detach-no-registry-warns",
+              (_verdict(ti_warn), "trkasy" in ti_note, "run_in_background" in ti_note), ("warn", True, True))
+        check("trunc/fg-detach-shapes-no-registry-warn",
+              [_verdict(ti_call({"command": v})) for v in (
+                  "dispatch_retry.sh 12 &", "./gate_merge.sh &", "nohup dispatch_retry.sh > log 2>&1 &",
+                  "worker & wait", "cat > a <<'A'\nit's\nA\njob &\ncat > b <<'B'\nit's\nB")], ["warn"] * 5)
+        check("trunc/fg-nonbare-amp-no-registry-allows",
+              [_verdict(ti_call({"command": v, "run_in_background": False})) for v in (
+                  "build && test", "build &> out.log", "build 2>&1", "build |& tee log", "echo 'a & b'",
+                  "echo done # & comment", "cat > f <<'EOF'\nFix A & B\nEOF", "ls")], ["allow"] * 8)
+        check("trunc/fg-unbalanced-no-registry-allows",
+              [_verdict(ti_call({"command": v})) for v in (
+                  "echo 'oops & bg", "cat > f <<'EOF'\nthe user's file\nEOF")], ["allow"] * 2)
+        check("trunc/fg-malformed-no-registry-allows",
+              [_verdict(aiqt_hooks.orch_truncation_guard(dict(
+                  ti.payload("PreToolUse", "Bash"), tool_input=tool_input))) for tool_input in (
+                  "long_job &", ["long_job &"], {"command": "long_job &", "run_in_background": "false"},
+                  {"command": "long_job &", "run_in_background": None}, {"command": 5}, {})],
+              ["allow"] * 6)
+        check("trunc/bg-no-registry-still-inert",
+              [_verdict(ti_call({"command": v, "run_in_background": True})) for v in (
+                  "python3 build.py | tail -5", "long_job &")], ["allow"] * 2)
         # REGISTRY-REQUIRED MODE (opt-in, AIQT_ORCH_REQUIRE_REGISTRY): an ABSENT registry DENIES instead
         # of leaving the guard inert, with a reason naming the mode and its repair; an explicit off value
-        # keeps the default inert allow, and a PRESENT registry behaves identically in both modes.
+        # keeps the default (the no-registry warn on a bare-& detach), and a PRESENT registry behaves
+        # identically in both modes.
         _rr = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
         _rr_old = os.environ.get(_rr)
         try:
@@ -9833,9 +9861,9 @@ def _main_isolated(report_path=None):
             check("trunc/registry-required-present-detach-denies",
                   _verdict(bg("long_job &", rib=False)), "deny")
             os.environ[_rr] = "off"
-            check("trunc/registry-required-off-value-inert", _verdict(aiqt_hooks.orch_truncation_guard(
+            check("trunc/registry-required-off-value-default-warns", _verdict(aiqt_hooks.orch_truncation_guard(
                 ti.payload("PreToolUse", "Bash",
-                           {"command": "long_job &", "run_in_background": False}))), "allow")
+                           {"command": "long_job &", "run_in_background": False}))), "warn")
             # The off values are matched EXACTLY, nothing stripped (ASCII case-insensitive): a comparison that
             # stripped the value first would read a tab, a newline, or an off word wrapped in spaces or
             # no-break spaces as OFF and allow without a registry. Each reads as ON.
@@ -9858,13 +9886,72 @@ def _main_isolated(report_path=None):
                 os.environ.pop(_rr, None)
             else:
                 os.environ[_rr] = _rr_old
-        # The cautious scanner's disclosed over-refusal residual: a here-document body is scanned as code,
-        # so a safe body carrying an unquoted `&` is denied; the double-quoted commit-message form is read
-        # as double-quoted text and allowed.
-        check("trunc/fg-heredoc-amp-overrefusal-residual-denies",
-              _verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)), "deny")
+        # The guard reads a foreground detach through the shared lexer beside the raw scan
+        # (_orch_foreground_detach_lexed). The scan reads a here-document body as code, so it reads each `&`
+        # in the allow rows below as a bare detach; the lexer places that `&` in one of the three shapes that
+        # alone lift the scan's deny: a quoted here-document body (<<'EOF', <<"EOF", the commit-message
+        # form's body), a single- or double-quoted string (the scan's quote state shifted by a body quote),
+        # and a comment. Each allow row denies with the guard reading the scan alone (as it did before).
+        check("trunc/fg-quoted-heredoc-amp-allows",
+              [_verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)),
+               _verdict(bg('cat > f <<"EOF"\nFix A & B\nEOF', rib=False))], ["allow", "allow"])
+        check("trunc/fg-commit-heredoc-quoted-amp-allows",
+              _verdict(bg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\"", rib=False)), "allow")
+        check("trunc/fg-quote-shift-single-quoted-amp-allows",
+              _verdict(bg("cat <<'A'\nit's\nA\necho 'a & b'\ncat <<'B'\nit's\nB", rib=False)), "allow")
+        check("trunc/fg-quote-shift-double-quoted-amp-allows",
+              _verdict(bg("cat <<'A'\nsay \"hi\nA\necho \"a & b\"\ncat <<'B'\nsay \"bye\nB", rib=False)),
+              "allow")
+        check("trunc/fg-quote-shift-comment-amp-allows",
+              _verdict(bg("cat <<'EOF'\nit's\nEOF\necho ok # it's a & b", rib=False)), "allow")
         check("trunc/fg-commit-template-amp-allows",
               _verdict(bg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\"", rib=False)), "allow")
+        # Every other case where the lexer and the scan disagree still denies: an `&` the lexer places in a
+        # substitution that a double-quoted string holds (even inside a quoted string there, which the
+        # lexer skips whole), one in an ANSI-C $'...' quote, and a quoted-delimiter body `&` after which
+        # the scan ends inside a quote (an apostrophe in the body). The first two rows allow if the
+        # narrowing lifts a scan detach without the lexer's place, the first also if it reads the outermost
+        # span holding the `&`, and the third if it lifts one without the scan reading to the end.
+        check("trunc/fg-amp-in-dq-substitution-denies",
+              _verdict(bg('echo "$(echo "a & b")"', rib=False)), "deny")
+        check("trunc/fg-amp-in-ansi-c-quote-denies", _verdict(bg("echo $'it\\'s & b' \\'", rib=False)), "deny")
+        check("trunc/fg-quoted-heredoc-amp-then-open-quote-denies",
+              _verdict(bg("cat > f <<'EOF'\nFix A & B's\nEOF", rib=False)), "deny")
+        # A substitution after the commit-message form's body makes the lexer lex again reading no body
+        # (_SubstHeredocRetry); that pass places the body `&` in the substitution, so the deny stands. It
+        # allows if a pass keeps the places recorded by the pass it replaced.
+        check("trunc/fg-commit-heredoc-retried-lex-amp-denies",
+              _verdict(bg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\" \"$(date)\"", rib=False)),
+              "deny")
+        # The lexer's bare `&` separator denies where the scan reads the `&` as quoted or commented text:
+        # the scan's QUOTE SHIFT (an apostrophe in each of two quoted here-document bodies around a real
+        # detach) and COMMENT SHIFT false allows. Each row allows with the guard reading the scan alone.
+        check("trunc/fg-quote-shift-heredoc-detach-denies",
+              _verdict(bg("cat > a <<'A'\nit's\nA\njob &\ncat > b <<'B'\nit's\nB", rib=False)), "deny")
+        check("trunc/fg-comment-shift-detach-denies",
+              _verdict(bg('echo "$(echo "a" "b # ")" & job # "', rib=False)), "deny")
+        # Where the lexer refuses the command (an unquoted here-document, an open quote, a process
+        # substitution, a here-string) the scan alone decides: its detach and open quote deny, and a
+        # command it reads with no bare `&` allows.
+        check("trunc/fg-unlexable-falls-back-denies",
+              [_verdict(bg(v, rib=False)) for v in ("cat > f <<EOF\nFix A & B\nEOF", "echo 'oops & bg",
+                                                    "cat <(job &)")], ["deny"] * 3)
+        check("trunc/fg-unlexable-no-amp-allows",
+              [_verdict(bg(v, rib=False)) for v in ("diff <(sort a) <(sort b)", 'grep x <<< "a & b"')],
+              ["allow"] * 2)
+        # The places the lexer records (_LexPlaces) change nothing it returns, and a single-quoted string, a
+        # substitution inside a double-quoted string, that string and a comment each record their span.
+        _places_vectors = ("cat > f <<'EOF'\nFix A & B\nEOF",
+                           "git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\"",
+                           "echo 'a' \"b $(c)\" # d", "x=$(true)# e\n f")
+        _places_plain = [aiqt_hooks._lex_command(v) for v in _places_vectors]
+        with aiqt_hooks._LexPlaces():
+            _places_recorded = [aiqt_hooks._lex_command(v) for v in _places_vectors]
+        check("trunc/lex-places-same-segments", _places_recorded, _places_plain)
+        with aiqt_hooks._LexPlaces() as _places_spans:
+            aiqt_hooks._lex_reading("echo 'a' \"b $(c)\" # d", False, {})
+        check("trunc/lex-places-spans", sorted(_places_spans),
+              [(5, 8, "quote"), (9, 17, "quote"), (12, 16, "code"), (18, 21, "comment")])
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
@@ -9890,8 +9977,8 @@ def _main_isolated(report_path=None):
         check("trunc/rib-omitted-foreground-detach-denies", raw({"tool_input": {"command": "sleep 5 &"}}),
               "deny")
         # Registry scope, the disclosed residual: BY DEFAULT (this run pops AIQT_ORCH_REQUIRE_REGISTRY) with NO
-        # registry file the guard is inert (malformed input
-        # included), while a PRESENT but unreadable or invalid registry keeps it active (fail-closed).
+        # registry file the guard is inert (malformed input included; only a readable foreground bare-&
+        # detach warns), while a PRESENT but unreadable or invalid registry keeps it active (fail-closed).
         check("trunc/malformed-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
             {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
              "tool_input": None})), "allow")
@@ -9936,9 +10023,10 @@ def _main_isolated(report_path=None):
               _verdict(bg("x=$(true) #; python3 build.py | head")), "warn")
         # The lexer vectors of the shared comment rule, run as foreground commands: bash 5.3.9 runs the RUN
         # or RAN command in each (vectors a and b detach it with a bare `&`), and each `#` is right after a
-        # `)` or at a word start inside an open ${...}, so the foreground scan denies every one as
-        # unbalanced. At the base commit a and b denied as a detach and c to i allowed; the earlier comment
-        # rule allowed all nine.
+        # `)` or at a word start inside an open ${...}, so the foreground scan reads every one as
+        # unbalanced, and the guard denies every one (a and b as the detach a lexer reading reaches). At the
+        # base commit a and b denied as a detach and c to i allowed; the earlier comment rule allowed all
+        # nine.
         _fg_hash_vectors = (
             'case x in x)# "\n :;; esac; printf RUN & # "\nwait',
             'echo ${x:-$(true # "\n)} & printf RUN # "\nwait',
@@ -10020,6 +10108,8 @@ def _main_isolated(report_path=None):
         # and git-toplevel union find no registry allows BY DEFAULT (a git FAILURE alone never denies by
         # default: the round-3 git lockout is withdrawn; the registry-required exception is pinned by
         # trunc/registry-required-git-unavailable-core-worktree-denies). The confirmed-outside CONTROL row passes before and after the fix.
+        # Each no-registry allow row below probes with the bare-& detach of nocwd, so it reads "warn": the
+        # no-registry warn allows the call with a note, where a registry in scope denies it.
         def _cwd_case(cwd):
             res = aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=cwd))
             why = (res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
@@ -10058,7 +10148,7 @@ def _main_isolated(report_path=None):
         bare = tmp / "cwd-bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True,
                        timeout=30)
-        check("trunc/cwd-bare-repo-no-registry-allows", _cwd_case(str(bare))[0], "allow")
+        check("trunc/cwd-bare-repo-no-registry-allows", _cwd_case(str(bare))[0], "warn")
         barein = t.root / "inner-bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(barein)], check=True, capture_output=True,
                        timeout=30)
@@ -10106,7 +10196,7 @@ def _main_isolated(report_path=None):
                                (_git_dubious, "trunc/git-dubious-ownership-no-registry-allows"),
                                (_git_badconfig, "trunc/git-broken-config-no-registry-allows")):
                 aiqt_hooks._recovery_git = _sim
-                check(_row, _cwd_case(str(norig))[0], "allow")
+                check(_row, _cwd_case(str(norig))[0], "warn")
             # the same failing git INSIDE an orchestrated tree: the registry is on the walk, so the guard
             # still applies its rules (the detach denies with the DETACH reason, a plain command allows).
             aiqt_hooks._recovery_git = _git_missing
@@ -10123,7 +10213,7 @@ def _main_isolated(report_path=None):
         cv, cw = _cwd_case(str(t.root / ".git"))
         check("trunc/cwd-inside-git-dir-with-registry-detach-denies",
               (cv, "detaches a child" in cw), ("deny", True))
-        check("trunc/cwd-inside-git-dir-no-registry-allows", _cwd_case(str(norig / ".git"))[0], "allow")
+        check("trunc/cwd-inside-git-dir-no-registry-allows", _cwd_case(str(norig / ".git"))[0], "warn")
         # the walk's own failure DENIES with an actionable fix: an ancestor directory it cannot open (the
         # openat of ".." is patched to refuse, as a root-run self-test reads every directory as readable).
         anc = tmp / "anc-noread"
@@ -10169,7 +10259,7 @@ def _main_isolated(report_path=None):
                                capture_output=True, text=True, timeout=30,
                                env=dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.realpath(str(tmp))))
         check("trunc/cwd-confirmed-outside-repo-allows",
-              (probe.returncode, _cwd_case(str(outside))[0]), (128, "allow"))
+              (probe.returncode, _cwd_case(str(outside))[0]), (128, "warn"))
         # HERMETICITY of every truncation-guard row: a registry ABOVE the fixture root never decides a
         # verdict (before this, a live registry above TMPDIR turned each out-of-scope row above into a
         # deny and let each registry-present row pass on the host's registry instead of its fixture's).
@@ -14072,10 +14162,12 @@ def _main_isolated(report_path=None):
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
           "producer's full output and exit status) and a "
           "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment "
-          "and failing a scan that ends inside an open quote toward a deny with its own reason (a quote the "
-          "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
-          "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "
-          "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, denies every "
+          "and failing a scan that ends inside an open quote toward a deny with its own reason (the shared "
+          "lexer's bare '&' separator also denies where that scan misreads a quote in mid-string, and the "
+          "scan's detach is lifted only where the lexer places every '&' in a quoted here-document body, a "
+          "quoted string or a comment), reads a '#' comment by bash's word-start rule as well, warns (allows "
+          "with a note naming rule trkasy) on a readable foreground bare-& detach when no registry is found, "
+          "denies every "
           "Bash call that passes the pre-scope checks when the opt-in registry-required mode is set and no registry is found or the nearest registry entry cannot be evaluated (a discovery fault never satisfies that mode; by default it keeps the guard active), and fails "
           "closed on a missing or unreadable tool_name, an unreadable cwd or one whose registry walk cannot "
           "be carried out (scope is the ancestor walk with its concurrent-move recheck, unioned with "
