@@ -20126,13 +20126,15 @@ def _cmd_adopt(rest):
           names anything that stays (the stale-lock arbitration file lock.break, a lock or lease whose
           creation failed part-way): journal-lock-held (a possibly-live owner holds the journal lock, never
           seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
-          classify), store-lease-held (a store pointer at the product root, or a store lease present, or
+          classify, a stray or wrong-type journal entry, or a transaction renamed or replaced after the
+          listing), store-lease-held (a store pointer at the product root, or a store lease present, or
           claimed by another writer, in a machine subdirectory, beside an open transaction other than
           init-store's), init-store-reversal-unproven (the reversal could remove content the operation
           did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
           began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
           recovery-failed (files already restored or frames already published stay, the transaction stays
-          open, and a later reconcile resumes it), or store-lease-release-failed (the recovery finished,
+          open, and a later reconcile resumes it; also a transaction directory replaced during recovery,
+          never reported recovered), or store-lease-release-failed (the recovery finished,
           but a store lease this run took could not be released and stays, named). Also exit 2: a
           cannot-evaluate root. NOT BUILT: releasing a dead run's leftover store lease (the spec 5.7
           lease leg) lands with the adoption lease join; until then the operator releases it. Exit 1 is
@@ -22052,14 +22054,17 @@ def _cli_self_test():
             journal, a completed transaction, a store lease with nothing open, and a second reconcile after
             a recovery each exit 0 with nothing written. Each refusal before any recovery write exits 2 with
             its named finding and every file byte-identical: a live journal lock (journal-lock-held), a
-            malformed lock and a transaction with an invalid frame sequence (journal-unclassifiable), a store
-            lease beside an open transaction (store-lease-held), and an init-store reversal whose live
-            creations are not the operation's own (init-store-reversal-unproven). A fault after recovery
-            began exits 2 as recovery-failed with the partial state the journal records (the transaction
-            open, no lock and no lease left), and a second reconcile resumes it to the prestate. The
-            lease exclusion itself, the pre-lock-fault finding and the race reports ride the library
-            self-test (_opf_adopt_apply section 8d). Returns None on success or EXIT_MALFORMED on a harness
-            error."""
+            malformed lock, a transaction with an invalid frame sequence and a stray journal entry beside no
+            transaction (journal-unclassifiable; red against a listing that skips the stray, which reads
+            nothing to reconcile), a store lease beside an open transaction (store-lease-held), and an
+            init-store reversal whose live creations are not the operation's own
+            (init-store-reversal-unproven). A fault after recovery began exits 2 as recovery-failed with
+            the partial state the journal records (the transaction open, no lock and no lease left), and a
+            second reconcile resumes it to the prestate. A product root that does not exist exits 2 as
+            cannot evaluate, never as a REFUSED finding, and nothing is created (a contract pin, green on
+            the build before it too). The lease exclusion itself, the pre-lock-fault finding, the race
+            reports and the held-listing vectors ride the library self-test (_opf_adopt_apply sections 8d
+            and 8e). Returns None on success or EXIT_MALFORMED on a harness error."""
             from unittest import mock
             adopt = _opf_adopt_apply
             journal = adopt._journal
@@ -22204,6 +22209,9 @@ def _cli_self_test():
                         logged = fh.read()
                     with open(frames, "wb") as fh:
                         fh.write(logged * 2)
+                    # a stray file in the journal beside no transaction and no lock
+                    strayonly = fixture("strayonly")
+                    put(strayonly, j_rel + "/stray", b"")
                     leased = interrupted("leased", mid_archive)
                     put(leased, lease_rel, b"held\n")
                     # an open transaction the reversal treats as init-store's (its name) whose live creations
@@ -22282,6 +22290,7 @@ def _cli_self_test():
                         ("a live journal lock", live, adopt.RECONCILE_LOCK_HELD),
                         ("a malformed journal lock", badlock, adopt.RECONCILE_UNCLASSIFIABLE),
                         ("an invalid frame sequence", badseq, adopt.RECONCILE_UNCLASSIFIABLE),
+                        ("a stray journal entry beside no transaction", strayonly, adopt.RECONCILE_UNCLASSIFIABLE),
                         ("a store lease beside an open transaction", leased, adopt.RECONCILE_STORE_LEASE_HELD),
                         ("an init-store reversal whose live creations are not its own", unproven,
                          adopt.RECONCILE_REVERSAL_UNPROVEN)):
@@ -22290,6 +22299,16 @@ def _cli_self_test():
                     if rc != EXIT_MALFORMED or "REFUSED ({})".format(finding) not in out or snap(root) != was:
                         failures.append("adopt reconcile over {}: rc={!r} (expected 2 + REFUSED ({}), "
                                         "byte-identical; {})".format(label, rc, finding, out.strip()))
+
+                # a product root that does not exist: cannot evaluate (exit 2), never a REFUSED finding, and
+                # nothing created there (a contract pin, green on the build before it too).
+                missing = os.path.join(rbase, "missing")
+                rc, out = run(missing)
+                if (rc != EXIT_MALFORMED or "cannot evaluate" not in out or "cannot open product root" not in out
+                        or "REFUSED" in out or os.path.lexists(missing)):
+                    failures.append("adopt reconcile over a product root that does not exist: rc={!r} (expected "
+                                    "2 + cannot evaluate, no REFUSED finding, nothing created; {})".format(
+                                        rc, out.strip()))
 
                 # recovery-failed: a fault AFTER recovery began (an EIO at a rollback checkpoint once the
                 # archive copy is discarded) exits 2 named, and the state is the journal's record of a
