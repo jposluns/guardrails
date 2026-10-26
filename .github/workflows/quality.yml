@@ -804,7 +804,6 @@ jobs:
       - name: Entry-guard self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
-
       - name: Entry-guard gate
         shell: bash
         run: python3 -I -B tools/check_entry_guard.py

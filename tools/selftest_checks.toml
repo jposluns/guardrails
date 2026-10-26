@@ -2359,6 +2359,9 @@ expected-check-ids = [
   "gate/rule-file-fifo-bad-name-exits-2",
   "gate/loose-rule-fifo-exits-2",
   "gate/rule-drift-fails",
+  # ---------- family directories and vendored sources replaced after their listing ----------
+  "gate/family-replaced-after-listing-exits-2",
+  "gate/vendored-source-replaced-after-listing-exits-2",
   # ---------- probe mutants, each caught by its named vector ----------
   "mutant/stat-follows-links-caught",
   "mutant/wrong-type-reads-absent-caught",
@@ -2371,6 +2374,7 @@ expected-check-ids = [
   "mutant/held-identity-unchecked-caught",
   "mutant/held-final-unopened-caught",
   "mutant/vanished-reads-absent-caught",
+  "mutant/listing-identity-unchecked-caught",
   # ---------- the gate's own --root guard ----------
   "vector/every-vector-holds",
   "launch/nonexistent-root-cannot-evaluate",

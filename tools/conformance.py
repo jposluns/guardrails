@@ -1548,6 +1548,22 @@ def self_test_main():
             failures.append("a .claude replaced after C3's probe's lstat of it expected C3 MALFORMED "
                             "naming it, got {}: {}".format(got.status, got.detail))
 
+        # 16l. A family directory holding a badly named rule, replaced by an empty directory right
+        #      after C3's listing of .claude/rules judged it (a hook on the walk's listing), changed
+        #      under the walk: C3 MALFORMED naming it, never a walk into the replacement that misses
+        #      the violation and passes on the other families.
+        family_replaced = (tmp / "family-replaced").resolve()
+        family_replaced.mkdir()
+        _build_conformant(family_replaced)
+        family = family_replaced / ".claude" / "rules" / "aiqt"
+        (family / "bad.md").write_text("# bad\n", encoding="utf-8")
+        with crp._patched(crp, "_listing", crp._replacing_listing(crp._listing, family)):
+            got = check_c3(family_replaced)
+        if (got.status != MALFORMED or not got.detail.startswith("cannot read the rules tree: ")
+                or "'{}'".format(family) not in got.detail):
+            failures.append("a family directory replaced after C3's listing expected C3 MALFORMED "
+                            "naming it, got {}: {}".format(got.status, got.detail))
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:
@@ -1581,7 +1597,8 @@ def self_test_main():
           "(standards, core rules, generated families, the .aiqt/.claude/.github parents, and the plugin "
           "hooks subtree), a live or dangling symlinked .claude, a symlinked family directory or rule "
           "file below .claude/rules, a .claude/rules swapped for a symlink, replaced or removed after "
-          "C3's probe, a .claude replaced after that probe's lstat of it, and a bad --root fail "
+          "C3's probe, a .claude replaced after that probe's lstat of it, a family directory "
+          "replaced after C3's listing, and a bad --root fail "
           "closed" + skip_note)
     return 0
 

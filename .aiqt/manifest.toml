@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0ac4c783aab6a7d14238a1acfd6b75e274f891723dae6c4742f295ac26b45548"
+tree-sha256 = "a485eb3001335294bc3a8103b57784639b1daa3e7968c701a21ec57ec55f3519"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3366,8 +3366,8 @@ sha256 = "d7d7614791529f4ba2fc961b84e7a8dee7fcc832fd6c2d034c682fcfc1b7549c"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 126251
-sha256 = "9c7d861b63e38407649220f084143acc6ce0060a0f0582c7f4597d4833a01a63"
+bytes = 126533
+sha256 = "8b3dcb8fe32863b919065eefd4eed4f1fb970db1b5a539a21a60b8f3ccf923b9"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -3536,8 +3536,8 @@ sha256 = "8432b91994571a4d2e8a41007d84d32b24990b15c772a134449a7b3cd57440a3"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
-bytes = 68841
-sha256 = "a58befaef7a4493bde447b64a006c4758e6e947c8b8f7982476d4b691b38d7e7"
+bytes = 75370
+sha256 = "f7c3fefa0ab7e4088aa3cb34410e0b97527300347758023e016a870a016fc071"
 
 [[sources]]
 path = "tools/check_secrets.py"
@@ -3591,8 +3591,8 @@ sha256 = "d5e68bcbdfc7f4910676d047b73f8ede82a3602b027b23e442f58fee2bba453d"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 81328
-sha256 = "f749c83c6df1b505948cef35ec0a530104b65f9a3f08f98d0c7645e7a70170ca"
+bytes = 82499
+sha256 = "530eee7e719d844e6e3b31d8ffc8d0ac4d75301cc40564179a93618e5699ace4"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -3791,8 +3791,8 @@ sha256 = "c1409ccf43b2d3d31ea1a1799677ecef9e2602904f5d2c1a38f65a462442b483"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 111597
-sha256 = "22dc69b6dc40143b3802e3bb40b8fe76a8533af2318001e00e19f49b2ce2ff8e"
+bytes = 111843
+sha256 = "0d43dbf4d3d19b861753981d7fb3d2982cff52d69f0eac07847b8b844146d09d"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

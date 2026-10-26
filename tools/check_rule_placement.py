@@ -41,8 +41,10 @@ read, and a symlink at any entry the walk inspects (an entry of the tree root, o
 or of external/, or a vendored source's PROVENANCE.md or LICENSE; a dot-named entry of the tree root
 or of a flat family is skipped unread, as is everything else inside a vendored source) exits 2 naming
 it, never followed. A rule file that is not a regular file (a FIFO included), in a family directory
-or loose at the tree root, exits 2 the same way whatever its name: its listed type is judged before
-its name, and the descriptor it is read through is judged again (opened without blocking).
+or loose at the tree root, exits 2 the same way even when its name is bad: its listed type is judged
+before its name, and the descriptor it is read through is judged again (opened without blocking). A
+dot-named entry is skipped before its type is checked, and the tree-root metadata names (README.md,
+PROVENANCE.md) are not type-checked as rule files.
 
 Emits the deterministic section 6.6 codes: loose, unknown-family, nested-dir, bad-name,
 tier-code-mismatch, numbered-non-aiqt, apex-nonstandard, frontmatter-drift, missing-provenance. Each
@@ -199,10 +201,18 @@ def check_drift(f, rules, data=None):
     return None
 
 
-def _listing(dir_fd):
-    """The entries of the directory held at dir_fd, sorted by name, listed through the descriptor."""
+def _listing(dir_fd, path):
+    """The entries of the directory path held at dir_fd, sorted by name, listed through the descriptor,
+    each with its lstat taken (and cached by entry.stat) as the listing is made, so the identity
+    _open_at checks is the one the listing judged; an entry gone by its lstat raises OSError naming it."""
     with _scandir(dir_fd) as entries:
-        return sorted(entries, key=lambda entry: entry.name)
+        listed = sorted(entries, key=lambda entry: entry.name)
+    for entry in listed:
+        try:
+            entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise OSError(exc.errno, exc.strerror, str(path / entry.name)) from exc
+    return listed
 
 
 def _refuse_link(entry, path):
@@ -211,22 +221,36 @@ def _refuse_link(entry, path):
         raise OSError(errno.ELOOP, "a symlink in the rules tree, which is never followed", str(path))
 
 
-def _open_at(dir_fd, path, flags):
-    """Open path's final component beneath dir_fd with flags (O_NOFOLLOW among them); any error, a
-    symlink swapped in after the listing included, raises OSError naming path."""
+def _open_at(dir_fd, path, flags, entry):
+    """Open path's final component beneath dir_fd with flags (O_NOFOLLOW among them), returning the
+    descriptor only when it is the entry the listing judged: its st_dev and st_ino must match entry's
+    lstat, taken as the listing was made, so an entry replaced after the listing (by another directory
+    or file) closes the descriptor and raises OSError(ESTALE) naming path. Any open error, a symlink
+    swapped in after the listing included, raises OSError naming path."""
+    listed = entry.stat(follow_symlinks=False)
     try:
-        return os.open(path.name, flags, dir_fd=dir_fd)
+        fd = os.open(path.name, flags, dir_fd=dir_fd)
     except OSError as exc:
         raise OSError(exc.errno, exc.strerror, str(path)) from exc
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (listed.st_dev, listed.st_ino):
+            raise OSError(errno.ESTALE, "the entry opened is not the one the listing judged (it was "
+                          "replaced in between)", str(path))
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 _NOT_REGULAR = "not a regular file where a rule file is required"
 
 
-def _read_rule(dir_fd, path):
-    """The bytes of the rule file path, read beneath dir_fd only when fstat on the opened descriptor
-    finds a regular file; anything else raises OSError naming path."""
-    fd = _open_at(dir_fd, path, _FILE_FLAGS)
+def _read_rule(dir_fd, path, entry):
+    """The bytes of the rule file path, listed as entry, read beneath dir_fd only when the opened
+    descriptor is that entry and fstat on it finds a regular file; anything else raises OSError naming
+    path."""
+    fd = _open_at(dir_fd, path, _FILE_FLAGS, entry)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(errno.EINVAL, _NOT_REGULAR, str(path))
@@ -250,13 +274,13 @@ def _entry_present(dir_fd, path):
 def _scan_family(family, item, family_fd, rules, report, checked):
     """Check one family directory, held open at family_fd, as _scan_tree does."""
     if family == "external":
-        for entry in _listing(family_fd):
+        for entry in _listing(family_fd, item):
             sub = item / entry.name
             _refuse_link(entry, sub)
             if not entry.is_dir(follow_symlinks=False):
                 continue
             checked(sub)
-            sub_fd = _open_at(family_fd, sub, _DIR_FLAGS)
+            sub_fd = _open_at(family_fd, sub, _DIR_FLAGS, entry)
             try:
                 present = [_entry_present(sub_fd, sub / name) for name in ("PROVENANCE.md", "LICENSE")]
             finally:
@@ -267,7 +291,7 @@ def _scan_family(family, item, family_fd, rules, report, checked):
     # aiqt and security are FLAT families (spec 6.3): only *.md directly in the family dir. Any nested
     # directory is a nested-dir violation (empty or not); dotfiles and non-md files are out of scope and
     # skipped. A listing (not rglob) surfaces a read error as exit 2.
-    for entry in _listing(family_fd):
+    for entry in _listing(family_fd, item):
         if entry.name.startswith("."):
             continue
         path = item / entry.name
@@ -287,7 +311,7 @@ def _scan_family(family, item, family_fd, rules, report, checked):
         if nc:
             report(path, nc[0], nc[1])
             continue
-        drift = check_drift(path, rules, _read_rule(family_fd, path))
+        drift = check_drift(path, rules, _read_rule(family_fd, path, entry))
         if drift:
             report(path, drift[0], drift[1])
 
@@ -297,14 +321,17 @@ def _scan_tree(rules, rules_fd, report, checked=lambda path: None):
     report(path, code, detail) for each violation, and checked(path) once for each rule file and
     vendored source it evaluates (conformance C3 counts them). Every listing is made through a held
     descriptor, and every directory it descends into is opened, and every rule file read, beneath its
-    parent's descriptor with O_NOFOLLOW, so the tree read is the one the probe judged, whatever later
-    happens to its names. A symlink at any entry the walk inspects (an entry of the tree root, of a
+    parent's descriptor with O_NOFOLLOW, and each opened descriptor's st_dev and st_ino are checked
+    against the lstat its listing took (_open_at), so an entry replaced after that lstat raises OSError
+    naming it, and the tree read is the one the probe and the listings judged, whatever later happens to
+    its names. Residual: an entry replaced between the listing's read of the directory and its lstat of
+    that entry is judged as the replacement. A symlink at any entry the walk inspects (an entry of the tree root, of a
     family directory or of external/, or a vendored source's PROVENANCE.md or LICENSE) raises OSError
     naming it, never followed, as does a rule file that is not a regular file, in a family or loose at
     the tree root, whatever its name (its type is judged before its name). Dot-named entries of the
     tree root and of a flat family are skipped unread, and nothing else inside a vendored source is
     inspected."""
-    for entry in _listing(rules_fd):
+    for entry in _listing(rules_fd, rules):
         if entry.name.startswith("."):
             continue
         item = rules / entry.name
@@ -321,7 +348,7 @@ def _scan_tree(rules, rules_fd, report, checked=lambda path: None):
         if family not in BUILTIN_FAMILIES:
             report(item, "unknown-family", "not a registered family directory")
             continue
-        family_fd = _open_at(rules_fd, item, _DIR_FLAGS)
+        family_fd = _open_at(rules_fd, item, _DIR_FLAGS, entry)
         try:
             _scan_family(family, item, family_fd, rules, report, checked)
         finally:
@@ -424,9 +451,11 @@ def main(argv=None):
 # descriptor (a swap or a removal before the listing exits 2, as does a .claude replaced by another
 # directory before its open, and a swap after the open changes nothing
 # read), and exits 2 on a symlink below it or a FIFO rule file (with a bad name or loose at the tree
-# root too), never following or blocking on either; and each
+# root too), never following or blocking on either, and on a family directory or vendored source
+# replaced by another directory after its listing, never walked into; each
 # listed probe mutant (a scratch copy of _standards.py with one guard reverted, loaded with
-# importlib) is caught by its named probe vector. It then proves the gate's own --root guard: every
+# importlib) is caught by its named probe vector, and the placement mutant (a scratch copy of this
+# file with the listing identity check dropped) by the family vector. It then proves the gate's own --root guard: every
 # --root vector holds, each patched guard mutant fails exactly its named vectors, and the default
 # root, launched as both rosters launch the gate, passes on this tree.
 
@@ -526,6 +555,44 @@ def _swapping_scandir(real_scandir, target, link_to):
             target.symlink_to(link_to)
         return real_scandir(fd)
     return _scandir
+
+
+def _replacing_listing(real_listing, target, fill=()):
+    """A walk listing that, once, right after the listing of target's parent, moves target aside and
+    puts at its name a fresh directory holding the files named in fill: an entry replaced by another
+    real directory after the listing judged it, so only _open_at's st_dev and st_ino check can refuse
+    the replacement."""
+    moved = []
+
+    def _listing(dir_fd, path):
+        listed = real_listing(dir_fd, path)
+        if not moved and path == target.parent:
+            moved.append(target.rename(target.with_name(target.name + "-judged")))
+            target.mkdir()
+            for name in fill:
+                (target / name).write_text("{}\n".format(name), encoding="utf-8")
+        return listed
+    return _listing
+
+
+def _replaced_after_listing(module, base, name, entry, inside, fill):
+    """Run module's gate over a fresh root whose .claude/rules/<entry>, a directory holding the files
+    named in inside, is replaced by one holding the files named in fill right after the listing that
+    judged it; returns ((exit code, stdout, stderr), the replaced path)."""
+    root = _root_fixture(base, name, rules="dir").resolve()
+    target = root / ".claude" / "rules" / entry
+    target.mkdir(parents=True)
+    for file_name in inside:
+        (target / file_name).write_text("# {}\n".format(file_name), encoding="utf-8")
+    with _patched(module, "_listing", _replacing_listing(module._listing, target, fill)):
+        got = _gate(module, ["--root", str(root)])
+    return got, target
+
+
+def _refused_naming(got, path):
+    """Whether a gate run exited 2 on the rules tree, naming path, with nothing on stdout."""
+    code, out, err = got
+    return code == 2 and out == "" and "cannot read the rules tree: " in err and "'{}'".format(path) in err
 
 
 def _probe(module, fixture, paths, root):
@@ -763,7 +830,22 @@ def _load_probe_mutant(source, directory, number):
     return module
 
 
-NO_RULES = "PASS: no .claude/rules/ tree\n"
+def _load_placement_mutant(source, directory):
+    """Write a mutated copy of this file to the scratch directory and load it with importlib, keeping
+    sys.path as it was (the copy's import prelude puts its own directory on it)."""
+    path = directory / "placement_mutant.py"
+    path.write_text(source, encoding="utf-8")
+    saved = list(sys.path)
+    try:
+        spec = importlib.util.spec_from_file_location("placement_mutant", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = saved
+    return module
+
+
+NO_RULES ="PASS: no .claude/rules/ tree\n"
 # (vector, fixture key, expected exit, expected stdout or None, expected stderr fragment or None); each
 # "{}" or "{!r}" in a stderr fragment is filled, in order, with the fixture's --root values. Each root/
 # vector is a --root the guard must refuse; each control/ vector is one it must still read.
@@ -1098,6 +1180,18 @@ def self_test(report_path=None):
                   code == 1 and (".claude/rules/aiqt/10-ACCUR-other.md: frontmatter-drift: derives "
                                  "aiqt/10-ACCUR-sample.md") in out.replace(os.sep, "/"), (code, out, err))
 
+            # 2e. a family directory holding a badly named rule, or a vendored source lacking its
+            # provenance, replaced by another real directory right after the listing that judged it (a
+            # hook on the walk's listing) exits 2 naming it, where a walk into the replacement (an
+            # empty family, or a source holding PROVENANCE.md and LICENSE) would find nothing and pass.
+            for cid, entry, inside, fill in (
+                    ("gate/family-replaced-after-listing-exits-2", "aiqt", ("bad.md",), ()),
+                    ("gate/vendored-source-replaced-after-listing-exits-2", "external/vendor", (),
+                     ("PROVENANCE.md", "LICENSE"))):
+                got, target = _replaced_after_listing(this, base, "gate-" + cid.split("/")[1], entry,
+                                                      inside, fill)
+                check(cid, _refused_naming(got, target), got)
+
             # 3. each probe mutant (one guard reverted in a scratch copy of _standards.py) must be
             # caught by its named probe vector: the mutant's outcome differs from the intact one.
             # The walk mutant judges only the final component beneath its followed parent, the
@@ -1155,6 +1249,21 @@ def self_test(report_path=None):
                         got = _probe(mutant, fixture, paths, base)
                     caught = got != want
                 check(cid, caught, got)
+
+            # 3b. the placement mutant (a scratch copy of this file with _open_at's st_dev and st_ino
+            # comparison dropped) walks into a family directory replaced after the listing and passes,
+            # so the family vector above must tell it from the intact gate. The anchor is joined here
+            # from two literals so this file holds it exactly once.
+            own = Path(__file__).resolve().read_text(encoding="utf-8")
+            old = "if (opened.st_dev, opened.st_ino) != " + "(listed.st_dev, listed.st_ino):"
+            if own.count(old) != 1:
+                caught, got = False, "mutation anchor found {} times".format(own.count(old))
+            else:
+                mutant = _load_placement_mutant(own.replace(old, "if False and " + old[3:]), mutant_dir)
+                got, target = _replaced_after_listing(mutant, base, "gate-mutant-family-replaced", "aiqt",
+                                                      ("bad.md",), ())
+                caught = not _refused_naming(got, target)
+            check("mutant/listing-identity-unchecked-caught", caught, got)
 
             # 4. every --root vector holds against this gate
             roots = _fixtures(base)
@@ -1223,8 +1332,9 @@ def self_test(report_path=None):
           "a symlink, replaced or removed before the listing, and on a .claude replaced before its "
           "open, and still finding the violation of one "
           "swapped after its open, and exits 2 on a symlinked family directory, rule file or vendored "
-          "source and on a FIFO rule file, with a bad name or loose at the tree root too, while still "
-          "finding a rule's frontmatter drift; 11 probe mutants "
+          "source and on a FIFO rule file, with a bad name or loose at the tree root too, and on a "
+          "family directory or vendored source replaced by another directory after its listing, "
+          "while still finding a rule's frontmatter drift; 11 probe mutants and a placement mutant "
           "each caught; {} --root vectors: a repeated, empty, missing, comma-joined, dangling or "
           "non-directory --root is cannot-evaluate; an existing root with no rules tree, a symlinked "
           "root, a violating root and the repository are still read; {} --root guard mutants each "
