@@ -12691,7 +12691,7 @@ def _main_isolated(report_path=None):
         # (bash keeps a backslash-newline inside single quotes, so that body runs to the end of the
         # command): they pass with the lexer's earlier reading too, and fail if the continuation is removed
         # inside single quotes.
-        _delim_bash_shapes = (
+        for check_id, shape, detaches in (
             ("trunc/heredoc-delim-continued-bash-agrees", "cat <<EO\\\nF\nbody\nEOF\nsleep 0 &", True),
             ("trunc/heredoc-delim-dq-continued-bash-agrees", "cat <<\"EO\\\nF\"\nbody\nEOF\nsleep 0 &", True),
             ("trunc/heredoc-delim-sq-continued-bash-agrees", "cat <<'EO\\\nF'\nbody\nEOF\nsleep 0 &", False),
@@ -12711,8 +12711,7 @@ def _main_isolated(report_path=None):
              True),
             ("trunc/heredoc-delim-cmdsubst-bash-agrees", "cat <<'E'$(x)\nbody\nE$(x)\nsleep 0 &", True),
             ("trunc/heredoc-delim-quoted-body-amp-bash-agrees", "cat <<'EOF'\nA & B\nEOF", False),
-        )
-        for check_id, shape, detaches in _delim_bash_shapes:
+        ):
             try:
                 _bash = subprocess.run(
                     ["/usr/bin/env", "-i", "/usr/bin/bash", "-c", 'eval "$1"; echo "BANG=$!"', "probe", shape],
