@@ -2877,6 +2877,182 @@ def _join_fast_failures(count=4000, seed=20261017):
     return out
 
 
+# Texts for the de-quoted reading's fast path (_gate_text_may_name_git): git plainly, in either case and behind a
+# path; split by quote characters, by a '$' before a quote, by a backslash and by a backslash-newline pair; coded
+# in an ANSI-C escape, outside quotes and one shell level in; added after an option word's attached value; and
+# texts naming no git that hold quotes, a '$', a backslash, both, or a backslash-newline pair.
+_GATE_READ_FAST_TEXTS = (
+    "", "echo a b", "git status", "GIT push -nv", "/usr/bin/Git commit -nv", "g'i't commit -nv", 'g"I"t push',
+    "g$'i't commit -nv", 'g$"i"T commit', "g" + chr(92) + "it commit -n", "g" + chr(92) + "\nit commit -n",
+    "echo $'g" + chr(92) + "x69t' commit -nv", "$'" + chr(92) + "147it' commit -n", "$'g" + chr(92) + "x{169}t'",
+    'sh -c "$' + "'g" + chr(92) * 2 + "x69t' commit -nv" + '"', "env --split-string=g'i't x", "env -S'g\"i\"t' x",
+    "echo 'a b' \"c\" d", "echo $HOME 'x'", "echo a" + chr(92) + "b c", "echo $'a" + chr(92) + "tb'",
+    "echo a" + chr(92) + "\nb", "digit gi t", "g it", "tig")
+_GATE_READ_FAST_ALPHABET = ("g", "i", "t", "G", "I", "T", "gi", "Gi", "it", "iT", "'", '"', "$", chr(92), "\n", " ",
+                            "x", "69", "/", "-", "=", "_", ";", "{")
+# Texts _gate_text_bypass must pass over without building a reading, and texts for which it must build both.
+_GATE_READ_FREE_TEXTS = ("", "echo a b", "echo 'a b' \"c\" d", "echo $HOME 'x'", "echo a" + chr(92) + "b c",
+                         "echo " + "a " * (128 * 1024))
+_GATE_READ_NAMING_TEXTS = ("git status", "g'i't commit -nv", "echo $'g" + chr(92) + "x69t' commit -nv")
+
+
+def _gate_read_git_named(text):
+    """True when a de-quoted reading of text (_gate_dequoted_words, _gate_bash_readings) holds a word that
+    _gate_word reads as git."""
+    readings = (aiqt_hooks._gate_dequoted_words(text),) + aiqt_hooks._gate_bash_readings(text)
+    return any(aiqt_hooks._gate_word(w) == "git" for words in readings for w in words)
+
+
+def _gate_read_full(text, skip_own):
+    """_gate_text_bypass(text, skip_own) with every reading built: its fast-path test is replaced by one that is
+    always True for the call and restored after it."""
+    may = aiqt_hooks._gate_text_may_name_git
+    aiqt_hooks._gate_text_may_name_git = lambda _text: True
+    try:
+        return aiqt_hooks._gate_text_bypass(text, skip_own)
+    finally:
+        aiqt_hooks._gate_text_may_name_git = may
+
+
+def _gate_read_misbuilt(free, naming):
+    """The texts for which _gate_text_bypass(text) built a reading though text is in free, or did not build both
+    though text is in naming: [(text, builds, wanted)], at most three. The builds are counted by wrappers
+    installed on _gate_dequoted_words and _gate_bash_readings for the run and restored after it."""
+    dequoted, bash = aiqt_hooks._gate_dequoted_words, aiqt_hooks._gate_bash_readings
+    calls = [0]
+
+    def counted_dequoted(text):
+        calls[0] += 1
+        return dequoted(text)
+
+    def counted_bash(text):
+        calls[0] += 1
+        return bash(text)
+
+    out = []
+    aiqt_hooks._gate_dequoted_words, aiqt_hooks._gate_bash_readings = counted_dequoted, counted_bash
+    try:
+        for text in free + naming:
+            calls[0] = 0
+            aiqt_hooks._gate_text_bypass(text)
+            wanted = 2 if text in naming else 0
+            if calls[0] != wanted and len(out) < 3:
+                out.append((text, calls[0], wanted))
+    finally:
+        aiqt_hooks._gate_dequoted_words, aiqt_hooks._gate_bash_readings = dequoted, bash
+    return out
+
+
+def _gate_read_fast_failures(count=4000, seed=20261026):
+    """(gw-read-fast) _gate_text_bypass, which passes over text that _gate_text_may_name_git says no de-quoted
+    reading can make name git, gives the full walk's result (every reading built, _gate_read_full) for both
+    skip_own values on _GATE_READ_FAST_TEXTS and `count` seeded random texts over _GATE_READ_FAST_ALPHABET, and
+    (gw-read-fast-named) that test is never False on a text one of whose readings holds a git word
+    (_gate_read_git_named). The corpus must hold texts the test passes over, texts whose readings name git, some
+    of them only once quotes, a backslash or an escape are read, and a text the full walk denies. Five wrong
+    tests (one reading the raw text, one not lowercasing, one ignoring escapes, one keeping the newline and one
+    keeping the '$') must each be caught by the gw-read-fast-named check, so it discriminates.
+    (gw-read-fast-taken) The fast path is taken: with the readings' builds counted (_gate_read_misbuilt),
+    _gate_text_bypass builds none for _GATE_READ_FREE_TEXTS, a long git-free segment among them, and both for
+    _GATE_READ_NAMING_TEXTS, since the equivalence above holds just as well for a test that is always True. A
+    test that is always True must be caught by the same count (gw-read-fast-taken-red)."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_GATE_READ_FAST_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_GATE_READ_FAST_ALPHABET) for _ in range(rng.randint(0, 10))))
+    named = [text for text in texts if _gate_read_git_named(text)]
+    passed = [text for text in texts if not aiqt_hooks._gate_text_may_name_git(text)]
+    hidden = [text for text in named if "git" not in text.lower()]
+    denied = [text for text in texts if _gate_read_full(text, False) is not None]
+    if not passed or not named or not hidden or not denied:
+        out.append("(gw-read-fast-corpus) the corpus must hold texts the test passes over ({}), texts whose "
+                   "readings name git ({}), some only once quotes, a backslash or an escape are read ({}), and a "
+                   "text the full walk denies ({})".format(len(passed), len(named), len(hidden), len(denied)))
+    missed = [text for text in named if not aiqt_hooks._gate_text_may_name_git(text)]
+    for text in missed[:3]:
+        out.append("(gw-read-fast-named) _gate_text_may_name_git({!r}) is False, but a reading of it names "
+                   "git".format(text))
+    mismatches = [(text, skip_own, aiqt_hooks._gate_text_bypass(text, skip_own), _gate_read_full(text, skip_own))
+                  for text in texts for skip_own in (False, True)]
+    for text, skip_own, got, want in [m for m in mismatches if m[2] != m[3]][:3]:
+        out.append("(gw-read-fast) _gate_text_bypass({!r}, {}) gave {!r}, the full walk {!r}".format(
+            text, skip_own, got, want))
+    drops = aiqt_hooks._GATE_READING_DROPS
+    no_newline = str.maketrans("", "", "'\"$" + chr(92))
+    no_dollar = str.maketrans("", "", "'\"\n" + chr(92))
+    wrong = (
+        ("raw", lambda text: "git" in text.lower()),
+        ("case", lambda text: ("$" in text and chr(92) in text) or "git" in text.translate(drops)),
+        ("escape", lambda text: "git" in text.translate(drops).lower()),
+        ("newline", lambda text: ("$" in text and chr(92) in text) or "git" in text.translate(no_newline).lower()),
+        ("dollar", lambda text: ("$" in text and chr(92) in text) or "git" in text.translate(no_dollar).lower()),
+    )
+    for name, may in wrong:
+        if all(may(text) for text in named):
+            out.append("(gw-read-fast-red-{}) a wrong fast-path test passes the git-naming check".format(name))
+    for text, builds, wanted in _gate_read_misbuilt(_GATE_READ_FREE_TEXTS, _GATE_READ_NAMING_TEXTS):
+        out.append("(gw-read-fast-taken) _gate_text_bypass({!r}) built {} reading(s), want {}: none for a text no "
+                   "reading can make name git, both for one that names it".format(text[:60], builds, wanted))
+    may = aiqt_hooks._gate_text_may_name_git
+    aiqt_hooks._gate_text_may_name_git = lambda _text: True
+    try:
+        always = _gate_read_misbuilt(_GATE_READ_FREE_TEXTS, _GATE_READ_NAMING_TEXTS)
+    finally:
+        aiqt_hooks._gate_text_may_name_git = may
+    if not always:
+        out.append("(gw-read-fast-taken-red) a test that is always True passes the build count")
+    return out
+
+
+# The budget of the de-quoted reading's cost row (gw-read-cost): the CPU time of _gate_behind_bypass over every
+# segment of a command must stay under this share of the CPU time of one lex of the same command.
+_GATE_READ_COST_SHARE = 0.25
+# The row's inputs must hold a segment of more than this many words, so the row times the long git-free reading.
+_GATE_READ_COST_WORDS = 128 * 1024
+
+
+def _gate_read_cost_problems(lex, read, longest, results):
+    """What one timing of the gw-read-cost row got wrong, as a list of phrases ([] for none): lex and read are the
+    CPU seconds of one lex of the command and of _gate_behind_bypass over every segment of it, longest is the
+    word count of its longest segment and results is what _gate_behind_bypass gave each segment."""
+    problems = []
+    if longest <= _GATE_READ_COST_WORDS:
+        problems.append("its longest segment holds {} words, not more than {}, so the row no longer times the long "
+                        "reading".format(longest, _GATE_READ_COST_WORDS))
+    found = [got for got in results if got is not None]
+    if found:
+        problems.append("the reading found {!r}, so the row no longer times it to its end".format(found[0]))
+    if read >= _GATE_READ_COST_SHARE * lex:
+        problems.append("the reading took {:.3f} s of CPU, {:.2f} times one lex of the command ({:.3f} s); the "
+                        "budget is under {:g} of the lex".format(read, read / lex if lex > 0 else float("inf"), lex,
+                                                                _GATE_READ_COST_SHARE))
+    return problems
+
+
+def _gate_read_cost_edge_failures():
+    """(gw-read-cost-edge) The row's own checks at each end: a reading just under, exactly at and just over the
+    budget's share of the lex (the last two fail), a longest segment of exactly the word floor and one word over
+    it (the first fails), and a segment the reading denies (it fails), so a comparison turned the wrong way or
+    made inclusive at the wrong end is caught here rather than by a timing."""
+    out = []
+    lex = 0.4
+    budget = _GATE_READ_COST_SHARE * lex
+    over_floor = _GATE_READ_COST_WORDS + 1
+    for label, read, longest, results, wanted in (
+            ("under", budget * 0.99, over_floor, [None], 0),
+            ("at", budget, over_floor, [None], 1),
+            ("over", budget * 1.01, over_floor, [None], 1),
+            ("floor-at", 0.0, _GATE_READ_COST_WORDS, [None], 1),
+            ("floor-over", 0.0, over_floor, [None], 0),
+            ("found", 0.0, over_floor, [None, ("commit", "a --no-verify spelling")], 1)):
+        got = _gate_read_cost_problems(lex, read, longest, results)
+        if len(got) != wanted:
+            out.append("(gw-read-cost-edge-{}) the row's checks gave {} problem(s), want {}: {}".format(
+                label, len(got), wanted, got))
+    return out
+
+
 # Commands for the lexer's skip_empty reading: runs of separators, blank lines, a comment and a quoted heredoc
 # opener (segments with no word and no redirect, some with a raw slice that is not blank), redirect-only
 # segments (kept), and commands the lexer refuses or, in partial mode, recovers in part.
@@ -12996,6 +13172,33 @@ def _main_isolated(monitor):
             failures.append("(lex-cost-doubt-reach) gate_weakening decided {} on the long doubt input whose "
                             "terminal word is on the sink deny list, instead of the fail-closed deny, so the "
                             "sink test no longer reaches the end of its scan".format(_cost_reach_got))
+        # READING COST. gate_weakening's parsed path also reads each segment's de-quoted text (_gate_behind_bypass:
+        # the blank-split reading and three bash-model readings, each a pass per character or per word, then the
+        # any-word walk, whose search for a first git word reads every word), and over every segment of a command
+        # that costs about twice one lex of it. On floor-long-words and main-reading-long-words, whose long echo
+        # segment names no git, it took gate_weakening to 1.8 and 2.6 times main's time: on one host, as the max
+        # of five runs, 0.237 s and 0.300 s against main's 0.129 s and 0.114 s, and over the 1 s bound above on a
+        # slower CI runner. Text no reading can make name git now gives None before any reading is built
+        # (_gate_text_may_name_git), and the same runs took 0.138 s and 0.102 s. This row holds the reading to a
+        # fixed linear budget that the host's speed cancels from: on each input, the CPU time of
+        # _gate_behind_bypass over every segment of every reading must stay under a quarter of the CPU time of one
+        # lex of the same command (_lex_readings, _gate_read_cost_problems). Over five runs on one host the
+        # reading took at most 0.010 of the lex with that pass-over and at least 1.94 of it with the readings
+        # built for every text, so the row fails the latter and passes the former about twenty-five times inside
+        # its budget; the clock is time.process_time, as in every row above.
+        failures.extend(_gate_read_cost_edge_failures())
+        for _rd_name in ("floor-long-words", "main-reading-long-words"):
+            _rd_cmd = dict(_cost_inputs)[_rd_name]
+            _rd_t0 = time.process_time()
+            _rd_segs = [seg for reading in aiqt_hooks._lex_readings(_rd_cmd) for seg in reading]
+            _rd_lex = time.process_time() - _rd_t0
+            _rd_t0 = time.process_time()
+            _rd_got = [aiqt_hooks._gate_behind_bypass(seg) for seg in _rd_segs]
+            _rd_read = time.process_time() - _rd_t0
+            _rd_longest = max((len(seg.argv) for seg in _rd_segs), default=0)
+            for _rd_problem in _gate_read_cost_problems(_rd_lex, _rd_read, _rd_longest, _rd_got):
+                failures.append("(gw-read-cost-{}) on a {}-character command, {}".format(
+                    _rd_name, len(_rd_cmd), _rd_problem))
         # The other scanners main's lexer helpers carry read a comment their own way, beside the lexer:
         # the continuation join keeps a backslash-newline after a '#' at a word start ('(' included) and removes
         # one after a '#' glued to a substitution's ')'; the uncertainty causes report any '#' outside quotes
@@ -15353,6 +15556,8 @@ def _main_isolated(monitor):
         dqwexpect("(gw-dqw-long-path) a long option's value whose basename is git adds a git word",
                   "--x=/usr/bin/git", ["--x=/usr/bin/git", "git"])
         dqwexpect("(gw-dqw-long-dotgit) a value ending in .git adds none", "--git-dir=r.git", ["--git-dir=r.git"])
+        # The de-quoted reading passes over text no reading can make name git and keeps every decision there.
+        failures.extend(_gate_read_fast_failures())
         # The run-out over-deny reaches a quoted URL or path ending in '.git' on ANY git line, roster verb or
         # not (the 'git' after the dot is a word-boundary match whose walk runs off the span end); the
         # gate-weakening residue discloses it. Pinned so a change to it updates that disclosure; the
@@ -15490,10 +15695,18 @@ def _main_isolated(monitor):
         # ~2); a quadratic re-walk quadruples it
         # (ratio ~4). The assertion is a RATIO, not a fixed wall-clock bound, so a threshold between 2x and
         # 4x discriminates regardless of host speed (a fixed bound passes a quadratic scan on a fast host).
-        # Because a sub-millisecond t_n gives a noisy ratio, n is DOUBLED (bounded, at most 6 times) until
-        # t_n clears a 0.02s floor; if it never does, the check FAILS 'linearity not evaluated' rather than
-        # passing silently (the former early-pass path). A ROSTER-verb-dense line is still super-linear by
-        # design and relies on the deadline's fail-closed, as the scan docstring states.
+        # Each scan is timed with time.process_time (this process's CPU time, as in the lex-cost rows), so
+        # time the process spends waiting for a CPU on a busy runner is not counted. Because a short t_n gives
+        # a noisy ratio, n is DOUBLED (bounded: from 4000 repetitions, at most 9 sizes) until t_n clears a
+        # 0.1 s floor; if it never does, the check FAILS 'linearity not evaluated' rather than passing
+        # silently (the former early-pass path). The floor sets how much stray cost one comparison absorbs:
+        # extra work counted in t_2n moves a linear row's ratio of about 2 past 3 only when it costs more
+        # than t_n itself. With a 0.02 s floor and a wall clock, one CI row failed at 3.24x (0.030 s then
+        # 0.097 s); at 0.1 s the clock's resolution and the cost of the call itself are negligible against
+        # t_n. On one host the slowest-growing rows (gw-lin-dq-off, gw-lin-dq-chain) clear 0.1 s only at
+        # 512000 repetitions, so the cap of 1024000 leaves a host about twice as fast room to clear it too.
+        # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
+        # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
         # gw-lin-opts (`git ` + `-C 'a;' `*n): the subcommand never resolves (all global options), so the
         #   off-roster stop never fires and the former per-quote re-walk of `words` was quadratic; the
@@ -15520,24 +15733,27 @@ def _main_isolated(monitor):
         # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
         import time as _time_lin
 
+        _gw_floor = 0.1
+        _gw_sizes = 9
+
         def _gw_scan_once(cmd, scan):
-            # (seconds, decision) for one scan of cmd
-            _t0 = _time_lin.perf_counter()
+            # (CPU seconds, decision) for one scan of cmd
+            _t0 = _time_lin.process_time()
             decision = scan(cmd)
-            return _time_lin.perf_counter() - _t0, decision
+            return _time_lin.process_time() - _t0, decision
 
         def _gw_scan_ratio(unit, prefix, suffix, scan):
-            # Double n (from 4000, at most 6 times) until t_n clears the 0.02s floor, then compare
-            # t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions), or (None, t_n, None, length,
+            # Double n (from 4000, at most _gw_sizes sizes) until t_n clears the _gw_floor floor, then
+            # compare t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions), or (None, t_n, None, length,
             # decisions) when the floor was never cleared in the bound, so the caller fails 'linearity not
             # evaluated'; decisions lists every timed scan's decision, in order. The input is a command string
             # for the whole-command scan or a word list for the dequoted-word scan.
             reps = 4000
             decisions = []
-            for _ in range(6):
+            for _ in range(_gw_sizes):
                 t_n, decision = _gw_scan_once(prefix + unit * reps + suffix, scan)
                 decisions.append(decision)
-                if t_n > 0.02:
+                if t_n > _gw_floor:
                     cmd_2n = prefix + unit * (reps * 2) + suffix
                     t_2n, decision = _gw_scan_once(cmd_2n, scan)
                     decisions.append(decision)
@@ -15569,8 +15785,8 @@ def _main_isolated(monitor):
                 failures.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
                                 .format(_gw_lbl, _gw_wrong[0], len(_gw_wrong), len(_gw_got), _gw_want))
             if _gw_ratio is None:
-                failures.append("({}) linearity not evaluated: t_n stayed under the 0.02s floor through "
-                                "6 doublings (last {:.4f}s)".format(_gw_lbl, _gw_tn))
+                failures.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
+                                "{} sizes (last {:.4f}s)".format(_gw_lbl, _gw_floor, _gw_sizes, _gw_tn))
             elif _gw_ratio > 3.0:
                 failures.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
                                 "{:.3f}s then {:.3f}s for an input of length {}"
